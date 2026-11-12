@@ -161,6 +161,12 @@ def harvest(sessions_dir: Path, stats: dict | None = None) -> dict[str, collecti
     files = sorted(sessions_dir.glob("*.jsonl"))
     if not files:
         raise SystemExit(f"no session events under {sessions_dir}")
+    if stats is not None:
+        #: The count of files this harvest ACTUALLY read. The report used to
+        #: glob the live directory a second time, ~390 s later, so the number it
+        #: published described an input the harvest may never have seen — on a
+        #: directory the brief itself calls live and non-monotone.
+        stats["files"] = len(files)
     for f in files:
         for line in f.open(errors="replace"):
             if stats is not None:
@@ -419,6 +425,12 @@ def run(args: argparse.Namespace) -> int:
                             exact[k]["rows_zero"] += 1
                             exact_by_class[row["cls"]][str(k)]["rows_zero"] += 1
                     if k == KS[0] and len(exact_misses) < 200:
+                        #: ⚠️ CAPPED, and the cap is BIASED: `sample` is built class
+                        #: by class (sorted), so this keeps the early classes'
+                        #: misses and drops the rest. Harmless at today's 116, but a
+                        #: larger sample would silently skew the crowding statistic
+                        #: §3 quotes — so the artifact now states how many misses it
+                        #: recorded and how many existed.
                         toks = _sanitise_query_text(name).split()
                         exact_misses.append({
                             "name": name, "cls": row["cls"],
@@ -436,6 +448,8 @@ def run(args: argparse.Namespace) -> int:
                     exact[k]["attached"] += 1
         arms["exact"] = exact
         arms["exact_misses"] = exact_misses
+        arms["exact_misses_recorded"] = len(exact_misses)
+        arms["exact_misses_total"] = len(sample) - exact[KS[0]]["in_window"]
         arms["exact_by_class"] = {c: dict(v) for c, v in sorted(exact_by_class.items())}
 
         # ── ARM 2: the mention is a surface VARIANT of the stored name.
@@ -506,7 +520,9 @@ def run(args: argparse.Namespace) -> int:
         report = {
             "issue": 11901,
             "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "corpus": {"dir": str(sessions), "files": len(list(sessions.glob("*.jsonl"))),
+            "corpus": {"dir": str(sessions),
+                       "files": _input_stats.get(
+                           "files", len(list(sessions.glob("*.jsonl")))),
                        "input": dict(_input_stats),
                        "harvested_distinct": counts, "population": len(pop),
                        "sample": len(sample), "elapsed_s": round(time.time() - t0, 1)},

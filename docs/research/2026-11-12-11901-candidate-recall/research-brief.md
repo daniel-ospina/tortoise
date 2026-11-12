@@ -101,7 +101,9 @@ to quote for any one class.
 
 ⚠️ **The corpus is LIVE, and the two runs therefore did NOT sample the identical population.** `~/.tortoise/session-events`
 is written by the fleet's own capture hook; the two committed artifacts harvested **102,898** (hybrid) and
-**103,087** (control) distinct definite descriptions, a 0.18 % drift between two runs ~60 s apart. ⛔ **That
+**103,087** (control) distinct definite descriptions, a 0.18 % drift between two runs whose HARVESTS were ~7 minutes
+apart (not ~60 s: each run harvests first, and the hybrid sweep alone took 390 s — `measured_at − elapsed_s` puts the
+two harvests 427 s apart). ⛔ **That
 0.18 % is a floor from a 61-second gap, NOT a bound on between-run variation**, and this corpus is not monotone
 under this harvest: re-running the committed `harvest()` over the same nine files ~2 h later (16:37Z) returned
 **91,725** distinct definite descriptions — **−10.9 %** — *fewer* than the earlier artifact, which appends alone
@@ -165,7 +167,8 @@ the two states with different fixes.
 
 ### 3.1 The finding that matters most: the dense leg moves the classes in OPPOSITE directions
 
-⚠️ **Between-run, not paired** (§2): the two artifacts sampled the same live corpus ~60 s apart, not the identical
+⚠️ **Between-run, not paired** (§2): the two artifacts sampled the same live corpus from harvests ~7 minutes apart,
+not the identical
 population, and §2 measures that this corpus is not even monotone under this harvest — so the direction of every
 delta below is not established as stable between runs, and the magnitudes are not a controlled effect size.
 
@@ -350,8 +353,8 @@ rank; §2's corpus shape as the artifacts record it (`corpus.files` and `corpus.
 population size); and §8's `rows_zero` claim. **Not pinned, and cannot be:** everything §2 says about the corpus
 CHANGING — §2's re-run figure (**91,725**) is a dated measurement of a directory that moves under it, and the
 record and character totals this section used to quote are gone for the opposite reason: they were never in the
-artifact and did not reproduce against the corpus they named. One unpinned sentence is the honest state; an
-unpinned TABLE is not.
+artifact and did not reproduce against the corpus they named. Unpinned prose about the live corpus is the honest
+state; an unpinned TABLE is not.
 
 ## 10. Write-back
 

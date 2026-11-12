@@ -631,6 +631,31 @@ def test_the_briefs_restatements_all_recompute(report, control):
         "§2 does not state the artifact's population and sample sizes "
         f"({report['corpus']['population']:,} / {report['corpus']['sample']})")
 
+    # ── §1's table caption: the pooled-arm DENOMINATOR. Round 4 found `20`
+    # unpinned, which is the population the whole "~40 vs 15" argument rests on.
+    caps = report["arms"]["pooled"]["3"]["captures"]
+    assert f"hybrid, {caps} captures" in text, (
+        f"§1's caption does not state the pooled denominator ({caps} captures)")
+
+    # ── §3's miss COUNT, which §3.1's crowding statistic is computed over.
+    assert f"The {len(misses)} recorded hybrid k=3 misses" in text, (
+        "§3 does not state the number of misses its crowding mean is taken over "
+        f"({len(misses)})")
+
+    # ── §4's prose pair: the in-window rise, and the fold's 100 % of in-window.
+    # Both were unpinned (round 4): the pair is DERIVED from `variant`, and the
+    # 100 % is a ratio of two sums, so neither was visible to a row guard.
+    v3, v15 = report["arms"]["variant"]["3"], report["arms"]["variant"]["15"]
+    pairs_v = v3["pairs"]
+    assert (f"({100 * v3['in_window'] / pairs_v:.1f} % → "
+            f"{100 * v15['in_window'] / pairs_v:.1f} %)") in text, (
+        "§4 does not state the recomputed in-window rise across the widths")
+    sep3 = _sum_cls(report, ("hyphen-to-space", "space-to-hyphen"), "3")
+    assert (f"{_pct_cell(100 * sep3['attached_folded'] / sep3['in_window'])} % "
+            f"of the in-window") in text, (
+        "§4's 'recovers X % of the in-window separator variants' does not match "
+        f"the artifact ({sep3['attached_folded']}/{sep3['in_window']})")
+
     # ── §6: the headline restated in the external-findings section.
     exact = report["arms"]["exact"]
     n = report["corpus"]["sample"]
@@ -753,16 +778,71 @@ def test_the_harness_reports_how_much_of_its_own_input_it_discarded(tmp_path):
     assert counts["definite"], "the one good record must still contribute a name"
 
 
-def test_the_input_counters_are_wired_into_the_artifact_it_writes():
-    """The counters exist in `harvest()` AND in the report it feeds.
+def test_main_writes_the_input_accounting_into_the_artifact_it_emits(tmp_path, monkeypatch):
+    """Drive `main()` and read the JSON it writes — not the source.
 
-    A counter nobody writes to the artifact would be the same blind spot in a
-    new place: the re-run reads the JSON, not the function's return value.
+    Round 4 caught the previous version of this guard asserting SUBSTRINGS of
+    `tools/candidate_recall_11901.py`, which is exactly the fail-open it was
+    meant to close: resetting `_input_stats` mid-run emitted `"input": {}` and
+    the suite stayed green, while renaming the variable reded a behaviour it did
+    not change. A behavioural test needs no graph: the SDK is stubbed, every
+    query returns no rows, and only the corpus block is read.
     """
-    src = TOOL.read_text()
-    assert "harvest(sessions, stats=_input_stats)" in src, (
-        "main() must pass its stats dict into harvest(), or the counters are dead")
-    assert '"input": dict(_input_stats)' in src, (
-        "the report's corpus block must carry the input accounting, or a re-run "
-        "cannot see it")
-    assert "records_without_text=0" in src, "the counters must be initialised"
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location("candidate_recall_11901", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules["candidate_recall_11901"] = mod
+    spec.loader.exec_module(mod)
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    # The harvest rules need enough distinct definite descriptions for the
+    # projection write to be worth doing; the three UNUSABLE records below are
+    # what the counters must account for.
+    good = "".join(
+        json.dumps({"conversation": [{"content": f"the widget {i} was broken"}]})
+        + "\n" for i in range(6))
+    (corpus / "2026-01-01.jsonl").write_text(
+        good + "not json at all\n" + json.dumps({"conversation": []}) + "\n",
+        encoding="utf-8")
+
+    class _Proj:
+        def _upsert_object(self, row):  # noqa: D401 - stub
+            return row
+
+    class _Sdk:
+        def __init__(self, **kw):
+            pass
+
+        def _get_proj(self):
+            return _Proj()
+
+        def tortoise_fts_query(self, *a, **kw):
+            return []
+
+        def close(self):
+            pass
+
+    import tortoise.sdk as sdk_mod
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _Sdk, raising=True)
+    monkeypatch.setattr(mod, "_has_embedder", lambda: False, raising=True)
+
+    out = tmp_path / "report.json"
+    rc = mod.main(["--sessions-dir", str(corpus), "--population", "6",
+                   "--sample", "2", "--captures", "1", "--out", str(out)])
+    assert rc == 0, f"main() returned {rc}"
+    rep = json.loads(out.read_text())
+
+    inp = rep["corpus"]["input"]
+    assert inp["lines"] == 8, f"every input line must be counted, got {inp}"
+    assert inp["parse_errors"] == 1, inp
+    assert inp["records_without_text"] == 1, inp
+    assert inp["files"] == 1, "the file count must be the harvest's OWN input"
+    assert rep["corpus"]["files"] == 1, (
+        "corpus.files must come from the harvest, not a second glob of a live dir")
+    assert rep["arms"]["exact_misses_recorded"] == len(rep["arms"]["exact_misses"])
+    assert rep["arms"]["exact_misses_total"] >= rep["arms"]["exact_misses_recorded"], (
+        "the artifact must state how many misses EXISTED beside how many it kept")
