@@ -356,6 +356,20 @@ RECORD_REAPPLY_EXCLUDED: dict[str, str] = {
     "20261025000002_record_source_canonical_index.sql":
         "index only — no column, refusal or policy; the readers parse files, and a "
         "container without it is slower, not wrong",
+    # #11827's retire of `public.point.as_of`. Classified by the axis the two
+    # entries above sit on, and one step further: this migration REMOVES a
+    # column, so re-applying it on a legacy container would DELETE the rows'
+    # historical `as_of` values — data that is recoverable from
+    # `PointAdded.point.asOf` but not for free. Nothing needs it re-applied:
+    # the drop is in the append-only tree, so the readers (`table_columns()`,
+    # `column_types()`, `replay_plan`) already answer "no such column" and the
+    # writer cannot emit it (`money.py`'s four reserved names). A legacy
+    # container therefore reads IDENTICALLY and writes the same rows, and the
+    # only difference is that it still HOLDS the retired values — which is the
+    # reason not to touch it, not a defect.
+    "20261110000001_record_point_retire_as_of_11827.sql":
+        "a DROP COLUMN — re-applying it destroys the retired values a legacy "
+        "container still holds; the readers parse files, so nothing needs it",
 }
 
 #: The minimum Supabase-shaped substrate the record migrations need: the three
@@ -3657,8 +3671,11 @@ def test_ensure_record_schema_reaches_the_forward_amendments_it_owes():
     set exists to remove. Same transaction-and-rollback discipline as the leg
     above, so the shared database is left as it was.
     """
+    # #11827: `as_of` is retired — a container that predates the retirement
+    # migration still has the column, and the re-apply only has to reach the
+    # FOUR live ones.
     money_columns = {"amount_minor", "currency", "minor_unit_exponent",
-                     "verbatim", "as_of"}
+                     "verbatim"}
     conn = _record_db()
     conn.autocommit = False
     try:

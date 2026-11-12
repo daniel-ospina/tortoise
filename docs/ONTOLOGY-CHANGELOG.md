@@ -81,6 +81,20 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.33 (2026-11-11 — issue #11827, landing #11915 with it — a value carries no temporal slot of its own; `asOf` retired):**
+>
+> **Owner approval of the exact changes** is on record on #11827 (comment 6805834755, 2026-11-11, *"text approved"*): two appended blocks, §4.7's clause and §4.1's **Values** paragraph. Both are applied **verbatim**. This entry records the change and bumps **v3.32 → v3.33**, because a model statement moved.
+>
+> **What the model now says.** §4.7 gains one clause — *a value carries no temporal slot of its own*: a stored number's instant is the CARRIER's valid-time start (`when`/`validFrom` on a `Point`, `startedAt` on an `Event`), never a field of the value, and where a value names no instant the carrier's absent-start rule applies and the write path **reports** it rather than inventing one. §4.1 gains the **Values** paragraph: a value is a number plus a reference, kept as flat sibling properties on its carrier, with the reference's standard deciding the fields (money = ISO 4217's `amountMinor`/`currency`/`minorUnitExponent` plus `verbatim`), and **a date is not a value shape**.
+>
+> **What was retired, and why it was a second name.** `asOf` (added by WS-C OD3 as an "assertion date ≠ occurrence time" axis) was **written and read by nothing**: no production reader in `read_money_value`/`total_minor`/`ratio_bp`, no in-tree reader of the record column. Measured on an embedded graph, one sentence carried the same instant three times — `[when, validFrom, asOf] = ['2026-03-31','2026-03-31','2026-03-31']` — and in the damaging direction (`when=None`, `asOf='2026-03-31'`) the node's only date was invisible to `get_historical_knowledge`, so a value asserted on 2026-03-31 read as **true at 2020-01-01**. OD3's rationale rests on a reading of `when` that §4.7 overrides, so this is a workaround for a disagreement inside our own ontology, not an axis. The owner's ontology-hygiene ruling of 2026-11-11 (prefer the approved slots; expand nothing) is the decision.
+>
+> **Build record (this is what the change did to the code, not to the model).** `tortoise/money.py`'s shape drops to four fields; the asserted-date derivation is lifted out of the money path into `value_normalizer.asserted_date` and feeds `validFrom` **only when the model returned no `when`**; `public.point.as_of` is dropped by a forward, append-only migration (`20261110000001_record_point_retire_as_of_11827.sql`) — the value is recoverable from the journal (`PointAdded.point.asOf`), and a legacy node keeps the graph property, inert and unread, still declared so replay does not warn. **Percent** gets its storing shape in the same change (`tortoise/percent.py`, #11915 — owner D6a: one change, not two), which is why §4.1's approved clause now names ratio/duration/quantity as the shapes still without one (see the status note at the clause).
+>
+> **OVERRIDES:** WS-C design §3/OD3 (*"`asOf` … leave it absent when the text states no date"*, i.e. the value owning an assertion date) — the value owns no temporal slot; the carrier's valid-time start is the one slot, per the owner's ontology-hygiene ruling of 2026-11-11. The marker is recorded here **and on the issue**, never inside `ONTOLOGY.md` (a build record belongs in this changelog — `docs/ax/ax-principles.md` §4, from #9202's placement rules).
+
+---
+
 > **Changelog v3.32 (2026-11-08 — issue #11083 — `ownedBy`'s range opens, and `produces` becomes a Layer-2 meaning):**
 >
 > **Owner approval of the exact changes** is on record on #11083 (comment 6667121779, 2026-11-05, "Approval
@@ -186,7 +200,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > reports (`'live'` for a status-carrying label, `''` for an `:Event`). **Scope of the trap:** `:Object` and
 > `:Subject` only. `Point` births keep the `#7856` born-live contract and still STORE `status='live'`, so the
 > `MATCH (p:Point {status:'live'})` idiom printed in **§5's Point Status Vocabulary**
-> (`ONTOLOGY.md:1166`) remains correct as written.
+> (`ONTOLOGY.md:1172`) remains correct as written.
 
 ---
 
