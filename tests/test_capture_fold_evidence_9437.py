@@ -159,7 +159,7 @@ def test_a_fold_carries_the_duplicates_attachments_span_and_provenance(
         params={"pid": canonical}).result_set[0][0] == 1
     # (d) a fold is a destructive outcome and must be REPORTED as one.
     assert any("folded into canonical" in w for w in meta["warnings"]), meta["warnings"]
-    assert any("attachment link" in w for w in meta["warnings"]), meta["warnings"]
+    assert any("attachment link(s) present" in w for w in meta["warnings"]), meta["warnings"]
 
 
 def test_a_plain_duplicate_with_no_evidence_still_folds(sdk, monkeypatch):
@@ -173,7 +173,8 @@ def test_a_plain_duplicate_with_no_evidence_still_folds(sdk, monkeypatch):
     assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
     assert len(_claim_rows(sdk._get_proj())) == 1, _claim_rows(sdk._get_proj())
     assert any("folded into canonical" in w for w in meta["warnings"]), meta["warnings"]
-    assert any("no evidence of its own" in w for w in meta["warnings"]), meta["warnings"]
+    assert any("no per-occurrence evidence of its own" in w
+               for w in meta["warnings"]), meta["warnings"]
 
 
 # ── 2) a slot the canonical owns is reported, never silently overwritten ──
@@ -338,12 +339,15 @@ def test_the_occurrence_address_is_carried_whole_or_not_at_all(
 
 # ── 7) the refusal tokens, one construction each ──────────────────────────
 
-#: The nine columns the evidence read selects, in query order:
-#: extractedFrom, extractedFromAll, quote, span_start, span_end,
-#: source_turn_id, search_keys, when, validFrom.
-_DUP_ROW = ("session:s", [], None, None, None, None, None, None, None)
-_DUP_ROW_QUOTED = ("session:s", [], "q dup", None, None, None, None, None, None)
-_CANON_ROW = ("session:s", [], None, None, None, None, None, None, None)
+#: The columns the evidence read selects, in query order: extractedFrom,
+#: extractedFromAll, quote, span_start, span_end, source_turn_id, search_keys,
+#: when, validFrom, confidence, pointKind.
+_NO_EVIDENCE = ("session:s", [], None, None, None, None, None, None, None,
+                None, None)
+_DUP_ROW = _NO_EVIDENCE
+_DUP_ROW_QUOTED = ("session:s", [], "q dup", None, None, None, None, None,
+                   None, None, None)
+_CANON_ROW = _NO_EVIDENCE
 
 
 class _FakeGraph:
@@ -468,3 +472,117 @@ def test_an_internal_error_is_a_refusal_never_an_exception():
     out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
     assert out["ok"] is False and out["reason"] == "internal_error", out
     assert "graph refused the read" in out["blocked"], out
+
+
+# ── 8) the five-rel attachment cascade, and its two writer-less predicates ──
+
+
+def test_every_attachment_predicate_the_capture_cascade_mints_is_READ():
+    """`projection._create_about_edges` is the rel-IGNORING
+    Subject→Object→Event→Source→Point cascade, so a capture Point can carry
+    FIVE `about*` predicates, not two.
+
+    Before this, `aboutEvent`/`aboutDocument`/`aboutPoint` were not read at all:
+    a duplicate whose `aboutEntities` resolved to an `:Event` was folded with
+    its link destroyed and a receipt saying it had "no per-occurrence evidence
+    of its own to carry" (measured through the real seam).
+    """
+    from tortoise.projection.edges import _EdgeHandlers
+
+    cascade = {rel for _label, rel in _EdgeHandlers._ABOUT_NAME_CASCADE}
+    assert cascade <= set(capture_fold._FOLD_ATTACHMENT_RELS), (
+        "the cascade can mint a predicate the fold does not read, so a fold "
+        f"destroys it: {sorted(cascade - set(capture_fold._FOLD_ATTACHMENT_RELS))}"
+    )
+    # …and the ones it CAN carry are the permitted Point-source triples.
+    from tortoise.session_link import ENTITY_LINKED_TRIPLES
+
+    for rel in capture_fold._CARRIABLE_ATTACHMENT_RELS:
+        assert (rel, "Point", {"aboutSubject": "Subject",
+                               "aboutObject": "Object",
+                               "aboutEvent": "Event"}[rel]) in ENTITY_LINKED_TRIPLES
+
+
+def test_an_aboutEvent_link_is_carried():
+    """The widened read is not decorative: an `aboutEvent` link is carried the
+    same way an `aboutObject` one is (label `Event` is in the writer's §3.2
+    triples)."""
+    proj = _FakeProj(_FakeGraph(
+        edges=[("aboutEvent", "Event", "ev_1", None)], carried=(1, None)))
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
+    assert out["ok"] is True and out["carried"] == 1, out
+
+
+def test_a_writerless_predicate_refuses_rather_than_being_dropped():
+    """`aboutDocument` (Point→Source) and `aboutPoint` (only Event→Point) are
+    not permitted §3.2 triples for a Point source, so no writer can re-create
+    them: the fold must refuse, not silently drop the link.
+
+    Token: `uncarriable_attachment`. RED before the widened read: the link was
+    not read at all, so the fold proceeded and the edge died with the node.
+    """
+    for rel, label in (("aboutDocument", "Source"), ("aboutPoint", "Point")):
+        proj = _FakeProj(_FakeGraph(edges=[(rel, label, "x_1", None)]))
+        out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
+        assert out["ok"] is False, (rel, out)
+        assert out["reason"] == "uncarriable_attachment", (rel, out)
+        assert rel in out["blocked"], out
+
+
+def test_a_half_written_address_refuses_and_blames_the_duplicate():
+    """A capture Point can hold `span_start` without `span_end` (the span
+    validator guards the SDK doors, not this seam). Writing it would raise on
+    the canonical and the receipt would blame the WRONG node, forever.
+
+    Token: `malformed_address`; and it must refuse BEFORE any write, so the
+    refused fold is a no-op.
+    """
+    dup_row = ("session:s", [], None, 30, None, None, None, None, None,
+               None, None)
+    sdk = _FakeSDK()
+    proj = _FakeProj(_FakeGraph(dup_row=dup_row))
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is False and out["reason"] == "malformed_address", out
+    assert "half an address" in out["blocked"], out
+    assert sdk.calls == [], f"a refused fold must not write: {sdk.calls}"
+
+
+def test_a_new_graded_link_carries_its_grading(sdk):
+    """The other arm of the `confidence` residual: when the link is NEW on the
+    canonical, the duplicate's grading rides it and there is NO residual.
+
+    (Only the residual arm was pinned before, so a regression that dropped the
+    grading on the create arm would have passed the suite.)
+    """
+    proj = sdk._get_proj()
+    for pid in ("pt_dup_graded", "pt_canon_ungraded"):
+        sdk.create_point("statement", f"claim for {pid}", id=pid, dedup=False)
+    sdk.create_object("GradedCo")
+    proj.g.query(
+        "MATCH (p:Point {id:'pt_dup_graded'}), (o:Object {name:'GradedCo'}) "
+        "MERGE (p)-[r:aboutObject]->(o) SET r.confidence=0.7")
+    out = capture_fold.carry_fold_evidence(
+        proj, "pt_dup_graded", "pt_canon_ungraded", sdk=sdk)
+    assert out["ok"] is True, out
+    assert out["carried"] == 1 and out["created"] == 1, out
+    assert out["residual"] == [], out
+    rows = proj.g.query(
+        "MATCH (:Point {id:'pt_canon_ungraded'})-[r:aboutObject]->"
+        "(:Object {name:'GradedCo'}) RETURN r.confidence").result_set
+    assert rows and rows[0][0] == 0.7, rows
+
+
+# ── 9) the evidence vocabulary cannot drift from the capture contract ──────
+
+
+def test_the_fold_reads_every_field_the_capture_contract_declares():
+    """The slot list is a hand-copy of `sdk._CAPTURE_PASSTHROUGH_ORDER`. A copy
+    with no guard drifts, and a drifted field is DESTROYED by the delete — the
+    exact failure this module exists to stop. The guard is an assertion, not an
+    import, because importing `sdk` here would be a cycle."""
+    capture_fold.assert_evidence_vocabulary()      # raises on drift
+    from tortoise.sdk import _CAPTURE_PASSTHROUGH_ORDER
+
+    declared = (set(capture_fold._OCCURRENCE_ADDRESS)
+                | {k for k, _ in capture_fold._SINGLE_SLOTS})
+    assert set(_CAPTURE_PASSTHROUGH_ORDER) <= declared

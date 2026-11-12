@@ -16985,15 +16985,26 @@ class TortoiseSDK:
                             # one: the receipt says what happened and what was
                             # carried, never a silent delete.
                             carried = fold_report["carried"]
+                            created = fold_report["created"]
                             copied = fold_report["copied"]
                             residual = fold_report["residual"]
+                            # ⚠️ "present" and "moved" are different facts:
+                            # `link_entity` short-circuits a link the canonical
+                            # already held, so `carried` counts links PRESENT
+                            # and only `created` were written by this fold.
+                            links = ""
+                            if carried:
+                                links = f"{carried} attachment link(s) present"
+                                if created != carried:
+                                    links += f" ({created} written by this fold)"
                             said = (
                                 f"repeated claim '{content[:60]}' folded "
-                                f"into canonical {pid} — carried "
-                                f"{carried} attachment link(s)"
+                                f"into canonical {pid} — "
+                                + (links or "no attachments") 
                                 + (f", copied {', '.join(copied)}"
                                    if copied else "")
-                                + (", no evidence of its own to carry"
+                                + (", no per-occurrence evidence of its own "
+                                   "to carry"
                                    if not carried and not copied else ""))
                             if residual:
                                 said += (
