@@ -296,6 +296,7 @@ __all__ = [
     "record_plan",
     "relation_from_row",
     "relation_statement",
+    "relation_vector_declined_properties",
     "served_vector_labels",
     "stored_vector_props",
     "unserved_vector_declined_properties",
@@ -419,6 +420,79 @@ def _unserved_vector_reason(label: str) -> str:
     return (f"{label} is not a label run_vector_query serves "
             f"(served: {sorted(served_vector_labels())}) — a vector stored "
             f"there has no query path")
+
+
+#: ⛔ `#12015` — a RELATIONSHIP IS THE SAME DEFECT WITH NO LABEL AT ALL.
+#:
+#: The words are `hosted_backup._require_served_restore_labels`'s (`#11641`), and
+#: they state the reason this rule exists: an EDGE carries a property bag exactly
+#: as a node does (`SET r += $props`), so an `embedding` key in that bag lands a
+#: vector on a relationship — **no label, nothing `run_vector_query` can reach**
+#: (the query leg is node-only: it validates an `entity_type` and derives a NODE
+#: label from it, so an edge has no coordinate it could even be asked about). That
+#: is `#5090` DoD row 2's forbidden shape, and the same one `#11747` closed for the
+#: `:Session` node.
+#:
+#: ⛔ WHY IT IS A FUNCTION AND NOT MORE OF `UNSERVED_VECTOR_LABELS`: the node rule is
+#: a set DIFFERENCE (`NODE_TABLES − served_store_labels()`), because a node has a
+#: label to subtract. An edge has NO label, so there is nothing to subtract — the
+#: refusal is UNCONDITIONAL and structural, and spelling it as "this edge type is
+#: not in the served set" would compare a type against a vocabulary of labels that
+#: can never contain it: a comparison that is true by construction, i.e. a rule that
+#: cannot fail and so cannot be measured.
+#:
+#: ⚠️ AND WHY IT IS READ LIVE RATHER THAN SNAPSHOTTED at import, the one way it
+#: differs from `UNSERVED_VECTOR_LABELS`: that constant must compute a difference
+#: once, while this rule is a pure alias of the ONE owner
+#: (:func:`stored_vector_props`) with no arithmetic in between — so a live read
+#: costs nothing and cannot drift. A snapshot could only DISAGREE with the store
+#: seam: widen the seam and the edge writer would keep storing the new property with
+#: nothing going red — the second-declaration class `#11747` spent a review round
+#: removing on the served side.
+#:
+#: ⚠️ THE DOORS READ THIS CALLABLE, not `STORED_VECTOR_PROPS` directly, so the
+#: falsifier can replace it (`monkeypatch.setattr(cp,
+#: "relation_vector_declined_properties", lambda: frozenset())`) and watch row 2 go
+#: red — the same arm `#11747`'s `UNSERVED_VECTOR_LABELS` pin uses. Without a name to
+#: disable, the instrument's relationship arm would be untestable.
+#:
+#: ⚠️ WHY A DROP AND NOT A REFUSAL — `#11747`'s rationale, which is the precedent for
+#: this door (`hosted_backup`'s default REFUSES the artifact and drops only under
+#: `allow_unserved_vectors`, and that stays right for a dump, where a whole artifact
+#: is validated before anything is mutated). A record view is a different door:
+#: `record_plan` materialises a whole view, so raising on one row's stray tail key
+#: would make a rebuild unable to complete over a single malformed row. Keep the
+#: edge, drop the vector, REPORT it on `Statement.dropped_vectors` and
+#: `RecordRelation.dropped_vectors` — never silently.
+#:
+#: ⚠️ THE ALREADY-WRITTEN POPULATION IS NOT CLEANED BY THIS. `relation_statement` is
+#: ADDITIVE (`MERGE … SET r += $props`), so a legacy cache that already holds
+#: `r.embedding` keeps it across an incremental re-projection; the vector goes only
+#: when the edge is re-MERGEd from a view that no longer carries it, or on a FULL
+#: `record-restore` (which wipes the cache first). Nothing on the read side reports
+#: the residue — `record_serve` has no relation read at all (`NOT_SERVED`),
+#: `parity_difference` is label-scoped and `record_reconcile` compares nodes — so it
+#: is stated here rather than left to be discovered. The node rule carries the same
+#: residue, for the same reason.
+
+
+def relation_vector_declined_properties() -> frozenset[str]:
+    """The properties this projection refuses to store on a RELATIONSHIP — `#12015`.
+
+    An alias of :func:`stored_vector_props` (see the note above for why a
+    relationship is refused unconditionally, and why this is read live rather than
+    snapshotted). Empty is not a state this can return today; the seam exists so the
+    RULE has a name, the two edge doors share one spelling of it, and a falsifier has
+    something to disable.
+    """
+    return stored_vector_props()
+
+
+def _relation_vector_reason(rel_type: str) -> str:
+    """WHY a vector on a relation of ``rel_type`` is refused — one spelling."""
+    return (f"<relationship:{rel_type}> is a RELATIONSHIP, and a relationship has "
+            f"no label at all — run_vector_query is node-only, so a vector stored "
+            f"there has no query path (#12015)")
 
 #: The relations table — every edge is a row (ONTOLOGY §8 reification).
 RELATION_TABLE = "relation"
@@ -1775,6 +1849,13 @@ class RecordRelation:
 
     Endpoints are addressed by `(label, key)` — Interface E's contract — never
     by a graph-resident id (`#2489`/`#5086`).
+
+    ``dropped_vectors`` is the DROP LOG (`#12015`), the edge-side twin of
+    :attr:`RecordNode.dropped_vectors`: the vector properties the RECORD IMAGE
+    refused for this relationship, mapped to the reason. It lives on the view for
+    the same reason it does on the node — the view is what a reader of the record
+    gets, and a view that carried a vector the cache refuses would advertise
+    bytes nothing can query.
     """
 
     rel_type: str
@@ -1784,6 +1865,7 @@ class RecordRelation:
     tgt_key: str
     idx: int = 0
     props: Mapping[str, Any] = field(default_factory=dict)
+    dropped_vectors: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -2662,9 +2744,21 @@ def relation_from_row(row: Mapping[str, Any]) -> RecordRelation:
         skip=frozenset({"rel_type", "src_label", "src_key", "tgt_label",
                         "tgt_key", "idx"}),
     )
+    # ⛔ `#12015`: an edge carries the row's open-set tail VERBATIM, and
+    # `chk_relation_props_no_derived` refuses only the four EP names — so
+    # `embedding` is a legal key here and would land a vector on a RELATIONSHIP,
+    # where no query leg can reach it. Dropped in the row→view map BOTH directions
+    # read, exactly as the `#11747` node rule is (see
+    # :func:`relation_vector_declined_properties` for the rule, its residue and why
+    # this is a drop rather than a refusal).
+    dropped: dict[str, str] = {}
+    for prop in sorted(relation_vector_declined_properties()):
+        if props.pop(prop, None) is None:
+            continue
+        dropped[prop] = _relation_vector_reason(rel_type)
     return RecordRelation(rel_type=rel_type, src_label=src_label, src_key=src_key,
                           tgt_label=tgt_label, tgt_key=tgt_key, idx=idx,
-                          props=props)
+                          props=props, dropped_vectors=dropped)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -3492,6 +3586,17 @@ def relation_statement(rel: RecordRelation) -> Statement:
     (`projection/__init__.py`, `sdk.py`, `mcp_server.py`) does. `record_plan`
     builds this before the wipe, so a non-allowlisted predicate refuses the
     whole projection up front rather than raising mid-materialization.
+
+    ⛔ `#12015`: the edge's property bag may not carry a stored vector. A
+    relationship has NO LABEL, so `run_vector_query` — which validates an
+    `entity_type` and derives a node label from it — can never reach one, and
+    the refusal is therefore unconditional
+    (:func:`relation_vector_declined_properties`). This is the writer's OWN
+    check, kept for a DIRECTLY-CONSTRUCTED :class:`RecordRelation`
+    (`record_plan` is public, so a caller may build one and hand it over, never
+    passing :func:`relation_from_row`'s drop) — the same two-door shape
+    :func:`node_statement` uses, and the reason `ProjectionPlan.dropped_vectors`
+    reads the STATEMENTS rather than the views.
     """
     try:
         validate_rel_type(rel.rel_type)
@@ -3503,6 +3608,15 @@ def relation_statement(rel: RecordRelation) -> Statement:
         ) from e
     src_kp = KEY_PROPERTY[rel.src_label]
     tgt_kp = KEY_PROPERTY[rel.tgt_label]
+    props = dict(rel.props)
+    dropped: dict[str, str] = dict(rel.dropped_vectors)
+    for prop in sorted(relation_vector_declined_properties()):
+        if props.pop(prop, None) is None:
+            continue
+        # ⛔ `#12015` — dropped, and REPORTED on the statement (never written
+        # silently). Seeded from the view's own log so a relation that arrived
+        # through `relation_from_row` reports the drop once, with the same reason.
+        dropped[prop] = _relation_vector_reason(rel.rel_type)
     cypher = (
         f"MATCH (src:{rel.src_label} {{{src_kp}:$src_key}}), "
         f"(tgt:{rel.tgt_label} {{{tgt_kp}:$tgt_key}}) "
@@ -3510,8 +3624,8 @@ def relation_statement(rel: RecordRelation) -> Statement:
     )
     return Statement(cypher=cypher, params={
         "src_key": rel.src_key, "tgt_key": rel.tgt_key, "idx": rel.idx,
-        "props": dict(rel.props),
-    })
+        "props": props,
+    }, dropped_vectors=dropped)
 
 
 @dataclass(frozen=True)
@@ -3542,15 +3656,24 @@ class ProjectionPlan:
         return {(n.label, n.key) for n in self.nodes}
 
     def dropped_vectors(self) -> dict[str, int]:
-        """`{label: count}` of vector properties this plan REFUSES to store — `#11747`.
+        """`{target: count}` of vector properties this plan REFUSES to store.
 
-        ⛔ Read from the STATEMENTS, not from the nodes: :func:`node_statement` is
-        the door that can refuse a directly-built :class:`RecordNode` (a caller may
-        build one and hand it to :func:`record_plan`), so a node-side read would
-        miss exactly the case the writer's own check exists for. The two tuples are
-        parallel by construction — :func:`record_plan` appends one node statement
-        per node and then the relation statements — and ``zip`` stops at
-        ``self.nodes``, so a relation statement can never be read as a node's.
+        ``#11747`` (nodes) keys by RECORD LABEL; ``#12015`` (edges) keys by
+        ``<relationship:TYPE>`` — the spelling
+        `hosted_backup._require_served_restore_labels` already reports an edge
+        vector under, so an operator sees one vocabulary for one defect. A
+        relationship entry is never a label, and a consumer that prints these
+        must not call them all labels.
+
+        ⛔ Read from the STATEMENTS, not from the views: :func:`node_statement` and
+        :func:`relation_statement` are the doors that can refuse a directly-built
+        :class:`RecordNode` / :class:`RecordRelation`, so a view-side read would
+        miss exactly the case those writers' own checks exist for. The two tuples
+        are parallel by construction — :func:`record_plan` appends one node
+        statement per node and THEN the relation statements — so the node loop is
+        bounded by ``len(self.nodes)`` and the relation loop starts there. A single
+        `zip(self.nodes, self.statements)` would be correct only while no relation
+        statement is ever reached, i.e. exactly until this feature existed.
         """
         counts: dict[str, int] = {}
         for node, stmt in zip(self.nodes, self.statements, strict=False):
@@ -3558,6 +3681,12 @@ class ProjectionPlan:
                 continue
             counts[node.label] = (counts.get(node.label, 0)
                                   + len(stmt.dropped_vectors))
+        for rel, stmt in zip(self.relations, self.statements[len(self.nodes):],
+                             strict=False):
+            if not stmt.dropped_vectors:
+                continue
+            key = f"<relationship:{rel.rel_type}>"
+            counts[key] = counts.get(key, 0) + len(stmt.dropped_vectors)
         return counts
 
 
@@ -3600,8 +3729,9 @@ class ProjectionReport:
             f"{self.relations_written} relation(s) written; coverage="
             f"{self.coverage} over {self.declaration_keys} declared key(s)"
             + (f" (scope {self.scope})" if self.scope else "")
-            + (f"; {self.dropped_vectors} vector(s) DROPPED on unserved "
-               f"label(s) {list(self.dropped_vector_labels)} — a vector there "
+            + (f"; {self.dropped_vectors} vector(s) DROPPED on "
+               f"unserved label(s) / relationship type(s) "
+               f"{list(self.dropped_vector_labels)} — a vector there "
                f"has no query path" if self.dropped_vectors else "")
         )
 

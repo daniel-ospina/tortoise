@@ -202,6 +202,46 @@ projection gap whose only sanctioned repair is a re-projection that can no longe
 add the field. The alternative — moving the drop off the read door — was
 rejected: it would restore the "live ≠ rebuild" divergence the drop removes.
 
+### 0.5c A RELATIONSHIP carries no stored vector at all (`#12015`)
+
+§0.5b's rule is about a LABEL no query path serves. An edge is the same defect with
+**no label at all**: `public.relation` rows carry the same open-set `props` bag, the
+writer emits `SET r += $props`, and `chk_relation_props_no_derived` refuses only the
+four EP names — so an `embedding` key in a relation row lands a vector on a
+RELATIONSHIP, where `run_vector_query` (node-only: it validates an `entity_type` and
+derives a NODE label from it) can never reach it. That is `#5090` DoD row 2 again, and
+`hosted_backup._require_served_restore_labels` already refuses the identical shape at
+the DR door in `#11641`'s words — *"a RELATIONSHIP IS THE SAME DEFECT WITH NO LABEL AT
+ALL"* — reporting it as `<relationship:TYPE>`.
+
+So the projection refuses it the same way, at the same two doors:
+
+* `cache_projection.relation_from_row` drops it from the row→view map (so a record read
+  cannot advertise a vector the cache refuses) and records it on
+  `RecordRelation.dropped_vectors`;
+* `cache_projection.relation_statement` keeps its OWN check for a directly-built
+  `RecordRelation` (`record_plan` is public), records it on `Statement.dropped_vectors`
+  and never emits it in `params["props"]`;
+* `ProjectionPlan.dropped_vectors()` reports it as `<relationship:TYPE>` — `#11641`'s
+  spelling, so one defect has ONE vocabulary — and the operator's line names the right
+  survivor ("the edges are restored", not "the nodes").
+
+The rule itself is `cache_projection.relation_vector_declined_properties`, a live alias
+of the store seam (`stored_vector_props`) rather than a snapshot: the node rule must
+COMPUTE a difference once, while this one is unconditional, so a live read cannot drift
+from the seam that defines which properties are vectors. ⛔ It is NOT an index decision
+and NOT a claim that an edge could never be searched — if an edge vector index ever
+exists, this is the one declaration to change, and the reason it says *no query path*
+rather than *no label* is that the absence is in the READ leg, not in the storage.
+
+⚠️ **Residue, stated rather than discovered:** `relation_statement` is additive
+(`MERGE … SET r += $props`), so a legacy cache that already holds `r.embedding` keeps it
+across an incremental re-projection. It goes only when the edge is re-MERGEd from a view
+that no longer carries it, or on a full `record-restore` (which wipes first). Nothing on
+the read side reports it — `record_serve` has no relation read (`NOT_SERVED`),
+`parity_difference` is label-scoped and `record_reconcile` compares nodes — the same
+residue §0.5b carries for nodes.
+
 ### 0.6 Verification
 
 * `tests/test_cache_projection.py` — hermetic, no DB:

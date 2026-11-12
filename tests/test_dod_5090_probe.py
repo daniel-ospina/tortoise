@@ -575,6 +575,64 @@ def test_the_PLANTED_property_set_is_DERIVED_not_the_literal_embedding(monkeypat
     assert literal.params["props"]["embedding"] == [0.5, 0.25]
 
 
+def test_the_row_two_MEASURES_the_EDGE_vector_door():
+    """`#12015` — the projection's EDGE store is measured, not assumed away.
+
+    `#11747` made row 2 measure the projection's NODE doors by running them. The same
+    writer has an EDGE door (`relation_from_row` → `relation_statement`, plus a
+    directly-built `RecordRelation`), and a node-only measurement keeps printing
+    `stored-without-a-query-path: none` over an edge vector — the identical blind spot,
+    one object over.
+
+    ⛔ Non-vacuity is the load-bearing half, and it is asserted by the FALSIFIER below
+    (`test_re_introducing_an_EDGE_vector…`), not here: on the fixed tree the correct
+    answer IS the empty set, so "nothing seen" and "nothing measurable" look alike. What
+    this test can assert is that the doors were actually BUILT for every allowlisted
+    predicate — an unbuildable door is reported as unmeasured, and unmeasured is not
+    clean.
+    """
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert measured["relationships"] == frozenset(), sorted(measured["relationships"])
+    edge_unmeasured = {k: v for k, v in measured["unmeasured"].items()
+                       if k.startswith("<relationship")}
+    assert edge_unmeasured == {}, (
+        "an edge door could not be built, so the empty set above is not a measurement: "
+        f"{edge_unmeasured}")
+    row = probe.score_path_bullet()
+    assert row.verdict == "MET", row.observed
+    assert "cache projection RELATIONSHIP vector targets" in row.observed, row.observed
+    assert "stored-without-a-query-path: none" in row.observed, row.observed
+
+
+def test_re_introducing_an_EDGE_vector_flips_row_two_to_NOT_MET(monkeypatch):
+    """The falsifier: restore the old edge writer's behaviour and row 2 must go red.
+
+    ⛔ Mutating the GATE (not the probe's inputs) is the point, exactly as the `#11747`
+    pin above does: the real derivation path runs end to end — `relation_from_row` →
+    `relation_statement` → `stmt.params["props"]` → the orphan comparison — so this
+    reds on the failure a future lane would actually introduce.
+
+    It is ALSO the non-vacuity proof for the test above: a probe that could not see an
+    edge store at all would report `relationships: []` here too, and this assertion
+    would fail.
+    """
+    import tortoise.cache_projection as cp
+
+    monkeypatch.setattr(cp, "relation_vector_declined_properties", lambda: frozenset())
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert "IMPL" in measured["relationships"], (
+        "the EDGE door is unmeasured: with the decline removed, the planted vector reaches "
+        f"`SET r += $props` and must be seen. Measured: {sorted(measured['relationships'])}")
+    assert "IMPL" not in measured["labels"], (
+        "a relationship type is NOT a node label — it must be reported under its own key")
+    row = probe.score_path_bullet()
+    assert row.verdict == "NOT MET", row.observed
+    assert "<relationship:IMPL>" in row.observed, row.observed
+    assert "stored-without-a-query-path: none" not in row.observed, row.observed
+
+
 def test_a_record_label_without_a_key_HOLDS_the_row_instead_of_crashing(monkeypatch):
     """`#11747` review, finding 4 — the per-label derivation is inside the envelope.
 
