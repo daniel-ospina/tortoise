@@ -178,12 +178,18 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     arm ASSERTED a row's status by issue — the arms that read the page compare
     COUNTS (§2's tally, the abstract, the WS-C cell) or check a row's presence,
     its pin, its status vocabulary and its anchors — so an edit that held the
-    tally and moved the claim was invisible to all of them as a CLAIM. One arm
-    does carry a per-issue status literal, but as a MUTATION FIXTURE's premise
-    rather than an assertion: `_rewrite_row(..., 2813, "| VERIFIED-FIXED |", …)`
-    fails with "row #2813 does not contain '| VERIFIED-FIXED |'", i.e. as a
-    broken fixture, not as a status finding. So a swap touching `#2813` reds only
-    by accident of a fixture premise that names it, which is not coverage.
+    tally and moved the claim was invisible to all of them as a CLAIM. Some arms
+    do carry a per-issue literal, but as a MUTATION FIXTURE's premise rather than
+    an assertion: `_rewrite_row(..., 2813, "| VERIFIED-FIXED |", …)` fails with
+    "row #2813 does not contain '| VERIFIED-FIXED |'", i.e. as a broken fixture,
+    not as a status finding. Those premises are therefore not the REASON such a
+    swap is caught: `#2813` is a WS-A row while all four `OPEN` rows sit in
+    WS-B/C/D, so a tally-holding swap touching it has to promote one of the four
+    the pin names — which reds this arm — and move WS-A's "5 of 5" cell, which
+    reds the count arms. What the premises add is the case this arm cannot see: a
+    UNILATERAL move whose counts are all corrected, where `problem_map_check
+    --check` reads CLEAN and the only reds are these premises, reading as
+    breakage rather than as a status finding.
     Reverting §2's `#2782` to `OPEN`
     **and** promoting `#2684` to `VERIFIED-FIXED` (one row each way, so §2 stays
     22/4/0, the total 26, WS-C 4 of 6, and both headlines intact) left
