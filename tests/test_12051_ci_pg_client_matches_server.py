@@ -1346,39 +1346,50 @@ CONDITION_LEAD_RE = re.compile(
 )
 
 
-#: Does a condition OPENED on this line still run on the next one? A shell condition
-#: continues across a line break after `&&`, `||` or an unescaped `\`, and an
-#: unterminated `[[` does too.
-#: ⛔ A CONTINUED CONDITION FAILED OPEN (#12069 review 7). The lead requirement is
-#: evaluated per LINE, so a condition split over two lines dropped the one clause
-#: holding the operator and the variable:
-#:     if [[ -n "${ONLY:-}" &&
-#:           "$tool" == pg_dump ]]; then version="$("$tool" --version)"; fi
-#: — the second line does not OPEN a condition (its `[[` is on the previous one),
-#: so nothing graded it, both tools were credited and `pg_restore --version` was
-#: never reached (measured GREEN; the head before this requirement refused it).
-def _condition_continues(line: str) -> bool:
-    """Will this line's condition (if any) keep running on the NEXT line?"""
+#: ⛔ CONTINUATION IS TEST DEPTH, NOT A LINE ENDING (#12069 reviews 7-8). Two cuts
+#: keyed continuation on the SHAPE OF THE LINE BREAK and each was wrong in one
+#: direction:
+#:   * no continuation at all failed OPEN on a condition split over two lines —
+#:         if [[ -n "${ONLY:-}" &&
+#:               "$tool" == pg_dump ]]; then …
+#:     — the second line does not OPEN a condition (its `[[` is on the previous one);
+#:   * continuing on a trailing `&&`/`||`/`\` failed the OTHER way, because those
+#:     continue a shell LIST, whose right-hand side is an ordinary COMMAND:
+#:         [ -n "$LOG" ] && \
+#:           echo "::notice::$tool = $version"      # a message, not a condition
+#:     — graded as a condition, so a body that checks every tool was REFUSED.
+#: What actually continues a CONDITION is an unclosed test construct. `[[` and `((`
+#: are counted (bare `[` is NOT: it appears inside `${T[0]}`, which is what made the
+#: bracket-matching span rule wrong), quotes are stripped first so a message that
+#: PRINTS `[[` opens nothing, and the depth carries across body lines.
+_QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\\\]|\\\\.)*\"")
 
-    stripped = line.rstrip()
-    if stripped.endswith(("&&", "||", "\\")):
-        return True
-    return stripped.count("[[") > stripped.count("]]")
+
+def _test_depth(text: str) -> int:
+    """Unclosed `[[` / `((` constructs in this text, quotes stripped first."""
+
+    bare = _QUOTED_RE.sub('""', text)
+    return max(0, bare.count("[[") - bare.count("]]")) + max(
+        0, bare.count("((") - bare.count("))")
+    )
 
 
-def _comparison_clauses(line: str, *, continued: bool = False) -> list[str]:
-    """The separator-delimited clauses of `line` that OPEN a comparison.
+def _comparison_clauses(line: str, *, depth: int = 0) -> tuple[list[str], int]:
+    """The clauses of `line` that OPEN a comparison, and the test depth after it.
 
-    `continued` grades the FIRST clause without requiring a lead, for a condition
-    that began on the previous line (see `_condition_continues`).
+    A clause is graded when it opens a condition ITSELF (`CONDITION_LEAD_RE`) or
+    when it sits inside a test construct still OPEN — the carried `depth`, which is
+    what makes a condition split over a line break, or a later clause of a single
+    `[[ … ]]`, a condition rather than an orphan.
     """
 
-    return [
-        clause
-        for index, clause in enumerate(CLAUSE_SPLIT_RE.split(line))
-        if CONDITION_LEAD_RE.match(clause) or (continued and index == 0)
-        if COMPARISON_RE.search(clause)
-    ]
+    graded: list[str] = []
+    for clause in CLAUSE_SPLIT_RE.split(line):
+        opened = CONDITION_LEAD_RE.match(clause) is not None
+        if (opened or depth > 0) and COMPARISON_RE.search(clause):
+            graded.append(clause)
+        depth = max(0, depth + _test_depth(clause))
+    return graded, depth
 
 
 def _matches_on(text: str, matcher: re.Match[str], ref: re.Pattern[str]) -> bool:
@@ -1458,7 +1469,7 @@ def _selects_on_var(body: list[str], var: str) -> bool:
         r"(?P<brace>\$\{" + re.escape(var) + r"(?![A-Za-z0-9_])[^}]*\})"
         r"|\$" + re.escape(var) + r"(?!\w)"
     )
-    continued = False
+    depth = 0
     for line in _with_aliases_each(body, var):
         match = ref.search(line)
         if match:
@@ -1468,10 +1479,10 @@ def _selects_on_var(body: list[str], var: str) -> bool:
             matcher = PATTERN_MATCHER_RE.search(line)
             if matcher and _matches_on(line, matcher, ref):
                 return True
-        for clause in _comparison_clauses(line, continued=continued):
+        clauses, depth = _comparison_clauses(line, depth=depth)
+        for clause in clauses:
             if ref.search(clause):
                 return True
-        continued = _condition_continues(line)
     return False
 
 
@@ -2704,6 +2715,22 @@ VERSION_CHECK_POLARITY = [
         'done',
         set(),
         "#12069 round-7: a condition CONTINUED over a line break is still a condition",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  if [[ -n "$X" && "$tool" == pg_dump ]]; then v="$("$tool" --version)"; fi\n'
+        'done',
+        set(),
+        "#12069 round-8: a NON-FIRST clause inside one `[[ … ]]` is still that condition",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  [ -n "$LOG" ] && \\\n'
+        '    echo "::notice::$tool = $version"\n'
+        'done',
+        {"pg_dump", "pg_restore"},
+        "#12069 round-8: `&&`/`\\` continue a LIST, whose right-hand command is no condition",
     ),
 ]
 
