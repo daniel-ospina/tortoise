@@ -594,7 +594,11 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
          'p["embedding"] = fields["embedding"]'),),
     "tortoise.api::_emit": (
         ("tortoise/api.py", "_emit", 'embedding="abc"'),
-        ("tortoise/api.py", "_emit", "stamp_journal_embedding ="),),
+        # ⛔ NOT `stamp_journal_embedding =` — that needle matches the import-failure
+        # FALLBACK (`stamp_journal_embedding = None`), so it survived deleting the stamp
+        # call the row's premise rests on (cycle-3 review, measured). Cite the CALL.
+        ("tortoise/api.py", "_emit",
+         "event = stamp_journal_embedding(event, creating=False)"),),
     "tortoise.api::_verify_record_vector_width": (
         ("tortoise/api.py", "_verify_record_vector_width",
          "embedding=[0.1234567890123, 1/3]"),
