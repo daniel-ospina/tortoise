@@ -156,7 +156,11 @@ not a tenth spelling — it is the one a text guard cannot reach:
   read-only command whose verb IS in the list (`rm`, `tee`, `install`,
   `chmod`) and which names a client binary after it is refused. That is
   the right polarity here: nothing legitimate rewrites those binaries,
-  and the message names the accepted form.
+  and the message names the accepted form. A REDIRECTION is graded
+  separately (`REDIRECT_TARGET_RE`), because it writes a file with no verb at
+  all: `: > /usr/lib/postgresql/16/bin/pg_dump` rewrote the pinned binary with
+  every row green until #12069 review P1, and ``>`/`>>`/`| tee` into a client
+  binary or a client `bin/` is now refused however the producer is spelled.
 - **The extraction's arithmetic** (`sed -E 's/.*/16/'`) cannot be proven; the
   in-job assertion is what makes a constant visible.
 
@@ -250,6 +254,53 @@ BINARY_MUTATION_RE = re.compile(
 #: compensating control) from reading as replacements — both measured RED, round
 #: 10. The call site also reads the name only AFTER the verb.
 BINARY_NAME_RE = re.compile(r"\b(?:pg_dump|pg_restore|pg_ctl|pg_wrapper)(?![\w.])")
+
+#: A REDIRECT whose TARGET is a client binary or the pinned bin directory
+#: (#12069 review P1, measured at `5de9f4b5d7`). The mutating-verb rule above
+#: needs a VERB, and a shell's ordinary way of writing a file is `>` — no verb at
+#: all. So the same act was REFUSED through `tee`/`cp` and GREEN through `>`:
+#:
+#:     printf '#!/bin/sh\nexec /usr/bin/pg_dump "$@"\n' > /usr/lib/postgresql/16/bin/pg_dump
+#:     : > /usr/lib/postgresql/16/bin/pg_dump
+#:     echo boom > /usr/lib/postgresql/16/bin/pg_dump
+#:
+#: every row green (`171 passed`), while the identical bytes through
+#: `| sudo tee …` / `cp` red `test_no_step_rewrites_the_client_path_to_another_major`.
+#: The first line is the full #12051 regression: `…/16/bin/pg_dump` becomes a
+#: wrapper that execs `/usr/bin/pg_dump` = `pg_wrapper` → the image's newest
+#: client — and the in-job `pg_dump --version` assertion cannot see it, because
+#: that lives in the PIN step, which runs BEFORE a later step can rewrite the
+#: binary. The TARGET is what makes this narrow (`nothing legitimate redirects
+#: INTO the pinned bin dir`), so the polarity is the mutating-verb rule's: refuse
+#: the shape loudly rather than try to prove the writer's intent.
+#:
+#: `>`, `>>` and `>|` are the redirections that WRITE; `| tee [-a]` is the other
+#: spelling and is matched so the two cannot disagree. A redirect to anything
+#: else (`$GITHUB_PATH`, `$RUNNER_TEMP/…`, `/dev/null`, a `pg_dump.log`) is
+#: spared — `BINARY_NAME_RE`'s `(?![\w.])` keeps `pg_dump.log` out, which is the
+#: same reason the tidy step and the guard's own `| tee -a "$RUNNER_TEMP/v.txt"`
+#: compensating control stay green.
+REDIRECT_TARGET_RE = re.compile(
+    r"(?:>>?\|?|\|\s*(?:sudo\s+)?tee\s+(?:-a\s+)?)\s*(?P<quote>['\"]?)"
+    r"(?P<target>[^\s;&|'\"]+)"
+)
+
+
+def _redirects_into_a_client_binary(line: str) -> bool:
+    """Does this line WRITE OVER a client binary by REDIRECTION? (#12069 P1)
+
+    A redirection needs no verb, so the rule above cannot see it. The target must
+    be a client BINARY NAME or a path under a versioned client `bin/` — the
+    pinned directory itself, which nothing legitimate writes into. Read from
+    every redirect on the line, not the first: `a > ok b > …/pg_dump` is one line.
+    """
+    for match in REDIRECT_TARGET_RE.finditer(line):
+        target = match.group("target")
+        if BINARY_NAME_RE.fullmatch(target.rsplit("/", 1)[-1]):
+            return True
+        if CLIENT_DIR_RE.search(target):
+            return True
+    return False
 
 #: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
 #: `echo <dir> >> "$GITHUB_PATH"` — read the major from the
@@ -643,16 +694,29 @@ def _unreachable_guards(
 def _replaces_a_client_binary(line: str) -> bool:
     """Does this line REPLACE a client binary? (#12051 review rounds 9-10)
 
-    The verb and the binary must both be present, and the binary must be named
-    AFTER the verb: reading the pair anywhere on the line made a tidy step
-    (`rm -f "$RUNNER_TEMP/pg_dump.log"`) and the guard's OWN recommended
-    compensating control (`pg_dump --version | tee -a "$RUNNER_TEMP/v.txt"`) read
-    as replacements — both measured RED, with a message saying the step replaced
-    a binary it only mentioned. The pin's own install line is excluded.
+    TWO ways in, both narrow on purpose:
+
+    · a MUTATING VERB followed by a client binary name. The binary must be named
+      AFTER the verb: reading the pair anywhere on the line made a tidy step
+      (`rm -f "$RUNNER_TEMP/pg_dump.log"`) and the guard's OWN recommended
+      compensating control (`pg_dump --version | tee -a "$RUNNER_TEMP/v.txt"`) read
+      as replacements — both measured RED, with a message saying the step replaced
+      a binary it only mentioned.
+    · a REDIRECTION whose TARGET is a client binary or the pinned `bin/`
+      (#12069 review P1). A redirect writes a file with NO verb, so the rule
+      above could not see `: > /usr/lib/postgresql/16/bin/pg_dump` — measured
+      green, and it is the full regression. See `REDIRECT_TARGET_RE`.
+
+    The pin's own install line is excluded.
     """
 
     if CLIENT_PKG_RE.search(line):
         return False
+    # ⛔ BEFORE the verb rule, because a redirection has NO verb (#12069 review
+    # P1): `: > /usr/lib/postgresql/16/bin/pg_dump` rewrote the pinned binary with
+    # every row green. See `REDIRECT_TARGET_RE`.
+    if _redirects_into_a_client_binary(line):
+        return True
     verb = BINARY_MUTATION_RE.search(line)
     if not verb:
         return False
@@ -3673,4 +3737,69 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     assert "REACHED_PAST_PRECONDITION" in present.stdout, (
         "the script never reached the line after the precondition even when the "
         "package resolved — the block is unconditional"
+    )
+
+
+#: A REDIRECTION that writes a client binary, both directions (#12069 review P1).
+#:
+#: `_replaces_a_client_binary` needed a mutating VERB, and a shell's ordinary way
+#: of writing a file has none — so the same act was refused through `tee`/`cp` and
+#: GREEN through `>`. MEASURED at `5de9f4b5d7` before the rule existed: all three
+#: of the first three rows below left `171 passed`, i.e. the row that exists to
+#: stop the pinned binary being rewritten could be satisfied by a redirection.
+#:
+#: Both directions are pinned because a rule that reds a CORRECT step is the same
+#: defect class as one that passes a broken one: this job legitimately redirects
+#: into `$GITHUB_PATH`, into `$RUNNER_TEMP`, into `/dev/null`, and pipes the pin's
+#: own `pg_dump --version` into `tee -a`.
+REDIRECT_POLARITY = [
+    # (line, must_be_refused, why)
+    (
+        "printf '#!/bin/sh\\nexec /usr/bin/pg_dump \"$@\"\\n' > /usr/lib/postgresql/16/bin/pg_dump",
+        True,
+        "a `>` writes the pinned binary into a wrapper: the full #12051 regression",
+    ),
+    ("          : > /usr/lib/postgresql/16/bin/pg_dump", True, "`:` with a redirect truncates it"),
+    ("echo boom > /usr/lib/postgresql/16/bin/pg_dump", True, "any producer, one redirect"),
+    ("echo x >> /usr/lib/postgresql/17/bin/pg_restore", True, "an append into another major's bin"),
+    (
+        "echo x | sudo tee /usr/lib/postgresql/16/bin/pg_dump",
+        True,
+        "`| tee` is the same write, so the two spellings cannot disagree",
+    ),
+    ('echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"', False, "the pin's own prepend"),
+    ('sudo apt-get install -y postgresql-client-16', False, "the install line names no client binary"),
+    ("pg_dump --version | tee -a \"$RUNNER_TEMP/v.txt\"", False, "the guard's own compensating control"),
+    ('rm -f "$RUNNER_TEMP/pg_dump.log"', False, "a filename that CONTAINS a binary name"),
+    ('echo "$SCRATCH" > "$RUNNER_TEMP/pg_dump.log"', False, "a log file, not a binary"),
+    ("cmd >/dev/null 2>&1", False, "discarding output is not a write into a client dir"),
+    ('echo "14 > 16" >> "$SCRATCH/report.txt"', False, "`>` inside a message string"),
+]
+
+
+@pytest.mark.parametrize(
+    "line,refused,why",
+    REDIRECT_POLARITY,
+    ids=[why.replace(" ", "-")[:32] for _, _, why in REDIRECT_POLARITY],
+)
+def test_a_redirect_into_a_client_binary_is_a_replacement(
+    line: str, refused: bool, why: str
+) -> None:
+    """A redirection has no verb, so the verb rule cannot see it (#12069 P1)."""
+
+    assert _replaces_a_client_binary(line) is refused, (
+        f"{'REFUSED' if refused else 'ALLOWED'} expected ({why}), but the rule "
+        f"{'allowed' if refused else 'refused'} {line!r}. The rule is "
+        "`_redirects_into_a_client_binary`: a redirect whose TARGET is a client "
+        "binary name or a path under a client `bin/`"
+    )
+
+
+def test_the_redirect_rule_reads_every_redirect_on_the_line() -> None:
+    """`a > ok b > …/pg_dump` is ONE line; grading the first redirect misses it."""
+
+    line = 'echo notes > "$SCRATCH/x.txt" && echo boom > /usr/lib/postgresql/16/bin/pg_dump'
+    assert _replaces_a_client_binary(line), (
+        "only the FIRST redirect on the line was graded, so a second one could "
+        "rewrite the pinned binary with every row green (#12069 review P1)"
     )
