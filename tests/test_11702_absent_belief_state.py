@@ -5840,12 +5840,20 @@ _CRED_WORD_YIELDS_075 = re.compile(
 #: negates something else — "the credibility word is not weak and is 0.75"
 #: reads as exempt; (ii) a demoting verb outside the list above; (iii) a BOUND
 #: form — "the credibility word is no more than 0.75" / "… is no higher than
-#: 0.75" — REPORTS, because the copula alternative is number-bound and a bare
-#: `is no <bound>` word is a determiner, not a denial of the attribution. That
-#: is a false block in the expensive direction, disclosed rather than fixed: it
-#: was exempt under the earlier unbound `is\s+no`, and re-widening to admit
-#: `more|higher` would re-open the determiner hole AND admit a genuinely FALSE
-#: bound claim (0.7561 is more than 0.75). It also still
+#: 0.75" — REPORTS. The copula alternative is NUMBER-bound, so `is no <bound>`
+#: reads as an attribution and is reported; a bare `is\s+no` exempted it, and
+#: that is why the residual exists rather than being closed by the alternative.
+#: ⚠️ It is NOT left open because a bounded alternative would reopen the
+#: determiner hole — measured, `is\s+no\s+(?:0?\.|75\s*%|more\b|higher\b)`
+#: still FIRES on "the credibility word is no mere flag and reads 0.75"
+#: ("mere" is not "more"), so the hole stays shut either way (review cycle 11,
+#: P2 — an earlier revision asserted both that this reports and that exempting
+#: it would admit a FALSE claim, which cannot both hold of the same two
+#: strings). The real reason is AMBIGUITY: the wording is TRUE of the word
+#: alone (0.5238 <= 0.75) and FALSE of the word on top of the #2199 default
+#: (0.7561 > 0.75), so a guard cannot decide it from the sentence — reporting
+#: is the safe direction, and it is pinned as a boundary in the control test
+#: rather than left as prose. It also still
 #: reports an attribution negated in an EARLIER clause and restated without
 #: one, which is outside the read window — a false block, the expensive
 #: direction. It is a tripwire on a class, never a parser, and strings for both
@@ -6107,6 +6115,14 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # corrected the count, which an earlier revision stated as 20 and
             # a threshold of "10 or less").
             "the credibility word reads exactly the default 0.75",
+            # …and residual (iii) PINNED as a boundary: a BOUND form reports today
+            # because the copula alternative is number-bound. The wording is
+            # ambiguous (true of the word alone at 0.5238, false of word+default
+            # at 0.7561), so reporting is the safe direction — but the DISCLOSURE
+            # must be falsifiable: exempting these makes them a silent FALSE PASS
+            # surface, so that change has to move these rows (review cycle 11, P2).
+            "the credibility word is no more than 0.75",
+            "the credibility word is no higher than 0.75",
             # …the other spellings of the SAME claim (review cycle 3, P2).
             "the credibility word reads .75",
             "the credibility word is 75%",
