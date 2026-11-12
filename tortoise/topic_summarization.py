@@ -26,7 +26,7 @@ from dataclasses import dataclass, field, asdict
 from tortoise.entity_identity import (
     AmbiguousEntityName,
     UnaddressableEntityName,
-    resolve_entity_id,
+    resolve_entity_id_same_entity,
 )
 from tortoise.search_engine import (
     annotate_ep_batch,
@@ -215,7 +215,12 @@ def _retrieve_topic_neighborhood(
                 # only by terminal carriers, D2's terminal-only reference) is
                 # likewise skipped: there is nothing live to seed from.
                 try:
-                    entity_id = resolve_entity_id(graph, entity_label, entity_name)
+                    # #12120: over the WRITER's folded union, so a spelling the
+                    # create door resolved onto this entity is not skipped as
+                    # absent (an empty seed is indistinguishable from "no
+                    # beliefs", which is the class #12047 removes).
+                    entity_id = resolve_entity_id_same_entity(
+                        graph, entity_label, entity_name)
                 except (AmbiguousEntityName, UnaddressableEntityName):
                     continue
                 if entity_id is None:

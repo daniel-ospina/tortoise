@@ -13,7 +13,7 @@ the retired value, and **TWO** tests pinned the default
 (`test_email_integration_resend.py::test_invite_link_contract_is_hermetic` via the
 cassette, and `test_welcome_url_consolidation.py::test_welcome_redirect_default_host`).
 An earlier revision of this paragraph said "exactly ONE", which was a miscount and
-omitted the second — and that second one is one of the two this PR had to change,
+omitted the second — and that second one is one of the two #11977 had to change,
 so the paragraph was understating its own surface.
 
 So the assertions here are on the ARTIFACT (the invite email's own body, the
@@ -27,17 +27,40 @@ whose host moved while its dead `#appeal` fragment did not (#11939).
 
 ⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE: the dashboard landing
 pages, the blog origin, and the dashboard's docs links used to spell the retired
-origin. Each is in `RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, the
-measured 301 that makes it a hop rather than a break, and the issue that owns the
-re-aim — so this guard cannot report GREEN over a file it never opened, and a
-sweep that removes one of those literals must remove its recorded reason too.
+origin. Every file in `RUNTIME_FILES` that STILL spells it is in
+`RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, its TERMINATOR — a 301
+onto a canonical origin (the DEFAULT `/blog*` 301 for five of them, so those five
+name no status: it is stated in the census below), or NOT REDIRECTED AT
+ALL, where the retired host answers in place — and, for the DEFERRALS, the issue
+that owns the re-aim. ⛔ BOUNDED TWICE, and both bounds matter: the ten DEFERRALS
+carry a terminator, while the four non-deferral KEEP rows (CORS and redirect
+allowlists, not links) have none to carry; and files OUTSIDE `RUNTIME_FILES` still
+spell the host with no row at all — the `blog/api/notify-publish` POST in
+`.github/workflows/deploy-pages.yml`, the `author_image_url` literals in
+`supabase/migrations/*`, and the served, crawler-facing `website/sitemap-product.xml`,
+`website/sitemap.xml` and `website/robots.txt` — whose `<loc>` and `Sitemap:` entries a
+sweep must re-aim too (`tests/test_website_docs_consistency.py`'s `SITE_HOSTS` lists the
+retired host as LEGITIMATE, so a retired-host `<loc>` passes there) — because this guard
+counts what the RUNTIME emits in its own surface, not every occurrence in the tree. Every file that reads 0 has
+NO row and stays in `RUNTIME_FILES` — the landed allowlist has never carried a row for ANY of
+them: three were re-aimed to 0 by main's #12058 (which landed before this branch's base and
+never touched this file), five were never described by a row anywhere (`email_notify.py`,
+`abuse.py`, the two `SKILL.md`s and `.env.example`), and `website/functions/blog/_lib.ts`
+reached 0 in the commit that introduced this list — #11977 repointed its three `navHtml`
+hrefs in `7e6baffc5d`, so the LANDED count was 0 from the list's first revision (the drafts'
+`_lib.ts` row, 4 then 3, is the one the map note below records) — so a literal coming back REDS the guard instead
+of leaving the surface, and no group is a leftover — which is why this guard
+cannot report GREEN over a file it never opened, and why a sweep that removes one of
+those literals must remove its recorded reason too.
 
-⛔ THE COUNTS MOVED UNDER THIS PR, AND THAT IS THE POINT OF AN EXACT COUNT. main's
-#12058 ("serve the product at premiselabs.co/tortoise", which is what CLOSED
-#11764) re-aimed most of the dashboard set while this PR was open, so THREE rows
-went to ZERO and were removed (`invite-accept.html` 3 -> 0, `welcome.html` 1 -> 0,
-`wizardPrompts.js` 3 -> 0) and two SHRANK (`signup.html` 2 -> 1,
-`overviewEmptyAction.js` 2 -> 1). Their files STAY in `RUNTIME_FILES`, so a literal
+⛔ THE COUNTS MOVED BEFORE THIS BRANCH'S BASE, AND THAT IS THE POINT OF AN EXACT
+COUNT. main's #12058 ("serve the product at premiselabs.co/tortoise", which is what
+CLOSED #11764) re-aimed most of the dashboard set before this branch was cut, so the
+counts an EARLIER DRAFT of this table carried no longer hold: `invite-accept.html`
+went 3 -> 0, `welcome.html` 1 -> 0, `wizardPrompts.js` 3 -> 0, and two SHRANK
+(`signup.html` 2 -> 1, `overviewEmptyAction.js` 2 -> 1). ⛔ The drafts' rows for the
+first three are gone with the drafts — the landed allowlist has never carried them —
+so read the table below, which is what this head measures, not this sentence. Their files STAY in `RUNTIME_FILES`, so a literal
 coming back REDS the guard rather than leaving the surface. The two survivors are
 app-ORIGIN hrefs (`/auth`, `/welcome`) on the retired host, which #12058's scope
 (the marketing and product pages) did not cover; they defer to **#12057**, which
@@ -49,17 +72,20 @@ non-deferral KEEP rows — `hosted_api.py`, the two Supabase edge functions and
 `supabase/config.toml` — name no follow-up issue on purpose: nothing is deferred
 there, so naming one would invent work that does not exist.)
 
-⛔ ONE ROW CHANGED UNDER THIS PR, AND THE CHANGE IS THE POINT OF THE EXACT COUNT.
-`website/functions/blog/_lib.ts` was 4 when this file was written; main's #11765
-(PR #11976, landed 2026-11-12 while this PR was open) flipped that file's
-`SITE_URL` to `premiselabs.co`, so the count was 3 — the three `navHtml`
-product hrefs, which #11976's own `tests/test_blog_seo_meta.mjs` kept on the
-retired host ON PURPOSE and assigned to #11764. This file was rebased onto that
-commit and the row followed it down to 3; #11764 then closed WITHOUT repointing
-them, so this PR emits the terminal forms and the row is now GONE (count 0). The
-file stays in `RUNTIME_FILES`, so a literal coming back REDS the guard. A count
-kept at 4 would have gone RED on a file nobody broke; a row deleted without the
-repoint would have un-pinned a deferral nobody owns.
+⛔ `_lib.ts` HAS NO ROW, AND THE LANDED HISTORY IS WHY. #11764's deferral was the
+three `navHtml` product hrefs, and it closed WITHOUT repointing them (2026-11-12,
+by PR #12058 — which touched neither `_lib.ts` nor this test file). The repoint is #11977's: its commit
+`7e6baffc5d` moved those three hrefs to the terminal forms AND introduced this
+allowlist, so the count was ALREADY 0 when the list first existed and no landed
+revision of it ever carried a `_lib.ts` row. ⛔ Measured, not inferred: 14 keys at
+`7e6baffc5d`, 14 at this head, the same set, and `_lib.ts` is a key in neither.
+This branch changes no line of `_lib.ts` and no line of the blog guard —
+`git log 81269704..HEAD` over both files is empty. #11976's own guard follows: on
+this head's base `tests/test_blog_seo_meta.mjs:2286` already pins
+`navRetired.length === 0`, so nothing here "flips" it. The file stays in
+`RUNTIME_FILES`, so a literal coming back REDS the guard. A count kept at 4 would
+have gone RED on a file nobody broke; a row added at 0 would have been a pin with
+nothing to pin.
 """
 from __future__ import annotations
 
@@ -227,14 +253,20 @@ RETIRED_HOST_ALLOWLIST = {
     # ⛔ #11767 items 4 AND 5 — NOT re-aimed by this PR, and recorded here so the
     # guard COVERS these files instead of silently skipping them (fresh-context
     # review, P1: with a hand-list, the sweep could not fail for the ONE page the
-    # emailed invite token lands on). Every URL built from these answers a
-    # PERMANENT 301 on the retired host (each measured 2026-11-12 below), so each
-    # is a hop, not a break — which is why deferring is safe and why it must stay
-    # VISIBLE: a sweep that deletes one of these must delete its reason too, and
+    # emailed invite token lands on). The retired host handles every URL built
+    # from these without a break, by one of TWO terminators: a 301 onto a
+    # canonical origin — the DEFAULT `/blog*` 301 for five of them, which those
+    # five rows do not restate, so the census below is where it is stated — or
+    # NOT REDIRECTED AT ALL, where the retired host answers the request in place.
+    # ⛔ Not "every one 301s": a literal whose row names no redirect is a
+    # different sweep with a different risk (see (a)/(b) below). That is why
+    # deferring is safe and why it must stay VISIBLE: a sweep that deletes one of
+    # these must delete its reason too, and
     # the deferred re-aim is tracked on #12057 rather than lost behind a green run.
-    # ⛔ `invite-accept.html`, `welcome.html` and `wizardPrompts.js` had rows here and
-    # no longer do: main's #12058 re-aimed all three to 0 while this PR was open
-    # (measured on this tree). Their files stay in `RUNTIME_FILES`, so a literal
+    # ⛔ `invite-accept.html`, `welcome.html` and `wizardPrompts.js` were re-aimed to
+    # 0 by main's #12058 before this branch's base (measured on this tree), and the
+    # landed allowlist has never carried a row for any of them — the rows an earlier
+    # draft listed are gone with the drafts. Their files stay in `RUNTIME_FILES`, so a literal
     # coming back REDS the guard instead of leaving the surface — which is the
     # difference between deleting a ROW and deleting a FILE.
     "website/apps/dashboard/public/signup.html": (
@@ -246,10 +278,12 @@ RETIRED_HOST_ALLOWLIST = {
         "to #12057, which lists this row."),
     "website/apps/dashboard/functions/blog/api/[[path]].ts": (
         1,
-        "#11767 item 4 — DEFAULT_BLOG_ORIGIN is still the retired host. ⛔ The "
-        "hop lands on premiselabs.co/blog (301, measured 2026-11-12) — the blog's "
-        "OWN canonical origin, NOT the premiselabs.co/tortoise product page an "
-        "earlier revision of this note named. Moving it changes what the blog API "
+        "#11767 item 4 — DEFAULT_BLOG_ORIGIN is still the retired host. ⛔ A bare "
+        "`/blog` on it 301s to premiselabs.co/blog (measured 2026-11-12) — the "
+        "blog's OWN canonical origin, NOT the premiselabs.co/tortoise product "
+        "page an earlier revision of this note named — but the URLs this "
+        "constant actually emits are `/blog/api/*`, which are NOT redirected at "
+        "all. Moving it changes what the blog API "
         "reads THROUGH, not just a link: the retired host's `/blog*` 301s with "
         "`/blog/api/*` deliberately excluded from the map, so a base flip that "
         "misses the exclusion turns a POST into a GET. The sweep is #12057's."),
@@ -262,23 +296,27 @@ RETIRED_HOST_ALLOWLIST = {
     # ⛔ The blog origin's ACTUAL source, missed by the first pass at this map: it
     # named the admin client and the dashboard Function but not `_lib.ts`, which is
     # what the blog's canonicals, OG tags, JSON-LD, sitemap and feed are built from.
-    # ⛔ THIS ROW IS GONE, and the removal is the deferral being PAID rather than
-    # moved. Two things happened under this PR: #11765 (PR #11976) re-aimed
-    # `SITE_URL` to `premiselabs.co`, and the three remaining occurrences were
-    # `navHtml`'s product hrefs, deferred to #11764. #11764 then CLOSED
-    # (2026-11-12T07:23:26Z, COMPLETED, by PR #12058) WITHOUT repointing them and
-    # #12057 explicitly excludes this file — so the deferral pointed at a closed
-    # issue, which this file's own OWNERSHIP note forbids ("a note deferring to it
-    # defers nowhere"). The destinations exist and were measured 2026-11-12
-    # (`premiselabs.co/tortoise/docs` answers 200; `/tortoise` is the product page;
-    # `/auth` 301s to the app origin), and the sibling blog guard moves with it:
-    # `tests/test_blog_seo_meta.mjs` pinned an UPPER BOUND (`<= 3`) only so it would
-    # "survive the repoint", and THIS PR flips it to `navRetired.length === 0` in a
-    # later commit — an exemption that outlives the deferral it excused is the
-    # false-PASS class that guard exists to refuse. So this PR emits the terminal
-    # forms and the count goes to 0. The file STAYS in `RUNTIME_FILES` on purpose:
-    # with no allowlist row its expected count is 0, so a literal coming back REDS
-    # this guard instead of silently leaving the surface.
+    # ⛔ THIS FILE HAS NO ROW, and that is the deferral being PAID rather than
+    # moved. TWO landings took it to zero, NEITHER of them in this PR's diff:
+    # #11765 (PR #11976) re-aimed `SITE_URL` to `premiselabs.co`, taking the file
+    # from 4 occurrences to the THREE `navHtml` product hrefs, which it deferred to
+    # #11764; #11764 then CLOSED (2026-11-12T07:23:26Z, COMPLETED, by PR #12058,
+    # which touched neither this test file nor `_lib.ts` and so removed nothing
+    # here) WITHOUT repointing those three, and #12057 explicitly excludes this
+    # file — so the deferral pointed at a closed issue, which this file's own
+    # OWNERSHIP note forbids ("a note deferring to it defers nowhere"). The repoint
+    # is #11977's: its commit `7e6baffc5d` moved those three hrefs to the terminal
+    # forms (`premiselabs.co/tortoise/docs`
+    # answers 200; `/tortoise` is the product page; `/auth` 301s to the app origin)
+    # and introduced this allowlist with NO `_lib.ts` row, because the count was
+    # already 0. The sibling blog guard lands with it, not with this PR: it pinned
+    # an UPPER BOUND (`<= 3`) only so it would "survive the repoint", and on this
+    # head's base `tests/test_blog_seo_meta.mjs:2286` pins
+    # `navRetired.length === 0` — an exemption that outlives the deferral it excused
+    # is the false-PASS class that guard exists to refuse. This PR changes neither
+    # file. The file STAYS in `RUNTIME_FILES` on purpose: with no allowlist row its
+    # expected count is 0, so a literal coming back REDS this guard instead of
+    # silently leaving the surface.
     "website/apps/dashboard/functions/admin/[[path]].ts": (
         1,
         "#11767 item 4 — the 403 page's `<a>← Back to the blog</a>` link (line "
@@ -287,8 +325,10 @@ RETIRED_HOST_ALLOWLIST = {
         "sweep (#12057). Measured 2026-11-12."),
     "website/apps/blog-admin/src/App.tsx": (
         1,
-        "#11767 item 4 — blog-admin UI origin; deferred with the blog sweep "
-        "(#12057). Measured 2026-11-12."),
+        "#11767 item 4 — the header's link to the PUBLIC BLOG at :53 (its visible "
+        "text at :58 is a bare host, which this counter does not see). ⛔ Not the "
+        "admin's own UI origin — the retired host is the blog the admin LINKS TO. "
+        "Deferred with the blog sweep (#12057). Measured 2026-11-12."),
     "website/apps/blog-admin/src/pages/PostEditor.tsx": (
         3,
         "#11767 item 4 — three PUBLIC-POST permalinks (`/blog/${slug}`, View and "
@@ -300,16 +340,22 @@ RETIRED_HOST_ALLOWLIST = {
         1,
         "#11767 item 4 — the `title=\"View public post\"` permalink (line 186), NOT "
         "an author-image thumbnail — an earlier revision of this row said the "
-        "thumbnail, which this file derives from the row's own URL. Deferred with "
+        "thumbnail, which this file does NOT render at all. Deferred with "
         "the blog sweep (#12057). Measured 2026-11-12."),
     "website/apps/dashboard/src/harnesses.js": (
         1,
-        "DOCS_ORIGIN constant (301 -> premiselabs.co/tortoise/docs). Deferred to "
+        "⛔ NOT a 301 to `/docs`, and not `/docs` at all: `DOCS_ORIGIN` builds "
+        "`${DOCS_ORIGIN}/skills/<name>.skill` and nothing else (:80-81). "
+        "`_middleware.ts` has no `/skills` branch and `website/_redirects` has no "
+        "rule, so the retired host SERVES the archive (200, no `Location`) and so "
+        "does premiselabs.co (200, same bytes; both measured 2026-11-12) — "
+        "re-aiming this constant moves WHICH host answers an identical download, "
+        "it never saves a hop. Deferred to "
         "#12057 with the rest of the dashboard copy. ⚠️ This row counts the FULL "
         "origin (`RETIRED_ORIGIN` carries the scheme), so it sees only this "
         "constant. The markdown-ish `:277` step used to carry a bare-host copy of "
         "the same docs URL and DOES NOT ANY MORE: main's #12058 re-aimed it to "
-        "`premiselabs.co/tortoise/docs#chatgpt` while this PR was open (verified: "
+        "`premiselabs.co/tortoise/docs#chatgpt` before this branch's base (verified: "
         "`git log -S'premiselabs.co/tortoise/docs#chatgpt' -- ` that file returns "
         "only `1cd4ac816826`). ⛔ An earlier revision of this row described `:277` "
         "as a deferred retired-host mention and argued a partial move would be "
@@ -327,41 +373,72 @@ RETIRED_HOST_ALLOWLIST = {
         "COMPARE_PLANS_URL `/#pricing-section` (301 -> premiselabs.co/tortoise). "
         "Deferred to #12057."),}
 
-#: Every runtime file THIS PR touched. An emitted occurrence of the retired
-#: origin in these that is not in the allowlist above fails.
+#: The surface this guard covers: every runtime file the #11767 work touched. An
+#: emitted occurrence of the retired origin in these that is not in the allowlist
+#: above fails.
 #:
 #: ⛔ NOT "every runtime file #11767 owns" — an earlier revision of this comment
 #: said exactly that and it was false. The issue also enumerates five app pages
-#: and API modules that still emit the retired origin and are DEFERRED here, not
-#: swept. Counts measured at this head, so the deferral cannot be read as a clean
-#: sweep. BASIS: EMITTING occurrences (an `href`/const a browser or server would
+#: and API modules in this surface. At this head THREE of them still emit and are
+#: DEFERRED here, not swept, while `invite-accept.html` and `welcome.html` were
+#: re-aimed to 0 by #12058 (neither carries a row — see the table below). Counts
+#: measured at this head, so NEITHER the deferral nor the sweep can be read as
+#: complete from this list alone.
+#: BASIS: EMITTING occurrences (an `href`/const a browser or server would
 #: follow) — a PROSE comment that merely names the host is not counted, which is
 #: why `[[path]].ts` is 1 and not 2 (line 12 is a comment, line 49 emits):
 #:   website/apps/dashboard/functions/blog/api/[[path]].ts   1  DEFAULT_BLOG_ORIGIN
-#:   website/functions/blog/_lib.ts                          0  navHtml repointed to the terminal forms (row removed)
+#:   website/functions/blog/_lib.ts                          0  navHtml repointed to the terminal forms (no row to remove)
 #:   website/apps/blog-admin/src/lib/blog-api.ts             1  DEFAULT_AUTHOR_IMAGE_URL avatar
 #:   website/apps/dashboard/functions/admin/[[path]].ts      1  the 403 page's ← Back to the blog link
-#:   website/apps/blog-admin/src/App.tsx                     1  blog-admin UI origin
+#:   website/apps/blog-admin/src/App.tsx                     1  header link to the PUBLIC BLOG
 #:   website/apps/blog-admin/src/pages/PostEditor.tsx        3  public-post permalinks (View / copy-link)
 #:   website/apps/blog-admin/src/pages/PostsList.tsx          1  "View public post" permalink
-#:   website/apps/dashboard/public/invite-accept.html        0  re-aimed by #12058 (row removed)
-#:   website/apps/dashboard/public/welcome.html              0  re-aimed by #12058 (row removed)
+#:   website/apps/dashboard/public/invite-accept.html        0  re-aimed by #12058 (no row)
+#:   website/apps/dashboard/public/welcome.html              0  re-aimed by #12058 (no row)
 #:   website/apps/dashboard/public/signup.html               1  canonical /auth (app origin)
-#:   website/apps/dashboard/src/wizardPrompts.js             0  re-aimed by #12058 (row removed)
+#:   website/apps/dashboard/src/wizardPrompts.js             0  re-aimed by #12058 (no row)
 #:   website/apps/dashboard/src/harnesses.js                 1  DOCS_ORIGIN
 #:   website/apps/dashboard/src/overviewEmptyAction.js       1  ONBOARDING_FUNNEL_HREF (app origin)
 #:   website/apps/dashboard/src/billingCta.js                1  COMPARE_PLANS_URL
-#: None of the TEN deferrals is a broken link (every one still 301s onto the
-#: canonical host); they are a SCOPE deferral, and all ten files they name ARE
+#: None of the TEN deferrals is a broken link, and no row is a silent leftover —
+#: every literal is one of two things, and its reason says which WHEREVER the
+#: terminator is anything but the default 301 onto `premiselabs.co` (see the
+#: `RUNTIME_FILES` note below):
+#:   (a) a 301 off the retired host onto a canonical origin — `premiselabs.co`, or
+#:       `app.premiselabs.co` for the one `/auth` literal (`_middleware.ts`
+#:       :403-406, which pins `/auth` BEFORE the product-host block) and
+#:       `ONBOARDING_FUNNEL_HREF`'s `/welcome` (`website/_redirects` :36 — the
+#:       middleware's `/welcome` entry sits in `APP_ONLY` INSIDE the company-host
+#:       block at :342/:350, so the retired host never reaches it);
+#:   (b) NOT REDIRECTED AT ALL — the retired host answers the request in place,
+#:       and the two members of this class do NOT share a status: `harnesses.js`'s
+#:       `/skills/<name>.skill` download answers 200 (both hosts, identical bytes),
+#:       while `DEFAULT_BLOG_ORIGIN`'s `/blog/api/*` calls are EXCLUDED from the
+#:       blog 301 by `_middleware.ts` :334-336 (a redirect would turn a POST into a
+#:       GET), so no branch rewrites them and they answer the ROUTE's own status —
+#:       404 for a GET/HEAD probe, and 401 `{"error":"unauthorized"}` with no
+#:       `Location` for an ANONYMOUS POST — the probe `.github/workflows/deploy-pages.yml`
+#:       :873 runs. ⛔ NOT the POST the console sends: that one goes same-origin to the
+#:       app-origin Token Handler, which sets a `Bearer`, and `notify-publish.ts:45-51`
+#:       returns 401 only when the admin gate REFUSES — so the console's own POST is
+#:       authorized and answers its own result (200 on success, 409 when the post is
+#:       held from the live blog). Re-aiming either
+#:       changes WHICH host answers; it saves no hop, so it is not the same sweep
+#:       as (a).
+#: Either way they are a SCOPE deferral, and all ten files they name ARE
 #: in `RETIRED_HOST_ALLOWLIST` with the same kind of reason — recording a count is
 #: not blessing the literal, it is what makes the deferral visible and what forces
 #: a sweep to update the record in the same commit.
-#: ⛔ The other FOUR files in the list above sit at 0 and are NOT in the map, for two
-#: different reasons, and the difference matters: `website/functions/blog/_lib.ts`
-#: is not a deferral at all — #11767 repointed its three `navHtml` hrefs to the
-#: terminal forms and DELETED the row (#11764 closed without doing it) — while
-#: `invite-accept.html`, `welcome.html` and `wizardPrompts.js` were re-aimed to 0 by
-#: main's #12058 and their rows deleted. All four stay in `RUNTIME_FILES` on purpose:
+#: ⛔ The other FOUR files in the list above sit at 0 and are NOT in the map, and the
+#: reason is ONE, not two: each carried a row only in the DRAFTS of this file, never in
+#: a landed revision. #11977 repointed `_lib.ts`'s three `navHtml` hrefs to the
+#: terminal forms in the same commit that introduced the map (#11764 closed without
+#: doing it); main's #12058 re-aimed `invite-accept.html`, `welcome.html` and
+#: `wizardPrompts.js` to 0 before this branch's base (it touched all three files and
+#: never touched this one). ⛔ So the table below is not a record of deletions — it is
+#: what this head measures, and no landed revision of the map has ever carried a row
+#: for any of these four. All four stay in `RUNTIME_FILES` on purpose:
 #: with no row the expected count is 0, so a literal coming back REDS this guard
 #: instead of leaving the surface.
 #: ⛔ COUNT THE TABLE, DO NOT TRUST A NUMBER HERE. An earlier revision of this
@@ -373,7 +450,7 @@ RETIRED_HOST_ALLOWLIST = {
 #:
 #: ⛔ An earlier revision of this paragraph said the OPPOSITE — that they were
 #: "deliberately NOT added", because blessing them "would turn a deferral into a
-#: decision" — while the map eleven lines up already carried them. Left standing,
+#: decision" — while that draft's map already carried them. Left standing,
 #: that is an instruction to delete the very entries that make this guard able to
 #: fail, leaving a red count check nobody can explain.
 #:
@@ -381,7 +458,7 @@ RETIRED_HOST_ALLOWLIST = {
 #: said the sweep "belongs to #11764/#12049" and that the deferred re-aim was
 #: "tracked on #11767": all three are false. `#12049` covers only the pasted
 #: onboarding copy, `#11764`'s scoping is the product-page move, and `#11767`
-#: CLOSES with this PR, so a note deferring to it defers nowhere. Where a row above
+#: is already CLOSED (by #11977's landing), so a note deferring to it defers nowhere. Where a row above
 #: cites "#11764"/"#11765" it names the work the deferral RIDES.
 RUNTIME_FILES = (
     "tortoise/email_notify.py",
@@ -395,7 +472,25 @@ RUNTIME_FILES = (
     "supabase/config.toml",
     # #11767 items 4 and 5 — dashboard/blog surfaces whose retired-origin literals
     # are RECORDED above rather than re-aimed here. In the surface so the guard
-    # can fail on them; every entry carries a measured 301 and a deferral note.
+    # can fail on them; every DEFERRAL row names its terminator WHEREVER it is
+    # anything but the DEFAULT 301 onto premiselabs.co — the `/blog*` branch at
+    # `website/functions/_middleware.ts` :520 (`toCompany`, a 301), which is why
+    # the five rows that rely on it carry no status of their own. What is
+    # NOT redirected is named as such rather than by a status: `harnesses.js`'s
+    # `/skills/<name>.skill` answers 200 on both hosts (identical bytes), while
+    # `/blog/api/*` is excluded from the 301 (`:334-336`) and answers the route's
+    # OWN status (404 for a GET/HEAD probe; 401 `{"error":"unauthorized"}`, no
+    # `Location`, for an ANONYMOUS POST — the `deploy-pages.yml:873` gate posts one;
+    # the console's own POST arrives through the app-origin Token Handler carrying a
+    # `Bearer`, so it is authorized) — so "a 200" is the
+    # `/skills` row's measurement, not a property of the class.
+    # The four non-website KEEP rows — `hosted_api.py`'s live CORS allowlist, the
+    # two Supabase edge-function public allowlists, and `supabase/config.toml`'s
+    # local-dev OAuth redirect allowlist (a redirect DESTINATION list, not a CORS
+    # list — the module header's own "four non-deferral KEEP rows" note names all
+    # four) — invent no terminator because none of them is a link this repo emits,
+    # and nothing is deferred on them.
+    # Every DEFERRAL row carries its deferral note.
     "website/apps/dashboard/public/invite-accept.html",
     "website/apps/dashboard/public/welcome.html",
     "website/apps/dashboard/public/signup.html",
@@ -481,8 +576,10 @@ def test_every_allowlisted_occurrence_has_a_reason():
     # reverse direction was unasserted — appending a row here (the natural way to
     # record a deferral) would silently create an unenforced, invisible entry, and
     # the module docstring promises the opposite ("this guard cannot report GREEN
-    # over a file it never opened"). Both sets are equal today, so this pins the
-    # invariant rather than repairing a live gap.
+    # over a file it never opened"). Every allowlisted key is in `RUNTIME_FILES`
+    # today — the assertion below pins that SUBSET, not equality: `RUNTIME_FILES`
+    # is deliberately the WIDER set (23 entries against 14 keys), because a file at
+    # 0 occurrences keeps its entry so a returning literal still reds the guard.
     orphans = sorted(set(RETIRED_HOST_ALLOWLIST) - set(RUNTIME_FILES))
     assert not orphans, (
         "these files carry an allowlist entry but are NOT in RUNTIME_FILES, so no "
@@ -497,9 +594,9 @@ def test_canonical_origin_set_is_what_the_runtime_may_emit():
     decided set (`CANONICAL_ORIGINS`) — never a second literal copy of that set.
     An earlier form asserted `{…the same five literals…} == CANONICAL_ORIGINS`, which
     is this file compared with itself: mutation-measured, it stayed GREEN under every
-    product revert its siblings caught (including the PR's own headline default-origin
+    product revert its siblings caught (including #11977's own headline default-origin
     revert) and could only fail by desyncing its own duplicate literal. A pin that
-    cannot fail on its regression is not a pin — the same defect class this PR fixes
+    cannot fail on its regression is not a pin — the same defect class #11977 fixed
     in `tests/test_onboarding_variants.py`.
     """
     from tortoise.hosted_api import _ALLOWED_ORIGINS

@@ -4853,14 +4853,17 @@ jobs:
           # it without moving that contract. Both causes share one guard, because they read
           # identically from here: no usable index arrived (the fetch failed, and a failed
           # fetch leaves the PREVIOUS lists in place, so what the grep sees may be stale), or
-          # the suite carries no such package. The policy file is `mktemp`, not a fixed `/tmp` path: this job is
-          # pool-eligible, and a shared box can pre-create that path as a symlink.
+          # the suite carries no such package. The index text is PIPED, not written to a
+          # file: a `> "$policy_file"` redirect names a bare expansion, which the client-pin
+          # guard refuses as an unclassifiable target
+          # (`test_no_step_rewrites_the_client_path_to_another_major`) — and refusing a temp
+          # file is a FALSE BLOCK there, so the step keeps no file at all rather than
+          # widening that rule. One less artifact on a pool box.
           # THIS BRANCH'S REMEDY IS NAMED FROM ITS OWN CAUSE, not from release
           # drift: a release PGDG does not publish (no suite) fails HARD at `apt-get update`,
           # i.e. the guard ABOVE, so the old `--repair-labels` advice here was advice that
           # could not change apt's answer.
-          policy_file="$(mktemp)"
-          if ! apt-cache policy postgresql-client-16 > "$policy_file" 2>/dev/null || ! grep -qF 'apt.postgresql.org' "$policy_file"; then
+          if ! apt-cache policy postgresql-client-16 2>/dev/null | grep -qF 'apt.postgresql.org'; then
             echo "::error::apt.postgresql.org did not SUPPLY postgresql-client-16 for this codename [$identity] — either its index never LOADED (apt-get update only WARNS and exits 0 on a DNS/egress/5xx failure, and a failed fetch leaves the PREVIOUS lists in place — so a row can still appear from a STALE index; look for 'W: Some index files failed to download' above) or the suite '${VERSION_CODENAME:-unknown}-pgdg' carries no such package. BOTH provisioned servers are pg16 and the client major is part of the artifact's contract (#12051), so this drill cannot fall back to the image's own archive client. Check 'apt-cache policy postgresql-client-16': apt.postgresql.org must list this major."
             exit 1
           fi

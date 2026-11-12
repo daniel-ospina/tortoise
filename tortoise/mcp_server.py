@@ -6185,9 +6185,12 @@ def tortoise_list_dedup_candidates(candidate_type: str = "content",
 
     candidate_type='content' → content-dedup candidates; 'temporal' →
     contradictory/replacement decision Points pending promotion wiring;
-    'entity' → [] (entity queue tracked separately). Each entry carries
+    'entity' → real entity-duplicate PAIRS from the exact → fuzzy → semantic
+    chain (#12047), or a raised error when the scan cannot run — never an empty
+    list standing in for "cannot answer". Each entry carries
     {id, content, pointKind, method/similarity (content) or replacement
-    (temporal), target_id, candidate_type, status}.
+    (temporal), target_id, candidate_type, status}; an entity row names the pair
+    as candidate_id/existing_id with the method and similarity that proposed it.
     """
     return _safe(_get_org_sdk().list_dedup_candidates,
                  candidate_type=candidate_type, limit=limit)
