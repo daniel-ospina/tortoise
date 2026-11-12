@@ -22,10 +22,11 @@ measured_at: 2026-11-12
 >
 > **Why it needed a re-cut, in one measurement.** The ledger's own §7 exists so
 > nobody re-learns a falsified claim the hard way. Re-measured at `f70d884b7`,
-> **seven of its twelve rows no longer read as written** — four of them overtaken by
-> the very fixes they motivated, three by a number or a tracker state that moved —
-> so a lane that trusted §7 today would believe the Point fold still
-> drops props (#2795 closed that), and would go looking for a defect that is gone.
+> **most of its twelve rows no longer read as written** (§3 carries the exact split,
+> and the one summary a lane quotes is this page's closing takeaway, so this
+> paragraph deliberately does not restate it, per §8's "exactly one" rule), so a
+> lane that trusted §7 today would believe the Point fold still drops props (#2795
+> closed that), and would go looking for a defect that is gone.
 > Meanwhile **three of the seven research briefs §4 indexes have no in-repo mirror at
 > all**, and the machine they lived on no longer carries them (§5).
 >
