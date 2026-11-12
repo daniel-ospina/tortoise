@@ -360,7 +360,12 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           #
           # Both are pinned: "the fallback body is valid UTF-8 (non-ASCII bytes are
           # dropped, never split)" and "does NOT claim a squeeze it did not perform".
-          excerpt="$(printf '%s' "$raw_tail" | LC_ALL=C tr -d '\200-\377')"
+          # ⛔ `|| true` is a GUARD, not decoration: under `set -euo pipefail` this is a
+          # plain assignment, so a `tr` that fails would abort `build_body` BEFORE
+          # anything is filed — a fail-CLOSED notifier, i.e. the very silence #2240
+          # exists to remove. The merge that brought this branch up to main dropped
+          # main's own `|| true` here (review P2, PR #12110); case 17h pins it.
+          excerpt="$(printf '%s' "$raw_tail" | LC_ALL=C tr -d '\200-\377' || true)"
           echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
           echo
         elif [ "$(printf '%s' "$excerpt" | wc -c)" -lt "$(printf '%s' "$raw_tail" | wc -c)" ]; then

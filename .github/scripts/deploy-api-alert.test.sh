@@ -9,6 +9,8 @@
 # Coverage (#2240 acceptance in brackets):
 #   1. a drift-gate failure files ONE issue whose title is the STABLE per-step
 #      key — no run id, no timestamp, no count [alert on the first failing run]
+#  1b. a >6000-byte report keeps its ACTIONABLE TAIL (the excerpt is the tail, not
+#      the head — `head -c` would keep the noise and drop the blocking list)
 #   2. that body carries the gate's OWN report (the blocking versions + the
 #      ordered `gh workflow run supabase-deploy.yml --ref main` remediation),
 #      so the alert cannot disagree with the run it describes
@@ -32,13 +34,26 @@
 #  15. the body file is written under RUNNER_TEMP and is the issue's body
 #  16. a NON-Actions author is refused by the shared substrate on this path too
 #      (the PAT trap: it would file a duplicate on every failing run)
+#  17. the pasted report cannot break the body it is pasted into (a fence longer than
+#      any backtick run in the excerpt, so repo-controlled text cannot close the block)
 #  17b. the excerpt squeeze's EXIT STATUS is neither the alert's nor evidence of what it
 #      did: an iconv that reports the mid-character cut in its status must not abort the
 #      ledger leg, one that emits nothing must paste the ASCII FALLBACK and SAY so (never
 #      claiming a squeeze, and never pasting the raw tail — the cut can leave a half
 #      character in it, and an undecodable body is not a report), and the drop must be
 #      disclosed from a BYTE MEASURE — so it is disclosed on a glibc that drops the
-#      sequence silently (2.39, rc=0) too
+#      sequence silently (2.39, rc=0) too, and NOT disclosed when the report cannot
+#      lose a byte (a measure, not a constant; case 1)
+#  17c. a report with no excerpt-able text says only what is TRUE (no claim of a
+#      squeeze, no empty fenced block under a heading that promises the report)
+#  17d. the READ GUARD — an existing but unreadable report must not abort the alert
+#  17e. a 0-byte report is READABLE and EMPTY, and must be described exactly so
+#  17f. a FIFO must not HANG the alert
+#  17g. main's own #12077 pin — the same two arms, converter-INDEPENDENT
+#  17h. a FAILING ASCII fallback must not DEAFEN the notifier: the `|| true` guard on
+#      the `tr` squeeze is a guard, not decoration — under `set -euo pipefail` its
+#      absence aborts the body build before anything is filed (#2240's silence)
+#  18. a LATE `deploy-api` failure must not read as "nothing shipped"
 #  19-21. `--resolve` (#8841) retires EXACTLY the keys whose steps reported
 #      `success` in this run (plus the job-level key only when `job.status` is
 #      `success`) — `skipped` and outcome-less steps are never read as a pass, and
@@ -254,6 +269,23 @@ assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "BLOCKING repo-
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "gh workflow run supabase-deploy.yml --ref main" "the body carries the exact remediation"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "Check migration drift (fail-closed)" "the body names the failed step"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "987654321" "the body links the run (the detail lives there)"
+# ⛔ The disclosure is a MEASURE, not a CONSTANT (review P2, PR #12110). Every other
+# arm asserts the disclosure PRESENT; none asserted it ABSENT when nothing was
+# dropped, so an implementation that discloses whenever the squeeze path RAN — rather
+# than when the bytes actually differ — was green on all of them (measured by the
+# reviewer: 159/159, 0 red, on both hosts). It then publishes "characters … were
+# dropped" about a report it carried verbatim, which is this PR's own declared threat
+# class: a disclosure that states a cause/magnitude it did not measure.
+# This fixture is under the 6000-byte cap and decodes as UTF-8 on its own, so
+# `iconv -c` can drop NOTHING from it (it drops invalid sequences, not valid multibyte
+# characters — the em dashes in the gate's own report survive). The precondition is
+# asserted first, or the row below is silently vacuous.
+if [ "$(wc -c < "$DRIFT_REPORT")" -lt 6000 ] && python3 -c 'import sys; open(sys.argv[1], "rb").read().decode("utf-8")' "$DRIFT_REPORT"; then
+  ok "case 1's fixture is under the 6000-byte cap and decodes as UTF-8, so no byte can be dropped here"
+else
+  bad "case 1's fixture holds an invalid UTF-8 sequence or exceeds the cap — the no-drop pin below would be vacuous"
+fi
+assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "NOT byte-identical" "and the body does NOT claim a drop it did not measure (a measure, not a constant)"
 
 echo "── case 1b: a >6000-byte report keeps its ACTIONABLE TAIL ─────────────"
 # The gate prints its context (remote-ahead, non-conforming files, the
@@ -580,6 +612,36 @@ else
   bad "the fallback body is NOT valid UTF-8 — the raw tail reached the issue"
 fi
 export PATH="$PATH_BEFORE_ICONV_SHIM"
+
+# ── case 17h: a failing ASCII FALLBACK must not deafen the notifier ──────────────────
+# `tr` is coreutils, but the guard around it is what a merge already dropped once
+# (review P2, PR #12110): without `|| true`, `set -e` aborts `build_body` AT the
+# assignment and NOTHING is filed — the exact silence #2240 exists to remove. The
+# guard is pinned here rather than assumed away as "tr never fails".
+REAL_TR="$(command -v tr)"
+if [ -n "$REAL_TR" ]; then
+  ok "case 17h: a real tr exists, so the failing-squeeze shim can wrap it"
+else
+  bad "case 17h: no tr on PATH — this arm cannot reproduce the failing fallback"
+fi
+TR_BROKEN_DIR="$FIX/bin-tr-broken"
+mkdir -p "$TR_BROKEN_DIR"
+cat > "$TR_BROKEN_DIR/tr" <<TR_BROKEN_EOF
+#!/usr/bin/env bash
+# Fail ONLY the ASCII-fallback squeeze: \`-d\` is that call's own flag, so
+# auto-file-issue.sh's \`tr '[:upper:]' '[:lower:]'\` still runs and this arm cannot red
+# for the WRONG reason (a refused author instead of a dead alert).
+for a in "\$@"; do [ "\$a" = "-d" ] && exit 1; done
+exec "$REAL_TR" "\$@"
+TR_BROKEN_EOF
+chmod +x "$TR_BROKEN_DIR/tr"
+export PATH="$ICONV_BROKEN_DIR:$TR_BROKEN_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$RC" "0" "case 17h: a failing ASCII fallback does NOT fail the alert (the ledger is the alert, the notifier is the safety net)"
+assert_eq "$(count_creates)" "1" "case 17h: and an issue IS still filed — a degraded body, never a deaf channel"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "case 17h: and the degradation is STATED rather than silent"
 
 # ── case 17b (arm c): the disclosure is a BYTE MEASURE, not the status ─────────────────
 # glibc 2.39 drops the split sequence and exits 0, so a status-based disclosure says
