@@ -20,7 +20,7 @@ the diff caused it, and the message reads as a defect in the record path — whi
 is why the pin is ASSERTED in the job (`pg_dump --version` / `pg_restore
 --version`, `::error::` + `exit 1`) rather than merely hoped for.
 
-This guard pins three things about `test-record-postgres`, none of which the
+This guard pins FIVE things about `test-record-postgres`, none of which the
 other CI-surface guards cover:
 
 1. **The two image pins agree** (the record server and D8's scratch server must
@@ -28,7 +28,13 @@ other CI-surface guards cover:
 2. **The client pin names that same major**, and prepends its versioned
    `/usr/lib/postgresql/<major>/bin` to `$GITHUB_PATH` — an unversioned install
    would leave the runner's own, newer client first on `PATH`.
-3. **The pin runs BEFORE the leg**, because `$GITHUB_PATH` only affects
+3. **Nothing else in the job puts another client major on the leg's PATH** —
+   not a later `$GITHUB_PATH` write (job-scoped, last writer wins) and not the
+   leg's own `export PATH=…` (a step-script assignment beats the prepend).
+4. **The pin fails closed**, as an ARMED branch: a single `if [ "$major" !=
+   "<major>" ]; then … fi` unit that announces and stops, in a step that can
+   actually run and actually red the job (no `if:`, no `continue-on-error`).
+5. **The pin runs BEFORE the leg**, because `$GITHUB_PATH` only affects
    subsequent steps: a pin placed after the pytest step is inert, and the job
    would red for a reason no diff explains.
 
@@ -56,7 +62,18 @@ JOB = "test-record-postgres"
 #: these — but reading BOTH forms keeps this guard's message about the major
 #: rather than about the spelling.
 IMAGE_RE = re.compile(r":(?:pg)?(\d+)(?:[-_][A-Za-z0-9._-]*)?$")
-CLIENT_PKG_RE = re.compile(r"postgresql-client-(\d+)\b")
+
+#: The CLIENT package as INSTALLED, not merely NAMED (#12051 review round 8):
+#: the name alone is matched by a read-only diagnostic (`dpkg -l
+#: postgresql-client-16 | tail -2`), which made the "exactly ONE pin step" rule
+#: red four rows and call a correct tree a second installer (measured). An
+#: install verb on the same line is what makes a step the pin.
+CLIENT_PKG_RE = re.compile(
+    r"(?:apt-get|apt|aptitude)\s+(?:install|reinstall)[^\n]*?postgresql-client-(\d+)\b"
+)
+
+#: The name alone, for MESSAGES and for the "is this the pin step" fallback.
+CLIENT_NAME_RE = re.compile(r"postgresql-client-(\d+)\b")
 
 #: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
 #: `echo <dir> >> "$GITHUB_PATH"` — read the major from the
@@ -66,14 +83,17 @@ GITHUB_PATH_PREPEND_RE = re.compile(
     r"\s*>>\s*['\"]?\$\{?GITHUB_PATH\}?['\"]?"
 )
 
-#: ANY mention of `$GITHUB_PATH` in the job's code (#12051 review rounds 6 and
-#: 7). Round 6 detected the WRITE (`>`, `>>`, `tee`) and still missed both a
+#: ANY mention of `GITHUB_PATH` in the job's code (#12051 review rounds 6, 7
+#: and 8). Round 6 detected the WRITE (`>`, `>>`, `tee`) and still missed both a
 #: file-name indirection (`gp="$GITHUB_PATH"; echo … >> "$gp"`) and a
 #: backslash-continued redirect (`>> \` then `"$GITHUB_PATH"`), each measured
-#: GREEN while the leg resolved pg17. A mention needs no guess about the
-#: producer or the redirect: every mention must BE the one classified write, and
-#: any mention the guard cannot classify is refused. Measured against the source:
-#: this job's only mention is the pin's own append, so the rule costs nothing.
+#: GREEN while the leg resolved pg17. Round 7 matched `$GITHUB_PATH`; round 8
+#: measured that dropping the `$` is not enough either — `printf … >> "$(printenv
+#: GITHUB_PATH)"` and `n=GITHUB_PATH; … >> "${!n}"` were both GREEN. The token
+#: WITHOUT a sigil is therefore the population: every mention must BE the one
+#: classified write, and any mention the guard cannot classify is refused.
+#: Measured against the source: this job's only mention is the pin's own append,
+#: so the rule costs nothing.
 #:
 #: STATED LIMIT: this reads the job's inline `run:` script text (with comment
 #: lines and trailing comments stripped, and backslash continuations joined). It
@@ -81,17 +101,23 @@ GITHUB_PATH_PREPEND_RE = re.compile(
 #: `x.sh` appends to `$GITHUB_PATH` is invisible, and no in-repo script this job
 #: calls does that today (`grep -n GITHUB_PATH .github/scripts/pytest-attribution.sh
 #: .github/scripts/record-postgres-leg-gate.py` → none).
-GITHUB_PATH_MENTION_RE = re.compile(r"\$\{?GITHUB_PATH\b")
+GITHUB_PATH_MENTION_RE = re.compile(r"\bGITHUB_PATH\b")
 
 #: A versioned client directory named ANYWHERE in the job's code (#12051 review
-#: round 7): the `$GITHUB_PATH` write is not the only way to put a client on the
-#: leg's PATH — the LEG's own script can `export PATH="/usr/lib/postgresql/17/bin:$PATH"`
-#: and, because the step's own assignment runs after the runner composes the
-#: prepend (actions/runner `Handler.AddPrependPathToEnvironment` → `ScriptHandler`),
-#: that export WINS. Measured GREEN before this rule, with the in-job
-#: `pg_dump --version` assertion still printing 16 because it lives in the PIN
-#: step. So no line in this job may name a major other than the servers'.
-CLIENT_DIR_RE = re.compile(r"/usr/lib/postgresql/(?P<major>\d+)/bin")
+#: rounds 7 and 8): the `$GITHUB_PATH` write is not the only way to put a client
+#: on the leg's PATH — the LEG's own script can `export
+#: PATH="/usr/lib/postgresql/17/bin:$PATH"` and, because the step's own
+#: assignment runs after the runner composes the prepend (actions/runner
+#: `Handler.AddPrependPathToEnvironment` → `ScriptHandler`), that export WINS.
+#: Measured GREEN before this rule, with the in-job `pg_dump --version`
+#: assertion still printing 16 because it lives in the PIN step. So no line in
+#: this job may name a major other than the servers'.
+#: ⛔ THE TOKEN IS NOT REQUIRED TO BE DIGITS (#12051 review round 8): matching
+#: `\d+` let the leg derive the directory instead of spelling it —
+#: `export PATH="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1):$PATH"`
+#: and `…/1"7"/bin` were both measured GREEN. A token this guard cannot read as
+#: a major is an offender in its own right, exactly like an unclassifiable write.
+CLIENT_DIR_RE = re.compile(r"/usr/lib/postgresql/(?P<token>[^/\s]+)/bin")
 
 #: The fail-closed branch as ONE unit (#12051 review rounds 4, 6 and 7): the
 #: `if` line that compares `$major`, its body, and its `fi`. "`::error::` and
@@ -214,7 +240,7 @@ def _github_path_writes(steps: list[dict]) -> list[tuple[int, str, int | None]]:
     ]
 
 
-def _client_dir_mentions(steps: list[dict]) -> list[tuple[int, str, int]]:
+def _client_dir_mentions(steps: list[dict]) -> list[tuple[int, str, int | None]]:
     """Every line that names a `/usr/lib/postgresql/<major>/bin` directory.
 
     The PATH that matters on the leg is not built by `$GITHUB_PATH` alone: the
@@ -229,7 +255,8 @@ def _client_dir_mentions(steps: list[dict]) -> list[tuple[int, str, int]]:
     for index, step in enumerate(steps):
         for line in _run_commands(step).splitlines():
             for match in CLIENT_DIR_RE.finditer(line):
-                found.append((index, line.strip(), int(match.group("major"))))
+                token = match.group("token")
+                found.append((index, line.strip(), int(token) if token.isdigit() else None))
     return found
 
 
@@ -240,8 +267,25 @@ def _classify_path_write(line: str) -> int | None:
     return int(match.group("major")) if match else None
 
 
+def _leg_indexes(steps: list[dict]) -> list[int]:
+    """Steps that run the D8 record capstone — the leg the pin must precede."""
+
+    return [
+        index
+        for index, step in enumerate(steps)
+        if "test_9567_record_capstone.py" in _run_commands(step)
+    ]
+
+
 def _pin_step(steps: list[dict]) -> tuple[int, dict]:
-    """The one step that installs a PostgreSQL client package."""
+    """The one step that INSTALLS a PostgreSQL client package.
+
+    The install VERB is required (#12051 review round 8): matching the package
+    name alone made `dpkg -l postgresql-client-16 | tail -2` — a read-only
+    diagnostic — a "second installer", which red four rows on a correct tree
+    with a message that sends the reader hunting an installer that does not
+    exist (measured).
+    """
     hits = [
         (index, step)
         for index, step in enumerate(steps)
@@ -314,14 +358,24 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     REFUSED, loudly, with this accepted form in the message (measured, round 7).
     That is the deliberate polarity: one spelling the guard can read beats a
     rule broad enough to accept a spelling it cannot.
+
+    ⛔ AND THE WRITE NEED NOT BE IN THE INSTALL STEP (#12051 review round 8):
+    the population is `[pin_index, leg_start)` — at or after the install, before
+    the leg. Splitting "install" from "prepend + assert" is a correct edit (the
+    prepend still reaches the leg) and used to red two rows with a message that
+    misdescribed it (measured). Inside that window it is the same "later wins"
+    precedence the position row already grades.
     """
     steps = _steps(job)
     image_majors = _postgres_image_majors(job)
     assert image_majors, "no pinned Postgres server image found — see the test above"
     server_major = image_majors[0]
 
-    _, pin = _pin_step(steps)
+    pin_index, pin = _pin_step(steps)
     text = _run_code(pin)
+    leg_indexes = _leg_indexes(steps)
+    assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
+    leg_start = min(leg_indexes)
 
     pkg = CLIENT_PKG_RE.search(text)
     assert pkg, f"the pin step does not install `postgresql-client-<major>`: {text!r}"
@@ -335,13 +389,15 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # ONE regex over the WHOLE command: the versioned dir must be the value
     # WRITTEN TO `$GITHUB_PATH`. A bare `CLIENT_PATH_RE`/`"GITHUB_PATH" in text`
     # pair is satisfiable by two different lines and by an inert `export`.
-    pin_index = steps.index(pin)
-    pin_mentions = [w for w in _github_path_writes(steps) if w[0] == pin_index]
+    pin_mentions = [
+        write for write in _github_path_writes(steps) if pin_index <= write[0] < leg_start
+    ]
     assert pin_mentions, (
-        "the pin step never writes a `/usr/lib/postgresql/<major>/bin` entry to "
-        "`$GITHUB_PATH`; a prepend that only exists as an `export` inside this "
-        "step cannot reach the pytest leg, so the leg would resolve `pg_dump` "
-        f"from the runner image instead (step text: {text!r})"
+        "no step between the client install and the record leg writes a "
+        "`/usr/lib/postgresql/<major>/bin` entry to `$GITHUB_PATH`; a prepend "
+        "that only exists as an `export` inside a step cannot reach the pytest "
+        "leg, so the leg would resolve `pg_dump` from the runner image instead "
+        f"(install step text: {text!r})"
     )
     # ⛔ EVERY write, not just the first (#12051 review round 5). `search()`
     # returns the FIRST match, so a SECOND append naming another major was
@@ -356,14 +412,16 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # `printf`/`tee`/`/usr/bin`/a continued redirect cannot slip past unseen.
     unreadable = [line for _, line, major in pin_mentions if major is None]
     assert not unreadable, (
-        "the pin step writes `$GITHUB_PATH` in a form this guard cannot read, so "
-        "it cannot prove which client major wins on the leg: "
-        f"{unreadable!r}. Write the versioned dir as a literal "
+        "a step between the client install and the record leg writes "
+        "`$GITHUB_PATH` in a form this guard cannot read, so it cannot prove "
+        f"which client major wins on the leg: {unreadable!r}. Write the "
+        "versioned dir as a literal "
         f'`echo "/usr/lib/postgresql/<major>/bin" >> "$GITHUB_PATH"` line.'
     )
     wrong = [str(major) for _, _, major in pin_mentions if major != server_major]
     assert not wrong, (
-        f"the pin step writes pg{', pg'.join(wrong)} to `$GITHUB_PATH` alongside "
+        f"a step between the client install and the record leg writes "
+        f"pg{', pg'.join(wrong)} to `$GITHUB_PATH` alongside "
         f"its pg{server_major} entry — the runner adds each line in file order, "
         "so the LAST one wins on the leg and the versioned binaries lose to "
         "another major (measured, round 5: a second append naming pg17 left "
@@ -434,7 +492,11 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     )
     other_majors = sorted(
         {
-            f"step {index} names pg{major}: {line!r}"
+            (
+                f"step {index} names pg{major}: {line!r}"
+                if major is not None
+                else f"step {index} names a client dir whose major this guard cannot read: {line!r}"
+            )
             for index, line, major in _client_dir_mentions(steps)
             if major != server_major
         }
@@ -477,19 +539,66 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     this job cannot do without provisioning a second client version; the
     in-job assertion (`pg_dump --version` printed and checked) is what makes a
     constant extraction visible in the log instead.
-    """
-    _, pin = _pin_step(_steps(job))
-    text = _run_code(pin)
-    server_major = _postgres_image_majors(job)[0]
 
-    branch = FAIL_CLOSED_BRANCH_RE.search(text)
-    assert branch, (
-        "the pin has no ARMED fail-closed branch — it must be one unit, "
-        '`if [ "$major" != "<major>" ]; then … fi`, not a substring pair: '
+    ⛔ AND AN ARMED BRANCH IS NOT ARMED IF IT CANNOT RED (#12051 review round 8).
+    `continue-on-error: true` on the pin step makes `exit 1` set
+    `Result = TaskResult.Succeeded` (actions/runner
+    `ExecutionContext.ApplyContinueOnError`), and `if: false` skips the branch
+    outright — both measured GREEN. Presence, not truthiness, is what is checked:
+    YAML parses `if: false` as boolean `False`, so `pin.get("if")` reads as
+    "absent".
+    """
+    steps = _steps(job)
+    pin_index, pin = _pin_step(steps)
+    server_major = _postgres_image_majors(job)[0]
+    leg_indexes = _leg_indexes(steps)
+    assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
+    leg_start = min(leg_indexes)
+
+    # The branch must be able to RUN and able to RED, or it is not armed. Every
+    # step in the window is checked, not only the install step: splitting
+    # "install" from "prepend + assert" is a correct edit and the assertion
+    # travels with the `major` it compares (round 8).
+    hits = [
+        (index, level)
+        for index, level in (
+            (index, FAIL_CLOSED_BRANCH_RE.search(_run_code(step)))
+            for index, step in enumerate(steps)
+            if pin_index <= index < leg_start
+        )
+        if level
+    ]
+    skippable = [
+        index
+        for index, step in enumerate(steps)
+        if pin_index <= index < leg_start
+        and ("continue-on-error" in step or "if" in step)
+    ]
+    assert not skippable, (
+        "a step carrying the client pin is SKIPPABLE — "
+        f"step(s) {skippable} set(s) `continue-on-error` (its `exit 1` sets "
+        "`Result = TaskResult.Succeeded`, actions/runner "
+        "`ExecutionContext.ApplyContinueOnError`) or `if:` (a false condition "
+        "skips the pin and its assertion with it). Either way the leg runs on "
+        "the inherited client and the job can stay green (#12051)."
+    )
+    assert hits, (
+        "no step between the client install and the record leg has an ARMED "
+        'fail-closed branch — it must be one unit, `if [ "$major" != "<major>" ] '
+        "; then … fi`, not a substring pair: "
         '`if false && [ "$major" != "16" ]; then` keeps both `::error::` and '
         "`exit 1` in the text while being unable to fire, which is the "
         "disjunction this assertion used to be (measured, #12051 round 4)"
     )
+    assert len(hits) == 1, (
+        "expected exactly ONE armed fail-closed branch between the client "
+        f"install (step {pin_index}) and the record leg (step {leg_start}); "
+        f"found {len(hits)} at step(s) {[index for index, _ in hits]} — two "
+        "assertions can disagree about which major is armed, and this row "
+        "cannot tell which one runs last"
+    )
+    branch_index, branch = hits[0]
+    branch_text = _run_code(steps[branch_index])
     assert int(branch.group("major")) == server_major, (
         "the fail-closed branch compares against major "
         f"{branch.group('major')} but the provisioned servers are pg{server_major} — "
@@ -508,7 +617,7 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
         "leg on the inherited client and exits 0"
     )
     for tool in ("pg_dump", "pg_restore"):
-        assert tool in text, (
+        assert tool in _run_commands(steps[branch_index]), (
             f"the pin must assert `{tool} --version`: the drill resolves BOTH "
             "from PATH, and pinning only one leaves the other on the image's "
             "client"
@@ -529,11 +638,7 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
     steps = _steps(job)
     pin_index, _ = _pin_step(steps)
 
-    leg_indexes = [
-        index
-        for index, step in enumerate(steps)
-        if "test_9567_record_capstone.py" in _run_commands(step)
-    ]
+    leg_indexes = _leg_indexes(steps)
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
     assert pin_index < min(leg_indexes), (
         f"the client pin is at step {pin_index}, the record leg at "
