@@ -1196,7 +1196,9 @@ def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
     §8 lists the shapes the refusal does NOT measure — `path#LINE`, `path@LINE`,
     `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE`, `path:L LINE`, `path N --flag`,
     and an HTTP-status line — because every one of them refused correct prose from this
-    repository's own `docs/` when it was measured (799 files). Nothing pinned that list,
+    repository's own `docs/` when it was measured (801 files — re-derive with
+    `git ls-tree -r --name-only HEAD docs/ | grep -c '\.md$'`; a hand-typed population rots
+    the same way the span counts did). Nothing pinned that list,
     so it could drift from the code with every test green; that is how the whitespace
     RANGE form (`path 16-18`) and `path N --flag` went unnoticed. This test is the
     guard on the boundary in BOTH directions: the carve-outs stay skippable, and the two
