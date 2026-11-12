@@ -1329,16 +1329,40 @@ def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
     assert violation(renamed) is None, (
         f"a rename of an unused loop binding reds the row: {violation(renamed)}")
 
-    # (4) PROSE IS NOT A STATEMENT: the needle left in a bare string statement carries no store,
-    # even when the loop is re-targeted around it.
+    # (4) PROSE IS NOT A STATEMENT: the needle carried by a BARE STRING statement stores nothing.
+    # ⛔ `#12020` review, Finding 2: this arm used to re-target the loop as well, so its red was the
+    # ITERATED arm's and the prose rule it claimed to pin was never the thing measured (arm (1b)
+    # already covers that mutant). The mutation below leaves the loop iterating the canonical
+    # constant — the iterated arm HOLDS on it — and moves the needle into a bare string at the top
+    # of the function body, so the red can only come from the statement arm. Both halves are
+    # asserted, so the two arms cannot drift apart silently the way they did before.
+    # ⚠️ The bare string has to sit where NO enclosing statement also carries it: a string inside the
+    # loop body is invisible to the statement arm because the `for` itself then carries the text
+    # (measured — that is why the first version of this arm could not isolate prose at all).
+    signature = (
+        "    def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), "
+        "**props) -> dict:\n")
     prose = source.replace(
         loop,
-        "            for label, _prop in _SOME_OTHER_PROPS:\n"
-        '                "in _CANONICAL_ENTITY_ID_PROPS:"\n',
-        1,)
+        "            for label, _prop in (\n"
+        "                _CANONICAL_ENTITY_ID_PROPS\n"
+        "            ):\n",
+        1,).replace(signature, signature + f'        "{needle}"\n', 1,)
     assert prose != source
-    assert violation(prose) is not None, (
+    fn_prose = _function_of(prose, symbol)
+    assert fn_prose.end_lineno is not None
+    # The loop half of the claim is deliberately UNTOUCHED by this mutant …
+    assert _iterated_store_problem(fn_prose, iterated, prose.splitlines()) is None, (
+        "the prose mutant moved the loop too — then its red is the iterated arm's, not the statement "
+        "arm's, and this arm measures nothing about prose")
+    # … and the needle really is left in a bare string, carried by no real statement.
+    assert _carrying_statements([fn_prose], prose.splitlines(), needle) == [], (
+        "the needle is still carried by a real statement — this mutant does not isolate prose")
+    problem = violation(prose)
+    assert problem is not None, (
         "a needle left in a docstring/bare string satisfied the row — prose is not a store")
+    assert "no STATEMENT" in problem, (
+        f"the red is not the statement arm's, so this arm does not pin the prose rule: {problem}")
 
     # (5) NO VACUOUS PASS: a source that does not define the symbol cannot be checked, and must RED
     # rather than answer by an empty `any(...)`.
@@ -1822,13 +1846,29 @@ def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
 #: never the `NULL` wipe, which removes the property), plus the map-merge (`SET n += $p`) the generic
 #: update door stores through: no alias rule can attribute that one, but it is unambiguously a
 #: store, and it is the shape `tortoise.sdk::_update_entity` declares its labels from.
+#: ⛔ `#12020` review, Finding 1: the `.embedding =` form is NARROWED here, because the first version
+#: credited two shapes that store nothing — the false-PASS direction this whole row exists to close.
+#:   · `(?!=)` excludes the COMPARISON: `if t.embedding == prior:` is not an assignment, and the
+#:     earlier `(?!\s*NULL)` let it through (measured: it matched `t.embedding =`).
+#:   · `(?!\s*(?i:null)\b)` excludes the NULL WIPE in ANY spelling, because CYPHER IS
+#:     CASE-INSENSITIVE — `SET n.embedding = null` clears the property exactly as `= NULL` does, and
+#:     `tortoise/consistency.py` already reads that shape as an `embedding: null` clear. The `\s*`
+#:     lives INSIDE the lookahead on purpose: written outside it, the engine backtracks the
+#:     whitespace and the lookahead then compares against a space, which matches.
+#: Both narrowings are pinned in `test_the_store_carrier_does_not_credit_a_comparison_or_a_wipe`.
 #: ⚠️ Residual, stated: this reads the carrier's SOURCE SLICE, so a string literal inside the carrier
 #: that quotes a store counts as one. Closing that needs AST-level clause detection, the same class
 #: of limit `_declared_symbol_bodies` records for trailing comments.
 _STORE_CARRIER = re.compile(
     r"set_embedding_clause\(|clear_then_set_prefix\("
-    r"|\b\w+\.embedding\s*=(?!\s*NULL)|\bSET\s+\w+\s*\+="
+    r"|\b\w+\.embedding\s*=(?!=)(?!\s*(?i:null)\b)|\bSET\s+\w+\s*\+="
 )
+
+
+#: Scope-defining node types: `ast.stmt` subclasses that establish a RANGE rather than execute a
+#: statement. Excluded as carriers by `_carrying_statements` — a symbol's own body is never the
+#: statement that carries its claim (#12020 review, Finding 2).
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
 def _slice(lines: list[str], node: ast.AST) -> str:
@@ -1870,14 +1910,29 @@ def _carrying_statements(universe: list[ast.AST], lines: list[str],
 
     ⛔ A bare string statement (the docstring shape) is not a carrier. Prose quoting a clause is not
     a claim about what the code executes — the same distinction `_without_comments` draws for whole
-    line comments. The residual that remains is a TRAILING comment, which this cannot strip without
-    cutting a `#` inside a Cypher string.
+    line comments. ⛔ `#12020` review, Finding 2: that rule was INERT until the scope roots below
+    were excluded, and the reason is worth keeping: `ast.FunctionDef` IS an `ast.stmt`, so the cited
+    symbol was itself a hit whenever the needle appeared anywhere in its body — including a
+    docstring — and minimality then returned the FUNCTION as "the statement that carries it",
+    whose slice obviously contains a store. Measured on the reviewed head: a needle left only in a
+    docstring satisfied the row. Excluding the roots is what makes the prose rule observable at all.
+    The residual that remains is a TRAILING comment, which this cannot strip without cutting a `#`
+    inside a Cypher string.
     """
+    # The cited symbol (and any other scope-defining ROOT) is the range the claim is bounded TO,
+    # never the statement that carries it: `ast.FunctionDef`/`AsyncFunctionDef`/`ClassDef` are
+    # `ast.stmt` subclasses, so without this a docstring-only needle answers "the function carries
+    # it" — the substring test this whole row replaced, one level up. Module CONSTANTS in
+    # `universe` are deliberately NOT excluded: a writer may hold its clause in one
+    # (`_TURN_WRITE_CYPHER`), and that statement is a real carrier.
+    roots = {id(root) for root in universe if isinstance(root, _SCOPE_NODES)}
     hits: list[tuple[ast.stmt, str]] = []
     for root in universe:
         for node in ast.walk(root):
             if not isinstance(node, ast.stmt):
                 continue
+            if id(node) in roots:
+                continue  # the cited symbol is not a statement that carries the needle
             if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
                     and isinstance(node.value.value, str)):
                 continue  # a docstring is prose, not a statement that stores
@@ -2050,6 +2105,96 @@ def _evidence_violation(source: str, symbol: str, needle: str,
             return None
         problems.append(f"{symbol}: {problem}")
     return "; ".join(problems)
+
+
+#: The needle the two `_STORE_CARRIER` / `_carrying_statements` pins below share — the same string
+#: `LABEL_EVIDENCE["tortoise.sdk::_update_entity"]` searches for, so the pins exercise the real key.
+_PROSE_NEEDLE = "in _CANONICAL_ENTITY_ID_PROPS:"
+
+
+def _function_of(source: str, name: str) -> ast.FunctionDef:
+    """The single `def name` in `source` — the direct input to `_carrying_statements`."""
+    return next(n for n in ast.walk(ast.parse(source))
+                if isinstance(n, ast.FunctionDef) and n.name == name)
+
+
+def test_the_store_carrier_does_not_credit_a_comparison_or_a_wipe() -> None:
+    """`#12020` review Finding 1: `_STORE_CARRIER` proves a STORE, so it must not credit these.
+
+    Measured at the reviewed head with the shipped regex: `if t.embedding == prior_ch:` matched
+    `t.embedding =`, and `SET n.embedding = null` matched too (only the UPPERCASE spelling was
+    excluded). Both credit a statement that stores nothing, which is the over-credit direction this
+    row exists to close — and `#11938`-class rows are exactly the shape that would sit in a
+    comparison, so it would have gone live with the next row rather than on this tree.
+    """
+    credited = {
+        # A COMPARISON is not an assignment.
+        "if t.embedding == prior_ch:",
+        "if p.embedding == q:",
+        "return t.embedding == 1",
+        # The NULL WIPE, in every spelling — Cypher is case-insensitive, so `= null` clears the
+        # property exactly as `= NULL` does.
+        "SET n.embedding = NULL",
+        "SET n.embedding = null",
+        "SET n.embedding=Null",
+        "SET n.embedding = null RETURN n",
+        # Not a store either: no `=` to assign with.
+        "if p.embedding >= 1:",
+        "t.embedding != q",
+    }
+    wrongly = sorted(s for s in credited if _STORE_CARRIER.search(s))
+    assert not wrongly, (
+        "_STORE_CARRIER credits a statement that stores nothing — that is a false PASS in the "
+        f"statement arm, which is the direction this row exists to close: {wrongly}")
+
+    stores = {
+        "n.embedding = $v",                       # a live assignment, the form the alias rows use
+        "SET n.embedding = nullify",               # a VALUE named nullify is a store, not a wipe
+        "SET n += $p",                             # the map-merge `_update_entity` declares from
+        "set_embedding_clause(n, vec)",
+        "clear_then_set_prefix(n)",
+    }
+    missed = sorted(s for s in stores if not _STORE_CARRIER.search(s))
+    assert not missed, (
+        "_STORE_CARRIER no longer sees a real store — the narrowing above went too far and the "
+        f"statement arm now reds on rows that hold: {missed}")
+
+
+def test_a_bare_string_statement_is_not_a_carrier() -> None:
+    """`#12020` review Finding 2: the docstring skip is LOAD-BEARING, and this is its only pin.
+
+    ⛔ Measured at the reviewed head: DELETING the skip in `_carrying_statements` left every
+    other assertion in this file with its verdict — all 10 `LABEL_EVIDENCE` rows still passed, and
+    the prose arm still reded (through a different arm's message). A rule no mutation can observe
+    is not pinned, and an assertion whose message says the rule is proved tells the next reader
+    something the test does not establish.
+
+    This is the assertion whose verdict FLIPS on that mutation: with the skip the bare string is
+    not a carrier (`[]`); without it the `Expr` is returned. The control below keeps it honest in
+    the other direction, so it cannot pass by the helper having become always-empty.
+    """
+    prose_only = (
+        "def _f() -> int:\n"
+        f'    "{_PROSE_NEEDLE}"\n'
+        "    return 1\n"
+    )
+    hits = _carrying_statements(
+        [_function_of(prose_only, "_f")], prose_only.splitlines(), _PROSE_NEEDLE)
+    assert hits == [], (
+        "a bare string statement counts as a carrier — prose is not code, and the skip in "
+        f"_carrying_statements is gone or inert: {[(type(n).__name__, t) for n, t in hits]}")
+
+    # CONTROL — a REAL statement carrying the same text IS returned, so the assertion above cannot
+    # pass merely because the helper answers nothing.
+    real = (
+        "def _f() -> None:\n"
+        "    for label, _prop in _CANONICAL_ENTITY_ID_PROPS:\n"
+        "        pass\n"
+    )
+    found = _carrying_statements(
+        [_function_of(real, "_f")], real.splitlines(), _PROSE_NEEDLE)
+    assert len(found) == 1 and isinstance(found[0][0], ast.For), (
+        f"a real statement no longer carries the needle, so the pin above proves nothing: {found}")
 
 
 
