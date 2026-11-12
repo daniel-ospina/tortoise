@@ -3720,6 +3720,13 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     interpreter, which `_pi_pids_from_ps` documents). SKIPS where `sleep` is unavailable
     or the process table cannot be read at all (reported as an error by the reader), so a
     box without those does not red a census that is fine.
+
+    ⛔ BOUNDED POLL, because `Popen` returns at FORK time (#12039). The census can run
+    in the window before the child has exec'd — its row still carries the PARENT's
+    command line, so `basename(argv[0]) == "pi"` matches nothing and the probe answers
+    `pids seen: []` about a process that is about to exist. One-shot, that window is a
+    per-run coin flip on a loaded runner: measured redding `test (h)` and `test (a)` on
+    main at `4b1d6cd0d4`. Polling removes the window without widening the match.
     """
     import shutil
     import subprocess
@@ -3738,18 +3745,10 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
         proc = subprocess.Popen([str(pi), "60"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            # ⛔ A BOUNDED POLL, NOT ONE SAMPLE (#12039). `Popen` returns at FORK time;
-            # the census may then run before the child's `execve` completes, and until it
-            # does the child carries the PARENT's `command=` (the pytest worker's argv),
-            # whose basename is not `pi`. Measured on a 4-vCPU CI runner: `pids seen: []`
-            # — a healthy spawn reported invisible, on a REQUIRED check, which is also the
-            # false-PASS half (re-run until green is how a real regression here would be
-            # waved through).
-            #
-            # ⛔ IT DOES NOT WEAKEN THE `-ww` PIN. A census without `-ww` truncates the
-            # long argv[0] on EVERY sample, so it still matches nothing — it just takes the
-            # whole deadline instead of one attempt. Verified by removing `-ww` from
-            # `fleet_state.pi_processes` and re-running this test: still RED.
+            # Bounded poll on the CENSUS ITSELF — never a widened or loosened match.
+            # A census missing `-ww` still never matches (its rows are cut before the
+            # basename), so the truncation pin keeps its discriminating power: it takes
+            # the FULL deadline and fails, it does not go green.
             deadline = time.time() + 10.0
             pids: list[int] = []
             while True:
