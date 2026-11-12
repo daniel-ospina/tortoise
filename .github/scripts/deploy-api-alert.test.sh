@@ -839,6 +839,44 @@ BLANK_BODY_LC="$(printf '%s' "$BLANK_BODY" | tr '\n' ' ' | tr '[:upper:]' '[:low
 assert_no_match "$BLANK_BODY_LC" "$BODY_17I_PRESENCE" "and the intro's presence claim is CONDITIONED here too — 'reproduced below;' would claim a report a blank state does not carry (#12200)"
 assert_match "$BLANK_BODY_LC" "$BODY_17I_CONDITION" "and that claim CARRIES its condition here too — the positive half, so an adverb after 'below' cannot smuggle the unconditional claim back in"
 
+# ── case 17k: a BIG report whose TAIL is blank — declare the cut and say which bytes
+#    were read (review round 5, P3) ────────────────────────────────────────────────
+# Only the report's LAST 6000 bytes are read, so a 15,400-byte report whose final bytes are
+# blank captures as EMPTY while the FILE holds plenty of text. Calling that "the report file
+# held no excerpt-able text" is false about the file — and it left the cut undeclared, which
+# made the section intro's "any of the 6000-byte cut … is declared beside it" false in this
+# single state. Both halves are pinned: the sentence must attribute the emptiness to the TAIL
+# it actually read, name the size, and the unqualified sentence must be absent.
+python3 -c 'import sys,pathlib; pathlib.Path(sys.argv[1]).write_bytes((b"check-migration-drift: BLOCKING 20260926000002\n" * 200) + (b"\n" * 6000))' "$FIX/drift-report-bigtail.txt"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-bigtail.txt"
+assert_eq "$RC" "0" "case 17k: a >6000-byte report with a blank tail still files the alert"
+BIGTAIL_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$BIGTAIL_BODY" "last 6000 bytes held no excerpt-able text" "case 17k: and it says the TAIL held nothing, not that the FILE did"
+assert_not_contains "$BIGTAIL_BODY" "**The report file held no excerpt-able text**" "case 17k: and the unqualified sentence — false about a 15,400-byte file — is ABSENT"
+assert_contains "$BIGTAIL_BODY" "15400 bytes" "case 17k: and it names the report's real size, so a reader sees text above the cut"
+assert_contains "$BIGTAIL_BODY" "only that tail is read" "case 17k: and the 6000-byte cut is DECLARED here too — the intro promises it beside the excerpt"
+assert_not_contains "$BIGTAIL_BODY" '```' "case 17k: and it pastes no fenced block it does not have"
+
+# ── case 17l: a HEALTHY converter that emits nothing is NOT a missing converter
+#    (review round 5, note 1) ───────────────────────────────────────────────────
+# The empty-fallback sentence used to name two causes — no `iconv`, or one that refused — while
+# a THIRD is reachable and needs no broken converter at all: the tail's last 6000 bytes are
+# entirely undecodable, so `iconv -c` succeeds, emits ZERO bytes, and the ASCII fallback finds
+# nothing to keep either. On such a host the old sentence told the on-call reader the converter
+# was missing while it had just run. The row pins the STATE ("emitted nothing it could convert")
+# and the absence of the two-cause form; it is a phrase-level pin, which is the residual #12283
+# records for this whole harness.
+python3 -c 'import sys,pathlib; pathlib.Path(sys.argv[1]).write_bytes((b"check-migration-drift: BLOCKING 20260926000002\n" * 200) + (b"\x92" * 6000))' "$FIX/drift-report-undecodable-tail.txt"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-undecodable-tail.txt"
+assert_eq "$RC" "0" "case 17l: an all-undecodable tail still files the alert"
+UNDEC_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$UNDEC_BODY" "produced no excerpt either" "case 17l: and it names the state it is in"
+assert_not_contains "$UNDEC_BODY" "is unavailable or refused to emit" "case 17l: and does NOT blame the converter — a healthy converter that emits nothing is not a missing one"
+assert_contains "$UNDEC_BODY" "emitted nothing it could convert" "case 17l: and the third cause is named, so the enumeration matches what the host can do"
+assert_not_contains "$UNDEC_BODY" '```' "case 17l: and it pastes no fenced block"
+
 # ── case 17d: the READ GUARD — an existing but unreadable report must not abort ─────
 # NOTE THE MECHANISM (corrected, pass-5 review): a DIRECTORY is `-s`-TRUE on this fs, so
 # this case would have reached the read even before the `-e`/`-p` widening. What it pins is

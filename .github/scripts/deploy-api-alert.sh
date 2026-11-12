@@ -366,8 +366,23 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # Claiming "could not be byte-squeezed" there (or pasting an empty block under
           # a heading that promises the report) would be two false statements; say only
           # what is true.
-          echo "⚠️ **The report file held no excerpt-able text** (nothing but line endings or NUL bytes, or it could not be re-read); the gate's own output is in the run link above."
-          echo
+          #
+          # ⛔ AND SAY WHICH BYTES WERE READ (review round 5, P3): the tail is only the
+          # report's LAST 6000 bytes, so a 15,400-byte report whose final bytes are blank
+          # holds plenty of text the alert never looked at. Calling that "the report file
+          # held no excerpt-able text" is false about the file — and it left the 6000-byte
+          # cut UNDECLARED, which made the section intro's "any of the 6000-byte cut … is
+          # declared beside it" false in this ONE state. Measure the size and name both
+          # facts without diagnosing which of them caused the empty capture.
+          report_bytes="$(wc -c < "$DRIFT_REPORT_FILE" 2>/dev/null)" || report_bytes=""
+          case "${report_bytes:-}" in '' | *[!0-9]*) report_bytes=0 ;; esac
+          if [ "$report_bytes" -gt 6000 ]; then
+            echo "⚠️ **The report's last 6000 bytes held no excerpt-able text** (nothing but line endings or NUL bytes, or it could not be re-read); the report itself is ${report_bytes} bytes, and only that tail is read — the gate's own output is in the run link above."
+            echo
+          else
+            echo "⚠️ **The report file held no excerpt-able text** (nothing but line endings or NUL bytes, or it could not be re-read); the gate's own output is in the run link above."
+            echo
+          fi
         elif [ -z "$excerpt" ]; then
           # An iconv that is absent, or that refuses without emitting anything, would
           # otherwise paste an EMPTY block under a heading that promises the report.
@@ -388,8 +403,11 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # ⛔ `|| true` is a GUARD, not decoration: under `set -euo pipefail` this is a
           # plain assignment, so a `tr` that fails would abort `build_body` BEFORE
           # anything is filed — a fail-CLOSED notifier, i.e. the very silence #2240
-          # exists to remove. The merge that brought this branch up to main dropped
-          # main's own `|| true` here (review P2, PR #12110); case 17h pins it.
+          # exists to remove. The guard is on main and must stay there: `origin/main:368`
+          # carries the same `|| true`, it has survived every rewrite of this statement since
+          # 49cf519354, and case 17h pins it. (An earlier draft of this comment said a merge
+          # dropped main's `|| true` — false, and the same class this change removes: a
+          # sentence stating a mechanism the artifact does not show.)
           excerpt="$(printf '%s' "$raw_tail" | LC_ALL=C tr -d '\200-\377' || true)"
           # ⛔ The fallback has a SECOND empty state, and the sentence below is a claim
           # about an artifact: a report whose excerpt-able text is entirely non-ASCII
@@ -400,8 +418,14 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # report is only at the run link). One sentence per state, each conditioned on
           # what was actually produced, is the shape that cannot diverge again. Pinned by
           # case 17i, whose not_contains row reds if this condition is removed.
+          # ⛔ NAME THE STATE, NOT ONE CAUSE (review round 5, note 1). An EMPTY `iconv`
+          # output has three reachable causes: no `iconv` at all, one that refused/failed, and
+          # — measured — one that is perfectly healthy and emits NOTHING because every byte of
+          # the tail was undecodable while the ASCII fallback still recovered text. Naming only
+          # the first two told the on-call reader the converter was missing on a host where it
+          # had just worked, so both sentences below enumerate the state inclusively.
           if [ -n "$excerpt" ]; then
-            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
+            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable, refused to emit, or emitted nothing it could convert); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
           else
             # ⛔ SAY ONLY WHAT IS TRUE IN THIS STATE, not what the BRANCH implies. `excerpt` is
             # empty here for TWO reasons and the body cannot tell them apart: the tail may be
@@ -412,7 +436,7 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
             # tr, an ASCII report), the body claimed every byte of an ASCII report was non-ASCII
             # — the exact class this whole change exists to remove, reintroduced one branch down.
             # The reader's action is the same in both states, so name the state, not the cause.
-            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit), and the ASCII fallback produced no excerpt either — so NOTHING is pasted below; the full report is at the run link above."
+            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable, refused to emit, or emitted nothing it could convert), and the ASCII fallback produced no excerpt either — so NOTHING is pasted below; the full report is at the run link above."
           fi
           echo
         elif [ "$(printf '%s' "$excerpt" | wc -c)" -lt "$(printf '%s' "$raw_tail" | wc -c)" ]; then

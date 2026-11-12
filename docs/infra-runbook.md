@@ -3387,7 +3387,9 @@ the alert could not open at all (the variable unset, the file missing, or a name
 not block on) sends the reader to the
 `Check migration drift (fail-closed)` **step log** inside the run — the gate's own stdout is
 there, and the alert deliberately does not re-run the gate — while a report that exists but
-yields nothing (empty, or nothing left by the squeeze and its fallback) sends them to the
+yields nothing (empty, or nothing left by the squeeze and its fallback, or a report larger
+than the 6000-byte cap whose **tail** was blank — the body then names the report's real size
+and says only that tail was read) sends them to the
 **run link**. It never claims an excerpt it is not showing, never guesses the cause when two states are
 indistinguishable from there, and the section intro no longer promises a "verbatim" report it
 may not be carrying (#12200): on-call reads the body, so a false claim there costs the reader
