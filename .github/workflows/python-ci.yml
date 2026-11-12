@@ -4738,7 +4738,7 @@ jobs:
             if [ -n "${ImageOS:-}" ]; then
               identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
             fi
-            echo "::error::no postgresql-client-16 in this image's archive [$identity] — BOTH provisioned servers are pg16 and the drill's client major is part of the artifact's contract (#12051), so it cannot run here. HOSTED runner: this release no longer carries the servers' major — pin the job to one that does. SELF-HOSTED runner: the box is not the pinned release, so this is the label-routing drift — run --repair-labels (#10289)."
+            echo "::error::no postgresql-client-16 in this image's archive [$identity] — BOTH provisioned servers are pg16 and the drill's client major is part of the artifact's contract (#12051), so it cannot run here. HOSTED runner: this release no longer carries the servers' major — pin the job to one that does. SELF-HOSTED runner: this box is not the pinned release yet claims the label, i.e. the routing drift #10289 — on it run CI_RUNNER_OS_LABEL=off tools/install-ci-runner-x64.sh --repair-labels --count <N> (an on/auto install KEEPS the pin, so a BARE --repair-labels changes nothing)."
             exit 1
           fi
           sudo apt-get install -y --no-install-recommends postgresql-client-16
