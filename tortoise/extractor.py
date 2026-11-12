@@ -1340,6 +1340,15 @@ class LLMExtractor:
         in ``seen_subjects`` and a later section never reaches the cue again — one
         record per surface, in step with ``subjects_hold_failed``.
 
+        ⛔ ``subjects_hold_failed`` IS A SUBSET OF ``subjects_minted``, NOT A THIRD
+        DISJOINT BUCKET (#12102 review P2). A cue that raises mints the surface,
+        so it is counted in BOTH. Therefore ``minted + held == population`` and
+        ``minted + held + failed`` OVERCOUNTS by exactly ``failed``. The failed
+        count is disclosed because a silently degraded gate must be visible, not
+        so it can be summed. And a section skipped under ``skip_on_failure=True``
+        contributes to NO bucket: its subjects were never proposed, so they are
+        absent from the population rather than counted anywhere.
+
         ``mentions`` is ``None`` on purpose, not an empty list: this stage has
         no claim Point to carry a mention record (DM1 / ``#11021``), so the
         honest answer is "unanswerable here", never "nothing to report".
@@ -1404,6 +1413,15 @@ class LLMExtractor:
         # count different units invites a caller to add them up.
         held_subjects: list[dict] = []
         held_surfaces: dict[str, str] = {}  # surface → its rule_id (first hold)
+        # ⛔ The UNIT above is (surface, section), so this set is what ENFORCES it:
+        # the ``name in seen_subjects`` skip below never applies to a held surface
+        # (``continue`` precedes the mint), so without this a model returning the
+        # same name twice inside ONE section appends two records with the SAME
+        # section — measured at the #12102 review: ``payload={"it","it","ODT"}``
+        # gave ``len(held_subjects)==2`` with ``[h["section"]] == ['A','A']`` while
+        # ``subjects_held==1``. A census that overcounts occurrences is worse than
+        # no census, because the measurement (#5087 R1) reads the records.
+        held_records_seen: set[tuple[str, str]] = set()  # (surface, section)
         # #12094: a cue that RAISES is fail-open — the surface is minted, as it
         # would have been before this gate existed — and the failure is reported.
         # ⛔ ONE record per surface, not per occurrence: a failed surface mints, so
@@ -1457,6 +1475,12 @@ class LLMExtractor:
                         "#12094: referentiality cue raised on %r in %r — minted "
                         "(fail-open): %s", name, title, exc, exc_info=True)
                 if _verdict is not None:
+                    held_surfaces.setdefault(name, _verdict[0])
+                    # ONE record per (surface, section), exactly as documented —
+                    # a repeat inside the same section is the same disposition.
+                    if (name, title) in held_records_seen:
+                        continue
+                    held_records_seen.add((name, title))
                     # ⛔ A WORD-BOUNDARY match, not `body.find(name)`. A substring
                     # index is wrong for exactly the class this gate holds: the
                     # pronoun `it` is found INSIDE "with"/"within"/"itself", so the
@@ -1485,7 +1509,6 @@ class LLMExtractor:
                         "span": list(span),
                         "phrase_offset": _offset,
                     })
-                    held_surfaces.setdefault(name, _verdict[0])
                     continue
                 try:
                     # #9572: forward the kind ONLY when the model named one — a

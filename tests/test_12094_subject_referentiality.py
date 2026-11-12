@@ -530,3 +530,79 @@ def test_the_phrase_offset_is_a_word_boundary_match(monkeypatch):
     assert held2[0]["phrase_offset"] == expected, (
         f"expected the standalone occurrence at {expected}, got "
         f"{held2[0]['phrase_offset']}")
+
+
+# ── 11. the (surface, section) unit is ENFORCED, not just documented ────────
+
+def test_a_repeated_surface_in_one_section_records_once(monkeypatch):
+    """``held_subjects`` carries ONE record per (surface, section) — enforced.
+
+    The ``name in seen_subjects`` skip at the top of the loop never applies to a
+    HELD surface (its ``continue`` precedes the mint, so it is not added to
+    ``seen_subjects``), which is what makes a second section record correctly.
+    The same asymmetry let a model that returns the SAME name twice inside ONE
+    section append two records with the SAME section — measured at the #12102
+    review: ``{"it","it","ODT"}`` gave ``len(held_subjects)==2`` with
+    ``[h["section"]] == ['A','A']`` while ``subjects_held==1``.
+
+    The census feeds a measurement (``#5087`` R1), so an occurrence count read
+    off ``held_subjects`` must not overcount: the record list is the OCCURRENCE
+    unit, and one name raised once in one section is one occurrence.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    api, _proj, _log = _proj_api()
+    payload = {"subjects": [
+        {"name": "Organisation Design Team", "subjectKind": "team"},
+        {"name": "it", "subjectKind": "other"},
+        {"name": "it", "subjectKind": "other"},
+    ], "objects": [], "aboutEntities": []}
+
+    result = _extract(monkeypatch, payload, api)
+
+    assert result["subjects_minted"] == 1
+    assert result["subjects_held"] == 1, "surface-level: one name, however often raised"
+    assert len(result["held_subjects"]) == 1, (
+        "one record per (surface, section): a repeat inside ONE section is the "
+        f"same disposition (records: {result['held_subjects']})")
+    assert result["held_subjects"][0]["section"] == "Product Strategy"
+
+
+# ── 12. the failed bucket is INSIDE minted, never a third disjoint unit ─────
+
+def test_a_failed_surface_is_counted_in_minted_and_in_failed(monkeypatch):
+    """``subjects_hold_failed`` ⊆ ``subjects_minted`` — pin the CONTAINMENT.
+
+    A cue that raises is fail-open: the surface is MINTED. So a caller computing
+    "the population" as ``minted + held + failed`` overcounts by exactly
+    ``failed`` — and the overcount lands in the direction that flatters the gate
+    (one extra surface looks like one more disposition than the document had).
+    The failed count exists so a degraded gate is VISIBLE, not so it can be added.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    api, _proj, _log = _proj_api()
+    payload = {"subjects": [
+        {"name": "Organisation Design Team", "subjectKind": "team"},
+        {"name": "it", "subjectKind": "other"},
+        {"name": "they", "subjectKind": "other"},
+    ], "objects": [], "aboutEntities": []}
+
+    real_hold = extractor_mod._referentiality_hold
+
+    def _boom(surface):
+        if surface == "it":
+            raise RuntimeError("cue exploded")
+        return real_hold(surface)
+
+    monkeypatch.setattr(extractor_mod, "_referentiality_hold", _boom)
+    result = _extract(monkeypatch, payload, api)
+
+    minted, held, failed = (result["subjects_minted"], result["subjects_held"],
+                            result["subjects_hold_failed"])
+    assert (minted, held, failed) == (2, 1, 1), (
+        "the raising surface mints (fail-open) AND is reported as failed")
+    population = minted + held
+    assert population == 3, "minted + held IS the population — no double count"
+    assert minted + held + failed == 4 > population, (
+        "the three-bucket sum OVERCOUNTS by exactly `failed`; the docstring says "
+        "so and a caller must not add it")
+    assert "it" in result["subject_names"], "fail-open means it was minted"
