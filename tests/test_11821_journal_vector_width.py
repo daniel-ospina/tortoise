@@ -1648,6 +1648,23 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
                    JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
                   embedding="abc")
 
+    # ⛔ …AND THE BELT HAS ITS OWN ROW, which is the one shape that reds when it
+    #    is removed (#12000 mutation pass, agent-infra#3442 — measured: with the
+    #    post-stamp call disabled, every other arm above still passes, because
+    #    they are all refused by the PRE-stamp check). An EMPTY vector is the
+    #    case that separates them: `_is_shortest_f32_text([])` is `True`
+    #    ("representable at every width" — `tortoise/embeddings.py`), so the
+    #    pre-stamp arm passes it truthfully, the seam then DROPS it to an owned
+    #    `None`, and the belt is what refuses the resulting `f32` over `None`.
+    #    Without this row the belt is unexercised — a guard with no attributable
+    #    mutant, which is how five PRs in one night were reviewed clean over
+    #    restored bugs.
+    with pytest.raises(ValueError, match="declared over NO vector"):
+        api._emit("PointAdded",
+                  {"id": "p-empty", "content": "c",
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+                  embedding=[])
+
     # 8. ⛔ THE SAME JUNK CARRIED ON THE RECORD, which is the shape the arms
     #    above MISS (#12000 round-10 re-review, F1' — measured). This is NOT a
     #    channel the belt cannot see: the belt is handed `event["point"]` as the
