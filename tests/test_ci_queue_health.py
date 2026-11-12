@@ -3706,6 +3706,56 @@ def test_a_fully_unmeasured_census_is_named_on_a_verdict_that_is_not_PR_UNWITNES
     assert measured.state_line != health.state_line
 
 
+def test_the_UNMEASURED_token_is_rendered_by_EVERY_arm_that_can_carry_it():
+    """A census disclosure must be rendered by every arm, not only the one first tested.
+
+    ⛔ WHY THIS IS SEPARATE FROM THE `partial_unmeasured_…` TEST ABOVE. That test asserts
+    the token through whatever verdict `classify` happens to reach — ONE arm. But
+    `_unmeasured_token` is spliced into five `state_line` arms, so dropping it from
+    `FLOOD` or `PR-BACKLOGGED` survived the whole file: the property "a partially
+    unmeasured census is always named" was enforced on one arm of five. Each arm is
+    rendered here from the SAME health object, so no arm can pass on state another one
+    produced.
+    """
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=1000)]
+    runs = [run(7001, "python-ci", event="pull_request", has_live_job=True),
+            run(7002, "python-ci", event="pull_request", has_live_job=None),
+            run(7003, "python-ci", event="pull_request", has_live_job=None)]
+    base = classify(queued, in_progress=runs, probe_attempted=True)
+    assert base.pr_running == 3 and base.pr_running_unmeasured == 2
+    for verdict in (Q.FLOOD, Q.PR_BACKLOGGED, Q.OK):
+        line = dataclasses.replace(base, verdict=verdict,
+                                   dominant_workflow="welcome-e2e").state_line
+        assert "unmeasured=2" in line, (verdict, line)
+        # EXACTLY ONCE: two occurrences would mean two arms rendered into one line.
+        assert line.count("unmeasured=2") == 1, (verdict, line)
+
+    # The ALL-UNMEASURED shape takes `census=unmeasured` instead of the count token, and
+    # must never print both. With the degradation flag set, the `PR-UNWITNESSED` arm is
+    # already printing it, so this property must add nothing.
+    exclusive = dataclasses.replace(
+        base, verdict=Q.PR_UNWITNESSED, pr_running_unmeasured=base.pr_running,
+        pr_running_census_unwitnessed=True,
+    ).state_line
+    assert exclusive.count("census=unmeasured") == 1, exclusive
+    assert ", unmeasured=" not in exclusive, exclusive
+
+
+def test_the_unread_bracket_names_ALL_THREE_causes():
+    """The `unread` bucket's text must cover every cause it stands for (review P2).
+
+    The settle gate gave this bucket a third cause — a read that SUCCEEDED while its list
+    proved nothing (truncated, or jobs stamped for another attempt, where the stamp can be
+    hours old so stillness is no obstacle). A two-cause bracket then asserted a cause that
+    did not happen for that reading, which is the precise class this PR removes. Nothing
+    pinned the text, so it could regress to a closed pair unnoticed.
+    """
+    text = Q._unmeasured_because(0, 1)
+    assert "read FAILED" in text, text
+    assert "other-attempt" in text, text
+    assert "still for" in text, text
+
+
 def test_the_PR_UNWITNESSED_line_names_the_census_exactly_once():
     # The guard that keeps the branch-local token and this one from both firing.
     runs = [run(7001, "python-ci", event="pull_request", has_live_job=None)]

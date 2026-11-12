@@ -1159,10 +1159,14 @@ def _settled_still(
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=UTC)
     reference = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
-    if stamp > reference:
-        # A future-dated stamp is not evidence of stillness (clock skew, or a payload
-        # this module cannot reason about). Abstain rather than subtract.
-        return False
+    # A FUTURE-dated stamp abstains WITHOUT a branch of its own (review NIT): the
+    # comparison below is the whole gate, and a negative difference can never be
+    # `>= settle_seconds` for any non-negative window. An explicit
+    # `if stamp > reference: return False` read as a second guard, but it changed the
+    # answer only for a NEGATIVE `settle_seconds`, which no caller passes — dead weight
+    # masquerading as protection, and the test that claimed to cover it passed with the
+    # branch deleted. `settle_seconds` is a duration; a negative one is meaningless.
+    # The behaviour (a future stamp abstains) is pinned by the tests, not by the branch.
     return (reference - stamp).total_seconds() >= settle_seconds
 
 
