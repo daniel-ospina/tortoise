@@ -2714,10 +2714,14 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
             sdk.create_subject("Old Team", "organization")  # the EXACT ref
             # An Object whose folded name IS the ref, collapsed onto a survivor
             # the graph no longer holds: the Object ref arm matches the row and
-            # then drops it.
+            # then drops it. Its carrier is TERMINAL — a group whose survivor is
+            # gone contributes only its LIVE members (review round 10), so a live
+            # carrier here would be addressable and would win the ref on the
+            # usual Object-first precedence instead of exercising the defer.
             g.query(
                 "CREATE (o:Object {id:'r10-gone-ref', name:'Old Team', "
-                "objectKind:'document', status:'live', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Even Older Team', "
                 "canonical_name:'old team', "
                 "resolved_from:'obj-12120-survivor-deleted'})")
             applied, skips, msgs = self._apply(sdk, [
@@ -3262,6 +3266,94 @@ class TestThe12120ReviewRound9:
             sdk.close()
 
 
+class TestThe12120ReviewRound10:
+    """Round 10: the REF side of the gone-survivor rule.
+
+    Round 9 fixed the successor side (a gone survivor must not hide its live
+    carrier). The REF probe kept dropping the group, so a record whose REF was
+    such a carrier was skipped as "no addressable carrier" — about a node that
+    sits in the graph with an id and a live status — while the raw arm applied
+    it. The carrier must be addressable; a TERMINAL member still must not be.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r10",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def _orphaned_live_carrier(self, sdk, label="Object"):
+        """A live carrier whose `resolved_from` survivor has been DELETED."""
+        from tortoise.entity_resolver import apply_entity_merge
+
+        g = sdk._get_proj().g
+        if label == "Object":
+            survivor = sdk.create_object("Widget", "document")["id"]
+            g.query(
+                "CREATE (o:Object {id:'r10-carrier', name:'The Widget', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'widget'})")
+            apply_entity_merge(sdk, candidate_id="r10-carrier",
+                               survivor_id=survivor, method="fuzzy",
+                               similarity=0.9)
+            sdk.delete_entity(survivor)
+            return "r10-carrier"
+        survivor = sdk.create_subject("Acme Corp", "organization")["id"]
+        g.query(
+            "CREATE (s:Subject {id:'r10-subj-carrier', name:'The Acme Corp', "
+            "subjectKind:'organization', status:'live', "
+            "canonical_name:'acme corp'})")
+        apply_entity_merge(sdk, candidate_id="r10-subj-carrier",
+                           survivor_id=survivor, method="fuzzy",
+                           similarity=0.9)
+        sdk.delete_entity(survivor)
+        return "r10-subj-carrier"
+
+    def test_a_live_ref_carrier_beside_a_gone_survivor_is_addressable(
+            self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            carrier = self._orphaned_live_carrier(sdk)
+            sdk.create_object("Gadget", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "The Widget", "supersedes_by": "Gadget",
+                 "evidence": "test"}])
+            assert applied == 1, (
+                "a LIVE ref carrier was refused because its survivor is gone: "
+                f"{(applied, skips, msgs)!r}")
+            row = g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+                          params={"id": carrier}).result_set
+            assert row and row[0][0] == "superseded", row
+        finally:
+            sdk.close()
+
+    def test_a_live_subject_ref_carrier_beside_a_gone_survivor_is_addressable(
+            self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            carrier = self._orphaned_live_carrier(sdk, label="Subject")
+            sdk.create_subject("Other Team", "organization")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "The Acme Corp", "supersedes_by": "Other Team",
+                 "evidence": "test"}])
+            assert applied == 1, (
+                f"the Subject twin refused a live carrier: "
+                f"{(applied, skips, msgs)!r}")
+            row = g.query("MATCH (s:Subject {id:$id}) RETURN s.status",
+                          params={"id": carrier}).result_set
+            assert row and row[0][0] == "superseded", row
+        finally:
+            sdk.close()
+
+
 class TestThe12120ReviewRound3:
     """The three defects review round 3 found in the round-2 fix itself.
 
@@ -3421,20 +3513,30 @@ class TestThe12120ReviewRound3:
         finally:
             sdk.close()
 
-    def test_a_carrier_with_a_deleted_survivor_is_never_folded(self, sdk_factory):
-        """Round 5: an unfetchable survivor leaves only the RETIRED carrier.
+    def test_a_TERMINAL_carrier_with_a_deleted_survivor_is_never_folded(
+            self, sdk_factory):
+        """Round 5: an unfetchable survivor must not resurrect a RETIRED carrier.
 
         The `resolved_from` pointer can outlive its target (the survivor was
         deleted). Falling back to the group's own row folded onto exactly the
-        incarnation the merge retired; the group has to be dropped instead, so the
-        caller REFUSES and reports.
+        incarnation the merge retired; such a group contributes its LIVE members
+        only (review round 10), and a carrier that is already terminal is refused
+        by the keep-first arm — it is never folded again.
+
+        (Round 10 is the other half of the same rule: a carrier that is still
+        LIVE beside a gone survivor IS addressable, and is folded —
+        `TestThe12120ReviewRound10`. This pin's fixture is therefore explicitly
+        terminal; before round 10 it said `live` and passed only because the whole
+        group was dropped regardless of status, which is the refusal round 10
+        removed.)
         """
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
             g.query(
                 "CREATE (c:Object {id:'obj-12120-orphan', name:'Old Team', "
-                "objectKind:'document', status:'live', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Even Older Team', "
                 "canonical_name:'old team', resolved_from:'gone-survivor-12120'})")
             sdk.create_object("New Team", "document")
             applied, skips, msgs = self._apply(sdk, [
@@ -3443,9 +3545,10 @@ class TestThe12120ReviewRound3:
             assert applied == 0, (applied, skips, msgs)
             assert skips, ("the refusal did not report itself: " f"{skips!r}")
             row = g.query(
-                "MATCH (o:Object {id:'obj-12120-orphan'}) RETURN o.status"
+                "MATCH (o:Object {id:'obj-12120-orphan'}) "
+                "RETURN o.status, o.supersededBy"
             ).result_set
-            assert row and row[0][0] != "superseded", (
+            assert row and row[0][1] == "Even Older Team", (
                 f"the fold landed on the retired carrier: {row}")
         finally:
             sdk.close()

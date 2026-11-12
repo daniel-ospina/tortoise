@@ -1083,6 +1083,40 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
     return out
 
 
+def _ref_candidates(entities, label: str) -> list:
+    """The candidate ROWS a REF probe may address, from grouped entities.
+
+    Two rules meet here and must not be traded for each other:
+
+    * a group's representative is its SURVIVOR, and a RETIRED carrier is never
+      folded onto — which is why the representative is the survivor in the first
+      place (review round 5);
+    * a group whose survivor is GONE still holds the carriers the graph has, and
+      a carrier that is still LIVE is addressable and visible. Dropping the whole
+      group made the ref probe refuse a fold the raw arm applied — the same defect
+      round 9 fixed on the SUCCESSOR side, reached from the ref side, where the
+      refusal ("no addressable carrier") even claimed the carrier was
+      unaddressable while it sat in the graph with an id and a live status
+      (review round 10).
+
+    So a group with a representative contributes it; a group whose survivor is
+    gone contributes its LIVE members, and the existing never-guess count then
+    reproduces the raw arm's behaviour exactly (two live carriers → refuse, one →
+    fold). Terminal members are dropped: folding onto one is the round-5 defect,
+    and the keep-first arms own a terminal TARGET.
+    """
+    terminal = (SUBJECT_TERMINAL_STATUSES if label == "Subject"
+                else _RECALL_OBJECT_EXCLUDED_STATUS)
+    rows = []
+    for rep, _key, members in entities:
+        if rep is not None:
+            rows.append(rep)
+            continue
+        rows.extend(m for m in members
+                    if m[1] and (m[3] or "") not in terminal)
+    return rows
+
+
 def _id_claimant_count(g, label: str, node_id: str) -> int:
     """How many NODES claim one logical id — the single-id form of
     :func:`_id_claimant_counts`.
@@ -1250,13 +1284,14 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
         # the rows are grouped by ENTITY first so a merged-away carrier is not
         # counted as a second carrier (see `_entity_rows`).
         _ref_space, _ref_params = name_key_space_same_entity("s", ref)
-        by_name = _entity_rows(
+        by_name = _ref_candidates(_entity_rows(
             proj.g, "Subject",
             proj.g.query(
                 f"MATCH (s:Subject) WHERE {_ref_space} "
                 "RETURN ID(s), s.id, s.name, s.status, s.supersededBy",
                 params=_ref_params,
-            ).result_set if _ref_space else [])
+            ).result_set if _ref_space else [],
+            with_groups=True), "Subject")
         if len(by_name) > 1:
             # ⛔ A DUPLICATE-ID pair is CORRUPTION, not two incarnations, and the
             # live narrowing below cannot tell them apart: with one claimant
@@ -1755,9 +1790,10 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # supersession-probe site review).
         _id_node_keys = {_row[0] for _row in _id_rows}
         rows = [list(_row[1:]) for _row in _id_rows]
-        _name_arm_rows = _entity_rows(
+        _name_arm_rows = _ref_candidates(_entity_rows(
             proj.g, "Object",
-            [_row for _row in _name_rows if _row[0] not in _id_node_keys])
+            [_row for _row in _name_rows if _row[0] not in _id_node_keys],
+            with_groups=True), "Object")
         if (not rows and _name_rows and not _name_arm_rows
                 and not _exact_subject_ref_ids(proj, ref)):
             # #12120 review: the name arm DID match carriers and every one of
@@ -1770,6 +1806,10 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # So ask the same exactness question the family defer asks, and
             # report only when the Subject family does not hold the ref (that
             # test is part of the guard above, so reaching here IS the report).
+            # ⛔ "Collapsed away" is now true only of groups with NO live member:
+            # `_ref_candidates` hands a gone-survivor group's LIVE carriers back
+            # as addressable (review round 10), so reaching this branch means the
+            # matched nodes are all terminal or id-less — not merely orphaned.
             warn(f"supersession ref {ref!r} matched {len(_name_rows)} "
                  f"Object(s) whose merged survivor is gone, and no :Subject "
                  f"holds the ref — skipped (no addressable carrier)")
