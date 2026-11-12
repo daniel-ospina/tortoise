@@ -4576,8 +4576,13 @@ def test_run_names_EVERY_seam_variable_on_the_stderr_target_line(
     for key, value in tl.lane_seam_env(16406, "tortoise_test_matrix").items():
         assert f"{key}=" in lines[0], lines[0]
         assert lines[0].count(f"{key}=") == 1, lines[0]
-        if value:
-            assert f"{key}={value}" in lines[0], lines[0]
+        # The VALUE is asserted for EVERY key, the empty one included: `''` is
+        # the password's real value, so a `repr` regression that rendered a
+        # bare `TORTOISE_TEST_DOCKER_PASSWORD=` would be indistinguishable from
+        # an ABSENT variable — the exact distinction `_live_utils.legacy_port`
+        # must never collapse — and `f"{key}="` alone cannot see it (review P2).
+        rendered = value if value else repr(value)
+        assert f"{key}={rendered}" in lines[0], lines[0]
 
 
 def test_run_invokes_the_RUNNING_venv_and_passes_pytest_argv_verbatim(
