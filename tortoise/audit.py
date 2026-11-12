@@ -1496,7 +1496,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         fwd, bwd = direction_flows(s["direction"])
         neither_arm = s["shape"] and not s["is_operator"]
         neutral = not (fwd or bwd)
-        if s["carrier_count"] == 1 and _succ_unread(s):
+        if s["carrier_count"] == 1 and _succ_refused(s):
             # ⛔ A CARRY needs a successor EP actually reads — and the check may only
             # say so when the name resolves to ONE carrier (an ambiguous name is the
             # repair's first problem, not a refusal). Where the successor is
@@ -1514,6 +1514,23 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "kept, not dropped: carry it where EP can read it (a :Point "
                 "operator the engine evaluates), never by re-attaching it to a "
                 "successor that cannot carry it")
+        elif s["carrier_count"] == 1 and s["carrier_terminal"]:
+            # ⛔ A TERMINAL successor is unreadable for a different reason, and the
+            # SHAPE wording above is false about it — measured: an 'archived'
+            # successor has ``is_operator NULL`` and no ``op_type``, yet the string
+            # called it "operator-shaped" beside the same string's `_chain_tail`
+            # naming the LIVE head of its chain, whose carry measurably restores the
+            # belief (#12210 review, P2). So: CARRY, onto the live carrier — never
+            # the dead one — and DROP only a refutation that no longer applies.
+            disposal = (
+                f"the successor it names is "
+                f"{_quoted(_status_or_flag(s['carrier_status'], s['carrier_outdated']))}"
+                ", which EP reads no input through — so CARRY the IMPL (or the NAND "
+                "that STILL APPLIES) onto whatever node now carries the claim (a "
+                "live one, named by ID), and drop only a refutation that MOTIVATED "
+                "the correction. A carry onto the dead name itself builds no factor "
+                "(measured: same posteriors as before the supersession once the edge "
+                "lands on the node that carries it)")
         elif neither_arm or neutral:
             why = ("EP assembles no factor for this endpoint in either arm, so the "
                    "support never counted"
@@ -1822,9 +1839,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             prefix = (f"FIRST name the successor meant: {_quoted(s['sup_sb'])} is "
                       f"carried by {s['carrier_count']} Objects (#3573) and this "
                       "check cannot pick one, so re-point onto the intended one "
-                      "by ID — and confirm THAT one is live and not operator-shaped, "
-                      "because an edge written to a dead or shaped node builds no "
-                      "factor. ")
+                      "by ID — and confirm THAT one is live and one EP reads as an "
+                      "input (``is_operator`` absent or ``false``"
+                      + ("), because an edge written to a dead or shaped node builds "
+                         "no factor. " if not s["is_operator"] else
+                         "), because an edge written to a dead node builds no "
+                         "factor. "))
         if s["shape"] and not s["is_operator"]:
             # ⛔ NEITHER arm: "write the equivalent edge" would change nothing, so the
             # repair is to clear the SHAPE **and** move the edge — measured: clearing

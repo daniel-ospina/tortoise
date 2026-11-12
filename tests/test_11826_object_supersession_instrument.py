@@ -2545,10 +2545,18 @@ def test_a_shaped_neutral_row_is_not_told_to_move_the_edge(sdk):
     """
     actor = sdk.create_entity("subject", "AcmeCorp")["node"]
     v1 = _obj(sdk, "PolicyV1")
-    _obj(sdk, "PolicyV2")
+    v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
     sdk.update_entity(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    # ⛔ A SECOND carrier of the successor name, so the ambiguity ``prefix`` exists
+    # at all: on a single-carrier row ``prefix`` is "" by construction, and the
+    # prefix-suppression assertion below could not fail (#12210 review, P3).
+    _q(sdk, "CREATE (:Object {id:'twin-PolicyV2', name:'PolicyV2', "
+            "objectKind:'other', status:'live'})", {})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) RETURN count(o)",
+              {}) == [[2]], "fixture drifted: the twin was upserted into one node"
+    assert v2["id"] != "twin-PolicyV2"
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -2692,10 +2700,15 @@ def test_a_terminal_successor_does_not_get_the_carry_disposition(sdk):
                  if i.node_id == v1["id"])
     fix = issue.fix
     assert "NOT the one it names ('PolicyV2')" in fix, fix
-    assert "may CARRY to the successor" not in fix, (
-        "the same string refuses the only successor it names, so it cannot also say "
-        "the edge may carry: " + fix)
-    assert "the disposition for this edge is DROP" in fix, fix
+    # ⛔ The successor is terminal, NOT operator-shaped, so the shape wording must
+    # not be reused for it: a terminal successor has no shape at all (measured:
+    # ``is_operator NULL``, no ``op_type``). And the disposition is CARRY onto the
+    # node that holds the claim — NOT DROP, which would discard a belief that a carry
+    # measurably restores (#12210 review, P2).
+    assert "operator-shaped" not in fix.split("ONTO")[0], (
+        "a terminal successor is not operator-shaped: " + fix)
+    assert "CARRY the IMPL" in fix, (
+        "the belief is restorable by carrying onto the live carrier: " + fix)
 
     # ...and a DRAFT keeps the carry, because promoting it repairs (measured).
     q = sdk.create_point("statement", "second policy")
@@ -2730,5 +2743,5 @@ def test_an_all_dead_ambiguous_name_warns_the_reader(sdk):
                  if i.node_id == v1["id"])
     fix = issue.fix
     assert "carried by 2 Objects" in fix, fix
-    assert "confirm THAT one is live and not operator-shaped" in fix, (
+    assert "confirm THAT one is live and one EP reads as an input" in fix, (
         "an all-dead ambiguous population must not be re-pointed onto blindly: " + fix)
