@@ -693,6 +693,26 @@ ALIAS_FORMS_STILL_BLIND: dict[str, tuple[str, dict[str, str], str, str]] = {
         "is trustworthy\" and it is not",
         "never-run call",
     ),
+    # ⛔ The COMPOSITION the harm clause names: a never-run seam call in a writer that ALSO has a
+    # live ungated reach. Pinned because "the writer owes nothing while it reaches nothing" is the
+    # WRONG repair for this shape — the verdict it wants is `ungated`, and the pre-empting seam
+    # branch is why.
+    "never_run_seam_call_MASKS_a_live_ungated_write": (
+        "from tortoise.embeddings import encode_for_store, encode_for_row as _enc\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    e = encode_for_store(text)\n"
+        "    if False:\n"
+        "        _enc(text, 384)\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": e})\n',
+        {"tortoise.m::w": "gated"},
+        "the SAME writer WITHOUT the dead seam call reads `ungated` and owes a declaration — the "
+        "never-run call pre-empts the write predicate (`if SEAM_CALL in called` is tested before "
+        "`elif set(UNGATED_CALLS) & called`), so it does not merely over-credit a phantom: it masks "
+        "a LIVE ungated reach out of `NEEDS_A_DECLARATION`. Both halves measured, one shape per "
+        "process",
+        "never-run call",
+    ),
     # ⛔ The SPELLING axis (`#12020`): the gate credit is NAME-BASED on the literal path, so neither
     # the shadow model nor `_ALIAS_HOMES` is consulted. Each pair below is the SAME code shape twice,
     # once with a cosmetic `as` — and the two halves measure OPPOSITELY, which is the whole point.
@@ -814,15 +834,30 @@ def test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on():
     for token in ("`def`", "`lambda`", "class-body method", "unreachable own-scope statement"):
         assert token in key, (
             f"the never-run call entry no longer names {token} — each of these was MEASURED (see "
-            f"ALIAS_FORMS_STILL_BLIND, one shape per process) and the title is the only place the "
-            f"enumeration lives, so trimming one narrows what the register claims while every "
-            f"row stays green: {key!r}")
-    # The residual must also reach the REGISTER's own prose — a blind spot named only in the
-    # instrument is invisible to whoever reads the declaration contract.
-    assert "never-run call" in (register.__doc__ or ""), (
-        "the register docstring must name the never-run-call residual: a caller reading the "
-        "declaration contract has to learn that a credited call may never execute"
-    )
+            f"ALIAS_FORMS_STILL_BLIND, one shape per process), and trimming one narrows what the "
+            f"table claims while every behaviour row stays green: {key!r}")
+    # ⛔ The SAME enumeration is shipped in TWO prose copies — the register's own docstring (what a
+    # caller reads) and the discovery walk's blindness note. `#12020` review round 9 (P2) measured
+    # that deleting the OWN-SCOPE half from the register copy left this whole test GREEN, which
+    # silently restored the "nested-scope-only residual" misreading the entry was renamed to remove.
+    # So both halves are pinned on all three carriers: nested, own scope, and the `if False`
+    # spelling that makes the own-scope half concrete. Lowercased, because the prose emphasises
+    # OWN SCOPE in caps.
+    carriers = {
+        "register docstring": register.__doc__ or "",
+        # The note sits on the WALK that answers scope (`_named_callees`), which is where the
+        # reader who could conclude "scope is handled, so reach is" actually is. Pinned by its
+        # real owner rather than by where one might expect it: measured, `_embedding_writers.
+        # __doc__` is empty.
+        "probe blindness note": probe._named_callees.__doc__ or "",
+    }
+    for where, text in carriers.items():
+        low = text.lower()
+        for half in ("never-run call", "nested", "own scope", "if false"):
+            assert half in low, (
+                f"the {where} no longer names {half!r} of the never-run-call residual — the entry "
+                f"is an AXIS (reach), and dropping the own-scope half from a copy restores the "
+                f"nested-scope-only reading it was renamed to remove: {text[:160]!r}…")
 
 
 def test_the_seam_CALL_population_is_the_one_the_register_names():
