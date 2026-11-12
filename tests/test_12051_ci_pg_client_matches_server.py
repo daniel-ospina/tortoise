@@ -1169,7 +1169,7 @@ PATTERN_MATCHER_RE = re.compile(r"\bcase\b|\b(?:(?:e|f)?grep|awk|expr)\b")
 #: a body that checks every tool unconditionally (measured false RED). What the
 #: copy does is make the loop variable reachable under ANOTHER NAME, which the
 #: line that actually COMPARES mentions (`[ "$t" = pg_dump ]`). So the copy is
-#: resolved by substitution, one level (`_selects_on_var`), not refused.
+#: resolved by substitution to a FIXED POINT (`_selects_on_var`), not refused.
 #: Only an assignment whose WHOLE VALUE is the variable records a copy — the pin's
 #: own `version="$("$tool" --version)"` assigns a command's OUTPUT, not the name.
 #: The trailing separator is a LOOKAHEAD so the separator is not consumed: it is the
@@ -1254,21 +1254,40 @@ def _with_aliases_each(body: list[str], var: str) -> list[str]:
 #:         [ "${#TARGETS[@]}" -gt 0 ] || { echo "::error::$tool …"; exit 1; }
 #:     — both refused a body that checks every tool unconditionally (measured).
 #: A CLAUSE is the separator-delimited run around each comparison, so the message
-#: branch is its own clause, carries no comparison operator, and is DROPPED; a
-#: selection in any clause of a `&&`/`||` chain is still found. That is one rule
-#: for both directions instead of a bracket-matching special case for each.
+#: branch is its own clause, OPENS NO CONDITION, and is DROPPED; a selection in any
+#: clause of a `&&`/`||` chain is still found. That is one rule for both directions
+#: instead of a bracket-matching special case for each.
+#: ⛔ A BRACE INSIDE A PARAMETER EXPANSION IS NOT A SEPARATOR (#12069 review 6).
+#: Splitting on every `{` cut `${tool}` into `$` + `tool}`, so
+#: `if [ "${tool}" = pg_dump ]` yielded one clause holding `= pg_dump ]` and another
+#: holding `tool}` — neither held both, `pg_restore` was never checked and the row went
+#: GREEN (measured; the parent head refused it). `(?<!\$)…` is the whole fix.
 CLAUSE_SPLIT_RE = re.compile(
-    r"&&|\|\||;|\b(?:then|else|elif|do|done|fi)\b|\{|\("
+    r"&&|\|\||;|\b(?:then|else|elif|do|done|fi)\b|(?<!\$)\{|(?<!\$)\("
+)
+
+#: A clause is graded only when it OPENS a condition: a comparison operator alone is
+#: not enough, because a MESSAGE can print one (#12069 review 6, all measured refusals
+#: of a body that checks every tool unconditionally):
+#:     printf '%s = %s\n' "$tool" "$version"
+#:     echo "::notice::$tool = $version"
+#:     echo "note: not -eq the other one for $tool"
+#: The operand lookbehind rejects a tight `s=`, but a SPACED `=` in a message read as a
+#: comparison. Shell has no comparison without a condition token (`[`, `[[`, `test`,
+#: `((`), and clauses are already split AT the separators, so that token sits at the
+#: clause's own start — optionally behind the keyword that introduces the test.
+CONDITION_LEAD_RE = re.compile(
+    r"\s*(?:(?:if|elif|while|until|!)\s+)*(?:\[\[?|\btest\b|\(\()"
 )
 
 
 def _comparison_clauses(line: str) -> list[str]:
-    """The separator-delimited clauses of `line` that contain a comparison."""
+    """The separator-delimited clauses of `line` that OPEN a comparison."""
 
     return [
         clause
         for clause in CLAUSE_SPLIT_RE.split(line)
-        if COMPARISON_RE.search(clause)
+        if CONDITION_LEAD_RE.match(clause) and COMPARISON_RE.search(clause)
     ]
 
 
@@ -1326,8 +1345,8 @@ def _selects_on_var(body: list[str], var: str) -> bool:
         log="$tool"   # … then used as a filename       # cut 3: the copy itself
 
     The rule is therefore, per line — with loop-variable ALIASES substituted back
-    in, one level (`_copied_to` / `_with_aliases`), so a copy used only as a file
-    name costs nothing:
+    in, to a FIXED POINT (`_copied_to` / `_with_aliases`), so a copy used only as a
+    file name costs nothing:
       * a brace expansion that TRANSFORMS the value (`${tool%…}`, `${tool#…}`,
         `${tool/…}`) selects — every name takes it differently;
       * a PATTERN MATCHER (`case`, `grep`/`egrep`/`fgrep`, `awk`, `expr`) selects
@@ -2571,6 +2590,21 @@ VERSION_CHECK_POLARITY = [
         'done',
         set(),
         "#12069 round-5: an alias CHAIN on ONE line must resolve, not fail open",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  if [ "${tool}" = pg_dump ]; then v="$("${tool}" --version)"; fi\n'
+        'done',
+        set(),
+        "#12069 round-6: `${tool}` is ONE token — a `{` inside an expansion is not a separator",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  echo "::notice::$tool = $version"\n'
+        'done',
+        {"pg_dump", "pg_restore"},
+        "#12069 round-6: an `=` PRINTED in a message opens no condition",
     ),
 ]
 
