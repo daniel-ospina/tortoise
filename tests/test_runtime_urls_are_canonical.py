@@ -25,13 +25,26 @@ the retired origin with a recorded removal trigger, the two Supabase edge
 functions whose public allowlists already carry both hosts, and the appeal URL
 whose host moved while its dead `#appeal` fragment did not (#11939).
 
-⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE but NOT re-aimed by the PR
-that added it: the dashboard landing pages (`invite-accept`, `welcome`, `signup`),
-the blog origin, and the dashboard's docs links used to spell the retired origin.
-Each is in `RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, the measured
-301 that makes it a hop rather than a break, and the child that owns the re-aim —
-so this guard cannot report GREEN over a file it never opened, and a sweep that
-removes one of those literals must remove its recorded reason too.
+⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE: the dashboard landing
+pages, the blog origin, and the dashboard's docs links used to spell the retired
+origin. Each is in `RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, the
+measured 301 that makes it a hop rather than a break, and the issue that owns the
+re-aim — so this guard cannot report GREEN over a file it never opened, and a
+sweep that removes one of those literals must remove its recorded reason too.
+
+⛔ THE COUNTS MOVED UNDER THIS PR, AND THAT IS THE POINT OF AN EXACT COUNT. main's
+#12058 ("serve the product at premiselabs.co/tortoise", which is what CLOSED
+#11764) re-aimed most of the dashboard set while this PR was open, so four rows
+went to ZERO and were removed (`invite-accept.html` 3 -> 0, `welcome.html` 1 -> 0,
+`wizardPrompts.js` 3 -> 0) or shrank (`signup.html` 2 -> 1, `overviewEmptyAction.js`
+2 -> 1). Their files STAY in `RUNTIME_FILES`, so a literal coming back REDS the
+guard rather than leaving the surface. The two survivors are app-ORIGIN hrefs
+(`/auth`, `/welcome`) on the retired host, which #12058's scope (the marketing and
+product pages) did not cover; they defer to **#12057**, which is open and lists
+them. ⛔ Every reason here names #12057 and NOT #11764: #11764 is CLOSED, and this
+file's OWNERSHIP note states the rule this row broke — "a note deferring to it
+defers nowhere". A row left pointing at a closed issue is the same defect as a
+deleted row: the sweep it asks for cannot be opened.
 
 ⛔ ONE ROW CHANGED UNDER THIS PR, AND THE CHANGE IS THE POINT OF THE EXACT COUNT.
 `website/functions/blog/_lib.ts` was 4 when this file was written; main's #11765
@@ -211,22 +224,18 @@ RETIRED_HOST_ALLOWLIST = {
     # is a hop, not a break — which is why deferring is safe and why it must stay
     # VISIBLE: a sweep that deletes one of these must delete its reason too, and
     # the deferred re-aim is tracked on #12057 rather than lost behind a green run.
-    "website/apps/dashboard/public/invite-accept.html": (
-        3,
-        "#11767 item 5 — the page the emailed INVITE TOKEN lands on still links "
-        "`/docs`, `/tos` and `/privacy` on the retired host (301 -> the canonical "
-        "origin, measured 2026-11-12). Re-aiming it belongs in the same commit as "
-        "#11764's canonical sweep, so the invite link and its landing page move "
-        "together instead of the link racing ahead of the page."),
-    "website/apps/dashboard/public/welcome.html": (
-        1,
-        "#11767 item 5 — the Product link is the retired host "
-        "(301 -> premiselabs.co/tortoise). Deferred with invite-accept.html."),
+    # ⛔ `invite-accept.html`, `welcome.html` and `wizardPrompts.js` had rows here and
+    # no longer do: main's #12058 re-aimed all three to 0 while this PR was open
+    # (measured on this tree). Their files stay in `RUNTIME_FILES`, so a literal
+    # coming back REDS the guard instead of leaving the surface — which is the
+    # difference between deleting a ROW and deleting a FILE.
     "website/apps/dashboard/public/signup.html": (
-        2,
+        1,
         "#11767 item 5 — `rel=canonical` names the retired `/auth` "
-        "(301 -> app.premiselabs.co/auth) and the Product link is the retired "
-        "host. Deferred with invite-accept.html (#11764)."),
+        "(301 -> app.premiselabs.co/auth). #12058 re-aimed this page's Product "
+        "nav link and left the canonical, because its scope was the marketing and "
+        "product pages: an app-ORIGIN href is a different destination. Deferred "
+        "to #12057, which lists this row."),
     "website/apps/dashboard/functions/blog/api/[[path]].ts": (
         1,
         "#11767 item 4 — DEFAULT_BLOG_ORIGIN is still the retired host. ⛔ The "
@@ -283,16 +292,10 @@ RETIRED_HOST_ALLOWLIST = {
         "an author-image thumbnail — an earlier revision of this row said the "
         "thumbnail, which this file derives from the row's own URL. Deferred with "
         "the blog sweep (#12057). Measured 2026-11-12."),
-    "website/apps/dashboard/src/wizardPrompts.js": (
-        3,
-        "#11767 item 5-adjacent — the copy-pasteable wizard prompts still hand the "
-        "user `https://tortoise.premiselabs.co/docs` "
-        "(301 -> premiselabs.co/tortoise/docs). Deferred with the dashboard sweep; "
-        "the docs target is the one #11764 settles."),
     "website/apps/dashboard/src/harnesses.js": (
         1,
         "DOCS_ORIGIN constant (301 -> premiselabs.co/tortoise/docs). Deferred to "
-        "#11764 with the rest of the dashboard copy. ⚠️ This file ALSO carries a "
+        "#12057 with the rest of the dashboard copy. ⚠️ This file ALSO carries a "
         "BARE-host mention of the same docs page in the ChatGPT step's copy "
         "(`:277`) that this counter does not see, because the guard counts the "
         "full origin — a bare-host sweep is a different guard. ⛔ That copy is "
@@ -300,17 +303,18 @@ RETIRED_HOST_ALLOWLIST = {
         "the two: this line is rendered IN the dashboard a user acts on, so the "
         "301 carries them; the copy re-aimed in this PR (`onboarding/SKILL.md` \u00a72) "
         "is pasted into an agent's own config, which no redirect can reach. "
-        "Re-aiming `:277` here would be #11764's change, and it would leave this "
+        "Re-aiming `:277` here would be #12057's change, and it would leave this "
         "file's DOCS_ORIGIN constant and its prose disagreeing — a partial move "
         "is worse than one recorded deferral."),
     "website/apps/dashboard/src/overviewEmptyAction.js": (
-        2,
-        "SDK_DOCS_HREF and ONBOARDING_FUNNEL_HREF (both 301). Same deferral "
-        "(#11764)."),
+        1,
+        "ONBOARDING_FUNNEL_HREF `…/welcome` (301 -> app.premiselabs.co/welcome). "
+        "#12058 re-aimed `SDK_DOCS_HREF` and left this one, because it is an "
+        "app-ORIGIN href rather than a product page. Deferred to #12057."),
     "website/apps/dashboard/src/billingCta.js": (
         1,
         "COMPARE_PLANS_URL `/#pricing-section` (301 -> premiselabs.co/tortoise). "
-        "Same deferral (#11764)."),}
+        "Deferred to #12057."),}
 
 #: Every runtime file THIS PR touched. An emitted occurrence of the retired
 #: origin in these that is not in the allowlist above fails.
@@ -329,12 +333,12 @@ RETIRED_HOST_ALLOWLIST = {
 #:   website/apps/blog-admin/src/App.tsx                     1  blog-admin UI origin
 #:   website/apps/blog-admin/src/pages/PostEditor.tsx        3  public-post permalinks (View / copy-link)
 #:   website/apps/blog-admin/src/pages/PostsList.tsx          1  "View public post" permalink
-#:   website/apps/dashboard/public/invite-accept.html        3  nav /docs + footer /tos + /privacy
-#:   website/apps/dashboard/public/welcome.html              1  nav /
-#:   website/apps/dashboard/public/signup.html               2  canonical /auth + nav /
-#:   website/apps/dashboard/src/wizardPrompts.js             3  copy-pasteable prompts
+#:   website/apps/dashboard/public/invite-accept.html        0  re-aimed by #12058 (row removed)
+#:   website/apps/dashboard/public/welcome.html              0  re-aimed by #12058 (row removed)
+#:   website/apps/dashboard/public/signup.html               1  canonical /auth (app origin)
+#:   website/apps/dashboard/src/wizardPrompts.js             0  re-aimed by #12058 (row removed)
 #:   website/apps/dashboard/src/harnesses.js                 1  DOCS_ORIGIN
-#:   website/apps/dashboard/src/overviewEmptyAction.js       2  SDK_DOCS_HREF + ONBOARDING_FUNNEL_HREF
+#:   website/apps/dashboard/src/overviewEmptyAction.js       1  ONBOARDING_FUNNEL_HREF (app origin)
 #:   website/apps/dashboard/src/billingCta.js                1  COMPARE_PLANS_URL
 #: None is a broken link (every one still 301s onto the canonical host); they are
 #: a SCOPE deferral, and ALL FOURTEEN files listed above ARE in

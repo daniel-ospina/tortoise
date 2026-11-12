@@ -2376,7 +2376,6 @@ surfaces:
   # and its `tier1:` row — the printed count is |`tier1`| minus any
   # `slow_files`/`uri_requiring`/`on_demand` overlap, so re-derive it in one
   # `select()` call) because `product/` is a
-  # the tier-1 smoke set, this suite absent) because `product/` is a
   # `NON_PYTHON_PREFIXES` entry. Those four modules are what THIS row buys;
   # the artifact leg needs the #12006 decision, so do not read this row as
   # covering the rates.
