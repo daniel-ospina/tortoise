@@ -10893,6 +10893,12 @@ durations:
   # re-derive this row, so `test_no_durations_row_states_a_stale_case_count`
   # red on `main` at 43db5c0f — fixed here because a stale citation in the map
   # this PR edits blocks every landing, not only this one.
+  # -> 57 once #11904's pin landed
+  # (`test_the_recut_row_and_survivors_hold_their_status_by_ISSUE`: the arm that
+  # reads a row's status BY ISSUE, so a compensating swap — one row demoted to
+  # `OPEN` while another is promoted, holding §2's tally — reds instead of
+  # passing; #11904 added it and left BOTH this note and §9 of the page stating
+  # the pre-pin 56/58, which #11958 re-derives here).
   # Round 14's own guard exists because `Path.exists()` re-raises
   # `PermissionError` (only the ENOENT family is swallowed) — each of these
   # controls is mutation-verified: it FAILS with its guard reverted.
