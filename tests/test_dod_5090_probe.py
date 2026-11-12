@@ -7275,17 +7275,39 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # was also the ONE fix in this PR with no distinguishing mutant: at the head
     # that was measured — this branch BEFORE the rebase, when the file collected
     # 152 — deleting that line left `3 failed, 148 passed, 1 skipped` in a scratch
-    # copy, byte-identical to the UNMUTATED copy's three repo-context failures,
-    # i.e. the removal redded NOTHING. ⛔ The count is SCOPED to that head rather
-    # than re-cut, because this file collects 171 now and no run of it can report
+    # copy, byte-identical to the UNMUTATED copy's three failures at that head,
+    # i.e. the removal redded NOTHING. ⛔ That head's three are left
+    # cause-agnostic on purpose: they are NOT #12045's — at that head neither
+    # writer that issue names was in the instrument's population
+    # (`_verify_record_vector_width` did not exist until `#11835`; `_emit`
+    # existed, but the note that enrols it did not until `#12000`'s F1b note),
+    # and a provenance asserted here would be the false record this note exists
+    # to prevent. ⛔ The count is SCOPED
+    # to that head rather than re-cut, because this file collects 171 now and no
+    # run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
     # measured at this tree, deleting the same line ADDS exactly one failure over
     # the same run's own baseline, namely
     # `test_the_residual_pin_separates_the_claim_from_its_inverse` (measured at
-    # `origin/main@0dca7fcad`, docker lane: baseline `3 failed, 167 passed,
-    # 1 skipped` → mutated `4 failed, 166 passed, 1 skipped`; those three are the
-    # same repo-context failures the paragraph above already names). ⛔ Stated as a
+    # `origin/main@8300c102c8`, docker lane: baseline `170 passed, 1 skipped` →
+    # mutated `1 failed, 169 passed, 1 skipped`, the added failure being that
+    # named test). ⛔ That cut SUPERSEDES one taken at `origin/main@0dca7fcad`
+    # (`3 failed, 167 passed, 1 skipped` → `4 failed, 166 passed, 1 skipped`):
+    # those three were **#12045**'s reds in THIS file (its shard-(d) red proper is
+    # the register test, one failure; this file was the second surface the issue
+    # records) — `tortoise.api::_emit` and
+    # `tortoise.api::_verify_record_vector_width`, both in the instrument's
+    # population (both enrolled by `#12000`: `_emit` via its F1b note, the verifier
+    # via the docstring example and two body comments that commit rewrote — the
+    # verifier itself is `#11835`'s) and both undeclared in the writer register — so
+    # a baseline taken while they were live
+    # is not a CLEAN baseline: the mutation still adds exactly one failure, but
+    # three reds sit beside it and the old text reported them as "repo context",
+    # which is the false provenance here. `#12042` declared both, and the
+    # figures above are measured at the tree that carries it; the three reds are
+    # therefore historical, not repo context, and this note cites them by issue
+    # so the next lane does not "correct" one cut into a false record. ⛔ Stated as a
     # DELTA on purpose, not as an absolute split: the split moves with the
     # interpreter and the LANE — the docstring of
     # `test_the_census_doc_collects_what_the_file_collects` (below) says so

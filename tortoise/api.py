@@ -253,8 +253,12 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     exactly the behaviour before this guard; the guard only ever turns a lie
     into a refusal, never a write into an I/O failure.
 
-    ⛔ WHAT THIS VERIFIES, EXACTLY: the WIDTH, and only when it is declared
-    ``f32``. The other five server-managed marker keys
+    ⛔ WHAT THIS VERIFIES, EXACTLY: the WIDTH — every declared width is refused
+    over NO vector, and only a declared ``f32`` is additionally checked against
+    the VALUES (#12059: the no-vector refusal belongs to no particular width,
+    so it runs before the `f32` narrowing rather than after it; a declared
+    ``f64`` over a vector is the always-truthful raw form and is accepted). The
+    other five server-managed marker keys
     (`_SERVER_MANAGED_EMBEDDING_KEYS`: `embedding_verbatim`,
     `embedding_preserved`, `embedding_model`, `embedding_revision`,
     `embedding_text_hash`) ride this channel UNCHECKED, and that is a deliberate
@@ -300,17 +304,47 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     except Exception:  # noqa: BLE001, RUF100 — #5148
         return
     declared = record.get(_KEY)
-    if declared is None or declared != _F32:
+    if declared is None:
         return
     # `_norm` splices the record OVER the envelope on replay (`{**ev,
     # **ev["point"]}`), so this is the pair the FOLD sees.
     values = {**payload, **record}.get("embedding")
     if values is None:
+        # ⛔ THIS REFUSAL IS INDIFFERENT TO WHICH WIDTH WAS DECLARED, so it runs
+        # BEFORE the `f32` narrowing below (#12059). Its justification — the
+        # seam POPS the key when there is no vector, so "width over no vector"
+        # is a state the journal contract says cannot exist — never mentioned
+        # `f32`, but it sat after the `declared != _F32` early return, so half
+        # the declaration surface was unchecked: a declared `f64` over no vector
+        # was ACCEPTED and journalled, a durable width no door can mint and the
+        # next width/base64 migration would trust. Measured at `25127b61b6`:
+        #
+        #     _emit("PointAdded", {"id": "p", "content": "c",
+        #                          KEY: "f64"})   -> journalled `f64`
         raise ValueError(
             f"{_KEY}={declared!r} is declared over NO vector: `{type_}`'s "
             f"record carries no `embedding` and neither does its envelope, and "
             f"a width without a vector is a state the journal contract says "
             f"cannot exist (the seam POPS the key when there is no vector).")
+    if declared != _F32:
+        # A declared `f64` is truthful about ANY values: it only forgoes
+        # narrowing, which the raw form is entitled to, so there is nothing left
+        # to verify on this channel.
+        #
+        # ⛔ NOT generalised to "any width" (#12059 review, P3 — measured). A
+        # declared width that is neither of the seam's two (`"f16"`, say) is
+        # ALSO returned here, and that is a named RESIDUAL, not a truthfulness
+        # claim: measured at this head, `embedding_width="f16"` beside a vector
+        # is ACCEPTED and journalled. No PRODUCER writes a third width (the seam
+        # mints only `f32`/`f64`), but that is not the same as unobservable — a
+        # caller can SUPPLY one, and `TortoiseSDK.create_source(**props)` takes
+        # `embedding_width` through its `_skip_sanitize` carve-out with no
+        # width verifier behind it, so a live caller can still journal a
+        # declared width over NO vector through the SDK funnel (#11948 records
+        # that unguarded-door class; this channel closes the EventAPI funnel
+        # only). The sentence above would become false only if someone widened
+        # it to "any other declared width is truthful".
+        return
     try:
         truthful = _is_shortest_f32_text(values)
     except Exception:  # noqa: BLE001, RUF100 — undecidable input keeps the old posture
