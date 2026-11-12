@@ -10918,6 +10918,12 @@ durations:
   # against the host it was taken on — one earlier revision of this line carried
   # a per-case stall from a loaded box and read as the file's own cost. Re-measure
   # rather than trusting a number here: it is a datum at ONE head. DB-free, graph-free, network-free (hence the `TORTOISE_TEST_CARVE_OUT=1`
+  # throwaway `git init` repo in three cases. Measured on this box at the landed
+  # head with `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_problem_map_2820.py -q`:
+  # `58 passed in 12.51s` at the pre-pin head (`59 passed` at this one) including
+  # the repo conftest's import/teardown, so the file's own testcase time is well
+  # under it. Re-measure rather than quoting
+  # this line: it is a datum at ONE head. DB-free, graph-free, network-free (hence the `TORTOISE_TEST_CARVE_OUT=1`
   # lane; without it the suite refuses a target it does not need). — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.5
   test_2206_confidence_surfaces.py: 3.0  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.3
   test_2350_validity_precision.py: 11.0  # #2350: required for the durations coverage half as well as the surface half (#4348 trap — do not drop the row without re-deriving the floor at that head) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 5.6 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 9.5

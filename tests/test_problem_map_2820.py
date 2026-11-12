@@ -172,7 +172,7 @@ def test_the_taxonomy_counts_are_what_the_summary_declares():
 
 
 def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
-    """Fails when two rows SWAP statuses — a compensating edit no count can see.
+    """Fails when any of the five pinned rows changes status — swap OR unilateral.
 
     Reachable, and measured at the PARENT head `65991398a1ed`, where this arm did
     not exist (the file collects 58 there): BEFORE THIS ARM no
@@ -186,9 +186,10 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     not as a status finding. Those premises are therefore not the REASON such a
     swap is caught: `#2813` is a WS-A row while all four `OPEN` rows sit in
     WS-B/C/D, so a tally-holding swap touching it has to promote one of the four
-    the pin names — which reds this arm — and move WS-A's "5 of 5" cell, which
-    reds the count arms. What the premises add is the case this arm cannot see: a
-    UNILATERAL move on a row the pin does NOT name, whose counts are all
+    the pin names — which reds this arm. Move WS-A's "5 of 5" cell with it and
+    the count arms stay green; leave the cell stale and they red instead —
+    breakage, not confirmation. What the premises add is the case this arm cannot
+    see: a UNILATERAL move on a row the pin does NOT name, whose counts are all
     corrected, where `problem_map_check --check` reads CLEAN and the reds are
     breakage — these premises, and the arms whose fixtures encode the shipped
     counts.
@@ -208,8 +209,9 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     row this re-cut is about, and the four survivors §8 counts. A count is what
     most of this file checks; a status is a per-row fact.
 
-    ⛔ These expectations are LITERALS — the four statuses above and the `22`/`4`
-    counts the count arm asserts. They are a second copy of the same hand
+    ⛔ These expectations are LITERALS — the five status literals asserted below
+    and the `22`/`4` counts the count arm asserts. They are a second copy of the
+    same hand
     measurement, not an independent source: a re-cut that moves the page and
     these literals together is caught by nothing here. The tracker records whether
     the TICKET was closed, and three of the page's §1 rows show that says nothing

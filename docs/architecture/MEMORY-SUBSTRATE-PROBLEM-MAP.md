@@ -416,10 +416,11 @@ rounding:**
   (The §8 prose that also names them is NOT compared — see the prose-counts
   residual below — so the guarantee rests on the `OPEN` count plus the pin, not
   on §8's sentence.)
-  Those expected values — the four statuses in that arm and the `22`/`4` literals
-  the count arm asserts — are a second copy of the same hand measurement, not an
-  independent source, so a re-cut that moves the page and the pin together is not
-  caught by anything here. The tracker records whether the *ticket* was closed,
+  Those expected values — the five status literals in that arm and the `22`/`4`
+  literals the count arm asserts — are a second copy of the same hand measurement,
+  not an independent source, so a re-cut that moves the page and the pin together
+  is not caught by anything here. The tracker records whether the *ticket* was
+  closed,
   and three of §1's four rows show that says nothing about the row in either
   direction — two are CLOSED in the tracker over a defect this page calls `OPEN`,
   one is `OPEN` over a fixed defect. `tools/problem_map_check.py` deliberately
