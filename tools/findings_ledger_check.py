@@ -723,17 +723,22 @@ def check_verdict_tally(text: str) -> list[str]:
     # de-bolded stale list plus one compliant bolded decoy — the historical exploit,
     # re-shaped — read CLEAN where the parent refused it (measured). A letter list is
     # a letter list however it is marked up, and the page's own §3 spells its overtaken
-    # group in plain text, so all four forms count: `**(x)**`, a bare `(x)`, a
-    # `x, y and z` run, and `x and y`. A sentence carrying none of them cannot be the
-    # arm's subject — there is no list in it to disagree with the table — which is
-    # what keeps a pure quotation out.
+    # group in plain text, so four forms count: `**(x)**`, a parenthesised run
+    # `(b), (c)`, a plain run `b, c, d`, and a plain pair `b and c`. ⛔ EVERY alternative
+    # is bounded to the page's own single-letter alphabet `a`–`l`: unbounded, the pair
+    # form matched ordinary prose (`as and in`, `to and fro`) and red the arm on a
+    # legitimate sentence, while DROPPING the form instead re-opened the hole it covers
+    # — a stale list spelled `c and d …` then read CLEAN beside one compliant decoy
+    # (both measured). A sentence carrying none of the four cannot be the arm's subject
+    # — there is no list in it to disagree with the table — which keeps a quotation out.
     #: A LETTER LIST in any spelling — and a LIST, not one stray parenthetical: a
     #: single `(c)` in ordinary prose is not a list, so it is not a candidate (that is
     #: what keeps a sentence QUOTING the phrase out, measured).
     letter_sentence = re.compile(
-        r"\*\*\([a-z]{1,2}\)\*\*"  # a bolded letter: **(a)**
-        r"|\([a-z]{1,2}\)(?:\s*,\s*\([a-z]{1,2}\))+"  # a parenthesised run: (b), (c)
-        r"|\b[a-z]\b(?:\s*,\s*\b[a-z]\b)+"  # a plain run of SINGLE letters: b, c, d
+        r"\*\*\([a-l]\)\*\*"  # a bolded letter: **(a)**
+        r"|\([a-l]\)(?:\s*,\s*\([a-l]\))+"  # a parenthesised run: (b), (c)
+        r"|\b[a-l]\b(?:\s*,\s*\b[a-l]\b)+"  # a plain run: b, c, d
+        r"|\b[a-l]\b\s+and\s+\b[a-l]\b"  # a plain pair: b and c
     )
     # ⛔ A SENTENCE THAT ONLY **QUOTES** THE PHRASE IS NOT ASSERTING IT. The page
     # discusses the phrase in §8 and in this very comment, so a sentence can contain it
