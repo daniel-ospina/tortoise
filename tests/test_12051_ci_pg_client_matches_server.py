@@ -5590,7 +5590,8 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     sources. `rm` is in the set for the same reason once the step grew its EXIT
     trap: an unstubbed trap cleans up HOST paths as the arm exits.
 
-    ⛔ AND THE TWO HOST READS ARE REPLACED, each with the count asserted. The
+    ⛔ AND EVERY HOST READ IS REPLACED, each with the count asserted (three now: the two
+    below, plus the apt-sources probe the presence gate reads). The
     prefix sources `. /etc/os-release` (the suite is derived from the box's
     codename) and fetches the key into `key_file="$(mktemp)"`; run verbatim they
     read the host's file and write the host's temp dir — the one thing a suite
@@ -5704,23 +5705,37 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # reuse branch and never exercise the guards at all. The probe is substituted with
     # fixtures under `tmp_path` and the substitution is count-asserted, so a rewrite reds
     # here instead of restoring the host dependency.
-    probe = (
-        "grep -rqs 'apt\\.postgresql\\.org' /etc/apt/sources.list "
-        "/etc/apt/sources.list.d/ 2>/dev/null"
-    )
-    probe_sites = code_only(prefix).count(probe)
-    assert probe_sites == 1, (
-        "the PGDG-presence probe is expected exactly once in the prefix's CODE; found "
-        f"{probe_sites}. Re-derive the substitution rather than letting the arm read the "
-        "HOST's apt sources"
+    # ⛔ THE FACT, NOT THE SPELLING (this file's own rule — `curl -o`/`--output`, `install -D`
+    # and `.`/`source` are tolerated for the same reason): the probe is located by what it
+    # DOES (a recursive `grep` line naming apt.postgresql.org and the apt source paths), and
+    # only its OPERAND PATHS are replaced. Pinning `grep -rqs '<pattern>' <paths> 2>/dev/null`
+    # verbatim false-redded `grep -rlqs`, `-e '<pattern>'` and a trailing-slash spelling as
+    # "Re-derive the substitution" — the guard telling the maintainer to do work already done.
+    probe_lines = [
+        line
+        for line in code_only(prefix).splitlines()
+        if re.search(r"\bgrep\b", line)
+        and "apt" in line
+        and "postgresql" in line
+        and "sources.list" in line
+    ]
+    assert len(probe_lines) == 1, (
+        "the PGDG-presence probe is expected exactly once in the prefix's CODE so this test "
+        f"can point it at fixtures; found {len(probe_lines)}. Re-derive the substitution "
+        "rather than letting the arm read the HOST's apt sources"
     )
     apt_sources = tmp_path / "host-sources.list"
     apt_sources_dir = tmp_path / "host-sources.list.d"
-    prefix = prefix.replace(
-        probe,
-        "grep -rqs 'apt\\.postgresql\\.org' "
-        f"{apt_sources} {apt_sources_dir}/ 2>/dev/null",
+    tee_log = tmp_path / "tee.log"
+    fixed_probe = re.sub(r"/etc/apt/sources\.list\.d/?", f"{apt_sources_dir}/", probe_lines[0])
+    fixed_probe = re.sub(
+        r"/etc/apt/sources\.list(?!\.d)", f"{apt_sources}", fixed_probe
     )
+    assert fixed_probe != probe_lines[0], (
+        "the probe's apt-source operands were not found on its line, so the arm would read "
+        f"the HOST's apt configuration: {probe_lines[0]!r}"
+    )
+    prefix = prefix.replace(probe_lines[0], fixed_probe, 1)
 
     def run_with(
         stub: str,
@@ -5734,6 +5749,7 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         # The host-sources fixtures the probe substitution points at. Empty by default (no
         # PGDG on the box -> the step adds its own stanza); `existing_pgdg` plants an
         # operator stanza so the REUSE branch is exercised.
+        tee_log.write_text("", encoding="utf-8")
         apt_sources.write_text("", encoding="utf-8")
         apt_sources_dir.mkdir(parents=True, exist_ok=True)
         for stale in apt_sources_dir.glob("*.list"):
@@ -5762,7 +5778,9 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
             "install() { return 0; }\n"
             "mkdir() { return 0; }\n"
             "rm() { return 0; }\n"
-            "tee() { cat >/dev/null; }\n"
+            # `tee` RECORDS what this step asked it to write, so an arm can assert that the
+            # step wrote NO stanza (the reuse branch) rather than only that it did not fetch.
+            f"tee() {{ cat >/dev/null; printf '%s\\n' \"$*\" >> \"{tee_log}\" ; }}\n"
             f"{stub}\n{prefix}\n"
             "echo REACHED_PAST_PRECONDITION\n",
             encoding="utf-8",
@@ -5805,6 +5823,10 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "the script never reached the line after the precondition even when the "
         "package resolved — the block is unconditional"
     )
+    assert "tortoise-12051-pgdg.list" in tee_log.read_text(encoding="utf-8"), (
+        "the control arm did not write the PGDG stanza, so the reuse arm's 'no write' "
+        "assertion would be satisfied by a step that never writes at all"
+    )
 
     # ⛔ AND A BOX THAT ALREADY CONFIGURES PGDG IS LEFT ALONE — THE REGRESSION THIS ROW
     # EXISTS FOR. Adding a SECOND stanza for the same URI+suite with a different
@@ -5837,6 +5859,17 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     assert "could not FETCH" not in already_combined, (
         "the step still fetched the signing key on a box it was not going to configure: "
         + repr(already_combined)
+    )
+    # ⛔ AND IT MUST NOT HAVE WRITTEN A STANZA AT ALL. `already` prints the reuse message and
+    # skips the fetch, and BOTH of those stay true if the `tee` is hoisted OUT of the gate —
+    # the exact regression this arm exists for (a second stanza for the same suite makes apt
+    # refuse the whole source list). MEASURED, review of `330dd8b962`: that hoist left the
+    # whole suite GREEN until this assertion existed.
+    assert tee_log.read_text(encoding="utf-8").strip() == "", (
+        "the step still WROTE an apt source stanza on a box that already has one — apt keys "
+        "a source on URI+suite and refuses the WHOLE list when the two stanzas carry "
+        "different Signed-By values, so this reds a correct box: "
+        + repr(tee_log.read_text(encoding="utf-8"))
     )
 
     # ⛔ AND THE PRODUCER'S OWN EXIT IS NOT PART OF THIS GUARD (#12051 review, P1).
@@ -5924,7 +5957,7 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # MEASURED, review cycle 9 — gutting this guard's `exit 1` leaves the suite GREEN,
     # because the ORIGIN guard then names its own failure. The named text IS the fact
     # here, and the downstream message must be ABSENT.
-    assert "apt-get update FAILED after the PGDG source was added" in update_combined, (
+    assert "apt-get update FAILED" in update_combined, (
         "`apt-get update` stopped the step but not on ITS OWN named cause — the whole "
         "point of the update guard is that a PGDG key/suite/egress failure reads as "
         f"THIS defect rather than as apt's opaque exit 100: {update_combined!r}"
@@ -6079,9 +6112,11 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     move the EXIT trap below the key fetch, or below the keyring install -> 2 failed (the
     same pair); point the step back at the SHARED `sources.list.d/pgdg.list` /
     `postgresql-common/pgdg` paths -> 3 failed (THIS row, the cleanup-trap row, and the
-    executed arm); remove the PGDG-PRESENCE GATE so the step always adds its own stanza ->
-    2 failed (THIS row and the executed arm's reuse arm, which needs the fetch to be
-    skipped); reintroduce a `had_*` pre-existence flag -> 2 failed (both trap rows);
+    executed arm); delete the PGDG-PRESENCE GATE so the step always adds its own stanza ->
+    2 failed (THIS row and the executed arm's reuse arm); HOIST the stanza write out of the
+    gate (both branches write) -> 1 failed (the executed arm's reuse arm — the one that reads
+    what `tee` was actually asked to write); reintroduce a pre-existence flag under ANY name
+    -> 2 failed (both trap rows, because the trap body must have no condition at all);
     unguard the os-release source -> 2 failed (THIS row and the executed arm); `-16` -> `-18`
     on the install -> 3 failed (the pin rows, where the install major is asserted). Each
     mutant's own message was read, not just the count — a red for the wrong reason is not
@@ -6114,14 +6149,12 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     # ⛔ THE WRITE IS GATED ON THE BOX NOT ALREADY CONFIGURING PGDG. Adding a second
     # stanza for the same URI+suite with a different `Signed-By` makes apt refuse the whole
     # source list and `apt-get update` exit 100 — a CORRECT box red (MEASURED, apt 2.8.4).
-    assert "grep -rqs 'apt\\.postgresql\\.org'" in code, (
+    assert re.search(r"grep\b[^\n]*sources\.list[^\n]*sources\.list\.d", code), (
         "the step does not check whether apt.postgresql.org is ALREADY configured, so on a "
         "pool box that carries an operator `pgdg.list` it adds a second stanza for the same "
         "suite — apt then refuses the whole source list and this step reds a correct box"
     )
-    assert code.index("grep -rqs 'apt\\.postgresql\\") < code.index(
-        "apt.postgresql.org/pub/repos/apt"
-    ), (
+    assert code.index("grep ") < code.index("apt.postgresql.org/pub/repos/apt"), (
         "the presence check runs AFTER the sources line, so the second stanza is already "
         "written — the check would always pass"
     )
@@ -6267,6 +6300,15 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "the trap is keyed on pre-existence again: with STEP-PRIVATE paths that flag can only "
         "produce the half-removed state (a rewritten file whose keyring is gone). Remove the "
         "flag, not the removal."
+    )
+    # ⛔ AND THE TRAP BODY MUST HAVE NO CONDITION AT ALL. Naming the two flags is not the
+    # property — a renamed one (`pre_existing_list`, `k=0`) reproduces the same half-removed
+    # state and kept the suite GREEN at `330dd8b962` (MEASURED). The property is the SHAPE:
+    # straight-line removals, so the ONLY thing that may vary is the path.
+    assert "if " not in cleanup and "[" not in cleanup, (
+        "the trap is CONDITIONAL, so some path is removed only sometimes — with step-private "
+        "names that can only leave half of this step's apt state behind (a sources file whose "
+        f"keyring is gone): {cleanup!r}"
     )
     key_target = re.search(r"curl\s[^\n]*?(?:-o|--output)\s+\"?\$\{?(\w+)", code)
     assert key_target, (
