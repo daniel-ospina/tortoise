@@ -2532,11 +2532,6 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # reds CORRECT prose — measured. The shipped doc wording is caught by the
         # clause-anchored needle above and the workflow's by "accepts a repair in either
         # state", so nothing that shipped loses coverage.
-        # a COUNT claim that contradicts this module's own emitted sentence: the field
-        # counts the budget-unreached runs too (the split is emitted separately). Anchored
-        # to the CLAIM, not to the bare count: "three causes, one bucket" alone is a true
-        # statement about `PR-UNWITNESSED` and reds on legitimate prose.
-
     ]
     flats = {name: flat(text) for name, text in scanned.items()}
     # The guard's own docstring quotes several of these to describe them, so the test file
@@ -2571,8 +2566,10 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # exercise nothing today. ⛔ NOR IS THE DISARM PATH COVERED BY `pre_fix` BELOW (round 10):
     # those entries must FIRE, and a firing hit is by definition one the context check did
     # not disarm — so `pre_fix` covers detection, never disarming. The disarm path is
-    # exercised ONLY by the `correct` entries that embed a span, and today that is exactly
-    # ONE. The assertion after this list pins that, so deleting it cannot be silent.
+    # exercised ONLY by the `correct` entries that embed a span. That was ONE when this was
+    # written and is FIVE now (the four vocabulary pins below joined it), which is why the
+    # assertion states a measured invariant instead of a count: `assert disarming` proves the
+    # path is exercised, and it is the entries themselves that keep the path alive.
     correct = [
         "PR-event runs whose EVERY job had completed, and which are therefore NOT counted "
         "in `pr_running` (#12037) only once its `updated_at` has been still for "
@@ -2632,9 +2629,10 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # above passes trivially for an entry that contains no needle span, so without this a
     # future edit could delete the ONE entry that makes `hits()`'s context check
     # load-bearing and the whole suite would stay green (measured).
-    assert disarming, (
-        "no `correct` entry embeds a needle span, so hits()'s disarm path is UNTESTED — "
-        "add a correct sentence that quotes a needle and qualifies it in the SAME sentence"
+    assert len({entry for entry, _ in disarming}) >= 5, (
+        f"hits()'s disarm path is exercised by only {len(disarming)} `correct` entries — it "
+        f"was five when this was pinned, and a deletion that takes it lower means the path is "
+        f"silently less tested: {disarming!r}"
     )
 
     # ⛔ AND THE OTHER HALF OF THE CONTRACT: EVERY SHIPPED RETRACTED SENTENCE MUST STILL FIRE
@@ -2645,11 +2643,10 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # phrasings that actually SHIPPED — pre-fix on `origin/main` for 13 of them, plus TWO
     # sentences that shipped only mid-branch at `6c05aeb903` (the merged closed-avenue claim,
     # later retracted), ONE truncation of a shipped sentence to its shortest true instance,
-    # ONE declared RE-TYPED variant, and TWO branch-only count forms. ⛔ AND THE COVERAGE IS
-    # NOT TOTAL, which is named here rather than left to be discovered: a shipped count
-    # sentence that itself goes on to name the stillness half is DISARMED by design (the
-    # discriminator reads it as a corrected restatement), so only its truncated numeral form
-    # is catchable — see the count entry's comment. Several guarded sites carry more than one
+    # ONE declared RE-TYPED variant — SIXTEEN entries. ⛔ THE COUNT CLAIMS ARE NOT HERE: they
+    # live in `unconditional` below, checked WITHOUT the discriminator, because a count sentence
+    # is wrong whatever stillness it also names (every shipped form names `JOB_SETTLE_SECONDS`,
+    # which would otherwise read as a correction). Several guarded sites carry more than one
     # entry, so this is not one-per-site.
     pre_fix = [
         # to_dict + the two field docs + classify_queue's comment + its returned-dict twin
@@ -2744,12 +2741,18 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "the list is PROVABLY COMPLETE, AND the run's own `updated_at` has",
         # read_run_live_job's summary sentence
         "COMPLETE**, and whose own `updated_at` has been STILL",
+        # ⛔ THE PROBE QUALIFIER, which is this PR's own correction to the ops doc: a frozen run
+        # is excluded only once it has been PROBED. Reverting just that hunk restores the
+        # "can never make the census unmeasured" claim this guard calls FALSE, and NO needle can
+        # catch it — the claim's own sentence carries `updated_at`, so `hits()` self-disarms it
+        # (measured: doc/h01 reverted -> GREEN before this entry existed).
+        "once it has been PROBED and its jobs read back all-completed",
     ]
     for phrase in must_state:
         needle = flat(phrase)
         assert any(needle in hay for hay in flats.values()), (
-            f"a site went SILENT about the stillness half — this clause must be PRESENT "
-            f"somewhere in the scanned files, and it is not: {phrase!r}"
+            f"a MANDATORY clause went SILENT — this clause must be PRESENT somewhere in the "
+            f"scanned files, and it is not: {phrase!r}"
         )
 
     for phrase in pre_fix:
