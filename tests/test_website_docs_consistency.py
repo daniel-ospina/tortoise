@@ -2692,6 +2692,21 @@ def _is_sitemap_document(path: Path) -> bool:
                 "rather than letting the walk drop it"
             ) from exc
         return False
+    # ⛔ A NAME THAT CLAIMS TO BE A SITEMAP MUST *BE* ONE (#11766 review). The two guards grade
+    # the same tree, and `tests/test_middleware_host_consolidation.mjs` THROWS on this exact
+    # class (`sitemapRoot` + the name check in `isSitemapDocument`). Returning False here instead
+    # meant one guard blocked the author while the other said nothing about the same file — so a
+    # `sitemap-draft.xml` with a `<draft>` root was unshippable per node and invisible per this
+    # walk, which drops it from the advertisement rule as though it were a feed.
+    if root_element not in SITEMAP_ROOT_ELEMENTS and "sitemap" in path.name.lower():
+        raise AssertionError(
+            f"{path} claims to be a sitemap by NAME but its root element is "
+            f"<{root_element}>, not one of {sorted(SITEMAP_ROOT_ELEMENTS)}. A file whose name "
+            "sends a crawler to it must BE a sitemap; classifying it as 'not a sitemap' instead "
+            "drops it from this walk silently, so nothing holds it to the advertisement rule — "
+            "and `tests/test_middleware_host_consolidation.mjs` throws on the same file, so the "
+            "two guards would grade one artifact differently. Rename it (a non-sitemap root is "
+            "a feed, not a sitemap) or give it the sitemap root it claims")
     return root_element in SITEMAP_ROOT_ELEMENTS
 
 
@@ -2933,12 +2948,17 @@ def test_the_retired_hosts_crawler_surface_covers_every_sitemap_in_the_tree() ->
 
     ⛔ THIS HALF IS THE STATIC POPULATION ONLY — every root file. A sitemap can also be a Pages
     FUNCTION (`/blog/sitemap.xml` is `functions/blog/sitemap.xml.ts`), which no literal in the
-    middleware enumerates and this list cannot see; measured: adding
-    `functions/events/sitemap.xml.ts` left this suite green while the retired host answered it
-    with a 200. That half is covered BEHAVIOURALLY in
+    middleware enumerates and this list cannot see. That half is covered BEHAVIOURALLY in
     `tests/test_middleware_host_consolidation.mjs`, whose crawler rows are derived from the tree
-    (`ROOT_ASSETS` + `FUNCTION_SITEMAPS`) and assert a one-hop 301 per served path — so a new
-    Function sitemap reds there the moment it lands, branch or no branch.
+    (`CRAWLER_ASSETS` + `FUNCTION_SITEMAPS`, both found by root element) and assert a one-hop 301
+    per served path — so a new Function sitemap reds there the moment it lands, branch or no
+    branch.
+
+    ⛔ What stays green here is THIS PIN, not the suite: adding
+    `functions/events/sitemap.xml.ts` leaves `CRAWLER_SURFACE` untouched (measured), so this
+    assertion still passes — while `test_the_sitemap_index_and_robots_advertise_the_same_set`,
+    added by the same PR, reds on it. Stating "this suite green" was the unfalsifiable-provenance
+    shape `MEMORY.md` warns about; the honest claim is the narrow one.
     """
     code = _middleware_code()
     literal = re.search(r"const CRAWLER_SURFACE = new Set\(\[(.*?)\]\)", code, re.S)

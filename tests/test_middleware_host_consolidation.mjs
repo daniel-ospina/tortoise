@@ -206,11 +206,16 @@ function ctx(urlStr) {
           headers: { Location: `${u.origin}${COMMITTED_REDIRECTS.get(u.pathname)}` },
         });
       }
-      if (isBlogFunction(u.pathname)) {
-        return new Response(`<html data-function="blog"></html>`, { status: 200 });
-      }
+      // ⛔ ORDER: a SITEMAP Function is checked BEFORE the blog Function, because
+      // `/blog/sitemap.xml` matches BOTH (`isBlogFunction` is `startsWith("/blog/")`).
+      // Blog-first answers today's only Function sitemap with an HTML body, so the sitemap
+      // branch below never models it and the comment claiming this half is covered
+      // behaviourally would be overstating it for the one case it exists for (#11766 review).
       if (FUNCTION_SITEMAPS.has(u.pathname)) {
         return new Response(`<urlset data-function="sitemap"></urlset>`, { status: 200 });
+      }
+      if (isBlogFunction(u.pathname)) {
+        return new Response(`<html data-function="blog"></html>`, { status: 200 });
       }
       if (u.pathname === "/") {
         return new Response(`<html data-asset="/index.html"></html>`, { status: 200 });

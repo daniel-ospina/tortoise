@@ -2281,25 +2281,29 @@ def test_source_patterns_all_name_something_real():
     `test_website_docs_consistency.py::test_every_guard_input_is_selectable_by_ci`).
     The reverse direction remains the open half of this class.
 
-    Existence is checked against the tracked set, in the two shapes
-    SOURCE_PATTERNS actually uses. No glob branch: no entry is a glob, and
-    `select()` itself has no glob support, so a glob-shaped entry satisfied here
-    would still select nothing — the test would bless a dead entry.
+    Existence is checked against the tracked set with the SAME predicate `select()`
+    uses — `startswith`. That is the whole point of a forward check: an entry is
+    LIVE exactly when some tracked path begins with it.
+
+    ⛔ #11766 review P1: this used to accept only two shapes — an exact tracked path,
+    or a SUBTREE anchored on the separator (`pattern.rstrip("/") + "/"`) — because
+    "no entry is a glob". A bare PREFIX is not a glob: `website/sitemap-` selects every
+    `sitemap-*.xml` under `startswith`, and it is the only way to register a population
+    the guards police from the TREE (they enumerate sitemaps; a hand-kept list of today's
+    members is how tomorrow's member ships unguarded). Refusing the prefix forced those
+    entries to be enumerated one by one, which is what left `website/sitemap-events.xml`
+    selecting NOTHING. The old shape also mis-stated the risk: a dead glob still matches
+    its own pattern (that is `test_every_source_pattern_is_selectable`'s half), while a
+    dead PREFIX matches no tracked path and is caught here.
     """
     root = Path(__file__).resolve().parents[1]
     tracked = set(_tracked_files(root))
 
     def names_something_real(pattern: str) -> bool:
-        # A real tracked path is always live.
-        if pattern in tracked:
-            return True
-        # Otherwise it must name a SUBTREE, anchored on the separator. `select()`
-        # matches with `startswith`, so a directory entry is live with OR without
-        # its trailing slash (`tortoise/onboarding` and `tortoise/onboarding/`
-        # both match). Reporting the slash-less form as "names NOTHING" would be
-        # false — it IS live — and would disagree with
-        # `test_every_source_pattern_is_selectable`, which accepts it.
-        return any(f.startswith(pattern.rstrip("/") + "/") for f in tracked)
+        # `select()` matches with `startswith`, so "live" IS "some tracked path starts
+        # with it". Exact paths, directory entries and prefixes are all one case here:
+        # the separator shape needs no special arm, and a dead entry of any shape reds.
+        return any(f.startswith(pattern) for f in tracked)
 
     dead = sorted(
         f"[{surface}] {pat}"
