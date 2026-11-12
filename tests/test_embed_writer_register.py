@@ -1162,7 +1162,7 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
         # membership test kept this row green while the store had moved (the issue reproduced it,
         # and `test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row` drives both directions).
         violation = _evidence_violation(
-            source, symbol, needle, declared, iterated=ITERATED_STORE_CLAIM.get(key),
+            source, symbol, needle, iterated=ITERATED_STORE_CLAIM.get(key),
             claim=("bound" if key in BOUND_LABEL_EVIDENCE
                    else "assembly" if key in ASSEMBLED_LABEL_EVIDENCE else "store"))
         if key in BOUND_LABEL_EVIDENCE:
@@ -1243,12 +1243,11 @@ def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
     """
     key = "tortoise.sdk::_update_entity"
     rel, symbol, needle, _labels = LABEL_EVIDENCE[key]
-    declared = EMBED_WRITER_CLASSES[key].stores
     source = (REPO_ROOT / rel).read_text(encoding="utf-8")
     iterated = ITERATED_STORE_CLAIM[key]
 
     def violation(text: str) -> str | None:
-        return _evidence_violation(text, symbol, needle, declared, iterated=iterated)
+        return _evidence_violation(text, symbol, needle, iterated=iterated)
 
     # CONTROL — the tree as it stands carries the claim, both arms.
     assert violation(source) is None, violation(source)
@@ -1269,8 +1268,6 @@ def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
         1,
     )
     assert retargeted != source
-    old_body = _without_comments(
-        "\n".join(retargeted.splitlines()[44935:45010]))
     assert needle in _without_comments(retargeted), (
         "the mutation did not preserve the needle — the arm below would red for the wrong reason")
     assert violation(retargeted) is not None, (
@@ -1872,7 +1869,10 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
     the AST: a `for` (or comprehension) whose ITERABLE is that `Name`, whose body carries a store
     marker, and whose target name the store statement actually mentions. A membership test on the
     same constant — the natural, good-faith refactor the issue describes — satisfies none of the
-    three.
+    three. ⚠️ It cannot see a store that names the label WITHOUT interpolating the binding
+    (`"MATCH (n:" + label`): the claim it checks is the interpolated form the writers on this tree
+    use, and a rewritten spelling would red here — a false hold whose repair is to restate the claim,
+    never to loosen this arm.
     """
     for sub in ast.walk(node):
         if isinstance(sub, ast.For):
@@ -1927,7 +1927,7 @@ def _enclosing_statements(statement: ast.stmt, parents: dict[int, ast.AST],
     return found
 
 
-def _evidence_violation(source: str, symbol: str, needle: str, declared,
+def _evidence_violation(source: str, symbol: str, needle: str,
                         *, iterated: str | None = None,
                         claim: str = "store") -> str | None:
     """Why `source` no longer carries the claim its `LABEL_EVIDENCE` row makes, or None.

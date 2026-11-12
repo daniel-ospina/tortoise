@@ -327,6 +327,11 @@ _EMBED_CONTAINER_KEY = "embedding"
 #: blind — the fail-open direction is the one the register's claim cannot survive.
 WRITE_CLAUSE_BUILDERS: tuple[str, ...] = ("set_embedding_clause", "clear_then_set_prefix")
 
+#: The names an import can alias to something this instrument must still resolve — the clause
+#: builders above plus the gate seams. Built once, not per call.
+_ALIASABLE_CALL_NAMES: frozenset[str] = (
+    frozenset(WRITE_CLAUSE_BUILDERS) | {SEAM_CALL} | frozenset(UNGATED_CALLS))
+
 #: Write shapes discovery CANNOT decide, with the reason — named so the
 #: register's claim can be scoped to the mechanism rather than wider than it
 #: (`tests/test_embed_writer_register.py::test_the_register_names_the_shapes_its_discovery_cannot_see`).
@@ -356,14 +361,13 @@ def _import_aliases(*roots: ast.AST) -> dict[str, str]:
     Only names in `WRITE_CLAUSE_BUILDERS`, `SEAM_CALL` and `UNGATED_CALLS` are resolved: an alias of
     anything else says nothing about a vector write, and resolving it would be a guess.
     """
-    known = set(WRITE_CLAUSE_BUILDERS) | {SEAM_CALL} | set(UNGATED_CALLS)
     found: dict[str, str] = {}
     for root in roots:
         for sub in ast.walk(root):
             if not isinstance(sub, ast.ImportFrom):
                 continue
             for alias in sub.names:
-                if alias.name in known:
+                if alias.name in _ALIASABLE_CALL_NAMES:
                     found[alias.asname or alias.name] = alias.name
     return found
 
