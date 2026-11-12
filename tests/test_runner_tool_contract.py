@@ -778,17 +778,45 @@ def _blank_quoted(line: str) -> str:
       4. DELETING A SPAN MANUFACTURES AN OPERATOR. `echo>"x"&bash 'tools/h.sh'` welded
          `>` and `&` into `>&`, which the redirect arm read as one redirect.
 
-    So: walk left to right, consume `\\X` as a PAIR (which is exactly bash's parity rule:
-    an odd run escapes, an even run does not), and replace a span — the two delimiters and
+    So: walk left to right, consume `\\X` as a PAIR (which is exactly bash's parity rule
+    OUTSIDE a single-quoted span: an odd run escapes, an even run does not — inside `'…'`
+    there are no escapes at all, see (5)), and replace a span — the two delimiters and
     everything between — with a SINGLE SPACE. A space cannot be mistaken for an operator
     and cannot fuse with its neighbours, so (4) is impossible; walking the escapes closes
-    (2) and (3); `_MESSAGE_WORD` closes (1).
+    (2) and (3); `_MESSAGE_WORD` closes (1); handling the single-quote span before the
+    escape branch closes (5).
+
+    5. SINGLE QUOTES DO NOT ESCAPE — `\'` INSIDE `'…'` IS A BACKSLASH AND THE CLOSER.
+       bash ends a single-quoted span at the next `'` unconditionally, so a backslash in
+       there is an ordinary character. Consuming `\'` as a PAIR (the rule above, applied
+       everywhere) swallowed the span's REAL closer, kept the walk "inside" the span to
+       end of line, blanked everything after it, and answered INERT for a line that
+       RUNS the helper — measured, marker file created:
+
+           echo 'a\' \" ; bash tools/h.sh ; true \" # '
+
+       Both readings then miss it: the RAW arm is skipped because the line judged inert,
+       and `_code_only`'s own naive pairing blanks the region holding the name. `#12149`'s
+       landed walker misses it too, so it is an inherited hole rather than a regression —
+       but this walk documents its escape rule as "exactly bash's parity rule", and that
+       was false in the one span type where bash has no escapes.
     """
     out: list[str] = []
     i, n = 0, len(line)
     quote = ""
     while i < n:
         ch = line[i]
+        # ⛔ A SINGLE-QUOTED SPAN CLOSES AT THE NEXT `'`, ESCAPE OR NOT. Checked BEFORE the
+        # escape branch, because that branch's pair rule is right everywhere else and
+        # catastrophically wrong here: `'a\' ; bash h.sh` would keep the walk inside the
+        # span (the `\\`+`'` consumed as a pair) and blank the invocation. Folded into the
+        # general `if quote:` branch below instead of a separate case would re-open it.
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+                out.append(" ")
+            i += 1
+            continue
         if ch == "\\" and i + 1 < n:
             # An escape consumes BOTH characters — inside a span it is skipped, outside it
             # is kept, and either way the byte after it can never open or close a span.
@@ -840,9 +868,11 @@ def _message_line_is_inert(line: str) -> bool:
       * `$(` or a backtick ANYWHERE  → False. Detected on the raw line, before any quote
         handling, so a quoted `)` or a `case` pattern cannot desync anything. This is what
         closes the `printf ')'; bash …` shape without tracking the substitution at all.
-      * a separator (`;` `&` `|`), a pipe, a redirect, a second command, an unquoted
-        argument, or an UNTERMINATED quote → the blanked text is not bare
-        `echo`/`printf` → False.
+      * a separator (`;` `&` `|`), a pipe, a second command, an unquoted argument, or an
+        UNTERMINATED quote → the blanked text is not bare `echo`/`printf` → False. A
+        TRAILING REDIRECT is NOT in this list: a redirect consumes its argument without
+        executing it, so `echo "…" >&2` is inert — see `_INERT_MESSAGE`, which is where
+        that allowance lives and where removing it would `>` a pinned row.
       * the first word of the RAW line is not the message command → False, even when the
         blanked text looks bare. `"bash" "tools/h.sh" echo` strips to ` echo` and would
         otherwise answer `True` for a line that RUNS `bash tools/h.sh`.
@@ -851,10 +881,13 @@ def _message_line_is_inert(line: str) -> bool:
     versions of this docstring made and could not support: **a line this returns `False`
     for is searched by the RAW-line rule the PRE-#12106 scan applied to every line.** So
     relative to that scan the exclusion REMOVES detections and adds none — measured: 0
-    gained over a 60 000-line fuzz corpus, and exactly 4 lines / 0 added across the tree.
+    gained over a 60 000-line fuzz corpus, and exactly 3 lines / 0 added across the tree
+    today (`finding-provenance.yml` x2, `mergify-guard-recut.yml` — all three operator
+    messages; it was 4 before `#12051` reworded the fourth away, see
+    `test_a_script_named_only_in_an_operator_message_is_not_a_gh_hazard`).
     **A removal is only as safe as the shape test behind it**: this is a regex, not a
-    parser, so a wrong answer in the lenient direction is possible and two have already
-    happened (see `_blank_quoted`). The mitigation is not a promise but the guards —
+    parser, so a wrong answer in the lenient direction is possible and three have already
+    happened (see `_blank_quoted`, classes (1)-(5)). The mitigation is not a promise but the guards —
     `$(`-anywhere, `_blank_quoted`'s escape-parity walk, `_MESSAGE_WORD` — each pinned by a
     fail-open test. Relative to #12106's cut 3 (which blanked prose inside message
     segments) this is wider on every message line: measured, 0 differing verdicts across
@@ -884,6 +917,27 @@ def _message_line_is_inert(line: str) -> bool:
     `test_the_nested_substitution_residual_is_over_report_not_a_miss`; if one ever
     appears, add the contract step or narrow the substitution reading — do NOT drop the
     bail.
+
+    ⛔ SECOND DECLARED RESIDUAL, IN THE OPPOSITE DIRECTION — A MESSAGE'S TEXT EXECUTED ON A
+    LATER LINE IS A MISS. This reader answers for ONE LINE, so:
+
+        echo 'bash tools/h.sh' > /tmp/gen.sh   # inert: a redirect executes nothing
+        bash /tmp/gen.sh                       # names no helper, so no hit
+
+    comes back CLEAN, though the job body really runs the helper — measured, marker file
+    created, `_gh_hazards(body, scripts) == []`. The SAME-LINE version
+    (`echo 'bash h.sh' > /tmp/x; bash /tmp/x`) IS a hazard, so the sliver is the cross-line
+    case only; it is inherited from `origin/main` and is not a regression.
+
+    ⛔ IT IS NOT CLOSED BY FORBIDDING REDIRECTS ON AN INERT MESSAGE, and that is a
+    decision rather than an omission: such a rule would flag every operator message that
+    sends its help text to stderr (`echo "… tools/h.sh …" >&2`), which is `#12133`'s
+    false-positive class and is pinned INERT by three rows in
+    `test_the_message_exclusion_cannot_hide_a_real_invocation`. Trading a live false red
+    for a cross-line shape with no live instance is the wrong direction, and #12133's cost
+    was a required CI gate withheld from every PR. Closing this needs body-level dataflow,
+    which is the widening `#12157` owns. Pinned as a declared miss, so a future fix reds
+    the pin and must update this paragraph.
     """
     if "$(" in line or "`" in line:
         return False
@@ -1044,8 +1098,10 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     EXECUTE on a line that also emits a message is a way this gate could fail OPEN — a
     job that runs a `gh` helper with no contract step, and a green suite.
 
-    ⛔ FOUR CUTS, FOUR CLASSES — each one was a FALSE NEGATIVE introduced by a fix that
-    modelled the shell, each verified HA ZARD on `origin/main`, so each was a regression:
+    ⛔ SIX CLASSES ACROSS FOUR CUTS — each one was a FALSE NEGATIVE in a fix that
+    modelled the shell. Where the class was already caught on `origin/main` it is stated
+    as ARMOR rather than claimed as this change's finding (`#12167` review, and the same
+    correction as the shape matrix above):
 
       1. `echo "starting"; bash h.sh`                  cut 1 excluded by LINE PREFIX
       2. `echo hi & bash "h.sh"`                       cut 2 had no bare-`&` separator
@@ -1053,6 +1109,11 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
       4. `echo "$(printf ')'; bash h.sh)"`             cut 3 desynced on a quoted `)`
       5. `echo 'bash h.sh' | bash`                     cut 3: the consumer EXECUTES the text
       6. `echo 'bash h.sh' > f; bash f`                cut 3: ditto, via a file
+
+    REGRESSIONS ON `origin/main` WHEN THIS CUT WAS WRITTEN: classes 5 and 6 only —
+    measured, main's landed arm MISSes both. Classes 1-4 already HIT there and are armor:
+    they pin the classes a future narrowing could re-open, which is the half of the pair
+    that keeps the next cut honest. (Re-measured after the `#12149` rebase: unchanged.)
 
     Classes 4 and 5 are pinned below rather than just remembered, because they are the
     shapes that made "model the shell" the wrong approach: the rule is now CONSERVATIVE —
@@ -1130,6 +1191,24 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     assert _gh_hazards([f"            echo>\"\"&bash 'tools/{helper}'"], scripts)
     assert _gh_hazards([f"            echo>\";\"&bash 'tools/{helper}'"], scripts)
 
+    # 11 — a SINGLE-QUOTED span has NO escapes, so a backslash before the closing `'` is a
+    #      literal character AND the span ends there. Treating that pair as an ESCAPE (the
+    #      rule that is right in double quotes and outside spans) kept the walk "inside"
+    #      the span to end of line, blanked the invocation and answered INERT — measured,
+    #      the helper really runs (marker file created) while the scan reported nothing.
+    #      Found by `#12167` review on the rebased head. `#12149`'s walker misses it too,
+    #      so it is inherited rather than a regression — pinned here rather than declared,
+    #      because the fix is a reorder of two branches.
+    #      The probe is BUILT BY CONCATENATION on purpose: as one literal it is a wall of
+    #      backslashes where a reader cannot tell a bash escape from a Python one, which is
+    #      the very confusion that produced the hole.
+    bs = "\\"  # ONE backslash, named so the probe below reads as bash, not as Python
+    sq = "'"
+    single_quote_escape = (
+        f'            echo {sq}a{bs}{sq} {bs}" ; bash tools/{helper} ; true {bs}" # {sq}'
+    )
+    assert _gh_hazards([single_quote_escape], scripts), single_quote_escape
+
     # 7 — the helper as the ARGUMENT-EXECUTING end of a pipeline
     assert _gh_hazards([f"            printf x | bash tools/{helper}"], scripts)
 
@@ -1181,12 +1260,26 @@ def test_every_printer_prefixed_shape_that_still_runs_a_command_is_a_hazard():
     the one THIS arm closed and #12149 also closes.
 
     ⛔ WHICH ROWS DISCRIMINATE AND WHICH ARE ARMOR — stated, because a pin that would
-    pass against an older reader proves nothing about this change. Replayed against the
-    PRE-#12106 scan (`edcac493a5`), four rows FLIP: both `<(`/`>(`) quoted spellings, the
-    `$( … )`-whose-body-contains-a-quoted-`)` row, and the `;`-after-a-quoted-`)` rows.
-    Every `;`/`&&`/`|`/`&`/backtick row already flags there and is ARMOR against a future
-    narrowing. Both kinds are kept deliberately: armor is what stops the next cut from
-    re-opening a closed class.
+    pass against an older reader proves nothing about this change. Measured row by row
+    against BOTH older readers, and the distinction matters because two different readers
+    are easy to confuse:
+
+      * against the TRUE pre-`#12106` reader (`7e3fef06f7`, whose name arm is
+        `script_ref.search(line)` — raw, no exclusion at all): **0 rows flip. All twelve
+        HIT there.** That is arithmetically required, not a coincidence: this arm's honest
+        claim is that the exclusion REMOVES detections and adds none, so it can never beat
+        the reader that had no exclusion.
+      * against the pre-`#12149` walker (`edcac493a5`): **THREE rows flip** — `<( … )`
+        quoted, `>( … )` quoted, and the `$( … )`-body-with-a-quoted-`)` row. These are the
+        DISCRIMINATING rows in this matrix.
+      * the two `;`-after-a-quoted-`)` rows (`grep -E "xml)"`, `sed -e 's/x)y/z/'`) already
+        HIT on `edcac493a5` — ARMOR, not flips (this docstring said "four rows flip"
+        including them, and called `edcac493a5` the pre-`#12106` reader; both wrong, found
+        by `#12167` review).
+      * every `;`/`&&`/`|`/`&`/backtick row was already ARMOR on both.
+
+    Both kinds are kept deliberately: armor is what stops the next cut from re-opening a
+    closed class, and the three discriminating rows are what this change closes.
 
     The `<( … )`/`>( … )` class is why this matrix exists at all: a printer whose helper
     sits QUOTED inside one was read as prose on `edcac493a5` (both spellings), while the
@@ -1289,6 +1382,43 @@ def test_the_nested_substitution_residual_is_over_report_not_a_miss():
         )
         == []
     )
+
+
+def test_the_cross_line_redirect_residual_is_a_declared_miss():
+    """The one FAIL-OPEN shape this arm declares instead of closing (#12167 review).
+
+    ⛔ PINNED AS A MISS, NOT AS A PASS — if this test ever reds, someone closed the shape
+    (or broke the same-line case) and must update the second residual block in
+    `_message_line_is_inert` rather than delete this pin.
+
+    The reader answers for ONE LINE and a job body is a list of them, so a message whose
+    text is written to a file and EXECUTED by a later line comes back clean while bash
+    really runs the helper — measured with a marker file. The same-line version is a
+    HAZARD and is pinned in `test_the_message_exclusion_cannot_hide_a_real_invocation`
+    (class 6), so only the cross-line sliver is open, and it is inherited from
+    `origin/main`'s walker, not introduced here.
+
+    Why it is declared rather than closed: the cheap rule that would catch it — treat a
+    redirect on an otherwise-inert message as non-inert — also flags `echo "… helper …" >&2`,
+    the shape that reddened `test-carve-out` on every PR (#12133) and that this arm pins
+    INERT in three rows. Swapping a live false red for a cross-line shape with no live
+    instance is the wrong trade; body-level dataflow is #12157's widening, not this cut's.
+    """
+    scripts = _gh_executing_scripts()
+    helper = "install-ci-runner-x64.sh"
+    # the cross-line shape: DECLARED MISS (this assertion is the declaration)
+    body = [
+        "          run: |",
+        f"            echo 'bash tools/{helper}' > /tmp/gen_probe.sh",
+        "            bash /tmp/gen_probe.sh",
+    ]
+    assert _gh_hazards(body, scripts) == [], (
+        "a cross-line fix landed: update the residual paragraph"
+    )
+    # …and the SAME-LINE shape stays a hazard, which is the half that IS closed.
+    assert _gh_hazards([f"            echo 'bash tools/{helper}' > /tmp/x; bash /tmp/x"], scripts)
+    # …and the redirect-on-prose rows stay INERT, which is why the cheap rule was refused.
+    assert _gh_hazards([f'            echo "run tools/{helper}" >&2'], scripts) == []
 
 
 def test_a_script_named_only_in_an_operator_message_is_not_a_gh_hazard():
