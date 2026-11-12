@@ -106,7 +106,16 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
             if word.search(line)
         )
     try:
-        src = path.read_text(encoding="utf-8")
+        # ⛔ BYTES + ONE LINE MODEL, for the same reason the non-Python arm above
+        # reads bytes: `read_text` applies UNIVERSAL NEWLINES, so a lone `\r`
+        # silently becomes a line break the PARSER sees and `grep -rn` does not —
+        # and the CALLER's line number is grep's. `\r\n` is folded to `\n` (a real
+        # line break in both views); a lone `\r` becomes a SPACE, one byte for one
+        # byte, so columns survive and a file that used `\r` AS its separator stops
+        # parsing — `None`, i.e. every line is code. Loud, never quiet: a file whose
+        # line model disagrees with grep's is not certifiable. (README CRLF files
+        # are unaffected; they fold to `\n` and number identically in both views.)
+        src = path.read_bytes().decode("utf-8").replace("\r\n", "\n").replace("\r", " ")
         tree = ast.parse(src, filename=str(path))
         tokens = list(tokenize.generate_tokens(io.StringIO(src).readline))
     except (OSError, UnicodeDecodeError, SyntaxError, ValueError, tokenize.TokenError,
@@ -316,17 +325,13 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
         "docstring": ('def f():\n    """propagate_shock is deprecated."""\n', set()),
         "docstring_multiline": (
             'def f():\n    """S2 VET \u2014 the pass\n\n    propagate_shock PERSISTS the\n    blend; it is never invoked.\n    """\n', set()),
-        # ⛔ This row is the whole "a NON-ASCII docstring's prose mention is prose"
-        # claim, and it is the ONLY one: two earlier rows
-        # (`long_non_ascii_docstring_mention_on_closing_line`,
-        # `docstring_non_ascii_mention_on_closing_line`) asserted they pinned the
-        # byte/char drift "where the box's right edge is tested", but their mention
-        # sits on an INTERIOR line, so containment compares (4, col) <= (5, …) and
-        # the columns never decide — both were green under every unit, including
-        # A docstring whose columns never decide is not a unit pin. This row stays
-        # for the plain regression it names — a prose mention inside a non-ASCII
-        # module/class docstring is prose — and the `_non_ascii` rows above are
-        # gone for the same reason two earlier rows went: they could not fail.
+        # ⛔ `class_docstring` below is ASCII on purpose: columns are AST BYTE
+        # offsets on BOTH sides of the containment test by construction, so a
+        # non-ASCII row decides nothing an ASCII row does not. Two `_non_ascii`
+        # rows were deleted here after measuring that they could not fail (see the
+        # coordinate-space note in `_code_lines_naming`); they were the same
+        # "a row that cannot fail is not a pin" class as the two rows dropped
+        # before them.
         "class_docstring": ('class C:\n    """propagate_shock is deprecated."""\n', set()),
         "module_docstring": ('"""propagate_shock is deprecated."""\nvalue = 1\n', set()),
         # PEP 257's TOLERATED forms, which a "first statement of a def" rule misses:
@@ -350,10 +355,13 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
         # ASCII-only row decides the same thing. (Two such rows were deleted here
         # after measuring that they could not fail — see the coordinate-space note
         # in `_code_lines_naming`.)
-        # ⛔ A prose box that SPANS lines: the docstring starts on line 2 and ends
-        # on line 3, and the live dependency shares line 3. Collapsing the box to
-        # its start line reds this row (measured), while the single-line rows
-        # above cannot see that regression. The em dashes are incidental content.
+        # ⛔ COLUMN CONTAINMENT ACROSS A MULTI-LINE PROSE BOX: the docstring opens on
+        # line 2 and closes on line 3, and a LIVE dependency shares its terminator
+        # line. Making containment LINE-granular reds this row (`[]` against the
+        # correct `{3}` — measured), which is what it pins. It does NOT pin the
+        # box's SPAN: a prose statement's own value is always inside its own box
+        # (measured — collapsing the box to its start line leaves this row green),
+        # so no row can pin the span and none claims to.
         "multiline_non_ascii_docstring_then_string_same_line": (
             'def f():\n    """\u2014 the pass\n    ' + "\u2014" * 18
             + '"""; x = getattr(m, "propagate_shock")\n', {3}),
@@ -486,6 +494,18 @@ def test_the_code_detector_is_fail_closed(tmp_path):
     binary = tmp_path / "binary.py"
     binary.write_bytes(b"\xff\xfe\x00propagate_shock")
     assert _code_lines_naming(binary, "propagate_shock") is None
+
+    # ⛔ A `.py` whose only line separator is a lone `\r` cannot be placed in grep's
+    # line model at all: `grep -n` sees ONE line, the parser sees many, and the
+    # caller's number is grep's. A degraded read, never a prose verdict.
+    cr_only = tmp_path / "cr_only.py"
+    cr_only.write_bytes(b"x = 1\rpropagate_shock()\r")
+    assert _code_lines_naming(cr_only, "propagate_shock") is None
+
+    # ...while CRLF folds to `\n`, a line break in BOTH views, so numbering survives.
+    crlf = tmp_path / "crlf.py"
+    crlf.write_bytes(b"x = 1\r\npropagate_shock()\r\n")
+    assert _code_lines_naming(crlf, "propagate_shock") == frozenset({2})
 
 
 # ── 1. propagate_shock callers ────────────────────────────────────
