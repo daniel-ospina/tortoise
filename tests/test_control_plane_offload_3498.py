@@ -594,6 +594,45 @@ def test_a_causeless_domain_failure_does_not_carry_the_bound_as_context(monkeypa
         f"whole fix removes: __context__={caught.value.__context__!r}")
 
 
+def test_a_caused_domain_failure_keeps_its_own_cause_at_the_re_armed_bound():
+    """#11962 review — the OTHER half of the remedy, at the second seam.
+
+    The sibling row above pins the half a plain ``raise`` gets wrong: the BOUND
+    must not be displayed as the domain error's context. This one pins the half
+    ``from None`` gets wrong: the domain error's OWN ``__cause__`` must survive,
+    because ``from None`` suppresses the bound by wiping that cause
+    (``__cause__ is None``). Both halves are why the remedy is
+    ``from future_exc.__cause__`` rather than either of those forms.
+
+    RED under ``from None`` at this site (measured): the propagated class is
+    still the ``ValueError``, and this assertion is the only thing that reds —
+    which is exactly why it is a separate row from the sibling's.
+    """
+    bound = 0.05
+    worker = monitoring._SingleSlotWorker("test-11962-reawait-cause", workers=1)
+    started = threading.Event()
+
+    def _boom():
+        started.set()
+        try:
+            raise KeyError("db-down")
+        except KeyError as inner:
+            raise ValueError("store exploded") from inner
+
+    future = worker.submit(_boom)
+
+    with pytest.raises(ValueError, match="store exploded") as caught:
+        asyncio.run(_stall_the_loop_past(
+            lambda: monitoring.reawait_control_plane_call(
+                future, op="reawait-domain-cause", timeout=bound),
+            worker, started, bound))
+
+    assert isinstance(caught.value.__cause__, KeyError), (
+        "the domain error's own chain was discarded at the re-await seam — its "
+        f"__cause__ is {caught.value.__cause__!r}, not the KeyError it was "
+        "raised from")
+
+
 def test_a_cancelled_await_is_recorded_as_cancelled():
     """#5840: cancellation is a terminal state and is recorded as its own.
 
