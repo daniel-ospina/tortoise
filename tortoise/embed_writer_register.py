@@ -266,7 +266,13 @@ claim and a slogan:
   nonlocal … found` — so no runnable writer can be in that shape.) ⛔ The
   RESOLUTION IS OF CALLS, not of imports: an alias imported and never called is credited nothing —
   crediting the import would fill the population with writers that store nothing, the cry-wolf
-  direction. Pinned, DRIVEN (a temp module per shape, through the real discovery filter), by
+  direction. ⛔ The MIRROR of that is NOT closed: a CALL sitting in a nested scope the writer never
+  RUNS — a never-called nested `def`, a never-called `lambda` body, or a method of a class the
+  writer never instantiates — IS credited, so the writer classes `gated` while reaching nothing
+  (measured; the dangerous direction). That is a named residual in `UNDECIDABLE_WRITE_SHAPES`
+  ("never-run nested scope") and pinned in the suite, not a resolved case, and this bullet must not
+  be read as "every credited call executes". Pinned, DRIVEN (a temp module per shape, through the
+  real discovery filter), by
   `tests/test_embed_writer_register.py::test_an_IMPORT_ALIAS_is_the_reach_it_names`.
 
 **Leaf, and it must stay one.** `04-plan.md` §5: a leaf must not live under `tortoise/projection/`,

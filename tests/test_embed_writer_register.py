@@ -628,6 +628,51 @@ ALIAS_FORMS_STILL_BLIND: dict[str, tuple[str, dict[str, str], str, str]] = {
         "into it and credits `factory`, a function that stores nothing, as `gated`",
         "closure-scoped alias",
     ),
+    # ⛔ The REACHABILITY axis, one over from scope. Measured at `b9a92e901a` while re-verifying the
+    # round-7 scope fix: the alias resolves correctly here and only the REACH is credited. The row
+    # below is the `def` spelling; the other two are pinned here too because the NAMING entry is
+    # deliberately named for the class of shape (all three measured identically, one shape per
+    # process), and a spelling left unmeasured is a spelling a reader may assume decided.
+    "never_run_nested_def": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    def _dead():\n"
+        "        return _enc(text)\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n',
+        {"tortoise.m::w": "gated", "tortoise.m::_dead": "gated"},
+        "`w` never CALLS `_dead`, so that body never executes — `w` reaches no gate and "
+        "`unresolved_write` is what the rule wants. The walk decides SCOPE; this is a CALL-GRAPH "
+        "question, so the over-credit is a NAMED residual rather than a guessed call graph",
+        "never-run nested scope",
+    ),
+    "never_run_nested_LAMBDA": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    _never = lambda: _enc(text)\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n',
+        {"tortoise.m::w": "gated"},
+        "the same reach-blindness through a LAMBDA the writer binds and never invokes: `_NEW_SCOPE_NODES` "
+        "already treats a lambda as a scope, so the credited body is unreachable for the same reason",
+        "never-run nested scope",
+    ),
+    "never_run_container_CLASS_METHOD": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    class _K:\n"
+        "        def m(self):\n"
+        "            return _enc(text)\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n',
+        {"tortoise.m::w": "gated", "tortoise.m::m": "gated"},
+        "the same reach-blindness through a class the writer defines and never instantiates: a class "
+        "BODY executes, a method body does not until called, so the credited seam call never runs",
+        "never-run nested scope",
+    ),
 }
 
 
