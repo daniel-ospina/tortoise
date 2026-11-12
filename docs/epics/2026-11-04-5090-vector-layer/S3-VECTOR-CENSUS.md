@@ -356,8 +356,11 @@ and
 reads 178 passed, 1 skipped on the docker lane at this head. The
 skip is the `<3.12` re-derive. The three `main` reds this row recorded for a day are CLEARED:
 `#12045`'s undeclared `tortoise.api::_emit` / `tortoise.api::_verify_record_vector_width` writers were
-the width verifier and a docstring-quoted call, and `#12042` (`b367c54214a2`) keeps both out of the
-embedding-writer population, so no nodeid here reds on this tree or on `origin/main` `25127b61b61c`.
+the width verifier and a docstring-quoted call, and `#12042` (`b367c54214a2`) CLASSED both
+`CENSUS_EXEMPT` and declared them exempt in `tortoise/embed_writer_register.py` (they are still in
+the population — `embedding_writers()` reports them as `unresolved_write` — but exemption is what
+reading (b) accepts), so row 2 no longer HOLDS on them and no nodeid here reds on this tree or on
+`origin/main` `25127b61b61c`.
 ⛔ The SPLIT is lane-bound, and the same tree reads **177 passed, 2 skipped** under
 `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies. Both splits add
