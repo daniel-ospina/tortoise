@@ -29,7 +29,7 @@ deliberately mechanical so a later lane re-runs it instead of re-reading prose:
 
 | bullet | the command | what makes it `MET` |
 |---|---|---|
-| 1 | `uv run python tools/dod_5090_probe.py --json` (reads the two gate modules + counts the write seams that reach the gate) | a stated predicate exists, ONE rule set (identity, not a copy), AND every embedding write path reaches it with the gate ON by default |
+| 1 | `uv run python tools/dod_5090_probe.py --json` (reads the two gate modules + counts the write seams that reach the gate) | a stated predicate exists, ONE rule set (identity, not a copy), AND every embedding write path reaches it with the gate ON by default — where "by default" is read **per surface** and is `True` only when every EXISTING deployment surface arms it (`#11455`; see below) |
 | 2 | same (`written labels ⊆ served labels`) | every label a write path embeds is one `run_vector_query` serves |
 | 3 | same (forces all three mechanisms through `run_vector_query`) | `index` / `scan` / `scan_fallback` are distinguishable in the caller's trace |
 | 4 | same (searches for a V1 ruling) | **`MET` is unreachable here**: the bullet is *decided **and implemented***, and this row cannot measure implementation — a record at most carries it to `PARTIAL`, and no record is `NOT MET` |
@@ -42,6 +42,16 @@ which is **unset in every shipped configuration** — so at default the epic's
 `enforced` half is an opt-in, not the operative rule of the write path. `#5008`
 chose that ordering on purpose (*"the rate effect is measurable before it is
 trusted"*); the instrument records the consequence rather than re-deciding it.
+⛔ **`#11455` re-cut the "by default" half, and the sentence above was already
+stale when it was written.** `#11445` armed the flag in `.env.example`, so the
+any-surface bool this row used to publish read `True` while the surface
+`docker compose up` actually consumes (`docker-compose.yml`, which passes an
+explicit `environment:` and declares no `env_file:`) set nothing. The row now
+reads the DEPLOYMENT subset (`DEPLOYMENT_SURFACES`) and publishes every surface's
+state, so a reader can tell a measured `True` from one armed TEMPLATE. On the
+tree that change landed in, the compose path is the only existing deployment
+surface and it is silent — so row 1 goes back to `PARTIAL`, which is the reading
+`#11086` item 4 must not be ticked over.
 
 ## §12.2a — the distinct-predicate count
 
@@ -1756,6 +1766,31 @@ CONFIG_SURFACES: tuple[str, ...] = (
     ".github/workflows",
 )
 
+#: The subset of `CONFIG_SURFACES` a DEPLOYED PROCESS's environment can actually be
+#: built from — the population `#11455` requires the row-1 condition to speak for.
+#: The other three are kept in the walk (and reported per surface) but they cannot
+#: arm a deployment:
+#:
+#: * `.env.example` is a TEMPLATE. Compose reads `.env` for `${VAR}` interpolation
+#:   in the compose file and for nothing else; a variable reaches the CONTAINER
+#:   only through `environment:` or an `env_file:` entry — and this repo's
+#:   `docker-compose.yml` declares `environment:` with **no** `env_file:` (measured
+#:   2026-11-07: `rg -n 'env_file' docker-compose.yml` → no match). So the template
+#:   arming the flag says nothing about what `docker compose up` gets.
+#: * `config/` is repository/tooling configuration and documentation (the flag's
+#:   own description lives in `config/v4-mechanisms.yml`); nothing reads it into a
+#:   container's environment.
+#: * `.github/workflows` runs CI, not a deployment.
+#:
+#: ⛔ This is a READING of the six surfaces, not a removal from them: `#11455`
+#: forbids dropping `.env.example` from the walk, because a walk that skipped it
+#: would report `set ON in: none` over a tree that arms it.
+DEPLOYMENT_SURFACES: tuple[str, ...] = (
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "Dockerfile",
+)
+
 
 #: ⛔ There is deliberately NO truthy vocabulary in this module. The values a
 #: shipped config can use to switch a flag ON are `tortoise/env_truthy.py`'s
@@ -1910,10 +1945,34 @@ def _assigned_value(line: str, flag: str) -> str | None:
 
 
 def flag_in_shipped_configs(flag: str) -> dict:
-    """Is ``flag`` switched ON by any configuration this repo ships?
+    """Is ``flag`` switched ON by any shipped configuration, and by WHICH surfaces?
 
     Returns ``{"on": bool, "files": [...], "searched": [paths],
-    "mentions": [paths], "unreadable": [paths]}``.
+    "mentions": [paths], "unreadable": [paths], "per_surface": {rel: {...}},
+    "armed": [rels], "silent": [rels], "absent": [rels], "unmeasured": [rels],
+    "deployment": {...}}``.
+
+    ⛔ **``on`` answers *any surface arms it* — it is NOT the question DoD row 1
+    asks, and reading it as one was the `#11455` defect.** Row 1 published
+    ``gate enabled by default: True`` from one bool over six surfaces while the
+    surface `docker compose up` actually uses sets nothing: `.env.example` is a
+    TEMPLATE that reaches a container only when the deployment declares
+    `env_file:`, and this repo's `docker-compose.yml` declares none. A reader could
+    then tick `#11086` item 4 (*"row 1's condition reads True"*) and infer item 1
+    (*"a deployment built from the shipped config rejects an identifier-only row
+    with no operator action"*), which is false for the compose path.
+
+    So the walk reports EVERY surface: `ON` (a read file assigns the flag a truthy
+    value), `OFF` (present and read, nothing arms it), `ABSENT` (the path does not
+    exist), or `UNMEASURED` (a file in it could not be read, so "silent" would be a
+    claim about a surface half of which was never seen). ``deployment`` carries the
+    reading row 1 USES: over `DEPLOYMENT_SURFACES` only, its ``on`` is `True`
+    **only when every existing deployment surface is armed** — never off one armed
+    template.
+
+    ``on`` is kept because dropping `.env.example` from the walk would re-open the
+    finding this walk was built for (`set ON in: none` over a tree that arms it):
+    the template is REPORTED and excluded from the DEPLOYMENT reading, not removed.
 
     ⛔ **`searched` is every path the walk READ; `mentions` is the subset whose
     text contains the flag.** They are different questions and the pre-fix code
@@ -1925,7 +1984,8 @@ def flag_in_shipped_configs(flag: str) -> dict:
 
     A flag set nowhere is a measured `False` **only** over the paths actually
     read; `unreadable` names any path the walk could not read (oversize, I/O
-    error) so "nowhere" cannot silently exclude a file that does set it.
+    error) so "nowhere" cannot silently exclude a file that does set it — and a
+    deployment surface holding an unreadable file is `UNMEASURED`, never silent.
     """
     from tortoise.env_truthy import is_truthy
 
@@ -1934,10 +1994,15 @@ def flag_in_shipped_configs(flag: str) -> dict:
     mentions: list[str] = []
     unreadable: list[str] = []
     documented_only = 0
+    per_surface: dict[str, dict] = {}
     for rel in CONFIG_SURFACES:
         target = REPO_ROOT / rel
+        present = target.exists()
         candidates = ([target] if target.is_file()
                       else sorted(target.rglob("*")) if target.is_dir() else [])
+        surface_hits: list[str] = []
+        surface_searched: list[str] = []
+        surface_unreadable: list[str] = []
         for path in candidates:
             if not path.is_file():
                 continue
@@ -1945,12 +2010,15 @@ def flag_in_shipped_configs(flag: str) -> dict:
             try:
                 if path.stat().st_size > 2_000_000:
                     unreadable.append(posix)
+                    surface_unreadable.append(posix)
                     continue
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 unreadable.append(posix)
+                surface_unreadable.append(posix)
                 continue
             searched.append(posix)
+            surface_searched.append(posix)
             if flag not in text:
                 continue
             mentions.append(posix)
@@ -1974,7 +2042,44 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     # so a shipped `export FLAG=1` is a HIT, not a note.
                 value = _assigned_value(line, flag)
                 if value is not None and is_truthy(value):
-                    hits.append(f"{posix}: {line.strip()[:90]}")
+                    hit = f"{posix}: {line.strip()[:90]}"
+                    hits.append(hit)
+                    surface_hits.append(hit)
+        if not present:
+            state = "ABSENT"
+        elif surface_unreadable:
+            # A file this walk could not read could arm the flag, so "present and
+            # silent" would be a claim about a surface half of which was never
+            # read. UNMEASURED is the only honest state — never a quiet OFF.
+            state = "UNMEASURED"
+        else:
+            state = "ON" if surface_hits else "OFF"
+        per_surface[rel] = {"state": state, "hits": surface_hits,
+                            "searched": surface_searched,
+                            "unreadable": surface_unreadable}
+
+    def _rels(state: str, pool: tuple[str, ...]) -> list[str]:
+        return [rel for rel in pool if per_surface[rel]["state"] == state]
+
+    deployment_present = [rel for rel in DEPLOYMENT_SURFACES
+                          if per_surface[rel]["state"] != "ABSENT"]
+    deployment_unmeasured = _rels("UNMEASURED", DEPLOYMENT_SURFACES)
+    deployment = {
+        "surfaces": list(DEPLOYMENT_SURFACES),
+        "present": deployment_present,
+        "armed": _rels("ON", DEPLOYMENT_SURFACES),
+        "silent": _rels("OFF", DEPLOYMENT_SURFACES),
+        "absent": _rels("ABSENT", DEPLOYMENT_SURFACES),
+        "unmeasured": deployment_unmeasured,
+        # MEASURED requires at least one deployment surface to EXIST and every
+        # existing one to be READABLE: a tree that ships no deployment config
+        # cannot answer "what does a deployment get", and that is UNMEASURED —
+        # never a pass, and never a `False` that blames the product.
+        "measured": bool(deployment_present) and not deployment_unmeasured,
+    }
+    deployment["on"] = (deployment["measured"] and not deployment["silent"]
+                        and not deployment_unmeasured)
+
     return {"on": bool(hits), "files": hits, "searched": searched,
             "mentions": mentions, "unreadable": unreadable,
             # Reported, never silently dropped: how many assignment-shaped lines
@@ -1983,7 +2088,76 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # `run:` body is not counted here — it is a setting, and it is
             # allowed to move `on`.
             "documented_only": documented_only,
-            "surfaces": list(CONFIG_SURFACES)}
+            "surfaces": list(CONFIG_SURFACES),
+            "per_surface": per_surface,
+            "armed": _rels("ON", CONFIG_SURFACES),
+            "silent": _rels("OFF", CONFIG_SURFACES),
+            "absent": _rels("ABSENT", CONFIG_SURFACES),
+            "unmeasured": _rels("UNMEASURED", CONFIG_SURFACES),
+            "deployment": deployment}
+
+
+def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
+    """Row 1's `gate enabled by default` note — a PER-SURFACE reading (`#11455`).
+
+    The row used to publish one bool over six surfaces, so an armed TEMPLATE read
+    as "the default is on" while the surface a `docker compose up` deployment
+    actually consumes set nothing. Every surface is now named with its state, the
+    armed/silent split is stated, and the DEPLOYMENT reading is spelled out
+    separately — a reader must be able to tell a measured `True` from a sampled one
+    without re-running the walk.
+
+    `ambient` is REPORTED here and never folded into the value: a lane's exported
+    flag is not a default (that is why `measure()` pins the switches OFF before
+    scoring, `#10996`). The value is `shipped["deployment"]["on"]`, which is `True`
+    only when every EXISTING deployment surface arms the flag.
+    """
+    deployment = shipped["deployment"]
+    on_by_default = deployment["on"]
+    per_surface_note = ", ".join(
+        f"{rel}={shipped['per_surface'][rel]['state']}" for rel in shipped["surfaces"]
+    )
+    deployment_surfaces_note = ", ".join(
+        f"{rel}={shipped['per_surface'][rel]['state']}" for rel in deployment["surfaces"]
+    )
+    if not deployment["measured"]:
+        if not deployment["present"]:
+            deployment_reading = (
+                "UNMEASURED — no deployment surface exists in this tree, so there is "
+                "nothing a deployment is built from and 'silent' would be an answer "
+                "to a question the tree cannot ask"
+            )
+        else:
+            deployment_reading = (
+                f"UNMEASURED — unreadable deployment surface(s) "
+                f"{deployment['unmeasured']}: an unread file could arm the gate, so "
+                "this is NOT a measurement of silence"
+            )
+    elif deployment["on"]:
+        deployment_reading = (
+            f"every existing deployment surface is armed ({deployment['armed']})"
+        )
+    else:
+        deployment_reading = (
+            f"UNARMED deployment surface(s) {deployment['silent']} — a deployment "
+            "built from those configs runs with the gate OFF. This condition is "
+            "SCOPED to the surface(s) that arm it "
+            f"({', '.join(shipped['armed']) or 'none'}) and is NOT a claim about a "
+            "deployment built from the silent path(s)"
+        )
+    return (
+        f"gate enabled by default: {on_by_default} (ambient "
+        f"{flag}={os.environ.get(flag, '')!r}; "
+        f"shipped config surface walked: {len(shipped['surfaces'])} "
+        f"({', '.join(shipped['surfaces'])}); per surface: {per_surface_note}; "
+        f"armed: {shipped['armed'] or 'none'}; silent: {shipped['silent'] or 'none'}; "
+        f"absent: {shipped['absent'] or 'none'}; "
+        f"deployment surfaces that can arm a deployed process: "
+        f"{deployment_surfaces_note} — {deployment_reading}; files read: "
+        f"{len(shipped['searched'])}; unreadable: {shipped['unreadable'] or 'none'}; "
+        f"mentioning it: {shipped['mentions'] or 'none'}"
+        f"; set ON in: {shipped['files'] or 'none'})"
+    )
 
 
 #: ── The product's declared writer register (#11444) ───────────────────────
@@ -2308,7 +2482,22 @@ def score_rule_bullet() -> Row:
     # the SHIPPED config is where a default actually lives.
     ambient = embed_gate.embed_gate_enabled()
     shipped = flag_in_shipped_configs(embed_gate.ENV_FLAG)
-    on_by_default = ambient or shipped["on"]
+    # ⛔ `#11455`: the clause is the DEPLOYMENT reading, not `shipped["on"]`. The
+    # latter is `True` when ANY shipped surface arms the flag, and on this tree the
+    # only surface that armed it was `.env.example` — a template that reaches a
+    # container only through an `env_file:` the compose file does not declare —
+    # while the surface `docker compose up` DOES use declared nothing. Reading the
+    # any-surface bool published "gate enabled by default: True" over a deployment
+    # path with the gate off, which is the false-PASS class this instrument exists
+    # to prevent (and the reading `#11086` item 4 would have been ticked on).
+    deployment = shipped["deployment"]
+    # ⛔ And the value IS the deployment reading — `ambient` is REPORTED beside it and
+    # deliberately not folded in: a lane's exported flag is not a DEFAULT, which is
+    # why `measure()` pins the switches to an explicit OFF before scoring (`#10996`).
+    # An `ambient or …` here would let a shell-armed gate publish `enabled by
+    # default: True` over a shipped deployment that sets nothing — the `#11455`
+    # defect in its other direction.
+    on_by_default = deployment["on"]
     # ⛔ The population a DECLARATION is owed for: every writer the rule never sees,
     # `unresolved_write` AND `ungated` — the same tuple
     # `tests/test_embed_writer_register.py::NEEDS_A_DECLARATION` spells, and the
@@ -2386,6 +2575,7 @@ def score_rule_bullet() -> Row:
     violations_at = ", ".join(
         f"{w}: {'; '.join(why)}" for w, why in sorted(violations.items())
     )
+    gate_note = shipped_default_note(shipped, embed_gate.ENV_FLAG, ambient)
     notes = [
         f"stated: {stated} (predicate in embed_gate: {stated_in_gate}; "
         f"{SEAM} calls it: {seam_wired})",
@@ -2403,14 +2593,7 @@ def score_rule_bullet() -> Row:
            "be admissible, the entry must carry an owning issue `#<n>`, the `reason` must "
            "cite the writer, and a `recognised_producer` claim must be corroborated)"
            if ungated else ""),
-        f"gate enabled by default: {on_by_default} (ambient "
-        f"{embed_gate.ENV_FLAG}={os.environ.get(embed_gate.ENV_FLAG, '')!r}; "
-        f"shipped config surface walked: {len(shipped['surfaces'])} "
-        f"({', '.join(shipped['surfaces'])}); files read: "
-        f"{len(shipped['searched'])}; unreadable: "
-        f"{shipped['unreadable'] or 'none'}; mentioning it: "
-        f"{shipped['mentions'] or 'none'}"
-        f"; set ON in: {shipped['files'] or 'none'})",
+        gate_note,
         # ⛔ A module that will not parse is a HOLE in the measurement, not a
         # zero: its writers — gated or bypassing — are invisible to every row
         # (this tool's own review, P2).
@@ -2462,6 +2645,29 @@ def score_rule_bullet() -> Row:
         notes.append(
             "writer register UNREADABLE or MALFORMED (hold this row at PARTIAL — "
             f"UNMEASURED, never 'nothing declared'): {register_error}"
+        )
+    # ⛔ `#11455`'s two hold notes. The gate clause is held by `not on_by_default`
+    # too, but a hold must NAME its reason: "the gate is off" and "the gate's shipped
+    # default could not be read" are different statements, and reporting either as
+    # the other is the misattribution this file refuses on the register/census side.
+    if not deployment["measured"]:
+        notes.append(
+            "shipped default UNMEASURED (hold this row at PARTIAL — the deployment "
+            "reading covers "
+            f"{deployment['surfaces']}: present {deployment['present'] or 'none'}, "
+            f"unreadable {deployment['unmeasured'] or 'none'}. A surface that could "
+            "not be read is not a surface that is silent, so the gate clause is "
+            "UNMEASURED, never True and never 'the config sets nothing')"
+        )
+    elif not deployment["on"]:
+        notes.append(
+            "shipped default NOT armed for every deployment surface (hold this row "
+            "at PARTIAL — silent deployment surface(s): "
+            f"{deployment['silent']} declare no gate, so a deployment built from "
+            "them runs with the rule off; the surfaces that do arm it "
+            f"({shipped['armed'] or 'none'}) do not deploy the container's "
+            "environment on their own. This is the `#11455` reading: one armed "
+            "TEMPLATE is not a shipped default)"
         )
     if not stated or not shared or not gated:
         verdict = "NOT MET"
