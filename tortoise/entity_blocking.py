@@ -238,8 +238,9 @@ def minhash_signature(key: str) -> tuple[int, ...]:
 def lsh_bands(signature: tuple[int, ...]) -> tuple[tuple[int, int, ...], ...]:
     """LSH bands ``(band_offset, values…)``; a partial trailing band is dropped.
 
-    The first element is the band's byte OFFSET into the signature
-    (``0, 4, 8, …``), **not** a ``0..n-1`` band index: it is ``start`` from the
+    The first element is the band's OFFSET into the signature (an element index
+    ``0, 4, 8, …`` — ``signature`` is a tuple of ints, so this is NOT a byte
+    offset), **not** a ``0..n-1`` band index: it is ``start`` from the
     ``range`` below. Zep's ``_lsh_bands`` returns **bare** bands and its caller
     (``_build_candidate_indexes``) supplies the ``enumerate`` index, so the two
     tables are not interchangeable across libraries — the offset here is
