@@ -3118,6 +3118,12 @@ def _current_entity_priors(sdk, rows: list[dict],
                 facts[(label, nid)] = fact
     out: list[dict] = []
     seen: set[str] = set()
+    #: Rows this pass could not resolve to a fixpoint. They are collected rather
+    #: than raised on, because the failure is known for ONE row and abandoning the
+    #: loop would drop every LATER row too — and a silently-missing prior reads
+    #: downstream as measured absence, which licenses a duplicate for entities that
+    #: have nothing to do with the bad row.
+    unresolved: list[str] = []
     for row in rows:
         rid = str(row.get("id") or "")
         label = labels.get(rid) if rid else None
@@ -3135,16 +3141,12 @@ def _current_entity_priors(sdk, rows: list[dict],
         if hops >= _PRIOR_HOP_BOUND and (facts.get((label, current))
                                           or (None,))[0]:
             # ⛔ The walk did not reach a fixpoint. `apply_entity_merge` hops the
-            # survivor first, so no chain of length >= 2 can be CREATED — a longer
-            # one is a corrupt/legacy record. Emitting `current` here would return
-            # a still-retired carrier (the exact node this guard exists to exclude)
-            # with no marker; the honest answer is cannot-answer, and the rows
-            # already folded travel with it so the caller keeps them.
-            raise _PriorFoldUnresolvable(
-                f"entity prior {rid!r} resolves through >= {_PRIOR_HOP_BOUND} "
-                "resolved_from hops — refusing to return a carrier with no "
-                "fixpoint (#12296 D-1)",
-                folded=list(out), unresolved=[rid])
+            # survivor and re-points the group, so a chain longer than 1 is a
+            # corrupt/legacy record. Emitting `current` here would return a
+            # still-retired carrier (the exact node this guard exists to exclude)
+            # with no marker; the row is withheld and named instead.
+            unresolved.append(rid)
+            continue
         if current in seen:
             continue
         seen.add(current)
@@ -3157,12 +3159,9 @@ def _current_entity_priors(sdk, rows: list[dict],
                 # would be the PRE-HOP carrier, the one thing this guard promises
                 # never to return: S4 would render it as an EXISTING ENTITY and
                 # `link_before_create` would record `found: True … existing
-                # <carrier> — connect, do not re-create`. Cannot-answer, per row.
-                raise _PriorFoldUnresolvable(
-                    f"entity prior {rid!r} resolves onto {current!r}, which is not "
-                    "readable on its label — refusing to return a pre-hop row "
-                    "(#12296 D-1)",
-                    folded=list(out), unresolved=[rid])
+                # <carrier> — connect, do not re-create`.
+                unresolved.append(rid)
+                continue
             # Nothing hopped: the id is in the FTS result but not on its label (a
             # row that vanished between the two reads). Kept AS IT CAME rather than
             # dropped, because a silently-missing prior reads downstream as
@@ -3188,6 +3187,14 @@ def _current_entity_priors(sdk, rows: list[dict],
         out.append({"id": current, "name": str(fact[1]),
                     "kind": "" if fact[2] is None else str(fact[2]),
                     "aliases": aliases})
+    if unresolved:
+        # ONE raise for the whole pass, carrying EVERY row that resolved: the
+        # caller grades the lookup PARTIAL and keeps them (see `search_graph`).
+        raise _PriorFoldUnresolvable(
+            "; ".join(unresolved) + " — could not be resolved to a fixpoint "
+            "(a dangling `resolved_from` or a chain longer than "
+            f"{_PRIOR_HOP_BOUND}); refusing to return a pre-hop row (#12296 D-1)",
+            folded=list(out), unresolved=unresolved)
     return out
 
 
@@ -6037,37 +6044,56 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     alias_name = normalize_entity_name(name)
     kind_folded = str(kind).strip().lower()
 
-    def _mention_hit(e: dict) -> bool:
-        if _norm(e.get("name", "")) == norm_name:
-            return True
+    def _name_hit(e: dict) -> bool:
+        return _norm(e.get("name", "")) == norm_name
+
+    def _alias_hit(e: dict) -> bool:
         aliases = e.get("aliases")
         if isinstance(aliases, str):
             aliases = [aliases]
         if not isinstance(aliases, (list, tuple, set)):
             return False
-        return alias_name in {str(a) for a in aliases if a is not None}
+        # Fold the STORED side too: `aliases` is undeclared-but-writable, so a
+        # caller may have stored `"The Team"` verbatim. Comparing a folded mention
+        # against an unfolded alias would make the one spelling the merge recorded
+        # fail to resolve — the permanent loss this lookup exists to prevent.
+        return alias_name in {normalize_entity_name(a) for a in aliases
+                              if a is not None}
 
-    def _mode_for(e: dict, kind_mode: str) -> str:
-        # The NAME dimension decides `alias`: a spelling only the alias list holds
-        # is not an exact name match, and a record must not claim one that did not
-        # happen. The KIND dimension keeps its own word (`exact` name+kind, `bare`
-        # namespace-folded kind) so no existing reader sees its values change.
-        if _norm(e.get("name", "")) != norm_name:
-            return "alias"
-        return "exact" if kind_mode == "exact" else "bare"
+    def _kind_exact(e: dict) -> bool:
+        return str(e.get("kind", "")).strip().lower() == kind_folded
 
-    exact = [e for e in entities
-             if _mention_hit(e)
-             and str(e.get("kind", "")).strip().lower() == kind_folded]
-    if exact:
-        return exact[0], _mode_for(exact[0], "exact")
     bare = _norm_kind(kind)
-    matches = [e for e in entities
-               if _mention_hit(e)
-               and _norm_kind(e.get("kind", "")) == bare]
-    if len(matches) == 1:
-        return matches[0], _mode_for(matches[0], "bare")
-    if len(matches) > 1:
+
+    def _kind_bare(e: dict) -> bool:
+        return _norm_kind(e.get("kind", "")) == bare
+
+    # ⛔ NAME BEFORE ALIAS, and an alias tie is AMBIGUOUS. `_mention_hit` used to
+    # return one undifferentiated True for both, and the caller took `[0]` — so the
+    # answer depended on candidate ORDER: a row that matched by NAME could lose to
+    # a row that merely carried the spelling as an alias, and two rows claiming the
+    # same alias resolved silently to whichever came first. Either way the claim
+    # was rewritten onto an entity nothing had decided, recorded `band: merge`.
+    # The name rungs keep their old semantics exactly (first-wins on an exact-kind
+    # name hit, unique-or-ambiguous on the bare-form rung); aliases are a strictly
+    # lower rung and must be unique.
+    named_exact = [e for e in entities if _kind_exact(e) and _name_hit(e)]
+    if named_exact:
+        return named_exact[0], "exact"
+    aliased_exact = [e for e in entities if _kind_exact(e) and _alias_hit(e)]
+    if len(aliased_exact) == 1:
+        return aliased_exact[0], "alias"
+    if len(aliased_exact) > 1:
+        return None, "ambiguous"
+    named_bare = [e for e in entities if _kind_bare(e) and _name_hit(e)]
+    if len(named_bare) == 1:
+        return named_bare[0], "bare"
+    if len(named_bare) > 1:
+        return None, "ambiguous"
+    aliased_bare = [e for e in entities if _kind_bare(e) and _alias_hit(e)]
+    if len(aliased_bare) == 1:
+        return aliased_bare[0], "alias"
+    if len(aliased_bare) > 1:
         return None, "ambiguous"
     return None, "none"
 
@@ -6100,7 +6126,7 @@ def _verdict_facts(facts, node_id, mention_name: str = "") -> dict:
     out["mention_is_alias"] = bool(
         mention_name and isinstance(aliases, (list, tuple, set))
         and normalize_entity_name(mention_name) in {
-            str(a) for a in aliases if a is not None})
+            normalize_entity_name(a) for a in aliases if a is not None})
     return out
 
 
@@ -6363,16 +6389,17 @@ def resolve_entities(entity_refs: list[dict], search: dict,
             continue
         ex, mode = _find_existing_entity(existing, name, kind)
         if ex is not None:
-            # #12296: phase 1 binds only on an EXACTLY-equal folded name+kind, so no
-            # name/kind veto can fire here — the one fact that can is `retired`, and
-            # it must: this is D-1's second door. The S3 prior set already folds a
-            # carrier onto its survivor (`_current_entity_priors`), but a `search`
-            # dict built by another caller (a test, `_index_search`, a replayed run)
-            # carries whatever that caller fetched, and binding a mention to a node
-            # a merge retired is the wrong resolution whichever door it came
-            # through. The GROUP-JOIN veto is deliberately NOT applied here: an
-            # exactly-equal spelling is the strongest evidence the tree has, and
-            # `_pair_reviewed`'s own rule already lets an exact re-mention bind.
+            # #12296: phase 1 binds on an exactly-equal folded name+kind OR on an
+            # alias the merge recorded (`mode == "alias"`). The name/kind vetoes
+            # CAN fire on the alias path — the two spellings differ there by more
+            # than separators — so the refusal is not hypothetical; what phase 1
+            # deliberately does NOT apply is `group_join`: an exactly-equal
+            # spelling (or one the survivor's `aliases[]` already records) is the
+            # strongest evidence the tree has, and `_pair_reviewed`'s own rule
+            # already lets an exact re-mention bind. `retired` DOES apply: this is
+            # D-1's second door, because a `search` dict built by another caller (a
+            # test, `_index_search`, a replayed run) carries whatever that caller
+            # fetched.
             cfacts = _verdict_facts(facts, ex.get("id"))
             refusal = _entity_verdict.hard_vetoes(
                 {"name": name, "kind": kind},
@@ -6380,9 +6407,13 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                 {"retired": cfacts.get("retired")})
             if refusal:
                 vetoed[name] = (kind, refusal)
+                # The sentence names what actually fired: the veto codes carry the
+                # rule, and a message that hard-codes "RETIRED carrier" asserts a
+                # retirement on a row that is not retired (measured: an
+                # `identifier_conflict` on the alias path printed exactly that).
                 warnings.append(
-                    f"entity '{name[:60]}' matches a RETIRED carrier "
-                    f"({', '.join(refusal)}) — HELD, not bound (#12296 D-1)")
+                    f"entity '{name[:60]}' matches a candidate the verdict "
+                    f"refused ({', '.join(refusal)}) — HELD, not bound (#12296)")
                 continue
             resolved[name] = {"id": str(ex.get("id") or ""),
                               "name": str(ex.get("name") or name)}

@@ -155,8 +155,8 @@ not a shared threshold — precision needs hard rule-based vetoes"*
 
 | veto | tests | why it is safe |
 |---|---|---|
-| `identifier_conflict` | both sides carry identifier-shaped tokens, the sets are disjoint, **and the two names are otherwise identical** (`billing v2 ledger` / `billing v3 ledger`) | the skeleton equality (`entity_verdict.skeleton`) is what keeps it from firing on `basename-only` variants of a path — measured, `tortoise/sdk.py` → `sdk.py` fired without it. Separator/case folding means the `#8933` class (`ERR-4032` ≡ `err4032`) never fires. A `#`-prefixed reference (`#11901`) is an identifier: it is the corpus's dominant spelling and the hash form is not a bare number, so `#11901 plan` / `#11905 plan` veto |
-| `date_conflict` | both sides carry date tokens, values are disjoint **for a shared kind**, names otherwise identical (`the Q3 plan` / `the Q4 plan`) | per-kind comparison: `Q3 plan` vs `2026 plan` is not a contradiction and those two spellings can name one entity. A `YYYY-MM` month is its own kind, so `2026-11 report` / `2026-12 report` reports a DATE conflict — the rule that fired — rather than being reported as an identifier one |
+| `identifier_conflict` | both sides carry identifier-shaped tokens, the sets are disjoint, **and the two names are otherwise identical** (`billing v2 ledger` / `billing v3 ledger`) — "identical" after the tree's own fold, so a leading article (`the billing v3 ledger`) does not defeat it | the skeleton equality (`entity_verdict.skeleton`) is what keeps it from firing on `basename-only` variants of a path — measured, `tortoise/sdk.py` → `sdk.py` fired without it. Separator/case folding means the `#8933` class (`ERR-4032` ≡ `err4032`) never fires. A `#`-prefixed reference (`#11901`) is an identifier: it is the corpus's dominant spelling and the hash form is not a bare number, so `#11901 plan` / `#11905 plan` veto |
+| `date_conflict` | both sides carry date tokens, values are disjoint **for a shared kind**, names otherwise identical (`the Q3 plan` / `the Q4 plan`) | per-kind comparison: `Q3 plan` vs `2026 plan` is not a contradiction and those two spellings can name one entity. Temporal compounds (`YYYY-MM`, `YYYY-MM-DD`, `YYYY-Qn`, `Qn-YYYY`) are their own kinds and are excluded from the identifier class, so a date disagreement is reported as a DATE conflict — the rule that fired — rather than under `identifier_conflict` |
 | `kind_conflict` | both sides declare a SPECIFIC kind and they differ | `other`/empty is the write-time coalesce default (`projection/entities.py:5086`) and is treated as *unknown*, never as a value; so is `unclassified`, the #1695 classify-later SENTINEL the S2 prompt instructs the model to emit and `execute_embed` repairs later — treated as a declared kind it conflicts with every real kind and vetoes every merge in classify-later mode. The comparison is on the BARE kind (`extractor_v2._norm_kind`), so `core:person` vs `ops:person` is not a conflict — the namespace is an emission-time spelling |
 | `target_suppressed` | the candidate carries a `reject` that named no survivor | `_pair_reviewed`'s documented case (`entity_resolver.py:236-250`): the reviewer answered, against an ambiguous set, and re-asking against one survivor is not a different question |
 | `target_retired` | the candidate carries `resolved_from` | D-1 at the candidate-table layer — the belt to `_current_entity_priors`' braces, for any caller that built the table another way |
@@ -169,7 +169,7 @@ spelling into the survivor's `aliases[]`, and the by-name resolver reads
 spelling's membership is *recorded*, not inferred, and no group-level comparison
 is being skipped. Without the escape, every later re-mention of an already-folded
 variant is refused **on every run for the lifetime of the merge**, and an entity
-hold is **not carried forward** (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch (~`:12156`)), so the mention is
+hold is **not carried forward** (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch, `extractor_v2.py:12267`)), so the mention is
 dropped rather than queued. Pinned by
 `test_a_repeat_mention_of_a_folded_alias_merges_instead_of_being_lost`.
 
@@ -186,15 +186,28 @@ name-only mention has no node, so only the target-less form (`target_suppressed`
 is evaluable here; the targeted form is honoured by the merge verb
 (`sdk.py:24861-24879`). Stated rather than approximated.
 
-**Phase 1 keeps exactly one veto** (`target_retired`). Phase 1 binds only on an
-exactly-equal folded name+kind, so no name/kind veto can fire by construction, and
-`group_join` must NOT: an exactly-equal spelling is the strongest evidence the
-tree has, and the merge queue's own rule lets an exact re-mention bind.
+**Phase 1 applies `target_retired` — and, on the alias path, the name/kind vetoes
+too.** It binds on an exactly-equal folded name+kind *or* on a spelling the
+survivor's `aliases[]` already records (`mode: "alias"`), and on that second path
+the two spellings differ by more than separators, so `identifier_conflict` /
+`date_conflict` / `kind_conflict` are reachable there (the warning names the codes
+that actually fired, never a retirement that did not happen). `group_join` is
+deliberately NOT applied in phase 1: an exactly-equal spelling, or one the merge
+recorded as an alias, is the strongest evidence the tree has, and the merge
+queue's own rule lets an exact re-mention bind.
+
+Name hits outrank alias hits, and an alias tie is `ambiguous` — the reverse (one
+undifferentiated "matched" answer plus `[0]`) made the answer depend on candidate
+ORDER: a row that matched by NAME could lose to one that merely carried the
+spelling as an alias, and two rows claiming the same alias resolved silently to
+whichever the ranking put first, with the claim rewritten onto it and recorded
+`band: merge`.
 
 `facts` reaches both phases through `_verdict_facts`, which adds
 `mention_is_alias` from the candidate's `aliases[]` and the mention's own
-`normalize_entity_name` fold — the same fold the alias was written with, so the
-two cannot disagree about a spelling.
+`normalize_entity_name` fold — and folds the STORED alias too, because `aliases`
+is writable by any caller and a stored `"The Team"` must not be a spelling
+nothing answers.
 
 ---
 

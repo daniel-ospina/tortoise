@@ -849,13 +849,10 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     # that is already retired would write `fixpoint -> survivor` on top of the
     # existing hop. The fixpoint is the entity; the caller's id is stale.
     candidate_fixpoint, candidate_hops = _survivor_fixpoint(graph, candidate_id)
-    if candidate_hops:
+    if candidate_hops or str(candidate_fixpoint) != str(candidate_id):
         raise ValueError(
             f"a merge needs a LIVE candidate — {candidate_id!r} was already "
             f"retired and resolves onto {candidate_fixpoint!r}")
-    if str(candidate_fixpoint) != str(candidate_id):
-        raise ValueError(
-            f"candidate {candidate_id!r} resolved onto {candidate_fixpoint!r}")
     # LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id` (this module's own
     # rule — an unlabelled id probe full-scans every label in the graph, and
     # `id` is a natural key on exactly two of them).

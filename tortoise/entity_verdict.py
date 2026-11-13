@@ -225,7 +225,12 @@ _TOKEN_OR_HASH = re.compile(r"#\d{2,}|[A-Za-z0-9][A-Za-z0-9._\-/]*")
 #: compounds. Excluded from identifiers (they are temporal) and compared by
 #: `date_tokens`, so `2026-11 report` / `2026-12 report` reports `date_conflict` —
 #: the rule that actually fired — instead of `identifier_conflict`.
-_YEAR_MONTH_RAW = re.compile(r"^(?:1[89]\d\d|2\d\d\d)[-/](?:0[1-9]|1[0-2]|q[1-4])$")
+_YEAR_MONTH_RAW = re.compile(
+    r"^(?:1[89]\d\d|2\d\d\d)[-/](?:0?[1-9]|1[0-2]|q[1-4])$")
+#: A full `YYYY-MM-DD` / `YYYY/MM/DD`. Same rule: temporal, not an identifier, so
+#: two different dates are reported under the date rule that fired.
+_YEAR_MONTH_DAY_RAW = re.compile(
+    r"^(?:1[89]\d\d|2\d\d\d)[-/](?:0?[1-9]|1[0-2])[-/](?:0?[1-9]|[12]\d|3[01])$")
 #: The quarter-first spelling of the same compound (`Q3-2026`).
 _QUARTER_YEAR_RAW = re.compile(r"^q[1-4][-/](?:1[89]\d\d|2\d\d\d)$")
 
@@ -241,7 +246,8 @@ def _temporal_compound(tok: str) -> bool:
     """
     folded = str(tok or "").casefold()
     return bool(_YEAR_MONTH_RAW.match(folded)
-                or _QUARTER_YEAR_RAW.match(folded))
+                or _QUARTER_YEAR_RAW.match(folded)
+                or _YEAR_MONTH_DAY_RAW.match(folded))
 _YEAR = re.compile(r"\b(1[89]\d\d|2\d\d\d)\b")
 _QUARTER = re.compile(r"\bq([1-4])\b")
 #: Tokens that LOOK identifier-shaped (letter+digit) but are temporal, so they
@@ -250,6 +256,9 @@ _QUARTER = re.compile(r"\bq([1-4])\b")
 #: reached by the wrong reason, and a record whose reason names the wrong rule is
 #: worse than no record.
 _TEMPORAL_TOKENS = re.compile(r"^(q[1-4]|1[89]\d\d|2\d\d\d)$")
+#: Leading articles dropped from a `skeleton`, so the skeleton-equality
+#: precondition sees the same name `normalize_entity_name` treats as identical.
+_ARTICLES = frozenset({"the", "a", "an"})
 _MONTHS = {
     name: idx
     for idx, name in enumerate(
@@ -276,13 +285,16 @@ def identifier_tokens(name: str) -> set[str]:
     """Identifier-shaped tokens in ``name``, separator- and case-folded.
 
     A token qualifies when it carries a DIGIT **and** (a letter or a separator) —
-    so `ERR-4032`, `v2`, `2026-11`, `abc123` and `v2.1` qualify, while `4032`,
-    `billing` and `the` do not. A `#`-prefixed reference (`#11901`) qualifies too,
-    folded onto its digits: the hash form is identifier-shaped, while the bare
-    digits are a quantity or a date. Folding drops separators and case, which is
-    what makes `ERR-4032` and `err4032` the SAME identifier: the #8933 separator
-    class is a *variant* class, and a veto that fired across it would refuse
-    exactly the merges the fold exists to enable.
+    so `ERR-4032`, `v2`, `abc123` and `v2.1` qualify, while `4032`, `billing` and
+    `the` do not. A `#`-prefixed reference (`#11901`) qualifies too, folded onto
+    its digits: the hash form is identifier-shaped, while the bare digits are a
+    quantity or a date. ⛔ A DATE never qualifies — `2026-11`, `2026-11-12`,
+    `2026-Q3` and `Q3-2026` are excluded here and compared by `date_tokens`, so a
+    date disagreement is recorded under the date rule that fired instead of under
+    this one. Folding drops separators and case, which is what makes `ERR-4032`
+    and `err4032` the SAME identifier: the #8933 separator class is a *variant*
+    class, and a veto that fired across it would refuse exactly the merges the
+    fold exists to enable.
     """
     out: set[str] = set()
     text = str(name or "")
@@ -336,11 +348,17 @@ def date_tokens(name: str) -> dict[str, set[str]]:
     if year_months:
         out["year_month"] = {tok.replace("/", "-") for tok in year_months}
     quarter_years = {tok for tok in _TOKEN.findall(str(name or ""))
-                     if _QUARTER_YEAR_RAW.match(tok)}
+                     if _QUARTER_YEAR_RAW.match(tok.casefold())}
     if quarter_years:
         out["year_quarter"] = out.get("year_quarter", set()) | {
-            "-".join(reversed(tok.replace("/", "-").split("-")))
+            "-".join(reversed(tok.casefold().replace("/", "-").split("-")))
             for tok in quarter_years}
+    full_dates = {tok for tok in _TOKEN.findall(str(name or ""))
+                  if _YEAR_MONTH_DAY_RAW.match(tok.casefold())}
+    if full_dates:
+        # Its own kind: `2026-11-12` against `2026-12-12` contradicts, while a full
+        # date against a bare month states LESS and contradicts nothing.
+        out["date"] = {tok.casefold().replace("/", "-") for tok in full_dates}
     if years and quarters:
         out["year_quarter"] = {f"{y}-{q}" for y in years for q in quarters}
     return out
@@ -382,6 +400,14 @@ def skeleton(
             out.append("<date>")
         else:
             out.append(folded)
+    # ⛔ A leading ARTICLE is not part of the skeleton (#11901's `article-drop`
+    # class, and the same fold `normalize_entity_name` applies for identity).
+    # Kept, it made the skeleton-equality precondition fail on the corpus's
+    # dominant variant class, so BOTH vetoes went silent exactly where they were
+    # needed: `billing v2 ledger` vs `the billing v3 ledger` merged, and so did
+    # `the Q3 plan` vs `Q4 plan`, `#11901 plan` vs `the #11905 plan`.
+    if out and out[0] in _ARTICLES:
+        out = out[1:]
     return tuple(out)
 
 
@@ -446,7 +472,8 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
     if skeleton(mention.get("name", ""), replace_dates=True) == skeleton(
         candidate.get("name", ""), replace_dates=True
     ):
-        for kind in ("year_quarter", "year", "quarter", "month", "year_month"):
+        for kind in ("year_quarter", "year", "quarter", "month", "year_month",
+                     "date"):
             mine, theirs = m_dates.get(kind), c_dates.get(kind)
             if mine and theirs and not (mine & theirs):
                 got.append(VETO_DATE_CONFLICT)

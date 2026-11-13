@@ -228,11 +228,19 @@ class TestThePriorSetNeverCarriesARetiredNode:
         rows = [{"id": "obj-good", "name": "the ledger", "kind": ""},
                 {"id": "obj-c0", "name": "link 0", "kind": ""}]
         with pytest.raises(v2._PriorFoldUnresolvable,
-                           match="resolved_from hops") as exc:
+                           match="could not be resolved to a fixpoint") as exc:
             v2._current_entity_priors(
                 sdk, rows, {"obj-good": "Object", "obj-c0": "Object"})
         assert [r["id"] for r in exc.value.folded] == ["obj-good"], exc.value
         assert exc.value.unresolved == ["obj-c0"]
+        # The bad row FIRST must not cost the good row after it: the refusal is
+        # collected, not raised mid-loop (a lost prior reads as measured absence).
+        with pytest.raises(v2._PriorFoldUnresolvable) as exc2:
+            v2._current_entity_priors(
+                sdk, list(reversed(rows)),
+                {"obj-good": "Object", "obj-c0": "Object"})
+        assert [r["id"] for r in exc2.value.folded] == ["obj-good"], exc2.value
+        assert exc2.value.unresolved == ["obj-c0"]
 
     def test_a_dangling_resolved_from_is_cannot_answer_not_a_pre_hop_row(
             self, sdk_factory):
@@ -401,6 +409,31 @@ class TestHardVetoes:
                              {"name": "2026 report", "kind": "k"})[
                                  "vetoes"] == []
 
+    def test_a_leading_article_does_not_defeat_the_veto(self):
+        """`article-drop` is the corpus's dominant variant class — and the tree's
+        own fold (`normalize_entity_name`) treats the article as noise, so keeping
+        it in `skeleton` made both vetoes silent exactly where they matter.
+        """
+        for a, b, code in (
+            ("billing v2 ledger", "the billing v3 ledger",
+             verdict.VETO_IDENTIFIER_CONFLICT),
+            ("ERR-4032 handler", "the ERR-4033 handler",
+             verdict.VETO_IDENTIFIER_CONFLICT),
+            ("#11901 plan", "the #11905 plan",
+             verdict.VETO_IDENTIFIER_CONFLICT),
+            ("the Q3 plan", "Q4 plan", verdict.VETO_DATE_CONFLICT),
+            ("2026-11 report", "the 2026-12 report",
+             verdict.VETO_DATE_CONFLICT),
+        ):
+            out = verdict.judge({"name": a, "kind": "k"},
+                                {"name": b, "kind": "k"})
+            assert out["vetoes"] == [code], (a, b, out)
+
+    def test_a_full_date_is_a_DATE_not_an_identifier(self):
+        out = verdict.judge({"name": "2026-11-12 weekly report", "kind": "k"},
+                            {"name": "2026-12-12 weekly report", "kind": "k"})
+        assert out["vetoes"] == [verdict.VETO_DATE_CONFLICT], out
+
     def test_a_year_quarter_compound_is_a_DATE_not_an_identifier(self):
         """`2026-Q3` is one token and it is a date.
 
@@ -438,7 +471,7 @@ class TestHardVetoes:
         AS a resolution (`entity_resolver.py:611`) — so this spelling's membership
         is RECORDED, not inferred, and no group-level comparison is being skipped.
         Refusing it is not merely conservative: an ENTITY hold is not carried
-        forward (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch (~`:12156`)), so the mention is dropped on
+        forward (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch, `extractor_v2.py:12267`)), so the mention is dropped on
         every run for the lifetime of the merge.
         """
         mention = {"name": "the team", "kind": "k"}
@@ -745,6 +778,50 @@ class TestTheResolverBands:
         assert res["map"] == {}, res
         assert [h["reason"] for h in res["held"]] == [v2.HOLD_VETOED]
         assert res["held"][0]["vetoes"] == [verdict.VETO_TARGET_RETIRED]
+
+    def test_a_name_match_beats_an_alias_match_and_two_aliases_are_ambiguous(self):
+        """Phase 1 must not depend on candidate ORDER.
+
+        Every folded prior row now carries `aliases`, so a live merge survivor
+        competes with an exact-name row for the same spelling. One undifferentiated
+        "matched" answer plus `[0]` meant the winner was whichever row the FTS
+        ranking put first — and the claim was then rewritten onto it, recorded
+        `band: merge`. A name hit wins; an alias tie is AMBIGUOUS.
+        """
+        rows = [
+            {"id": "A", "name": "Acme Holdings", "kind": "core:org",
+             "aliases": ["team"]},
+            {"id": "B", "name": "the team", "kind": "core:org"},
+        ]
+        hit, mode = v2._find_existing_entity(rows, "the team", "core:org")
+        assert (hit["id"], mode) == ("B", "exact"), (hit, mode)
+        hit, mode = v2._find_existing_entity(list(reversed(rows)),
+                                             "the team", "core:org")
+        assert (hit["id"], mode) == ("B", "exact"), (hit, mode)
+        # Two DIFFERENT rows claiming the spelling as an alias is not a decision
+        # this layer may make.
+        rivals = [
+            {"id": "A", "name": "Acme Holdings", "kind": "core:org",
+             "aliases": ["team"]},
+            {"id": "C", "name": "Beta Corp", "kind": "core:org",
+             "aliases": ["team"]},
+        ]
+        assert v2._find_existing_entity(rivals, "the team", "core:org") == (
+            None, "ambiguous")
+
+    def test_an_unfolded_stored_alias_still_resolves(self):
+        """`aliases` is undeclared-but-writable, so the stored side must be folded
+        too — otherwise `"The Team"` is a spelling nothing resolves and the mention
+        is held-and-dropped, exactly the loss the alias escape exists to prevent.
+        """
+        rows = [{"id": "A", "name": "Acme Holdings", "kind": "core:org",
+                 "aliases": ["The Team"]}]
+        hit, mode = v2._find_existing_entity(rows, "the team", "core:org")
+        assert (hit["id"], mode) == ("A", "alias"), (hit, mode)
+        facts = {"A": {"retired": False, "dependents": 2,
+                       "suppressed": False, "aliases": ["The Team"]}}
+        derived = v2._verdict_facts(facts, "A", "the team")
+        assert derived["mention_is_alias"] is True, derived
 
     def test_the_orchestrator_passes_the_facts_reader_output_to_the_resolver(
             self, monkeypatch):
