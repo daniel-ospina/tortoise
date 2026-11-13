@@ -1301,9 +1301,15 @@ def _exact_subject_ref_ids(proj, ref: str) -> list:
     space, params = name_key_space_same_entity("s", ref)
     if not space:
         return []
-    return proj.g.query(
+    # ⛔ FLATTENED to ids (review round 25): this returned the query's raw
+    # `result_set` — one `[id]` ROW per holder — while its name, its `-> list`
+    # annotation and its docstring all promise *ids*. The only caller today uses it
+    # as a boolean, so nothing was wrong yet; the next caller that iterates or sets
+    # it would get a list of one-element lists (`unhashable type: 'list'`). The
+    # siblings (`_live_holders_same_entity`) already flatten.
+    return [r[0] for r in proj.g.query(
         f"MATCH (s:Subject) WHERE {space} AND s.name = $ref RETURN s.id",
-        params={**params, "ref": ref}).result_set
+        params={**params, "ref": ref}).result_set if r and r[0]]
 
 
 def _subject_family_holds_ref(proj, ref: str) -> bool:
@@ -1552,13 +1558,34 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
                    for r in _matched_subj if len(r) > 4)):
                 return False
             if _matched_subj:
+                # ⛔ Same ENTITY-COUNT classification as the Object twin below
+                # (review round 25): `unaddressable-name` tells a repair consumer
+                # to fix ONE dangling pointer, which is true only when the matched
+                # carriers are carriers of ONE entity. Two distinct entities with
+                # dangling pointers keep `main`'s `ambiguous-name` record — the
+                # rule `_ref_is_one_gone_entity` states for the sibling arm
+                # (round 17) and `test_an_id_less_holder_is_not_a_gone_entity`
+                # pins. Answering both shapes alike was the round-23 mis-classification.
+                if not _matched_is_one_entity:
+                    record_non_folded(
+                        "Subject", ref,
+                        display_holder_ids(
+                            [r[1] for r in _matched_subj if r[1]]),
+                        shape="ambiguous-name")
+                    warn(f"subject supersession {ref!r} matches "
+                         f"{len({_k for _rep, _k, _m in _subj_raw})} Subject "
+                         f"entities by name, none addressable — skipped "
+                         f"(never-guess)")
+                    _skip(ref, supersedes_by, "ambiguous subject name")
+                    return False
                 record_non_folded(
                     "Subject", ref,
                     display_holder_ids([r[1] for r in _matched_subj if r[1]]),
                     shape="unaddressable-name")
                 warn(f"subject supersession {ref!r} matched "
-                     f"{len(_matched_subj)} Subject carrier(s) whose merged "
-                     f"survivor is gone — skipped (no addressable carrier)")
+                     f"{len(_matched_subj)} Subject carrier(s) of ONE entity "
+                     f"whose merged survivor is gone — skipped "
+                     f"(no addressable carrier)")
                 _skip(ref, supersedes_by, "ref carrier's survivor is gone")
                 return False
             warn(f"subject supersession {ref!r} not found in the graph as "
@@ -2112,6 +2139,30 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                                             candidate_names=_sb_carrier_spellings)
                             for r in _name_rows)):
                 continue
+            # ⛔ The DURABLE SHAPE is classified by ENTITY COUNT, not chosen here
+            # (review round 25): the `not by_name` arm is reached by shapes the
+            # `by_name > 1` arm above classifies two different ways, and answering
+            # both with `unaddressable-name` told a repair consumer to fix ONE
+            # dangling pointer where the graph holds two entities — the exact
+            # downgrade `_ref_is_one_gone_entity` was written to prevent (round 17:
+            # "two distinct entities with dangling pointers must keep `main`'s
+            # `ambiguous-name` record rather than be reported as one repairable
+            # entity"). `main` refuses this shape with `ambiguous object name`
+            # (`by_name = [r for r in rows if r[1] == ref]; len(by_name) > 1`), and
+            # `test_an_id_less_holder_is_not_a_gone_entity` already pins that rule
+            # on the sibling arm — so the `_name_is_one_entity` test decides the
+            # shape HERE too, rather than gating only the silent-dedup `continue`.
+            if not _name_is_one_entity:
+                record_non_folded(
+                    "Object", ref,
+                    display_holder_ids([r[1] for r in _name_rows if r[1]]),
+                    shape="ambiguous-name")
+                warn(f"supersession ref {ref!r} matches "
+                     f"{len({_k for _rep, _k, _m in _name_entities})} Object "
+                     f"entities by name, none addressable — skipped "
+                     f"(never-guess)")
+                _skip(ref, supersedes_by, "ambiguous object name")
+                continue
             # The entry is the record (review round 18): both twin refusals
             # (`unaddressable-name` on the Subject lane and on the Object id arm)
             # write one, so a warn + `_skip` alone was invisible to the repair
@@ -2121,8 +2172,8 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                 display_holder_ids([r[1] for r in _name_rows if r[1]]),
                 shape="unaddressable-name")
             warn(f"supersession ref {ref!r} matched {len(_name_rows)} "
-                 f"Object(s) whose merged survivor is gone, and no :Subject "
-                 f"holds the ref — skipped (no addressable carrier)")
+                 f"Object(s) of ONE entity whose merged survivor is gone, and no "
+                 f":Subject holds the ref — skipped (no addressable carrier)")
             _skip(ref, supersedes_by, "ref carrier's survivor is gone")
             continue
         if not rows and not _name_arm_rows:

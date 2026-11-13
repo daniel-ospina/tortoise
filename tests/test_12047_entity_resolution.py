@@ -5306,13 +5306,28 @@ class TestThe12120ReviewRound21:
                 "CREATE (b:Object {id:'r21-b', name:'Shared Co', "
                 "objectKind:'document', status:'superseded', "
                 "supersededBy:'Other Co', resolved_from:'r21-gone-2'})")
+            from tortoise.entity_identity import (
+                clear_non_folded_entries,
+                non_folded_entries,
+            )
+            clear_non_folded_entries()
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Shared Co", "supersedes_by": "New Co",
                  "evidence": "r21"}])
             assert applied == 0, (applied, skips, msgs)
-            assert skips, (
-                "one unrelated dangling incarnation absorbed a genuine "
-                f"divergence silently: {skips!r} {msgs!r}")
+            # The CLASSIFICATION, not just truthiness (review round 25): two
+            # DISTINCT entities (`r21-gone-1` / `r21-gone-2`, i.e. two group keys)
+            # are `main`'s never-guess shape (`len(by_name) > 1` →
+            # `ambiguous object name`), NOT the one-gone-entity shape
+            # `_ref_is_one_gone_entity` answers with `unaddressable-name`. The
+            # truthiness assertion this test shipped with accepted both, which is
+            # how the downgrade survived a round.
+            assert [s_["reason"] for s_ in skips] == [
+                "ambiguous object name"], skips
+            shapes = [e.shape for e in non_folded_entries()
+                      if getattr(e, "name", None) == "Shared Co"]
+            assert shapes == ["ambiguous-name"], (
+                f"two entities must keep main's ambiguous-name record: {shapes}")
         finally:
             sdk.close()
 
@@ -5429,14 +5444,151 @@ class TestThe12120ReviewRound22SubjectTwin:
                 {"superseded": "Shared Team", "supersedes_by": "New Team",
                  "evidence": "r22s"}])
             assert applied == 0, (applied, skips, msgs)
-            # The CLASSIFICATION, not just truthiness (review round 23): this arm
-            # must report the dangling survivor, never `ambiguous subject name` —
-            # which writes a durable `shape='ambiguous-name'` entry telling a
-            # repair consumer to merge a pair the merge already made (round 17).
+            # ⛔ CORRECTED (review round 25): this arm is classified by ENTITY
+            # COUNT. Round 23 pinned `unaddressable-name` here on the argument that
+            # `ambiguous-name` tells a repair consumer to merge a pair the merge
+            # already made — that argument is true of ONE entity with two carriers
+            # (round 22's shape) and false of THIS fixture, which is two distinct
+            # entities (`r22s-gone-1` / `r22s-gone-2` = two group keys) that no
+            # merge ever joined. `main` refuses two name-matching carriers with
+            # `ambiguous subject name`, `_ref_is_one_gone_entity`'s docstring states
+            # the rule for the sibling arm (round 17), and
+            # `test_an_id_less_holder_is_not_a_gone_entity` pins it — so the pin
+            # below is the corrected classification, and the one-entity direction is
+            # pinned by `TestThe12120ReviewRound25`.
             assert [s_["reason"] for s_ in skips] == [
-                "ref carrier's survivor is gone"], skips
+                "ambiguous subject name"], skips
+            shapes = [e.shape for e in non_folded_entries()
+                      if getattr(e, "name", None) == "Shared Team"]
+            assert shapes == ["ambiguous-name"], shapes
+        finally:
+            sdk.close()
+
+
+class TestThe12120ReviewRound25:
+    """The `not by_name` refusal's SHAPE is classified by ENTITY COUNT (round 25).
+
+    Both families reach a report arm when every carrier the widened ref probe
+    matched was dropped by `_ref_candidates` (terminal, under a survivor node that
+    no longer exists). That arm answers two DIFFERENT graphs, and it answered both
+    with `unaddressable-name` — the one-gone-entity classification — which tells a
+    repair consumer to fix ONE dangling pointer. `main` distinguishes them
+    (`by_name = [r for r in rows if r[1] == ref]; len(by_name) > 1` →
+    `ambiguous-name`), `_ref_is_one_gone_entity`'s docstring states the rule for the
+    sibling arm (round 17), and `test_an_id_less_holder_is_not_a_gone_entity` pins
+    it. The two-entity direction is pinned by `TestThe12120ReviewRound21` (Object)
+    and `TestThe12120ReviewRound22SubjectTwin` (Subject); the ONE-entity direction
+    on this arm was pinned nowhere, so it is pinned here — otherwise the fix could
+    be "completed" by flipping both shapes and dropping the `unaddressable-name`
+    report the round-17 test demands.
+    """
+
+    @staticmethod
+    def _apply(sdk, records, suffix):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id=suffix,
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_two_terminal_carriers_of_one_object_entity_report_the_pointer(
+            self, sdk_factory):
+        from tortoise.entity_identity import (
+            clear_non_folded_entries,
+            non_folded_entries,
+        )
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("New Co", "document")
+            # ONE entity: both carriers name the SAME gone survivor. The successor
+            # is deliberately different from the one either carrier stores, so the
+            # silent-dedup `continue` cannot swallow the record and the report arm
+            # decides.
+            g.query(
+                "CREATE (a:Object {id:'r24-a', name:'Shared Co', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Other Co', resolved_from:'r24-gone'}) "
+                "CREATE (b:Object {id:'r24-b', name:'shared co', "
+                "objectKind:'document', canonical_name:'shared co', "
+                "status:'superseded', supersededBy:'Third Co', "
+                "resolved_from:'r24-gone'})")
+            clear_non_folded_entries()
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Shared Co", "supersedes_by": "New Co",
+                 "evidence": "r24"}], "s-12120-r24o")
+            assert applied == 0, (applied, skips, msgs)
+            assert [s_["reason"] for s_ in skips] == [
+                "ref carrier's survivor is gone"], (
+                "one entity's two carriers are the dangling-pointer shape, not "
+                f"the duplicate-name shape: {skips!r} {msgs!r}")
+            shapes = [e.shape for e in non_folded_entries()
+                      if getattr(e, "name", None) == "Shared Co"]
+            assert shapes == ["unaddressable-name"], (
+                f"one entity must keep the dangling-pointer record: {shapes}")
+        finally:
+            sdk.close()
+
+    def test_two_terminal_carriers_of_one_subject_entity_report_the_pointer(
+            self, sdk_factory):
+        from tortoise.entity_identity import (
+            clear_non_folded_entries,
+            non_folded_entries,
+        )
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_subject("New Team", "organization")
+            g.query(
+                "CREATE (a:Subject {id:'r24s-a', name:'Shared Team', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'Other Team', resolved_from:'r24s-gone'}) "
+                "CREATE (b:Subject {id:'r24s-b', name:'shared team', "
+                "canonical_name:'shared team', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'Third Team', resolved_from:'r24s-gone'})")
+            clear_non_folded_entries()
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Shared Team", "supersedes_by": "New Team",
+                 "evidence": "r24s"}], "s-12120-r24s")
+            assert applied == 0, (applied, skips, msgs)
+            assert [s_["reason"] for s_ in skips] == [
+                "ref carrier's survivor is gone"], (
+                "one Subject entity's two carriers are the dangling-pointer "
+                f"shape: {skips!r} {msgs!r}")
             shapes = [e.shape for e in non_folded_entries()
                       if getattr(e, "name", None) == "Shared Team"]
             assert shapes == ["unaddressable-name"], shapes
+        finally:
+            sdk.close()
+
+    def test_the_exact_subject_ref_helper_returns_ids_not_rows(self, sdk_factory):
+        """`_exact_subject_ref_ids` promises IDs and used to return result ROWS.
+
+        Its only caller reads it as a boolean, so the mismatch was latent — the
+        next caller that iterates or sets the answer gets one-element lists
+        (`unhashable type: 'list'`) from a helper whose name, annotation and
+        docstring all say ids. Pinned by returning the value into a `set`, which
+        is the operation the docstring promises is safe (review round 25).
+        """
+        from tortoise.commit_ops import _exact_subject_ref_ids
+
+        sdk = sdk_factory()
+        try:
+            created = []
+            for _kind in ("organization", "organization"):
+                c = sdk.create_subject("Exact Co", _kind)
+                created.append(c.get("id") if isinstance(c, dict) else c)
+            assert all(isinstance(_i, str) and _i for _i in created), created
+            ids = _exact_subject_ref_ids(sdk._get_proj(), "Exact Co")
+            assert set(ids) == set(created), (
+                "the helper must answer ids, not `[id]` rows: "
+                f"{ids!r} (created {created!r})")
         finally:
             sdk.close()
