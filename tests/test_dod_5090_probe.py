@@ -3009,7 +3009,7 @@ def test_a_shell_indirection_is_UNMEASURED_never_silent(tmp_path, monkeypatch):
     assert shipped["indeterminate"], shipped
     note = _gate_note(shipped)
     assert "gate enabled by default: UNMEASURED" in note, note
-    assert "could not be RESOLVED" in note, note
+    assert "cannot RESOLVE" in note, note
     assert "indeterminate assignments: [" in note, note
 
 
@@ -3213,7 +3213,7 @@ def test_an_UNDETERMINED_assignment_is_named_as_unresolved_not_unreadable(
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     note = _gate_note(shipped)
-    assert "could not be RESOLVED" in note, note
+    assert "cannot RESOLVE" in note, note
     assert "UNREADABLE deployment file(s)" not in note, note
     assert "unreadable: none" in note, note
 
@@ -3726,6 +3726,15 @@ _UNSET_SHAPES = [
     ("export TORTOISE_EMBED_GATE=1\nunset -f TORTOISE_EMBED_GATE\n", "ON", "-f is a function"),
     ("export TORTOISE_EMBED_GATE=1\nunset -n TORTOISE_EMBED_GATE\n", "ON", "-n is a nameref"),
     # …CONTROLS: another name, a longer name the flag PREFIXES, and a non-builtin word.
+    # ⛔ An OPERATOR glued to the last name (`unset FLAG;`, `unset FLAG|cmd`) was split on
+    # whitespace only, so `FLAG;` matched nothing and the earlier arm stood — fail-OPEN,
+    # and inconsistent with the SPACED ` ;` which read correctly (fresh review PR #12474, P3).
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE;\n", "OFF", "glued ;"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE; exec python -m x\n", "OFF",
+     "glued ; then a command"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE|cat\n", "OFF", "glued |"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE 2>/dev/null\n", "OFF",
+     "redirect"),
     ("export TORTOISE_EMBED_GATE=1\nunset OTHER_VAR\n", "ON", "a different name"),
     ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE_EXTRA\n", "ON", "a PREFIX"),
     ("export TORTOISE_EMBED_GATE=1\nunsetfv TORTOISE_EMBED_GATE\n", "ON", "not an unset"),
@@ -3791,7 +3800,10 @@ def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, mon
                for entry in shipped["unset_declarations"]), shipped["unset_declarations"]
     assert not shipped["disarming_assignments"], shipped["disarming_assignments"]
 
-    # …and the reverse order leaves the arm standing.
+    # …and the reverse order leaves the arm standing — and the unset line is claimed ONCE.
+    # ⛔ It used to appear in BOTH lists here, the second time under a heading that calls an
+    # `unset` "a value that OVERRIDES it OFF" — false about it, and no longer even the
+    # direction the file ends in (fresh review of PR #12474, P2, measured).
     (tmp_path / "docker-compose.yml").write_text(
         "services:\n  tortoise:\n    environment:\n"
         "      - TORTOISE_EMBED_GATE\n"
@@ -3799,6 +3811,8 @@ def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, mon
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["per_surface"]["docker-compose.yml"]["state"] == "ON", (
         shipped["per_surface"]["docker-compose.yml"])
+    assert len(shipped["unset_declarations"]) == 1, shipped["unset_declarations"]
+    assert not shipped["disarming_assignments"], shipped["disarming_assignments"]
 
 
 def test_the_LEGACY_ENV_space_form_is_a_deployment_hit(tmp_path, monkeypatch):

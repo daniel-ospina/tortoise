@@ -2435,7 +2435,12 @@ def _shell_unset_target(line: str, flag: str) -> str | None:
     match = _SHELL_UNSET.match(line)
     if not match:
         return None
-    names = match.group("names").split()
+    # ⛔ Split on shell OPERATORS as well as whitespace: `unset FLAG;` / `unset FLAG|cmd`
+    # glue the operator to the last name, so a whitespace-only split produced the single
+    # word `FLAG;`, matched nothing, and left an earlier `export` standing — fail-OPEN on a
+    # spelling shell scripts really use, and inconsistent with the SPACED ` ;` which read
+    # correctly (fresh review of PR #12474, P3, measured).
+    names = [word for word in re.split(r"[ \t;&|()<>]+", match.group("names")) if word]
     if not names:
         return None
     if re.search(r"-[a-zA-Z]*[fn]", match.group("opts") or ""):
@@ -2898,11 +2903,13 @@ def flag_in_shipped_configs(flag: str) -> dict:
     mentions: list[str] = []
     unreadable: list[str] = []
     documented_only = 0
-    # ⛔ Reported, never dropped: an assignment of the flag to a value this walk
-    # cannot resolve (`export FLAG="${OTHER}"`, `${FLAG:+x}`), and an assignment in
-    # a place a deployed process never reads (`fly.toml`'s `[build.args]`, or a
-    # shell variable the entrypoint never `export`s). Both are the shapes where
-    # reading "silent" would be a claim about a line the walk did not understand.
+    # ⛔ Reported, never dropped: a line this walk cannot resolve — an assignment of the
+    # flag to a value it cannot read (`export FLAG="${OTHER}"`, `${FLAG:+x}`), or a
+    # COMPUTED NAME in an `unset` (`unset "$FLAG"`), which may or may not remove the
+    # variable — and an assignment in a place a deployed process never reads (`fly.toml`'s
+    # `[build.args]`, or a shell variable the entrypoint never `export`s). Both are the
+    # shapes where reading "silent" would be a claim about a line the walk did not
+    # understand.
     indeterminate: list[str] = []
     outside_runtime: list[str] = []
     # ⛔ The TWO DISARMING directions, reported separately, because either one takes an
@@ -3126,7 +3133,13 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     surface_hits.append(hit_text)
                     surface_file_hits.setdefault(posix, []).append(hit_text)
                     for truthy, _hit, earlier in decisions[:-1]:
-                        if truthy is False:
+                        # ⛔ DEDUPED HERE TOO, not only in the `else` branch below: since a
+                        # value-less compose entry and a shell `unset` are `False`
+                        # DECISIONS now, an already-reported `unset` line reached this loop
+                        # and was published a SECOND time — under a heading that is false
+                        # about it, since an `unset` is not "a value that OVERRIDES it OFF"
+                        # (fresh review of PR #12474, P2, measured).
+                        if truthy is False and earlier not in unset_declarations:
                             disarming_assignments.append(
                                 earlier + " (shadowed by a later truthy value)")
                 else:
@@ -3395,9 +3408,9 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
                     "file could arm the gate")
             if unresolved_files:
                 causes.append(
-                    f"deployment file(s) whose assignment could not be RESOLVED "
-                    f"{unresolved_files} — a value this walk cannot read may arm it "
-                    f"(see `indeterminate assignments`)")
+                    f"deployment file(s) carrying a line this walk cannot RESOLVE "
+                    f"{unresolved_files} — it could arm OR disarm the gate, and the walk "
+                    f"cannot read which (see `indeterminate assignments`)")
             deployment_reading = (
                 "UNMEASURED — " + "; and ".join(causes)
                 + ", so this is NOT a measurement of silence"
