@@ -478,6 +478,94 @@ def test_the_workflow_files_the_drift_ON_A_FAILING_READING() -> None:
     )
 
 
+def test_the_check_step_exits_with_the_code_the_checker_returned(tmp_path) -> None:
+    """⛔ BEHAVIOURAL, because a TEXT SCAN CANNOT TELL A LIVE PREDICATE FROM A DEAD ONE.
+
+    Cycle 3 measured the presence pin above as insufficient: `rc=$?` -> `rc=0` (invocation left
+    intact), a commented-out invocation, and `rc=$? || true` ALL stayed green across the consent
+    suite and 537 workflow-wide tests. A one-token edit therefore restores this PR's headline defect:
+    a live MISMATCH exits 0, so the filing step takes its GREEN path and `resolve`s BOTH standing
+    issues with "the two live deployments published the same key fingerprint (AGREE)" — a false
+    AGREE written into the public ledger, no alert, green run list.
+
+    So the step body is EXECUTED here against a stubbed `python3` that returns 1 with a MISMATCH
+    reading, and the assertions are on the exit status and on the values it wrote to
+    `$GITHUB_OUTPUT` — the two things the rest of the workflow actually consumes. No network.
+    """
+    import os
+    import stat
+
+    failing = [s for s in _steps() if (s.get("run") or "").rstrip().endswith('exit "$rc"')]
+    assert len(failing) == 1, "the check step is gone — re-anchor this pin rather than deleting it"
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stub = bindir / "python3"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'if [ "$1" = "-c" ]; then exec {sys.executable!r} "$@"; fi\n'
+        "echo '{\"verdict\": \"MISMATCH\", \"exit_code\": 1}'\n"
+        "exit 1\n"
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    gh_out = tmp_path / "github_output"
+    gh_out.write_text("")
+
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "GITHUB_OUTPUT": str(gh_out),
+        "API_URL": "https://api.example.test",
+        "APP_URL": "https://app.example.test",
+    }
+    reading = Path("/tmp/consent-key.json")
+    err = Path("/tmp/consent-key.err")
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", failing[0]["run"]], env=env, capture_output=True, text=True, timeout=120
+        )
+        written = gh_out.read_text()
+    finally:
+        for leftover in (reading, err):
+            leftover.unlink(missing_ok=True)
+
+    assert proc.returncode == 1, (
+        "the check step did not propagate the checker's exit code — a MISMATCH would be a GREEN run "
+        "and the filing step would resolve the standing ledger with a false AGREE. "
+        f"got rc={proc.returncode}; stdout={proc.stdout[-400:]!r} stderr={proc.stderr[-400:]!r}"
+    )
+    assert "rc=1" in written, (
+        "`$GITHUB_OUTPUT` must carry the checker's rc — the filing step branches on `RC` to decide "
+        f"whether to RESOLVE the standing ledger. got {written!r}"
+    )
+    assert "verdict=MISMATCH" in written, (
+        f"the verdict extracted from the reading must reach `$GITHUB_OUTPUT`, got {written!r}"
+    )
+
+
+def test_the_filing_step_only_RESOLVES_the_ledger_on_a_MEASURED_AGREE() -> None:
+    """The GREEN branch closes BOTH standing issues; nothing pinned its condition.
+
+    Cycle 3 measured `if [ "${RC:-}" = "0" ]` -> `if [ "1" = "1" ]` GREEN: the run stays red but
+    `resolve` is called unconditionally, closing the ledger with "the two live deployments published
+    the same key fingerprint (AGREE)" while every consent grant is dead — and, because the drift
+    issue is then gone, the next tick files a FRESH one (the dedupe key was released).
+
+    Pinned LINE-ANCHORED and uncommented, so a `# `-prefixed condition (which bash would fail on, but
+    which a plain substring check would accept) is not enough to satisfy it.
+    """
+    body = "\n".join(s.get("run") or "" for s in _steps())
+    assert re.search(r'^\s*if \[ "\$\{RC:-\}" = "0" \]; then$', body, re.MULTILINE), (
+        "the filing step no longer branches on a MEASURED AGREE (`RC` == 0) — it would resolve the "
+        "standing ledger (and release the dedupe key) on a split"
+    )
+    agree = body.index('${RC:-}" = "0"')
+    resolve = body.index("auto-file-issue.sh resolve")
+    assert resolve > agree, (
+        "`resolve` must sit INSIDE the RC == 0 branch, not before it: a split would clear the ledger"
+    )
+
+
 def test_the_workflow_grants_the_alert_scope_and_runs_on_its_stated_cadence() -> None:
     """The two settings the monitor needs and NOTHING else asserted — both measured undefended.
 
