@@ -425,8 +425,11 @@ def entity_candidates(graph, *, limit: int | None = 50,
         #: (up to ~12: ``E``, ``B``, ``P``, one ``T`` per token, 8 ``S`` bands),
         #: and a pair's row is identical in every one of them — `fuzzy_sim`,
         #: `sem_sim`, `kind_mismatch` and the survivor/candidate assignment are pure
-        #: functions of the pair — so the dedupe costs nothing a caller can see and
-        #: saves recomputing the comparison per block.
+        #: functions of the pair — so the dedupe changes no output. It is checked
+        #: at the TOP of the pair loop, before the vector lookup, the length prune
+        #: and ``similarity``: a dedupe placed after them skips only the append,
+        #: and the repeated comparison it was added to avoid still happens (a pair
+        #: in 6 blocks measured 6 ``similarity`` calls — #12295 round-2 B4).
         emitted: set[tuple[str, str]] = set()
 
         sem: dict = {}
@@ -453,6 +456,17 @@ def entity_candidates(graph, *, limit: int | None = 50,
                 for right in members[i + 1:]:
                     if right["id"] in settled:
                         continue
+                    # Already COMPARED from another block this pair shares — the
+                    # verdict, not just the row, is a pure function of the pair,
+                    # so it is recorded here rather than at the emit path. (At the
+                    # emit path a pair that is NOT emitted — a transposition whose
+                    # similarity stays under the review floor — was recorded
+                    # nowhere and re-compared once per shared block: measured 3
+                    # `similarity` calls for one pair, #12295 round-2 B4.)
+                    _pair_key = (left["id"], right["id"])
+                    if _pair_key in emitted:
+                        continue
+                    emitted.add(_pair_key)
                     # ⛔ TWO rungs, TWO candidate pools (#12047 round-3 P2). The
                     # length bound below is a LEXICAL one: difflib's ratio is
                     # <= 2*min/(sum), so a pair that cannot reach the review
@@ -506,14 +520,6 @@ def entity_candidates(graph, *, limit: int | None = 50,
                     kind_mismatch = bool(
                         survivor["kind"] and candidate["kind"]
                         and survivor["kind"] != candidate["kind"])
-                    # ⛔ #12295: a union of blocking keys puts the SAME pair in
-                    # several blocks. Emit it once — the row is identical in each
-                    # (see `emitted` above), so this saves work and changes no
-                    # output.
-                    _pair_key = (survivor["id"], candidate["id"])
-                    if _pair_key in emitted:
-                        continue
-                    emitted.add(_pair_key)
                     pairs.append({
                         "id": candidate["id"],
                         "candidate_id": candidate["id"],

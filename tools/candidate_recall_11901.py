@@ -707,13 +707,9 @@ def run(args: argparse.Namespace) -> int:
         #: COST side of pair completeness (a blocker can reach 1.0 by proposing
         #: everything, which is the number a lone recall figure hides).
         blocked_sizes: dict[int, list[int]] = {k: [] for k in KS}
-        #: (row, surface) pairs the blocker's cost figure is computed over —
-        #: materialised so `reduction_ratio` is computed by its one helper.
-        _mk_mentions: list[tuple[dict, str]] = []
         for row in sample:
             name = row["name"]
             for vclass, surface in variants(name, row["cls"]):
-                _mk_mentions.append((row, surface))
                 folded_surface = _fold_punct(surface)
                 # The multi-key blockers are graph-free, so they are computed ONCE
                 # per (row, surface) and reported at every k — the window does not
@@ -776,11 +772,17 @@ def run(args: argparse.Namespace) -> int:
         #: is the same quantity only while every mention proposes a fixed count —
         #: two definitions under one name is how a published ratio stops meaning
         #: anything).
-        _mk_pairs = {
-            frozenset((row["id"], cid))
-            for row, surface in _mk_mentions
-            for cid in index.candidates(surface, label="Object")
-        }
+        #: ⛔ OVER THE SAME POPULATION ON BOTH SIDES: the denominator is
+        #: `C(1000, 2)`, so the numerator must be the pairs proposed BY all 1000
+        #: names — not the pairs proposed by the 300-row sample (which published a
+        #: ratio ~3x cheaper than the quantity its own definition names, #12295
+        #: round-2 B3). The per-mention mean stays over the variant sample, where
+        #: the cost of a DUPLICATE-LOOKING mention is what matters.
+        _mk_pairs = set()
+        for _row in pop:
+            for _cid in index.candidates(_row["name"], label="Object"):
+                if _cid != _row["id"]:
+                    _mk_pairs.add(frozenset((_row["id"], _cid)))
         arms["blocking"] = {
             "pairs": _pairs,
             "population": len(pop),

@@ -220,7 +220,7 @@ def test_oversized_block_is_skipped_by_a_QUERY_and_REPORTED():
     """A dropped block must never read as "nothing shares this key".
 
     This pins the QUERY path (`candidates`) only. The SCAN path deliberately has
-    no cap — see :func:`test_the_scan_path_has_no_size_cap_and_reports_its_blocks`,
+    no cap — see :func:`test_the_scan_reports_its_largest_block_and_caps_NOTHING`,
     because a cap there would drop pairs a smaller graph showed.
     """
     index = BlockIndex()
@@ -271,8 +271,15 @@ def test_reduction_ratio_is_reported_beside_completeness():
 # ── the LIVE consumer: `entity_resolver.entity_candidates` ────────────────
 # ⛔ These exist because the module's own tests are not coverage of the scan: a
 # wider block set is MONOTONE, so every pre-existing `entity_candidates` test
-# stayed green when the hunk landed. Each test below reds if its hunk is
-# reverted, which is the property "the suite would notice" actually means.
+# stayed green when the hunk landed. The three tests below each red without the
+# hunk they name — verified by reverting it, not asserted:
+#   * the transposition  → 0 rows / 0 `similarity` calls under the single key
+#   * the stored fold    → 0 rows when the index re-folds `name`
+#   * the size cap       → 0 rows when a `<= MAX_BLOCK_SIZE` filter is restored
+# `test_the_scan_still_reports_the_pair_a_prefix_shared_name_makes_exact` is the
+# baseline those three are read against: it pins the rung itself (which the
+# wider block set must NOT change), and it shares `P:pla` under BOTH old and new
+# keys — so it is deliberately NOT a regression witness for the union.
 
 
 def _stub_scan(monkeypatch, entities):
@@ -337,11 +344,50 @@ def test_the_scan_still_reports_the_pair_a_prefix_shared_name_makes_exact(monkey
     assert rows[0]["similarity"] == 1.0
 
 
+def test_the_scan_COMPARES_each_pair_once_across_the_blocks_it_shares(monkeypatch):
+    """The dedupe must skip the COMPARISON, not just the append.
+
+    A union of keys puts one pair in several blocks. Checking the dedupe after
+    ``similarity`` saved the dict append and left the repeated comparison the
+    comment promised to avoid: measured 6 ``similarity`` calls for one pair in
+    six blocks, and 3 for a pair that is never emitted at all (`#12295` round-2
+    B4). Both are pinned here — the transposition case is the one a
+    "record it when emitted" dedupe cannot cover, because it emits nothing.
+    """
+    import collections
+
+    from tortoise import entity_resolver
+
+    ents = [
+        _entity("o1", "the project alpha", kind="core:other"),
+        _entity("o2", "alpha project", kind="core:other",
+                created="2026-01-02T00:00:00Z"),
+        _entity("o3", "the plan doc", kind="core:other"),
+        _entity("o4", "the plan-docs", kind="core:other",
+                created="2026-01-02T00:00:00Z"),
+    ]
+    calls: collections.Counter = collections.Counter()
+    real = entity_resolver.similarity
+
+    def spy(a, b):
+        calls[(min(a, b), max(a, b))] += 1
+        return real(a, b)
+
+    _stub_scan(monkeypatch, ents)
+    monkeypatch.setattr(entity_resolver, "similarity", spy)
+    entity_resolver.entity_candidates(None, include_semantic=False, limit=None)
+    assert calls, "no comparison ran at all — the fixture reaches no block"
+    for pair, n in calls.items():
+        assert n == 1, (
+            f"{pair} was compared {n}x — the pair dedupe runs after the work it "
+            "exists to skip")
+
+
 def test_the_scan_blocks_on_the_STORED_fold_not_on_a_re_fold_of_the_name(monkeypatch):
     """One value, one key: block on what the scan SCORES.
 
     `scan_entities` scores ``normalize_entity_name(canonical or name)``
-    (`entity_resolver.py:266`), and a caller-supplied `canonical_name` is legal
+    (`entity_resolver.py:269`), and a caller-supplied `canonical_name` is legal
     (`api.py:2671`) — as is a pre-`#12047` row whose fold differs from its name.
     Indexing such a row by ``key_of(name)`` blocks on one value and scores on
     another, so an `exact` 1.0 pair silently leaves the queue.
@@ -360,19 +406,30 @@ def test_the_scan_blocks_on_the_STORED_fold_not_on_a_re_fold_of_the_name(monkeyp
 def test_the_scan_reports_its_largest_block_and_caps_NOTHING(monkeypatch):
     """A cap on the scan's pair set would be a behaviour change, not a bound.
 
-    Every name here shares one shingle band, so the biggest block is the whole
-    population — and every pair must still be compared (main compared every block;
-    a cap would silently drop what a smaller graph showed).
+    ⛔ The population is ``MAX_BLOCK_SIZE + 1`` **on purpose**: with fewer
+    entities no cap could fire, and this test would stay green under exactly the
+    defect it exists to catch (a `len(block) <= MAX_BLOCK_SIZE` filter on the
+    scan restored it and 6 entities passed — #12295 round-2 B1). Every name
+    here folds to one key, so the block IS the population.
+
+    The row count is the witness: a capped scan drops the whole block and
+    reports 0 rows, while an uncapped one reports one row per duplicate. The
+    exact number is not asserted — it depends on the survivor/tie rules — only
+    that it is the same as the uncapped index's own view and strictly positive.
     """
-    ents = [_entity(f"o{i}", "the shared token here", kind="core:other",
-                    created=f"2026-01-{i + 1:02d}T00:00:00Z")
-            for i in range(6)]
+    from tortoise.entity_blocking import MAX_BLOCK_SIZE, BlockIndex
+
+    n = MAX_BLOCK_SIZE + 1
+    ents = [_entity(f"o{i:04d}", "the shared token here", kind="core:other",
+                    created=f"2026-01-{(i % 28) + 1:02d}T{(i % 24):02d}:00:00Z")
+            for i in range(n)]
     er = _stub_scan(monkeypatch, ents)
     rows = er.entity_candidates(None, include_semantic=False, limit=None)
-    # 6 entities, all mutually exact → the per-duplicate reduction keeps one row
-    # per candidate, so 5 candidates are reported, each against its survivor.
-    assert len(rows) == 5
-    from tortoise.entity_blocking import BlockIndex
+    assert len(rows) == n - 1, (
+        f"the scan compared {len(rows)} of {n - 1} duplicates — a size cap on the "
+        "scan path dropped pairs a smaller graph would have reported")
 
-    stats = BlockIndex.from_rows(ents).stats()
-    assert stats["max_block_size"] == 6      # reported, not capped
+    stats = BlockIndex.from_rows([dict(e) for e in ents]).stats()
+    assert stats["max_block_size"] == n      # reported, not capped
+    assert not stats.get("oversized_skipped"), (
+        "the SCAN indexed a block as oversized — the cap belongs to the query path")

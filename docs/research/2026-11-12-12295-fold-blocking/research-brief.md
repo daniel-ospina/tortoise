@@ -3,7 +3,8 @@
 **Lane:** `fix/12295-fold-blocking` · **Artifact:** `measurement.json` in this directory ·
 **Harness:** `tools/candidate_recall_11901.py` (**reused, not rebuilt** — the tool and its pinned
 test landed with `#12159`) · **Run:** `--population 1000 --sample 300 --captures 20`, elapsed
-392.6 s, graph `recall11901_1794529308_2855367`, population digest `c13acf1f3522208f`.
+402.4 s, graph `recall11901_1794531950_484047`, population digest `d90dc3b702b74e3d`,
+measured at code head `6aeb9e5b0d2f8b3c9cf411659047a61d6b34d089` — the commit this brief and the artifact ship with.
 
 **Search rung, stated because it was taken twice and failed twice.**
 `mcp__seo-intelligence__perplexity_search` → `Unknown MCP server 'seo-intelligence'` (rung 1
@@ -23,7 +24,7 @@ and it is the reason no new field, no new fold and no second source of truth app
 
 | mechanism | where | what it does |
 |---|---|---|
-| `normalize_entity_name` | `entity_resolver.py:136` | NFKC → casefold → drop a leading **article** → non-word run → space → whitespace collapse |
+| `normalize_entity_name` | `entity_resolver.py:141` | NFKC → casefold → drop a leading **article** → non-word run → space → whitespace collapse |
 | write doors that persist it as `canonical_name` | `sdk.py:45593` (the `_emit` funnel), `api.py:2628` (`add_subject`), `api.py:2671` (`add_object`), `sdk.py:46935` (a real rename) | filled at every door, `setdefault`, so a caller-supplied fold wins |
 | the projection | `projection/entities.py:5077` (ON CREATE), `:5084` (`coalesce` fill) | `canonical_name` is written ON CREATE only, so a re-mention cannot rewrite the key that resolved it |
 | identity | `projection/entities.py:5061` (`merge_key = "id"`) | `name` is a mutable natural key; the id is the identity (`#3584`/`#3590`) |
@@ -80,8 +81,13 @@ same quantity: `k` rows per mention for the window, one candidate list per menti
 | FTS window, k=5 | 5 | 0.9953 |
 | FTS window, k=10 | 10 | 0.9976 |
 | FTS window, k=15 | 15 | **1.0000** |
-| FTS candidate set a capture actually sees (`search_graph` pooled union) | 2.86 (42.85 per capture of 15 mentions — **not** a per-mention figure, and not comparable to the row below) | not measured per mention |
-| **multi-key blocking** (`entity_blocking.BlockIndex`: folded key ∪ folded prefix ∪ per-token prefixes ∪ LSH shingle bands) | **34.73** (max 152) | **1.0000** (422/422), reduction ratio 0.0195 |
+| FTS candidate set a capture actually sees (`search_graph` pooled union) | 2.84 (42.65 per capture of 15 mentions — **not** a per-mention figure, and not comparable to the row below) | not measured per mention |
+| **multi-key blocking** (`entity_blocking.BlockIndex`: folded key ∪ folded prefix ∪ per-token prefixes ∪ LSH shingle bands) | **34.9** (max 152) | **1.0000** (422/422), reduction ratio 0.0255 |
+
+The reduction ratio is the blocker's actual cost on the whole graph: pairs proposed by **all 1000**
+names over `C(1000, 2)` (`entity_blocking.reduction_ratio`, computed by that one helper). It is NOT
+the pairs proposed by the 300-row variant sample — mixing the two published a ratio ~3× cheaper
+than the quantity its own definition names (`#12295` round-2 B3, fixed before this run).
 
 ### 3.2 The falsifier, answered — and it fires against the BLOCKER
 
@@ -93,14 +99,18 @@ on its own terms, and the work proceeded.** But the number says something sharpe
 is the point of having a falsifier:
 
 - the shipped window **already clears the 0.95 floor at every `k`**, and reaches **1.0000 at `k=15`
-  with 15 candidates per mention** — **less than half the multi-key blocker's 34.73**;
+  with 15 candidates per mention** — **less than half the multi-key blocker's 34.9**;
 - the multi-key blocker reaches the same completeness at roughly **2.3× the cost**.
 
-⇒ **Multi-key blocking is NOT earned for the capture prior on this corpus.** This is N-3's falsifier
-**F1** firing (*"pair completeness does not rise above the FTS-only blocker on the `#11901`
-population → no blocker needed"*), reported as a result rather than buried. And the width is not the
-reason to widen either: see 3.3 — attaching is flat in `k` (207 at `k=3`, 212 at `k=15`), so a wider
-window buys completeness that the matcher cannot spend.
+⇒ **Multi-key blocking is NOT earned for the capture prior on this corpus — on COST, not on
+completeness.** ⚠️ The plan's falsifier **F1** is worded *"pair completeness does not rise above the
+FTS-only blocker"*, and **read literally F1 does NOT fire**: completeness does rise at `k=3`, `k=5`
+and `k=10` (0.9692 → 1.0). It ties only at `k=15`, and it gets there for **2.3× the cost**. So the
+honest statement of what fired is the falsifier's *purpose* — **the blocker's spend is not
+justified by a gain in reach** — and it is stated as that, not as a quote of a criterion that a
+literal reading does not satisfy. And the width is not the reason to widen either: see 3.3 —
+attaching is flat in `k` (207 at `k=3`, 212 at `k=15`), so a wider window buys completeness that the
+matcher cannot spend.
 
 **Where the blocker IS load-bearing is a different surface: the dedupe scan** (`entity_candidates`),
 which has no FTS window at all and blocked on ONE 3-character prefix. There the union is the only
@@ -206,8 +216,7 @@ retrieval-miss class `#11901` owns; the folded rung cannot reach what the window
 
 ## 7. What moves next, with the number attached
 
-1. **The article-anchor reopen (evidence filed, not adopted).** `+179` pairs (42.4 % of the variant
-   class) are in the window and reachable; only the anchor prevents the bind. The artifact's
+1. **The article-anchor reopen (evidence filed, not adopted).** `+179` pairs (42.4 % of the 422 pairs) are in the window and reachable; only the anchor prevents the bind. The artifact's
    `attached_folded = 386` is the number that reopen is argued with, not an estimate of it. Route: argue it where
    `#12047` round-4 finding 5 lives, with this brief's §4 as the evidence — **not** a quiet change to
    `normalize_entity_name`, and not a second comparison key smuggled in beside it.
