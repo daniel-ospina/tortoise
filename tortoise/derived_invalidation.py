@@ -1004,7 +1004,11 @@ _GONE_PROBE = "MATCH (n) WHERE n.id = $id RETURN n.id LIMIT 1"
 #:
 #: ⛔ SO THE GRAPH IS ASKED, one id-wide read, ONLY on the already-rare ``gone`` arm.
 #: A node that is still there is UNADDRESSABLE — counted with the no-``id`` shape —
-#: and ``gone`` keeps exactly the door's meaning. This is deliberately an
+#: and ``gone`` then means what the GRAPH says: no node carries this id. ⚠️ That is
+#: NOT what the door's own un-probed ``gone`` means ("could not resolve this id"),
+#: which is the whole reason the probe exists — so the sweep's ``gone`` and
+#: ``invalidate_stale``'s ``counts.gone`` are the same bucket NAME and different
+#: predicates (#12534). This is deliberately an
 #: OBSERVATION rather than a second spelling of the door's label/identity table:
 #: restating that table here is how the two would drift apart again, and a
 #: label-membership filter over-excludes (it would sweep every ``:Event`` into
@@ -1031,16 +1035,20 @@ _GONE_PROBE = "MATCH (n) WHERE n.id = $id RETURN n.id LIMIT 1"
 #: 5, verified: that module's index notes are about an un-indexed PROP inside a
 #: LABELLED branch); the rule it overrides is the `sdk.py` one above, so an auditor
 #: can tell a measured trade-off from an accident.
+#: can tell a measured trade-off from an accident.
+#:
+#: ⚠️ WHAT THE PROBE ESTABLISHES, stated here rather than inside the payload string:
+#: it is id-WIDE (``MATCH (n) WHERE n.id = $id``), so it proves that A node with
+#: this id exists — not, strictly, that the GOAL node does. That asymmetry is kept
+#: deliberately: a same-id stranger outliving a real deletion can only make the
+#: sweep under-report a ``gone``, never assert one. ⛔ ``GONE_UNPROVEN`` below is
+#: CONSUMER-FACING (it is assigned verbatim to ``record["reason"]``), so it is plain
+#: prose with no Sphinx roles and no emoji — the rationale lives in this comment,
+#: the way ``NOT_DURABLE_REASON``'s does.
 GONE_UNPROVEN = (
     "a node carrying this goal id is still in the graph, but the entity surface "
-    "cannot resolve it by that id — it is not on a label resolved by `id` (the "
-    "sweep matched it label-agnostically by `n.id`, while the door resolves only "
-    "the canonical labels, each by its OWN primary identity prop) — so its cache "
-    "was NOT reconciled and it is COUNTED rather than reported gone. ⛔ The probe "
-    "behind this (:data:`_GONE_PROBE`) is id-WIDE, so what it establishes is that "
-    "A node with this id exists — not, strictly, that the goal node does. That "
-    "asymmetry is kept deliberately: a same-id stranger that outlives a real "
-    "deletion can only make the sweep under-report a `gone`, never assert one"
+    "cannot resolve it by that id, so its cache was NOT reconciled and it is "
+    "counted rather than reported gone"
 )
 
 
