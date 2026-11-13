@@ -6142,9 +6142,12 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     # coalesce default). Kind-gating every alias rung therefore returned
     # `(None, "none")` for a survivor whose kind is `other`/empty/different — the
     # mention fell through to `new` (a CREATE, the D-1 duplicate) or to a phase-2
-    # guess that cannot see aliases at all. A genuinely conflicting declared kind
-    # is recorded where the design already expects it: phase 1's `hard_vetoes`
-    # fires `kind_conflict` and the name is HELD with its code.
+    # guess that cannot see aliases at all. What keeps a genuinely conflicting
+    # declared kind honest is the caller's `alias_recorded` fact: this rung reports
+    # `mode: alias`, phase 1 passes `alias_recorded=True` for it, and
+    # `hard_vetoes` stands the three spelling vetoes down on THAT fact alone —
+    # never on `mention_is_alias`, which also covers a same-spelling pair and must
+    # keep vetoing it (`plan` "Acme" vs `org` "Acme").
     aliased_any = [e for e in entities if _alias_hit(e)]
     if len(aliased_any) == 1:
         return aliased_any[0], "alias"
@@ -6184,26 +6187,28 @@ def _verdict_facts(facts, node_id, mention_name: str = "") -> dict:
     aliases = entry.get("aliases")
     spellings = {normalize_entity_name(a) for a in aliases
                  if a is not None} if isinstance(aliases, (list, tuple, set)) else set()
-    mention_folded = normalize_entity_name(mention_name) if mention_name else ""
-    # ⛔ TWO facts, not one, and the split is load-bearing.
-    #
-    # `mention_is_alias` means the spelling is one a MERGE RECORDED in the
-    # candidate's `aliases[]` — the reviewer already decided these two are one
-    # entity, so the verdict must not re-litigate the identifier/date/kind
-    # spellings (an entity hold is not carried forward, so re-litigating LOSTS the
-    # mention forever). `aliases[]` ONLY: folding the candidate's own name in here
-    # would stand `kind_conflict` down for every phase-2 proposal of the form
-    # "same spelling, different declared kind", which is the DOMINANT phase-2
-    # shape (phase 1's name rungs are kind-gated, so that pair is exactly what
-    # reaches phase 2) — a silent false merge, and there is no alias record
-    # behind it.
-    out["mention_is_alias"] = bool(mention_folded and mention_folded in spellings)
-    # `mention_is_own_name` means the mention is spelled exactly like the target.
-    # That is not an inference about a group, so it stands `group_join` down —
-    # but it is not a reviewer's record either, so the spelling vetoes still run.
-    out["mention_is_own_name"] = bool(
-        mention_folded and entry.get("name")
-        and mention_folded == normalize_entity_name(entry["name"]))
+    # ⛔ The candidate's OWN name counts, not only its aliases. A mention spelled
+    # exactly like the target is not inferring membership of a group — nothing is
+    # being inferred — and phase 1 can miss it when the mention's kind is unstated
+    # (`""`/`other`/`unclassified`), which used to reach phase 2 and there be
+    # vetoed `group_join` with the reason "no alias of the candidate carries this
+    # spelling" about the candidate's own name.
+    # ⛔ TWO facts, not one, and the split is load-bearing (round-4 review).
+    # `alias_recorded` is the spelling the MERGE recorded — `aliases[]` ONLY — and
+    # it is what stands the three SPELLING vetoes down (`hard_vetoes`). The
+    # candidate's OWN name must not: a same spelling is the one case where the two
+    # rows can still be different entities (`plan` "Acme" vs `org` "Acme"), and
+    # keyed on the combined fact the `kind_conflict` guard went silent for exactly
+    # that pair — a phase-2 proposal to bind a plan "Acme" onto an org "Acme" was
+    # accepted with no hold and no record. `mention_is_alias` keeps both halves,
+    # because `group_join`'s escape needs the own-name case (nothing is being
+    # INFERRED about a group when a mention is spelled like its target).
+    out["alias_recorded"] = bool(
+        mention_name and normalize_entity_name(mention_name) in spellings)
+    if entry.get("name"):
+        spellings.add(normalize_entity_name(entry["name"]))
+    out["mention_is_alias"] = bool(
+        mention_name and normalize_entity_name(mention_name) in spellings)
     return out
 
 
@@ -6508,7 +6513,9 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                 {"name": name, "kind": kind},
                 {"name": ex.get("name") or "", "kind": ex.get("kind") or ""},
                 {"retired": cfacts.get("retired"),
-                 "mention_is_alias": mode == "alias"})
+                 # `alias_recorded`, NOT `mention_is_alias`: see `hard_vetoes` —
+                 # the own-name half must keep the spelling vetoes alive.
+                 "alias_recorded": mode == "alias"})
             if refusal:
                 vetoed[name] = (kind, refusal)
                 # The sentence names what actually fired: the veto codes carry the
