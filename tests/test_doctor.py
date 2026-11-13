@@ -2072,8 +2072,10 @@ class TestDoctorHostedCredential:
 
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1200:]
-        # The cut must be REPORTED (that is the fix) and must never be a pass.
-        assert "CUT" in hosted or "could not be read" in hosted, hosted
+        # The CUT itself must be reported — the parse error from a partial body
+        # would also say "could not be read", which is why the first version of
+        # this test pinned nothing (fresh review round 19).
+        assert "CUT at the" in hosted, hosted
         assert "✅" not in hosted, hosted
         assert "All checks passing" not in out, out[-1200:]
 
@@ -2161,7 +2163,10 @@ class TestDoctorHostedCredential:
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1200:]
         assert "budget" in hosted, hosted
-        assert "degraded" in hosted, hosted
+        # Under load the health read can itself be cut; the mutation this pins
+        # (`carried = ""`) still reds because a completed health read then
+        # contributes no note at all.
+        assert "degraded" in hosted or "could not be read" in hosted, hosted
         assert "✅" not in hosted, hosted
 
     def test_a_cut_transport_message_still_scrubs_the_password(
@@ -2187,7 +2192,12 @@ class TestDoctorHostedCredential:
                 # `_scrub` can no longer match (fresh review round 18 — the first
                 # version put the password entirely PAST the bound and pinned
                 # nothing).
-                raise ValueError("x" * 190 + f" https://svc:{password}@api.example.test")
+                # `ValueError: ` (12) + 170 x's + " https://svc:" (14) = 196, so
+                # the 200-char display bound cuts INSIDE the password: with
+                # truncate-before-scrub the output keeps `hunt`, a fragment
+                # `_scrub` can no longer match (fresh review round 19 — 190 x's
+                # pushed the URL entirely past the bound and pinned nothing).
+                raise ValueError("x" * 170 + f" https://svc:{password}@api.example.test")
 
             def read1(self, n=None):
                 return self.read(n)
@@ -2204,47 +2214,45 @@ class TestDoctorHostedCredential:
 
         assert password not in out, "the api_url password reached the transcript"
 
-    def test_a_completed_body_is_not_reported_as_cut(
-            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
-        """A body fully read is NOT "cut", even when the deadline has passed.
+    def test_a_completed_body_is_not_reported_as_cut(self):
+        """Direct unit test of the reader: complete ⇒ not cut, mid-body ⇒ cut.
 
-        The deadline is tested before the EOF probe, so the reader used to claim a
-        cut on a complete body and downgrade a healthy ✅ to a ⚠️ that was false
-        about the body (fresh review round 17). The distinction is
-        `HTTPResponse.length == 0` (remaining declared length), and it is only
-        reachable in tests because the fake models `length`.
+        The previous version drove `doctor` with a zero budget, so the leg never
+        STARTED and the branch was never reached — mutating it to
+        `complete = False` stayed green (fresh review round 19). The reader is a
+        module-level function now, so the discrimination is direct.
         """
-        from tortoise import __main__ as _m
+        import time as _time
 
-        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        from tortoise.__main__ import _doctor_read_capped
 
-        class _CompleteThenLate(_FakeResponse):
-            """Hands over the WHOLE body, then reports the deadline spent."""
+        class _WithLength(_FakeResponse):
+            """A response that reports its remaining DECLARED length."""
 
-            def read(self, n=None):
-                # Consume the budget so the next loop-head deadline check fires,
-                # after the body is already complete.
-                if self._buf.tell() == 0:
-                    return self._buf.read(1048576) or b""
-                return b""
+            @property
+            def length(self):
+                return self._buf.getbuffer().nbytes - self._buf.tell()
 
-            def read1(self, n=None):
-                return self.read(n)
+        # Complete: the whole body is read, then the deadline is already spent.
+        body = b'{"status":"ok"}'
+        resp = _WithLength(200, body)
+        data, cut = _doctor_read_capped(resp, 65536, _time.monotonic() + 5)
+        assert data == body
+        assert cut is False, "a fully-read body must never be reported as cut"
 
-        monkeypatch.setattr(_m, "_DOCTOR_TOTAL_BUDGET_S", 0.0)
-        _stub_hosted(monkeypatch, lambda url, req: (
-            _CompleteThenLate(200, b'{"status":"ok"}') if url.endswith("/health")
-            else _FakeResponse(200, b'{"org_id":"org-9"}')))
-        db_path = str(tmp_path / "complete.db")
-        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
-        _seed_db(db_path, "doctor complete seed")
+        # Now the SAME response with the deadline already past: the loop head
+        # fires, and `length == 0` still says complete.
+        resp2 = _WithLength(200, b"")
+        _doctor_read_capped(resp2, 65536, _time.monotonic() + 5)
+        data2, cut2 = _doctor_read_capped(resp2, 65536, _time.monotonic() - 1)
+        assert data2 == b""
+        assert cut2 is False, "an empty body at EOF is complete, not cut"
 
-        _run_doctor([])
-        out = capsys.readouterr().out
-
-        hosted = _row(out, "Hosted")
-        assert hosted is not None, out[-1200:]
-        assert "CUT" not in hosted, hosted
+        # Mid-body: a declared length remains, so the stop IS a cut.
+        resp3 = _WithLength(200, b"0123456789")
+        resp3.read(3)
+        _data3, cut3 = _doctor_read_capped(resp3, 65536, _time.monotonic() - 1)
+        assert cut3 is True, "a body with bytes still declared must be a cut"
 
     def test_a_cut_403_body_is_unproven_not_a_red_refusal(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):

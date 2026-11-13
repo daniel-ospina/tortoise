@@ -12914,6 +12914,66 @@ _HOSTED_KEY_PREFIXES = ("tt_", "tk_")
 _OAUTH_ONLY_KEY_PREFIX = "oat_"
 
 
+def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
+    """Read at most `cap` bytes, stopping when `deadline` passes.
+
+    ⛔ `urlopen(timeout=…)` is a PER-RECV bound, not a wall-clock one: a
+    server dripping one byte at a time keeps every gap under it and holds the
+    caller for as long as it likes (measured: `timeout=1` returned 30 bytes
+    after 12.0 s). `read(cap)` alone therefore leaves a started leg unbounded
+    — and the four legs times two reads each is how "the probe is bounded"
+    was true on paper only (fresh review round 15). Reading in chunks and
+    checking the deadline between them makes the bound real, and the cap
+    still bounds the memory.
+    """
+    import time
+
+    chunks: list[bytes] = []
+    total = 0
+    reader = getattr(resp, "read1", None) or resp.read
+    while total < cap:
+        if time.monotonic() >= deadline:
+            # ⛔ CUT is REPORTED, never silent: a body truncated by the
+            # deadline is an UNREAD verdict, and a silent break here made a
+            # `degraded` /health read ✅ and a healthy /v1/team read ❌
+            # (fresh review round 16 — the two false verdicts this reader
+            # could produce).
+            #
+            # ...but only when the body is genuinely incomplete. The check
+            # runs BEFORE the EOF probe, so a body whose last chunk arrived
+            # exactly at the boundary (or a fixed-length body fully read)
+            # would otherwise be reported CUT and downgrade a healthy ✅ to a
+            # "we stopped early" ⚠️ — a false claim about the body (fresh
+            # review round 17). `HTTPResponse.length` is the remaining
+            # declared length: 0 means COMPLETE. `None` (chunked, no
+            # Content-Length) stays an honest "unknown, so assume cut".
+            # ⛔ `HTTPResponse.length` is the remaining DECLARED length; an
+            # `HTTPError` carries no `length` of its own — its `fp` does. Reading
+            # the attribute off the error itself made every cut 4xx look cut even
+            # when it had completed (fresh review round 19).
+            length_owner = resp
+            if getattr(length_owner, "length", None) is None:
+                inner = getattr(resp, "fp", None)
+                if inner is not None and getattr(inner, "length", None) is not None:
+                    length_owner = inner
+            complete = getattr(length_owner, "length", None) == 0
+            return b"".join(chunks), not complete
+        # ⛔ A read error PROPAGATES: "the body could not be READ" is a
+        # distinct verdict from "the body carried no status", and swallowing
+        # it here made a stalled-but-200 `/health` read as green again —
+        # the exact arm round 13 added. The callers already handle it.
+        chunk = reader(min(4096, cap - total))
+        if not chunk:
+            return b"".join(chunks), False
+        # A reader that IGNORES `n` (a test double, a custom transport, a
+        # proxy shim) would otherwise append the same bytes on every pass
+        # until the cap — duplicating the body instead of bounding it.
+        chunk = chunk[: cap - total]
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks), False
+
+
 def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> None:
     """#11912: report the hosted identity AND whether it works.
 
@@ -13220,54 +13280,6 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             return f"{refused} ({scrubbed})"
         return f"{failed} ({scrubbed})"
 
-    def _read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
-        """Read at most `cap` bytes, stopping when `deadline` passes.
-
-        ⛔ `urlopen(timeout=…)` is a PER-RECV bound, not a wall-clock one: a
-        server dripping one byte at a time keeps every gap under it and holds the
-        caller for as long as it likes (measured: `timeout=1` returned 30 bytes
-        after 12.0 s). `read(cap)` alone therefore leaves a started leg unbounded
-        — and the four legs times two reads each is how "the probe is bounded"
-        was true on paper only (fresh review round 15). Reading in chunks and
-        checking the deadline between them makes the bound real, and the cap
-        still bounds the memory.
-        """
-        chunks: list[bytes] = []
-        total = 0
-        reader = getattr(resp, "read1", None) or resp.read
-        while total < cap:
-            if time.monotonic() >= deadline:
-                # ⛔ CUT is REPORTED, never silent: a body truncated by the
-                # deadline is an UNREAD verdict, and a silent break here made a
-                # `degraded` /health read ✅ and a healthy /v1/team read ❌
-                # (fresh review round 16 — the two false verdicts this reader
-                # could produce).
-                #
-                # ...but only when the body is genuinely incomplete. The check
-                # runs BEFORE the EOF probe, so a body whose last chunk arrived
-                # exactly at the boundary (or a fixed-length body fully read)
-                # would otherwise be reported CUT and downgrade a healthy ✅ to a
-                # "we stopped early" ⚠️ — a false claim about the body (fresh
-                # review round 17). `HTTPResponse.length` is the remaining
-                # declared length: 0 means COMPLETE. `None` (chunked, no
-                # Content-Length) stays an honest "unknown, so assume cut".
-                complete = getattr(resp, "length", None) == 0
-                return b"".join(chunks), not complete
-            # ⛔ A read error PROPAGATES: "the body could not be READ" is a
-            # distinct verdict from "the body carried no status", and swallowing
-            # it here made a stalled-but-200 `/health` read as green again —
-            # the exact arm round 13 added. The callers already handle it.
-            chunk = reader(min(4096, cap - total))
-            if not chunk:
-                return b"".join(chunks), False
-            # A reader that IGNORES `n` (a test double, a custom transport, a
-            # proxy shim) would otherwise append the same bytes on every pass
-            # until the cap — duplicating the body instead of bounding it.
-            chunk = chunk[: cap - total]
-            chunks.append(chunk)
-            total += len(chunk)
-        return b"".join(chunks), False
-
     #: `/health`'s verdict notes, populated in place after the reachability read.
     #: Declared HERE (before the helpers) so `_budget_spent_row` closes over the
     #: same list object — a `locals()` lookup inside a nested function reads that
@@ -13311,12 +13323,15 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             # buffered whole into a memory-tight box's RSS (fresh review round 3
             # — `read()` then `len()` bounds the terminal, not the process).
             try:
-                raw_health, _cut = _read_capped(resp, _DOCTOR_BODY_CAP, deadline)
+                raw_health, _cut = _doctor_read_capped(resp, _DOCTOR_BODY_CAP, deadline)
                 if _cut:
                     health_read_error = (
                         f"the body was CUT at the {_fmt_bound(deadline - started)}s"
                         " deadline before it completed")
-                if isinstance(raw_health, bytes) and raw_health:
+                # A CUT body is PARTIAL by definition: parsing it would only
+                # overwrite the cut verdict with a JSONDecodeError and lose the
+                # "CUT at the deadline" fact this row exists to carry.
+                if not _cut and isinstance(raw_health, bytes) and raw_health:
                     parsed_health = _json.loads(raw_health.decode("utf-8", "replace"))
                     if isinstance(parsed_health, dict):
                         candidate_status = parsed_health.get("status")
@@ -13464,14 +13479,14 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                 team_code = getattr(resp, "status", None) or resp.getcode()
                 # Bounded at the read (see the `/health` note above): a proxy
                 # echoing a large body must not be buffered whole.
-                raw_team, team_cut = _read_capped(resp, _DOCTOR_BODY_CAP, deadline)
+                raw_team, team_cut = _doctor_read_capped(resp, _DOCTOR_BODY_CAP, deadline)
                 team_body = raw_team.decode("utf-8", "replace")
         except HTTPError as exc:
             team_code = exc.code
             try:
                 if exc.fp:
-                    raw_team, team_cut = _read_capped(exc, _DOCTOR_BODY_CAP,
-                                                      deadline)
+                    raw_team, team_cut = _doctor_read_capped(exc, _DOCTOR_BODY_CAP,
+                                                       deadline)
                     team_body = raw_team.decode("utf-8", "replace")
                 else:
                     team_body = ""
@@ -13616,13 +13631,6 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             if isinstance(value, str) and value.strip():
                 identity = field
                 break
-        if team_cut and identity is None:
-            results.append(_combine("⚠️",
-                            f"{health_part}; the `/v1/team` reply was CUT before "
-                            f"it completed ({_printable(body[:160]) if body else 'no bytes'})"
-                            ". The credential is UNPROVEN rather than wrong — "
-                            "re-run, or use `--offline`"))
-            return
         if identity is None:
             results.append(_combine("❌",
                             f"{health_part}; /v1/team answered "
