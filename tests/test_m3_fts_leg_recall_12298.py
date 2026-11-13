@@ -1015,13 +1015,27 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
         f"the degenerate ids cover {sum(deg.values())} of the census's "
         f"{census['degenerate']} — the split below would then describe a "
         "different population")
-    assert f"{deg['definite']} `definite`" in text, (
-        f"§2 must state {deg['definite']} `definite` degenerate queries — "
-        "recomputed from `degenerate_ids` and the pinned classes")
-    assert f"{deg['ident']} ident" in text, (
-        f"§2 must state {deg['ident']} ident degenerate queries — recomputed "
-        "from `degenerate_ids` and the pinned classes")
-    assert (deg["path"] == 0) == ("none of them a path" in text), (
+    # ⛔ SENTENCE-scoped and DIGIT-anchored, not a whole-document substring
+    # (#12349 round-14 finding 1). The first cut asserted these counts against
+    # the flattened WHOLE brief while its comment claimed §3.4's cell treatment;
+    # measured: adding a plausible §4 restatement ("Of the corpus, 108
+    # `definite` names plus 18 ident names drove that.") AND rewriting §2's own
+    # cells to 118/28 kept all 72 tests green — the §2 cells falsified with every
+    # gate green, which is P2-2 surviving in a weaker form. `(?<!\d)` stops a
+    # `108` from being satisfied by a `1108`.
+    census_sentence = next(
+        s for s in re.split(r"(?<=\.)\s+", text)
+        if "queries are degenerate" in s)
+    assert re.search(rf"(?<!\d){deg['definite']} `definite`", census_sentence), (
+        f"§2's own census sentence must state {deg['definite']} `definite` "
+        f"degenerate queries — recomputed from `degenerate_ids` and the pinned "
+        f"classes, and read from the sentence that carries the census rather "
+        f"than from anywhere in the document: {census_sentence}")
+    assert re.search(rf"(?<!\d){deg['ident']} ident", census_sentence), (
+        f"§2's own census sentence must state {deg['ident']} ident degenerate "
+        f"queries — recomputed from `degenerate_ids` and the pinned classes: "
+        f"{census_sentence}")
+    assert (deg["path"] == 0) == ("none of them a path" in census_sentence), (
         "§2's `none of them a path` clause must agree with the classes: "
         f"{deg['path']} degenerate queries are `path`")
     subset = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
