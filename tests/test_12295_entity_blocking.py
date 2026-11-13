@@ -137,14 +137,30 @@ def test_basename_never_attaches_on_a_capture_window():
 
 def test_injective_key_wins_over_a_non_injective_one():
     """If one candidate matches on the fold and another only on the basename,
-    the fold decides — the ambiguity rule must not degrade a certain match."""
+    the fold decides — the ambiguity rule must not degrade a certain match.
+
+    ⛔ THE FIXTURE IS LOAD-BEARING and the previous one proved nothing: it used
+    `plan-doc.md` as the weak candidate, which folds to `plan doc md` and so shares
+    NO key with the mention — it never entered `out` at all, so both assertions
+    stayed green with the precedence block deleted. MEASURED with the
+    `if strong_hits: return strong_hits` return removed, on THIS fixture: `[]`
+    instead of `[(o1, False)]` — the weak-only path then runs with `complete=False`
+    and returns nothing, so a CERTAIN fold match is silently DROPPED (not merely
+    degraded), which is the failure this pin exists to catch. `o2` must therefore be
+    a real basename carrier of the mention's own basename. The rule is load-bearing
+    on a `complete=True` caller too: with the precedence gone,
+    `extractor_v2._find_by_folded_key` hands the adjudicator a strong hit plus a weak
+    one, `same_kind` reaches length 2, and a certain match degrades to `ambiguous`
+    (a HOLD).
+    """
     cands = [
-        {"id": "o1", "name": "the plan doc", "kind": "core:other"},
-        {"id": "o2", "name": "plan-doc.md", "kind": "core:other"},
+        {"id": "o1", "name": "lib config py", "kind": "core:other"},
+        {"id": "o2", "name": "src/config.py", "kind": "core:other"},
     ]
-    got = attach_matches("the plan doc", cands)
-    assert [m["id"] for m in got] == ["o1"]
-    assert got[0]["basename_only"] is False
+    got = attach_matches("lib/config.py", cands)
+    assert [(m["id"], m["basename_only"]) for m in got] == [("o1", False)], (
+        f"the basename carrier was not suppressed by the fold hit: "
+        f"{[(m['id'], m['basename_only']) for m in got]!r}")
 
 
 # ── the entropy gate: Zep's shape, blocking-side ──────────────────────────
@@ -256,6 +272,8 @@ def test_a_from_rows_index_answers_its_own_candidates():
                                   {"id": "o2", "name": "the plan doc"},
                                   {"id": "o3", "name": "another name"}])
     found = index.candidates("the plan doc")
+    #: ⛔ THIS is the assertion the label fallback is pinned by: restoring
+    #: `labels = list(ENTITY_LABELS)` reds here (`a from_rows index answered []`).
     assert sorted(found) == ["o1", "o2"], (
         f"a from_rows index answered {found!r}; its own blocks() hold "
         f"{index.blocks()!r}")
@@ -264,7 +282,8 @@ def test_a_from_rows_index_answers_its_own_candidates():
     #: the SHINGLE bands deliberately surface fuzzy candidates, so blocking is not
     #: an exact-key lookup and that assertion would pin the wrong contract.)
     assert sorted(index.candidates("The Plan-Doc")) == ["o1", "o2"]
-    #: Reverting the label fallback reds THIS assertion and nothing else.
+    #: An explicit label still SCOPES the query — this pins the scoping contract,
+    #: NOT the fallback (the fallback's own pin is the assertion above).
     assert index.candidates("the plan doc", label="Object") == [], (
         "an explicit label must still scope the query to that label's blocks")
 
@@ -501,3 +520,28 @@ def test_the_fold_collision_is_a_declared_residual_not_a_regression():
         f"`C++` no longer binds a lone `C#` candidate (got {(node['id'], method)!r}) — if "
         "that is deliberate, remove the residual from invariant 3 instead of "
         "leaving it declared")
+
+
+def test_a_whitespace_only_fold_is_never_indexed():
+    """Pins the empty-fold guard, whose justification this branch rewrote.
+
+    ⛔ MEASURED before this test: deleting `if not folded: return` from
+    `BlockIndex.add` left all 25 tests green, and two unrelated whitespace-only
+    names then landed in ONE `E:` block and paired as `exact` — the mass-merge the
+    guard exists to prevent, unpinned. `"   "` is reachable: a reader admits any
+    truthy `name`, so the class is real even though punctuation-only names are NOT
+    in it (they fold to themselves, `key_of("!!!") == "!!!"`).
+    """
+    index = BlockIndex()
+    index.add("a", "   ", label="Object")
+    index.add("b", "\t", label="Object")
+    assert index.stats()["members"] == 0, (
+        "a whitespace-only fold was indexed — two unrelated names now share one "
+        f"`E:` block: {index.blocks()!r}")
+    assert not [b for b in index.blocks() if b[1].startswith("E:")], (
+        f"an `E:` block was created for an empty fold: {index.blocks()!r}")
+    #: A punctuation-only name is NOT this class: it folds to itself and is indexed.
+    index.add("c", "!!!", label="Object")
+    assert index.stats()["members"] == 1, (
+        "a punctuation-only name was dropped as if its fold were empty — `key_of` "
+        "falls back to the stripped fold, so `!!!` keys as `!!!`")
