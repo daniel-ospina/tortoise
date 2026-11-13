@@ -1263,8 +1263,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "record exists (measured: no factor, no record): promote it "
                     "to live **and then re-point onto it** — promotion alone "
                     "repairs nothing, because the stale edge still ends at the "
-                    "superseded Object (measured: ``effective_n 2.9296`` once the "
-                    "edge moves too)")
+                    # ⛔ NOT ``2.9296``: that figure needs a SECOND live support
+                    # on the claim; on the single-edge row this sentence is emitted
+                    # for, promotion + re-point measures ``effective_n 2.5255``
+                    # (#12210 review, P3).
+                    "superseded Object (measured on this row: ``effective_n 2.5255`` "
+                    "once the edge moves too)")
             else:
                 _draft_repair = (
                     "strips like a terminal input (#780) — promote it to live "
@@ -2040,10 +2044,21 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                    # destination was WITHDRAWN ("… because it is operator-shaped,
                    # which EP refuses as a factor input, deleting the edge into the
                    # old endpoint") (#12210 review, P3).
-                   (f"re-point this {s['edge_type']} "
-                    f"{'input' if s['is_operator'] else 'edge'} onto "
-                    + (dest if s["carrier_count"] == 1 else "that successor")
-                    + ". Delete the edge into the old endpoint"))
+                   # ⛔ …and the NEITHER-arm step, mirroring the sibling arms
+                   # (``{_shape_repair} AND re-point …``): measured — perform this
+                   # bare re-point on a shaped-endpoint row and the belief stays at
+                   # ``confidences {}`` while the finding goes QUIET (0 rows); add
+                   # ``{'is_operator': False, 'op_type': None}`` and it returns
+                   # (``effective_n 2.5255``) (#12210 review, P2).
+                   ((f"{_shape_repair} AND re-point this {s['edge_type']} "
+                     f"{'input' if s['is_operator'] else 'edge'} onto "
+                     + (dest if s["carrier_count"] == 1 else "that successor")
+                     + ". Delete the edge into the old endpoint")
+                    if (s["shape"] and not s["is_operator"]) else
+                    (f"re-point this {s['edge_type']} "
+                     f"{'input' if s['is_operator'] else 'edge'} onto "
+                     + (dest if s["carrier_count"] == 1 else "that successor")
+                     + ". Delete the edge into the old endpoint")))
                 + ". "
                 # ⛔ ``tail`` IS guarded here, and the guard is live: this arm is
                 # ``sup_id is None``, not ``carrier_count == 0`` — the
