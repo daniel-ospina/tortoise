@@ -4,8 +4,12 @@
 WHAT THIS ANSWERS. The P0 design note's figures are already committed
 (`docs/evidence/11821-journal-encoding/`); this probe measures the P2
 PROJECTION on the same corpus, with the same instrument convention, so every
-number in `docs/plans/*-issue-12459-journal-base64-payload.md` is reproducible
-by one command.
+figure the note draws FROM THIS PROBE is reproducible by one command. ⚠️ Not every
+number in the note: the P0 baseline has its own probe
+(`docs/evidence/11821-journal-encoding/`), and the note's appendix carries five
+numbered blocks (this probe, the P0 probe, the 9-digit round-trip script, the
+raw-byte scan, the key-order scan) — each with its own command. §0's external
+survey is not reproducible here at all, and the note says so.
 
 It writes the P0 journal with the REAL writer (`EventLog.append` +
 `stamp_journal_embedding`), then measures, per vector-bearing record:
@@ -31,7 +35,13 @@ changes no payload — but it is not writer-free either, and saying so is the
 point: it writes a throwaway journal under `tempfile.mkdtemp()` with the
 COMMITTED writer (`EventLog(...).append`), then re-reads that file, because a
 baseline measured off the real writer's bytes is the only baseline that answers
-"what would this cost". Everything it prints is measured on that tempdir copy. `tools/journal_growth.py` cannot answer the vector questions (it
+"what would this cost". ⚠️ Precisely: every **P0** figure it prints is measured on
+that tempdir copy (the corpus line, the `journal_growth` report, and the per-class
+P0 record/vector spans, `raw_decode`d out of the written lines). The P2 columns,
+the six refusals, the default-decoder arm, the truncation sweep, the six-alphabet
+and degenerate-shape tables and the `f64` fixtures are computed **in memory** from
+that journal's vector and from synthetic fixtures — they are the framed candidate,
+and the tables label them as such. `tools/journal_growth.py` cannot answer the vector questions (it
 re-serialises with SPACED separators — its own docstring calls the output
 attribution; see #11886), so the P0 vector spans here are `raw_decode`d out of the
 journal this probe actually wrote, on ONE ruler, and the compact re-serialisation is
@@ -423,13 +433,21 @@ def main() -> int:
     #       it is simply measuring the wrong thing from either side.
     producer = [float(x) for x in vec]
     decoded_last = unframe(frame("f32", 4, verified_vector))
-    f64_value_vs_producer = [float(v) for v in decoded_last] == producer
-    f64_value_vs_p0_text = [float(v) for v in decoded_last] == [
-        float(v) for v in verified_vector]
+    n_producer = sum(1 for a, b in zip(decoded_last, producer, strict=True) if a == b)
+    n_p0_text = sum(
+        1 for a, b in zip(decoded_last, verified_vector, strict=True) if a == b)
+    f64_value_vs_producer = n_producer == len(producer)
+    f64_value_vs_p0_text = n_p0_text == len(verified_vector)
+    # COUNTED, not a boolean the note then re-derives a count from: the note quotes
+    # "384 of 384" and "0 of 384", and a whole-list `==` returning False proves only
+    # that SOME element differs. A figure with no line behind it is the defect this
+    # probe has been reviewed for twice.
     print("  float64-VALUE decoded == producer (must PASS — value equality cannot "
-          "see width):", f64_value_vs_producer)
+          f"see width): {f64_value_vs_producer}  elements equal: "
+          f"{n_producer:,} of {len(producer):,}")
     print("  float64-VALUE decoded == P0 un-narrowed text (must REJECT a correct "
-          "encode):", f64_value_vs_p0_text)
+          f"encode): {f64_value_vs_p0_text}  elements equal: "
+          f"{n_p0_text:,} of {len(verified_vector):,}")
     # …and the bits assertion CAN fail — a negative control, so it is not vacuous.
     # Both are ASSERTED: a control that is only printed reports a vacuous control
     # as a pass (that is how round 14's tautology survived). The expectations are

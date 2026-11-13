@@ -404,8 +404,10 @@ stating only one of them is how this paragraph was wrong before:
   the truth side has to be narrowed to the stored width (`#8615`) before any comparison at all. That is a
   **false red**, not leniency — the same test is simply measuring the wrong thing from either side.
 
-The probe prints both (`float64-VALUE decoded == producer …: True` / `… == P0 un-narrowed text …: False`),
-and beside them the **negative control** that proves the bits assertion is not vacuous: a **1-ULP
+The probe prints both, WITH the element counts the two figures above are drawn from — `float64-VALUE
+decoded == producer …: True  elements equal: 384 of 384` and `… == P0 un-narrowed text …: False  elements
+equal: 0 of 384` (a whole-list `==` returning False proves only that SOME element differs, so a count with no
+line behind it would be exactly the defect this paragraph is about) — and beside them the **negative control** that proves the bits assertion is not vacuous: a **1-ULP
 perturbation** of one element flips it to `False`. ⚠️ **The first draft of that control was itself inert** —
 it printed `float(np.float64(v)) == v` over the producer with `decoded` ABSENT, under a label naming
 `decoded==producer`, so it was a widening identity that no input can falsify and the guard under it could

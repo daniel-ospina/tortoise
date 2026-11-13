@@ -75,9 +75,13 @@ of framing (14 B prefix + 2 B of JSON quotes) = **2,064 B**.
   on the truth side: against the **producer** it passes 384 of 384 — an `f32` value is exactly a
   `float64`, so value equality carries no width and cannot discriminate; against P0's **un-narrowed
   decimal text** it rejects a correct encode, 0 of 384. Both arms are printed and asserted, beside a
-  **1-ULP perturbation** negative control that proves the bits assertion can fail. Where a value *is* off
-  the float32 grid (the `f64` fixture below) the truth side is narrowed by
-  `stored_form.narrow_to_stored_width` / `consistency._as_f32` (#8615).
+  **1-ULP perturbation** negative control that proves the bits assertion can fail. ⚠️ The two
+  comparisons need DIFFERENT truth handling, and conflating them is how this paragraph was wrong before:
+  the f32-vs-P0-text comparison narrows the truth side to the **stored width** (`#8615` — the probe does it
+  by packing both sides to float32 bits), while the `f64` fixture below is compared **bit-identically at its
+  own width and is NOT narrowed by anything** — applying `stored_form.narrow_to_stored_width` /
+  `consistency._as_f32` there would red the probe's own `assert` and would be the narrowing §4.4 calls a
+  reopen.
 - **The `f64` population is not narrowed** — a caller-owned / preserved vector round-trips to the
   **same float64 bits**, and the fixture is off the float32 grid so the check cannot pass vacuously
   (P0's R2 rule).
