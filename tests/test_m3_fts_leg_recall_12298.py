@@ -479,9 +479,22 @@ _DIRECTIONAL = frozenset({
     "unreachable", "refuses", "accepts", "asserted", "ignored", "ascending",
     "descending", "zero", "non-zero", "nonzero", "not", "fail", "pass",
     "significant", "recovered", "two-sided", "one-sided", "tie", "tied",
-    "==", "!=", ">=", "<=", "<", ">", "\u2192",
+    # ⛔ POLARITY DETERMINERS are polarities too (round-24 reviewer, cycle 6):
+    # `any` → `no`, `nothing` → `something`, `both` → `neither` each invert the
+    # claim without touching its numbers, and the set's own docstring claims to
+    # cover polarities.
+    "any", "no", "none", "both", "neither", "nothing", "something", "all",
+    "every", "only", "plus", "minus",
+    "==", "!=", ">=", "<=", "<", ">", "\u2192", "\u00d7", "\u00f7", "\u00b1",
+    "\u2248",
 })
-_WORD_OR_OPERATOR = re.compile(r"[A-Za-z][A-Za-z'\-]*|[<>=!]=?|\u2192")
+# ⛔ The ARITHMETIC operators are matched too (round-24 reviewer, cycle 6): a set
+# entry for a symbol the tokeniser cannot see is a no-op — `\u00d7` listed above
+# would never fire otherwise. `/` is deliberately NOT in the alternation: it is the
+# "of" separator in these documents' `180 / 90 / 30` lists, so a site that pins one
+# names it in `free` explicitly rather than every list-triple being refused.
+_WORD_OR_OPERATOR = re.compile(
+    r"[A-Za-z][A-Za-z'\-]*|[<>=!]=?|\u2192|\u00d7|\u00f7|\u00b1|\u2248")
 
 
 def _unnamed_words(true: str, free: tuple[str, ...]) -> list[str]:
@@ -526,7 +539,6 @@ def _unnamed_values(true: str, values: tuple[str, ...],
         token = match.group(0)
         if _magnitude(token) in named:
             continue
-        before = residual[match.start() - 1] if match.start() else ""
         after = residual[match.end()] if match.end() < len(residual) else ""
         # ⛔ Letters AFTER the number are a unit glued to the value (`1.33pts`),
         # not an identifier — exempting them was a bypass (#12349 round-24
@@ -535,11 +547,18 @@ def _unnamed_values(true: str, values: tuple[str, ...],
         if after.isalnum() or after == "_":
             out.append(token)
             continue
-        if before.isdigit():
-            continue  # a numeric run split by `-` inside an id (`m3-000014`)
+        # ⛔ The hyphenated-id exemption is decided from the LOCAL WORD only
+        # (round-24 reviewer, cycle 6): a residual-wide search let one `m3-000014`
+        # anywhere in the claim exempt every number glued to a single letter, so
+        # `m3-000014 gains p5 rows` pinned with `5` literal. Two letters before the
+        # token still make it an identifier (`BM25`); one letter plus a hyphenated
+        # numeric run makes it one too (`m3-000014`, both halves).
+        word_start = residual.rfind(" ", 0, match.start()) + 1
+        word_end = residual.find(" ", match.end())
+        word = residual[word_start:len(residual) if word_end < 0 else word_end]
         prefix = re.search(r"[A-Za-z_]+$", residual[:match.start()])
-        if prefix and (len(prefix.group(0)) >= 2
-                       or re.search(r"[A-Za-z][A-Za-z0-9]*-\d", residual)):
+        if (prefix and len(prefix.group(0)) >= 2) or re.fullmatch(
+                r"[A-Za-z][A-Za-z0-9]*(?:-\d+)+", word):
             continue  # part of an IDENTIFIER (`BM25`, `m3-000014`)
         # ⛔ NO bare `=` here (#12349 round-24 reviewer, cycle 4): `p = 0.34` is
         # the form every p-value pin uses, so exempting `=` exempted the exact
@@ -1999,7 +2018,7 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     _only_claim(
         section2,
         "for every one of them the two Postgres arms' ranks are identical.",
-        "§2's control-break disclosure", free=("identical",))
+        "§2's control-break disclosure", free=("identical", "every"))
     # §0's subset row states BOTH recalls, and §0 is where a reader quotes from —
     # read from §0's SLICE, like every other pin here (round 17, P2: the previous
     # form read the whole document, so the comment above was wider than the code).
@@ -2313,7 +2332,10 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     _only_claim(_scoped(brief_text, "4.3"),
                 f"share(path) × {path_delta:.1f}",
                 "§4.3's path term",
-                values=(f"{path_delta:.1f}",))
+                values=(f"{path_delta:.1f}",),
+                # ⛔ `×` is the operator the claim turns on (round-24 reviewer,
+                # cycle 6): `×` → `/` pinned green while it stayed literal.
+                free=("\u00d7",))
 
     snake = [n["id"] for n in population["names"]
              if n["cls"] == "ident" and "#" not in n["name"]]
@@ -2391,7 +2413,7 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
                 # ⛔ `adds` and `non-zero` are both pivots: `adds` → `costs` and
                 # `non-zero` → `zero` each planted green (round-24 reviewer,
                 # cycles 2 and 5).
-                free=("non-zero", "adds"))
+                free=("non-zero", "adds", "any"))
 
 
 def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> None:
@@ -2503,7 +2525,7 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         # ⛔ `inside` is the claim's direction (`inside` → `outside`) and
         # `differently` is its point (`rank differently` → `identically`) —
         # both planted green when left literal (round-24 reviewer, cycles 4-5).
-        free=("inside", "differently"))
+        free=("inside", "differently", "both"))
 
     _only_claim(
         plain,
@@ -3028,7 +3050,7 @@ def test_brief_states_what_the_reuse_guards_actually_do(brief_text,
     # acceptance's `accepted`, the operator pair in `` `==`, not `>=` ``.
     _only_claim(flat, "refuses a graph whose population differs, or that "
                 "population plus leftover rows",
-                "§2's reuse-guard scope", free=("refuses", "differs"))
+                "§2's reuse-guard scope", free=("refuses", "differs", "plus"))
     _only_claim(flat, "the graph's total `:Object` count is asserted against "
                 "the population",
                 "§2's count guard", free=("asserted",))
@@ -3037,7 +3059,8 @@ def test_brief_states_what_the_reuse_guards_actually_do(brief_text,
     _only_claim(flat, "a graph already holding exactly the same 300 names and "
                 "nothing else is still accepted",
                 "§2's accepted-reuse disclosure",
-                values=(str(len(population["names"])),), free=("accepted",))
+                values=(str(len(population["names"])),),
+                free=("accepted", "nothing"))
     assert "with the SAME population is ACCEPTED" not in flat
     assert "numDocuments >= n" not in flat, (
         "§2 still says the wait accepts an at-least-full index — it requires "
