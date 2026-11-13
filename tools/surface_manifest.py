@@ -2242,8 +2242,17 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
             )
         kind = str(entry.get("kind") or "")
         symbol = str(entry.get("symbol") or "")
-        if kind and symbol:
-            archived.add((kind, symbol))
+        if not kind or not symbol:
+            # A mapping that names no symbol is the same defect one branch over: skipping it
+            # grades "unreadable" as "not archived", so `cut` tells the operator to archive
+            # a symbol that IS archived and a corrupt manifest stays quiet. `check` reds this
+            # shape through the file metadata, but the cut never gives it a committed tree.
+            raise SurfaceEvidenceUnreadable(
+                f"an `archive/MANIFEST.json` entry names no {'symbol' if kind else 'kind'} "
+                f"({sorted(entry)[:6]}) — the removal gate cannot tell which symbol it "
+                "freezes, and an entry it cannot read is not an entry that is not there"
+            )
+        archived.add((kind, symbol))
     try:
         from tortoise.sdk_retired import REMOVED_SDK_METHODS, RETIRED_SDK_METHODS
         from tortoise.tool_registry import RETIRED_USE_INSTEAD
@@ -2259,13 +2268,34 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
     }
 
 
+def parse_waiver(entry: str) -> tuple[str | None, str]:
+    """`tool:<symbol>` / `sdk:<symbol>` → `("tool", "<symbol>")`; a bare name → `(None, name)`.
+
+    ONE parser for ONE grammar. Two implementations of it disagreed: `removal_report` treated
+    `foo:bar` as a BARE symbol while `cmd_cut` keyed on any `:` and read it as the qualified
+    `bar`, so a bare symbol containing a colon was accepted by one and mangled by the other
+    (review of PR #12313). `None` means "whichever surface this cut removes".
+    """
+    text = str(entry)
+    head, sep, tail = text.partition(":")
+    if sep and head in ARCHIVE_KIND_BY_CLASS and tail:
+        return head, tail
+    return None, text
+
+
+def waiver_matches(entry: str, symbol: str, cls: str) -> bool:
+    """Does this waiver entry account for the removal of `symbol` on surface `cls`?"""
+    want_cls, want_symbol = parse_waiver(entry)
+    return want_symbol == symbol and (want_cls is None or want_cls == cls)
+
+
 def removal_report(
     prior: set[tuple[str, str]],
     derived: set[tuple[str, str]],
     records: dict,
     *,
     allowed: set[str] | None = None,
-) -> tuple[list[str], dict[str, str]]:
+) -> tuple[list[str], dict[tuple[str, str], str]]:
     """`(problems, accounting)` for the symbols that disappeared from the surface.
 
     A symbol present in `prior` and absent from `derived` is a REMOVAL. It is accounted for
@@ -2300,12 +2330,11 @@ def removal_report(
     bare: set[str] = set()
     qualified: dict[str, str] = {}
     for entry in allowed or ():
-        text = str(entry)
-        head, sep, tail = text.partition(":")
-        if sep and head in ARCHIVE_KIND_BY_CLASS and tail:
-            qualified[tail] = head
+        entry_cls, entry_symbol = parse_waiver(entry)
+        if entry_cls is None:
+            bare.add(entry_symbol)
         else:
-            bare.add(text)
+            qualified[entry_symbol] = entry_cls
     problems: list[str] = []
     accounting: dict[tuple[str, str], str] = {}
     # `{(symbol, class): …}` — ONE entry per REMOVAL, not per symbol. Keyed by symbol (as it
@@ -2457,11 +2486,21 @@ def cmd_cut(args: argparse.Namespace) -> int:
               "operator who wrote a justification believes something was waived.")
         return 1
     problems: list[str] = []
+    removals: set[tuple[str, str]] = set()
     if prior_doc is not None:
         try:
+            prior_symbols = surface_symbols(prior_doc)
+            derived_symbols = surface_symbols(doc)
+            # What THIS cut actually removes. The override validator below must compare the
+            # waiver against this set, never against `accounting`: `accounting` is also empty
+            # for a symbol a REAL record already accounts for, and for a symbol whose
+            # removal was refused — so a symbol-keyed comparison against it reported
+            # "this cut does not remove <symbol>" for a symbol the cut DID remove, and hid
+            # the specific refusal `removal_report` had produced (review of PR #12313).
+            removals = prior_symbols - derived_symbols
             records = removal_records()
             problems, accounting = removal_report(
-                surface_symbols(prior_doc), surface_symbols(doc), records, allowed=set(allowed)
+                prior_symbols, derived_symbols, records, allowed=set(allowed)
             )
         except SurfaceEvidenceUnreadable as exc:
             return _refuse(exc)
@@ -2470,10 +2509,13 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # record" would send the operator to archive a symbol instead of fixing the flag. On a
     # first cut `accounting` is empty, so every override is unexplained and refused — which
     # is the point: nothing was removed, so a waiver for it is a false record.
-    # A waiver entry may be surface-qualified (`tool:<symbol>`), so compare on the SYMBOL
-    # each entry names: `accounting` is keyed `(symbol, class)`.
-    allowed_symbols = {e.partition(":")[2] if ":" in e else e for e in allowed}
-    unexplained = sorted(allowed_symbols - {symbol for (symbol, _cls) in accounting})
+    # A waiver entry may be SURFACE-QUALIFIED (`tool:<symbol>` / `sdk:<symbol>`), so it is
+    # matched against the removal SET (symbol AND class) through the ONE parser both callers
+    # share — comparing bare symbols let a `sdk:x` waiver be "explained" by a TOOL removal of
+    # the same name, and printed an override that never applied (review of PR #12313).
+    unexplained = sorted(
+        e for e in allowed if not any(waiver_matches(e, s, c) for (s, c) in removals)
+    )
     if unexplained:
         print(f"::error::--allow-removal named symbol(s) this cut does not remove: "
               f"{', '.join(unexplained)}")
@@ -3542,11 +3584,14 @@ def main() -> int:
         "--allow-removal",
         action="append",
         default=[],
-        metavar="SYMBOL",
+        metavar="[tool:|sdk:]SYMBOL",
         help=(
             "permit ONE named symbol to disappear from the baseline with no archive or "
             "retirement record (a genuine rename). Repeatable, requires "
-            "--allow-removal-reason, and logged in the cut output (#12237)."
+            "--allow-removal-reason, and logged in the cut output (#12237). A bare SYMBOL "
+            "waives whichever surface this cut removes it from, and is refused if that is "
+            "BOTH — name the surface as `tool:SYMBOL` / `sdk:SYMBOL` when the same name is "
+            "removed from two of them."
         ),
     )
     p_cut.add_argument(

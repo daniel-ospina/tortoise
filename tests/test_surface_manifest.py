@@ -5583,3 +5583,77 @@ def test_a_NON_MAPPING_archive_entry_is_UNREADABLE_not_absent(tmp_path):
         _json.dumps({"entries": [{"kind": "mcp-tool", "symbol": "tortoise_y"}]}), encoding="utf-8"
     )
     assert sm.removal_records(path)["archived"] == {("mcp-tool", "tortoise_y")}
+
+
+def test_an_override_for_a_recorded_symbol_reports_the_RECORD_not_an_unused_override(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The SPECIFIC refusal must survive the `cmd_cut` seam.
+
+    `removal_report` produces "already accounted for by archive entry (mcp-tool)", but the
+    `unexplained` gate in `cmd_cut` compared the waiver against `accounting` — which is empty
+    for exactly that case — and returned first with "this cut does not remove <symbol>". That
+    claim is FALSE (the cut does remove it), it hid the real reason, and it suppressed the
+    `accounted` block that names the archive record. The unit test above cannot see this,
+    which is why this one drives `cmd_cut` (review of PR #12313, round 8).
+    """
+    sm = _load_manifest_tool()
+    symbol = "tortoise_vanished_probe"
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": symbol}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": {("mcp-tool", symbol)},
+            "forward": set(),
+            "sdk_retired": set(),
+        },
+    )
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=[symbol],
+            allow_removal_reason="renamed to something else",
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "does not remove" not in out, out
+    assert "already accounted for by archive entry (mcp-tool)" in out, out
+    assert path.read_text(encoding="utf-8") == before
+
+    # non-vacuity: the same tree with NO override passes and names the record.
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert f"{symbol}: archive entry (mcp-tool)" in out, out
+
+
+def test_ONE_waiver_grammar_is_shared_by_both_callers():
+    """`removal_report` and `cmd_cut` used to parse the waiver grammar differently.
+
+    `removal_report` treated `foo:bar` as a BARE symbol (its head is not a surface class)
+    while `cmd_cut` keyed on any `:` and read it as the qualified `bar` — so a symbol
+    literally named `foo:bar` was accepted by one and mangled by the other. Both now go
+    through `parse_waiver`, and `waiver_matches` is the single matcher, on the class axis the
+    waiver grammar added: a `sdk:` waiver must NOT be satisfied by a tool removal.
+    """
+    sm = _load_manifest_tool()
+    assert sm.parse_waiver("foo:bar") == (None, "foo:bar")
+    assert sm.parse_waiver("tool:foo:bar") == ("tool", "foo:bar")
+    assert sm.parse_waiver("tool:") == (None, "tool:")
+    assert sm.parse_waiver("tortoise_x") == (None, "tortoise_x")
+
+    assert sm.waiver_matches("foo:bar", "foo:bar", "tool") is True
+    assert sm.waiver_matches("x", "x", "tool") is True
+    assert sm.waiver_matches("tool:x", "x", "tool") is True
+    # The class axis: a waiver naming the OTHER surface is not an explanation.
+    assert sm.waiver_matches("sdk:x", "x", "tool") is False
+    assert sm.waiver_matches("tool:x", "x", "sdk") is False
