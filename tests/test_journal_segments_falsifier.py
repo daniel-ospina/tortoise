@@ -26,7 +26,6 @@ Measured at ``feat/9025-journal-bound``; the PR body records the run.
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
 import warnings
 from dataclasses import dataclass
@@ -58,10 +57,10 @@ MUTANTS = (
         # how a dropped segment becomes "nothing to see here".
         name="discovery-of-a-departed-segment",
         needle="""    for name, row in declared.items():
-        if name in on_disk:
+        if name in journalled:
             continue""",
         replacement="""    for name, row in ():  # MUTANT: a departed segment leaves the layout
-        if name in on_disk:
+        if name in journalled:
             continue""",
         kills="test_FALSIFIER_a_segment_dropped_without_a_boundary_REFUSES",
     ),
@@ -70,10 +69,10 @@ MUTANTS = (
         name="scope-denies-a-full-claim",
         needle="""    return ReconstructionScope(
         full=False,
-        from_segment=first.name,""",
+        first_missing=missing.name,""",
         replacement="""    return ReconstructionScope(
         full=True,  # MUTANT: a departed segment no longer denies the claim
-        from_segment=first.name,""",
+        first_missing=missing.name,""",
         kills="test_FALSIFIER_a_full_claim_across_a_recorded_boundary_REFUSES",
     ),
     Mutant(
@@ -96,6 +95,27 @@ MUTANTS = (
         needle="""        if seg.disposition != "present" and seg.on_disk:""",
         replacement="""        if False:  # MUTANT: a stale disposition accepted""",
         kills="test_FALSIFIER_a_stale_disposition_REFUSES",
+    ),
+    Mutant(
+        # ANCHOR 2: the size the manifest recorded at seal time. Remove it and a
+        # sealed segment truncated in place certifies full reconstruction.
+        name="recorded-size-anchor",
+        # ⛔ A triple-quoted needle cannot carry a backslash-newline: Python
+        # folds the continuation away and the needle silently stops matching.
+        # Built as an explicit concatenation instead.
+        needle=("        if seg.on_disk and seg.recorded_bytes is not None \\"
+                "\n"
+                "                and seg.bytes != seg.recorded_bytes:"),
+        replacement="""        if False:  # MUTANT: a rewritten sealed segment is accepted""",
+        kills="test_ANCHOR2_a_truncated_sealed_segment_is_REFUSED",
+    ),
+    Mutant(
+        # ANCHOR 1: a `*.jsonl` the sequence cannot place. `rebuild_all` replays
+        # it regardless, so ignoring it is a claim over bytes we did not describe.
+        name="unplaceable-jsonl",
+        needle="""    if unplaceable:""",
+        replacement="""    if False:  # MUTANT: a file the replay folds is silently ignored""",
+        kills="test_ANCHOR1_an_unplaceable_jsonl_is_REFUSED_not_ignored",
     ),
     Mutant(
         # The switch. Removing it arms sealing for every deployment that never
@@ -130,14 +150,21 @@ def load_mutant(tmp_path: Path, mutants: Mutant | tuple[Mutant, ...]):
     # `read_all_segments`; give the mutant the real package so it resolves.
     module.__package__ = "tortoise"
     sys.modules[spec.name] = module
+    # ⛔ The `__package__ != __spec__.parent` DeprecationWarning is raised when
+    # `read_all_segments` performs its FUNCTION-LOCAL relative import, i.e. at
+    # CALL time — not here. A `catch_warnings()` around `exec_module` is a no-op
+    # for it (measured), so the suppression lives in `call_quietly` and the tests
+    # that trigger it go through that.
+    spec.loader.exec_module(module)
+    return module
+
+
+def call_quietly(fn, *args, **kwargs):
+    """Call a mutant function with the loader's DeprecationWarning suppressed."""
     with warnings.catch_warnings():
-        # CPython notes `__package__ != __spec__.parent` for a module loaded this
-        # way. It is the price of exercising the REAL source with one guard
-        # removed, and it is confined to this call.
         warnings.filterwarnings("ignore", category=DeprecationWarning,
                                 message=r".*__package__ != __spec__\.parent.*")
-        spec.loader.exec_module(module)
-    return module
+        return fn(*args, **kwargs)
 
 
 def _by_name(name: str) -> Mutant:
@@ -218,8 +245,9 @@ def test_mutant_discovery_dropped_segment_is_no_longer_seen(
     assert report["verified"] is True
     assert report["full_reconstruction"] is True
     # the sealed segment is not merely mis-described — it is not described at
-    # all, because the manifest row that recorded it left the layout with it
-    assert [s["name"] for s in report["segments"]] == []
+    # all, because the manifest row that recorded it left the layout with it.
+    # Only the (empty) active tail remains, so the journal reads as new.
+    assert [s["name"] for s in report["segments"]] == [mutant.ACTIVE_NAME]
     assert report["total_bytes"] == 0
 
 
@@ -246,6 +274,23 @@ def test_mutant_claim_function_licenses_the_claim_it_exists_to_refuse(
     mutant.assert_full_reconstruction(layout)                  # ⛔ silent claim
 
 
+def _manifest_for(graph: Path, names: list[str]) -> None:
+    """A valid manifest for a hand-built directory (the mutant's own format)."""
+    import json
+    rows = [{"name": n, "index": int(n.split(".")[1]), "bytes": 1, "lines": 1,
+             "disposition": "present", "recorded_at": "2026-11-13T00:00:00+00:00"}
+            for n in names]
+    for row in rows:                                  # sizes must match, or ANCHOR 2 fires
+        row["bytes"] = (graph / row["name"]).stat().st_size
+        row["lines"] = 1
+    (graph / "journal-manifest.json").write_text(json.dumps({
+        "version": 1, "graph_dir": str(graph), "segments": rows,
+        "boundary": {"recorded_at": "2026-11-13T00:00:00+00:00",
+                     "through_index": max(r["index"] for r in rows),
+                     "first_missing": None}}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+
+
 def test_mutant_gap_guard_accepts_a_broken_sequence(tmp_path: Path):
     """Kills ``test_FALSIFIER_a_gap_in_the_sealed_sequence_REFUSES``."""
     mutant = load_mutant(tmp_path, _by_name("sequence-gap"))
@@ -256,11 +301,13 @@ def test_mutant_gap_guard_accepts_a_broken_sequence(tmp_path: Path):
     _journal(graph, mutant, ["b"])
     (graph / mutant.ACTIVE_NAME).rename(graph / "events.0002.jsonl")
     _journal(graph, mutant, ["c"])
+    _manifest_for(graph, ["events.0000.jsonl", "events.0002.jsonl"])
 
     mutant.verify(mutant.discover(graph))           # no refusal at all
     # and the replay now reads a sequence it cannot know is complete, in order,
     # and reports nothing wrong — a plausible and wrong graph.
-    assert [r["id"] for r in mutant.read_all_segments(graph)] == ["a", "b", "c"]
+    assert [r["id"] for r in call_quietly(mutant.read_all_segments, graph)] == \
+        ["a", "b", "c"]
 
 
 def test_mutant_stale_disposition_is_accepted(tmp_path: Path,
@@ -278,10 +325,15 @@ def test_mutant_stale_disposition_is_accepted(tmp_path: Path,
     assert mutant.reconstruction_scope(mutant.discover(graph)).full is False
 
 
-def test_mutant_switch_default_on_seals_without_the_opt_in(tmp_path: Path):
+def test_mutant_switch_default_on_seals_without_the_opt_in(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Kills ``test_the_default_layout_is_byte_for_byte_todays``."""
     mutant = load_mutant(tmp_path, _by_name("switch-defaults-on"))
-    assert real.ENV_FLAG not in os.environ
+    # ⛔ Deliberately unset on THIS process: asserting `ENV_FLAG not in os.environ`
+    # pinned a property of the machine, and reds a correct tree on any cell that
+    # exports the flag — which is exactly how it is meant to be used.
+    monkeypatch.delenv(real.ENV_FLAG, raising=False)
+    assert not real.enabled()
     graph = tmp_path / "graph"
     graph.mkdir()
     _journal(graph, mutant, ["a"])
@@ -304,11 +356,7 @@ def test_all_guards_removed_makes_the_lie_reachable(
     state the falsifier has to be able to reach.
     """
     monkeypatch.setenv(real.ENV_FLAG, "1")
-    mutant = load_mutant(tmp_path, tuple(
-        _by_name(n) for n in ("discovery-of-a-departed-segment",
-                              "scope-denies-a-full-claim",
-                              "claim-refusal",
-                              "stale-disposition")))
+    mutant = load_mutant(tmp_path, MUTANTS)      # every guard, not a subset
     graph = _seal_dropped(tmp_path, mutant)
 
     report = mutant.summarise(graph)
