@@ -728,6 +728,75 @@ def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
     )
 
 
+def test_the_transcript_STEPS_are_ordered_so_the_evidence_can_be_collected():
+    """Order, not just content: every step in the evidence chain must FOLLOW the thing it reads (#12363 round 12).
+
+    Path and name equality is not enough, and each of these three inversions is silent —
+    measured at `b3b1ac4763`: all 53 pins in this file plus the alert harness stayed GREEN
+    with the step moved, because nothing compared step POSITION. What each inversion costs
+    at runtime:
+
+      * the canary's / the build job's `upload-artifact` placed ABOVE the tool invocation
+        collects a log that does not exist yet (`if-no-files-found: warn`), so the evidence
+        is absent on EVERY run, including the reds that need it most;
+      * the report job's `download-artifact` placed BELOW the alert steps leaves
+        `published-artifact-alert.sh` reading a file that is not there, and every filed
+        issue body degrades to "(no transcript reached this job …)" — `continue-on-error:
+        true` keeps the job green while the diagnosis is gone from the durable record.
+
+    This is the same class round 3 closed for the exit status, in the two remaining places.
+    """
+    import yaml
+
+    workflows = REPO_ROOT / ".github" / "workflows"
+
+    def index_of(steps, predicate, label: str) -> int:
+        found = [i for i, step in enumerate(steps) if predicate(step)]
+        assert len(found) == 1, (label, f"expected exactly one match, got {len(found)}")
+        return found[0]
+
+    for wf_file, job_name in (
+        ("release-artifact-canary.yml", "canary"),
+        ("publish-pypi.yml", "build"),
+    ):
+        steps = yaml.safe_load((workflows / wf_file).read_text())["jobs"][job_name]["steps"]
+        invoked = index_of(
+            steps, lambda s: "published_artifact_canary.py" in str(s.get("run") or ""), wf_file
+        )
+        uploaded = index_of(
+            steps,
+            lambda s: str(s.get("uses", "")).startswith("actions/upload-artifact")
+            and s.get("with", {}).get("name") in ("publish-canary-log", "published-artifact-canary-log"),
+            wf_file,
+        )
+        assert invoked < uploaded, (
+            f"{wf_file}/{job_name}: the transcript is uploaded at step {uploaded} but only "
+            f"written at step {invoked} — `if-no-files-found: warn` keeps this GREEN while it "
+            f"collects nothing, so the evidence is missing on every run including a red"
+        )
+
+    report_steps = yaml.safe_load(
+        (workflows / "release-artifact-canary.yml").read_text()
+    )["jobs"]["report"]["steps"]
+    downloaded = index_of(
+        report_steps,
+        lambda s: str(s.get("uses", "")).startswith("actions/download-artifact"),
+        "report",
+    )
+    alert_steps = [
+        i
+        for i, step in enumerate(report_steps)
+        if "published-artifact-alert.sh" in str(step.get("run") or "")
+    ]
+    assert alert_steps, "the report job no longer runs the alert script"
+    assert downloaded < min(alert_steps), (
+        f"the transcript is downloaded at step {downloaded} but the alert runs at step "
+        f"{min(alert_steps)} — the alert would TAIL a file that is not there yet and every "
+        f"filed issue body would say \"(no transcript reached this job …)\", silently "
+        f"(`continue-on-error: true`)"
+    )
+
+
 def test_the_transcript_is_written_incrementally_not_only_at_the_end(tmp_path):
     """A job cancelled at its timeout boundary never reaches the final write, so the
     transcript must land as each command finishes (#12363 round 3)."""
