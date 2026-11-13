@@ -828,28 +828,35 @@ def test_the_zone_child_gets_the_parents_sys_path_not_just_the_repo_root() -> No
     # resolution order, so a dedupe that sorts — or that moves an entry — changes WHICH
     # module a child resolves, and NO assertion above can see it: first-position,
     # membership and uniqueness all survive a pure reordering. ⚠️ The mutant must leave
-    # those three untouched, so it keeps `repo_root` FIRST and reorders only the tail:
+    # those three untouched and must ACTUALLY REORDER the tail, so it either keeps
+    # `repo_root` FIRST and reverses/sorts the rest — or it is not a falsifier at all:
     #
-    #     [repo_root, *sorted(p for p in sys.path if p and p != repo_root)]
+    #     [repo_root, *reversed([p for p in sys.path if p and p != repo_root])]
     #
-    # ⛔ `sorted({p for p in sys.path if p})` with NO `repo_root` prefix does NOT reliably
-    # isolate this assertion, and an earlier cut of this comment wrongly called it "the
-    # correct mutant". It reds `entries[0] == repo_root` whenever some `sys.path` entry
-    # sorts before the repo root — a macOS `/Library/Frameworks/...` against a repo under
-    # `/Users/...`, or a user-site `/home/<u>/.local/...` against `/home/<u>/tortoise`
-    # (`.` < `t`) — so on those boxes the order assert is never reached and this entry is
-    # not re-derivable. It reproduced HERE only because this box's repo root happens to be
-    # the lexicographically smallest `sys.path` entry: same class as this repo's
-    # `MEMORY.md` `[pin-defensive-claim]` row — a falsifier entry must name the assert its
-    # mutant actually reds, on the box the next reader runs. Measured with the isolating
-    # mutant above: `1 failed` at `assert tail == sorted(tail)`, and no other assertion.
+    # ⛔ VERIFY THE MUTANT CHANGED `entries` BEFORE TRUSTING A GREEN RUN. `sorted(...)` over
+    # a tail that is ALREADY non-decreasing is the IDENTITY — the mutant asserts nothing,
+    # passes, and a reader concludes the order arm is unpinned; `reversed(...)` below is a
+    # no-op in the mirror case (an already-reverse-sorted tail), which is the strictly less
+    # likely shape but the same trap. A mutant that leaves its input unchanged is not a
+    # falsifier, whichever way it is spelled.
+    # ⛔ And `sorted({p for p in sys.path if p})` with NO `repo_root` prefix does NOT
+    # isolate this assertion at all: it reds `entries[0] == repo_root` whenever some
+    # `sys.path` entry sorts before the repo root — a macOS `/Library/Frameworks/...`
+    # against a repo under `/Users/...`, or a user-site `/home/<u>/.local/...` against
+    # `/home/<u>/tortoise` (`.` < `t`) — so the order assert is never reached. An earlier
+    # cut of this comment called that "the correct mutant"; it reproduced only because this
+    # box's repo root HAPPENS to be the lexicographically smallest `sys.path` entry. Same
+    # class as this repo's `MEMORY.md` `[pin-defensive-claim]` row — a falsifier entry must
+    # name the assert its mutant actually reds, on the box the next reader runs.
     #
     # ⛔ FIRST occurrence, not last: `entries` is built with `dict.fromkeys`, which keeps
     # each path's FIRST position, so a `sys.path` carrying a non-adjacent duplicate
     # (`[root, "X", "Y", "Y", "X"]`) would invert the indices under a last-wins map and
     # red this assertion on a CORRECT helper (measured: tail `[4, 3]` against sorted
-    # `[3, 4]`). No `sys.path.append` exists in `tests/` today, so the realistic trigger is
-    # a `.pth`/site or plugin re-adding an earlier path after a later one.
+    # `[3, 4]`). ⚠️ The trigger is IN this repo, not exotic: `tests/` mutates `sys.path`
+    # in hundreds of `insert(0, …)` sites, and `insert(0, X)` for an `X` already present
+    # LATER is exactly the non-adjacent duplicate that inverts under a last-wins map — the
+    # first-occurrence keying below is what keeps that green.
     position: dict[str, int] = {}
     for i, p in enumerate(sys.path):
         position.setdefault(p, i)

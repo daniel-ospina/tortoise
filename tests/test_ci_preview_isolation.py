@@ -735,11 +735,14 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     #
     # ⛔ THE POLL IS INSIDE THE GUARD, NOT ONLY THE `assert` (#12330 REVIEW). The `ps`
     # call has NO `timeout=`, so its realistic failure is an `OSError` under fork pressure
-    # (EAGAIN/ENOMEM) — the exact trigger the JOB-A guard below names — and it runs for a
-    # bounded 5 s on every Linux leg. ⛔ That bound is ~80 iterations, not the 250 a bare
-    # `5 s / 0.02 s` suggests: this block's own measurement puts a `ps -o comm=` sample at
-    # ~42 ms, so each iteration costs ~62 ms, and two claims in one sentence that cannot
-    # both hold is the count class this PR already corrects elsewhere. With the `try:`
+    # (EAGAIN/ENOMEM) — the exact trigger the JOB-A guard below names. ⛔ Its DEADLINE is
+    # 5 s, which at this block's own measured ~42 ms `ps -o comm=` plus the 0.02 s sleep is
+    # ~80 samples — not the 250 a bare `5 s / 0.02 s` suggests. Two claims in one sentence
+    # that cannot both hold is the count class this PR already corrects elsewhere.
+    # ⚠️ And the DEADLINE is NOT a bound on a SAMPLE: `while time.time() < deadline:` reads
+    # the clock only BETWEEN iterations, so a `ps` that stalls overruns 5 s without limit —
+    # that unboundedness, on a call with no `timeout=`, is exactly why a raise here must be
+    # guarded instead of trusted to finish. With the `try:`
     # around the assertion alone, that raise ran no teardown and leaked this 120 s decoy in
     # its own session.
     # Measured: injecting `OSError` from the `ps` call left the decoy alive, reparented to
@@ -964,7 +967,9 @@ def test_a_raising_ps_poll_still_reaps_the_peer_decoy(
 
     The comm poll that proves the peer decoy is NAMED `workerd` has no `timeout=`, so its
     realistic failure is an `OSError` under fork pressure (EAGAIN/ENOMEM) — the trigger
-    the job-A guard already names — and it runs up to 250 times on every Linux leg. Before
+    the job-A guard already names — and it samples for a 5 s deadline (~80 samples at the
+    ~62 ms per iteration measured above, not the 250 that `5 s / 0.02 s` would suggest).
+    Before
     this PR the poll sat OUTSIDE the guard that reaps the decoy: only the `assert` after it
     was inside a `try:`, so a raise from `ps` left a 120 s `workerd` alive, reparented to
     pid 1.
