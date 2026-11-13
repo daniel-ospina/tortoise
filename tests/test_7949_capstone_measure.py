@@ -4798,9 +4798,19 @@ _LINE_CITE = re.compile(rf"{_SEP}\s*{_WRAP}{_NUM}{_WRAP}")
 #: sentence with the literal filename was RED. That is the exact rot this arm
 #: removes, re-armable in the document's own words — measured, then closed here.
 _MANIFEST = r"(?:ci-surfaces\.yml|the\s+manifest)"
+#: ⛔ THE SECOND ARM NEEDS `(?<![\w.])` IN FRONT OF ITS SEPARATOR. Without it
+#: ``sdk.py:9612`` — a legit cite of ANOTHER file that merely happens to sit before
+#: the manifest's name — matched as a manifest cite, and the pin accused the author of
+#: a line-number cite they never wrote:
+#:
+#:     the loader (`sdk.py:9612`) reads `config/ci-surfaces.yml` on every run
+#:
+#: Measured True before this guard, False after; a cite of THIS file in this order is
+#: written ``… `:9987`, see `config/ci-surfaces.yml```, so its separator follows
+#: whitespace or a wrapper character, while `sdk.py`'s colon follows a letter.
 _MANIFEST_CITE = re.compile(
     rf"{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_NUM}{_WRAP}"
-    rf"|{_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}{_MANIFEST}"
+    rf"|(?<![\w.]){_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}{_MANIFEST}"
     rf"|{_WRAP}{_LEADING_NUM}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
     rf"|{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_RANGE_NUMS}{_WRAP}"
     rf"|{_WRAP}{_RANGE_NUMS}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
@@ -4846,6 +4856,18 @@ def _bare_number_hits(text: str) -> list[str]:
 #: The block's own names. A line carrying one of these is a line that TALKS ABOUT the
 #: block, and it is the population the neighbour arm scans.
 _BLOCK_WORDS = re.compile(r"carve[_-]?out|carve out|\b(?:entry|block|manifest)\b")
+#: ⛔ …AND SO DOES A LINE THAT NAMES THE ENTRY. The block's own vocabulary is only
+#: half the population: the most natural way to put the number back names the FILE,
+#: not the block —
+#:
+#:     The row `test_pack_logic_writeprobe_11083.py` sits at `:9987` on this head.
+#:     The write-probe row sits at `:9987` on this head.
+#:     The row `test_pack_logic_writeprobe_11083.py` sits at 9987 on this head.
+#:
+#: — all three measured GREEN while gating on `_BLOCK_WORDS` alone, because none of
+#: them carries `carve_out`/`entry`/`block`/`manifest`. The stems are the entry's own
+#: name in the three spellings the document and the bundle use for it.
+_ENTRY_STEMS = re.compile(r"writeprobe|write[-_ ]?probe|pack[-_ ]?logic|11083")
 #: …and a line that names ANOTHER source file is that file's, not this claim's: see
 #: `_neighbour_number_strays` for the measurement that made this necessary.
 _OTHER_FILE = re.compile(r"[\w/]+\.(?:py|ya?ml|json|md)\b")
@@ -5961,7 +5983,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # that exists only inside a test body cannot be tested.
         neighbour_findings: list[str] = []
         for other_line in doc_lines:
-            if other_line == doc_hits[0] or not _BLOCK_WORDS.search(other_line):
+            if other_line == doc_hits[0]:
+                continue
+            if not (_BLOCK_WORDS.search(other_line)
+                    or _ENTRY_STEMS.search(other_line)):
                 continue
             stray = _neighbour_number_strays(other_line.replace(ENTRY, ""))
             if stray:
@@ -6243,6 +6268,31 @@ def test_the_neighbour_arm_admits_another_files_cite_and_still_catches_this_clai
     assert _neighbour_number_strays(line) == strays, (
         f"`_neighbour_number_strays({line!r})` — the exemption for another file's cite "
         f"must not become a bypass, and it must not refuse correct prose")
+
+
+def test_the_neighbour_population_includes_the_line_that_names_the_entry():
+    """A line naming the ENTRY is a line about the claim — measured GREEN when not.
+
+    The neighbour arm gated on the BLOCK's vocabulary, so the most natural way to put
+    the number back was invisible to it: all three of these lines carried no
+    `carve_out`/`entry`/`block`/`manifest` token, so none was scanned and the
+    re-introduced `:9987` stayed green.
+    """
+    entry = "test_pack_logic_writeprobe_11083.py"
+    for line in (f"The row `{entry}` sits at `:9987` on this head.",
+                 f"The row `{entry}` sits at 9987 on this head.",
+                 "The write-probe row sits at `:9987` on this head."):
+        assert (_BLOCK_WORDS.search(line) or _ENTRY_STEMS.search(line)), (
+            f"{line!r} is not in the neighbour population — the entry's own name "
+            f"must put a line under the arm, or the rot returns uncaught")
+        assert _neighbour_number_strays(line.replace(entry, "")), (
+            f"{line!r} is in the population but yields no stray — the arm is inert")
+    # …and the widening must not drag ordinary prose in: a cite of ANOTHER module is
+    # the document's normal writing, and `_neighbour_number_strays` exempts it.
+    prose = ("the block is spliced by `tools/ci_selection.py` "
+             "(its `entry_lines` loop, `:4906`)")
+    assert _neighbour_number_strays(prose) == [], (
+        "a cite of another module on a neighbouring line must stay green")
 
 
 def test_the_two_cite_arms_are_complementary_not_duplicate():
