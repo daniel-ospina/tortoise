@@ -4756,8 +4756,13 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     #     An earlier revision was superseded and the read is sized to `counts.Event + 1`.
     #
     # all stayed GREEN (measured, 1 passed apiece). The exemption is therefore on the
-    # SIZING PHRASE BEING PAST-FORM — the only shape that REPORTS a withdrawn sizing
-    # rather than prescribing a current one.
+    # SIZING PHRASE BEING PAST-FORM, which is (nearly) the only shape that REPORTS a
+    # withdrawn sizing rather than prescribing a current one.
+    # ⚠️ "(nearly)": a past-form sizing and a live present-tense sizing that share a
+    # PUNCTUATION-FREE clause still collapse into one unit, and the past one donates the
+    # exemption — `The first draft was sized to `counts.Event + 1` and it is sized to
+    # `counts.Event + 1` today.` is NOT flagged (measured). The gap is NARROWED by this
+    # rule, not closed; it is re-pinned as a known gap below rather than left implied.
     _HISTORY = _re.compile(
         r"\b(?:was|were|had been)\s+(?:\w+\s+){0,2}sized\b"      # "was [therefore] sized"
         r"|\bsized\s+the\s+request\s+to\b"                       # narrative past
@@ -4781,10 +4786,11 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         split too.
         ⚠️ NOT a universal, and the split was described as sufficient when it is not:
         history and a live prescription CAN share a unit when no `.,;:` separates them, and
-        a history marker attached to the SIZING then exempts the live prescription in the
-        same unit. That shape is a KNOWN GAP — pinned by a self-test case below so it is
-        visible rather than mistaken for safety. The plan's history block is a separate
-        paragraph, so it does not take this shape.
+        a PAST-FORM sizing then exempts a live present-tense sizing in the same unit. That
+        shape is NARROWED, not closed — the marker rule above removed the loose history words
+        but one past-form sizing still donates the exemption — and it is pinned as a KNOWN
+        GAP by the self-test case below that asserts it is NOT flagged. The plan's history
+        block is a separate paragraph, so it does not take this shape.
         """
         return [
             c.strip() for c in _re.split(r"(?<=[.;:,])\s+", text)
@@ -4812,7 +4818,10 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     assert not _prescribes(
         "The superseded row sized the request to `counts.Event + 1`."), (
         "recorded history must stay writable")
-    # ✅ FORMER KNOWN GAP, now CLOSED (review cycle 11). It read: "with no `.,;:` between a
+    # ✅ ONE KNOWN-GAP SHAPE, now CLOSED (review cycle 11) — but see the re-pin below: the
+    # GAP ITSELF was narrowed, not closed, because a PAST-FORM sizing still donates the
+    # exemption inside a punctuation-free clause (review cycle 12, measured). This case is
+    # the "bare history WORD" shape. It read: "with no `.,;:` between a
     # history marker and a live prescription, they share one unit and the marker exempts
     # it", and it was pinned as `assert not _prescribes(...)` with the instruction "if this
     # ever starts failing, the detector got STRONGER — update the note it pins". The
@@ -4824,6 +4833,14 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         "its request to `counts.Event + 1` today."), (
         "the no-punctuation mixed shape regressed: a history word is exempting the live "
         "prescription that shares its clause")
+    # ⚠️ THE REMAINING KNOWN GAP, pinned so it cannot pass for safety: a PAST-FORM sizing
+    # and a live present-tense sizing in ONE punctuation-free clause are not separated, and
+    # the past one exempts the live one. If this assertion starts failing, the detector got
+    # STRONGER — narrow this note rather than deleting the case.
+    assert not _prescribes(
+        "The first draft was sized to `counts.Event + 1` and it is sized to "
+        "`counts.Event + 1` today."), (
+        "the residual puntuation-free mixed shape is now flagged: narrow the note above")
     # ⛔ ...and the other direction of the same trap: a history WORD is not a history
     # STATEMENT. `Cycle 3` says where the number came from; it does not withdraw it.
     # Measured GREEN before this case was added (review cycle 10).
