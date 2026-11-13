@@ -2129,23 +2129,31 @@ def test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_
         "retirement left")
 
 
+#: Up to three words of inserted text between two anchors of one denial.
+#: A family stated as a LITERAL SUBSTRING is defeated by one word inserted INSIDE
+#: the phrase — round 31 found four survivors that way ("nothing EVER repairs",
+#: "cannot EVER be repaired", "never EVER a finding again"), all of which said the
+#: falsehood with no qualifier. Anchors, not substrings; a bounded gap, not `.*`.
+_GAP = r"(?:\s+\w+){0,3}\s+"
+
+
+def _family(*anchors: str) -> re.Pattern[str]:
+    """Compile one repair-denial family as an anchor SEQUENCE with a bounded gap."""
+    return re.compile(_GAP.join(anchors))
+
+
 #: Every phrase family by which this PR's prose has denied a repair that exists.
-#: Round 29 defeated a literal ban with one inserted word ("no automatic path EVER
-#: repairs it"); round 30 defeated a two-prefix allowlist by stating the falsehood
-#: in a DIFFERENT family, or in the tail of the allowed one. So the pin is a grid:
-#: every family, at every site, each occurrence judged on its own window.
+#: Rounds 29-31 each defeated a narrower encoding of this net (a literal ban, a
+#: two-prefix allowlist, a literal substring); the families are now anchor
+#: sequences, and each occurrence is judged in its OWN SENTENCE.
 _REPAIR_DENIALS = (
-    "no automatic path",
-    "no automatic repair",
-    "no later pass",
-    "no later sweep",
-    "nothing else repairs",
-    "nothing else repair",
-    "nothing repairs",
-    "never a finding again",
-    "unrepairable",
-    "no repair route",
-    "cannot be repaired",
+    _family(r"no", r"automatic", r"(?:path|repair|route|sweep|pass)"),
+    _family(r"no", r"(?:later|subsequent|further)", r"(?:pass|sweep|scan|revisit\w*)"),
+    _family(r"nothing", r"(?:else\s+)?(?:repairs?|fixes?|clears?|reconciles?|remediates?)"),
+    _family(r"never", r"(?:a\s+)?finding", r"again"),
+    _family(r"unrepairable"),
+    _family(r"cannot", r"be", r"repaired"),
+    _family(r"no", r"repair", r"(?:route|path|possible)"),
 )
 
 #: The qualifiers that make a denial TRUE. The routing fact (#12315/#12336) is
@@ -2162,23 +2170,25 @@ _REPAIR_QUALIFIERS = (
 
 
 def _assert_repair_denials_are_qualified(text: str, site: str) -> None:
-    """Every repair denial in ``text`` must carry a qualifier in its OWN window.
+    """Every repair denial in ``text`` must carry a qualifier in its OWN SENTENCE.
 
-    A window, not a prefix: a prefix allowlist is defeated by appending a false
-    clause after the allowed wording, and a blanket ``not in`` is defeated by one
-    inserted word. The window reaches BACKWARDS too, because the true form states
-    the shape first ("a goal whose last claim is gone ... never a finding again").
+    A sentence, not a window: an inserted false clause in its own sentence must
+    inherit nothing from a neighbour (round 30's window form let
+    ``Nothing else repairs it afterwards.`` pass by sitting next to a qualified
+    sentence). And anchors with a bounded gap, not substrings, so one inserted
+    word cannot remove a denial from the net.
     """
     low = " ".join(text.lower().split())
     sentences = re.split(r"(?<=[.!?])\s+", low)
-    for family in _REPAIR_DENIALS:
+    for pattern in _REPAIR_DENIALS:
         for sentence in sentences:
-            if family not in sentence:
+            m = pattern.search(sentence)
+            if m is None:
                 continue
             assert any(q in sentence for q in _REPAIR_QUALIFIERS), (
-                f"{site}: {family!r} is stated in a sentence with no qualifier — "
-                "every repair denial must say WHICH shape needs the MANUAL route, "
-                f"in its OWN sentence; found: {sentence[:170]!r}")
+                f"{site}: {m.group(0)!r} is stated in a sentence with no qualifier "
+                "— every repair denial must say WHICH shape needs the MANUAL "
+                f"route, in its OWN sentence; found: {sentence[:170]!r}")
 
 
 def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
@@ -2190,16 +2200,21 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
     for a missing repair. The behaviour is pinned by
     `test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_left`;
     this pins that the words still agree with it — as a (site x family) grid,
-    because rounds 27-30 each escaped a narrower form of this assertion.
+    because rounds 27-31 each escaped a narrower form of this assertion.
 
-    ⛔ DECLARED RESIDUAL (round 30, adversarial-bound cycle 2): a false denial
+    ⛔ DECLARED RESIDUAL (round 30, unchanged by round 31): a false denial
     inserted INTO a sentence that already carries a qualifier is not caught here.
     That shape makes the sentence SELF-CONTRADICTORY ("no later pass revisits it
     once its last live claim is gone, and nothing ever repairs the word
     afterwards") and no text pin can separate it from legitimate prose without
     freezing every sentence verbatim — which would false-block benign rewording by
-    the other writer on this branch. Coverage by mutant: 9 of the 10 round-30
-    survivors are killed; that one is this residual, stated rather than hidden.
+    the other writer on this branch. Stated rather than hidden.
+
+    WHAT IS NOT RESIDUAL: an inserted word INSIDE the family phrase. Round 31
+    broke the substring form this way ("nothing EVER repairs", "cannot EVER be
+    repaired", "never EVER a finding again" — four survivors, all saying the
+    falsehood with no qualifier); `_REPAIR_DENIALS` is now built by `_family` as
+    anchor sequences with a bounded gap, and all four are killed.
     """
     import tortoise.derived_invalidation as di
 
