@@ -246,11 +246,19 @@ name+kind *or* on a spelling the survivor's `aliases[]` already records
 (`mode: "alias"`), and on that alias path the three SPELLING vetoes are stood
 down on purpose: `aliases[]` is the reviewer's record that these two are one
 entity, and `kind_conflict` in particular would fire on the retired variant's kind
-namespace (`extractor_v2.py` passes `mention_is_alias: mode == "alias"` and a
-spelling that differs from the row's own name, and the
-warning names only the codes that actually fired). On the exact/bare rungs the
+namespace (`extractor_v2.py` passes `mention_is_alias` when `mode == "alias"`
+**and** the folded mention differs from the row's own name — a row must never
+ALIAS ITSELF, see §3 — and the warning names only the codes that actually fired).
+On the exact/bare rungs the
 spellings are `_norm`-equal and the kind already matched, so none of the three can
-fire there either. What phase 1 never skips is `retired` — D-1's second door. `group_join` is
+fire there either. ⛔ That `_norm` equality is #11901's decision, not an oversight:
+a surface variant (article, separator, punctuation) is deliberately INVISIBLE to
+phase 1, because the candidate-recall harness measures the fallback's contribution
+from exactly that gap (`test_the_matcher_is_exact_norm_equality_plus_kind` pins it).
+Widening the name comparison to the fold would make the variant bind deterministically
+here — a round-6 review proposed it — but it CONTRADICTS that recorded conclusion, so
+it is refused; the variant's home is the write door's fold
+(`entity_identity.resolve_or_mint`). What phase 1 never skips is `retired` — D-1's second door. `group_join` is
 deliberately NOT applied in phase 1: an exactly-equal spelling, or one the merge
 recorded as an alias, is the strongest evidence the tree has, and the merge
 queue's own rule lets an exact re-mention bind. `target_suppressed` is NOT applied

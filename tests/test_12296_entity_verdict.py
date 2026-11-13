@@ -1192,10 +1192,12 @@ class TestTheResolverBands:
         assert res["records"][0]["mode"] == "alias", res
         assert res["held"] == [], res
         # ⛔ The CONTROL: the escape is the RECORD, not an amnesty for mismatched
-        # kinds — asked at the veto layer, because phase 1 legitimately finds no
-        # row for a name whose declared kind is a different NAMESPACE (a `plan`
-        # "Acme" and an `org` "Acme" are different entities, so that name is not a
-        # hold but a create).
+        # kinds — asked at the veto layer. Note the pair below is `the team` vs
+        # `Acme Holdings`, which the name rungs cannot match at all (no spelling
+        # overlap), so it is `kind_conflict` and nothing else; the same-SPELLING
+        # case (`plan` "Acme" vs `org` "Acme") is HELD `kind_conflict`, never a
+        # create — `test_same_spelling_with_a_different_kind_is_still_a_kind_conflict`
+        # owns that assertion.
         pair = ({"name": "the team", "kind": "core:plan"},
                 {"name": "Acme Holdings", "kind": "core:org"})
         assert verdict.hard_vetoes(*pair, {}) == [verdict.VETO_KIND_CONFLICT]
@@ -1280,6 +1282,15 @@ class TestTheResolverBands:
         hit, mode = v2._find_existing_entity([survivor], "billing v2 ledger",
                                              "core:plan")
         assert (hit["id"], mode) == ("S", "alias"), (hit, mode)
+        # …and a STORED self-fold is a reviewer's record, not the injection
+        # (`apply_entity_merge` unions the candidate's fold unconditionally, so a
+        # merge of two same-fold rows leaves it there) — dropping it would delete a
+        # decision the tree made. Only the injected row name is skipped.
+        stored = {"id": "S2", "name": "Acme, Inc.", "objectKind": "core:org",
+                  "aliases": []}
+        v2._absorb_spellings(stored, {"id": "S2", "name": "Acme, Inc."},
+                             ("resolved_from", "S2", "core:org", ["acme inc"]))
+        assert stored["aliases"] == ["acme inc"], stored
 
     def test_an_unfolded_stored_alias_still_resolves(self):
         """`aliases` is undeclared-but-writable, so the stored side must be folded
