@@ -4945,3 +4945,39 @@ class TestThe12120ReviewRound19:
             assert msgs, "the divergence emitted no warning"
         finally:
             sdk.close()
+
+    def test_another_entitys_row_cannot_silence_the_divergence_either(
+            self, sdk_factory):
+        """The rescue reads the TARGET'S group, not every holder of the name.
+
+        The name arm matches every holder of the widened key space, so an unrelated
+        terminal entity with a DANGLING survivor (its rows are dropped by
+        `_ref_candidates`, leaving the target the only candidate) could still answer
+        the idempotency question for the target. Measured: the graph below reported
+        `applied=0, skips=[], warns=[]` at the unscoped head, while the same graph
+        minus the second entity reported `terminal object target` and warned — and
+        `main` warned in both.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("New Co", "document")
+            g.query(
+                "CREATE (t:Object {id:'c-target', name:'Shared Co', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Other Co'}) "
+                "CREATE (o:Object {id:'c-other', name:'Shared Co Holdings', "
+                "objectKind:'document', status:'superseded', "
+                "canonical_name:'shared co', supersededBy:'New Co', "
+                "resolved_from:'c-gone-survivor'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Shared Co", "supersedes_by": "New Co",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert any("terminal object target" in str(s.get("reason") or "")
+                       for s in skips), (
+                "another entity's row silenced the target's divergence: "
+                f"{skips!r} {msgs!r}")
+            assert msgs, "the divergence emitted no warning"
+        finally:
+            sdk.close()

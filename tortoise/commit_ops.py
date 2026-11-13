@@ -2006,10 +2006,11 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # supersession-probe site review).
         _id_node_keys = {_row[0] for _row in _id_rows}
         rows = [list(_row[1:]) for _row in _id_rows]
-        _name_arm_rows, _name_widened = _ref_candidates(_entity_rows(
+        _name_entities = _entity_rows(
             proj.g, "Object",
             [_row for _row in _name_rows if _row[0] not in _id_node_keys],
-            with_groups=True), "Object")
+            with_groups=True)
+        _name_arm_rows, _name_widened = _ref_candidates(_name_entities, "Object")
         if (not rows and _name_rows and not _name_arm_rows
                 and not _subject_family_holds_ref(proj, ref)):
             # #12120 review: the name arm DID match carriers and every one of
@@ -2347,22 +2348,23 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # into a reported divergence plus a `skipped` entry — where `main`
             # (whose raw arm hit the carrier) was silent, and where hosted counts
             # a warn as a real keep-first conflict.
-            # ⛔ `not rows` is load-bearing (review round 19, second pass): an
-            # ID-matched target (`rows` non-empty) also has `_name_rows` — the
-            # rows the NAME probe matched for the SAME ref text, which may be a
-            # DIFFERENT entity that happens to carry that id as its name (the OR
-            # collision this file records as reachable). Asking THOSE rows whether
-            # the fold happened answered for the wrong node and silenced a genuine
-            # divergence (`applied=0, skips=[], warns=[]`, where the same graph
-            # with one unrelated name-match changed reported
-            # `terminal object target` and warned). The intended shape — a
-            # merge-then-supersede target whose CARRIERS store this record's
-            # successor — is reached only on the name arm.
+            # ⛔ The rescue reads the TARGET'S OWN GROUP, never the whole name arm
+            # (review round 19, two passes). `_name_rows` is every holder the
+            # WIDENED key space matched — multi-entity by construction — so asking
+            # it whether the fold happened answered for other nodes: measured, an
+            # unrelated terminal entity with a dangling survivor (whose rows
+            # `_ref_candidates` drops, leaving the target the only candidate) made
+            # a genuine divergence vanish — `applied=0, skips=[], warns=[]` where
+            # `main` warned and where the same graph minus that node reported
+            # `terminal object target`. Scoping to `_target_key` keeps the intended
+            # shape (a merge-then-supersede target whose CARRIERS store this
+            # record's successor) and restores the refusal + warn otherwise.
             _stored_here = (o_sb or "")
-            if (not rows
-                    and not _same_successor(_stored_here, supersedes_by)
+            _carrier_rows = [m for _rep, _key, _members in _name_entities
+                             if _key == _target_key for m in _members]
+            if (not _same_successor(_stored_here, supersedes_by)
                     and any(_same_successor(str(r[4] or ""), supersedes_by)
-                            for r in _name_rows if len(r) > 4)):
+                            for r in _carrier_rows if len(r) > 4)):
                 continue
             # #5370/#12120: the fold stores the successor NODE's spelling; rows
             # folded BEFORE #5370 carry the old 200-char prefix (#2164's fold
