@@ -1122,9 +1122,19 @@ def list_tools() -> list[str]:
 def call_tool(name: str, arguments: dict[str, Any] | None = None) -> Any:
     """Call an MCP tool (e.g. tortoise_create_point) and return its result.
 
-    Raises on transport/auth failure — callers that want graceful behavior
-    should check `available()` first (or catch exceptions). An auth rejection
-    with no credential resolved raises `MCPKeyEmptyError`.
+    ⛔ Raises `fastmcp.exceptions.ToolError` for ANY tool-level ERROR RESULT, not only for
+    transport/auth failure (#11153). The hosted surface flags a refused call with
+    `isError: true` — a quota refusal (`-32006`), an auth rejection, a validation error, a
+    wait-bound expiry — and fastmcp's client is built with `raise_on_error=True` by
+    default, so that refusal arrives as a RAISED `ToolError` and never reaches the caller
+    as a payload. `normalise_tool_result` therefore cannot see it; a caller that needs the
+    refusal's `code` must catch `ToolError` and read its text.
+
+    Also raises on transport failure, and `MCPKeyEmptyError` when an auth rejection leaves
+    no credential resolved.
+
+    ⚠️ `available()` answers REACHABILITY only — it cannot pre-empt a tool-level refusal, so
+    "call `available()` first" is not a substitute for handling `ToolError`.
     """
     provider = _BearerProvider(resolve_connection().url)
 

@@ -770,8 +770,19 @@ class MCPReader:
         res = self._get_entities(limit_sent)
         err = _error_of(res)
         if err:
-            raise RuntimeError(f"read of the Event layer was refused: {err[:300]}")
+            # ⛔ `CurationRefused`, NOT bare `RuntimeError`: `main()` answers rc 3 for this
+            # class and rc 1 ("the run crashed") for anything else — the same contract the
+            # `_fingerprint_walk` refusal below states. `cmd_inventory` (and `cmd_plan`)
+            # catch `C.CurationRefused` only, so a bare `RuntimeError` here escaped uncaught
+            # and reported a DESIGNED refusal as a crash. It is a `RuntimeError` subclass,
+            # so the existing `pytest.raises(RuntimeError, ...)` assertions still hold.
+            raise C.CurationRefused(f"read of the Event layer was refused: {err[:300]}")
         if not _is_row_listing(res):
+            # ⛔ bare `RuntimeError` ON PURPOSE — rc 1, not rc 3. The sibling layers
+            # (`read_sources`, `read_operators`) raise the same class here, and the rc
+            # table (`docs/architecture/CURATION-11469.md`) puts "the payload was not a
+            # listing" on the rc-1 row: it is the READ being unusable, not a designed
+            # census refusal. Only the `_error_of` arm above is a designed refusal.
             raise RuntimeError(
                 "read of the Event layer answered in an unrecognised shape "
                 f"({type(res).__name__} with keys "

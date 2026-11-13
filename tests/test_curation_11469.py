@@ -4516,6 +4516,30 @@ def test_a_non_graph_refusal_on_the_event_read_does_NOT_fall_back():
         assert not reader.note or "read from the credential" not in reader.note, reader.note
 
 
+def test_the_event_layer_error_arm_is_a_designed_refusal():
+    """The in-band `_error_of` arm must raise `CurationRefused`, NOT a bare `RuntimeError`.
+
+    The rc table (`docs/architecture/CURATION-11469.md`) answers **3** for a designed
+    refusal and **1** for "the run crashed", and `cmd_inventory`/`cmd_plan` catch
+    `C.CurationRefused` only — so a bare `RuntimeError` here reported a designed
+    Event-layer refusal to a driver as a crash.
+
+    ⛔ The class needs its OWN assertion: `CurationRefused` IS a `RuntimeError` subclass, so
+    every `pytest.raises(RuntimeError, ...)` in this file (and `except Exception` in the
+    fallback test above) stays green either way — measured, with a bare `RuntimeError` the
+    whole suite passed. Same reason the sibling arms in `read_sources` and `read_operators`
+    are `CurationRefused`.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        return {"error": "Team points limit reached (25000). Upgrade your plan."}
+
+    reader = mod.MCPReader(call, None)
+    with pytest.raises(C.CurationRefused, match="read of the Event layer was refused"):
+        reader.read_events({"counts": {"Event": 3}})
+
+
 def test_an_event_payload_that_is_not_a_row_listing_is_refused():
     """A count-only or renamed-key payload is not "an empty layer" (final review, F4).
 
