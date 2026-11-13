@@ -13799,12 +13799,24 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                             "or store a `tt_` key with `tortoise signup` if you "
                             "want the REST verdict"))
             return
+        # ⛔ "the STORED key" is false for an env-supplied one, and this file
+        # already says so 10 lines up (the `oat_` arm) — printing it anyway told
+        # an env user a store refused them and that `config show` "names which
+        # store won" when nothing is stored (fresh review at `7f206d2266`,
+        # measured: `❌ … https://api.example.test refused the stored key` on a box
+        # with `TORTOISE_API_KEY` set and no store at all). Same split as the two
+        # remedy strings below (`_transport_remedy`/`_identity_remedy`).
         results.append(_combine("❌",
                         f"{health_part}; /v1/team 401 Invalid API key — "
-                        f"{base} refused the stored key. Re-mint it: `tortoise "
-                        "signup` (new team) or `tortoise recover` (same team, "
-                        "needs your st_ recovery token); `tortoise config show` "
-                        "names which store won"))
+                        f"{base} refused the "
+                        + ("key in TORTOISE_API_KEY" if _from_env
+                           else "stored key")
+                        + ". Re-mint it: `tortoise signup` (new team) or "
+                        "`tortoise recover` (same team, needs your st_ recovery "
+                        "token); "
+                        + ("`tortoise config show` shows what this shell sends"
+                           if _from_env else
+                           "`tortoise config show` names which store won")))
         return
 
     error_code = None

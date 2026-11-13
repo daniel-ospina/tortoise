@@ -1002,6 +1002,40 @@ class TestDoctorHostedCredential:
         assert hosted is not None and "UNGRADED" in hosted, out[-1500:]
         assert "TORTOISE_API_URL" in hosted, hosted
 
+    def test_an_env_key_is_not_told_a_STORE_refused_it(
+            self, clear_db_env, tmp_path, capsys, monkeypatch,
+            _hermetic_hosted_identity):
+        """A 401 on an ENV key must not name a store (fresh review `7f206d2266`).
+
+        The 401 arm said "refused the stored key … `config show` names which store
+        won" to every credential. On a box whose key comes from `TORTOISE_API_KEY`
+        nothing is stored, so both clauses are false about the user's own setup —
+        and they contradict the `Credentials` row printed immediately above, which
+        names `env:TORTOISE_API_KEY`. Measured before the fix: `❌ … refused the
+        stored key` with no store in existence.
+        """
+        monkeypatch.setenv("TORTOISE_API_KEY", _FAKE_ENV_KEY)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            return _FakeResponse(401, b'{"detail":"Invalid API key"}')
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "env-401.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor env 401 seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "❌" in hosted, out[-1500:]
+        assert "stored key" not in hosted, hosted
+        assert "which store won" not in hosted, hosted
+        assert "TORTOISE_API_KEY" in hosted, hosted
+
     def test_env_key_names_its_source(self, clear_db_env, tmp_path, capsys,
                                      monkeypatch):
         """The env key is the highest-precedence candidate and is NAMED as such.
@@ -1854,6 +1888,49 @@ class TestDoctorHostedCredential:
             assert "TORTOISE_API_URL" not in hosted, hosted
             assert "config show" in hosted, hosted
             assert rc == 1
+
+    def test_an_env_key_is_told_about_its_own_url_when_no_identity_completes(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The identity arm's ENV form names `TORTOISE_API_URL` — and nothing pinned it.
+
+        `382e91911d` keyed the remedy on the ARM (round 29) and so produced four
+        arm x source cells; three can fail loudly and the env form of the
+        IDENTITY arm could not — mutating its keying (`if _from_env` -> `if False`)
+        left the suite at 134 passed (round 31 measurement). That is the same
+        one-arm-unpinned shape as round 26's `team_code != 401`.
+
+        What the unpinned arm would print is worse than a cosmetic slip: an
+        env-only box (a captive portal answering 200 to everything) would be told
+        to check "the `api_url` this store supplies" — a store that need not exist
+        on a pure env box — while omitting `TORTOISE_API_URL`, the only knob that
+        moves that endpoint for an env-sourced key (#2369 D1.1 co-source). The
+        store form of the SAME arm is pinned above; this is its sibling.
+        """
+        monkeypatch.setenv("TORTOISE_API_KEY", _FAKE_ENV_KEY)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://portal.example.test")
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            return _FakeResponse(200, b"<html>Please sign in to the network</html>")
+
+        calls = _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "soft200-env.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor soft200 env seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert calls and calls[0][0] == "https://portal.example.test/health", calls
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "❌" in hosted, out[-1500:]
+        assert "no team identity" in hosted, hosted
+        # The knob that CAN move an env key's endpoint is named...
+        assert "TORTOISE_API_URL" in hosted, hosted
+        # ...and the store-only phrasing is NOT, because this box need not have a store.
+        assert "this store supplies" not in hosted, hosted
+        assert rc == 1
 
     def test_offline_never_prints_all_checks_passing(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
