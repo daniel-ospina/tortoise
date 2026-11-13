@@ -5347,6 +5347,39 @@ def test_the_rename_remedy_does_not_claim_to_be_the_whole_record_for_an_SDK_meth
     assert len(problems) == 1 and problems[0].kind == "no-record", problems
     assert accounting == {}, accounting
     assert "has no departure record" in str(problems[0]), problems[0]
+    # ⛔ AND THE PER-ROW LINE NAMES ONE MAP FOR THIS SHAPE. It offered
+    # "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`" as interchangeable, so following it
+    # literally (add the DEPARTURE map, re-pass "the same override") produced a byte-identical
+    # refusal — the closing line's round-21 defect in the row an operator reads first (review
+    # of PR #12313, round 22). The line must say the departure map does not clear this shape.
+    row = str(problems[0])
+    assert "`RETIRED_SDK_METHODS` in `tortoise/sdk_retired.py`" in row, row
+    assert "A `REMOVED_SDK_METHODS` entry is a DEPARTURE with no replacement" in row, row
+    assert "does not clear this shape" in row, row
+
+    # Non-vacuity, and the reason the wording is not cosmetic: the RENAME route it names does
+    # clear this exact shape, and the DEPARTURE route it now excludes does not.
+    rename_records = dict(
+        archived=set(),
+        forward_raw=set(),
+        sdk_retired={"ghost_method"},
+        sdk_renamed={"ghost_method"},
+    )
+    cleared, accounting = sm.removal_report(
+        {("ghost_method", "sdk")}, set(), rename_records, allowed={"sdk:ghost_method"}
+    )
+    assert cleared == [] and accounting, (cleared, accounting)
+    departure_records = dict(
+        archived=set(),
+        forward_raw=set(),
+        sdk_retired={"ghost_method"},
+        sdk_renamed=set(),
+    )
+    refused, accounting = sm.removal_report(
+        {("ghost_method", "sdk")}, set(), departure_records, allowed={"sdk:ghost_method"}
+    )
+    assert len(refused) == 1 and refused[0].kind == "no-record", refused
+    assert accounting == {}, accounting
     # The remedy the parser ADVERTISES names the map entry as still required — and names the
     # RENAME map only: offering `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` as interchangeable
     # halves re-collapsed the two maps round 18 separated, and for a `REMOVED_SDK_METHODS` name
