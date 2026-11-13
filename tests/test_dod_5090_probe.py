@@ -8049,7 +8049,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     statements = [int(n) for n in re.findall(r"this tree: (\d+) collected", text)]
     statements += [int(n) for n in
                    re.findall(r"collects \*\*(\d+) in the tree", text)]
-    # ⛔ The arithmetic total is written ``(`122 + … = 186`)`` — a BACKTICK follows the
+    # ⛔ The arithmetic total is written ``(`122 + … = 187`)`` — a BACKTICK follows the
     # digits, never a paren (`#12015` review MEASURED the first spelling: it matched
     # nothing, and a dead arm shrinks to the arms that still match, so `= 999` stayed
     # green while the comment claimed all three were pinned).
