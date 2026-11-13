@@ -79,7 +79,9 @@ and its `graph` argument already exist, so the surface-approval rule is not enga
 Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
 
 - reconciliation target is `counts.Event` (the tool returns a bare list, so there is
-  no `total` key to prefer) — `mcp_server.py:5422`;
+  no `total` key to prefer) — `mcp_server.py:5422`; the forwarding hop is
+  `tortoise_get_entity` → `tortoise_get` (`:5574`) → the `t == "events"` arm (`:6094`)
+  → `:6096` calls `tortoise_get_events`;
 - the truncation arm is load-bearing because the read has `LIMIT` and no offset —
   `sdk.py:49054`, <https://docs.falkordb.com/cypher/return.html>;
 - identity is `id`, with `eventId` as the fallback spelling — `entities.py:5769`;
@@ -110,8 +112,25 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
 1. `EVENT_READ_CEILING` + `read_events` + `_get_entities`. **Test:**
    `test_the_event_layer_reaches_the_census` (`event:AgentSession` / `event:meeting`
    in `by_class`, `events_read == counts.Event`).
-2. Content lane: `content := name`, fallbacks `title` then `subject`. **Test:**
-   `test_an_events_text_is_its_name` (two Events sharing a `subject` stay distinct).
+
+   ⛔ The bound is **OURS, not the surface's**: `get_events` validates no upper `limit`
+   (it goes straight into the Cypher `LIMIT`), so declaring it as "the surface's maximum"
+   would be false — and the refusal's stated cause would not bind. The read is therefore
+   **sized to `counts.Event + 1`**, which is the smallest request that PROVES
+   non-truncation, and the bound is only consumed by a layer that genuinely has no whole
+   read. The refusal says exactly that: a size bound on ONE response, raise it
+   deliberately if the layer legitimately outgrew it.
+2. Content lane: `content := name`, fallbacks `title` then `subject`; rows carrying
+   none are COUNTED on `read_note` (they share one content-addressed key, so the
+   duplicate fold reports them and the count explains it). **Test:**
+   `test_an_events_text_is_its_name_with_title_and_subject_fallbacks`.
+
+   ⚠️ **`classify_event` is NOT unchanged** (round-1 correction): it tested the session
+   kinds case-SENSITIVELY against lower-case `agentSession`, while the write path stores
+   `AgentSession`. Unreachable while nothing read the layer; reachable the moment it is
+   read, and then all 4,670 agent-session rows get a false per-row reason — which is the
+   one thing reading the layer buys. **Test:**
+   `test_an_agent_session_event_gets_the_session_reason_not_the_domain_one`.
 3. Identity: `id`, fallback `eventId`; a row with neither refuses. **Test:**
    `test_an_event_row_with_no_identity_is_refused`.
 4. Guard arms, each with its own test: above ceiling; fills the limit with nothing
@@ -119,17 +138,21 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
    non-empty read is a `read_note`, not a refusal.
 5. Routing: `graph` sent; a graph-BOUND credential falls back and discloses. **Test:**
    `test_the_event_read_is_routed_to_the_graph` + `…_falls_back_and_discloses`.
-6. Wire both verbs; emit the three fields on both payloads **and** on every disarmed
-   arm. **Test:** disarmed tri-state on both stop points.
-7. Adapter: extend `_with_operator_count` so pre-existing fakes answer `events` +
-   `counts.Event`. **Test:** the existing suite stays green (this is the blast radius).
+6. Wire both verbs; emit the three fields on both payloads **and** on all THREE disarmed
+   call sites. **Test:** disarmed tri-state on the failed-read arm AND the ledger arm.
+7. Adapter: extend **BOTH** `_with_operator_count` and `_operator_surface` so pre-existing
+   fakes answer `events` + `counts.Event`. **Test:** the existing suite stays green (this
+   is the blast radius).
 8. `NOT_ENUMERABLE` + `docs/architecture/CURATION-11469.md`. **Test:**
    `test_the_event_layer_is_no_longer_claimed_unreadable` (asserts `"event"` absent and
-   `object`/`subject` still named) + the doc diff.
+   `object`/`subject` still named) + `test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread`
+   (asserts the doc's two old sentences are gone and the row cites #12378) — so the doc
+   drift is PINNED rather than remembered.
 
 ## Rounds
 
-**Rounds:** pending (filled at PLAN-VERIFY close)
+**Rounds:** 2 (verifiers: 1 per round, class: code) — round 1 returned 5 issues; all were
+verified against source and fixed, and round 2 re-checked the amended plan.
 
 ### Review Scope Contract
 **Class:** code
@@ -141,17 +164,29 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
 - R2 **A correct read is refused** (false block: count/rows disagree legitimately). →
   the exact-equality arm is a *passing* test with the reported count equal to the rows,
   and the refusal text names its causes so a real refusal is attributable.
-- R3 **The census key shape shifts** for consumers (`event:<kind>`). → a test asserting
-  `by_class` keys and `total_rows` for a zero-Event graph are unchanged.
+- R3 **The census key shape shifts** for consumers (`event:<kind>`). → step 1's assertion
+  on the census keys (`event:AgentSession` / `event:meeting` / `event:deployment`), which
+  is the check that actually discriminates. ⚠️ The zero-Event-graph assertion alone is
+  INERT for this risk — with no event rows a broken key leaves it green — so it is carried
+  as the no-regression half only.
 - R4 **Every pre-existing fake surface breaks** (new required read → rc 3). → the full
-  suite run through `worktree_report.py run`; the adapter change is what keeps it green.
+  suite run through `worktree_report.py run`. ⚠️ **BOTH** fixture builders must be
+  extended, not one: `_with_operator_count` (the wrapper most pre-existing fakes go
+  through) **and** `_operator_surface`, whose own docstring says operator-read fixtures
+  must not be wrapped — so it has to answer the Event read itself. The file carries 35
+  inline `def call(...)` fakes and 48 `main([...])` call sites; those that reach the
+  census armed are the blast radius.
 - R5 **An unrouted read mixes two graphs.** → routing test asserting the `graph`
   argument is sent, plus the bound-credential fallback disclosure test.
 - R6 **Disarmed runs lose the new fields** (the round-2/3 defect class on the operator
-  layer: the disarmed payload lacked the layer fields). → tri-state test on both
-  disarmed stop points, `None` distinct from `(n, m)`.
+  layer: the disarmed payload lacked the layer fields). → tri-state tests on the disarmed
+  stop points, `None` distinct from `(n, m)`. **Three** call sites in `cmd_plan`, not two:
+  a refused census read, an unexpected exception, and a refused/damaged LEDGER — a
+  two-arm test stays green with the ledger arm silently dropping `events_*`.
 - R7 **Doc drift**: `CURATION-11469.md` still says the pass deliberately does not read
-  the layer. → updated in the same commit; the doc's own row cites #12378.
+  the layer. → updated in the same commit, **and pinned**: a test asserts neither
+  "this pass does NOT read it" nor "counted here, NOT enumerated" survives in the doc,
+  so a future revert of the row reds rather than drifting.
 
 **Out of scope — must NOT be raised** (note, file, do not chase):
 
