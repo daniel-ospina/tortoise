@@ -72,9 +72,13 @@ WHAT THE GATE STILL DOES NOT SEE (named, so a green run is not over-read)
   caller never got, so it is a declared exemption here, not a miss.
 * **A refusal nested deeper than the seam reads.** `_returned_safe_failure`
   reads the payload and its ``result`` wrap key. `tortoise_overview()` with no
-  `section` nests each section's payload one level down (`combined[sec] =
-  result`), so a section's refusal is not classified. Pre-existing, and it
-  never turned a failure into a DIFFERENT failure — it stays `ok`.
+  `section` used to nest each section's payload one level down
+  (`combined[sec] = result`), so a section's refusal was not classified. #11153
+  closed the case that mattered — a TOTAL outage now returns the refusal at the
+  top level (so the wire says `isError: true` and the row stops reading `ok`) —
+  and a PARTIAL summary still nests its refused sections, which this gate does
+  not see. That residue only turns a failure into an `ok` row, never into a
+  different failure.
 * **A refusal answered with a KEYLESS plain dict.** The gate matches a dict
   carrying a CONSTANT ``error`` key, and the seam classifies a keyless refusal
   only when the body returns an `_SafeError` (the exact-payload arm is

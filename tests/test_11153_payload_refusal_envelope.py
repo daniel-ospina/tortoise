@@ -358,3 +358,40 @@ def test_the_routine_wait_bound_refusal_is_still_a_designed_refusal(monkeypatch)
     with pytest.raises(C.CurationRefused) as caught:
         mod._live_call_tool("tortoise_query", {})
     assert "wait budget" in str(caught.value), str(caught.value)
+
+
+# ── the aggregate orientation door (review round 6) ────────────────────────
+
+
+def test_a_total_outage_of_the_orientation_summary_is_a_refusal(monkeypatch):
+    """`tortoise_overview()` with no `section` must not bury a total outage.
+
+    It used to copy each section's `_SafeError` into `combined[sec]`, one level
+    down, where the #11153 verdict flip and the #8135 telemetry arm cannot see it
+    — so a complete outage shipped `isError: false` (measured, review round 6).
+    When NOTHING answered, the refusal belongs at the TOP level.
+    """
+    def _all_refused(_sec, *_a, **_k):
+        return ms._SafeError({"error": QUOTA_REFUSAL, "code": QUOTA_CODE})
+
+    monkeypatch.setattr(ms, "_overview_section", _all_refused)
+    result = ms.tortoise_overview()
+    assert isinstance(result, ms._SafeError), (
+        "a total outage was folded into the summary, so neither the verdict flip "
+        "nor the telemetry arm could see it")
+    assert result["error"] == QUOTA_REFUSAL
+
+
+def test_a_partial_orientation_summary_keeps_reporting_what_answered(monkeypatch):
+    """The other direction: a summary where SOME sections answered stays a
+    summary — the aggregate is still useful, and only a total outage is a
+    refusal."""
+    def _one_refused(sec, *_a, **_k):
+        if sec == "taxonomy":
+            return {"kinds": 3}
+        return ms._SafeError({"error": QUOTA_REFUSAL, "code": QUOTA_CODE})
+
+    monkeypatch.setattr(ms, "_overview_section", _one_refused)
+    result = ms.tortoise_overview()
+    assert isinstance(result, dict) and not isinstance(result, ms._SafeError)
+    assert result["taxonomy"] == {"kinds": 3}

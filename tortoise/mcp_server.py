@@ -1907,10 +1907,19 @@ def _returned_safe_failure(payload: Any) -> dict[str, Any] | None:
 
     Residual, deliberate: a tool that REWRITES the text (prefixes it with its
     own prose) or buries it deeper than the top level / wrap envelope still
-    reads ``ok``. No tool in the tree does either — every `_safe` return site
-    hands the `_SafeError` back verbatim, and `tortoise_recall`'s only reshape
-    keeps the text at the `error` key. That false-negative direction is
-    preferred to inventing a failure the wire never showed.
+    reads ``ok``. That false-negative direction is preferred to inventing a
+    failure the wire never showed.
+
+    ⚠️ The second half of that sentence USED to read "No tool in the tree does
+    either" — it was false, and #11153's contract depended on it: ``tortoise_
+    overview()`` with no ``section`` copied each section's `_SafeError` into
+    ``combined[sec]``, one level down, so a TOTAL outage shipped
+    ``isError: false`` on the orientation door (measured, review round 6). Fixed
+    at the producer instead: when NO section answered, the refusal is returned at
+    the top level, where this gate sees it (a PARTIAL summary keeps the old
+    shape). A tool that buries a failure today would still read ``ok`` here —
+    that is the residual, stated as a property of a hypothetical rather than of
+    a tool that exists.
     """
     failures = _dispatch_safe_failures.get()
     if not failures or not isinstance(payload, dict):
@@ -6334,12 +6343,24 @@ def tortoise_overview(section: str | None = None,
     """
     if section is None:
         combined: dict[str, Any] = {}
+        answered = 0
+        first_refusal: Any = None
         for sec in _OVERVIEW_SECTIONS:
             if sec in _OVERVIEW_SUMMARY_SKIP:
                 # requires an argument, or is deliberately not part of the
                 # default summary — see `_OVERVIEW_SUMMARY_SKIP`.
                 continue
             result = _overview_section(sec, entity_id, days, limit)
+            if isinstance(result, _SafeError):
+                # #11153: a section that was REFUSED is remembered, not buried.
+                # Folding it into `combined[sec]` puts the failure one level down
+                # where neither the verdict flip nor the #8135 telemetry arm can
+                # see it — so a total outage shipped `isError: false` on the
+                # orientation door (measured, review round 6).
+                if first_refusal is None:
+                    first_refusal = result
+            else:
+                answered += 1
             # #3510: every data-proportional section is folded to bounded
             # counts here — the rows themselves stay behind the explicit
             # section= calls. `tags`/`pointkinds` fold in their section's own
@@ -6357,6 +6378,12 @@ def tortoise_overview(section: str | None = None,
             elif sec == "structure_check":
                 result = _overview_summary(result, "type", "by_rule")
             combined[sec] = result
+        if answered == 0 and first_refusal is not None:
+            # NOTHING answered: this is a refused call, not an empty graph. Return
+            # the refusal itself so it lands at the payload's TOP level, where the
+            # seam's `_returned_safe_failure` gate flips the verdict and the
+            # telemetry row stops reading `ok`.
+            return first_refusal
         return combined
     if not isinstance(section, str):
         return _SafeError({"error": f"overview: section must be a string, got "
