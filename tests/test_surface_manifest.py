@@ -5109,18 +5109,24 @@ def test_cut_REFUSES_a_dropped_tool_with_no_record(monkeypatch, tmp_path, derive
     )
 
 
-def test_cut_ACCEPTS_a_dropped_tool_that_is_RETIRED_FORWARD(monkeypatch, tmp_path, derived_baseline, capsys):
-    """The real forward map satisfies the gate (a retirement is a record, not a removal).
+def test_a_dropped_tool_still_in_RETIRED_USE_INSTEAD_is_REFUSED_like_check(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The forward map CANNOT account for a removal — archiving it is red by `check`.
 
-    `tortoise_get` is live in `RETIRED_USE_INSTEAD` and is NOT a row of the derived document,
-    so a committed baseline carrying it is exactly the shape of "a name that left the count".
+    ⛔ This test used to assert the opposite (`rc == 0`, `tortoise_get: RETIRED_USE_INSTEAD`),
+    and that acceptance could not be reached in production: `build_doc` writes every SERVED
+    forward name into `retired:`, which `surface_symbols` reads, so such a name is never in
+    `prior - derived` and never a removal at all — the arm was dead. The REACHABLE shape is the
+    one below after the map is read RAW: a `RETIRED_USE_INSTEAD` key whose tool declaration is
+    gone (the "retire the name AND delete the tool" cleanup) leaves the surface without the
+    name while the map still holds it — and `archive_surface.surface_violations` reds archiving
+    a forward entry. Both halves are asserted, so `cut` and `check` cannot disagree again
+    (review of PR #12313: `cut` exited 0 there and `check` reddened it).
     """
+    from tools import archive_surface
+
     sm = _load_manifest_tool()
-    # The committed baseline carries `tortoise_get` as a RETIRED row and the derived one does
-    # not. This is the shape AFTER a `RETIRED_USE_INSTEAD` edit is reverted-but-not-re-cut, and
-    # what makes it PASS is that the REAL map still holds the name: `removal_records` reads the
-    # imported map, so `RETIRED_USE_INSTEAD` accounts for it. (An edit that ALSO drops the map
-    # key is the round-1 case — refused, because then nothing accounts for the name.)
     prior = copy.deepcopy(derived_baseline)  # already carries `tortoise_get` as retired
     derived = copy.deepcopy(derived_baseline)
     derived["retired"] = [
@@ -5128,14 +5134,42 @@ def test_cut_ACCEPTS_a_dropped_tool_that_is_RETIRED_FORWARD(monkeypatch, tmp_pat
     ]
     path = tmp_path / "surface-manifest.yml"
     path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived))
 
     rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
 
     out = capsys.readouterr().out
-    assert rc == 0, out
-    assert "tortoise_get: RETIRED_USE_INSTEAD" in out, out
+    assert rc == 1, f"a forward entry was accepted as a record for a removal:\n{out}"
+    assert "tortoise_get" in out and "RETIRED_USE_INSTEAD" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+    # And `check` really does red the archive that would have cleared it — the refusal above
+    # is not a second opinion invented here.
+    surface = {
+        "tools": set(),
+        "methods": set(),
+        "forward": {name for name in sm.removal_records()["forward_raw"]},
+        "sdk_retired": set(),
+        "modules": set(),
+    }
+    violations = archive_surface.surface_violations(
+        [{"kind": "mcp-tool", "symbol": "tortoise_get"}], surface
+    )
+    assert violations and "STILL SERVED" in violations[0], violations
+
+    # non-vacuity: with the stale key actually gone, the same removal is refused for the
+    # REASON the gate exists (no record), not for the contradiction.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": set(), "forward": set(), "forward_raw": set(), "sdk_retired": set()},
+    )
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "tortoise_get (tool) was DROPPED with no record" in out, out
 
 
 def test_cut_ACCEPTS_a_dropped_sdk_method_recorded_as_REMOVED(monkeypatch, tmp_path, derived_baseline, capsys):

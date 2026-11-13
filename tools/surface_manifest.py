@@ -2278,6 +2278,15 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
     return {
         "archived": archived,
         "forward": served_forward,
+        # The RAW map as well as the SERVED subset, because `archive_surface.check` reads the
+        # raw one: a KEY whose `ToolDefinition` was deleted is invisible to `check`'s
+        # `forward`-is-still-served arm and reds its ARCHIVE arm instead ("is a
+        # RETIRED_USE_INSTEAD forward entry — a forward entry is STILL SERVED … must not be
+        # archived"). With only the served subset here, `cut` told the operator to archive a
+        # dangling name and `check` refused that same archive: two gates, two verdicts, one
+        # tree, and the only way out of the red was deleting the frozen entry. The raw set is
+        # what lets `removal_report` refuse in `check`'s words (review of PR #12313).
+        "forward_raw": set(RETIRED_USE_INSTEAD),
         "sdk_retired": set(RETIRED_SDK_METHODS) | set(REMOVED_SDK_METHODS),
     }
 
@@ -2317,9 +2326,16 @@ def removal_report(
     own half — with ONE documented exception, because the two halves' records are not the
     same artifact:
 
-    * a TOOL archived AND `RETIRED_USE_INSTEAD` is TWO records and is refused: the archive
-      says the name is gone and the forward entry says it still answers (#3883), which is the
-      contradiction `archive_surface.check` reds from its own side;
+    * a TOOL in `RETIRED_USE_INSTEAD` is REFUSED, and that refusal is REACHABLE: the map is
+      read RAW here (`forward_raw`), not as the served subset, because a key whose tool
+      declaration was deleted serves nothing (so the surface lost it and it IS a removal)
+      while `archive_surface.check` still reds archiving it — "a forward entry is STILL
+      SERVED … must not be archived". A served forward name can never be a removal at all
+      (`build_doc` writes those names into `retired:`, which `surface_symbols` reads), so the
+      old arm that ACCEPTED `RETIRED_USE_INSTEAD` as an accounting record could not fire in
+      production, and its "two records" sibling fired only on a document the derivation
+      cannot emit. Both are replaced by this one arm, which fires on the state that really
+      happens: retired-name cleanup that forgot the map key;
     * an SDK method archived AND in `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` is ONE
       record, not two. `archive_surface.check` requires a frozen `sdk-method` to ALSO appear
       in the map — **one-directionally**: a map entry needs no archive row, a frozen entry
@@ -2388,17 +2404,31 @@ def removal_report(
             continue
         elif archived:
             found.append(f"archive entry ({kind})")
-        if cls == "tool" and symbol in records.get("forward", ()):
-            found.append("RETIRED_USE_INSTEAD")
-        # The inconsistency is reported BEFORE the override is honoured: an override names a
-        # rename, and a rename is not an answer to "this symbol is simultaneously archived
-        # and still served".
-        if len(found) > 1:
-            problems.append(
-                f"{symbol} ({cls}) is accounted by {len(found)} records "
-                f"({', '.join(found)}) — a symbol that is both archived and still recorded "
-                "as retired/served is an inconsistency; pick ONE"
-            )
+        if cls == "tool" and symbol in records.get("forward_raw", records.get("forward", ())):
+            # REACHABLE, and refused in `check`'s own words. "Archived AND forward" is TWO
+            # records only when an archive entry is also present; on its own the forward key
+            # is the whole problem: the tool declaration is gone (so the name serves nothing
+            # and the surface lost it) while the map still names it, and `archive_surface.check`
+            # reads the RAW map and reds archiving a forward entry. Accepting the archive here
+            # — or claiming the symbol has "no record" — sends the operator to a red whose
+            # cheapest clearing is deleting the frozen code. (review of PR #12313)
+            if archived:
+                problems.append(
+                    f"{symbol} (tool) is accounted by 2 records (archive entry ({kind}), "
+                    "RETIRED_USE_INSTEAD) — and the archive one is a CONTRADICTION: "
+                    "`archive_surface.py check` reads the raw forward map and reds archiving "
+                    "a forward entry (\"a forward entry is STILL SERVED … must not be "
+                    "archived\"). Delete the stale forward key, or restore the tool; do not "
+                    "archive it"
+                )
+            else:
+                problems.append(
+                    f"{symbol} (tool) is still a `RETIRED_USE_INSTEAD` entry whose tool "
+                    "declaration is gone: it serves nothing (which is why the surface lost "
+                    "it), and `archive_surface.py check` refuses to archive a name that is "
+                    "in that map at all. Delete the stale forward key, or restore the tool — "
+                    "the archive route is not available for it"
+                )
             continue
         if found:
             if _waived(symbol, cls):
