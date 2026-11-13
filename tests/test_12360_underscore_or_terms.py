@@ -544,7 +544,10 @@ class TestPin:
         # REFUSED. Same false PASS class (the read sends a literal the index
         # truncates), reached through the branch that returns early. The fix is
         # ORDER: the bound now runs first, and a number the index CAN hold is
-        # still accepted (the `4820` case pinned elsewhere in this file).
+        # still accepted — that acceptance is pinned in
+        # `tests/test_11070_source_prose_repair.py:3074`, while the row below pins
+        # the AT-BOUND number HERE (#12368 review round 17: this comment first
+        # pointed at a row in this file that does not exist).
         assert probe_phrase_rejection("1" * MAX_COMPOSITE_RUN_LEN) is None, (
             "a 128-byte number is one the index holds — refusing it is a false "
             "block")
