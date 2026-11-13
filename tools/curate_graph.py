@@ -1128,9 +1128,11 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         "operators_reconciled": operators_reported is not None,
         # The episodic layer this census used to omit entirely (#12378). Same two facts
         # as the operator pair, for the same reason: `events_read` is the READ's own
-        # count, `events_total_reported` is `counts.Event`, and a disagreement is
-        # re-counted once and then accepted or refused — so a reader of this artifact can
-        # see both.
+        # count, and `events_total_reported` is the count THIS READ WAS RECONCILED AGAINST
+        # — `counts.Event` normally, or the FRESH RE-READ when the two disagreed and the
+        # re-count resolved it (so on a staleness accept this field is the newer number,
+        # not the status count the run started with). A disagreement is re-counted once
+        # and then accepted or refused, so a reader of this artifact can see both.
         "events_read": len(events),
         "events_total_reported": events_reported,
         # `events_total_reported is None` means NO cross-check was available: the layer's

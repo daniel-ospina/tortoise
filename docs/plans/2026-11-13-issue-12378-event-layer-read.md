@@ -80,7 +80,7 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
 
 - reconciliation target is `counts.Event` (the tool returns a bare list, so there is
   no `total` key to prefer) — `mcp_server.py:5422`; the forwarding hop is
-  `tortoise_get_entity` → `tortoise_get` (`:5574`) → the `t == "events"` arm (`:6094`)
+  `tortoise_get_entity` → `tortoise_get` (`:6073`) → the `t == "events"` arm (`:6094`)
   → `:6096` calls `tortoise_get_events`;
 - the truncation arm is load-bearing because the read has `LIMIT` and no offset —
   `sdk.py:49054`, <https://docs.falkordb.com/cypher/return.html>;
