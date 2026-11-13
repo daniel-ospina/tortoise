@@ -67,7 +67,7 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 ⚠️ **A fourth landing arrived between the base and this record's merge — and it is why one recipe below
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
-`hasPart` (`tortoise/extractor_v2.py:1771`). It does **not** discharge A1: it is **transport only** —
+`hasPart` (`tortoise/extractor_v2.py:1773`). It does **not** discharge A1: it is **transport only** —
 nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:11524`, and
 `git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
 materialising them as Object→Object edges is **`#11237`** (OPEN). ⛔ **FALSE in this record's merged
@@ -733,7 +733,7 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
-# sdk.py:19009 (`_capture_session` reaches it at `sdk.py:16802`)  [re-derived at 2dbfb046d7: #12203 inserted 109 lines above every anchor in this table]. Of the three hits only ONE was still prose-about-absence (the stale comment at
+# sdk.py:19009 (`_capture_session` reaches it at `sdk.py:16911`)  [both numbers re-derived at 2dbfb046d7: #12343 (`b85194d6bcb1`) moved them by +109, so the caller cite moved WITH the callee — leaving `16802` here would have been half of the edit]. Of the three hits only ONE was still prose-about-absence (the stale comment at
 # `extractor_v2.py:11524`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
 # ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:11524` was

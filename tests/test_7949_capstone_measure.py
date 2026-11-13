@@ -5171,14 +5171,19 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            # ⛔ RE-DERIVED at the #12374 rebase onto `2dbfb046d7`: #12203
-            # (`357e6222df9a`, the name-key space readers) inserted 109 lines
-            # above every anchor in this table, so all ten rows moved by
-            # exactly +109 — the same +109 that moved the `04-plan.md`
+            # ⛔ RE-DERIVED at the #12374 rebase onto `2dbfb046d7`. The mover was
+            # #12343 (`b85194d6bcb1`, the cross-encoder rerank calibration), which
+            # added 501 lines to `tortoise/sdk.py` and shifted every anchor in this
+            # table by exactly +109 — the same +109 that moved the `04-plan.md`
             # `declared = declared_relation_predicates()` pin 25284 -> 25393.
-            # Measured with `grep -nF <anchor> tortoise/sdk.py` on THIS tree,
-            # never carried from a parent; the anchors are keyed on the symbol,
-            # so only the numbers moved.
+            # Measured with `grep -nF <anchor> tortoise/sdk.py` on THIS tree, never
+            # carried from a parent; the anchors are keyed on the symbol, so only
+            # the numbers moved.
+            # ⛔ NOT #12203 (`357e6222df9a`): that landing is `106 17` on sdk.py and
+            # moved the `declared` anchor 25195 -> 25284 (+89) at the SAME commit
+            # where these ten anchors still read their old values — so attributing
+            # the +109 to it would be a causal claim the numstat refutes, and this
+            # table's own docstring records that class as the one to avoid.
             ("19009", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
@@ -5195,14 +5200,19 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            # ⛔ RE-DERIVED at the #12374 rebase onto `2dbfb046d7`: #12203
-            # (`357e6222df9a`, the name-key space readers) inserted 109 lines
-            # above every anchor in this table, so all ten rows moved by
-            # exactly +109 — the same +109 that moved the `04-plan.md`
+            # ⛔ RE-DERIVED at the #12374 rebase onto `2dbfb046d7`. The mover was
+            # #12343 (`b85194d6bcb1`, the cross-encoder rerank calibration), which
+            # added 501 lines to `tortoise/sdk.py` and shifted every anchor in this
+            # table by exactly +109 — the same +109 that moved the `04-plan.md`
             # `declared = declared_relation_predicates()` pin 25284 -> 25393.
-            # Measured with `grep -nF <anchor> tortoise/sdk.py` on THIS tree,
-            # never carried from a parent; the anchors are keyed on the symbol,
-            # so only the numbers moved.
+            # Measured with `grep -nF <anchor> tortoise/sdk.py` on THIS tree, never
+            # carried from a parent; the anchors are keyed on the symbol, so only
+            # the numbers moved.
+            # ⛔ NOT #12203 (`357e6222df9a`): that landing is `106 17` on sdk.py and
+            # moved the `declared` anchor 25195 -> 25284 (+89) at the SAME commit
+            # where these ten anchors still read their old values — so attributing
+            # the +109 to it would be a causal claim the numstat refutes, and this
+            # table's own docstring records that class as the one to avoid.
             ("10064", "subject_binding_available,"),
             ("10117", "and not subject_binding_available(graph):"),
         ), "sdk"),
@@ -5213,14 +5223,19 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            # ⛔ RE-DERIVED at the #12374 rebase onto `2dbfb046d7`: #12203
-            # (`357e6222df9a`, the name-key space readers) inserted 109 lines
-            # above every anchor in this table, so all ten rows moved by
-            # exactly +109 — the same +109 that moved the `04-plan.md`
+            # ⛔ RE-DERIVED at the #12374 rebase onto `2dbfb046d7`. The mover was
+            # #12343 (`b85194d6bcb1`, the cross-encoder rerank calibration), which
+            # added 501 lines to `tortoise/sdk.py` and shifted every anchor in this
+            # table by exactly +109 — the same +109 that moved the `04-plan.md`
             # `declared = declared_relation_predicates()` pin 25284 -> 25393.
-            # Measured with `grep -nF <anchor> tortoise/sdk.py` on THIS tree,
-            # never carried from a parent; the anchors are keyed on the symbol,
-            # so only the numbers moved.
+            # Measured with `grep -nF <anchor> tortoise/sdk.py` on THIS tree, never
+            # carried from a parent; the anchors are keyed on the symbol, so only
+            # the numbers moved.
+            # ⛔ NOT #12203 (`357e6222df9a`): that landing is `106 17` on sdk.py and
+            # moved the `declared` anchor 25195 -> 25284 (+89) at the SAME commit
+            # where these ten anchors still read their old values — so attributing
+            # the +109 to it would be a causal claim the numstat refutes, and this
+            # table's own docstring records that class as the one to avoid.
             ("10064", "subject_binding_available,"),
             ("10117", "and not subject_binding_available(graph):"),
         ), "sdk"),
@@ -12178,13 +12193,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
-    # ⛔ RE-DERIVED for `#11002`'s rebase, not offset by hand: this branch inserts
-    # above BOTH anchors (the G5 record at the module head and the `run_s1`
-    # emphasis seam), so the schema line moved `:1720` → `:1764` and the comment
-    # `:10891` → `:11362` — the same **+15** §10.15 records for the collector.
-    # Measured off the MERGED tree (`grep -n 'hasPart' tortoise/extractor_v2.py`
-    # → `:1764`, `grep -n 'nothing in this tree consumes'` → `:11362`).
-    assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1771`" in text, (
+    # ⛔ RE-DERIVED at the #12374 rebase onto `2dbfb046d7`, never offset by hand:
+    # `grep -n 'hasPart' tortoise/extractor_v2.py` → `:1773` (it read `:1764` when
+    # §10.15 recorded the collector's own +15, and `:1771` — two lines short —
+    # until this rebase, i.e. the cite had drifted from its own anchor). Measured
+    # on THIS tree; the trail above is history, not a value to reuse.
+    assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1773`" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
     # ⛔ THE ADJACENCY IS DELIBERATELY NOT PINNED — recorded here, which is what the review of
     # the forward merge (#11519) asked for as the alternative to restoring it. Three forms were
@@ -12239,7 +12253,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "EVERY statement of the A1 proof command must use the non-dot-excluding class — a "
         f"`[^[:alnum:]_.]` copy is blind to a receiver-qualified call (found {_all_a1})")
     assert "hasPart" in ext[1771 - 1] and '"predicate":' in ext[1771 - 1], (
-        f"extractor_v2.py:1771 reads {ext[1771 - 1].strip()[:90]!r}, not the schema "
+        f"extractor_v2.py:1773 reads {ext[1773 - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")
     assert "`extractor_v2.py:11524`" in text, (
         "the record must cite the comment that says nothing consumes the channel")
