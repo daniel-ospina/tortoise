@@ -497,7 +497,7 @@ def _has_high_entropy(normalized_name: str) -> bool:
     ⛔ The conjunction is deliberate and is the part a later "simplification"
     would break: `len < 6 AND tokens < 2` refuses only names that are BOTH short
     and single-token, so `fix` is refused, `hotfix` (6 chars, 1 token) is NOT,
-    and `the fix` (9 chars, 2 tokens) is not. As an `or` it would refuse every
+    and `the fix` (7 chars, 2 tokens) is not. As an `or` it would refuse every
     single-token name — wider than the source ships, and in the direction that
     removes correct candidates.
     """

@@ -110,7 +110,9 @@ def test_zep_constants_are_pinned():
     # the AND: refused only when SHORT **and** SINGLE-TOKEN
     ("fix", False),        # 3 chars, 1 token → both conditions hold → refused
     ("hotfix", True),      # 6 chars, 1 token → length passes, entropy ~2.5
-    ("the fix", True),     # 9 chars, 2 tokens → both pass on the long-name arm
+    ("the fix", True),     # 7 chars, 2 tokens → the token arm passes, so the
+                           # length arm is never consulted (9 chars is
+                           # `the suite`, the header's other example)
     ("a bcd", True),      # 5 chars but 2 tokens → escapes the length test, and
                            # entropy of "abcd" is 2.0, so it passes on merit
     ("a b", False),       # …but a two-token name is not automatically allowed: it
@@ -177,6 +179,21 @@ def test_the_declines_artifact_carries_the_invariants():
         # per-predicate count, so a double-append cannot hide
         assert len([e for e in arms["gate_gated_names"]
                     if p in e["predicates"]]) == g["gated"], p
+        # the class table must reconstruct the arm totals, exactly — `run()`
+        # increments both from the same branch, so this cannot false-red a
+        # re-run, and it is what makes a hand-edited class table (the shape the
+        # PR body quotes as "definite 71 of 180") visible
+        assert sum(c[p]["gated"] for c in arms["gate_by_class"].values()) \
+            == g["gated"], p
+        assert (sum(c[p]["suppressed_correct_k_sum"]
+                    for c in arms["gate_by_class"].values())
+                == g["suppressed_correct_k_sum"]), p
+        # …and the per-name EVIDENCE must agree with the per-k totals, which
+        # `run()` writes from the same `hit` — the other checkable surface
+        for k, n in g["suppressed_correct_by_k"].items():
+            assert sum(1 for e in arms["gate_gated_names"]
+                       if p in e["predicates"]
+                       and e["in_window_by_k"].get(k) is True) == n, (p, k)
         # the pooled population is the sample — UNLESS the run disclosed that it
         # is not. `_pooled_coverage.truncated` is the instrument's own supported
         # state (a wider `--sample`, fewer `--captures`), and a truncated run is
