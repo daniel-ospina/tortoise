@@ -1362,7 +1362,7 @@ def test_brief_headline_table_pins_every_column_and_the_subset_row(
     """
     rows: dict[str, list[str]] = {}
     for cells in _table(_scope_slice(brief, "0"), "recall@3", "Δ vs shipped"):
-        if "tokens-controlled subset" in cells[0]:
+        if "tokens-controlled subset" in _plain(cells[0]):
             rows["__subset__"] = cells
             continue
         arm_name = _plain(cells[0]).split(" (")[0].strip()
@@ -3727,13 +3727,15 @@ def test_brief_derived_prose_figures_are_the_artifact(
         fixture_rows["abc_def"]["rank_wide"] is None, (
         "§3.5's mechanism sentence says the shipped leg never returns `abc_def`; "
         f"the artifact now records {fixture_rows.get('abc_def')}")
-    # ⛔ Emphasis is NOT content: EVERY prose scope a claim is matched against
-    # strips `*` (and no claim literal carries `**`), and the STRUCTURAL matches
-    # go through the same rule — table header needles compare `_plain(cell)`, §1's
-    # marker and the document-wide negative assertion match a stripped view — or
-    # bolding a word
-    # in a correct document false-reds the pin (round-25 re-review, P2 — the same
-    # shape the previous round graded).
+    # ⛔ Emphasis is NOT content. This round stripped `*` from EVERY `_only_claim`
+    # scope (and from every claim literal), and routed the STRUCTURAL matches
+    # through the same rule: `_table`'s header needles and body cells, the
+    # changelog's row/label needles and its `(N of N queries)` label, §0's arm-name
+    # extraction and subset label, §1's marker (indexed on the same string it is
+    # applied to), the `NOT RECORDED` cell, and the document-wide NEGATIVE
+    # assertion. ⛔ The list is an ENUMERATION, not a universal promise: a NEW
+    # structural match added to this file must route through `_plain`/a stripped
+    # view too, and this sentence must grow with it.
     _only_claim(
         _scoped(brief, "3.5").replace("*", ""),
         "are two terms the index does not hold; it holds `abc_def`",
