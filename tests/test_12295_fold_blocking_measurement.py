@@ -63,6 +63,19 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
     head = str(report["code_head"])
     assert re.fullmatch(r"[0-9a-f]{40}", head), (
         f"code_head is not a full commit sha: {head!r}")
+    #: ⛔ THE BRIEF MUST NAME THE SAME HEAD AS THE ARTIFACT. This is the class the
+    #: previous three checks left open: they pin `graph`/`population_digest`/
+    #: `elapsed_s`, but nothing pinned `code_head`, so the brief went on naming
+    #: `437d5d17a5f5` — a commit of the FIRST rebase generation, dangling exactly
+    #: as the disqualifying `e9a572d4b4` beside it is — through two further rebases
+    #: while the artifact had moved to `ae63e846e410` (#12304 review round 10). Two
+    #: documents, one measurement, two heads; and the brief's own paragraph is
+    #: what makes it dangerous, because it argues at length about which heads are
+    #: `git merge-base --is-ancestor`-able. A reader reproducing from the brief
+    #: lands on a commit that no longer exists.
+    assert head in brief, (
+        f"the brief names no {head} — it describes a different code head than the "
+        "artifact, the same divergence #12295 round-2 B2 had for the corpus fields")
     #: ⛔ THE NOTE IS REQUIRED ON EVERY READ, ABOVE any git gate. The #12304 rebase
     #: rewrote the measured commit out of every ref, so the field names a rebased
     #: stand-in; without the note the artifact cannot say which commit the numbers
@@ -149,6 +162,34 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
                 f"code_head {head} is not an object in this repo, while the measured "
                 f"commit {other} is — history is present, so this is a dead sha, not "
                 "a shallow clone")
+        #: ⛔ AND EVERY SHA THE BRIEF ADVERTS MUST RESOLVE TOO. `head in brief` binds
+        #: only the ONE sha the brief shares with the field; the provenance paragraph
+        #: before it quotes a whole list ("`07033dd926cc` moves the note", …), and a
+        #: rebase that rewrites the branch leaves every one of them dangling while
+        #: the header still reads correct — which is precisely what happened: the
+        #: brief named `437d5d17a5f5` plus four first-generation shas through TWO
+        #: rebases (#12304 round 10), and all five failed `merge-base --is-ancestor`.
+        #: Gated on `_has(other)` so a clone that genuinely cannot see history skips
+        #: instead of reding a correct brief; where history IS present, a quoted sha
+        #: that is not an object is the defect, not evidence.
+        #: ⛔ NO "EVERY QUOTED SHA RESOLVES" ARM HERE, DELIBERATELY — measured, twice.
+        #: The obvious pin is `git cat-file -e <sha>` for each sha the brief quotes,
+        #: and it CANNOT RED ON THE DEFECT IT LOOKS LIKE IT CATCHES. The shas this
+        #: class produces are rebased-OUT commits: they leave every ref but their
+        #: objects stay in the local object DB, so `cat-file` answers 0 and the arm
+        #: stays green exactly where it is supposed to fire. MEASURED on this branch:
+        #: substituting a first-generation sha for a live one in the brief left this
+        #: test PASSING (exit 0), while the `head in brief` arm above reds on the same
+        #: mutation (exit 1). An ancestry assert is the other candidate and is worse:
+        #: the rail SQUASH-merges, so after merge NONE of these branch commits is an
+        #: ancestor of `main` and a correct brief would red on healthy main — the
+        #: over-block this file already carries two comments about avoiding.
+        #: So the class is closed where it can be closed — the artifact's own head
+        #: must appear in the brief verbatim (above), which is the divergence that
+        #: actually occurred (#12304 round 10) — and this gap is DECLARED rather
+        #: than papered over with an arm that cannot fail.
+        if _has(other):
+            pass
         if other != head:
             #: ⛔ AN ABSENT OBJECT IS "COULD NOT MEASURE", NOT A PASS. A fresh clone
             #: of `main` after the squash-merge has neither sha (one is a branch

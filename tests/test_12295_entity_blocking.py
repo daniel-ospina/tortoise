@@ -524,8 +524,9 @@ def test_the_scan_COMPARES_each_pair_once_across_the_blocks_it_shares(monkeypatc
 def test_the_scan_blocks_on_the_STORED_fold_not_on_a_re_fold_of_the_name(monkeypatch):
     """One value, one key: block on what the scan SCORES.
 
-    `scan_entities` scores ``normalize_entity_name(canonical or name)``
-    (`entity_resolver.py:284`), and a caller-supplied `canonical_name` is legal
+    `scan_entities` scores ``normalize_entity_name(canonical or name)`` (cited by
+    SYMBOL rather than by line, so an insertion in `entity_resolver.py` cannot rot
+    it), and a caller-supplied `canonical_name` is legal
     (`api.py:2671`) — as is a pre-`#12047` row whose fold differs from its name.
     Indexing such a row by ``key_of(name)`` blocks on one value and scores on
     another, so an `exact` 1.0 pair silently leaves the queue.

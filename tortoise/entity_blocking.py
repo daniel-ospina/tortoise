@@ -21,9 +21,11 @@ the shipped rung that replaced it:
   measured the consequence: **0 of 419 real surface variants attach at every
   ``k``, in both retrieval modes**, while 62 % of them are *inside* the window.
   ⛔ The folded rung is now reached from that path: `_find_existing_entity`
-  delegates to ``_find_by_folded_key`` (``extractor_v2.py:5823``), which binds on
+  delegates to ``_find_by_folded_key`` (``extractor_v2`` — cited by SYMBOL: a
+  ``file.py:<line>`` cite rots on any insertion above it, and this one already had),
+  which binds on
   :func:`tortoise.entity_blocking.key_of` equality.
-* ``entity_resolver.entity_candidates`` (``entity_resolver.py:383``) blocked on
+* ``entity_resolver.entity_candidates`` (cited by SYMBOL, same rule) blocked on
   ONE key — ``block_key`` = the first :data:`entity_resolver.MIN_BLOCK_CHARS`
   folded characters — so a transposition or a word-order change
   (``the project alpha`` vs ``alpha project``) landed in two blocks and the pair
@@ -257,8 +259,9 @@ def attach_keys(name: object, *, key: str | None = None) -> tuple[str, ...]:
     ``E`` is always present (and is what folds case, articles, separators,
     unicode and a leading ``#``). ``B`` is the path-basename key; because it is
     carried by every file of that name it is listed in :data:`AMBIGUOUS_KEYS`,
-    and :func:`attach_matches` only lets it decide between two PATH-shaped
-    names, only when exactly one candidate holds it.
+    and :func:`attach_matches` only lets it decide when AT LEAST ONE of the two
+    names is PATH-shaped (`attach_matches` applies `mention_path or
+    is_path_shaped(cand_name)`), and only when exactly one candidate holds it.
 
     ``key`` overrides the fold for a row whose STORED key is not ``key_of(name)``
     — `#12047` writes ``canonical_name`` and `entity_resolver.scan_entities`
@@ -343,7 +346,8 @@ class BlockIndex:
 
         ``key`` is the member's STORED fold. Pass it whenever the caller already
         holds one, which `entity_resolver.scan_entities` does: it scores
-        ``normalize_entity_name(canonical or name)`` (``entity_resolver.py:284``),
+        ``normalize_entity_name(canonical or name)`` (cited by SYMBOL: the
+        scoring line in `entity_resolver.scan_entities`, not a line number),
         so indexing this row by ``key_of(name)`` would BLOCK on one value and
         SCORE on another — and a row whose ``canonical_name`` differs from its
         name's fold (legal: a caller-supplied key, ``api.py:2671``, or a pre-

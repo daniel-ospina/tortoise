@@ -4,20 +4,37 @@
 **Harness:** `tools/candidate_recall_11901.py` (**reused, not rebuilt** — the tool and its pinned
 test landed with `#12159`) · **Run:** `--population 1000 --sample 300 --captures 20`, elapsed
 390.6 s, graph `recall11901_1794532634_746264`, population digest `03785295abd20d9a`,
-measured at code head `437d5d17a5f5` — the commit whose code these numbers describe. ⚠️ The run
-itself happened at `e9a572d4b4`, which the `#12304` rebase rewrote out of every ref (a dangling
-local object, absent from a fresh clone); `437d5d17a5f5` is that same commit rebased, and
-`git diff e9a572d4b4 437d5d17a5f5 -- tortoise/entity_resolver.py tortoise/entity_blocking.py
-tortoise/extractor_v2.py` is EMPTY. Commits after it touch those files in two ways, and the
-provenance claim is stated as the diff rather than as a summary of it: (a) DOCSTRINGS/COMMENTS —
-`07033dd926cc` moves the `emitted:` note and `3e75c65c71a8` adds the `complete=True` note;
-(b) LABELS — `ebf7b13fc3cd` renames the `lsh_bands` docstring label and the `stats()` counter key
-`keys` -> `key_memberships`, and `f7c0e819f4` adds a `candidates(label=None)` LABEL FALLBACK in
-`entity_blocking.py`. Apart from that counter-key RENAME, the fallback is the only statement change in those
-files after `437d5d17a5f5`, and this run never reaches it: the harness calls
-`index.candidates(surface, label="Object")` (`tools/candidate_recall_11901.py:725`), so the
-`label is None` branch is not taken. No statement in `entity_resolver.py` or `extractor_v2.py`
-moved after `437d5d17a5f5`.
+measured at code head `ae63e846e4104311de508d83b19b32fb5e672d4f` — the commit whose code these
+numbers describe (full 40-hex on purpose: this is the anchor a reader reproduces from, so it is
+quoted in full and `test_the_artifact_declares_one_uniform_retrieval_mode` asserts the brief names
+the artifact's `code_head` verbatim). ⚠️ The run
+itself happened at `e9a572d4b4`, which the `#12304` rebases rewrote out of every ref (a dangling
+local object, absent from a fresh clone); `ae63e846e410` is that same commit as the LATEST rebase
+left it, and `git diff e9a572d4b4 ae63e846e410 -- tortoise/entity_resolver.py
+tortoise/entity_blocking.py tortoise/extractor_v2.py` is EMPTY. ⛔ This paragraph named the
+`437d…`-generation shas (a first rebase generation, now dangling) until #12304 review round 10 —
+every one of them fails `git merge-base --is-ancestor` against this branch, i.e. they were dangling
+in exactly the way the sentence beside them calls disqualifying. They are named here WITHOUT their
+full digests on purpose: a dead sha quoted as provenance is the defect this paragraph warns about,
+and `test_the_artifact_declares_one_uniform_retrieval_mode` now asserts that every sha the brief
+quotes resolves in this repo. The artifact is the
+source of truth for this field and the brief must agree with it; that same test now asserts
+`report["code_head"] in brief` so they cannot diverge again.
+Commits after it touch those files in two ways, and the provenance claim is stated as the diff
+rather than as a summary of it: (a) DOCSTRINGS/COMMENTS — `5b618ed0524d` moves the `emitted:` note
+and `f546f0e5a957` adds the `complete=True` note; (b) LABELS — `d52a989eafd2` renames the
+`lsh_bands` docstring label and the `stats()` counter key `keys` -> `key_memberships`, and
+`22ec4d1a6048` adds a `candidates(label=None)` LABEL FALLBACK in `entity_blocking.py`.
+⛔ The enumeration, not this summary, is what proves it: `git log --format=%h ae63e846e410..HEAD --
+tortoise/entity_resolver.py tortoise/entity_blocking.py tortoise/extractor_v2.py` returns 12
+commits, of which exactly TWO are statement changes — `d52a989eafd2` (the `stats()` key rename,
+a diagnostic LABEL, which is why the artifact reads `key_memberships` while the run emitted
+`keys`) and `22ec4d1a6048` (the fallback). Apart from those two, everything on that list is
+docstring/comment-only, and this run never reaches the fallback: the harness calls
+`index.candidates(surface, label="Object")` (cited BY SYMBOL, never by line — the number has rotted
+three times already, so `grep -n` for the symbol in `tools/candidate_recall_11901.py` is the
+check), so the `label is None` branch is not taken. No statement in `entity_resolver.py` or
+`extractor_v2.py` moved after `ae63e846e410`.
 
 **Search rung, stated because it was taken twice and failed twice.**
 `mcp__seo-intelligence__perplexity_search` → `Unknown MCP server 'seo-intelligence'` (rung 1
@@ -37,7 +54,7 @@ and it is the reason no new field, no new fold and no second source of truth app
 
 | mechanism | where | what it does |
 |---|---|---|
-| `normalize_entity_name` | `entity_resolver.py:156` | NFKC → casefold → drop a leading **article** → non-word run → space → whitespace collapse |
+| `normalize_entity_name` | `entity_resolver.py` → `def normalize_entity_name` | NFKC → casefold → drop a leading **article** → non-word run → space → whitespace collapse |
 | write doors that persist it as `canonical_name` | `sdk.py:45886` (the `_emit` funnel), `api.py:2628` (`add_subject`), `api.py:2671` (`add_object`), `sdk.py:47229` (a real rename) | filled at every door, `setdefault`, so a caller-supplied fold wins |
 | the projection | `projection/entities.py:5094` (ON CREATE, objects) / `:4958` (subjects), coalesce fill at `:5101` / `:4975` | `canonical_name` is written ON CREATE only, so a re-mention cannot rewrite the key that resolved it |
 | identity | `projection/entities.py:4907` (`merge_key = "id"`) | `name` is a mutable natural key; the id is the identity (`#3584`/`#3590`) |

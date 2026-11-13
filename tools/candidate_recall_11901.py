@@ -63,11 +63,11 @@ fixes:
                        classes the shipped matcher already binds, so it is NOT
                        comparable with `#11901`'s `attached_folded` field — and the
                        114 → 386 movement is BOTH terms, never either alone:
-                       386 = 114 + 186 CODE + 86 CORPUS — the two terms measured
+                       386 = 114 + 186 CODE + 86 INPUT — the two terms measured
                        as the DIFFERENCE against #11901's per-class field. The CODE
                        186 is the classes the arm could not bind AT ALL there
                        (`article-drop` `attached_folded` 0 → 175, `hash-dropped`
-                       0 → 11); the CORPUS 86 is the separator classes, 100
+                       0 → 11); the INPUT 86 is the separator classes, 100
                        %-of-in-window in BOTH runs (`space-to-hyphen` 101/101 →
                        179/179, `hyphen-to-space` 13/13 → 21/21). ⛔ attached_folded
                        <= in_window by construction — the gate is
