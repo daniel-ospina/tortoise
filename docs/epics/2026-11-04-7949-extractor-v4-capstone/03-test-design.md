@@ -78,7 +78,7 @@ to 98.0 s**, so the erratum is not "new tests arrived" — the row was wrong whe
 |---|---|---|---|
 | **the pinned registration** (`preregistration.json` + checker) | State / config | Read + Write (amended) | `capstone-preregistration/v1`; `criteria[].id`, `denominator_floors`, `below_floor`, `corpus`, `amendments`; the A-rows enter as a **versioned amendment** quoting superseded text |
 | **the verdict gate enum** (`capstone_verdict_check.py:162`) | State (closed vocabulary) | Read | `capstone-verdict-v1`; a **closed** `CRITERIA` tuple that refuses any id outside `RECOGNISED_CRITERIA` (`= (*CRITERIA, *E6_CRITERIA, *A_CRITERIA)`, `:191`; refused at `:970-976` — so A1–A5 and `E6` are accepted) — two schemas move, not one |
-| **the corpus pin** (fixture + A-corpus) | State | Read + Write | **three shapes already exist** (`fixtures_hash` in the record; `corpus.sha256`/`items` demanded by `capstone_run.py`'s G1 — the fail-closed read is `if not frozen.get("sha256")`, `:1194`; a derived `e1e2_corpus.json`) — the A-corpus must **unify the contract**, not add a fourth |
+| **the corpus pin** (fixture + A-corpus) | State | Read + Write | **three shapes already exist** (`fixtures_hash` in the record; `corpus.sha256`/`items` demanded by `capstone_run.py`'s G1 — the fail-closed read is `if not frozen.get("sha256")`, `:1186`; a derived `e1e2_corpus.json`) — the A-corpus must **unify the contract**, not add a fourth |
 | **the A-corpus capture** (`POST /v1/sessions`) | External service | Out → graph | request = curated payloads; response = receipt; **402 quota** at `hosted_api.py:18494` (`if count + est > max_points`) / `:18519` (`quota_refusal_payload`); harness resolution `#3681` |
 | **the graph the A-rows read** (hosted `live-v4` / per-run graph) | DB | Read | `:Object`/`:Event`/`:Point`/`:Subject` shapes; `hasPart` Object→Object (ONTOLOGY §3.7); `batch_id` on `RelationUpsert.attrs` |
 | **the pack declaration → write path** (`semantics`/`hierarchies`) | State | Read | `relation_write_verdict` returns `writable`; **unread legs**: `semantics` (surfaced at `pack_registry.py:472-484`), `hierarchies` (validated only, `:2489-2503`) |
@@ -144,7 +144,7 @@ the owner already ruled on (#10194).
 | **Stale measurement artifact** | the shipped verdict table carries `E4 2/15` while `E1-E5-PROOFS.md` corrects to `5/15` | CI pin that **both** figures are named and the stale one is not used as a bar |
 | **N+1 / cost blowup** | `capstone_measure.py` re-derives over 397 nodes; the E4 leg pays 7-session LLM cost | Tier E only; a CI pin on the *declared* point budget would be theatre |
 | **Race / non-determinism** | D6 makes both connection sets model-proposed; the repo measured gold swinging `0,1,1,1,2 of 4` on identical code (`PRE-REGISTRATION.md` §1.4) | E2E-5's repeat policy: deterministic quantities identical, model-proposed arms reported with their disagreement |
-| **Quota as a hidden gate** | capture returns **402** at 25,000 points (`hosted_api.py:18494` — `if count + est > max_points`) | an explicit `BLOCKED — capture refused 402` reporting state, so a capped run can never read as a zero or a pass |
+| **Quota as a hidden gate** | capture returns **402** at 25,000 points (`hosted_api.py:18205` — `if count + est > max_points`) | an explicit `BLOCKED — capture refused 402` reporting state, so a capped run can never read as a zero or a pass |
 
 **No pgTAP flag applies** — this epic touches no Postgres function; the state is the graph and the committed
 record, and the skill's pgTAP rule is scoped to SQL business logic.
