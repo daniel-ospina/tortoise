@@ -354,7 +354,10 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # broken, and a `| tr -d ' '` here FAILED under `pipefail` in case 17h's state (broken
         # `tr`), silently setting the size to 0 and reverting to the cut-undeclared sentence —
         # measured. Parameter expansion strips a right-padded `wc` count without a subprocess;
-        # the guard maps "cannot read it" (a directory: `wc` fails) to 0.
+        # the guard maps "cannot read it" (`-f` false — a directory or a device — or a `wc` that
+        # fails) to 0. ⛔ THE OLD PARENTHETICAL HERE SAID "a directory: `wc` fails", which the
+        # `-f` guard below made FALSE: `wc` is never invoked for a directory at this head, so the
+        # directory is refused by the property check, not by a failing `wc` (#12272 review cycle 1).
         #
         # ⛔ `-f`, BECAUSE `wc -c` READS TO EOF AND A DEVICE NEVER REACHES ONE (#12272 review
         # round 8). The read guard above admits anything that is `-e`-true and not a FIFO, and
