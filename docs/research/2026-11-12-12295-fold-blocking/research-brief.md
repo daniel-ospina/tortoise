@@ -4,21 +4,20 @@
 **Harness:** `tools/candidate_recall_11901.py` (**reused, not rebuilt** — the tool and its pinned
 test landed with `#12159`) · **Run:** `--population 1000 --sample 300 --captures 20`, elapsed
 390.6 s, graph `recall11901_1794532634_746264`, population digest `03785295abd20d9a`,
-measured at code head `ae63e846e4104311de508d83b19b32fb5e672d4f` — quoted in full because
+measured at code head `dcb43345a3b6755d58725469aa96b9d339427d6d` — quoted in full because
 `test_the_artifact_declares_one_uniform_retrieval_mode` asserts the brief names the artifact's
 `code_head` verbatim.
 ⛔ **AND THAT SHA IS *NOT* A REPRODUCTION ANCHOR — the correction (#12304 review round 21).** This
 paragraph used to call it "the anchor a reader reproduces from" and to imply it survived the rebases
-because the LATEST one left it. Measured: `git merge-base --is-ancestor ae63e846e410` answers **1**
-against BOTH this branch's HEAD and `origin/main`, and the only ref that contains it is a local,
-un-refetched `refs/remotes/` entry — so it is dangling in exactly the way the paragraph below
+because the LATEST one left it. Measured: `git merge-base --is-ancestor dcb43345a3b6` answers **1**
+against BOTH this branch's HEAD and `origin/main`, and no ref contains it at all — the `#12304` force-pushes carried the local `refs/remotes/` entry past the generation that held it — so it is dangling in exactly the way the paragraph below
 calls disqualifying, and no reader can `git show` it from a fresh clone. The FIELD is kept because
 it is what the artifact's own contract requires and because a squash merge destroys every branch
 sha anyway (the pin's own comment records that, and is why it asserts the note's SHAPE and a
 content-equivalence rather than an ancestry). What replaces it as the anchor is CONTENT, which is
 checkable without any sha being reachable: on a docstring-stripped AST compare,
 `tortoise/entity_resolver.py` and `tortoise/extractor_v2.py` are **identical** between
-`ae63e846e410` and this head, and `tortoise/entity_blocking.py` differs **only** by the two label
+`dcb43345a3b6` and this head, and `tortoise/entity_blocking.py` differs **only** by the two label
 changes named below. ⛔ This paragraph also named the `437d…`-generation shas (a first rebase
 generation, now dangling) until #12304 review round 10, for the same reason they are not named here
 now: a sha no ref serves is not provenance, and quoting one in full makes it look like it is.
@@ -34,13 +33,13 @@ source of truth for this field and the brief must agree with it.
 The DELTA between the code that produced these numbers and this head touches those files in two
 ways, and the provenance claim is stated as the diff rather than as a summary of it: (a)
 DOCSTRINGS/COMMENTS — the `emitted:` note moves, and a
-`complete=True` note is added; (b) LABELS — `1990cca573` (pre-rebase `d52a989eafd2`) renames the
+`complete=True` note is added; (b) LABELS — `e7f9d77ed5b7` (pre-rebase `d52a989eafd2`) renames the
 `lsh_bands` docstring label and the `stats()` counter key `keys` -> `key_memberships`, and
-`22e43732e9` (pre-rebase `22ec4d1a6048`) adds a `candidates(label=None)` LABEL FALLBACK in
+`fe9cbee4e447` (pre-rebase `22ec4d1a6048`) adds a `candidates(label=None)` LABEL FALLBACK in
 `entity_blocking.py`.
 ⛔ The enumeration, not this summary, is what proves it — and ⛔ **THE RANGE NO LONGER ISOLATES
 POST-RUN CHANGES**: the `#12304` rebases rewrote every branch sha, so
-`git log --format=%h ae63e846e410..HEAD -- tortoise/entity_resolver.py tortoise/entity_blocking.py
+`git log --format=%h dcb43345a3b6..HEAD -- tortoise/entity_resolver.py tortoise/entity_blocking.py
 tortoise/extractor_v2.py` now prints the whole rewritten branch's commits, and SPANS it. No count
 is stated here — deliberately: an integer quoting a range this same PR keeps extending is a
 number a reader cannot re-derive, and this paragraph quoted one such figure before it was removed. It is not a list of docstring-only
@@ -48,8 +47,8 @@ commits and this paragraph does not claim it is — it holds the branch's own fe
 commits too, which is what a base-moved range holds. What the enumeration DOES establish is the
 IDENTITY of the two statement changes, and it establishes it by CONTENT, not by position: the
 `stats()` key rename (a diagnostic LABEL, which is why the artifact reads `key_memberships` while
-the run emitted `keys`) is `git log -S'key_memberships'` -> `1990cca573`, and the fallback is
-`git log -S'every label this index actually holds'` -> `22e43732e9`; both are members of that
+the run emitted `keys`) is `git log -S'key_memberships'` -> `e7f9d77ed5b7`, and the fallback is
+`git log -S'every label this index actually holds'` -> `fe9cbee4e447`; both are members of that
 list, and both pre-rebase shas are dangling objects no reader can resolve. This run never
 reaches the fallback: the harness calls
 `index.candidates(surface, label="Object")` (cited BY SYMBOL, never by line — the number has rotted
@@ -168,7 +167,7 @@ same quantity: `k` rows per mention for the window, one candidate list per menti
 | FTS window, k=10 | 10 | 0.9976 |
 | FTS window, k=15 | 15 | **1.0000** |
 | FTS candidate set a capture actually sees (`search_graph` pooled union) | 2.84 (42.65 per capture of 15 mentions — **not** a per-mention figure, and not comparable to the row below) | not measured per mention |
-| **multi-key blocking** (`entity_blocking.BlockIndex`: folded key ∪ folded prefix ∪ per-token prefixes ∪ LSH shingle bands) | **34.9** (max 152) | **1.0000** (422/422), reduction ratio 0.0255 |
+| **multi-key blocking** (`entity_blocking.BlockIndex`: folded key ∪ folded prefix ∪ per-token prefixes ∪ LSH shingle bands) | **35.9** (max 152) | **1.0000** (422/422), reduction ratio 0.0255 |
 
 The reduction ratio is the blocker's actual cost on the whole graph: pairs proposed by **all 1000**
 names over `C(1000, 2)` (`entity_blocking.reduction_ratio`, computed by that one helper). It is NOT
