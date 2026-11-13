@@ -41712,22 +41712,36 @@ class TortoiseSDK:
                                     key=lambda x: (x[1], weights.get(x[0], 0.0)),
                                     reverse=True))
                 result_ids = list(fused.keys())
-                # ⛔ NOT "did the id order move", and not "did the query
-                # return" either: a recency multiplier that
-                # agrees with the fused order leaves the ids identical while the
-                # caller's recency order IS in force (measured — the test's own
-                # fixture seeds newest-first, so 4b is a no-op permutation there
-                # and "no movement" inverted the page). The mechanical question is
-                # whether recency WEIGHTING actually bit: at least TWO rows carried
-                # usable dates — a SPREAD — so the multiplier could reorder and
-                # must not be demoted. ⛔ "At least one" is not the predicate:
-                # ``_recency_factors`` returns an all-zero map below two dated rows
-                # (``if len(dated) < 2: return factors``, search_engine.py), because
-                # one date has nothing to rank against. A pool with a single dated
-                # row therefore weighs every row 0, did nothing, and the rerank
-                # RUNS — which is the behaviour ``any(w > 0 …)`` gives, and what
-                # the wording above has to say if a reader is to reproduce it.
-                _recency_applied = any(w > 0 for w in weights.values())
+                # What the #12297 rerank below keys its skip on: whether the
+                # caller's recency WEIGHTING could reorder anything. ⛔ Three
+                # framings are all wrong, and each was shipped at some point:
+                #
+                # 1. "did the id order move" — a recency multiplier that already
+                #    agrees with the fused order leaves the ids identical while the
+                #    caller's order IS in force (the test's own fixture seeds
+                #    newest-first, so 4b is a no-op permutation there and "no
+                #    movement" inverted the page).
+                # 2. "did any row carry a date" — ``_recency_factors`` returns an
+                #    all-zero map below TWO dated rows (``if len(dated) < 2: return
+                #    factors``, search_engine.py), because one date has nothing to
+                #    rank against. A pool with a single dated row weighs every row 0
+                #    and did nothing.
+                # 3. "did at least two rows carry a date" — a page whose dates all
+                #    fall in ONE group has many dated rows and still weighs every row
+                #    the SAME factor (a tie group shares its highest factor), so the
+                #    multiplier is an identity. Measured: five points created on one
+                #    date — a bulk import or one capture burst — the read with
+                #    recency byte-identical to the read without it, the rerank
+                #    skipped, and the trace naming ``recency_order_requested`` over a
+                #    pool in plain fused order.
+                #
+                # The mechanical question is whether the EFFECTIVE WEIGHTS can
+                # reorder anything: a SPREAD, not a sign and not a count.
+                # Undated pools, one-dated-row pools and all-tied pages all collapse
+                # to zero spread and let the lever run, which is what each of the
+                # three must do — none of them applied an order to demote.
+                _eff = {pid: weights.get(pid, 0.0) for pid in fused}
+                _recency_applied = bool(_eff) and max(_eff.values()) > min(_eff.values())
             except Exception as e:
                 _logger.warning("recency weighting failed (%s) — plain RRF", e)
 

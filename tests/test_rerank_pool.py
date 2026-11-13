@@ -832,6 +832,61 @@ class _Positional:
         return [float(i - n) for i in range(n)]
 
 
+def test_an_all_tied_page_is_NOT_a_recency_order_in_force(sdk, monkeypatch):
+    """One date for every row is not an order — the multiplier is an identity.
+
+    ``_recency_factors`` gives a tie group the group's highest factor, so a page
+    whose dates all fall in ONE group weighs every row the same and the multiplier
+    reorders nothing. A sign test ("did any row carry a date") treated that as "the
+    caller's order is in force", suppressed the rerank and had the trace name
+    ``recency_order_requested`` — true of a page written in one day (a bulk import,
+    a single capture burst) with no row reordered. The predicate is the SPREAD of
+    the effective weights.
+    """
+    # ⛔ THE SAME `createdAt` ON EVERY ROW, written straight to the graph:
+    # ``create_point`` stamps a microsecond timestamp, and on this build a later
+    # ``update_point(properties={"createdAt": …})`` leaves the stored value
+    # untouched (measured), so a tie group cannot be seeded through the API.
+    # `_recency_factors` groups by EQUAL sort key, so distinct timestamps would be
+    # distinct dates and the spread would be real — a bulk import or a single
+    # capture burst writes exactly the shape below.
+    ids = [_id(sdk.create_point(kind="statement",
+                                content=f"zebra migration claim number {i:02d}"))
+           for i in range(5)]
+    sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids SET n.createdAt = $ts",
+        params={"ids": ids, "ts": "2026-01-01"})
+    probe = {"recency_field": "createdAt", "recency_boost": 0.5}
+
+    # PREMISE, asserted: on this page the weighting is a proven no-op — the order
+    # with recency is the order without it.
+    without = [r["id"] for r in sdk.tortoise_fts_query(
+        "zebra migration", entity_type="point", limit=5)]
+    with_recency = [r["id"] for r in sdk.tortoise_fts_query(
+        "zebra migration", entity_type="point", limit=5, **probe)]
+    assert with_recency == without, (
+        "premise: a single date group must reorder nothing, or this test proves "
+        f"nothing (without={without} with={with_recency})")
+
+    calls: list[list[str]] = []
+
+    class _Recording:
+        def score(self, query, texts):
+            calls.append(list(texts))
+            return [0.0 for _ in texts]
+
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    _inject(_Recording(), monkeypatch)
+    trace: list[dict] = []
+    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=5,
+                           leg_trace=trace, **probe)
+
+    entry = _rerank_entries(trace)[0]
+    assert entry["ran"] is True, entry
+    assert entry["reason"] == "ok", entry
+    assert calls, "the lever reported that it ran but never reached the scorer"
+
+
 def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
         sdk, monkeypatch):
     """#12297 — step 4b's recency order has the last word when a caller asks.
