@@ -89,6 +89,7 @@ __all__ = [
     "is_probe_session_id",
     "is_spooled",
     "list_spool_metas",
+    "outcome_unrecorded",
     "quota_refusal",
     "read_capture_status",
     "read_discards",
@@ -97,6 +98,7 @@ __all__ = [
     "remove_spool_entry",
     "reset_terminal_entries",
     "spool_dir",
+    "unrecorded_captures",
     "write_capture_status",
     "write_spool_entry",
 ]
@@ -309,6 +311,37 @@ class PostOutcome:
     body: dict = field(default_factory=dict)
 
 
+#: The key a 2xx body (and the spool meta of the entry it filed) uses to say the
+#: server has NOT recorded whether extraction ran. Set by
+#: ``__main__._session_post._refused`` for the ``PENDING`` verdict (#12362) and
+#: copied onto the spool entry by ``_flush_one`` so the state outlives the run.
+UNRECORDED_OUTCOME_KEY = "extraction_outcome"
+UNRECORDED_OUTCOME_VALUE = "unknown"
+
+
+def outcome_unrecorded(body) -> bool:
+    """True when a 2xx body says the EXTRACTION OUTCOME was never recorded.
+
+    THE one definition of the state #12379 owns, so the three surfaces that see
+    one wire body (the spool drain, the day-file drain and the spool entry's own
+    durable marker) cannot drift apart about it.
+
+    ⛔ It is NOT "extracted nothing". A keyless capture (#4188) or a team with
+    extraction switched off (#4258) genuinely produced no memory points and the
+    server SAYS so (``outcome_known: true``); those keep their priced deferral,
+    because re-extracting them is the remedy that works. This marker means the
+    opposite — the server has not said either way — so pricing it would offer a
+    re-attempt for a session that may already have extracted (the #12362 bug).
+
+    Deliberately narrow and fail-safe: only the explicit marker counts. A body
+    from a tree that does not carry #12362, a malformed body, or ``None`` all
+    read as "nothing known to be unrecorded" — an absent marker never
+    fabricates a trace, and it never suppresses a real one.
+    """
+    return (isinstance(body, dict)
+            and body.get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE)
+
+
 @dataclass
 class FlushSummary:
     attempted: int = 0
@@ -350,6 +383,14 @@ class FlushSummary:
     #: need (the org's spend cap must not read as a plan quota). Mirrors the Pi
     #: leg's ``summary.quota``.
     quota: dict | None = None
+    #: #12379: how many of the 2xx answers in THIS pass said the server had not
+    #: recorded the extraction outcome (see :func:`outcome_unrecorded`). The
+    #: session ids are kept beside the count because a number with no id is not
+    #: actionable — the surviving trace a human can act on is the marker on the
+    #: entry itself (``count_unrecorded_captures``), and this pair is what the
+    #: drain's own line names.
+    unrecorded: int = 0
+    unrecorded_sessions: list[str] = field(default_factory=list)
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
 
@@ -2351,6 +2392,49 @@ def count_pending_captures(root: Path) -> int | None:
     return pending
 
 
+def unrecorded_captures(root: Path) -> list[str] | None:
+    """Session ids of captures whose extraction outcome the server never recorded.
+
+    The DURABLE half of #12379's trace. A drain's counter lives in one run's
+    console line, and the hook that produces most captures throws that stderr
+    away (``claude-hooks/session-end.sh`` → ``2>/dev/null``), so the state is
+    also stamped onto the spool entry when it is filed (:func:`_flush_one`) and
+    listed here by the surface that survives the redirect, ``session health``.
+
+    Ids, not a bare count: a number a user cannot resolve to a session is a
+    fact they cannot act on, and the entry is the only thing left that names it.
+
+    Read-only and TOTAL, like :func:`count_pending_captures`: a meta this leg
+    cannot parse is skipped (it cannot be read as an unrecorded capture either),
+    and ``None`` means the spool could not be LISTED — an unreadable directory is
+    not an empty one.
+
+    Includes an entry stamped and then left unfiled by a compare-and-swap miss:
+    that session's outcome is just as unrecorded, and the next pass re-posts it.
+    """
+    try:
+        names = sorted(os.listdir(_entries_dir(root)))
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+    found: list[str] = []
+    for name in names:
+        if not name.endswith(".meta.json"):
+            continue
+        try:
+            meta = json.loads((_entries_dir(root) / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        if meta.get(UNRECORDED_OUTCOME_KEY) != UNRECORDED_OUTCOME_VALUE:
+            continue
+        sid = meta.get("session_id") or name[: -len(".meta.json")]
+        found.append(str(sid))
+    return found
+
+
 def _health_scan(root: Path) -> tuple[int, list[dict]] | None:
     """ONE read-only pass over `entries/`: the pending count AND the metas.
 
@@ -2956,6 +3040,16 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # left the breadcrumb standing (and `session verify` reading a failure
         # that had already been resolved) (#4714 review).
         _clear_breadcrumb_for(meta.get("harness"), sid)
+        # #12379: the 2xx may be honest about the turns and silent about the
+        # extraction — the server stored them and never recorded whether
+        # extraction ran. FILING is right (the spool's contract is turn
+        # durability) but the state must leave a trace: #12362 removed the false
+        # "no memory points were extracted" claim AND the priced deferral, which
+        # is the correct trade, and left nothing anywhere naming the session.
+        unrecorded = outcome_unrecorded(outcome.body)
+        if unrecorded:
+            summary.unrecorded += 1
+            summary.unrecorded_sessions.append(sid)
         # COMPARE-AND-SWAP, on the POSTED CONTENT **AND LANE**. A concurrent
         # capture (a resumed session, or the SessionStart drain racing a live
         # turn) can grow this entry while the POST is in flight. Stamp
@@ -3027,6 +3121,21 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                 now_ms / 1000.0, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             fresh["attempts"] = 0
             fresh["next_attempt_at_ms"] = 0
+            # #12379: the DURABLE half of the trace, written in the same CAS as
+            # `filed_key` so it describes the content that was actually filed.
+            # Set-only-when-present and CLEARED on a later filing that is not
+            # unrecorded (a re-filed entry whose outcome the server has since
+            # recorded must not keep claiming otherwise), the same
+            # omit-rather-than-write-null rule `filed_lane`/`filed_stamp` follow
+            # for the TS leg's strict comparison.
+            #
+            # A CAS miss leaves the entry unfiled and unstamped: its content was
+            # not what this POST carried, so the next pass re-posts it and that
+            # attempt's own outcome stamps it.
+            if unrecorded:
+                fresh[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
+            else:
+                fresh.pop(UNRECORDED_OUTCOME_KEY, None)
             _write_meta(root, fresh)
         # else: the posted content WAS filed; the entry keeps the newer turns
         # and stays unfiled, so they are re-posted next time.
