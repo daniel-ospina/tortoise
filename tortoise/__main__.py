@@ -4573,7 +4573,13 @@ def _cmd_config(args) -> int:
         # nothing reads it.
         print("  ·  a `.env` NO entry point reads")
         print(f"     {_printable(_other['path'])}")
-        print(f"  sets          {_printable(', '.join(_other['keys']))}")
+        if _other.get("state") == "unreadable":
+            # Nothing was parsed, so there is no key list to print — and printing
+            # "sets" with an empty list would report an observation this command
+            # could not make (#12441 item 3).
+            print("  sets          (unknown — this file cannot be read)")
+        else:
+            print(f"  sets          {_printable(', '.join(_other['keys']))}")
         print("  ⚠️  the daemon reads "
               f"{_printable(env_file['path'])} — not this file — and no CLI")
         print("      verb reads any .env for its graph target, so nothing above")
@@ -11500,6 +11506,29 @@ def _db_value_source(key: str | None) -> str:
     return ("file" if _dotenv_file.applied_value(key, _path) == value else "env")
 
 
+def _ladder_deciding_key() -> str | None:
+    """The ladder key `config.daemon_db_target` reads FIRST — by ITS OWN test.
+
+    TRUTHINESS, not `.strip()`: the ladder is written `if uri:` /
+    `if os.environ.get("TORTOISE_DB_PATH"):`, so a WHITESPACE-ONLY value is a
+    DECIDING rung carrying a value it then REJECTS (a relative path), not an
+    unset one. A `.strip()` scan went blind to exactly those values, fell
+    through to the file's healthy key, and reported "the value is the one this
+    `.env` supplied" about a value the SHELL supplied — while the same payload's
+    `blank_graph_keys["env"]` named the environment (#12441). Where the blank is
+    a `TORTOISE_DB_PATH`, `resolve_db_path` strips it itself and falls through to
+    the canonical default, so `env_graph_keys`' non-blank filter stays right:
+    that one answers which key a RESOLVED target came from, not which rung the
+    ladder was ON when it raised.
+    """
+    import os
+
+    for key in _DB_LADDER_KEYS:
+        if os.environ.get(key):
+            return key
+    return None
+
+
 def _dotenv_already_applied() -> bool:
     """Has THIS process applied the daemon's `.env` yet? (Recorded in `LOADED_PATHS`)
 
@@ -11639,9 +11668,25 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         cwd_assignments = _dotenv_file.parse_dotenv(candidate)
         if cwd_assignments:
             other.append({"path": _printable(candidate),
+                          "state": "present",
                           "keys": sorted(cwd_assignments),
                           "graph_keys": [key for key in _DB_LADDER_KEYS
                                          if key in cwd_assignments]})
+        elif not os.access(candidate, os.R_OK):
+            # ⛔ A file that cannot be READ and a file that sets NOTHING both
+            # parse to nothing, and only the parse result was consulted, so a
+            # `chmod 000` `.env` in the project directory vanished from the
+            # report while the daemon side of this same payload reports it as
+            # "exists but cannot be read — this command cannot tell". The
+            # posture "cannot tell is never a pass" is not a property of one
+            # path, so it applies one level out (#12441 item 3). EMPTY is not
+            # this state: an empty readable file configures nothing, and stays
+            # silent — the two are distinguished by READABILITY here, not by
+            # the key count, which an unreadable file cannot supply.
+            other.append({"path": _printable(candidate),
+                          "state": "unreadable",
+                          "keys": [],
+                          "graph_keys": []})
     payload["unread_env_files"] = other
     if payload["state"] == "absent":
         return payload
@@ -11789,9 +11834,11 @@ def _dotenv_divergence(graded_target: str | None = None, *,
                         # (the file sets a healthy `TORTOISE_DB_PATH`, the shell
                         # exports a broken `TORTOISE_DB_URI`) makes the file a
                         # bystander, not a second cause (#12428 review).
-                        _overlay_key = next(
-                            (key for key in _DB_LADDER_KEYS
-                             if (os.environ.get(key) or "").strip()), None)
+                        # ⛔ The ladder's OWN test (truthiness), via the one
+                        # helper — a whitespace-only key is DECIDING and
+                        # rejected, so it is the file's cause only when the FILE
+                        # supplied that key. See `_ladder_deciding_key`.
+                        _overlay_key = _ladder_deciding_key()
                         payload["daemon_error_source"] = (
                             "both" if _overlay_key in effective else "env")
                     else:
@@ -11837,11 +11884,7 @@ def _dotenv_divergence(graded_target: str | None = None, *,
             # FILE put it there, or because the user exported it themselves —
             # and only the record can tell (#12428 review).
             daemon_target = None
-            _key = None
-            for _candidate in _DB_LADDER_KEYS:
-                if (os.environ.get(_candidate) or "").strip():
-                    _key = _candidate
-                    break
+            _key = _ladder_deciding_key()
             _source = _db_value_source(_key)
             daemon_error = _redact_db_value(
                 f"{type(exc).__name__}: {exc}"
@@ -11925,6 +11968,17 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     """
     rows: list[tuple[str, str, str]] = []
     for other in env_file.get("unread_env_files") or ():
+        if other.get("state") == "unreadable":
+            # ⛔ "cannot tell" is never a pass — the rule the daemon's own arm
+            # already applies. Nothing is known about what this file sets, so the
+            # row must not claim it sets anything and must not go silent either
+            # (#12441 item 3).
+            rows.append(("Config: .env (unread)", "⚠️",
+                         f"{_printable(other['path'])} exists but cannot be read — "
+                         "NO Tortoise entry point reads it, and this command "
+                         "cannot tell what it sets, so a target configured "
+                         "there is invisible here. Fix its permissions"))
+            continue
         keys = ", ".join(other.get("graph_keys") or other.get("keys") or ())
         rows.append(("Config: .env (unread)", "⚠️",
                      f"{_printable(other['path'])} sets {_printable(keys)} but "

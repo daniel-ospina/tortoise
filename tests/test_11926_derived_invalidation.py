@@ -22,6 +22,8 @@ per process (``PYTHONHASHSEED``).
 from __future__ import annotations
 
 import hashlib
+import inspect
+import re
 
 import pytest
 
@@ -495,6 +497,283 @@ def test_a_claim_carrying_the_LEGACY_outdated_flag_is_already_retired(sdk):
     assert result["invalidated"] is False
     assert result["alreadyRetired"] is True, result
     assert sdk.get_entity(made["point_id"])["status"] != "retracted"
+    # ⛔ AND THE RECONCILE STILL RAN, sourced from the CLAIM (#12336 review
+    # cycle 11): this `Invalidation` names no goal, so passing
+    # `invalidation.goal_id` alone left `checked: False` over a claim that DOES
+    # carry `goalId` — the dependent state unreconciled on the exact shape the
+    # module block above says must be repaired.
+    assert result["cache"]["checked"] is True, result["cache"]
+
+
+def test_an_already_terminal_claim_reconciles_the_goal_the_CLAIM_names(sdk):
+    """A caller that names no goal must still reconcile: the claim is the source.
+
+    The shape is real and supported (the legacy-flag pin above builds it): an
+    `Invalidation(judgement_id=…)` with no `goal_id`, over a claim retired out of
+    band, so `verdicts`/`invalidate_stale` never sees THAT CLAIM again — and once
+    it was the goal's last live claim, no automatic path repairs the goal's
+    displayed word (#12336); while another live claim stands, that claim's own
+    stale finding does. MEASURED by review: reading the
+    id from `invalidation.goal_id` alone made this case report
+    `cache.checked: False` while `goalState` still read `met` — and a skipped
+    check moves neither `counts.failed` nor `counts.gone`, so the sweep read
+    clean over a goal whose word names a claim that no longer counts.
+
+    The mutation this excludes, stated per arm because the claim was previously
+    broader than the evidence: reverting the ALREADY-TERMINAL arm to
+    `invalidation.goal_id` alone fails this test and the legacy-flag pin above;
+    reverting the POST-EXCEPTION arm fails
+    `test_the_POST_EXCEPTION_terminal_arm_reconciles_too`
+    (which now names no goal, on purpose); and reverting the SUCCESS arm fails
+    `test_the_success_arm_reconciles_the_goal_the_CLAIM_names`. Every other test
+    builds the `Invalidation` with the goal the claim carries, which is why each
+    of the three was green before.
+    """
+    i, t, g = _world(sdk, tag="terminal-goal-from-claim")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+    # out of band: no door call, so the word above is left naming this claim
+    sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$id}) SET p.outdated = 'true'",
+        params={"id": made["point_id"]},
+    )
+    finding = Invalidation(judgement_id=made["point_id"], reason="target-revised",
+                           detail="…")
+    result = invalidate(sdk, finding)
+    assert result["alreadyRetired"] is True, result
+    assert result["found"] is True, result
+    assert result["cache"]["checked"] is True, result["cache"]
+    assert sdk.get_entity(g["id"]).get("goalState") is None
+
+
+def test_the_success_arm_reconciles_the_goal_the_CLAIM_names(sdk):
+    """The arm that ACTUALLY retires is the one where a skipped reconcile is fatal.
+
+    #12315 review cycle 12. Every other success-path test goes through
+    `invalidate_stale`, where `invalidation_for` copies `goalId` from the claim —
+    so a DIRECT `invalidate()` call with a goal-less `Invalidation` was the one
+    shape nobody built, and it passed `invalidation.goal_id` (None) to the
+    reconcile. The claim is terminal after this call, so `invalidate_stale` never
+    scans it again: the goal keeps the derived word FOREVER, and neither
+    `counts.failed` nor `counts.gone` moves for the skip. The result must also
+    report the resolved id, not the caller's `None`.
+    """
+    i, t, g = _world(sdk, tag="success-goal-from-claim")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+    # the claim is LIVE and stale: the bar moved above the recorded reading
+    sdk.update_entity(t["id"], threshold=8.0)
+    finding = Invalidation(judgement_id=made["point_id"], reason="target-revised",
+                           detail="threshold moved")
+    result = invalidate(sdk, finding)
+    assert result["invalidated"] is True, result
+    assert not result.get("alreadyRetired"), result
+    assert result["cache"]["checked"] is True, result["cache"]
+    assert result["goalId"] == g["id"], result
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
+
+
+def test_the_CLAIMS_goal_wins_when_the_caller_names_a_DIFFERENT_one(sdk):
+    """Precedence, pinned where the two readings DIVERGE (#12315 review cycle 13).
+
+    The rule is deliberate: the claim's own `goalId` says whose displayed word
+    names this claim, so that is the state to repair; a caller's id that diverges
+    names a goal that is not the one showing the stale word. Before this test the
+    suite never built the divergent case, so inverting the precedence left every
+    test green while three arms leaned on it — the `[pin-defensive-claim]` shape:
+    the case where the readings differ is the case that has to be built.
+
+    `reconcile_goal_state_cache` RE-DERIVES from the goal's live claims rather
+    than clearing blindly, so the caller's goal here is not merely skipped, it is
+    correctly left `met`: its own claim is live and still met.
+    """
+    i1, t1, g1 = _world(sdk, tag="precedence-claim")
+    made = _judge(sdk, i1, t1, g1)
+    i2, t2, g2 = _world(sdk, tag="precedence-caller")
+    _judge(sdk, i2, t2, g2)
+    assert sdk.get_entity(g1["id"])["goalState"] == "met"
+    assert sdk.get_entity(g2["id"])["goalState"] == "met"
+    sdk.update_entity(t1["id"], threshold=8.0)  # g1's claim goes stale, still live
+    finding = Invalidation(judgement_id=made["point_id"], reason="target-revised",
+                           detail="threshold moved", goal_id=g2["id"])
+    result = invalidate(sdk, finding)
+    assert result["invalidated"] is True, result
+    # the CLAIM's goal, not the caller's — in the record and in the repair
+    assert result["goalId"] == g1["id"], result
+    assert sdk.get_entity(g1["id"]).get("goalState") is None, (
+        "the claim's own goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g1['id']).get('goalState')!r}")
+    assert sdk.get_entity(g2["id"])["goalState"] == "met", (
+        "the caller's unrelated goal was reconciled: "
+        f"{sdk.get_entity(g2['id']).get('goalState')!r}")
+
+
+def _a_second_goal(sdk, tag):
+    """Another goal whose word is DIRTY, so a reconcile onto it would show.
+
+    ⛔ `met` ALONE WOULD NOT DISCRIMINATE (#12315 review cycle 15). A caller-first
+    mutant reconciles the goal the CALLER named, and `reconcile_goal_state_cache`
+    RE-DERIVES from that goal's live claims — so a second goal with a live, `met`
+    claim would be written back as `met` and the "untouched" assertion would pass
+    under the very mutation it claims to exclude. Its claim is therefore retired
+    out of band while the word is left `met`: a reconcile onto it clears the word
+    to `None`, which the callers assert against.
+    """
+    i, t, g = _world(sdk, tag=tag)
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+    sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$id}) SET p.outdated = 'true'",
+        params={"id": made["point_id"]},
+    )
+    assert sdk.get_entity(g["id"])["goalState"] == "met", (
+        "the fixture's premise: a retired-out-of-band claim leaves the word "
+        "naming it, which is exactly what a stray reconcile would clear")
+    return g
+
+
+def test_the_PRECEDENCE_holds_in_the_ALREADY_TERMINAL_arm(sdk):
+    """Same rule, second arm (#12315 review cycle 14).
+
+    The divergent case above reaches only the SUCCESS arm, so flipping the `or`
+    in this arm (caller-first) left every test green: every other test either
+    names no goal (both orders then resolve to the claim) or names the goal the
+    claim already carries. The direction is the recorded decision, so each arm
+    that implements it needs the case where the two readings differ.
+    """
+    i, t, g1 = _world(sdk, tag="prec-terminal")
+    made = _judge(sdk, i, t, g1)
+    g2 = _a_second_goal(sdk, "prec-terminal-other")
+    sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$id}) SET p.outdated = 'true'",
+        params={"id": made["point_id"]},
+    )
+    result = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
+                                          reason="target-revised", detail="…",
+                                          goal_id=g2["id"]))
+    assert result["alreadyRetired"] is True, result
+    # ⛔ THE RECORD NAMES THE GOAL IT RECONCILED (#12315 review cycle 16): the
+    # documented repair route is "call `reconcile_goal_state_cache` again with the
+    # goal's id", so a `cache.error` here must be walkable from the record — and
+    # a direct `invalidate()` caller has no `report["stale"]` to join against.
+    assert result["goalId"] == g1["id"], result
+    assert sdk.get_entity(g1["id"]).get("goalState") is None, (
+        "the claim's own goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g1['id']).get('goalState')!r}")
+    assert sdk.get_entity(g2["id"])["goalState"] == "met", (
+        "the caller's unrelated goal was reconciled: "
+        f"{sdk.get_entity(g2['id']).get('goalState')!r}")
+
+
+def test_the_PRECEDENCE_holds_in_the_POST_EXCEPTION_arm(sdk, monkeypatch):
+    """Same rule, third arm — the re-read (`after`) is where the id comes from."""
+    i, t, g1 = _world(sdk, tag="prec-post-exception")
+    made = _judge(sdk, i, t, g1)
+    g2 = _a_second_goal(sdk, "prec-post-exception-other")
+
+    def retired_by_a_PEER(point_id, **_kwargs):
+        sdk.update_entity(point_id, status="retracted")
+        raise ValueError("already terminal")
+
+    monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
+    result = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
+                                          reason="target-revised", detail="…",
+                                          goal_id=g2["id"]))
+    assert result["alreadyRetired"] is True, result
+    assert result["goalId"] == g1["id"], result
+    assert sdk.get_entity(g1["id"]).get("goalState") is None, (
+        "the claim's own goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g1['id']).get('goalState')!r}")
+    assert sdk.get_entity(g2["id"])["goalState"] == "met", (
+        "the caller's unrelated goal was reconciled: "
+        f"{sdk.get_entity(g2['id']).get('goalState')!r}")
+
+
+@pytest.mark.parametrize("shape", ["success", "terminal", "post-exception",
+                                   "vanish"])
+def test_a_claim_that_NAMES_NO_goal_falls_back_to_the_CALLERs(sdk, monkeypatch,
+                                                              shape):
+    """The `or invalidation.goal_id` half of every arm's precedence (#12315 c17).
+
+    ⛔ THE FALLBACK IS A REACHABLE SHAPE, NOT DECORATION, and it was unpinned in
+    all four arms: deleting `or invalidation.goal_id` from every local left the
+    suite green, because every other test that reaches these locals reads a claim
+    carrying a `goalId`. A claim can name none — `invalidation_for` documents
+    "a corrupt or partial claim" as reachable, and `REMOVE p.goalId` produces it —
+    and with the fallback gone that shape SKIPS the reconcile: `cache.checked` is
+    `False` and neither `counts.failed` nor `counts.gone` moves, which is the
+    silent class the
+    helper exists to make visible (#12336).
+    """
+    i, t, g = _world(sdk, tag=f"fallback-{shape}")
+    made = _judge(sdk, i, t, g)
+    claim_id = made["point_id"]
+    sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$id}) REMOVE p.goalId", params={"id": claim_id},
+    )
+    assert sdk.get_entity(claim_id).get("goalId") is None, (
+        "the fixture's premise: the claim names no goal at all")
+
+    if shape == "success":
+        sdk.update_entity(t["id"], threshold=8.0)  # live, and stale
+    elif shape == "terminal":
+        sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$id}) SET p.outdated = 'true'",
+            params={"id": claim_id},
+        )
+    elif shape == "post-exception":
+        def retired_by_a_PEER(point_id, **_kwargs):
+            sdk.update_entity(point_id, status="retracted")
+            raise ValueError("already terminal")
+        monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
+    else:
+        sdk.update_entity(t["id"], threshold=8.0)  # live, and stale
+
+        def vanish_during_retract(point_id, **_kwargs):
+            sdk.delete_entity(point_id)
+            raise ValueError("no such point")
+        monkeypatch.setattr(sdk, "retract_point", vanish_during_retract)
+
+    result = invalidate(sdk, Invalidation(judgement_id=claim_id,
+                                          reason="target-revised", detail="…",
+                                          goal_id=g["id"]))
+    assert result["cache"]["checked"] is True, (
+        "the reconcile was SKIPPED because the claim named no goal and the "
+        f"caller's id was not used as the fallback: {result['cache']!r}")
+    assert result["goalId"] == g["id"], result
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the caller's goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
+
+
+def test_the_PRECEDENCE_holds_when_the_claim_VANISHES(sdk, monkeypatch):
+    """Same rule, fourth arm — the claim read at the top is the only source left."""
+    i, t, g1 = _world(sdk, tag="prec-vanish")
+    made = _judge(sdk, i, t, g1)
+    g2 = _a_second_goal(sdk, "prec-vanish-other")
+    sdk.update_entity(t["id"], threshold=8.0)  # live, and stale
+
+    def vanish_during_retract(point_id, **_kwargs):
+        sdk.delete_entity(point_id)
+        raise ValueError("no such point")
+
+    monkeypatch.setattr(sdk, "retract_point", vanish_during_retract)
+    result = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
+                                          reason="target-revised",
+                                          detail="threshold moved",
+                                          goal_id=g2["id"]))
+    assert result["alreadyRetired"] is True, result
+    assert result["found"] is False, result
+    # the id survives the claim: this is the arm where it cannot be re-read
+    assert result["goalId"] == g1["id"], result
+    assert sdk.get_entity(g1["id"]).get("goalState") is None, (
+        "the goal of the claim that vanished still displays a word: "
+        f"{sdk.get_entity(g1['id']).get('goalState')!r}")
+    assert sdk.get_entity(g2["id"])["goalState"] == "met", (
+        "the caller's unrelated goal was reconciled: "
+        f"{sdk.get_entity(g2['id']).get('goalState')!r}")
 
 
 # ── 4b. an UNNAMED scope is undecidable, never a retirement ──────────────
@@ -725,8 +1004,10 @@ def test_a_goal_retired_by_its_STATUS_does_not_keep_a_derived_word(sdk):
     retiring a goal by its ``status`` used to skip the reconcile entirely (the
     reason was ``goal-retired``), so a goal carrying a derived ``met`` kept it
     forever — the issue's own headline surviving one of its three named inputs,
-    and unrepairable afterwards because no live judgement remains for a later
-    sweep to reconcile."""
+    with no AUTOMATIC repair afterwards because no live judgement remains for a
+    later sweep to reconcile (the manual, public, idempotent
+    ``reconcile_goal_state_cache`` is the route, and this sweep's own step-4
+    reconcile is what the assertions below measure)."""
     i, t, g = _world(sdk, tag="goal-status-word")
     _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"])["goalState"] == "met"
@@ -974,7 +1255,12 @@ def test_a_window_with_an_UNDATED_reading_is_UNDECIDABLE_not_narrower(sdk):
 
 
 def test_every_minted_dwell_claim_places_its_window(sdk):
-    """Why the two rows above are the ONLY shapes that need the undecidable arm.
+    """Why these are the only shapes a MINTED dwell claim can reach the undecidable
+    report through.
+
+    (The undecidable arm has three routes in total; this paragraph covers only the
+    one this test can build. `undecidable_scope` and the "cannot be ordered"
+    boundary branch are separate routes, pinned elsewhere.)
 
     An UNCHANGED state mints nothing (#11822's unchanged arm re-asserts the live
     claim), and a `dwell-holding` pass reports the PREVIOUS state — which equals the
@@ -1114,6 +1400,7 @@ def test_the_retirement_is_reported_in_full_and_is_IDEMPOTENT(sdk):
                    if v.invalidation])
     retired = invalidate(sdk, first, at="2026-11-12T12:00:00+00:00")
     assert retired["invalidated"] is True
+    assert retired["found"] is True, retired   # the SUCCESS arm reports it too
     assert retired["validTo"] == "2026-11-12T12:00:00+00:00"
     assert retired["reason"] == "target-revised"
     assert retired["detail"] == first.detail
@@ -1123,15 +1410,353 @@ def test_the_retirement_is_reported_in_full_and_is_IDEMPOTENT(sdk):
     again = invalidate(sdk, first)
     assert again["invalidated"] is False
     assert again["alreadyRetired"] is True
+    assert again["found"] is True, again       # it WAS read, and was terminal
     assert sdk.get_entity(made["point_id"])["status"] == "retracted"
 
 
 def test_retiring_a_missing_claim_reports_it_rather_than_raising(sdk):
+    """An absent claim is the idempotent outcome, and it says WHICH one (#12315).
+
+    ``alreadyRetired`` is the honest field for it — a claim that does not exist
+    cannot be stale — and it is what keeps the finding inside a ``counts`` bucket;
+    the previous ``False`` left it in none (see the mid-sweep test below).
+    """
     report = invalidate(sdk, Invalidation(judgement_id="no-such-point",
                                           reason="target-revised", detail="…"))
     assert report["invalidated"] is False
-    assert report["alreadyRetired"] is False
+    assert report["alreadyRetired"] is True
+    assert report["status"] is None
+    # ⛔ `found` is the MECHANICAL discriminator between the two facts
+    # `alreadyRetired` now covers; `status` is not, because a claim whose
+    # terminal predicate was the legacy `outdated` flag also reports None.
+    assert report["found"] is False
     assert "no such judgement" in report["detail"]
+    # no goal is named on this direct call, so there is nothing to reconcile —
+    # REPORTED as such rather than assumed clean (#12336)
+    assert report["cache"]["checked"] is False
+    assert "goalId" in report["cache"]["reason"]
+    # ⛔ AND THE RECORD STILL NAMES THE GOAL IT WOULD HAVE RECONCILED, so a
+    # `cache.error` here is repairable from the record alone — the absent arm is
+    # the one with no claim, so the caller's id is all there is (#12315 review
+    # cycle 16). `None` when the caller named none, which is the honest value.
+    assert "goalId" in report, report
+    assert report["goalId"] is None, report
+
+
+def test_the_VANISH_BETWEEN_READ_AND_RETIREMENT_reconciles_the_CLAIMS_goal(sdk, monkeypatch):
+    """The goal id survives the claim: read BEFORE it vanished, used after.
+
+    #12315 review cycle 13. The vanish-before-retirement arm re-reads the claim,
+    finds it gone, and reports the idempotent outcome — but the dict read at the
+    TOP of `invalidate` is still in scope, and its `goalId` is the one fact that
+    says whose displayed word may still name the vanished claim (#12336). Passing
+    only `invalidation.goal_id` made a caller that names no goal reconcile
+    NOTHING here, while the counters read clean — and this is the arm where the
+    loss is permanent: the claim no longer exists, so no later sweep can find it.
+    """
+    i, t, g = _world(sdk, tag="vanish-before-retirement")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+    sdk.update_entity(t["id"], threshold=8.0)  # live, and stale
+
+    def vanish_during_retract(point_id, **_kwargs):
+        sdk.delete_entity(point_id)  # gone between the read and the write
+        raise ValueError("no such point")
+
+    monkeypatch.setattr(sdk, "retract_point", vanish_during_retract)
+    result = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
+                                          reason="target-revised",
+                                          detail="threshold moved"))
+    assert result["alreadyRetired"] is True, result
+    assert result["found"] is False, result
+    assert "vanished before the retirement" in result["detail"], result
+    assert result["cache"]["checked"] is True, result["cache"]
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word for a claim that vanished: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
+
+
+def test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket(sdk, monkeypatch):
+    """⛔ #12315, reproduced. ``invalidate``'s MISSING arm returned
+    ``alreadyRetired: False`` with no ``error`` and no ``cache`` — and
+    ``invalidate_stale`` has no bucket for that shape. So a claim deleted between
+    the scan and the retirement (a concurrent purge, a peer's cleanup) produced
+    ``stale: 1`` with ``retired``/``alreadyRetired``/``failed``/``gone`` ALL zero:
+    the per-finding record was honest and the SUMMARY could not be reconciled,
+    which is the rule the ``failed`` and ``gone`` buckets were added to keep.
+
+    The probe is the issue's own reproduction — delete the claim immediately
+    before the retirement, so ``invalidate`` takes its MISSING arm.
+    """
+    i, t, g = _world(sdk, tag="vanish-mid-sweep")
+    made = _judge(sdk, i, t, g)
+    sdk.update_entity(t["id"], threshold=12.0)  # a real stale finding
+
+    from tortoise import derived_invalidation as di
+
+    real_invalidate = di.invalidate
+
+    def vanishing(sdk_, invalidation, **kwargs):
+        sdk_.delete_entity(invalidation.judgement_id)
+        return real_invalidate(sdk_, invalidation, **kwargs)
+
+    monkeypatch.setattr(di, "invalidate", vanishing)
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    counts = report["counts"]
+    assert counts["stale"] == 1, counts
+    assert counts["retired"] == 0, counts
+    assert counts["alreadyRetired"] == 1, (
+        "the vanished claim landed in NO bucket — a consumer totalling the "
+        f"buckets cannot reconcile this summary: {counts}")
+    assert counts["failed"] == 0 and counts["gone"] == 0, counts
+
+    per_finding = report["invalidated"][0]
+    assert per_finding["invalidated"] is False
+    assert per_finding["alreadyRetired"] is True
+    assert per_finding["found"] is False, per_finding
+    assert "no such judgement" in per_finding["detail"]
+    # `found` is a contract on the records the DOOR returns, not on the sweep's
+    # own finding records: a `stale` record is `Invalidation.as_dict`, which
+    # carries `state` instead. Asserted so the docstring's scope stays true.
+    assert "found" not in report["stale"][0], report["stale"][0]
+    assert "state" in report["stale"][0], report["stale"][0]
+
+    # ⛔ THE OVERLAP RULE — that `retired` and `failed` (or `gone`) can BOTH count
+    # one finding, so the buckets are per-finding predicates and never a partition
+    # — is deliberately NOT asserted here, and this is the measurement that decided
+    # it: with a single finding whose `stale` and `alreadyRetired` are already
+    # asserted above (`stale` 1, `retired` 0, `alreadyRetired` 1), any
+    # `accounted >= stale` line is ARITHMETICALLY FORCED true, so no mutant can
+    # red it — a dead assertion that would read as coverage. The rule is pinned
+    # where it can actually fail: `test_a_failed_cache_write_counts_as_a_FAILED_sweep`
+    # (one finding counted in `retired` AND `failed`) and
+    # `test_a_GOAL_that_no_longer_EXISTS_is_reported_gone_not_cleared`
+    # (`retired` 1 AND `gone` 1 — NOT the absent-claim goal-gone test below, whose
+    # counts are `retired` 0 AND `gone` 1, i.e. the opposite pair); it is
+    # documented on `invalidate_stale`.
+    #
+    # ⛔ AND THE GOAL'S CACHE IS RECONCILED, not just the bucket (#12336). The
+    # cached word named the claim that vanished, and nothing after this sweep
+    # would revisit the goal — `invalidate_stale` scans LIVE claims, so a goal
+    # whose last claim is gone is never a finding again. Without the reconcile
+    # the goal keeps displaying `met` with nothing behind it while the summary
+    # above reads clean.
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
+    assert per_finding["cache"]["checked"] is True, per_finding["cache"]
+    # FIXTURE PREMISE, not a claim about `invalidate`: the probe deleted this
+    # point BEFORE the retirement ran (see `vanishing`, above), so it reads back
+    # falsy no matter what the sweep does. Asserted so the premise stays
+    # checkable — it is never coverage of "nothing was written".
+    assert not sdk.get_entity(made["point_id"])
+
+
+def test_an_ALREADY_TERMINAL_claim_also_reconciles_the_goal_word(sdk):
+    """#12336's second door-side half, on the arm that used to skip it entirely.
+
+    A claim retired OUT OF BAND (a direct status write, a purge) leaves the goal's
+    ``goalState`` word naming it. It IS cleared automatically once ANOTHER of that
+    goal's claims goes stale — that finding's own step-4 reconcile re-derives the
+    word from whatever still stands — but for a goal whose LAST claim is gone the
+    repair route is the manual, public, idempotent
+    ``reconcile_goal_state_cache``, because ``invalidate_stale`` scans LIVE claims
+    and a gone claim never becomes a finding again.
+    MEASURED before this round: ``goalState`` stayed ``met``, and the finding
+    carried NO ``cache`` key at all — so `(r.get("cache") or {})` read clean and
+    neither ``counts.failed`` nor ``counts.gone`` could see it.
+    """
+    i, t, g = _world(sdk, tag="terminal-reconciles")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"]).get("goalState") == "met"
+    sdk.update_entity(made["point_id"], status="retracted")  # out of band
+
+    report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
+                                          goal_id=g["id"],
+                                          reason="target-revised", detail="…"))
+    assert report["alreadyRetired"] is True, report
+    assert report["found"] is True, report
+    assert report["cache"]["checked"] is True, report["cache"]
+    assert report["cache"]["cleared"] is True, report["cache"]
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
+
+
+def test_an_absent_claim_whose_GOAL_is_gone_lands_in_GONE_too(sdk, monkeypatch):
+    """The clause #12315 forces onto ``counts.gone``'s docstring: a finding in the
+    ABSENT arm can set ``gone`` with NO retirement having landed (the reconcile
+    could not happen because there is no goal node), so ``gone`` there means
+    "the cache could not be reconciled", never "a retirement landed".
+    """
+    i, t, g = _world(sdk, tag="vanish-goal-gone")
+    _judge(sdk, i, t, g)
+    sdk.update_entity(t["id"], threshold=12.0)  # a real stale finding
+
+    from tortoise import derived_invalidation as di
+
+    real_invalidate = di.invalidate
+
+    def vanishing(sdk_, invalidation, **kwargs):
+        sdk_.delete_entity(invalidation.judgement_id)
+        sdk_.delete_entity(g["id"])
+        return real_invalidate(sdk_, invalidation, **kwargs)
+
+    monkeypatch.setattr(di, "invalidate", vanishing)
+    counts = invalidate_stale(sdk, goal_id=g["id"])["counts"]
+    assert counts["alreadyRetired"] == 1, counts
+    assert counts["gone"] == 1, counts        # the cache could not be reconciled
+    assert counts["retired"] == 0, counts     # nothing was retired here
+    assert counts["failed"] == 0, counts
+
+
+def test_the_POST_EXCEPTION_terminal_arm_reconciles_too(sdk, monkeypatch):
+    """The third already-retired arm (#12336), which the claim-side predicate
+    normally MASKs.
+
+    ``invalidate`` re-reads the claim after ``retract_point`` raises, so this arm is
+    only reachable when the claim becomes terminal BETWEEN those two reads — which
+    is exactly the concurrent sweep it was written for. Reaching it needs the raise
+    and the status flip together. ⚠️ Measured when this test was written: deleting
+    the arm's ``cache`` key left the whole suite green — a dead arm that read as
+    coverage. ``test_a_reconcile_that_RAISES_is_reported_not_raised`` now reaches
+    that arm's cache report as well, so the arm is no longer singly-pinned.
+    """
+    i, t, g = _world(sdk, tag="post-exception")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"]).get("goalState") == "met"
+
+    def retired_by_a_PEER(point_id, **_kwargs):
+        sdk.update_entity(point_id, status="retracted")
+        raise ValueError("already terminal")
+
+    monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
+    # ⛔ NO `goal_id` HERE, ON PURPOSE (#12315 review cycle 12): passing it makes
+    # the claim-sourced read short-circuit, so the fallback this arm exists to
+    # provide was evaluated by NO test — reverting it to `invalidation.goal_id`
+    # alone left the suite green at the commit before this pin.
+    report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
+                                          reason="target-revised", detail="…"))
+    assert report["alreadyRetired"] is True, report
+    assert report["found"] is True, report
+    assert "already terminal" in report["detail"], report
+    assert report["cache"]["checked"] is True, report["cache"]
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
+
+
+def test_a_claim_that_vanishes_BEFORE_the_retirement_lands_is_alreadyRetired(
+        sdk, monkeypatch):
+    """The SECOND vanish window (#12315 review, P1): the claim is deleted between
+    the read at the top of ``invalidate`` and ``retract_point``, so the refusal
+    comes back for a claim that is no longer there.
+
+    ⛔ IT IS NOT A SECOND DEFECT CLASS. An absent claim cannot be stale — the rule
+    the MISSING arm states — and this arm only reaches the same fact by a longer
+    route: the claim WAS live when ``invalidate`` read it, and a peer's purge
+    landed inside the call. Collapsing the post-raise re-read to ``None`` reported
+    that benign no-op as ``failed`` AND skipped the goal's reconcile, which is the
+    #12336 residual this module closes for every other already-retired arm:
+    measured before this round, ``goalState`` stayed ``met`` naming a claim that no
+    longer existed, and no later sweep could revisit THAT CLAIM — only another of
+    the goal's claims going stale could reconcile the word, and that is luck, not
+    a route this arm may rely on (a later ``judge_and_record`` that reaches a
+    decided state also REWRITES the word, but it mints a new claim, so it is not
+    a repair of this one).
+
+    ⚠️ ``found`` here is ``False``, not ``None``, and that is the point: ``None``
+    is reserved for a re-read that could not answer (``after is None``). "Gone" is
+    an answer, and it is the one this race produces.
+    """
+    i, t, g = _world(sdk, tag="vanish-before-retract")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"]).get("goalState") == "met"
+
+    def purged_by_a_PEER(point_id, **_kwargs):
+        sdk.delete_entity(point_id)          # the peer's cleanup, then its refusal
+        raise ValueError(f"no such point {point_id}")
+
+    monkeypatch.setattr(sdk, "retract_point", purged_by_a_PEER)
+    report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
+                                          goal_id=g["id"],
+                                          reason="target-revised", detail="…"))
+    assert report["invalidated"] is False, report
+    assert report["alreadyRetired"] is True, report
+    assert report["found"] is False, report
+    # a cancel is never a failure: no `error` key, so `counts.failed` cannot see it
+    assert "error" not in report, report
+    assert report["cache"]["checked"] is True, report["cache"]
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
+
+    # ...and the same race reached through a SWEEP lands in `alreadyRetired`, never
+    # in `failed`. The sweep is where #12315's bucket-totality rule lives, and this
+    # arm is only reachable with a claim that was STALE when the scan read it.
+    i2, t2, g2 = _world(sdk, tag="vanish-before-retract-sweep")
+    _judge(sdk, i2, t2, g2)
+    sdk.update_entity(t2["id"], threshold=12.0)  # a real stale finding
+    report2 = invalidate_stale(sdk, goal_id=g2["id"])
+    counts = report2["counts"]
+    assert counts["stale"] == 1, counts
+    assert counts["alreadyRetired"] == 1, counts
+    assert counts["retired"] == 0 and counts["failed"] == 0, counts
+    assert report2["invalidated"][0]["found"] is False, report2["invalidated"][0]
+    assert sdk.get_entity(g2["id"]).get("goalState") is None, (
+        "the sweep's finding vanished and the goal's word was never reconciled: "
+        f"{sdk.get_entity(g2['id']).get('goalState')!r}")
+
+
+def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
+    """``_reconcile_or_report``'s contract: the idempotent retirement outcome is
+    never discarded because the cache follow-up broke.
+
+    ``reconcile_goal_state_cache`` wraps only ``sdk.get_entity``; the
+    ``latest_judgement`` read and the two ``update_entity`` writes after it are NOT
+    wrapped, so a read failure there or a write failure (the shape
+    ``test_a_failed_cache_write_counts_as_a_FAILED_sweep`` models) both make the
+    reconcile raise. ``latest_judgement`` is used here because it is the one
+    reachable without patching the SDK's write path.
+
+    MEASURED without the guard: the exception leaves ``invalidate`` and is caught
+    by ``invalidate_stale``'s per-finding handler, so the finding still lands in a
+    bucket — but in ``failed`` rather than ``alreadyRetired`` (``counts``
+    ``alreadyRetired`` 1 -> 0) and the record degrades to the generic refusal
+    shape that carries ``error`` only, so the idempotent outcome AND
+    ``cache.error`` are both lost.
+    """
+    i, t, g = _world(sdk, tag="reconcile-raises")
+    _judge(sdk, i, t, g)
+    sdk.update_entity(t["id"], threshold=12.0)  # a real stale finding
+
+    from tortoise import derived_invalidation as di
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("graph read exploded")
+
+    def retired_by_a_PEER(point_id, **_kwargs):
+        sdk.update_entity(point_id, status="retracted")
+        raise ValueError("already terminal")
+
+    monkeypatch.setattr(di, "latest_judgement", boom)
+    monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    counts = report["counts"]
+    assert counts["stale"] == 1, counts
+    assert counts["alreadyRetired"] == 1, counts
+    assert counts["failed"] == 1, counts      # reported, never raised
+    # ⛔ AND `counts.undecidable` IS PINNED ON THIS SHAPE TOO (#12315 review).
+    # A drift that folds either count into `undecidable`
+    # (`len(undecidable) + len(stale)`, or `+ len(invalidated)`) reds this line —
+    # the second one had NO pin anywhere while this line was absent, because the
+    # dry-run site's `invalidated` is empty by construction and cannot see it.
+    assert counts["undecidable"] == 0, counts
+    # the finding keeps its idempotent outcome AND its cache report; the generic
+    # refusal shape (the mutant's) has neither
+    per_finding = report["invalidated"][0]
+    assert per_finding["alreadyRetired"] is True, per_finding
+    assert "graph read exploded" in per_finding["cache"]["error"], per_finding
 
 
 def test_the_derived_state_stops_feeding_the_goal(sdk):
@@ -1334,6 +1959,42 @@ def test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep(sdk):
     failed = [r for r in report["invalidated"] if r.get("error")]
     assert len(failed) == 1 and "refused on purpose" in failed[0]["error"]
     assert len(report["invalidated"]) == 2
+    # ⛔ THE DOCUMENTED DISCRIMINATOR IS TOTAL (#12315). The docstring tells a
+    # caller to separate the absent arm from the read arms on `found`, and this
+    # is the one record a caller reads first when the sweep reported a failure:
+    # while the key was omitted here, `record["found"]` was a KeyError and
+    # `.get("found")` read `None` — indistinguishable from an unnamed bucket,
+    # which is the #12315 defect class one level out. `None` is the conservative
+    # answer: this synthetic raise happens before any read, and the trailing
+    # `raise exc` in `invalidate` re-raises `retract_point`'s own exception, which
+    # carries nothing about the read (the `claim is None` refusal does name itself
+    # — "could not read judgement" — but the sweep does not parse prose).
+    assert failed[0]["found"] is None, failed[0]
+    # ⛔ AND `cache` IS A KEY A REFUSAL STILL OMITS, which is correct rather
+    # than untidy: no reconcile ran, so there is no report to carry — but an
+    # absent key must never be the whole answer, which is why `found` is present
+    # above. Pinned here because nothing else fails if a plausible `cache` is
+    # invented for a reconcile that never happened (the same class as the
+    # `counts.gone` fold this module already fixed).
+    assert "cache" not in failed[0], failed[0]
+    # ⛔ AND IT OMITS `goalId` FOR THE SAME REASON, which the docstring now states
+    # as a RULE (#12315 review cycle 17): `goalId` is present exactly where
+    # `cache` is, because it names the goal a reconcile RAN AGAINST. `inv.goal_id`
+    # is in scope here, so writing it in would report a reconcile that never
+    # happened — the same class of untruth as inventing a `cache`.
+    assert "goalId" not in failed[0], failed[0]
+    # ⛔ AND A REFUSAL IS NOT AN ALREADY-RETIRED OUTCOME — the one word in this
+    # synthetic record that could silently invert the summary (fresh-context
+    # review, 2026-11-13). Flip `"alreadyRetired": False` to `True` where the
+    # record is built and the suite stayed GREEN before these two lines: every
+    # other `counts["alreadyRetired"]` assertion in this file is `== 1`, so
+    # nothing pinned the zero side anywhere, and this is the only sweep that
+    # contains a refusal record. The counter would then book a REFUSAL as
+    # "already retired, nothing to do" — the #12315 defect class (a summary that
+    # misreports a finding) one arm over, and the same shape as the `found` /
+    # `cache` / `goalId` traps pinned just above.
+    assert report["counts"]["alreadyRetired"] == 0, report["counts"]
+    assert failed[0]["alreadyRetired"] is False, failed[0]
 
 
 # ── 8. the sweep: scope, limit, dry run, and no re-derivation ────────────
@@ -1345,6 +2006,14 @@ def test_dry_run_writes_nothing_and_names_what_it_would_retire(sdk):
     report = invalidate_stale(sdk, goal_id=g["id"], dry_run=True)
     assert report["dryRun"] is True
     assert report["counts"]["stale"] == 1
+    # ⛔ `counts.undecidable` IS PINNED ON A SHAPE WHERE A DRIFT REDS IT (#12315
+    # review). A sweep over one stale finding decides that finding, so nothing is
+    # undecidable and the counter must read 0; `counts["stale"] == 1` is asserted
+    # just above, so anything that folds `stale` into `undecidable` reds this
+    # line. It also fails under the same mutant on the retirement-arm site, which
+    # pins the `invalidated` half of the expression — so the line lives on BOTH
+    # shapes: neither site alone sees every drift.
+    assert report["counts"]["undecidable"] == 0, report["counts"]
     assert report["invalidated"] == []
     assert sdk.get_entity(made["point_id"])["status"] == "live"
     assert sdk.get_entity(g["id"])["goalState"] == "met"
@@ -1430,6 +2099,249 @@ def test_the_claim_survives_with_a_SECOND_live_judgement_taking_over_the_cache(s
     assert latest_judgement(sdk, goal_id=g["id"])["id"] == second["point_id"]
     assert sdk.get_entity(first["point_id"])["status"] == "retracted"
 
+
+def test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_left(sdk):
+    """The SAME goal, repaired by the SWEEP, with no manual reconcile anywhere.
+
+    This pins the qualifier the door-side docstrings state (``invalidate``'s
+    ``alreadyRetired`` note and ``_reconcile_or_report``): a goal whose LAST claim
+    is gone is never a finding again, so that shape needs the manual, public,
+    idempotent ``reconcile_goal_state_cache`` — but while the goal still holds
+    ANOTHER live claim, that claim's own stale finding repairs the word
+    automatically, because its step-4 reconcile re-derives from whatever stands.
+    Without this test the prose can regress to "no automatic path repairs it",
+    which a single-claim world makes look true.
+    """
+    i, t, g = _world(sdk, tag="auto-repair")
+    other = sdk.create_object("CI p95 <= 12m [auto-repair]", objectKind="target",
+                              comparator="<=", threshold=12.0)
+    first = _judge(sdk, i, t, g, value=11.0, at="2026-11-11T10:00:00Z")
+    second = _judge(sdk, i, other, g, value=11.0, at="2026-11-11T11:00:00Z")
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+
+    # OUT OF BAND: a direct status write retires the NEWEST claim, so no door runs
+    # and no reconcile happens — the word still names the claim that just left.
+    sdk.update_entity(second["point_id"], status="retracted")
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+
+    # Now the FIRST claim's own justification goes (its target's bar moved). The
+    # goal's LAST claim is therefore gone, and this finding's step-4 reconcile is
+    # the automatic repair the docstring names — no manual call below.
+    sdk.update_entity(t["id"], threshold=13.0)
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    assert report["counts"]["retired"] == 1
+    assert [f["judgementId"] for f in report["stale"]] == [first["point_id"]]
+    assert report["invalidated"][0]["goalId"] == g["id"]
+    assert report["invalidated"][0]["cache"]["cleared"] is True
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the sweep's own reconcile did not clear the word the out-of-band "
+        "retirement left")
+
+
+#: Up to three words of inserted text between two anchors of one denial.
+#: A family stated as a LITERAL SUBSTRING is defeated by one word inserted INSIDE
+#: the phrase (round 31: "nothing EVER repairs"); a FILLER allowlist is defeated by
+#: any adverb off the list (round 32: "nothing STRICTLY repairs", "nothing QUIETLY
+#: repairs"). So the gap is ingredient-agnostic: any word, at most three, and the
+#: patterns run per SENTENCE so a match cannot cross a boundary.
+_GAP = r"(?:\s+\w+){0,3}\s+"
+
+
+def _family(*anchors: str) -> re.Pattern[str]:
+    """Compile one repair-denial family as an anchor SEQUENCE with a bounded gap."""
+    return re.compile(_GAP.join(anchors))
+
+
+#: Every phrase family by which this PR's prose has denied a repair that exists.
+_REPAIR_DENIALS = (
+    _family(r"no", r"automatic", r"(?:path|repair|route|sweep|pass)"),
+    _family(r"no", r"(?:later|subsequent|further)", r"(?:pass|sweep|scan|revisit\w*)"),
+    _family(r"nothing", r"(?:else\s+)?(?:repairs?|fixes?|clears?|reconciles?|remediates?)"),
+    _family(r"never", r"(?:a\s+)?finding", r"again"),
+    re.compile(r"un[\s-]?repairable"),  # one token or two, hyphen or space
+    _family(r"cannot", r"be", r"repaired"),
+    _family(r"no", r"repair", r"(?:route|path|possible)"),
+)
+
+#: Sentences the net flags which state a TRUE fact, exempted by a stable marker AND
+#: a reason. Exemptions are themselves asserted, so one cannot outlive its sentence.
+_TRUE_NON_DENIALS = (
+    # `nothing` is the cache's OBJECT ("holding nothing"), not an actor that repairs.
+    "(or holding nothing) is reconciled",
+)
+
+#: The qualifiers that make a denial TRUE. The routing fact (#12315/#12336) is
+#: that a goal holding ANY other live claim is reconciled by that claim's own
+#: stale finding, so only the last-claim shape needs the MANUAL route.
+_REPAIR_QUALIFIERS = (
+    "once the goal holds no other live claim",
+    "once its last live claim is gone",
+    "whose last claim is gone",
+    "while a live claim",
+    "while another live claim",
+    # Naming the goal sweep is the strongest admissible qualifier: a denial next to
+    # `reconcile_goal_states` tells the reader where the automatic repair IS.
+    "reconcile_goal_states",
+)
+
+
+def _assert_repair_denials_are_qualified(text: str, site: str) -> None:
+    """Every repair denial in ``text`` must carry a qualifier in its OWN SENTENCE.
+
+    A sentence, not a window: an inserted false clause in its own sentence must
+    inherit nothing from a neighbour (round 30's window form let
+    ``Nothing else repairs it afterwards.`` pass by sitting next to a qualified
+    sentence). And anchors with a bounded gap, not substrings, so one inserted
+    word cannot remove a denial from the net.
+    """
+    for sentence in re.split(r"(?<=[.!?])\s+", " ".join(text.lower().split())):
+        # Match on a punctuation-FLATTENED copy: the gap is `\w`-only, so inserted
+        # punctuation breaks an anchor without changing the claim — round 32 walked
+        # through it with "never, EVER a finding again", "no automatic self-REPAIR
+        # path" and "un-repairable", all green. The QUALIFIER test still reads the
+        # raw sentence, so flattening cannot manufacture a qualifier.
+        if any(marker in sentence for marker in _TRUE_NON_DENIALS):
+            continue
+        # A hyphen inside a word is a JOIN in one reading and a SEPARATOR in the
+        # other, and both readings deny: "re-paired" is "repaired" (round 33) while
+        # "self-repaired" is "self repaired" (round 32). So the sentence is matched
+        # under BOTH -- joined and split -- and a hit in either one is a denial. The
+        # QUALIFIER test still reads the raw sentence, so neither reading can
+        # manufacture a qualifier.
+        joined = re.sub(r"(?<=\w)[-'\u2019](?=\w)", "", sentence)
+        split = re.sub(r"[^\w\s]", " ", sentence)
+        for pattern in _REPAIR_DENIALS:
+            m = pattern.search(joined) or pattern.search(split)
+            if m is None:
+                continue
+            assert any(q in sentence for q in _REPAIR_QUALIFIERS), (
+                f"{site}: {m.group(0)!r} is stated in a sentence with no qualifier "
+                "— every repair denial must say WHICH shape needs the MANUAL "
+                f"route, in its OWN sentence; found: {sentence[:170]!r}")
+
+
+def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
+    """The absolute regressed FIVE times, so pin the PROSE, not only the behaviour.
+
+    `verdicts`' cap is pinned the same way ("the docstring is the only place a
+    caller can learn …"), and here the docstrings are likewise the artifact a
+    consumer reads: the sweep's `cache` dict is not something a caller can inspect
+    for a missing repair. The behaviour is pinned by
+    `test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_left`;
+    this pins that the words still agree with it — as a (site x family) grid,
+    because rounds 27-31 each escaped a narrower form of this assertion.
+
+    ⛔ DECLARED RESIDUAL (round 30, unchanged by round 31): a false denial
+    inserted INTO a sentence that already carries a qualifier is not caught here.
+    That shape makes the sentence SELF-CONTRADICTORY ("no later pass revisits it
+    once its last live claim is gone, and nothing ever repairs the word
+    afterwards") and no text pin can separate it from legitimate prose without
+    freezing every sentence verbatim — which would false-block benign rewording by
+    the other writer on this branch. Stated rather than hidden.
+
+    WHAT IS NOT RESIDUAL — material inserted INSIDE the family phrase, and what
+    closes each of the three rounds that found it:
+
+    * round 31, an inserted WORD ("nothing EVER repairs") — the families were
+      literal substrings, so `_family` builds them as anchor SEQUENCES with a gap;
+    * round 32, inserted PUNCTUATION ("never, EVER a finding again", "no automatic
+      self-repair path") — punctuation is a separator, so the sentence is also
+      matched on a split-normalised copy;
+    * round 33, an arbitrary adverb off a filler allowlist ("nothing STRICTLY
+      repairs") and a hyphen that JOINS a word ("cannot be re-paired") — the gap is
+      now ingredient-agnostic (any word, at most three), and the sentence is matched
+      under BOTH readings of an intra-word hyphen, joined ("re-paired" ->
+      "repaired") and split ("self-repaired" -> "self repaired").
+
+    Matching under both readings flags exactly one TRUE sentence, so that sentence is
+    exempted by stable marker with its reason in `_TRUE_NON_DENIALS` — and the
+    exemption is itself asserted, so it cannot outlive the prose it excuses.
+    """
+    import tortoise.derived_invalidation as di
+
+    door = " ".join((di.invalidate.__doc__ or "").lower().split())
+    helper = " ".join((di._reconcile_or_report.__doc__ or "").lower().split())
+    cache_doc = " ".join((di.reconcile_goal_state_cache.__doc__ or "").lower().split())
+    # Strip the leading comment markers so a WRAPPED comment reads as one sentence.
+    norm = " ".join(
+        re.sub(r"(?m)^\s*#", "", inspect.getsource(di.invalidate)).lower().split())
+
+    # ---- POSITIVE anchors: zero occurrences must FAIL, never pass vacuously ----
+    assert "claims going stale later does repair" in door, (
+        "the `alreadyRetired` note must say WHICH shape repairs itself")
+    assert "a goal whose last claim is gone is never a finding again" in door, (
+        "and which shape cannot")
+    assert "no claim-side pass can reach that shape" in door, (
+        "and that no CLAIM-side pass reaches it — the claim that replaced the "
+        "false 'no automatic path', which main's goal sweep (#12336) made wrong: "
+        "the sweep IS the automatic path")
+    assert "the repair starts from the goal" in door, (
+        "the note must name WHERE the repair starts, not only what fails")
+    assert "that reaches a decided state" in door, (
+        "and the re-judge route must stay scoped to a DECIDED state: `unknown` "
+        "writes nothing (`_write_goal_state_cache` skips a None)")
+    for site, text in (("invalidate.__doc__", door),
+                       ("_reconcile_or_report.__doc__", helper),
+                       ("reconcile_goal_state_cache.__doc__", cache_doc),
+                       ("invalidate (source + comments)", norm)):
+        assert "no automatic path" not in text, (
+            f"{site}: 'no automatic path' is FALSE on the merged tree — "
+            ":func:`reconcile_goal_states` is exactly that path (#12336)")
+    assert "no claim-side pass repairs it once the goal holds no other live claim" in helper
+    assert ":func:`reconcile_goal_states`" in helper, (
+        "the helper must NAME the goal sweep; a denial that names no repair route "
+        "is precisely the false absolute")
+    assert "no claim-side pass revisiting that goal once its last live claim is gone" in cache_doc, (
+        "the archived-goal bullet must say WHY the last-claim shape cannot recur here")
+    assert "archived sweep retires them together" in cache_doc
+    assert ":func:`reconcile_goal_states`" in cache_doc
+    assert ("no claim-side pass repairs it later once the goal holds no other live "
+            "claim") in norm, (
+        "the absent-arm COMMENT must keep the qualifier IN the sentence")
+    assert "reconcile_goal_states" in norm, (
+        "and must name the sweep that closes the shape")
+    for marker in _TRUE_NON_DENIALS:
+        assert any(marker in t for t in (door, helper, cache_doc, norm)), (
+            f"stale exemption {marker!r} — it no longer appears at any site, so it "
+            "excuses nothing; delete it rather than leaving a blind spot")
+    assert norm.count("no claim-side pass") == 2, (
+        "EXACTLY TWO 'no claim-side pass' statements may stand in `invalidate` — the "
+        "docstring's ('can reach that shape') and the absent-arm comment's "
+        "('repairs it later ONCE …'); the adjacency assertion above cannot see a "
+        "third one planted in another comment, so the count is the guard")
+
+    # ---- the `found` contract's SCOPE (review cycle 1) -----------------------
+    # The absolute "`found` is PRESENT on every shape" was FALSE: `stale` holds
+    # `Invalidation.as_dict` records, which carry `state` and no `found`, so a
+    # caller following the sentence and walking `stale` gets the KeyError the
+    # sentence denies. Pinned as the same two-part shape as the repair bound —
+    # the falsified absolute absent, the corrected SCOPE present — so a revert
+    # reds here instead of passing silently (`grep` shows no other test reads
+    # this docstring).
+    sweep_doc = " ".join((di.invalidate_stale.__doc__ or "").lower().split())
+    assert "present on every shape" not in sweep_doc, (
+        "`found` is NOT on every shape: `stale` records are "
+        "`Invalidation.as_dict`, which carry `state` and omit `found`")
+    assert "present on every record of ``invalidated``" in sweep_doc, (
+        "so the sentence must name the list it is true of")
+
+    # ---- the door's own wording (review cycle 1, F2) ------------------------
+    # The absent-arm comment quotes `reconcile_goal_state_cache`'s docstring.
+    # A quotation that is not a substring of the source is this PR's defect
+    # class, and the door says "calling", not "call".
+    assert '("call this again' not in norm, (
+        "the quotation must be verbatim — the door says 'calling this again'")
+    assert '("calling this again' in norm, (
+        "and the quote must still be present, not quietly dropped")
+
+    # ---- the grid: every family, at every site -------------------------------
+    for site, text in (
+        ("invalidate.__doc__", door),
+        ("_reconcile_or_report.__doc__", helper),
+        ("reconcile_goal_state_cache.__doc__", cache_doc),
+        ("invalidate (source + comments)", norm),
+    ):
+        _assert_repair_denials_are_qualified(text, site)
 
 # ── 9. a claim that leaves by a route the door never sees (#12336) ────────
 #
