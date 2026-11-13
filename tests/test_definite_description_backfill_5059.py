@@ -1039,6 +1039,17 @@ def test_the_transition_map_the_doc_cites_has_exactly_one_documented_reader() ->
         "`_update_entity`'s Point `status` arm to it, so the design doc's 'no "
         "longer inert' is now the stale half (#5333)."
     )
+    # ⛔ Review F10-2: the test's NAME and its docstring both promise "exactly
+    # ONE documented reader" and that a SECOND consumer reds — but `assert reads`
+    # only says ≥1, so a second reader INSIDE `sdk.py` (the one shape the
+    # `sdk.py:` prefix check below cannot catch) stayed green. A second Point-table
+    # reader is exactly the hazard the passage is written against (#5333).
+    assert len(reads) == 1, (
+        f"`{TRANSITION_MAP}` gained a second production reader ({reads}) — the "
+        "map is ONTOLOGY §5's POINT table; another consumer (especially one that "
+        "could apply it to a non-Point label) must update this pin and the design "
+        "doc together (#5333/#9649)."
+    )
     assert all(site.startswith("sdk.py:") for site in reads), (
         f"`{TRANSITION_MAP}` gained a reader outside `sdk.py` ({reads}). The map "
         "is ONTOLOGY §5's POINT lifecycle table and the consumer that must ask it "

@@ -47263,6 +47263,11 @@ class TortoiseSDK:
             # status is the ONLY lifecycle field supplied, EVERY bound row holds
             # exactly that status, and none holds NULL (a NULL-status row is not
             # "equal", it is the legacy shape the backfill route exists for).
+            # (The `"status" in props` conjunct is REDUNDANT in situ — with no
+            # `status` the block is only reached via a temporal member, which the
+            # next clause refuses — and it is kept as defence-in-depth: it is what
+            # makes `props["status"]` below safe to read without a guard. A
+            # mutation that deletes it is an EQUIVALENT mutant, not a hole.)
             _status_entailed = (
                 "status" in props
                 and not (_TEMPORAL_RESTAMP_PROPS & set(props))
