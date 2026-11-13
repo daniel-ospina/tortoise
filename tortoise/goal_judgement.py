@@ -867,7 +867,9 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
 #: ``RESULTSET_SIZE`` (a hosted deployment pins 10000 in
 #: ``apps/graph-viz/docker-compose.yml``; a lane container reports ``-1`` = no
 #: cap), because ONE unbounded query is truncated BY THE SERVER in store order
-#: and says nothing about it — #4233's silent-truncation class, whose remedy is
+#: and says nothing about it — #4515's silent-truncation class (an UNPAGED read
+#: over ``RESULTSET_SIZE`` backs up silently partial and verifies GREEN), whose
+#: remedy is
 #: ``hosted_backup._paged_rows``. ⛔ A CAP PINNED BELOW THIS NUMBER IS **NOT**
 #: SILENT HERE: :func:`latest_readings` compares the rows it collected against an
 #: independent ``count(e)`` aggregate — the guard ``hosted_backup`` calls "the
@@ -994,7 +996,7 @@ def latest_readings(
 
     The rows are fetched by KEYSET PAGES on ``id(e)`` (see
     :data:`_READINGS_PAGE_SIZE`) rather than in one query, so a server-side
-    result-set cap cannot silently truncate the set in store order (#4233; the
+    result-set cap cannot silently truncate the set in store order (#4515; the
     page-size PRECONDITION is stated at the constant). Ordering
     happens in Python because no Cypher-computable instant key exists in this
     codebase today (measured: no ``startedAtEpoch``/``startedAtMs`` property, and
@@ -1101,7 +1103,7 @@ def latest_readings(
             "page had been truncated"
         )
     g = sdk._get_proj().g
-    # ⛔ THE INDEPENDENT COUNT, and it must be an AGGREGATE: #4233's incident is
+    # ⛔ THE INDEPENDENT COUNT, and it must be an AGGREGATE: #4515's incident is
     # a truncated page set that reported nothing, and `tools/turn_parity_census.py`
     # names the consequence ("silence, not an error"). One row, so a result-set
     # cap cannot truncate it to a lie.
@@ -1134,8 +1136,11 @@ def latest_readings(
             f"{indicator_id!r} — a page came back short of {batch}. TWO causes, "
             "with different remedies: a server-side RESULTSET_SIZE pinned below "
             "_READINGS_PAGE_SIZE (lower the constant below the cap) or a "
-            "concurrent delete of a reading that landed mid-read (re-run; no "
-            "setting can prevent it). Which rows a truncated tail costs is "
+            "concurrent DELETE of a reading the count had already seen, which "
+            "shortens the set after the count was taken (re-run; no setting can "
+            "prevent it) — a CREATE that lands mid-read cannot: it either reuses "
+            "an id already paged past (count unchanged) or appends one (count "
+            "short by nothing). Which rows a truncated tail costs is "
             "whatever currently holds the highest live ids (``id(e)`` is creation "
             "order only while nothing has been deleted, and a deleted row is "
             "wherever it was), so the loss is arbitrary by instant: an answer "

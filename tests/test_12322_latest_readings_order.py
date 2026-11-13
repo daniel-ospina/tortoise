@@ -18,7 +18,7 @@ Two stored spellings whose instant order and byte order DISAGREE are enough to
 crop the genuinely newest reading out of the page — no crowded history, no
 ``limit=1`` overflow:
 
-* ``2026-11-12T01:00:00-05:00`` is 06:00Z, and its 12th byte is ``'1'``;
+* ``2026-11-12T01:00:00-05:00`` is 06:00Z, and its byte at index 12 is ``'1'``;
   ``2026-11-12T05:00:00Z`` is 05:00Z with ``'5'`` there, so ``DESC`` puts the
   OLDER row first and ``LIMIT 1`` keeps it.
 * the ingest producer's ``2026/11/12 (Thu) 01:00`` sorts above every dashed row
@@ -220,7 +220,7 @@ def test_ties_are_broken_deterministically_by_reading_id(sdk):
 
 def test_the_read_pages_rather_than_relying_on_one_result_set(sdk, monkeypatch):
     """The history is fetched by keyset pages, so a server-side
-    ``RESULTSET_SIZE`` cap cannot silently truncate it in store order (#4233).
+    ``RESULTSET_SIZE`` cap cannot silently truncate it in store order (#4515).
 
     The page size is retuned to 2 here — the pattern
     ``tests/test_9226_dump_paging_v6.py`` uses — so paging is exercised without
@@ -243,7 +243,7 @@ def test_the_read_pages_rather_than_relying_on_one_result_set(sdk, monkeypatch):
     ⛔ AND (3) A QUERY-COUNT PIN, because (1) and (2) both survive the paging
     being deleted: ONE unbounded query over 5 rows returns the same five rows in
     the same order, which is exactly the regression that would re-introduce
-    #4233's silent store-order truncation. With the page size retuned to 2, a
+    #4515's silent store-order truncation. With the page size retuned to 2, a
     paged read of 5 rows issues **3 PAGE** queries plus the ONE aggregate
     `count(e)` the truncation guard needs (4 in total); a single unbounded read
     issues 1 page query plus the aggregate. Counting is done on the SDK's own
@@ -280,7 +280,7 @@ def test_the_read_pages_rather_than_relying_on_one_result_set(sdk, monkeypatch):
     count_calls = [c for c in calls if "RETURN count(e)" in c]
     assert len(page_calls) == 3, (
         f"5 readings at a page size of 2 must take 3 page queries, took "
-        f"{len(page_calls)} — a single unbounded query re-opens #4233's silent "
+        f"{len(page_calls)} — a single unbounded query re-opens #4515's silent "
         "truncation"
     )
     assert all("id(e) >= $cursor" in c for c in page_calls)
@@ -390,7 +390,7 @@ def test_a_truncated_page_set_raises_instead_of_answering_from_survivors(
     measured on a lane: ids 2,3,4 for A,B,C, delete B, create D ⇒ D holds id 3),
     and a backfilled row can be instant-OLD while landing last. So continuing
     would compute the state from an incomplete set — the defect #12322 removes
-    arriving through the read's own transport (#4233).
+    arriving through the read's own transport (#4515).
 
     Reproduced without a server cap (a lane reports ``RESULTSET_SIZE = -1``) by
     truncating the PAGE query's rows in the client; the ``count(e)`` aggregate is
