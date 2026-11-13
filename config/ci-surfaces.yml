@@ -1109,12 +1109,12 @@ surfaces:
   # arms are load-bearing — measured with `select()`, not assumed:
   # `['tortoise/__main__.py']` → `['api']` (a named-surface match REPLACES the
   # `core` fallback), so without this row the guard ran ZERO times on a
-  # `__main__.py`-only diff — and `__main__.py` is exactly where the two things
-  # this file pins live (`_cmd_config`'s `.env` disclosure and
-  # `_dotenv_unread_candidates`). `tortoise/dotenv_file.py` reaches it through
-  # `core`; `tortoise/mcp_server.py` is a SHARED_MODULES path (`full: True`) and
-  # hid the gap. Same silent-drop class, and the same remedy, as the
-  # `test_11892_health_quota.py` row further down this list. ⛔ No case count is
+  # `__main__.py`-only diff — and `__main__.py` is exactly where what this file pins
+  # lives (`_cmd_config`'s `.env` disclosure, `_dotenv_unread_candidates`, and the
+  # `_dotenv_*` / redaction helpers it imports from there). `tortoise/dotenv_file.py`
+  # reaches it through `core`; `tortoise/mcp_server.py` is a SHARED_MODULES path
+  # (`full: True`) and hid the gap. Same silent-drop class, and the same remedy, as
+  # the `test_11892_health_quota.py` row further down this list. ⛔ No case count is
   # quoted here on purpose: a hand-written count re-stales on every round a
   # reviewer adds a case. Measured after the fix:
   # `select(['tortoise/__main__.py'])` → this file selected.
