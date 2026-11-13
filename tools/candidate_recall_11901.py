@@ -795,8 +795,14 @@ def run(args: argparse.Namespace) -> int:
                 # oranges claim — the per-mention column is what a reader must use.
                 "candidates_mean_per_mention": round(_mk_mean, 2),
                 "candidates_max": max(_sizes),
-                "reduction_ratio": round(
-                    reduction_ratio(_mk_pairs, len(pop)) or 0.0, 4),
+                #: ⛔ The helper answers ``None`` when there is nothing to measure
+                #: (population < 2) so a degenerate run cannot be read as a figure.
+                #: `or 0.0` here collapsed that into "the blocker proposed zero
+                #: pairs" — a flattering-half reading, and exactly the false label
+                #: `entity_blocking.reduction_ratio` refuses to print.
+                "reduction_ratio": (
+                    None if (rr := reduction_ratio(_mk_pairs, len(pop))) is None
+                    else round(rr, 4)),
                 "k_independent": True,
             },
             "fts_only": {
