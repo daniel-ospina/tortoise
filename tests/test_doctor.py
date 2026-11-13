@@ -15,6 +15,7 @@ Runnable with: uv run python -m pytest tests/test_doctor.py -v
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import subprocess
 import sys
@@ -148,22 +149,41 @@ def _hermetic_hosted_identity(monkeypatch, tmp_path):
 
 
 class _FakeResponse:
-    """The minimal `urlopen(...)` context-manager response shape doctor uses."""
+    """The minimal `urlopen(...)` context-manager response shape doctor uses.
+
+    Backed by a real `io.BytesIO` so it behaves like a file: it HONOURS `n` and
+    returns `b""` at EOF. A duck-typed double that returned its whole body on
+    every call made the (chunked) body reader append the same bytes until the cap
+    — and made an `HTTPError`'s `fp` wrapper raise on GC (fresh review rounds 10
+    and 15).
+    """
 
     def __init__(self, status: int, body: bytes = b""):
         self.status = status
+        self._buf = io.BytesIO(body if isinstance(body, (bytes, bytearray)) else b"")
         self._body = body
 
-    def read(self, *_a, **_k):
-        return self._body
+    def read(self, n: int = -1):
+        return self._buf.read(n)
+
+    def read1(self, n: int = -1):
+        return self._buf.read(n)
 
     def getcode(self):
         return self.status
+
+    def close(self):
+        self._buf.close()
+
+    @property
+    def closed(self):
+        return self._buf.closed
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_a):
+        self.close()
         return False
 
 
@@ -492,6 +512,11 @@ class TestDoctorHostedCredential:
             def read(self, *_a, **_k):
                 raise TimeoutError(
                     "the read timed out for https://svc:" + password + "@x/health")
+
+            # `_read_capped` prefers `read1`; the stall must cover both entry
+            # points or the fake silently answers "empty body" instead.
+            def read1(self, *a, **k):
+                return self.read(*a, **k)
 
         _stub_hosted(monkeypatch, lambda url, req: (
             _StalledBody(200) if url.endswith("/health")
@@ -1289,9 +1314,7 @@ class TestDoctorHostedCredential:
         _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
         caps_seen: list[int | None] = []
 
-        import io as _io
-
-        class _BoundedStream(_io.BytesIO):
+        class _BoundedStream(io.BytesIO):
             """A real file-like body that RECORDS the size of each read.
 
             `io.BytesIO` on purpose: `HTTPError` wraps its `fp` in
@@ -1317,8 +1340,12 @@ class TestDoctorHostedCredential:
                 # removing the cap stayed green through that path (fresh review
                 # round 6). Asserting on the recorded values afterwards is the
                 # only shape that can fail.
-                return _BoundedStream(self._body, caps_seen).read(
-                    -1 if n is None else n)
+                caps_seen.append(None if n is None or n < 0 else n)
+                return super().read(-1 if n is None else n)
+
+            def read1(self, n=None):
+                # `_read_capped` prefers `read1`; record through it as well.
+                return self.read(n)
 
         def handler(url, req):
             if url.endswith("/health"):
@@ -1338,9 +1365,13 @@ class TestDoctorHostedCredential:
         _run_doctor([])
         out = capsys.readouterr().out
 
-        assert caps_seen == [65536, 65536], (
-            "an unbounded or differently-capped read() reached the wire on some "
-            f"leg — the body cap is not applied uniformly: {caps_seen}")
+        # Every read must be BOUNDED (a positive int <= the cap): the reader now
+        # walks the body in chunks so a dripping proxy cannot hold a started leg
+        # open, which is why an exact call-size list is the wrong assertion.
+        assert caps_seen, caps_seen
+        assert all(isinstance(n, int) and 0 < n <= 65536 for n in caps_seen), (
+            "an unbounded read() reached the wire on some leg — the body cap is "
+            f"not applied: {sorted(set(caps_seen))[:8]}")
         hosted = _row(out, "Hosted")
         # → API error 400 (the error-body read is the third capped read)
         assert hosted is not None and "❌" in hosted, out[-1200:]

@@ -12862,10 +12862,12 @@ def _session_index_rows_without_graph(
 #: from this comment must use 75, not 45: a 45 s cap pre-empts the `/health` retry
 #: and reproduces the "cold box reported as a broken endpoint" failure this whole
 #: retry exists to prevent (fresh review of this change caught the arithmetic).
-#: ⚠️ Those are per-`recv` bounds, NOT a wall-clock cap: a server that drips bytes
-#: just slowly enough keeps `read()` alive past them. `_DOCTOR_TOTAL_BUDGET_S`
-#: below is the enforced wall-clock bound on STARTING legs; it does not interrupt
-#: a leg already inside a slow read (residual filed as tortoise#12398).
+#: ⚠️ Those are per-`recv` bounds, NOT a wall-clock cap on their own: a server
+#: that drips bytes just slowly enough keeps one `read()` alive past them. That is
+#: why the body is read in CHUNKS against a deadline (`_read_capped`) under the
+#: `_DOCTOR_TOTAL_BUDGET_S` wall clock below — measured with a real dripping
+#: server: `doctor` returns in ~18 s instead of the ~200 s a single
+#: `read(cap)` was held for.
 _DOCTOR_HEALTH_TIMEOUT_S = 5
 _DOCTOR_TEAM_TIMEOUT_S = 10
 _DOCTOR_TEAM_RETRY_TIMEOUT_S = 30
@@ -12874,15 +12876,15 @@ _DOCTOR_TEAM_RETRY_TIMEOUT_S = 30
 #: `doctor` buffer an unbounded stream on a memory-tight box.
 _DOCTOR_BODY_CAP = 65536
 
-#: The hosted probe's wall-clock budget (#11912) — bounded at the START of legs.
-#: ⛔ What this enforces, precisely: a leg is not BEGUN once the budget is spent,
-#: and each leg's socket bound is `min(its own, what is left)`. It does NOT
-#: interrupt a leg already inside `resp.read(...)` — a server dripping bytes just
-#: under the per-recv bound can still outlive the budget inside one leg. The
-#: residual in-leg hang is filed as tortoise#12398 rather than claimed fixed.
-#: Why the budget exists at all: without it a spent socket bound was invisible and
-#: `min()` had nothing to subtract from, so `doctor` (and `onboard`'s last step)
-#: could chain four slow legs on exactly the network `--offline` exists for.
+#: The hosted probe's wall-clock budget (#11912). It bounds leg STARTS, caps each
+#: leg at `min(its own bound, what is left)`, AND is passed into every body read
+#: as a deadline (`_read_capped`), so a leg already inside `resp.read(...)` stops
+#: at it too — the residual in-leg hang filed as tortoise#12398 is closed here
+#: rather than documented (a dripping server that held one leg for ~200 s now
+#: returns in ~18 s total). Why the budget exists at all: without it a spent
+#: socket bound was invisible and `min()` had nothing to subtract from, so
+#: `doctor` (and `onboard`'s last step) could chain four slow legs on exactly the
+#: network `--offline` exists for.
 _DOCTOR_TOTAL_BUDGET_S = 75
 
 
@@ -13098,13 +13100,60 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         v = float(value)
         return f"{v:.0f}" if v.is_integer() else f"{v:.1f}"
 
+    def _read_capped(resp, cap: int, deadline: float) -> bytes:
+        """Read at most `cap` bytes, stopping when `deadline` passes.
+
+        ⛔ `urlopen(timeout=…)` is a PER-RECV bound, not a wall-clock one: a
+        server dripping one byte at a time keeps every gap under it and holds the
+        caller for as long as it likes (measured: `timeout=1` returned 30 bytes
+        after 12.0 s). `read(cap)` alone therefore leaves a started leg unbounded
+        — and the four legs times two reads each is how "the probe is bounded"
+        was true on paper only (fresh review round 15). Reading in chunks and
+        checking the deadline between them makes the bound real, and the cap
+        still bounds the memory.
+        """
+        chunks: list[bytes] = []
+        total = 0
+        reader = getattr(resp, "read1", None) or resp.read
+        while total < cap:
+            if time.monotonic() >= deadline:
+                break
+            # ⛔ A read error PROPAGATES: "the body could not be READ" is a
+            # distinct verdict from "the body carried no status", and swallowing
+            # it here made a stalled-but-200 `/health` read as green again —
+            # the exact arm round 13 added. The callers already handle it.
+            chunk = reader(min(4096, cap - total))
+            if not chunk:
+                break
+            # A reader that IGNORES `n` (a test double, a custom transport, a
+            # proxy shim) would otherwise append the same bytes on every pass
+            # until the cap — duplicating the body instead of bounding it.
+            chunk = chunk[: cap - total]
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+
+    #: `/health`'s verdict notes, populated in place after the reachability read.
+    #: Declared HERE (before the helpers) so `_budget_spent_row` closes over the
+    #: same list object — a `locals()` lookup inside a nested function reads that
+    #: function's OWN locals and would never see it (fresh review round 15).
+    _health_notes: list[str] = []
+
     def _budget_spent_row(leg: str) -> tuple[str, str, str]:
-        """A budget stop is UNPROVEN, not wrong: ⚠️, never `❌` + exit 1."""
+        """A budget stop is UNPROVEN, not wrong: ⚠️, never `❌` + exit 1.
+
+        It still has to CARRY a `/health` verdict already established before the
+        stop: dropping it withheld a known "the service is degraded / returned
+        5xx" from the report and told the user only to re-run (fresh review round
+        15). `_combine` is defined later, so the note is applied inline here.
+        """
+        carried = (" — " + "; ".join(_health_notes)) if _health_notes else ""
         return ("Hosted", "⚠️",
                 f"{base} — the hosted probe ran out of its "
                 f"{_DOCTOR_TOTAL_BUDGET_S} s budget before {leg}; the credential "
-                "is UNPROVEN rather than wrong. Re-run, or use `tortoise doctor "
-                f"--offline` to skip the hosted half{_provenance_note}")
+                f"is UNPROVEN rather than wrong{carried}. Re-run, or use "
+                f"`tortoise doctor --offline` to skip the hosted half"
+                f"{_provenance_note}")
 
     health_code: int | None = None
     health_status: str | None = None
@@ -13114,7 +13163,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     health_first_bound = 0.0
     health_retry_bound = 0.0
 
-    def _health_request(timeout: int) -> None:
+    def _health_request(timeout: float, deadline: float) -> None:
         nonlocal health_code, health_status, health_read_error, latency
         started = time.monotonic()
         with urlopen(Request(f"{api_url}/health"), timeout=timeout) as resp:
@@ -13127,7 +13176,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             # buffered whole into a memory-tight box's RSS (fresh review round 3
             # — `read()` then `len()` bounds the terminal, not the process).
             try:
-                raw_health = resp.read(_DOCTOR_BODY_CAP)
+                raw_health = _read_capped(resp, _DOCTOR_BODY_CAP, deadline)
                 if isinstance(raw_health, bytes) and raw_health:
                     parsed_health = _json.loads(raw_health.decode("utf-8", "replace"))
                     if isinstance(parsed_health, dict):
@@ -13145,8 +13194,14 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                 # added to remove (fresh review round 13). Recorded so the row
                 # downgrades to ⚠️ below.
                 health_status = None
-                health_read_error = (
-                    f"{type(read_exc).__name__}: {str(read_exc)[:80]}")
+                # ⛔ SCRUB FIRST, TRUNCATE SECOND (fresh review round 15): an
+                # 80-char cut that lands inside a userinfo password makes it a
+                # fragment `_scrub` can no longer match, so a later scrub printed
+                # all but one character of it. Every other site in this file
+                # scrubs the whole text and only bounds the DISPLAY.
+                health_read_error = _printable(
+                    _scrub(f"{type(read_exc).__name__}: {read_exc}",
+                           api_url, api_key)[:200])
         latency = time.monotonic() - started
 
     _health_budget = _leg_budget(_DOCTOR_HEALTH_TIMEOUT_S)
@@ -13155,7 +13210,8 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         return
     health_first_bound = _health_budget
     try:
-        _health_request(_health_budget)
+        _health_request(_health_budget, min(probe_deadline,
+                                            time.monotonic() + _health_budget))
     except HTTPError as exc:
         # A 4xx/5xx IS an answer — the host is reachable and something is
         # serving. The code is reported; it does not need the transport branch.
@@ -13199,7 +13255,8 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         try:
             health_retried = True
             health_retry_bound = _retry_budget
-            _health_request(_retry_budget)
+            _health_request(_retry_budget, min(probe_deadline,
+                                              time.monotonic() + _retry_budget))
         except HTTPError as retry_exc:
             health_code = retry_exc.code
         except (OSError, http.client.HTTPException, ValueError) as retry_exc:
@@ -13221,7 +13278,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     # entirely: `200 {"status":"degraded"}` rendered `ℹ️ … /health 200` — counted
     # in neither column — and `doctor` printed `✅ All checks passing!` during a
     # real outage, which is the under-block the health note exists to remove.
-    _health_notes: list[str] = []
+    _health_notes.clear()
     if isinstance(health_status, str) and health_status.strip().lower() not in (
             "ok", "healthy", "pass"):
         # `_scrub` as well as `_printable`: the status STRING is server-controlled
@@ -13260,7 +13317,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     team_first_bound = 0.0
     team_retry_bound = 0.0
 
-    def _team_request(timeout: int) -> None:
+    def _team_request(timeout: float, deadline: float) -> None:
         nonlocal team_code, team_body
         req = Request(f"{api_url}/v1/team",
                       headers={"Authorization": f"Bearer {api_key}"})
@@ -13269,11 +13326,13 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                 team_code = getattr(resp, "status", None) or resp.getcode()
                 # Bounded at the read (see the `/health` note above): a proxy
                 # echoing a large body must not be buffered whole.
-                team_body = resp.read(_DOCTOR_BODY_CAP).decode("utf-8", "replace")
+                team_body = _read_capped(resp, _DOCTOR_BODY_CAP,
+                                         deadline).decode("utf-8", "replace")
         except HTTPError as exc:
             team_code = exc.code
             try:
-                team_body = (exc.read(_DOCTOR_BODY_CAP).decode("utf-8", "replace")
+                team_body = (_read_capped(exc, _DOCTOR_BODY_CAP,
+                                          deadline).decode("utf-8", "replace")
                              if exc.fp else "")
             except (OSError, http.client.HTTPException):
                 team_body = ""
@@ -13284,7 +13343,8 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         return
     team_first_bound = _team_budget
     try:
-        _team_request(_team_budget)
+        _team_request(_team_budget, min(probe_deadline,
+                                        time.monotonic() + _team_budget))
     except (OSError, http.client.HTTPException, ValueError) as exc:
         reason = getattr(exc, "reason", None) or exc
         if not _is_timeout_reason(reason):
@@ -13297,7 +13357,9 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                 return
             try:
                 team_retry_bound = _team_retry_budget
-                _team_request(_team_retry_budget)
+                _team_request(_team_retry_budget,
+                              min(probe_deadline,
+                                  time.monotonic() + _team_retry_budget))
             except (OSError, http.client.HTTPException, ValueError) as retry_exc:
                 retry_reason = getattr(retry_exc, "reason", None) or retry_exc
                 reach_error = (
