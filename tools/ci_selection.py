@@ -1638,6 +1638,18 @@ def is_function_sitemap_path(path: str) -> bool:
 
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
+             # #12363: the published-artifact canary's tool. `tools/` is in
+             # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and the
+             # docs-only early return answers with `surfaces: []` — measured before this
+             # entry: `--changed-files tools/published_artifact_canary.py` → `surfaces: []`
+             # and `test_published_artifact_canary.py` was NOT in the selected set, so a
+             # PR that changed the tool ALONE (its 0/1/2 exit contract, the `--wheel`
+             # empty-path refusal, the ambient-env strip) merged with every
+             # falsifiability pin unrun. Same silent-drop class as the `website/` binaries
+             # and `tools/skip-guard.py` above. With the entry: `surfaces=['core']` and the
+             # pin is selected. Pinned by
+             # tests/test_published_artifact_canary.py::test_a_tool_only_diff_selects_this_pin.
+             "tools/published_artifact_canary.py",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
              # /docs formula guard lives there), and a SOURCE_PATTERNS match
              # REPLACES the `core` fallback (#2938) — so without this entry the
