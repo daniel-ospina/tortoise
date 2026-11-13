@@ -39,7 +39,7 @@ the append path)
 | source | what it settles |
 |---|---|
 | `~/.pi/agent/state/TORTOISE-GRAPH-BRIEF.md` | **ABSENT on this box** — declared, not skipped. Nothing here is a graph query. |
-| #11821 | the three-phase spec. P0 = width, P1 = the `:GraphEvent` mirror, **P2 = this**. Its own sequencing rule: *"no implementation until P0 and P1 are merged and measured… shares a PR with nothing."* |
+| #11821 (+ its P0 PR #11835) | the three-phase spec. P0 = width, P1 = the `:GraphEvent` mirror, **P2 = this**. The sequencing rule is stated in **two homes**, quoted together here and attributed separately in §5: #11821 — *"no implementation until P0 and P1 are merged and measured"*; PR #11835 — *"… shares a PR with nothing."* |
 | #11835 (P0's PR) | the Review Scope Contract R1–R5, the measured post-P0 figures, and the two acceptance figures it reported as **not** holding rather than adjusting them |
 | `tortoise/embeddings.py::stamp_journal_embedding`, `_stamp_journal_vector_width`, `_is_shortest_f32_text`, `shortest_float32_vector` | the landed P0 seam: what "the shortest float32 round trip" means here, the **three outcomes** of the width stamp, and the eight homes the marker is declared in |
 | `tests/test_11821_journal_vector_width.py` (**51 tests** at this head) | the pins P2 must not move: float32 bits, the never-narrowed population, the pre-change replay test at `:518` |
@@ -77,8 +77,10 @@ how a repairable gap becomes a permanent one.
   (count, version, alphabet) and why this note does **not** claim integrity from the encoding. Recorded
   in-repo too: `STORAGE-ARCHITECTURE.md` §5.2 reads *"~4× more than base64 of the same information as the
   float32 the graph itself stores (2,048 B for a 384-d vector, against 8,414 B of decimal text)"* — so
-  base64 is **4.11× smaller than the float64 decimal text** (8,414 → 2,048) and **5.48× smaller than the
-  raw 4 B/float** (8,414 → 1,536). Those are two different comparisons and §1.4 keeps them apart.
+  **base64 is 4.11× smaller than the float64 decimal text** (8,414 → 2,048), and **the decimal text is
+  5.48× the raw 4 B/float** (8,414 → 1,536) — which is the same fact as *"base64 pays **+33.3 %** over
+  raw"* (2,048 B of base64 against 1,536 B raw), the trade §2.5 refuses. The two comparisons differ in subject and §1.3/§2.5 keep
+  them apart (the `~5×` in the source is *text vs raw*, never *base64 vs raw*).
 - **(b) shortest-round-trip printing.** The formal bound is `⌈1 + p·log₁₀2⌉` with `p = 24` significand
   bits ⇒ `⌈8.22⌉ = **9**`: for every finite binary32 value there is a ≤9-digit decimal that correctly
   rounds back to **exactly** it, and "round-trips" means `R₃₂(P(x)) = x` — equality of sign, exponent and
@@ -302,8 +304,10 @@ in `measurement.txt`):
 more than a multiple of 4"*) — so the danger is not a partial quantum. It is the **aligned** cut: 4 base64
 characters are 3 whole bytes, so a body shortened by a multiple of 4 characters is still **valid** base64
 and decodes silently to fewer bytes. Let `m` be the number of **quanta** (4-character units) removed, so
-`k = 4m` characters: the decoded length is `4(N−3m)` bytes, and `3m ≡ 0 (mod 4)` iff `m ≡ 0 (mod 4)` —
-i.e. only every **16th** character may go. At **−16 characters** (`m = 4`) that is exactly the
+`k = 4m` characters and **three bytes per quantum**: the decoded length is **`4N − 3m`** bytes (not
+`4(N−3m)`: a 4-character quantum carries 3 bytes, not 4). Then `4N − 3m ≡ 0 (mod 4)` iff
+`3m ≡ 0 (mod 4)` iff `m ≡ 0 (mod 4)`, i.e. only every **16th** character may go. At **−16 characters**
+(`m = 4`, `4N − 3m = 1,524`) that is exactly the
 case (1,524 B = **381 whole floats**), so a reader checking only `len(decoded) % 4` **accepts a silently
 truncated vector**. Only the declared count refuses it. (This is the fail-open direction on the durability
 artifact: a short vector replayed into the graph is a wrong graph with no error anywhere.) `validate=True`
