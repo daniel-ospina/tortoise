@@ -224,6 +224,29 @@ _HASH_ID = re.compile(r"#(\d{2,})")
 #: `_TOKEN` or a hash id, in name order — the one scanner both `identifier_tokens`
 #: and `skeleton` use, so the two cannot disagree about what a token is.
 _TOKEN_OR_HASH = re.compile(r"#\d{2,}|[A-Za-z0-9][A-Za-z0-9._\-/]*")
+def _scan(text: str) -> list[str]:
+    """Tokens in ``text``, with a PATH split into its components.
+
+    ⛔ A whole path is one token (`_TOKEN`'s charset includes `/`), and one token
+    cannot be both a locator and an identity. Dropping it silenced BOTH vetoes for
+    every path pair (`tortoise/extractor_v2.py` vs `.../extractor_v3.py` merged);
+    keeping it whole folded two spellings of ONE file into disjoint "identifiers"
+    while their skeletons were both ``("<id>",)``, so the `#11901`
+    `basename-only` class was vetoed. Components answer both: `tortoise` is a
+    literal, and the basename is tokenised like any other name.
+
+    `_TOKEN`'s charset is unchanged on purpose — `_YEAR_MONTH_RAW` and friends read
+    whole tokens (``2026/11`` is a date written with a slash, not a path).
+    """
+    out: list[str] = []
+    for tok in _TOKEN_OR_HASH.findall(str(text or "")):
+        if "/" in tok and not tok.startswith("#"):
+            out.extend(part for part in tok.split("/") if part)
+        else:
+            out.append(tok)
+    return out
+
+
 #: A `YYYY-MM` (or `YYYY/MM`) month reference, and the `YYYY-Qn` / `Qn-YYYY`
 #: compounds. Excluded from identifiers (they are temporal) and compared by
 #: `date_tokens`, so `2026-11 report` / `2026-12 report` reports `date_conflict` —
@@ -305,7 +328,7 @@ def identifier_tokens(name: str) -> set[str]:
     # not (see `_TOKEN`'s note). Folded onto the digits, so the same reference
     # written with an inner separator still agrees.
     out.update(_HASH_ID.findall(text))
-    for tok in _TOKEN.findall(text):
+    for tok in _scan(text):
         has_digit = any(ch.isdigit() for ch in tok)
         if not has_digit:
             continue
@@ -314,15 +337,8 @@ def identifier_tokens(name: str) -> set[str]:
         if not (has_alpha or has_sep):
             continue
         if _temporal_compound(tok):
-            continue
-        if "/" in tok:
-            # ⛔ A PATH is a locator, not an identifier. `_TOKEN` includes `/`, so
-            # a whole path is ONE token and folds to one identifier — which made
-            # two spellings of the same file (`tortoise/extractor_v2.py` vs
-            # `extractor_v2.py`) a "disjoint identifier" pair while their
-            # skeletons were both `("<id>",)`: the veto fired on the `#11901`
-            # `basename-only` variant class it exists to spare, and the mention was
-            # HELD (and an entity hold is not carried forward, so lost).
+            # A date is compared by `date_tokens`, so the record names the rule
+            # that fired instead of claiming an identifier conflict.
             continue
         folded = _SEPARATORS.sub("", tok.casefold())
         if not folded or _TEMPORAL_TOKENS.match(folded):
@@ -355,17 +371,17 @@ def date_tokens(name: str) -> dict[str, set[str]]:
     # against `2026-12` contradicts; `2026-11` against `2026` does not (one side
     # states a month, the other only a year) — the same like-with-like rule as
     # year vs quarter.
-    year_months = {tok for tok in _TOKEN.findall(str(name or ""))
-                   if _YEAR_MONTH_RAW.match(tok)}
+    year_months = {tok for tok in _scan(name)
+                   if _YEAR_MONTH_RAW.match(tok.casefold())}
     if year_months:
         out["year_month"] = {tok.replace("/", "-") for tok in year_months}
-    quarter_years = {tok for tok in _TOKEN.findall(str(name or ""))
+    quarter_years = {tok for tok in _scan(name)
                      if _QUARTER_YEAR_RAW.match(tok.casefold())}
     if quarter_years:
         out["year_quarter"] = out.get("year_quarter", set()) | {
             "-".join(reversed(tok.casefold().replace("/", "-").split("-")))
             for tok in quarter_years}
-    full_dates = {tok for tok in _TOKEN.findall(str(name or ""))
+    full_dates = {tok for tok in _scan(name)
                   if _YEAR_MONTH_DAY_RAW.match(tok.casefold())}
     if full_dates:
         # Its own kind: `2026-11-12` against `2026-12-12` contradicts, while a full
@@ -392,7 +408,7 @@ def skeleton(
     real.
     """
     out: list[str] = []
-    for tok in _TOKEN_OR_HASH.findall(str(name or "")):
+    for tok in _scan(name):
         if tok.startswith("#"):
             # A hash reference is an identifier token under `replace_ids`, and its
             # digits otherwise — the same shape `identifier_tokens` produces, so a
@@ -584,7 +600,7 @@ def chain_length(node_id: str, edges) -> int:
     with (`apply_entity_merge` enforces the bound by construction), so a lane
     asking "is this chain longer than 1?" reads it against a graph, not a hope.
     """
-    survivor_of = {str(a): str(b) for a, b in edges}
+    survivor_of = {str(a): str(b) for a, b in edges if b is not None}
     current, seen = str(node_id), {str(node_id)}
     hops = 0
     while True:

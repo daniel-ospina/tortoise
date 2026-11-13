@@ -551,6 +551,10 @@ class TestClosureReverification:
         # as a bound cannot be told "1" about a record that is corrupt.
         assert verdict.chain_length("a", [("a", "b"), ("b", "a")]) == -1
         assert verdict.chain_length("a", []) == 0
+        # A LIVE node read from the graph carries `resolved_from = None`, and that
+        # must not count as a hop (a graph-wide read would otherwise report every
+        # live node as a 2-chain).
+        assert verdict.chain_length("a", [("a", None), ("b", None)]) == 0
 
     def test_the_merge_verb_cannot_create_a_chain(self, sdk_factory):
         """The closure guard's positive half, on a real graph.
@@ -693,6 +697,26 @@ class TestVetoesAreSilentOnTheGenuineVariantCorpus:
             out = verdict.judge({"name": surface, "kind": "core:plan"},
                                 {"name": name, "kind": "core:plan"})
             assert out["vetoes"] == [], (variant_cls, surface, name, out)
+
+    def test_two_different_paths_are_still_vetoed(self):
+        """The converse of the corpus test — and the reason the locator rule
+        splits a path into COMPONENTS.
+
+        Dropping a path token wholesale silenced both vetoes for every pair of
+        paths (`tortoise/extractor_v2.py` vs `.../extractor_v3.py` merged); a
+        silence-only corpus test cannot tell that from success.
+        """
+        for a, b, code in (
+            ("tortoise/extractor_v2.py", "tortoise/extractor_v3.py",
+             verdict.VETO_IDENTIFIER_CONFLICT),
+            ("docs/v1/notes.md", "docs/v2/notes.md",
+             verdict.VETO_IDENTIFIER_CONFLICT),
+            ("docs/2026-11/report.md", "docs/2026-12/report.md",
+             verdict.VETO_DATE_CONFLICT),
+        ):
+            out = verdict.judge({"name": a, "kind": "k"},
+                                {"name": b, "kind": "k"})
+            assert out["vetoes"] == [code], (a, b, out)
 
     def test_the_dated_path_class_is_the_case_that_needs_the_skeleton(self):
         """`basename-only` on a path carrying a DATE would otherwise read as a
