@@ -2845,9 +2845,17 @@ def flag_in_shipped_configs(flag: str) -> dict:
     deployment surface holding an unreadable file is `UNMEASURED`, never silent.
 
     ⛔ **The same doctrine, one shape over (#12022): an assignment the walk cannot
-    RESOLVE is also `UNMEASURED`.** `export FLAG="${OTHER}"` may arm the flag, so
-    reading it as silence would be a claim about half an assignment; it lands in
-    ``indeterminate`` and the file holds as `UNMEASURED`. And an assignment in a
+    RESOLVE is also `UNMEASURED` — unless a LATER resolvable assignment decides
+    it.** `export FLAG="${OTHER}"` may arm the flag, so reading it as silence would
+    be a claim about half an assignment; it lands in
+    ``indeterminate`` and the file holds as `UNMEASURED`. ⚠️ The qualifier is the
+    LAST-WINS rule above, not a weakening of it: `ENV FLAG="${OTHER}"` followed by
+    `ENV FLAG=1` is `ON`, because the later line genuinely decides the file, and only
+    the reverse order (a truthy assignment, then an unresolvable one) holds
+    `UNMEASURED`. The unresolvable line is REPORTED in ``indeterminate`` in BOTH
+    orders, so the qualifier cannot turn a half-read assignment back into silence
+    (fresh review of PR #12474, P2 — this sentence was unconditional and the walk's
+    own control arm falsified it). And an assignment in a
     place a deployed process never reads — a TOML key outside `[env]`, a shell
     variable the entrypoint never `export`s — lands in ``outside_runtime`` and is
     REPORTED rather than silently discounted, because a reader has to be able to

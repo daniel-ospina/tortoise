@@ -3368,6 +3368,52 @@ def test_the_per_file_caveat_names_the_MEASURED_build_edge(tmp_path, monkeypatch
     assert "OUTSIDE the walked population" not in caveat, caveat
 
 
+def test_the_UNMEASURED_doctrine_names_the_ORDERING_it_does_not_cover(
+        tmp_path, monkeypatch):
+    """An unresolvable assignment holds the file UNMEASURED — but only as the LAST word.
+
+    ⛔ Measured (fresh review of PR #12474, P2): the docstring stated the rule
+    UNCONDITIONALLY (*"an assignment the walk cannot RESOLVE is also `UNMEASURED` … it
+    lands in `indeterminate` and the file holds as `UNMEASURED`"*) while the walk's own
+    control arm — a resolvable truthy assignment AFTER the unresolvable one — returns
+    `ON`. Both behaviours are right; only the sentence was wider than the code, which is
+    the defect class this probe exists to remove, and a maintainer scoping follow-up
+    work off that sentence would not add the guard where it is missing.
+    """
+    # ⛔ NORMALISED before matching: a phrase pin that depends on the DOCSTRING'S
+    # line wrapping reds on a reflow that changes no meaning, and the first version of
+    # this pin did exactly that (the phrase straddled a wrap and the arm was red on a
+    # correct docstring — measured). `" ".join(split())` asserts the SENTENCE.
+    doc = " ".join((probe.flag_in_shipped_configs.__doc__ or "").split())
+    assert "unless a LATER resolvable assignment decides it" in doc, (
+        "the docstring's UNMEASURED doctrine is unconditional again: "
+        "an unresolvable assignment is ONLY the final word, so a later resolvable "
+        "assignment still decides the file (fresh review of PR #12474, P2)")
+    assert "REPORTED in ``indeterminate`` in BOTH" in doc, (
+        "the docstring must say the unresolvable line is still REPORTED in BOTH "
+        "orders, or the qualifier reads as permission to drop it")
+
+    # Both orderings, measured — the sentence's two arms, not just the one it shipped for.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE="${OTHER}"\n'
+        "ENV TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    later_truthy = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert later_truthy["deployment"]["files"]["Dockerfile.hosted"] == "ON", (
+        later_truthy["deployment"])
+    assert later_truthy["indeterminate"], (
+        "the unreadable line must stay REPORTED even though a later line decides: "
+        f"{later_truthy['indeterminate']}")
+
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
+        'ENV TORTOISE_EMBED_GATE="${OTHER}"\n', encoding="utf-8")
+    last_unknown = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert last_unknown["deployment"]["files"]["Dockerfile.hosted"] == "UNMEASURED", (
+        last_unknown["deployment"])
+    assert last_unknown["indeterminate"], last_unknown["indeterminate"]
+
+
 def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
         tmp_path, monkeypatch):
     """A compose entry with NO value DISARMS the container — the direction that costs.
@@ -9018,7 +9064,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `212 + 1` and `211 + 2` at THIS tree, both equal to the `213` the pin re-derives
+    count: `213 + 1` and `212 + 2` at THIS tree, both equal to the `214` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
