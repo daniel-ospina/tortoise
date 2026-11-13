@@ -2631,16 +2631,20 @@ to answer.
 - **What moved, and why an offset cannot describe it.** The branch's delta against `origin/main` WAS
   **`+99 / -12` in fifteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
   read-back (`:10508` on `main`, `:10536` on the branch), and `+54` from `_collect_classify_items`
-  (`:11803` → `:11857`) through the S2.2 VET gate (`:16779` → `:16833`). ⛔ **THE FORWARD MERGE OF
-  `main` (`6408da01ce`) MOVED THE FILE AGAIN — by `+48` — so every number below was opened on the
-  MERGED tree instead of carrying either parent's value or an offset from it.**
+  (`:11803` → `:11857`) through the S2.2 VET gate (`:16779` → `:16833`). ⛔ **THIS ENTRY'S NUMBERS ARE
+  `main`'S TREE, NOT THIS BRANCH'S.** They were opened on `main` after the forward integration of
+  `main` (`6408da01ce`) moved the file by `+48` — verified at `main` `070d97360c`, where `:12730` is
+  the `def` and `:11409` the read-back. This branch's merged tree sits a further `+90` above that
+  (`_collect_classify_items` at `:12820`), and its LIVE carriers are §10.34's, not this entry's.
+  A dated entry records the tree it was measured on; it is never a re-point (§10.26→§10.27).
 - **New value — measured at this head, by opening each line:** `_collect_classify_items` at
   `:12730`, extent `:12730-12752` (`def` to `return items`, unchanged in size); the two `if items:`
   gates at `:15149`/`:15302`; the two fail-open `except` arms at `:15162`/`:15313`; the two result
   blocks at `:15611` (closing `:15617`) and `:15621` (closing `:15625`); `_run_vet_pass`'s S2.2
   call at `:17805` and its post-S4 union call at `:15278`; and the `#10360` read-back
-  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:11409` — the record's live
-  `read_back` now carries this value, superseding §10.28's `:10536` sentence.
+  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:11409` — `main`'s value; the
+  record's live `read_back` carries `:11499`, this branch's merged-tree value superseding
+  §10.28's `:10536` sentence (§10.34 carries it).
 - **Verified by content, not by arithmetic.** `:12730` is
   `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12752` is `return items`;
   `:15149`/`:15302` are the two `if items:` gates; `:15162`/`:15313` are the two fail-open
