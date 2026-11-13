@@ -2550,15 +2550,16 @@ to answer.
   are the ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for
   *any* edit to this file, and the probe's cite and this document's cite are re-pointed TOGETHER so
   they cannot disagree about this anchor.
-- ⛔ **Superseded for THIS tree by §10.29, and then by §10.30 — which owns the window below.** This entry's window was the live one when it was
+- ⛔ **Superseded for THIS tree by §10.29, and then by §10.31 — which owns the live window.** This entry's window was the live one when it was
   written, and `#12067` has no hunk in `tortoise/projection/__init__.py` — but a later merge on
   the branch inserted above the anchor, so the window this tree carries is
   `projection/__init__.py:14272-14274`, not `:14248-14250` — re-derived by opening the lines
   (`14272` is the `# Ensure pointKind is present` comment, `14274` is `clean["pointKind"] = ""`),
   and the probe's cite of the same anchor is re-pointed with it so the two cannot disagree. (§10.26 records the `:14245` window; `29ec0f3471` then inserted a net `+3` above the
-  anchor, making `:14248-14250` what this entry measured.) ⚠️ Per §10.30 this window's LIVE carrier is
-  §10.30 itself — the sentence is re-derived here because the probe cites the same anchor, not
-  because this entry was re-pointed in place.
+  anchor, making `:14248-14250` what this entry measured.) ⚠️ The live window is `:14272-14274`, and
+  §10.31 owns it — `42409813a7` (`#12348`) inserted above the anchor. It is named here only because
+  the probe cites the same anchor and the two must not disagree; this entry's OWN numbers below are
+  unchanged, so it was not re-pointed in place.
 
 ### 10.28 — the §11/§9 cite block re-derived for `#12067`'s `+54`, and the `#10360` read-back re-pointed (2026-11-13, `#12067`)
 
@@ -2736,9 +2737,8 @@ to answer.
   measured, per §10.19/§10.22/§10.24; a re-point in place would be a false record of what was
   measured. The live carriers are §11, §9, §3.4/§3.7/§7 for the `edges.py` windows, §10.29 for
   the one `record_projection.py` value that has no other carrier, and §10.31 — which succeeds this
-  entry for the `sdk.py` carriers — including the
-  `#548` window, `projection/__init__.py:14272-14274` (`:14265-14267` at §10.29's head — `d63caecf56`,
-  `#12338`, inserted 29 lines above the anchor), whose sentence lives in §10.27.
+  entry for the `sdk.py` carriers AND for the `#548` window, `projection/__init__.py:14272-14274`
+  (`42409813a7`, `#12348`), whose sentence lives in §10.27.
 - **This entry was LIVE for the merged tree until §10.31**; §10.31 now carries the `sdk.py` values
   for the next head, and this entry stays true to the `main` it names (`5bacb44e0b`).
 
@@ -2773,5 +2773,12 @@ to answer.
 - ⛔ **§10.1–§10.30 stay HISTORY.** §10.30's `18799`/`18822`/`18900`/`19009`/`19051` chain is a
   per-commit record of ITS wave and must keep those numbers even though `19009` and `19051` now name
   different lines on this tree — that is the whole point of recording a head.
+- **The `#548` window travels with this entry too**, because it has no other live carrier:
+  `projection/__init__.py:14272-14274` (`14272` = the `# Ensure pointKind is present` comment,
+  `14274` = `clean["pointKind"] = ""`). Measured per commit: `0dca7fcadc`/`31b29c3ceb` `14248`,
+  `201bd941e0` `14255`, `1a0ace242a`/`c7499ac7a7` `14265`, and `42409813a7` (`#12348`) `14272` — the
+  same commit that did the `extractor_v2.py` insert, which is why the two moved together. (An
+  earlier draft of §10.30 attributed this move to `d63caecf56`/`#12338`; that commit never touches
+  `projection/__init__.py`, and `d63caecf56^` already reads `14272` — measured, not inferred.)
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
   supersede marker.
