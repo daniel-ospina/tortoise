@@ -266,8 +266,10 @@ one** of an `archive/MANIFEST.json` entry of the matching kind (`tools/archive_s
 archive mcp-tool|sdk-method <symbol> --batch <slug> --reason <text>`, run **before** the
 deletion — see [`archive/README.md`](archive/README.md)), `RETIRED_USE_INSTEAD` (the MCP name
 keeps answering and names its replacement), or `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`
-(the SDK's fail-closed `AttributeError` record). A genuine **rename** passes `--allow-removal
-<symbol> --allow-removal-reason <why>`, which is logged in the cut output and belongs in the PR
+(the SDK's fail-closed `AttributeError` record — for an SDK method the freeze and the map entry
+count as ONE record, since `archive_surface.py check` requires a frozen method to appear in the
+map; the requirement runs that way only, a map entry needs no archive row). A genuine **rename**
+passes `--allow-removal <symbol> --allow-removal-reason <why>`, which is logged in the cut output and belongs in the PR
 body. The refusal runs **before** the write, so a refused cut leaves the baseline intact —
 the committed baseline is the only list of what USED to be there.
 

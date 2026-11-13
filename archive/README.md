@@ -108,9 +108,15 @@ enforced at two different seams, deliberately:
   `RETIRED_USE_INSTEAD`, so one edit to that map detaches both, and a gate reading only
   `rows:` would watch a live name leave the product and report nothing. A dropped symbol must
   be accounted for by exactly ONE of an archive entry of the matching kind,
-  `RETIRED_USE_INSTEAD` (MCP), or `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` (SDK). Two
-  records is also refused: a name that is both archived and still served is the inconsistency
-  `check` reds from its own side. A genuine rename passes `cut --allow-removal <symbol>
+  `RETIRED_USE_INSTEAD` (MCP), or `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` (SDK). For a
+  **tool**, an archive entry AND a `RETIRED_USE_INSTEAD` row is two records and is refused: a
+  name that is both archived and still served is the inconsistency `check` reds from its own
+  side. For an **SDK method** the freeze and the map entry are ONE record: `check` requires a
+  frozen `sdk-method` to appear in the map — **one-directionally**, so a map entry needs no
+  archive row, while a frozen entry with no map entry leaves a caller with a bare
+  `AttributeError` — and counting the pair apart refused this file's own procedure (freeze,
+  then record) while leaving the map-only shape, which loses the frozen code, as the only
+  passing one. A genuine rename passes `cut --allow-removal <symbol>
   --allow-removal-reason <why>`, which is logged in the cut output and belongs in the PR body;
   a reason with no symbol is refused, because it records an override that did not happen.
   **The refusal happens BEFORE the write**, so a refused cut never leaves a baseline that has

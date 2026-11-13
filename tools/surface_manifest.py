@@ -2260,9 +2260,22 @@ def removal_report(
 
     A symbol present in `prior` and absent from `derived` is a REMOVAL. It is accounted for
     by EXACTLY ONE record — the archive entry of its own kind, or the retirement map for its
-    own half. Two records is also a problem (not a pass): a name that is both archived and
-    retired-forward is simultaneously "gone" and "still served", which is the inconsistency
-    `archive_surface.check` reds from its own side.
+    own half — with ONE documented exception, because the two halves' records are not the
+    same artifact:
+
+    * a TOOL archived AND `RETIRED_USE_INSTEAD` is TWO records and is refused: the archive
+      says the name is gone and the forward entry says it still answers (#3883), which is the
+      contradiction `archive_surface.check` reds from its own side;
+    * an SDK method archived AND in `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` is ONE
+      record, not two. `archive_surface.check` requires a frozen `sdk-method` to ALSO appear
+      in the map — **one-directionally**: a map entry needs no archive row, a frozen entry
+      needs the map entry ("a caller would then hit a bare AttributeError instead of the
+      recorded departure"). So counting the pair as two records refused the DOCUMENTED
+      procedure (freeze the code, record the departure) and pushed the operator to the
+      map-only form — which loses the frozen code, the exact loss this archive exists to
+      prevent. Found by review round 5 of PR #12313, and the one-directional reading by
+      round 6. The pair IS the record: the archive freezes the code, the map records the
+      departure.
 
     `allowed` is the deliberate-rename escape hatch (`cut --allow-removal`), applied to a
     NAMED symbol only — there is no blanket flag, because a blanket flag is how a gate
@@ -2276,28 +2289,38 @@ def removal_report(
             continue
         found: list[str] = []
         kind = ARCHIVE_KIND_BY_CLASS[cls]
-        if (kind, symbol) in records.get("archived", ()):
+        archived = (kind, symbol) in records.get("archived", ())
+        if cls == "sdk" and symbol in records.get("sdk_retired", ()):
+            # ONE record: `archive_surface.check` requires a frozen `sdk-method` to ALSO
+            # appear in the map (that direction only — a map entry needs no archive row), so
+            # the freeze and the map entry are the same record, not two. Counting them apart
+            # refused this tree's own procedure and left the map-only shape — which loses the
+            # frozen code — as the only passing one (see the docstring).
+            label = "RETIRED_SDK_METHODS/REMOVED_SDK_METHODS"
+            found.append(f"{label} + archived code" if archived else label)
+        elif archived:
             found.append(f"archive entry ({kind})")
         if cls == "tool" and symbol in records.get("forward", ()):
             found.append("RETIRED_USE_INSTEAD")
-        if cls == "sdk" and symbol in records.get("sdk_retired", ()):
-            found.append("RETIRED_SDK_METHODS/REMOVED_SDK_METHODS")
+        # The inconsistency is reported BEFORE the override is honoured: an override names a
+        # rename, and a rename is not an answer to "this symbol is simultaneously archived
+        # and still served".
+        if len(found) > 1:
+            problems.append(
+                f"{symbol} ({cls}) is accounted by {len(found)} records "
+                f"({', '.join(found)}) — a symbol that is both archived and still recorded "
+                "as retired/served is an inconsistency; pick ONE"
+            )
+            continue
         if symbol in allowed:
             accounting[symbol] = "`--allow-removal` (deliberate rename, stated in the PR)"
             continue
-        if len(found) == 1:
+        if found:
             accounting[symbol] = found[0]
             continue
-        if not found:
-            problems.append(
-                f"{symbol} ({cls}) was DROPPED with no record — it is gone from the "
-                "declaration and from the archive both, so there is nothing left to read"
-            )
-            continue
         problems.append(
-            f"{symbol} ({cls}) is accounted by {len(found)} records "
-            f"({', '.join(found)}) — a symbol that is both archived and still recorded as "
-            "retired/served is an inconsistency; pick ONE"
+            f"{symbol} ({cls}) was DROPPED with no record — it is gone from the "
+            "declaration and from the archive both, so there is nothing left to read"
         )
     return problems, accounting
 

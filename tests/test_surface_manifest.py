@@ -5420,3 +5420,55 @@ def test_a_NON_MAPPING_baseline_row_is_UNREADABLE_not_absent(monkeypatch, tmp_pa
     assert rc == 1, f"an unreadable row was graded as absent and the cut passed:\n{out}"
     assert "not a mapping" in out, out
     assert path.read_text(encoding="utf-8") == before
+
+
+def test_the_SDK_archive_pair_is_ONE_record_not_two():
+    """`archive_surface.check` requires a frozen sdk-method to ALSO be in the map.
+
+    One-directionally: a map entry needs no archive row, a frozen entry needs the map entry.
+    Counting the pair as two records therefore refused the DOCUMENTED procedure (freeze the
+    code, record the departure) and left the map-only form — which loses the frozen code —
+    as the only passing shape. Review round 5 of PR #12313 found the refusal; round 6
+    corrected this rationale, which had claimed the requirement was symmetric.
+    """
+    sm = _load_manifest_tool()
+    problems, accounting = sm.removal_report(
+        {("backfill_sources", "sdk")},
+        set(),
+        {
+            "archived": {("sdk-method", "backfill_sources")},
+            "forward": set(),
+            "sdk_retired": {"backfill_sources"},
+        },
+    )
+    assert problems == [], problems
+    assert "archived code" in accounting["backfill_sources"], accounting
+
+    # The TOOL pair is still a contradiction: archived AND still served.
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool")},
+        set(),
+        {
+            "archived": {("mcp-tool", "tortoise_x")},
+            "forward": {"tortoise_x"},
+            "sdk_retired": set(),
+        },
+    )
+    assert problems and not accounting, (problems, accounting)
+
+
+def test_an_override_does_not_MASK_a_two_record_inconsistency():
+    """A rename is not an answer to "simultaneously archived and still served"."""
+    sm = _load_manifest_tool()
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool")},
+        set(),
+        {
+            "archived": {("mcp-tool", "tortoise_x")},
+            "forward": {"tortoise_x"},
+            "sdk_retired": set(),
+        },
+        allowed={"tortoise_x"},
+    )
+    assert problems and not accounting, (problems, accounting)
+    assert "2 records" in problems[0], problems
