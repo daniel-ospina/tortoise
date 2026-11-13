@@ -3690,19 +3690,14 @@ def test_brief_derived_prose_figures_are_the_artifact(
         "§3.5's mechanism sentence",
         free=("not", "holds"))
 
-    # ── §3.4 — the identifier class's headline recall and its miss count ────
-    # ⛔ These four figures move the same class this commit is named for (round-25
-    # review, P2-1): each restates a value the artifact DERIVES, each sat in a
-    # section the docstring claimed, and each went GREEN on a one-token edit.
+    # ── §3.4 — the identifier class's MISS COUNT (§3.4's recall is pinned above,
+    # and §3.3's score below; the two lanes' pins are NOT duplicated here) ─────
+    # ⛔ Arithmetic the artifact derives: `72 = 90 × (1 − 0.20)`, so `72` → `73`
+    # planted GREEN (round-25 review, P2-1).
     ident_pc = artifact["arms"]["falkordb_tfidf"]["per_class"]["ident"]
     ident_recall = ident_pc["3"]
     ident_total = sum(1 for n in population["names"] if n["cls"] == "ident")
     ident_misses = round(ident_total * (1 - ident_recall))
-    _only_claim(
-        _scoped(brief, "3.4").replace("**", ""),
-        f"the identifier class's `recall@3` is {ident_recall:.2f}",
-        "§3.4's identifier-class recall",
-        values=(f"{ident_recall:.2f}",))
     _only_claim(
         _scoped(brief, "3.4"),
         f"most of that class's {ident_misses} misses at k=3",
