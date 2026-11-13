@@ -3948,6 +3948,13 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
     # so this filter is future-proofing, NOT a defence against a points read — an earlier
     # revision of this comment claimed the latter and that was false (review cycle 14).
     typed: list[tuple[str, str | None]] = []
+    # ⛔ The request SIZE, recorded separately (review cycle 15). `typed` alone binds to the
+    # EARLIEST events-typed call in the verb, so any earlier read-only
+    # `tortoise_get_entity(type="events", limit=1)` probe would re-point the order assertion
+    # at a call that is not the layer read — a FALSE RED with freshness intact (measured),
+    # and, placed after a `status` read, it satisfied the order half while proving nothing.
+    # `limit == EVENT_READ_CEILING` is the whole-layer request, so binding to it is exact.
+    limited: list[tuple[str, int | None]] = []
     # ⛔ THE LAYER NEEDS A ROW TO RECONCILE (review cycle 14): with an EMPTY layer the
     # stale and fresh arms are indistinguishable on the artifact, so the value pin below
     # would have nothing to see.
@@ -3960,6 +3967,7 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         args = args or {}
         seen.append((name, args.get("section")))
         typed.append((name, args.get("type")))
+        limited.append((name, args.get("limit")))
         payload = surface(name, args)
         # ⛔ THE FIRST status READ IS TOO EARLY TO VOUCH (review cycle 14). It is the
         # top-of-verb `counts`, taken BEFORE the 34+-call point walk. Stripping its `Event`
@@ -3977,6 +3985,7 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
     for verb in ("inventory", "plan"):
         seen.clear()
         typed.clear()
+        limited.clear()
         status_calls[0] = 0
         monkeypatch.setattr(mod, "_live_call_tool", recording)
         argv = [verb, "--graph", "org_x_g_old", "--no-verify-read",
@@ -4000,8 +4009,9 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         # (review cycle 14): `max(...)` pinned "no status read anywhere AFTER the events",
         # which is not the property, and a freshness-PRESERVING tidy-up (refresh `counts`
         # after the walk, for the report) redded this test falsely. Measured.
-        events_at = next(i for i, (name, t) in enumerate(typed)
-                         if name == "tortoise_get_entity" and t == "events")
+        events_at = next(i for i, (name, lim) in enumerate(limited)
+                         if name == "tortoise_get_entity"
+                         and lim == mod.EVENT_READ_CEILING)
         assert events_at >= 1, (verb, seen, typed)
         assert seen[events_at - 1] == ("tortoise_graph_overview", "status"), (
             verb, events_at, seen, typed)
