@@ -1071,7 +1071,7 @@ steps:
     - step: S2.3
       condition: >-
         the S2 map left at least one candidate's kind missing or `unclassified`, so
-        `_collect_classify_items` (tortoise/extractor_v2.py:11857, `def _collect_classify_items`) had an item to hand the classifier;
+        `_collect_classify_items` (tortoise/extractor_v2.py:12730, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
         the run's own classify surface reads enabled=true with empty s2/union, the receipt's
@@ -1200,7 +1200,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11857-11879` (`_collect_classify_items`, the collector's item set), `:14276` and `:14429` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:12730-12752` (`_collect_classify_items`, the collector's item set), `:15149` and `:15302` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -1459,7 +1459,7 @@ place a machine reads it.
   be either observed or witnessed **idle** with a basis. The conditional set is read from this record
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
-  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11803-11825`) collects only
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:12730-12752`) collects only
   kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:14222`, `:14375`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
@@ -2163,9 +2163,9 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 ### 11.1 The finding, and what it is not
 
-`_collect_classify_items` (`tortoise/extractor_v2.py:11857-11879`) collects only candidates whose kind
+`_collect_classify_items` (`tortoise/extractor_v2.py:12730-12752`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:14276` (the S2 pass) and `:14429` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:15149` (the S2 pass) and `:15302` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -2209,7 +2209,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:14289`, `classify(S2) failed` / `:14440`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:15162`, `classify(S2) failed` / `:15313`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
@@ -2527,8 +2527,9 @@ to answer.
 > ⛔ **Superseded for the merged tree by §10.28** — but only for the cites that entry names.
 > This entry's `tortoise/projection/__init__.py:14248-14250` window is untouched by `#12067`
 > (that diff has no hunk in `projection/__init__.py`), so it stayed the live value through
-> §10.28; §10.29 then measured it at `:14265-14267` for the merged tree this record ships
-> with, and §10.29 owns that window.
+> §10.28; §10.29 then measured it at `:14265-14267` for the merged tree that record shipped
+> with, and the probe's own cite (`capstone_measure.py`, re-pointed to `:14272-14274` in the same
+> commit as this line) is what carries the live window.
 >
 - **What redded.** `probes/capstone_measure.py:2989` carried
   `tortoise/projection/__init__.py:14245-14247` from §10.26, and `29ec0f3471` ("name :PackSelection at
@@ -2552,8 +2553,9 @@ to answer.
 - ⛔ **Superseded for THIS tree by §10.29.** This entry's window was the live one when it was
   written, and `#12067` has no hunk in `tortoise/projection/__init__.py` — but a later merge on
   the branch inserted above the anchor, so the window this tree carries is
-  `projection/__init__.py:14265-14267`, not `:14248-14250`. §10.29 owns the values this tree
-  carries. (§10.26 records the `:14245` window; `29ec0f3471` then inserted a net `+3` above the
+  `projection/__init__.py:14272-14274`, not `:14248-14250` — re-derived by opening the lines
+  (`14272` is the `# Ensure pointKind is present` comment, `14274` is `clean["pointKind"] = ""`),
+  and the probe's cite of the same anchor is re-pointed with it so the two cannot disagree. (§10.26 records the `:14245` window; `29ec0f3471` then inserted a net `+3` above the
   anchor, making `:14248-14250` what this entry measured.)
 
 ### 10.28 — the §11/§9 cite block re-derived for `#12067`'s `+54`, and the `#10360` read-back re-pointed (2026-11-13, `#12067`)
@@ -2615,9 +2617,16 @@ to answer.
   per §8's rule for *any* edit to this file.
 - **§10.29 succeeds this entry**, and it re-measures the same values: `34bb716315`'s `+9`
   insert was removed again by `391313ca9a`, so nothing below moved. The entry that carries
-  a `LIVE for the merged tree` bullet is §10.29, not this one.
+  a `LIVE for the merged tree` bullet is §10.30, not this one.
 
 ### 10.29 — the §11/§9 cite block re-derived for THIS branch's delta, round 15's code included (2026-11-13, `#12067`)
+
+> ⛔ **Superseded for the merged tree by §10.30.** §10.29 measured this branch's own delta against
+> the base it names; `main` then moved under it (`#12348`'s `+971/-48` inside `extractor_v2.py` and
+> `#12343`'s `+48` after it, plus the `tortoise/sdk.py` carriers below), so the lines it opens are no
+> longer the lines this tree carries. Nothing
+> below is corrected in place — those numbers are a faithful record of the head this entry names.
+> §10.30 owns the live values.
 
 > **A successor entry, not an edit to §10.28.** §10.28's numbers are a faithful record of the head
 > it names. Two merges have landed since: `34bb716315` added 9 lines to the relation builder, and
@@ -2674,5 +2683,53 @@ to answer.
   cite sweep edited them in place and was reverted. A reader who needs the live numbers takes
   the `edges.py` ones from §3.4/§3.7/§7 above, and the `record_projection.py` one from this
   entry, because no live carrier holds it.
+- **§10.30 succeeds this entry**, and it re-measures the §11/§9 cite block above against `main` at
+  `5bacb44e0b`. The entry that carries a `LIVE for the merged tree` bullet is §10.30, not this one.
+  ⛔ For the `edges.py` windows the live carriers are §3.4/§3.7/§7 (this entry names them); for
+  `record_projection.py:4996-4999` this entry is still the ONLY carrier, and it stays correct.
+
+### 10.30 — the §11/§9 cite block re-derived on `main` after the post-§10.29 merge wave (2026-11-13, `#12266`)
+
+> **A successor entry, not an edit to §10.29.** §10.29 recorded the branch's own delta against the
+> base it names, and that record stays true to that head. `main` has since advanced: `#12348`
+> inserted `+971/-48` inside `tortoise/extractor_v2.py` (net `+923`) and `#12343` then added 48 more,
+> and `#12120` then `#12343` moved the `tortoise/sdk.py` carriers (the meta fold
+> `_capture_stats_with_step_witness(out, len(extracted))`: `18864` → `18942` → `19051`; the write seam
+> `relation_write = apply_relation_edges(`: `18799` → `18900` → `19009`). §10.29's numbers
+> therefore describe a tree that is no longer the one
+> this record ships with.
+
+- ⚠️ **An offset cannot describe the move, which is why every line below was opened.** The
+  `result["classify_later"]` block moved `+971` while `_collect_classify_items` moved `+873` on the
+  same tree — two regions of one file moved by different amounts, so a single offset is wrong at one
+  of them. The decomposition, measured line by line across the two commits: `42409813a7` (`#12348`)
+  introduced `+971/-48` and moved the block `14640` → `15563` and the collector `11857` → `12682`;
+  `b85194d6bc` (`#12343`) then added 48 above both, giving `15611` and `12730`.
+- **New value — measured on `main` at `5bacb44e0b`, by opening each line:**
+  `_collect_classify_items` at `:12730`, extent `:12730-12752` (`def` to `return items`); the two
+  `if items:` gates at `:15149`/`:15302`; the two fail-open `except` arms at `:15162`/`:15313`; the
+  two result blocks at `:15611` (closing `:15617`) and `:15621` (closing `:15625`);
+  `_run_vet_pass`'s S2.2 call at `:17805` and its post-S4 union call at `:15278`; and the `#10360`
+  read-back (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:11409`.
+- **Verified by content, not by arithmetic.** `:12730` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12752` is `return items`;
+  `:15149`/`:15302` are the two `if items:` gates; `:15162`/`:15313` are the two fail-open `except`
+  arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:15611` opens
+  `result["classify_later"]` and `:15617` closes it (`}`), `:15621` opens `result["vet"]` and
+  `:15625` closes it; `:17805` is
+  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:15278` is
+  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:11409` is the read-back assignment.
+  The selection flags this block sits under are at `:14693` (`vet_enabled`), `:14662`
+  (`classify_later`) and `:14687` (its construction-failure arm, `classify_later = False`), and the
+  early return that emits both OFF surfaces is `if not edus:` at `:14697`, with
+  `edus = _edus_from_conversation(...)` at `:14696` above it.
+- **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
+  threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
+  denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
+  per §8's rule for *any* edit to this file.
+- ⛔ **§10.1–§10.29 are HISTORY and were NOT re-pointed.** Their numbers name the head each entry
+  measured, per §10.19/§10.22/§10.24; a re-point in place would be a false record of what was
+  measured. The live carriers are §11, §9, §3.4/§3.7/§7 for the `edges.py` windows, §10.29 for
+  the one `record_projection.py` value that has no other carrier, and this entry.
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
   supersede marker.
