@@ -160,9 +160,12 @@ KS: tuple[int, ...] = (3, 5, 10, 15)
 
 #: The windows the GATE arms account at (#12294). Two, not four: k=3 is what the
 #: capture prior ships and k=15 is the widest window #11901 measured, so the pair
-#: bounds the answer. Module-level so the arm's schema and its accounting loop
-#: cannot drift apart — when they were declared apart, `gated_and_missed`'s
-#: `not any(...)` would have silently inverted.
+#: bounds the answer. Module-level so the arm's schema, its accounting loop and
+#: `gated_and_missed`'s `not any(...)` read ONE declaration: if this set and the
+#: loop's k set ever diverge, `_g_hit[p]` can be empty for a gated name and
+#: `not any({})` counts it as unreachable — the headline number inverting
+#: silently. (This is the drift the set is hoisted to prevent; not a bug that
+#: has already happened.)
 _GATE_KS: tuple[int, ...] = (3, 15)
 
 #: ``the <1-4 tokens>`` — the definite-description class. Bounded to 4 tokens:
@@ -401,14 +404,14 @@ def _fold_punct(text: str) -> str:
 #     fallback (`sparse.py:536-550`) — so `the fix` is queried as `the fix`, which
 #     RediSearch evaluates as an implicit AND over both terms (`sparse.py:13-17`).
 #     The article is not a wasted term, it is half of the conjunction.
-#   * the SHIPPED-shaped predicate gates **85 names of 300**, and **85 of 85 are
-#     reachable by the leg at k=15** (73 already at k=3) — so the gate removes a
+#   * the SHIPPED-shaped predicate gates **86 names of 300**, and **86 of 86 are
+#     reachable by the leg at k=15** (74 already at k=3) — so the gate removes a
 #     CORRECT candidate for almost every name it touches;
-#   * the class it was proposed for — names unreachable at ANY k (`82/300`,
-#     #11901's 27 %) — has **zero** overlap with the gated set: the predicate is
-#     anti-correlated with the population it was meant to protect;
+#   * the class it was proposed for — names unreachable at ANY k (**81/300**,
+#     `#11901`'s 27 %) — has **zero** overlap with the gated set: the predicate
+#     is anti-correlated with the population it was meant to protect;
 #   * with the real capture UNION (15 names, `max_queries`), the OTHER names'
-#     queries rescue **1 of 85** gated names at k=3 and **6 of 85** at k=15, so
+#     queries rescue **1 of 86** gated names at k=3 and **6 of 86** at k=15, so
 #     the recall cost is not an artefact of measuring each name in isolation;
 #   * the exact Zep port — including the FUZZY normaliser it actually receives
 #     (`_zep_normalize_for_fuzzy`, `dedup_helpers.py:46-50`) — is narrower and no
@@ -420,8 +423,14 @@ def _fold_punct(text: str) -> str:
 #     attach is 0.0 % before and after), so the gate trades measured recall for
 #     zero duplicate reduction.
 #
-# The artifact behind every figure above is committed at
-# `docs/research/2026-11-12-11901-candidate-recall/measurement-entropy-gate-12294.json`.
+# ⚠️ THE CORPUS IS LIVE. `--sessions-dir` defaults to `~/.tortoise/session-events`,
+# which grows while a lane measures, so two runs a few minutes apart differ by one
+# or two names (measured: 85 vs 86 gated). The committed artifact
+# `docs/research/2026-11-12-11901-candidate-recall/measurement-entropy-gate-12294.json`
+# is the RECORD; quote its numbers, and treat a re-run that lands within a name or
+# two as a reproduction rather than a contradiction. What is invariant across runs
+# is the finding, not the count: 0 gated names are unreachable at any k, ~100 % are
+# reachable at k=15, and 0 gated variant pairs attach.
 #
 # The predicate is kept HERE rather than in `tortoise/`, because it is live
 # measurement code and would be dead product code:
@@ -914,6 +923,14 @@ def run(args: argparse.Namespace) -> int:
         #: (surface × k), which produced a 184 % ratio. The falsifier's number,
         #: ``would_attach_before_any_k``, IS counted over every k: a gated pair
         #: that phase 1 binds at ANY width is a duplicate the gate creates.
+        #: ``pairs``, ``gated_pairs``, ``in_window_before`` and
+        #: ``would_attach_before`` are all counted at ONE window (``_GATE_KS[0]``)
+        #: so the share is readable — the first cut counted the denominator once
+        #: per surface and the numerator per (surface × k), a 184 % ratio.
+        #: ``would_attach_before_any_k`` is the falsifier's number and is counted
+        #: once per PAIR over every k (a pair phase 1 binds at ANY width is a
+        #: duplicate the gate creates) — per pair, not per (pair × k), which is
+        #: how it was first accumulated and would over-report up to 4×.
         vgate: dict[str, dict[str, int]] = {
             p: {"pairs": 0, "gated_pairs": 0, "in_window_before": 0,
                 "would_attach_before": 0, "would_attach_before_any_k": 0}
@@ -928,6 +945,10 @@ def run(args: argparse.Namespace) -> int:
                 _v_gated = {"shipped": not _name_carries_signal(surface),
                             "zep_full_name": not _has_high_entropy(
                                 _zep_normalize_for_fuzzy(surface))}
+                #: per predicate, did phase 1 bind THIS pair at ANY width — the
+                #: accumulator that makes `would_attach_before_any_k` a PAIR
+                #: count rather than a (pair × k) event count.
+                _v_attach: dict[str, bool] = {p: False for p in _v_gated}
                 for k in KS:
                     var[k]["pairs"] += 1
                     by_class[vclass][str(k)]["pairs"] += 1
@@ -953,7 +974,7 @@ def run(args: argparse.Namespace) -> int:
                         if not _g:
                             continue
                         if hit_ok:
-                            vgate[_p]["would_attach_before_any_k"] += 1
+                            _v_attach[_p] = True
                         if in_win and k == _GATE_KS[0]:
                             vgate[_p]["in_window_before"] += 1
                             if hit_ok:
@@ -969,6 +990,10 @@ def run(args: argparse.Namespace) -> int:
                     if cand2 is not None and cand2.get("id") == row["id"]:
                         var[k]["attached_folded"] += 1
                         by_class[vclass][str(k)]["attached_folded"] += 1
+                # once per PAIR, after every window is known
+                for _p, _ok in _v_attach.items():
+                    if _ok:
+                        vgate[_p]["would_attach_before_any_k"] += 1
         arms["variant"] = var
         arms["variant_by_class"] = {c: dict(v) for c, v in sorted(by_class.items())}
         arms["gate_variant"] = vgate

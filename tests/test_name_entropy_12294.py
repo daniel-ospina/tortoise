@@ -17,13 +17,13 @@ So this module guards two different things, and both are needed:
    `len < 6 and tokens < 2` into an `or` would refuse every single-token name,
    and a drift in the `1.5` threshold silently changes which population is
    affected. Both are pinned here against the values read from
-   `graphiti_core/utils/maintenance/dedup_helpers.py:31-33,60-86`.
+   `graphiti_core/utils/maintenance/dedup_helpers.py:31-33,53-86`.
 
 2. **The falsification cannot be re-derived by accident.** The gate was declined
    because its premise is false for our leg: a bare definite description is
    queried as its ORIGINAL whitespace terms (two-term implicit AND), not as a
-   bare content word, so the leg finds the canonical node — 98 of 98 gated rows
-   at k=15 on the measured corpus. `test_the_product_does_not_gate` reds if
+   bare content word, so the leg finds the canonical node — 86 of 86 gated
+   names at k=15 on the measured corpus (74 at k=3). `test_the_product_does_not_gate` reds if
    anyone re-wires the gate into `_derive_queries` without new evidence, and
    `test_the_premise_is_false_for_our_query_builder` states the mechanism.
 
@@ -33,19 +33,25 @@ MEASURED NUMBERS (the record the decline rests on — artifact: the `gate`,
 `#11901`'s committed artifacts are hybrid, and this arm's conclusion is about
 WHICH NAMES GET SEARCHED, which is leg-independent):
 
-  * shipped predicate: **85 names of 300** gated, of which **73** have the
-    canonical in the k=3 window and **85 of 85** at k=15; **0** of the gated
-    names is unreachable at any k (the class the gate was proposed for, 81–82
-    of 300, is entirely OUTSIDE the gated set);
+  * shipped predicate: **86 names of 300** gated, of which **74** have the
+    canonical in the k=3 window and **86 of 86** at k=15; **0** of the gated
+    names is unreachable at any k (the class the gate was proposed for, 81 of
+    300, is entirely OUTSIDE the gated set);
   * the verbatim Zep port (with the fuzzy normaliser it actually receives):
     **15** names, all `#NNNN` identifiers — **0** bare definite descriptions,
     the 62.3 % class the issue targeted;
   * within a real 15-name capture union, the other names' queries rescue **1 of
-    85** gated names at k=3 and **6 of 85** at k=15 — the recall cost is not an
+    86** gated names at k=3 and **6 of 86** at k=15 — the recall cost is not an
     isolation artefact;
   * gated VARIANT pairs that phase 1 binds today: **0** at every k
     (`would_attach_before_any_k`), so the gate prevents no duplicate
     (`#11901` measured variant attach 0.0 % either way).
+
+⚠️ The corpus is LIVE (`~/.tortoise/session-events` grows while a lane measures),
+so two runs minutes apart differ by a name or two (85 vs 86 gated, measured). The
+committed artifact is the record; a re-run within a name or two reproduces it.
+What is invariant is the finding: 0 gated names unreachable at any k, ~100 %
+reachable at k=15, 0 gated variant pairs attaching.
 
 Every figure above is checkable against the committed artifact
 `docs/research/2026-11-12-11901-candidate-recall/measurement-entropy-gate-12294.json`
@@ -138,7 +144,7 @@ def test_the_premise_is_false_for_our_query_builder(name):
         survive; with one survivor it returns the RAW query (`sparse.py:536-550`);
       * RediSearch evaluates space-separated terms as implicit AND
         (`sparse.py:13-17`), so the leg searches BOTH terms — and finds the
-        node. Measured: 85 of 85 gated names in-window at k=15 (73 at k=3).
+        node. Measured: 86 of 86 gated names in-window at k=15 (74 at k=3).
     """
     from tortoise.sparse import SPARSE_STOPWORDS, build_or_query
 
@@ -237,5 +243,8 @@ def test_no_gated_entity_reporting_reached_the_product():
     assert "gated_entities" not in empty, sorted(empty)
     # …and no other return path may carry it either, so the module cannot name
     # the seam at all.
+    # ⛔ The KEY form, not the bare word: the module is allowed to NAME the
+    # declined seam in prose (that is how a moved/reverted seam stays findable —
+    # see the `#2552` / `#4509` note in that file), it just may not WIRE it.
     src = Path(v2.__file__).read_text()
-    assert "gated_entities" not in src
+    assert '"gated_entities"' not in src
