@@ -926,3 +926,51 @@ def test_config_show_does_not_deny_reading_a_file_it_just_applied(capsys, _isola
     assert "already applied that file at import" in out, out
     # …and the divergence it must still report is reported.
     assert "/tmp/daemon-side.db" in out and "/tmp/cli-side.db" in out, out
+
+
+def test_doctor_row_does_not_deny_a_read_it_just_performed(capsys, _isolated):
+    """The applied+divergent `doctor` row is one sentence, so it must not split.
+
+    Measured before the fix: the row read "this command does NOT read it, the
+    daemon does … — ⚠️ this run imported the daemon module, which applies the
+    file at import, so its values ARE in this process now (the graph verdict was
+    resolved before that)". That is a denial and a confession in one line, and
+    the parenthetical is FALSE when the file was applied before the run: the
+    graded target came FROM the file's values (#12428 review).
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    _write_env(_isolated,
+               "TORTOISE_DB_URI=/tmp/daemon-side.db\n"
+               "TORTOISE_DB_PATH=/tmp/cli-side.db\n")
+    _load_dotenv(str(_isolated))
+
+    _run(("doctor",))
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+
+    assert "does NOT read it" not in row, row
+    assert "applied it at import as well" in row, row
+    assert "the two LADDERS" in row, row
+    assert "resolved before that" not in row, row
+
+
+def test_config_show_does_not_credit_an_inert_file_key(capsys, _isolated, monkeypatch):
+    """A key the daemon never ran must not be named as the reason they agree.
+
+    Measured before the fix: env `TORTOISE_DB_URI` (which WINS the daemon's
+    ladder) plus a `.env` `TORTOISE_DB_PATH` printed "the file's
+    TORTOISE_DB_PATH resolves to it for the daemon too" — the file's key resolves
+    to nothing, and naming it is the "reason that cannot explain the outcome"
+    class round 1 removed (#12428 review).
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", DOCKER_URI)
+    _write_env(_isolated, "TORTOISE_DB_PATH=/tmp/never-used.db\n")
+
+    out = _show_text(capsys)
+
+    assert "resolves to it for the daemon too" not in out, out
+    assert "the ENVIRONMENT's" in out, out
+    assert "TORTOISE_DB_URI decides it" in out, out
+    # The file's inert key is still DISCLOSED BY NAME (never its value).
+    assert "TORTOISE_DB_PATH" in out, "the file's inert key was not named at all"

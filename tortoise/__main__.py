@@ -4292,10 +4292,29 @@ def _cmd_config(args) -> int:
                 # TORTOISE_STARTER_PACKS") explained a graph agreement by a key
                 # that has nothing to do with the graph (#12428 review round 1).
                 elif env_file.get("graph_keys"):
-                    print("  →  the same graph target as above: the file's "
-                          f"{_printable(', '.join(env_file['graph_keys']))}")
-                    print("     resolves to it for the daemon too (no difference to")
-                    print("     report — the two ladders agree on this box)")
+                    # ⛔ A key that cannot explain the answer must not be named as
+                    # the reason. When the daemon's DECIDING rung is a key the
+                    # ENVIRONMENT already sets (a `TORTOISE_DB_URI` above the
+                    # file's `TORTOISE_DB_PATH`), the file's key resolves to
+                    # nothing and the sentence below credited it with the
+                    # agreement (#12428 review: "the file's TORTOISE_DB_PATH
+                    # resolves to it for the daemon too" — it never ran).
+                    _deciding = next(
+                        (key for key in _DB_LADDER_KEYS
+                         if key in env_file["graph_keys"]
+                         or key in env_file.get("shadowed_graph_keys") or ()),
+                        None)
+                    if _deciding and _deciding not in env_file["graph_keys"]:
+                        print(f"  →  the same graph target as above: the ENVIRONMENT's")
+                        print(f"     {_printable(_deciding)} decides it for the daemon,")
+                        print("     so the file's "
+                              f"{_printable(', '.join(env_file['graph_keys']))}"
+                              " cannot change the target")
+                    else:
+                        print("  →  the same graph target as above: the file's "
+                              f"{_printable(', '.join(env_file['graph_keys']))}")
+                        print("     resolves to it for the daemon too (no difference to")
+                        print("     report — the two ladders agree on this box)")
                 elif env_file.get("shadowed_graph_keys"):
                     print("  →  the same graph target as above: the environment")
                     print("     already sets "
@@ -11418,11 +11437,22 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     # import the daemon module, which applies the file at import — measured on
     # the real CLI (`doctor` prints a `Session extraction` verdict that exists
     # only because the file was applied, while this row said it was not read).
-    _applied_note = ""
-    if env_file.get("read_by_this_command"):
-        _applied_note = (" — ⚠️ this run imported the daemon module, which applies "
-                         "the file at import, so its values ARE in this process "
-                         "now (the graph verdict was resolved before that)")
+    _applied = bool(env_file.get("read_by_this_command"))
+    # ⛔ NOT an unconditional clause: in the applied state this process HAS read
+    # the file, and appending the note below to a sentence that denies it is the
+    # self-contradiction this PR fixed for `config show`'s header (#12428 review
+    # — the row read "this command does NOT read it" … "its values ARE in this
+    # process now").
+    _read_clause = ("this command applied it at import as well — the daemon does too"
+                    if _applied else
+                    "this command does NOT read it, the daemon does")
+    # ⛔ No "the graph verdict was resolved before that" parenthetical: when the
+    # file was applied EARLIER in this process, the graded target was resolved
+    # FROM the file's values, so that clause asserted the opposite of what
+    # happened (measured, #12428 review).
+    _applied_note = (" — ⚠️ this run imported the daemon module, which applies the "
+                     "file at import, so its values ARE in this process now"
+                     if _applied else "")
     if env_file.get("graded_unresolved") or env_file.get("cli_error"):
         # This run has NO target — either the caller's `--db`/`--path` failed or
         # the environment's own resolution did. Either way NOTHING below grades a
@@ -11477,17 +11507,20 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
         # (#12428 round 4, NB1).
         detail = (f"{path} sets "
                   f"{_printable(', '.join(env_file['file_graph_keys']) or 'no graph key')} — "
-                  "this command does NOT read it, the daemon does. The daemon "
+                  f"{_read_clause}. The daemon "
                   f"serves {_printable(str(env_file['daemon_target'] or ''))}; "
                   f"the rows below grade {_printable(str(graded))} — a "
                   "DIFFERENT store" + _applied_note)
+        if _applied:
+            detail += (" (both read the SAME environment now, so the difference "
+                       "comes from the two LADDERS ranking its keys differently)")
         if env_file.get("difference_is_masked"):
             detail += f" ({env_file['difference_is_masked']})"
         rows.append(("Config: .env", "⚠️", detail))
         return rows
     detail = (f"{path} sets "
-              f"{_printable(', '.join(env_file['keys']) or 'nothing')} — this "
-              "command does NOT read it (the daemon does); it selects the same "
+              f"{_printable(', '.join(env_file['keys']) or 'nothing')} — "
+              f"{_read_clause}; it selects the same "
               f"graph target the rows below grade ({_printable(str(graded))})")
     detail += _applied_note
     rows.append(("Config: .env", "ℹ️", detail))
