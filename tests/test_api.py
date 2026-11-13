@@ -7,6 +7,7 @@ or via pytest if installed.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 
@@ -528,9 +529,24 @@ def test_add_operator_rejects_non_string_op_type():
     SUBSTANCE instead: the type refusal, and the message naming what this
     door does accept.
     """
+    class _EqualToEveryMechanism:
+        """Only the isinstance half refuses this one (#12240 review).
+
+        `x in ("NAND", "IMPL")` is True for it, so the VALUE half passes it and
+        only `not isinstance(op_type, str)` raises. Without this case the test
+        cannot tell the two guards apart: every other value in the loop below is
+        ALSO not a mechanism name, so deleting `not isinstance(op_type, str)`
+        from `tortoise/api.py` left all four green (measured on the pre-fix
+        test). Its own name promises `rejects_non_string_op_type`; this is the
+        case that makes that promise true rather than incidental.
+        """
+
+        def __eq__(self, other):  # equality is the whole point
+            return True
+
     api, _log = _api()
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
-    for bad in (None, 123, b"NAND", ["NAND"]):
+    for bad in (None, 123, b"NAND", ["NAND"], _EqualToEveryMechanism()):
         try:
             api.add_operator(bad, ["a"], prov)
             assert False, f"should have raised ValueError for {bad!r}"  # noqa: B011
@@ -541,13 +557,18 @@ def test_add_operator_rejects_non_string_op_type():
             # 'NAND', 'IMPL'") would red this for nothing. Assert the CLAIM the
             # message exists to carry — a refusal that is this door's limit,
             # naming the mechanisms it does accept — so the SURROUNDING PROSE,
-            # ORDER, quoting, separator and CASE are free; only the two
-            # mechanism names themselves must appear, because they are the
-            # values this door accepts (a message that names them by ROLE —
-            # "a support or an attack mechanism" — or by POINTER alone is a
-            # different claim and is outside this pin).
-            folded = msg.upper()
-            assert "NAND" in folded and "IMPL" in folded, (
+            # ORDER, quoting, separator and CASE are free, while the two
+            # mechanism names must appear AS NAMES: word boundaries, because a
+            # bare substring accepts `implementation` for `IMPL` (measured — the
+            # clause could stop naming `IMPL` at all and still pass).
+            #
+            # The `got {op_type!r}` tail is dropped first: it REPRINTS the
+            # rejected value, so `b"NAND"` and `["NAND"]` would supply the name
+            # to a message whose acceptance clause had been deleted outright
+            # (measured: both still passed the bare-substring form with the
+            # clause gone, so half this assertion rested on the echo).
+            claim = msg.replace(repr(bad), "")
+            assert re.search(r"\bNAND\b", claim) and re.search(r"\bIMPL\b", claim), (
                 "the refusal must name the mechanisms this door DOES accept — "
                 "a bare 'unknown gate' text reads as a typo rather than as "
                 f"this door's limit (#12067): {msg!r}")
