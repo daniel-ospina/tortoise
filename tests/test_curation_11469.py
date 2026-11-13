@@ -4720,12 +4720,31 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     assert "RESULTSET_SIZE" in plan, (
         "the plan does not name the engine cap that makes `bound + 1` unfillable")
     # ⚠️ PRESENT TENSE, not the broad substring (PR-review cycle 7): the plan legitimately
-    # RECORDS the superseded sizing ("the first draft said the request WAS sized to
-    # `counts.Event + 1`"), and a bare `sized to ...` test false-reds on exactly that note
-    # — measured: inserting one history line redded this test. `is sized to` cannot match a
-    # past-tense note, so the history stays writable and the prescription still reds.
-    assert "is sized to `counts.Event + 1`" not in plan, (
-        "the plan still prescribes sizing the request to the count (one row of headroom)")
+    # RECORDS the superseded sizing ("the first draft WAS sized to `counts.Event + 1`"), and
+    # a bare `sized to ...` test false-reds on exactly that note.
+    #
+    # ⛔ BUT THE "`is sized to`" FORM WAS A NO-OP GATE, AND THAT IS WORSE THAN BRITTLE
+    # (review cycle 8, measured). The withdrawn sentence this pin exists for reached the
+    # doc EMHPHASIS-WRAPPED and mid-sentence — "The read is therefore\n**sized to
+    # `counts.Event + 1`**, which is…" — so neither `is sized to` nor any `is `-prefixed
+    # form can match it, and re-inserting it VERBATIM from
+    # `git show 3770e1e59a:docs/plans/…:118-123` left this test GREEN (`1 passed`).
+    # A test that cannot fail on the exact defect it was written for is not a pin.
+    #
+    # The check is therefore per-SENTENCE on emphasis-normalised text, EXCLUDING sentences
+    # that explicitly mark the sizing as history — so recorded history stays writable and a
+    # present-tense prescription reds in any emphasis or word order.
+    plan_norm = _re.sub(r"\*+", "", _re.sub(r"\s+", " ", plan))
+    _HISTORY = _re.compile(
+        r"\b(was|were|had been)\b|withdrawn|original|superseded|first draft|earlier|"
+        r"\bcycle \d|used to|no longer", _re.I)
+    prescribing = [
+        s.strip() for s in _re.split(r"(?<=[.;:])\s+", plan_norm)
+        if "sized to `counts.Event + 1`" in s and not _HISTORY.search(s)
+    ]
+    assert not prescribing, (
+        "the plan prescribes sizing the request to the count (one row of headroom), which "
+        f"the code does not send; offending sentence(s): {prescribing[:2]}")
     # ⛔ ...and the CODE's own text, which nothing pinned (PR-review cycle 5). The plan pin
     # above guards the plan, but `tools/curate_graph.py` carried the SAME superseded
     # prescription in TWO places — the `read_events` docstring bullet and the
