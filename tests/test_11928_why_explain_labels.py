@@ -1088,6 +1088,18 @@ def test_the_supersession_line_renders_by_the_labels_own_status_rule(
     assert event_view["line"] == "", (
         "an :Event carries no `status` family — a `live` line is the #6976 "
         "conflation: " + repr(event_view))
+    # ⛔ round 7: `document`/`source` are NAMED non-status-carrying layers too. If
+    # the map stops naming them they reach `status_as_reported` as None, which the
+    # rule treats as STATUS-CARRYING and upgrades to the Point-lane word — the same
+    # conflation one entity type over (latent today: no document item gets a block,
+    # and it lands the moment the search gates widen, which this PR names).
+    for _etype in ("document", "source"):
+        view = why_module.project_item(
+            {"id": f"{_etype}1", "content": "x", "entity_type": _etype}, bare_block,
+        )["supersession"]
+        assert view["line"] == "", (
+            f"a :{_etype.title()} exposes no `status` family — `live` is the #6976 "
+            "conflation one entity type over: " + repr(view))
     object_view = why_module.project_item(
         {"id": "obj1", "content": "a goal", "entity_type": "object"}, bare_block,
     )["supersession"]

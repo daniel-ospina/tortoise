@@ -50,10 +50,18 @@ Contract invariants (plan §3.1.1/§3.1.3/§3.1.4/§6.1 + #2101):
   whole batch (#11928): the existence anchor probes labels in
   ``live.EPISTEMIC_LABELS`` order until every id resolves, then each dependent
   read (supports×2, conflicts, tradeoffs, assessments) runs once per RESOLVED
-  label over THAT label's ids. So a Point-only batch — the overwhelming majority
-  of enriched recalls — costs exactly 7: one anchored ep read, six dependent
-  reads (supports×2, conflicts, tradeoffs, assessments, supersession). A batch
-  with four distinct labels costs at most 4 + 5×4 + 1 = 25. The counts are
+  label over THAT label's ids. So the bound is
+  ``≤ 4 anchor probes + 5 × resolved-labels + 1 (supersession)``: a Point-only
+  batch of EXISTING ids — the overwhelming majority of enriched recalls — costs
+  exactly 7 (1 + 5 + 1), and a batch with four distinct labels costs at most
+  4 + 5×4 + 1 = 25.
+  ⛔ #11928 review round 7: an id that exists under NO epistemic label costs a
+  probe under EVERY label (it never leaves ``unresolved``), so the 7 is a
+  property of a batch whose ids ALL resolve — and ``point_ids_in_raw`` does
+  produce non-epistemic candidates (it matches any ULID-shaped cell). Measured:
+  ``[existing Point, one unresolvable id]`` = 10 queries, ``[unresolvable id]``
+  alone = 5 and no blocks. The bound above holds in every case; only the
+  per-batch number is a claim about resolved ids. The counts are
   pinned by ``tests/test_w4_why_enrichment.py::test_assembly_bounded_batch_reads``
   (Point-only == 7, size-independent) and
   ``tests/test_11928_why_explain_labels.py::test_the_batch_read_count_is_fixed_for_a_goal_batch``
@@ -175,18 +183,28 @@ def _snippet(text: str) -> str:
     return text[:SNIPPET_MAX]
 
 
-#: The label an item's ``entity_type`` names (#11928 review round 6). The search
-#: surfaces spell the four epistemic layers in lower case; ``document``/``source``
-#: have no epistemic label and resolve to None.
+#: The label an item's ``entity_type`` names (#11928 review rounds 6-7). The
+#: search surfaces spell the layers in lower case. ⛔ ``document`` and ``source``
+#: are mapped too, even though they carry no epistemic label: they must reach
+#: ``status_as_reported`` as a NAMED non-status-carrying layer (⇒ ``''``), which
+#: ``None`` would silently upgrade to the Point-lane word ``live`` — the same
+#: #6976 conflation round 6 removed for ``:Event``, one entity type over.
+#: ``operator`` is deliberately absent: an operator IS a ``:Point``, so the
+#: unnamed arm's ``live`` is correct for it.
 _ENTITY_TYPE_LABELS = {"point": "Point", "subject": "Subject",
-                       "object": "Object", "event": "Event"}
+                       "object": "Object", "event": "Event",
+                       "document": "Document", "source": "Source"}
 
 
 def _entity_label(entity_type) -> str | None:
-    """The epistemic label an item's ``entity_type`` names, or None when it does
-    not say — and an UNNAMED label is treated as STATUS-CARRYING, which is
-    ``live.status_as_reported``' own rule (right for Point/Subject/Object, and
-    only wrong for an ``:Event`` the caller failed to name)."""
+    """The label an item's ``entity_type`` names, or None when it does not say.
+
+    An UNNAMED label is treated as STATUS-CARRYING, which is
+    ``live.status_as_reported``' own rule — right for Point/Subject/Object (and
+    for an operator, which is a ``:Point``), and reachable here only for an item
+    that carries no ``entity_type`` at all. Every entity type the search surfaces
+    can actually emit IS named above, so the conflation is not reachable through
+    a known type."""
     if not isinstance(entity_type, str):
         return None
     return _ENTITY_TYPE_LABELS.get(entity_type.strip().lower())
