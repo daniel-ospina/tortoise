@@ -354,15 +354,21 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # broken, and a `| tr -d ' '` here FAILED under `pipefail` in case 17h's state (broken
         # `tr`), silently setting the size to 0 and reverting to the cut-undeclared sentence —
         # measured. Parameter expansion strips a right-padded `wc` count without a subprocess;
-        # the guard maps "cannot read it" (`-f` false — a directory or a device — or a `wc` that
-        # fails) to 0. ⛔ THE OLD PARENTHETICAL HERE SAID "a directory: `wc` fails", which the
-        # `-f` guard below made FALSE: `wc` is never invoked for a directory at this head, so the
-        # directory is refused by the property check, not by a failing `wc` (#12272 review cycle 1).
+        # the guard maps "no size to be had" to 0: either the property check refuses (`-f` false —
+        # a directory, a device) or the READ fails before `wc` starts (an unreadable regular file:
+        # bash's `<` fails and `wc` is never invoked — measured, a logging `wc` on `PATH` logs 0
+        # calls for a `chmod 000` file). ⛔ NO `wc`-FAILURE CLAUSE, and the history is why: this
+        # comment has twice named a mechanism that cannot run — first "a directory: `wc` fails"
+        # (the `-f` guard below refuses a directory before `wc` exists in the pipeline), then "or a
+        # `wc` that fails" as its correction (#12272 review cycle 2). The one state a failing `wc`
+        # could describe is a `wc` MISSING from `PATH` — an exec failure, not a failing `wc` — so it
+        # is named as the one unmeasured residual rather than asserted beside the measured causes.
         #
-        # ⛔ `-f`, BECAUSE `wc -c` READS TO EOF AND A DEVICE NEVER REACHES ONE (#12272 review
-        # round 8). The read guard above admits anything that is `-e`-true and not a FIFO, and
-        # `tail -c 6000` is BOUNDED — it stops after 6000 bytes — but `wc -c` is not: a
-        # character device such as `/dev/zero` (which `[ -p ]` does not catch) reads forever, so
+        # ⛔ `-f`, BECAUSE THAT IS THE PROPERTY THAT MAKES THE READ TERMINATE (#12272 review round 8).
+        # The read guard above admits anything that is `-e`-true and not a FIFO, and `tail -c 6000`
+        # is BOUNDED — it stops after 6000 bytes — but `wc -c` is not: for anything it cannot size
+        # up front (a non-regular fd) it must read to EOF, and a character device such as `/dev/zero`
+        # (which `[ -p ]` does not catch) never reaches one, so
         # `build_body` never returns and NOTHING is filed: no ledger entry, no exit status, the
         # #2240 silence this script exists to remove, one primitive past the FIFO guard. It is
         # the same class as that guard, so it takes the same shape: name the property that makes
