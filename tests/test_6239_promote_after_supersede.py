@@ -96,6 +96,26 @@ def _append_raw_promote(sdk, events_dir, pid: str, *,
         }) + "\n")
 
 
+def _restatus_raw(sdk, pid: str, status: str) -> None:
+    """Journal a ``restatus`` the way a PRE-#9649 live write left it.
+
+    #9649 closed this shape at the write door: ``update_entity`` now refuses a
+    lifecycle write on a terminal Point, because a ``superseded`` claim has no
+    outgoing transition (``_ALLOWED_TRANSITIONS`` / ONTOLOGY §5) and
+    re-statusing it resurrected a dead claim beside its closed window. Every
+    graph written BEFORE that fix still holds the shape, and the fold-ordering
+    properties below are about replay, not about the door — so the fixture
+    reproduces the pre-fix write: graph value first, then the record (this
+    door's own order).
+    """
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status=$st",
+        params={"id": pid, "st": status})
+    sdk._journal_entity_mutation("Point", pid, "restatus",
+                                 state={"status": status})
+
+
+
 # ══════════════════════════════════════════════════════════════════════
 # The shared gate
 # ══════════════════════════════════════════════════════════════════════
@@ -173,12 +193,19 @@ def test_raw_promote_after_supersede_agrees_across_engines(sup):
 def test_restatus_then_promote_after_supersede_matches_live(sup):
     """Every step here is a public SDK call, so live is the oracle: the
     ``restatus`` makes the promote legal again, and the promote re-livens the
-    Point. Before #6239 ``rebuild_all``'s re-fold clobbered it to ``draft``."""
+    Point. Before #6239 ``rebuild_all``'s re-fold clobbered it to ``draft``.
+
+    ⚠️ **#9649: the ``restatus`` is no longer mintable through the door.** A
+    ``superseded`` Point has no outgoing transition (ONTOLOGY §5), so
+    ``update_entity`` refuses it; the fixture therefore reproduces the pre-fix
+    LIVE WRITE with ``_restatus_raw``, exactly as a graph written before #9649
+    holds it. ``promote_point`` — the observed call — is still made through the
+    public SDK, so live remains the oracle for the fold."""
     _, events, sdk = sup
     a = sdk.create_point("statement", "OLD", status="live")["id"]
     succ = sdk.create_point("statement", "SUCC", status="live")["id"]
     sdk.supersede_point(a, succ)
-    sdk.update_entity(a, status="draft")
+    _restatus_raw(sdk, a, "draft")
     promoted = sdk.promote_point(a)
     assert promoted["promoted"] is True
 
@@ -207,9 +234,12 @@ def test_later_restatus_after_the_promote_still_wins(sup):
     a = sdk.create_point("statement", "OLD", status="live")["id"]
     succ = sdk.create_point("statement", "SUCC", status="live")["id"]
     sdk.supersede_point(a, succ)
-    sdk.update_entity(a, status="draft")
+    # #9649: both restatus writes are pre-fix shapes (terminal → draft, then
+    # live → archived, which ONTOLOGY §5 does not declare) — journalled the way
+    # a pre-#9649 writer left them. ``promote_point`` stays a public SDK call.
+    _restatus_raw(sdk, a, "draft")
     sdk.promote_point(a)
-    sdk.update_entity(a, status="archived")
+    _restatus_raw(sdk, a, "archived")
 
     live = _point_state(sdk, a)
     assert live["status"] == "archived"

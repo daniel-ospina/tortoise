@@ -960,9 +960,16 @@ def test_the_doc_does_not_claim_archived_has_no_writer():
         "the passage must name the map it cites (`_ALLOWED_TRANSITIONS`) so the "
         "reader can check what it is (#5333)."
     )
-    assert "nothing consults" in lowered, (
-        "the passage must say that nothing consults `_ALLOWED_TRANSITIONS`; "
-        "citing it as an authority is what made the claim false (#5333)."
+    assert "no longer inert" in lowered, (
+        "the passage must say that `_ALLOWED_TRANSITIONS` now HAS a consumer "
+        "(#9649 wired it into `_update_entity`'s Point status arm) — the "
+        "pre-#9649 wording, 'nothing consults that map', is now false and "
+        "citing the map as an Object authority is what made the claim false "
+        "(#5333)."
+    )
+    assert "point-lifecycle spec" in lowered and "bounds no" in lowered, (
+        "the passage must still scope the map to POINTS: its consumer matches "
+        "`n:Point`, so it cannot bound an `:Object` write (#5333)."
     )
 
 
@@ -1003,28 +1010,52 @@ def _transition_map_sites(
     return definitions, reads
 
 
-def test_the_transition_map_the_doc_cites_has_no_production_reader() -> None:
-    """The doc's own reason for distrusting `_ALLOWED_TRANSITIONS`, executed.
+def test_the_transition_map_the_doc_cites_has_exactly_one_documented_reader() -> None:
+    """The doc's account of `_ALLOWED_TRANSITIONS`, executed — INVERTED by #9649.
 
-    If a consumer is ever wired up, the doc's *"nothing consults that map"*
-    becomes false and this reds — the pin is the claim, in both directions.
+    Until #9649 the pin was `reads == []`, because the design doc said *"nothing
+    consults that map"* and cited it as an authority for an `:Object` claim. That
+    was true then and it is false now: `_update_entity`'s Point `status` arm
+    consults the map for the declared transition, which is what makes the door
+    refuse `draft -> archived` and a terminal `-> live` (#9649). The pin is still
+    the CLAIM, in both directions — the passage now says the map *"is no longer
+    inert"* and scopes it to POINTS, so this reds if the consumer is removed (the
+    doc would overclaim a mechanism this tree no longer has) or if a SECOND
+    consumer appears (the passage would under-describe it, and, more to the point,
+    a reader outside `sdk.py` could consult the Point map for a non-Point label).
 
     The scan covers **`sdk.py` too**, and it counts READS rather than textual
-    mentions. Both halves are load-bearing: the map and every verb that would
-    plausibly consult it (`update_point`, `retract_point`, `supersede_point`)
-    live in the same file, so a guard that skipped the definition's own file
-    could not red on the most likely consumer — the one the map's own comment
-    names — while reding on a comment elsewhere.
+    mentions. Both halves are load-bearing: the map and the verb that consults it
+    (`_update_entity`) live in the same file, so a guard that skipped the
+    definition's own file could not see the only consumer.
     """
     definitions, reads = _transition_map_sites(ROOT / "tortoise")
     assert definitions, (
         f"`{TRANSITION_MAP}` is not defined anywhere under `tortoise/`, so the "
         "design doc's citation of it is stale — re-point this guard (#5333)."
     )
-    assert reads == [], (
-        f"`{TRANSITION_MAP}` now has a production reader ({reads}), so the "
-        "design doc's 'nothing consults that map' is stale — and so is the "
-        "claim that it cannot bound a write (#5333)."
+    assert reads, (
+        f"`{TRANSITION_MAP}` has NO production reader ({reads}) — #9649 wired "
+        "`_update_entity`'s Point `status` arm to it, so the design doc's 'no "
+        "longer inert' is now the stale half (#5333)."
+    )
+    # ⛔ Review F10-2: the test's NAME and its docstring both promise "exactly
+    # ONE documented reader" and that a SECOND consumer reds — but `assert reads`
+    # only says ≥1, so a second reader INSIDE `sdk.py` (the one shape the
+    # `sdk.py:` prefix check below cannot catch) stayed green. A second Point-table
+    # reader is exactly the hazard the passage is written against (#5333).
+    assert len(reads) == 1, (
+        f"`{TRANSITION_MAP}` gained a second production reader ({reads}) — the "
+        "map is ONTOLOGY §5's POINT table; another consumer (especially one that "
+        "could apply it to a non-Point label) must update this pin and the design "
+        "doc together (#5333/#9649)."
+    )
+    assert all(site.startswith("sdk.py:") for site in reads), (
+        f"`{TRANSITION_MAP}` gained a reader outside `sdk.py` ({reads}). The map "
+        "is ONTOLOGY §5's POINT lifecycle table and the consumer that must ask it "
+        "(`_update_entity`) lives there; a reader elsewhere could apply a Point "
+        "table to another label — update this pin and the design doc together "
+        "(#5333/#9649)."
     )
     assert "sdk.py:" in definitions[0], (
         f"the map moved out of `sdk.py` (defined at {definitions}); the doc's "
