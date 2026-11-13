@@ -357,9 +357,16 @@ def production_terms(query: str) -> tuple[list[str], bool]:
 
     ⛔ **``#12368`` ADDED A THIRD TAIL**, after the alias and phrase tails: the
     ``_``-PRESERVING composites (:func:`tortoise.sparse.underscore_run_terms`),
-    which is the repair this harness's own §3.4 finding asked for. It also counts
-    in ``build_or_query``'s DEGENERATE predicate, so a `_`-carrying query whose
-    plain tokens all die (``in_progress``) no longer takes the escaped-raw branch.
+    which is the repair this harness's own §3.4 finding asked for. ⛔ It does NOT
+    enter ``build_or_query``'s DEGENERATE predicate — that stays
+    ``len(tokens) <= 1 and not aliases and not phrases`` — it decides which branch
+    UNDER it runs (``if degenerate and not composites:`` escaped-raw, else
+    ``if degenerate:`` literal + composite tail). So a `_`-carrying query whose
+    plain tokens all die (``in_progress``) keeps the escaped literal byte-for-byte
+    and only its FLAG moves; an earlier wording here said the tail "counts in the
+    degenerate predicate", which is the opposite of the code (`sparse.py:905-911`
+    carries the same correction, and names the failure: a maintainer aligning the
+    predicate to that prose would delete the escaped-literal branch).
     Both are reproduced below, because a control that skipped either would stop
     reproducing the shipped leg — the one thing this module exists to guarantee.
 

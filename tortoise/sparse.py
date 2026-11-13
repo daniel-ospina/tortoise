@@ -916,21 +916,27 @@ def build_or_query(
     # `10\:00_u`), so the branches must see both.
     composites = underscore_run_terms(query) if underscore_terms_enabled() else []
     # #12360 review round 3 (P1): the branches below must NOT drop the escaped-raw
-    # literal that the degenerate arm used to send. The composite is the INDEX's term only while the run is pure ASCII
-    # (`[A-Za-z0-9_]`); the index treats every Unicode LETTER as a word character
-    # too, so for `año_actual` the index holds `año_actual` as ONE term and the
-    # composite this module can build from it (`o_actual`) is a term NOTHING
-    # holds. MEASURED on the lane, `_upsert_object` + `run_fts_query`, switch
-    # OFF vs ON: `año_actual` (o0), `dé_installer` (o4), `x_café` (o2),
-    # `the_café` (o3) and `_café` (o1) were each returned by their own name with
-    # the switch OFF and returned ZERO rows with it ON — a recall regression
-    # inside the very class this issue repairs, on the default-ON path.
+    # literal that the degenerate arm used to send. A composite is the INDEX's term
+    # only while the run is pure ASCII (`[A-Za-z0-9_]`); the index treats every
+    # Unicode LETTER as a word character too, so an ASCII-only run class WOULD
+    # build a composite the index does not hold — `año_actual` would yield
+    # `o_actual`. MEASURED on the lane (`_upsert_object` + `run_fts_query`, switch
+    # OFF vs ON) before the abutment rule existed: `año_actual` (o0),
+    # `dé_installer` (o4), `x_café` (o2), `the_café` (o3) and `_café` (o1) were
+    # each returned by their own name with the switch OFF and returned ZERO rows
+    # with it ON — a recall regression inside the very class this issue repairs,
+    # on the default-ON path. ⛔ `underscore_run_terms` now DROPS such a run at the
+    # source (the abutment rule), so today `año_actual` is byte-identical either way
+    # (`underscore_run_terms('año_actual') == []`) and the example is the REASON the
+    # branch keeps the literal, not a live reproduction — a maintainer who checks
+    # that example and finds no composite will otherwise read the paragraph as stale
+    # and delete the arm that `10:00_u` still needs (P2, #12368 review).
     #
     # So when the pre-#12360 predicate would have been degenerate, the literal
     # STAYS and the composites ride beside it: additive by construction, which
     # is what the zero-loss column claims. `x__y` and `a_` are byte-identical
     # through the dedupe below (`x__y|x__y` -> `x__y`), and `10:00_u` keeps its
-    # gain (`10\:00_u` + `00_u`).
+    # gain (`10\:00_u` + `00_u`) — that is the live reproduction.
     degenerate = len(tokens) <= 1 and not aliases and not phrases
     if max_terms < 1:
         return escape_redisearch_literal(query)

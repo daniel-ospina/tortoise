@@ -1629,6 +1629,11 @@ surfaces:
   #   select(['tortoise/config.py'])    -> surfaces=['core'] n=846 selected=True
   #   select(['tortoise/dotenv_file.py'])-> surfaces=['core'] n=846 selected=True
   #   select(['tortoise/__main__.py'])  -> surfaces=['api']  n=385 selected=False
+  # ⛔ That third line is a BEFORE reading, and the row below is the difference
+  # (P2, #12368 review: unlabelled, a reader who re-runs it gets
+  # `n=386 selected=True` and may conclude this row is redundant and delete it —
+  # the silent-drop class the row exists to prevent). AFTER, at this head:
+  #   select(['tortoise/__main__.py'])  -> surfaces=['api']  n=386 selected=True
   # so a `core`-only row ran this file ZERO times on a diff to the CLI it is
   # mostly about (`tortoise config show` / `tortoise doctor` — the two-entry-point
   # divergence answer, and the credential-never-printed and
