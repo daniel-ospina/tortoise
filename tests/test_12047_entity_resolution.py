@@ -5363,3 +5363,72 @@ class TestThe12120ReviewRound22:
                 f"an idempotent re-ingest into a refusal: {skips!r} {msgs!r}")
         finally:
             sdk.close()
+
+
+class TestThe12120ReviewRound22SubjectTwin:
+    """The Subject arm's half of rounds 21-22, pinned on its own (review round 22).
+
+    Both fixes were made in TWO families and only the Object one was pinned: the
+    Subject guard is reachable only in the `not by_name` branch, and the one
+    two-carrier Subject fixture in this file has LIVE carriers (so
+    `_ref_candidates` hands them back and the arm is never reached). Restoring
+    the distinct-id conjunct — or deleting the guard — left the suite green,
+    which is the mirror drift this file records more than once.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r22s",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_two_carriers_of_one_subject_entity_still_dedup_silently(
+            self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_subject("New Team", "organization")
+            g.query(
+                "CREATE (a:Subject {id:'r22s-a', name:'Old Team', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'New Team', resolved_from:'r22s-gone'}) "
+                "CREATE (b:Subject {id:'r22s-b', name:'old team', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'Other Team', resolved_from:'r22s-gone'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Team", "supersedes_by": "New Team",
+                 "evidence": "r22s"}])
+            assert (applied, skips, msgs) == (0, [], []), (
+                "two CARRIERS of ONE Subject entity were read as two entities: "
+                f"{skips!r} {msgs!r}")
+        finally:
+            sdk.close()
+
+    def test_a_gone_survivor_subject_dedup_cannot_span_two_entities(
+            self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_subject("New Team", "organization")
+            g.query(
+                "CREATE (a:Subject {id:'r22s-c', name:'Shared Team', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'New Team', resolved_from:'r22s-gone-1'}) "
+                "CREATE (b:Subject {id:'r22s-d', name:'Shared Team', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'Other Team', resolved_from:'r22s-gone-2'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Shared Team", "supersedes_by": "New Team",
+                 "evidence": "r22s"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips, (
+                "one unrelated dangling Subject incarnation absorbed a genuine "
+                f"divergence silently: {skips!r} {msgs!r}")
+        finally:
+            sdk.close()
