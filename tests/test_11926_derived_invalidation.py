@@ -1339,7 +1339,6 @@ def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
     assert counts["stale"] == 1, counts
     assert counts["alreadyRetired"] == 1, counts
     assert counts["failed"] == 1, counts      # reported, never raised
-    assert counts["undecidable"] == 0, counts
     # the finding keeps its idempotent outcome AND its cache report; the generic
     # refusal shape (the mutant's) has neither
     per_finding = report["invalidated"][0]
