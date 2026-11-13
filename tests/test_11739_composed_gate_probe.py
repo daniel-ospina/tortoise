@@ -15,14 +15,16 @@ asserting a digest that no longer matches the committed code while every check s
 The instrument this bundle exists to preserve would then be silently self-invalidated.
 
 Every test names the mutation that reds it. Hermetic: two probes are hashed and two JSON
-artifacts are parsed. No DB, no graph, no network, no key, no model call — safe in the docker
-lane and in CI.
+artifacts are parsed, plus one float-pair read from `tortoise.embeddings` (no model, no key, no
+network, no DB).
 """
 from __future__ import annotations
 
 import hashlib
 import json
 from pathlib import Path
+
+from tortoise.embeddings import DEFAULT_THRESHOLD, NEAR_DUPLICATE_THRESHOLD
 
 REPO = Path(__file__).resolve().parent.parent
 BUNDLE = REPO / "docs" / "evidence" / "11739-composed-gate"
@@ -84,3 +86,41 @@ def test_the_two_artifacts_name_different_probes():
         "both artifacts claim the same probe digest — one provenance block was copy-pasted")
     assert gate == _digest_of("composed_gate.py")
     assert identity == _digest_of("quote_identity.py")
+
+
+def test_the_bundle_records_a_failed_measurement():
+    """FAILS IF the recorded verdict is flipped to a pass IN PLACE.
+
+    This bundle is the dated record of the 2026-11-13 run that #12436 is scoped against, and its
+    headline is FAIL. A re-run that PASSES is a real and desirable outcome — it is how #12436
+    closes — but it must land as a NEW artifact (its own bundle directory, its own index row, the
+    PR that flips `TORTOISE_COMPOSED_EMBED_TEXT` citing it), because overwriting this one drops the
+    baseline the fix was measured from. This assertion forces that decision instead of letting it
+    happen silently.
+    """
+    verdict = _artifact("gate.json")["verdict"]
+    assert verdict["all_pass"] is False, (
+        "the recorded gate verdict is no longer FAIL — a passing re-run belongs in a NEW bundle, "
+        "not in the 2026-11-13 baseline #12436 is scoped against")
+    assert verdict["gates"] == {"gate1": False, "gate2": False, "gate3": False}
+
+
+def test_the_declared_bands_are_the_products_bands():
+    """FAILS IF the record's bands drift from the constants the product uses.
+
+    The README's declared limitations state that the 0.89 / 0.72 literals in the probe EQUAL
+    `NEAR_DUPLICATE_THRESHOLD` / `DEFAULT_THRESHOLD` in `tortoise/embeddings.py` — i.e. the gate
+    changed no threshold. Pinning it from the artifact's side means a band re-tune that moves
+    either the product constant or the recorded band reds HERE rather than quietly re-basing a
+    gate whose whole authority is "no threshold was adjusted to make this pass".
+
+    RESIDUAL, stated rather than implied: this cannot see a probe-literal edit followed by
+    `--attest` — attest re-binds the digest to the edited probe and leaves the record's numbers
+    alone. That hole is bounded (not closed) by the verdict test above and by review of any diff
+    touching the probe.
+    """
+    gate = _artifact("gate.json")
+    assert gate["gate1_similarity"]["threshold"] == NEAR_DUPLICATE_THRESHOLD == 0.89, (
+        "GATE 1's recorded band is not the product's near-duplicate band")
+    assert gate["gate3_false_proposal"]["threshold"] == DEFAULT_THRESHOLD == 0.72, (
+        "GATE 3's recorded candidate band is not the product's default threshold")

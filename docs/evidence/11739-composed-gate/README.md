@@ -1,3 +1,14 @@
+---
+title: "#11739 — the composed-text gate, measured on the live graph (all three gates FAIL)"
+type: evidence
+domain: platform
+doc_status: live
+created: 2026-11-13
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph, composed embedding text, verbatim quote, near-duplicate band
+aboutObjects: "#11739, #12436, #11838, #11682, #11706, #8488, #1349, #4194"
+---
+
 # #11739 — the composed-text GATE, measured on the live graph (2026-11-13)
 
 **Verdict: all three gates FAIL. `TORTOISE_COMPOSED_EMBED_TEXT` must stay OFF.**
@@ -44,7 +55,8 @@ Field map (artifact → field):
 
 | figure | artifact field |
 |---|---|
-| 1.000 global / 1.000 worst session / 0.89 / raw 1.000 | `gate.json` → `gate1_similarity` |
+| 1.000 global / 0.89 / raw 1.000 | `gate.json` → `gate1_similarity` |
+| 1.000 worst session | `gate.json` → `subject_groups.worst_session.worst_composed` |
 | 3,706 · 7.41 · 500 · 3,033 of 4,186 · 27,356 · 2,795,990 · 2,316,407 → 3,661,251 | `gate.json` → `gate2_rank` |
 | 13,691 / 17,305 / 10,232 / 20 / 1.000 | `gate.json` → `gate3_false_proposal` |
 | 15,842 · 15,008 · 997 · 14,941 · 384 · encoder 1.0 · 949.2 s | `gate.json` → `population`, `subject_groups`, `duration_s` |
@@ -126,7 +138,8 @@ uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
 uv run python docs/evidence/11739-composed-gate/probes/quote_identity.py \
     --rows /tmp/11739-rows.jsonl \
     --out docs/evidence/11739-composed-gate/quote_identity.json
-# 3. only if step 1 was run without emitting provenance: rebind the SAME artifact
+# 3. only after a probe EDIT — rebinds provenance to the edited probe WITHOUT re-running the
+#    measurement (every fresh run already writes its own provenance)
 uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
     --attest docs/evidence/11739-composed-gate/gate.json
 ```
@@ -143,5 +156,9 @@ head sha — the repo squash-merges, so a head sha is unverifiable when someone 
 check it (the same binding the #11838 census uses). `_provenance()` in `composed_gate.py` is the one
 producer of that field: a fresh run calls it, and `--attest` calls it on an existing artifact (it
 refuses an artifact with no gate verdicts). `--attest` exists because a fresh run is ~16 minutes of
-encoding while the binding is a pure function of the probe's bytes; it changes ONLY `provenance`, so
-re-running steps 1–2 reproduces every number in this bundle.
+encoding while the binding is a pure function of the probe's bytes; it rewrites ONLY `provenance`, so
+it cannot move a number. Note what that means for a re-run: the committed numbers are reproducible
+from the committed row cache, and a fresh run (no cache on the box) is a **live** walk over a graph
+that has captured more Points since 2026-11-13 — so it reproduces the **protocol and the gate logic**,
+which is what #12436's acceptance test means by "the same gate re-run", not these literals (see the
+`rows_source` limitation above).
