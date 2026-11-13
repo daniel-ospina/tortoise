@@ -3399,7 +3399,9 @@ tail is never mistaken for a blank report (a path that cannot be read at all yie
 name, and the sentence says that instead). A carried report **larger than the cap** declares the CUT
 and not its size — the excerpt is there to read, so the size adds nothing, and the squeeze loss, when
 there is one, is declared beside it as above — and one under the cap states nothing about its extent,
-because nothing was cut. A carried report whose **own size could not be measured** — the size probe is
+because nothing was cut. When the length comparison that detects a squeeze loss **cannot itself be made**
+(a `wc` that yields no number), the body says the loss is **unmeasured** rather than declaring none: an
+unmeasured comparison is not evidence that nothing was dropped. A carried report whose **own size could not be measured** — the size probe is
 skipped for a path that is not a regular file, and the size is never guessed when the count does not resolve
 to a number — declares the 6000-byte **window** instead of a cut: that only the
 report's last 6000 bytes are shown, and that its own size could not be measured. Whether anything was cut is

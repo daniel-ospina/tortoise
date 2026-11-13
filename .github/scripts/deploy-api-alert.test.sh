@@ -76,6 +76,11 @@
 #  17o. a NON-REGULAR report path (a character device) must not HANG the alert — `wc -c` reads
 #      to EOF and a device never reaches one — and a size it could not measure must not be
 #      asserted: the carrying arm declares the 6000-byte WINDOW instead (#12272, round 8)
+#  17p. a `wc` that yields NO NUMBER must not silence the LOSS disclosure: the squeeze-length
+#      comparison is the second measurement site, and an unguarded `[ -lt ]` there both logs
+#      `integer expression expected` and CLEARS the "excerpt is NOT byte-identical" sentence on
+#      a report whose cut really did split a character. Unmeasurable ⇒ declared unmeasured
+#      (#12200, review round 9)
 #  18. a LATE `deploy-api` failure must not read as "nothing shipped"
 #  19-21. `--resolve` (#8841) retires EXACTLY the keys whose steps reported
 #      `success` in this run (plus the job-level key only when `job.status` is
@@ -1154,6 +1159,105 @@ DEV_ICONV_EOF
 else
   ok "case 17o: SKIPPED on this host — no \`timeout\` binary (macOS); the device guard is pinned by CI (ubuntu-latest)"
 fi
+
+# ── case 17p: a `wc` that yields NO NUMBER must not silence the LOSS disclosure (#12200) ──
+# `-f` guards the SIZE PROBE. The squeeze-length comparison is a SECOND `wc` call site, and it is
+# reached on every carrying arm. Unguarded, a `wc` that prints text (or exits non-zero) makes
+# `[ … -lt … ]` emit `integer expression expected` into the job log AND clears the disclosure: on
+# `drift-report-utf8.txt` the cut really does split a character (case 17b arm c measures that), so
+# the body then carries a shorter-than-report excerpt while saying nothing about the loss — the
+# exact class #12200 exists to remove, at the one site the size probe's guard does not reach.
+# Two shim shapes, because they fail differently: a non-numeric PRINT leaves the command status 0,
+# an exiting shim leaves the capture EMPTY. Both must land on the same sentence.
+WC_NAN_DIR="$FIX/bin-wc-nan"
+mkdir -p "$WC_NAN_DIR"
+cat > "$WC_NAN_DIR/wc" <<'WC_NAN_EOF'
+#!/usr/bin/env bash
+# Bounded by construction: it never reads stdin, so a case that reaches it cannot hang the suite.
+echo not-a-number
+exit 0
+WC_NAN_EOF
+chmod +x "$WC_NAN_DIR/wc"
+export PATH="$WC_NAN_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$RC" "0" "case 17p: a non-numeric \`wc\` still files the alert"
+assert_eq "$(count_creates)" "1" "case 17p: and the ledger leg is untouched by it"
+assert_not_contains "$OUT" "integer expression expected" "case 17p: and NO arithmetic diagnostic reaches the job log"
+WC_NAN_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$WC_NAN_BODY" "could NOT be measured" "case 17p: and the loss it could not measure is DECLARED, not cleared"
+assert_not_contains "$WC_NAN_BODY" "the excerpt is NOT byte-identical" "case 17p: and it does NOT assert a comparison it never made"
+assert_contains "$WC_NAN_BODY" "only the report's LAST 6000 bytes are shown" "case 17p: (the WINDOW is still declared — the size probe's own guard is unaffected)"
+assert_contains "$WC_NAN_BODY" '```' "case 17p: and the excerpt itself is still carried, so this case is not vacuous"
+
+WC_FAIL_DIR="$FIX/bin-wc-fail"
+mkdir -p "$WC_FAIL_DIR"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$WC_FAIL_DIR/wc"
+chmod +x "$WC_FAIL_DIR/wc"
+export PATH="$WC_FAIL_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$RC" "0" "case 17p: a \`wc\` that exits non-zero (an empty capture) still files the alert"
+assert_not_contains "$OUT" "integer expression expected" "case 17p: and that shape emits no arithmetic diagnostic either"
+WC_FAIL_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$WC_FAIL_BODY" "could NOT be measured" "case 17p: and it lands on the SAME unmeasured sentence, not a third wording"
+assert_not_contains "$WC_FAIL_BODY" "the excerpt is NOT byte-identical" "case 17p: and it still does not assert a comparison it never made"
+
+# A LC-COLLATION SHAPE: `[!0-9]` is a RANGE, and under a UTF-8 collation locale it also matches
+# non-ASCII decimal digits — so a shim `wc` printing `١٢٣` passes a range guard as "all digits" and
+# then fails the numeric test with the same diagnostic and the same cleared disclosure. The guard
+# therefore spells the class as a literal list `[!0123456789]`, which no locale can widen. The pin
+# needs a collation locale; without one the shape is indistinguishable, so it is SKIPPED by name
+# rather than silently passing (case 17o's pattern for a missing `timeout`).
+if locale -a 2>/dev/null | grep -qiE '^en_US\.utf-?8$'; then
+  WC_LOCALE_DIR="$FIX/bin-wc-locale"
+  mkdir -p "$WC_LOCALE_DIR"
+  cat > "$WC_LOCALE_DIR/wc" <<'WC_LOCALE_EOF'
+#!/usr/bin/env bash
+# Arabic-Indic digits: all "digits" to a collation-aware range guard, and not a number to `[`.
+printf '\331\241\331\242\331\243\n'
+exit 0
+WC_LOCALE_EOF
+  chmod +x "$WC_LOCALE_DIR/wc"
+  export PATH="$WC_LOCALE_DIR:$PATH_BEFORE_ICONV_SHIM"
+  reset_case
+  LC_ALL=en_US.UTF-8 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+  export PATH="$PATH_BEFORE_ICONV_SHIM"
+  assert_eq "$(count_creates)" "1" "case 17p: a locale-digit count still files the alert"
+  assert_not_contains "$OUT" "integer expression expected" "case 17p: and a collation-widened digit does NOT reach the numeric test"
+  WC_LOCALE_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+  assert_contains "$WC_LOCALE_BODY" "could NOT be measured" "case 17p: and it is declared UNMEASURED (the range spelling would have hidden the loss here)"
+else
+  ok "case 17p: SKIPPED — no en_US.UTF-8 collation locale on this host, so the range/list spellings are indistinguishable"
+fi
+
+# A DIGIT-ONLY count can still be uncomparable: bash's `test` rejects anything past int64 and
+# leaves BOTH flags 0, so this shape needs its own bound (verification round 2, measured).
+WC_OVERFLOW_DIR="$FIX/bin-wc-overflow"
+mkdir -p "$WC_OVERFLOW_DIR"
+cat > "$WC_OVERFLOW_DIR/wc" <<'WC_OVERFLOW_EOF'
+#!/usr/bin/env bash
+# 20 digits: pure `0-9`, and past int64, so `[` refuses it with status 2.
+echo 99999999999999999999
+exit 0
+WC_OVERFLOW_EOF
+chmod +x "$WC_OVERFLOW_DIR/wc"
+export PATH="$WC_OVERFLOW_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$(count_creates)" "1" "case 17p: an out-of-range count still files the alert"
+assert_not_contains "$OUT" "integer expression expected" "case 17p: and an int64-overflowing count emits no arithmetic diagnostic"
+WC_OVERFLOW_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$WC_OVERFLOW_BODY" "could NOT be measured" "case 17p: and it is declared UNMEASURED rather than treated as a comparable length"
+
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+WC_REAL_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$WC_REAL_BODY" "the excerpt is NOT byte-identical" "case 17p: the REAL \`wc\` still declares the measured loss on the same fixture (so the two answers are distinguishable)"
+assert_not_contains "$WC_REAL_BODY" "could NOT be measured" "case 17p: and it does not claim an unmeasured comparison"
 
 # ── #8841: the RESOLVE leg — retiring a recovered finding's ledger key ──────
 # Filing without closing is a ledger that can only grow. Measured on this
