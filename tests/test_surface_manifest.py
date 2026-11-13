@@ -5347,16 +5347,108 @@ def test_the_rename_remedy_does_not_claim_to_be_the_whole_record_for_an_SDK_meth
     assert len(problems) == 1 and problems[0].kind == "no-record", problems
     assert accounting == {}, accounting
     assert "has no departure record" in str(problems[0]), problems[0]
-    # The remedy the parser ADVERTISES names the map entry as still required.
+    # The remedy the parser ADVERTISES names the map entry as still required — and names the
+    # RENAME map only: offering `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` as interchangeable
+    # halves re-collapsed the two maps round 18 separated, and for a `REMOVED_SDK_METHODS` name
+    # the flag changes nothing (review of PR #12313, round 21).
     assert "an SDK method still needs its" in parser_source, parser_source[:200]
+    assert "`RETIRED_SDK_METHODS` entry, which is what records the rename" in parser_source
+    assert "a DEPARTURE, not a rename" in parser_source
     # ⛔ AND NOT AN ASSERTION THAT CANNOT FAIL. `assert "<the old phrase>" not in
     # parser_source` looked like the natural counterpart and is inert: the old wording was
     # split across two adjacent literals, so the joined phrase never appears in the SOURCE and
     # the assert could not red on a revert (measured, review of PR #12313, round 20). The
     # positive assertion above is the discriminator: it reds when the help text is reverted.
-    # ...and the printed closing line no longer calls the flag the record on its own.
+    # ...and the printed closing line no longer calls the flag the record on its own, nor offers
+    # the DEPARTURE map as a sufficient half. Asserted on the RENDERED text: the print is one
+    # concatenated call, so a `not in source` check over split literals cannot fail.
     cut_source = inspect.getsource(sm.cmd_cut)
     assert "that is the record TOGETHER WITH its" in cut_source, "the SDK qualifier is missing"
+    assert "A `REMOVED_SDK_METHODS` name is a DEPARTURE, not a rename" in cut_source
+
+    # The DEPARTURE state really is inert under the flag — the premise the text now states.
+    problems, accounting = sm.removal_report(
+        {("apikey_list", "sdk")},
+        set(),
+        {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"apikey_list"},
+            "sdk_renamed": set(),
+        },
+        allowed={"sdk:apikey_list"},
+    )
+    assert len(problems) == 1 and problems[0].kind == "no-record", problems
+    assert accounting == {}, accounting
+
+
+def test_the_rename_remedy_is_NOT_offered_as_the_clearance_for_a_DEPARTURE(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """A `REMOVED_SDK_METHODS` name is a DEPARTURE; `--allow-removal` provably cannot clear it.
+
+    The closing remedy named `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` as interchangeable
+    halves. The no-freeze arm reads `sdk_renamed` (`RETIRED_SDK_METHODS`) only - so for a
+    `REMOVED_SDK_METHODS` name (a departure with NO replacement) the flag changed nothing and
+    the refusal was BYTE-IDENTICAL with and without it: round 15's defect, one map over
+    (review of PR #12313, round 21). This asserts on the RENDERED closing line, because the
+    `print` is one concatenated call and a `not in source` check over split literals cannot
+    fail.
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:apikey_list", "method": "apikey_list"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    # A DEPARTURE: the name IS in a retirement map, but in `REMOVED_SDK_METHODS`, not the
+    # rename map - exactly what `removal_records()` returns for `apikey_list`.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"apikey_list"},
+            "sdk_renamed": set(),
+        },
+    )
+
+    args = argparse.Namespace(
+        commit=CUT_SHA,
+        allow_approval_reset=True,
+        allow_removal=["sdk:apikey_list"],
+        allow_removal_reason="deleted: returned every tenant, zero callers",
+    )
+    rc = sm.cmd_cut(args)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "NO replacement" in out and "FREEZE IT" in out, out
+    # The closing line names ONE sufficient map (`RETIRED_SDK_METHODS`) and says the departure
+    # map is not cleared by the override - the claim the code actually enforces.
+    closing = out[out.index("A genuine RENAME") :]
+    assert "`RETIRED_SDK_METHODS` entry" in closing, closing
+    assert "A `REMOVED_SDK_METHODS` name is a DEPARTURE, not a rename" in closing, closing
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+    # Non-vacuity: the SAME waiver over the RENAME map clears the identical shape.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"apikey_list"},
+            "sdk_renamed": {"apikey_list"},
+        },
+    )
+    rc = sm.cmd_cut(args)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "rename record" in out, out
 
 
 def test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES():

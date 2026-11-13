@@ -2932,11 +2932,20 @@ def cmd_cut(args: argparse.Namespace) -> int:
                 # what keeps a caller from meeting a bare `AttributeError` — so a refusal whose
                 # cause is the missing map entry must not close by prescribing the flag alone
                 # the operator has already typed (review of PR #12313, round 20).
+                # ⛔ AND THE MAP IT NAMES IS THE RENAME MAP, NOT BOTH. The qualifier that
+                # fixed round 20's over-claim re-collapsed the two opposite maps that round 18
+                # separated: it offered `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` as
+                # interchangeable halves, but the no-freeze arm reads `sdk_renamed`
+                # (`RETIRED_SDK_METHODS`) alone — so for a `REMOVED_SDK_METHODS` name (a
+                # departure with NO replacement) the flag changed NOTHING and the refusal was
+                # byte-identical with and without it: round 15's defect, one map over (review
+                # of PR #12313, round 21).
                 print("  A genuine RENAME (the old name is gone by design) passes "
                       "`--allow-removal <symbol> --allow-removal-reason <why>`; for an SDK "
-                      "method that is the record TOGETHER WITH its `RETIRED_SDK_METHODS` / "
-                      "`REMOVED_SDK_METHODS` entry (the row above says which half is missing). "
-                      "It is logged in the cut output and belongs in the PR body.")
+                      "method that is the record TOGETHER WITH its `RETIRED_SDK_METHODS` "
+                      "entry. A `REMOVED_SDK_METHODS` name is a DEPARTURE, not a rename — "
+                      "this override does not clear it and the freeze is still required. It "
+                      "is logged in the cut output and belongs in the PR body.")
             return 1
         print(f"::error::cut refused this removal: {len(problems)} problem(s)")
         print("REFUSED — each line names what is wrong, and the record it names is the "
@@ -4011,8 +4020,9 @@ def main() -> int:
         help=(
             "permit ONE named symbol to disappear from the baseline with no archive "
             "record (a genuine rename); an SDK method still needs its "
-            "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` entry, which is what records the "
-            "departure for a caller. Repeatable, requires "
+            "`RETIRED_SDK_METHODS` entry, which is what records the rename for a caller — a "
+            "`REMOVED_SDK_METHODS` name is a DEPARTURE, not a rename, and still needs the "
+            "freeze. Repeatable, requires "
             "--allow-removal-reason, and logged in the cut output (#12237). A bare SYMBOL "
             "waives whichever surface this cut removes it from, and is refused if that is "
             "BOTH — name the surface as `tool:SYMBOL` / `sdk:SYMBOL` when the same name is "
