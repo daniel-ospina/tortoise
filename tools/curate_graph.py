@@ -910,7 +910,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # ⛔ The reasoning layer, read and reconciled — see `read_operators`, and `structure`
         # read IMMEDIATELY before it so the count and the rows describe one instant: a full
         # point walk between them lets a concurrent create make `read > reported`, a
-        # direction none of the refusal's named causes produces (see `cmd_inventory`).
+        # direction the refusal did NOT name before this change (it names it now, as its
+        # fourth cause — see `read_operators`). `cmd_inventory` reads its count the same way,
+        # for the same reason: the message is shared, so the window it states must be true
+        # for every caller.
         structure = reader.structure()
         operators, operators_reported = reader.read_operators(structure)
         # ⛔ Bound the moment the read COMPLETES, and bound before the `try` so every
