@@ -786,6 +786,20 @@ def _survivor_fixpoint(graph, survivor_id: str) -> tuple[str, bool]:
     if label is None:
         return str(survivor_id), False
     fixed = follow_resolved_from(graph, label, survivor_id)
+    # ⛔ `follow_resolved_from` STOPS on a cycle and returns `current` (its own
+    # cycle guard) — so on a cyclic `resolved_from` record the "fixpoint" it hands
+    # back is still retired, and writing `candidate -> fixed` would create the
+    # 2-hop chain this function exists to make impossible. Cannot-answer is the
+    # honest response, and `EntityScanUnavailable` is this module's contract for
+    # it. Reachable only from an out-of-band/legacy cycle: this verb cannot create
+    # one.
+    row = graph.query(
+        f"MATCH (n:{label} {{id:$id}}) RETURN n.resolved_from",
+        params={"id": str(fixed)}).result_set
+    if row and row[0] and row[0][0]:
+        raise EntityScanUnavailable(
+            f"the fixpoint for {survivor_id!r} is itself retired ({fixed!r}) — a "
+            "cyclic resolved_from record; refusing to write a 2-hop chain")
     return str(fixed), str(fixed) != str(survivor_id)
 
 

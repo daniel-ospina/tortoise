@@ -842,6 +842,21 @@ class TestClosureReverification:
             {"name": "Acme Holdings Ltd", "kind": "core:plan"},
             derived)["band"] == verdict.BAND_MERGE
 
+    def test_a_cyclic_resolved_from_record_is_refused_not_chained(self, sdk_factory):
+        """`follow_resolved_from` stops on a cycle, so its "fixpoint" can still be
+        retired — writing a hop onto it would create the 2-hop chain the verb
+        exists to make impossible."""
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-n0", "loop zero")
+        _create_object(sdk, "obj-n1", "loop one")
+        _create_object(sdk, "obj-c", "loop target")
+        graph = sdk._get_proj().g
+        graph.query("MATCH (n:Object {id:'obj-n0'}) SET n.resolved_from = 'obj-n1'")
+        graph.query("MATCH (n:Object {id:'obj-n1'}) SET n.resolved_from = 'obj-n0'")
+        with pytest.raises(Exception, match="cyclic resolved_from"):
+            apply_entity_merge(sdk, "obj-c", "obj-n0", method="exact",
+                               similarity=1.0)
+
     def test_a_merge_of_an_already_retired_candidate_is_refused(self, sdk_factory):
         """A stale reviewer approval must not write a second hop."""
         sdk = sdk_factory()
