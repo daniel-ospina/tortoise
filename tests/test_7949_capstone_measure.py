@@ -5353,12 +5353,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # `c17e3c5f78`, 9987 at `f1f74135a15b` and at `abf186f110`. ⛔ `9951`
             # is in that list only because this row printed it — it was a predicted
             # merge-tree value (9943 + 8), never a line any commit on `main`
-            # carried. What `main` has carried is `9633, 9635, 9714, 9823, 9906,
-            # 9917, 9933, 9934, 9951, 9973`; `9987` is on NO `main` commit — it
-            # exists only once this one lands, which is why the recipe below prints
-            # eleven values from a LOCAL branch and ten from `origin/main`. The
-            # COUNT is deliberately not the claim: reproduce it, one value
-            # per commit, with
+            # carried. As a ROW value, `main` has carried `9633, 9635, 9714,
+            # 9823, 9906, 9917, 9933, 9934, 9951, 9973`; `9987` is the one this PR
+            # adds. ⛔ Do not conflate that with the ENTRY line — `9987` has been
+            # the entry's line on `main` since `f1f74135a15b` (see the paragraph
+            # above), so the ROW value is the only sense in which `9987` is absent
+            # from `main`. The COUNT is deliberately not the claim, and neither is
+            # "ten" nor "eleven": the recipe below walks
+            # whatever branch you RUN IT ON, so it prints the values THAT branch
+            # carries and can make no main/branch distinction for you. Reproduce
+            # it, one value per commit, with
             #   for c in $(git log --reverse --format=%h -- tests/test_7949_capstone_measure.py); do
             #     git show $c:tests/test_7949_capstone_measure.py \
             #       | rg -o '"[0-9]{4}", "- test_pack_logic_writeprobe_11083.py"'; done | sort -u
