@@ -4601,8 +4601,12 @@ CROSS_LENS_ANN_TOP_K = 20
 CROSS_LENS_ANN_TOP_K_MAX = 100
 
 # #432: declarative spec for the Point lifecycle — ONTOLOGY §5's transition
-# table in code (``tests/test_claim_lifecycle.py`` cross-checks the pair, so a
-# map that drifted from the doc, or a doc that drifted from the map, reds).
+# table in code, PLUS one code-review decision the doc does not carry: a DRAFT
+# may terminalize before it is ever live (``draft -> retracted/superseded``), so
+# the map is a SUPERSET of §5's `draft` row and an exact match of its `live`
+# row. ``tests/test_claim_lifecycle.py`` cross-checks the terminal words and the
+# doc's declared transitions; the `draft` widening is pinned there as the #432
+# decision, not as doc↔map equality.
 # NOT consulted by update_point per-call (update_point only promotes
 # draft→live; every claim transition is observable via a Task 3 emit hook, and
 # no transition can slip through update_point unemitted).
@@ -47153,18 +47157,30 @@ class TortoiseSDK:
             # because an unrelated `:Point:Source` carried that value as its url
             # (measured: the row the caller named was never written and the
             # refusal blamed a Point it never addressed — AX rule 2).
+            # ⛔ Review F7-1: INDEX-BACKED, one arm at a time. A single
+            # `WHERE n.id = $id OR (n:Event AND n.eventId = $id) …` defeats the
+            # `Point(id)` range index (measured: 23.7 ms vs 0.6 ms at 60k Points),
+            # and it ran for EVERY label's lifecycle write — including the
+            # `:Object`/`:Subject` writes whose id can never match a Point. Each
+            # arm below is the probe the write itself uses, so the ordinary
+            # id-addressed call costs exactly the one indexed read it did before
+            # this change.
+            _ADDRESS_TAIL = ("RETURN count(n) AS hits, "
+                             "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) "
+                             "AS idless, collect(DISTINCT n.id) AS ids")
             _addressed = proj.g.query(
-                "MATCH (n:Point) WHERE n.id = $id "
-                "OR (n:Event AND n.eventId = $id) "
-                "RETURN count(n) AS hits, "
-                "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
-                "collect(DISTINCT n.id) AS ids, "
-                "sum(CASE WHEN n.status IS NULL THEN 1 ELSE 0 END) AS null_statuses, "
-                "collect(DISTINCT n.status) AS statuses",
+                f"MATCH (n:Point {{id:$id}}) {_ADDRESS_TAIL}",
                 params={"id": id_val}).result_set
-            (_hits, _idless, _addressed_ids,
-             _null_statuses, _addressed_statuses) = (
-                _addressed[0] if _addressed else (0, 0, [], 0, []))
+            _hits, _idless, _addressed_ids = (
+                _addressed[0] if _addressed else (0, 0, []))
+            if not _hits:
+                # The `:Event` arm resolves by `eventId` (its own primary key).
+                _by_event = proj.g.query(
+                    f"MATCH (n:Event {{eventId:$id}}) WHERE n:Point "
+                    f"{_ADDRESS_TAIL}",
+                    params={"id": id_val}).result_set
+                _hits, _idless, _addressed_ids = (
+                    _by_event[0] if _by_event else (0, 0, []))
             if not _hits:
                 # The `:Source` arm consults `url` only when nothing matched by
                 # `id`, so the url arm of this read asks the same question.
@@ -47173,17 +47189,11 @@ class TortoiseSDK:
                     params={"id": id_val}).result_set[0][0]
                 if not _source_by_id:
                     _by_url = proj.g.query(
-                        "MATCH (n:Point:Source) WHERE n.url = $id "
-                        "RETURN count(n) AS hits, "
-                        "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
-                        "collect(DISTINCT n.id) AS ids, "
-                        "sum(CASE WHEN n.status IS NULL THEN 1 ELSE 0 END) "
-                        "AS null_statuses, "
-                        "collect(DISTINCT n.status) AS statuses",
+                        f"MATCH (n:Point:Source) WHERE n.url = $id "
+                        f"{_ADDRESS_TAIL}",
                         params={"id": id_val}).result_set
-                    (_hits, _idless, _addressed_ids,
-                     _null_statuses, _addressed_statuses) = (
-                        _by_url[0] if _by_url else (0, 0, [], 0, []))
+                    _hits, _idless, _addressed_ids = (
+                        _by_url[0] if _by_url else (0, 0, []))
             # `is not None`, not truthiness: `collect` already drops NULLs, so the
             # only thing `if i` could filter is a FALSY non-null id (`id: 0`) — and
             # `_lifecycle_ids` is the single gate for the guard, the vocabulary
@@ -47347,10 +47357,13 @@ class TortoiseSDK:
                     raise ValueError(
                         f"update_entity refused the status transition "
                         f"{_stored!r} -> {_status!r} on Point {id_val!r}: "
-                        f"ONTOLOGY §5's Point lifecycle declares "
-                        f"{_stored!r} -> {{{_declared_text}}}, so {_status!r} is "
-                        f"not a declared transition from {_stored!r} through "
-                        f"this door.{_reserved} Use a declared transition, or — "
+                        f"this door's declared Point transitions from "
+                        f"{_stored!r} are {{{_declared_text}}} "
+                        f"(`_ALLOWED_TRANSITIONS` — ONTOLOGY §5's table, plus "
+                        f"#432's decision that a draft may terminalize before it "
+                        f"is ever live), so {_status!r} is not a declared "
+                        f"transition through this door.{_reserved} Use a "
+                        f"declared transition, or — "
                         f"if the claim itself changed — mint a new Point and "
                         f"supersede this one with "
                         f"`supersede_point({id_val!r}, <new_id>)`."
