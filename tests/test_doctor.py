@@ -1853,22 +1853,30 @@ class TestDoctorHostedCredential:
         the deadline rendered `✅ … /health 200` and `All checks passing!` (fresh
         review round 16 — the round-13 class re-entered through the deadline).
         """
+        import time as _time
+
         from tortoise import __main__ as _m
 
         _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
 
-        class _Drip(_FakeResponse):
-            """Yields one byte per call, so the leg deadline cuts it."""
+        class _SlowDrip(_FakeResponse):
+            """One byte per 50 ms — the 250 ms floor cuts it mid-body.
+
+            The first version of this test dripped from an in-memory buffer with
+            NO delay, completed in microseconds, and never reached the cut arm
+            (fresh review round 17).
+            """
 
             def read(self, n=None):
+                _time.sleep(0.05)
                 return self._buf.read(1)
 
             def read1(self, n=None):
                 return self.read(n)
 
-        monkeypatch.setattr(_m, "_DOCTOR_HEALTH_TIMEOUT_S", 0.001)
+        monkeypatch.setattr(_m, "_DOCTOR_HEALTH_TIMEOUT_S", 0.001)  # → 0.25 floor
         _stub_hosted(monkeypatch, lambda url, req: (
-            _Drip(200, b'{"status":"degraded"}') if url.endswith("/health")
+            _SlowDrip(200, b'{"status":"degraded"}') if url.endswith("/health")
             else _FakeResponse(200, b'{"org_id":"org-9"}')))
         db_path = str(tmp_path / "cut-health.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
@@ -1879,6 +1887,8 @@ class TestDoctorHostedCredential:
 
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1200:]
+        # The cut must be REPORTED (that is the fix) and must never be a pass.
+        assert "CUT" in hosted or "could not be read" in hosted, hosted
         assert "✅" not in hosted, hosted
         assert "All checks passing" not in out, out[-1200:]
 
@@ -1890,28 +1900,31 @@ class TestDoctorHostedCredential:
         `❌ … Check your TORTOISE_API_URL` with a fragment of the user's own body
         as "evidence" — a healthy setup graded red (fresh review round 16).
         """
+        import time as _time
+
         from tortoise import __main__ as _m
 
         _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
-        calls = {"n": 0}
 
-        class _CutTeam(_FakeResponse):
-            """First call returns a partial JSON body; the next returns b""."""
+        class _SlowTeam(_FakeResponse):
+            """One byte per 50 ms, so the TEAM leg's deadline cuts it mid-body.
+
+            `/health` must COMPLETE here: a spent budget at leg one would test the
+            budget row instead of the cut arm (fresh review round 17 caught
+            exactly that in the first version).
+            """
 
             def read(self, n=None):
-                calls["n"] += 1
-                if calls["n"] == 1:
-                    return b'{"org_id":'
-                return b""
+                _time.sleep(0.05)
+                return self._buf.read(1)
 
             def read1(self, n=None):
                 return self.read(n)
 
-        # A deadline that has already passed cuts after the first chunk.
-        monkeypatch.setattr(_m, "_DOCTOR_TOTAL_BUDGET_S", 0.0)
+        monkeypatch.setattr(_m, "_DOCTOR_TEAM_TIMEOUT_S", 0.001)  # → 0.25 floor
         _stub_hosted(monkeypatch, lambda url, req: (
             _FakeResponse(200, b'{"status":"ok"}') if url.endswith("/health")
-            else _CutTeam(200)))
+            else _SlowTeam(200, b'{"org_id":"org-9","tier":"anon"}')))
         db_path = str(tmp_path / "cut-team.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _seed_db(db_path, "doctor cut team seed")
@@ -1921,8 +1934,85 @@ class TestDoctorHostedCredential:
 
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1200:]
+        assert "CUT" in hosted, hosted
         assert "❌" not in hosted, hosted
-        assert "CUT" in hosted or "UNPROVEN" in hosted or "UNGRADED" in hosted, hosted
+        assert "TORTOISE_API_URL" not in hosted, hosted
+
+    def test_a_budget_stop_still_reports_an_established_health_verdict(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A budget stop must CARRY a `/health` verdict already established.
+
+        Otherwise the report withholds a known `degraded`/5xx and only says
+        "re-run" — the round-15 fix, which round 17 measured as unpinned
+        (`carried = ""` left the suite green).
+        """
+        import time as _time
+
+        from tortoise import __main__ as _m
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        class _SlowHealth(_FakeResponse):
+            """Completes the body in ~0.2 s, leaving < 0.25 s for the next leg."""
+
+            def read(self, n=None):
+                _time.sleep(0.02)
+                return self._buf.read(4)
+
+            def read1(self, n=None):
+                return self.read(n)
+
+        monkeypatch.setattr(_m, "_DOCTOR_TOTAL_BUDGET_S", 0.30)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _SlowHealth(200, b'{"status":"degraded"}') if url.endswith("/health")
+            else pytest.fail("the team leg must not start on a spent budget")))
+        db_path = str(tmp_path / "budget-carried.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor budget carried seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "budget" in hosted, hosted
+        assert "degraded" in hosted, hosted
+        assert "✅" not in hosted, hosted
+
+    def test_a_cut_transport_message_still_scrubs_the_password(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """Scrub BEFORE truncate: a cut inside the password must not leak a fragment.
+
+        The read-error text is bounded for display, but a bound applied FIRST
+        turns the password into a fragment `_scrub` can no longer match — all but
+        one character of it printed (fresh review round 15). Round 17 measured the
+        ordering as unpinned because the only such test used a short message.
+        """
+
+        password = "hunter2pass"
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url=f"https://svc:{password}@api.example.test")
+
+        class _Stalled(_FakeResponse):
+            def read(self, n=None):
+                # The password sits PAST the 200-char display bound, so
+                # truncate-then-scrub would print its tail.
+                raise ValueError("x" * 260 + f" https://svc:{password}@api.example.test")
+
+            def read1(self, n=None):
+                return self.read(n)
+
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _Stalled(200) if url.endswith("/health")
+            else _FakeResponse(200, b'{"org_id":"org-9"}')))
+        db_path = str(tmp_path / "cut-scrub.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor cut scrub seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert password not in out, "the api_url password reached the transcript"
 
 
 class TestDoctorPath:

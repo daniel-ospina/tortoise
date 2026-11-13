@@ -13199,7 +13199,17 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                 # `degraded` /health read ✅ and a healthy /v1/team read ❌
                 # (fresh review round 16 — the two false verdicts this reader
                 # could produce).
-                return b"".join(chunks), True
+                #
+                # ...but only when the body is genuinely incomplete. The check
+                # runs BEFORE the EOF probe, so a body whose last chunk arrived
+                # exactly at the boundary (or a fixed-length body fully read)
+                # would otherwise be reported CUT and downgrade a healthy ✅ to a
+                # "we stopped early" ⚠️ — a false claim about the body (fresh
+                # review round 17). `HTTPResponse.length` is the remaining
+                # declared length: 0 means COMPLETE. `None` (chunked, no
+                # Content-Length) stays an honest "unknown, so assume cut".
+                complete = getattr(resp, "length", None) == 0
+                return b"".join(chunks), not complete
             # ⛔ A read error PROPAGATES: "the body could not be READ" is a
             # distinct verdict from "the body carried no status", and swallowing
             # it here made a stalled-but-200 `/health` read as green again —
