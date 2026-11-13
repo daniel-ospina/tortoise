@@ -623,11 +623,13 @@ def _rerank_arm(
             "pool width outside that set (the shipped 40 is one) has no cell there "
             "at all. Read it only where its key matches the width you are asking "
             "about; everywhere else the achieved cell above is the only figure this "
-            "artifact carries for this arm. miss_past_k at k=P is 0 BY "
-            "CONSTRUCTION (a response has at most P rows, so 'the rank is past P' "
-            "cannot occur) and is not the ceiling; miss_absent_at_max_k is not a "
-            "width-independent bound either — it counts golds absent within "
-            "arm 1's MAXIMUM window (15)").format(label=label),
+            "artifact carries for this arm. miss_past_k is 0 BY CONSTRUCTION only "
+            "at arm 1's WIDEST window (a response has at most that many rows, so "
+            "'the rank is past it' cannot occur) and is NON-ZERO at every narrower "
+            "k, where a gold the legs returned further down is genuinely past the "
+            "cut — so it is never the ceiling at any width; miss_absent_at_max_k is "
+            "not a width-independent bound either — it counts golds absent within "
+            "arm 1's MAXIMUM window").format(label=label),
     }
     # ⛔ THE ORDER IS PRODUCED BY THE SHIPPED FUNCTION, NOT BY A COPY OF IT.
     # This arm used to sort the scores itself and reorder EVERY row, including a
