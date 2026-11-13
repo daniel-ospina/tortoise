@@ -76,7 +76,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: ca74f2375ef4f365346551f894e127d9d7b0d44e
+cut_at_commit: 6408da01ce9063c903405057e8160a5560d77460
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1211,22 +1211,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-# #12297: SPLICED, not re-cut — and the two reasons are the REAL costs of a cut,
-# not a claim that a cut would lose hand-curated cells (it would not:
-# `CARRIED_TOOL_ROW_KEYS` in tools/surface_manifest.py carries `used_by` /
-# `recommendation` / `basis` / `reason` / `exemption` forward from the committed
-# manifest, and a cut reproduces this tool row byte-for-byte). The costs it does
-# have: (1) `cut --commit` must be handed a DEFAULT-BRANCH sha (#11057 review F1)
-# — cut at a lane head, `provenance_report` reds — and (2) a cut re-derives the
-# 39 `sdk:` rows' `used_by` cells by design (`CARRIED_SDK_ROW_KEYS` is just
-# `exemption`), churning a diff this change has nothing to do with.
-# So exactly one derived cell moves, to the value `check` itself derives from the
-# declaration (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it
-# stands on this branch, after the owner's 2239f94ff6 and c82c0337a4 rewrote the
-# same two comments). Nothing else in this row, and nothing in any other row,
-# moves. ⛔ Splicing a DERIVED cell is safe only because `check` re-derives it: if
-# this value ever disagrees with the declaration, both gates go red rather than
-# drifting. It is not a general licence to edit derived cells.
 - name: tortoise_suggest_entry_points
   served_from: tortoise/mcp_server.py:aae4bf5f5ceffe7c
   served_attributes: 542cf2dbb222d260
@@ -2218,32 +2202,6 @@ rows:
   job: Fast one-hop neighbor enumeration for an entity — quick discovery and navigation. Use for shallow context;
     for multi-hop filtered BFS use tortoise_entity_profile.
   dependency: declares TortoiseSDK.list_topics (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_analyze
-  served_from: tortoise/mcp_server.py:d01328faeb18c368
-  served_attributes: 0b934dac2f43c7b6
-  family: reasoning
-  family_rank: 3
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: find
-  keyword_rank: 6
-  cluster: null
-  canonical: null
-  job: 'Answer natural language questions about the Tortoise epistemic graph. Ask things like: ''where is the disagreement?''
-    ''what supports claim X?'''
-  dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep

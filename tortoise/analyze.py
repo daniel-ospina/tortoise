@@ -14,11 +14,18 @@ and THIS LIST IS THE DEPENDENCY MAP, so keep it exhaustive:
   `compute_confidence` is the public caller: the SDK is a module consumer even
   though it is not a door), `tortoise/dream.py`, and the `graph-scripts/`
   diagnostics (`graph-diagnostics.py`, `parity_sample.py`, `dream-scale-bench.py`)
+- `_stale_first_claims`, `_stale_first_count_stamped` — `tortoise/dream.py`
+  (`Dreamer.dream_window`'s stale-first scheduler, reached from
+  `TortoiseSDK.dream(mode="stale-first")`; a FUNCTION-LEVEL import, so nothing
+  fails until that pass runs) and `graph-scripts/dream-scale-bench.py`
 - `mean_grounding`, `grounding_snapshot` — `tortoise/mining.py`
 - `_LLM_PROVIDERS` — `tortoise/hosted_api.py`
 
 Any lane that considers archiving or moving this module must re-derive that list
-first: an omission here is how `compute_confidence` breaks.
+with an AST sweep (a single-line `grep` misses the multi-name imports above):
+`rg -n "from .analyze import|from tortoise.analyze import" --glob '!archive/**'`
+over the package and `graph-scripts/`. An omission here is how a restore or an
+archive breaks `compute_confidence` or `dream(mode="stale-first")`.
 Template Cypher + LLM for intent classification and result synthesis.
 No LLM-Cypher generation (rejected: 61% accuracy, 40% silent errors).
 """
