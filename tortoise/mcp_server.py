@@ -3941,7 +3941,12 @@ def tortoise_query(kind: str | None = None,
     query_points_by_tag into this one tool).
 
     - Structural path (text=None): property-filter query, **bounded to `limit`**
-      (default 100 — see the #10602 note below).
+      (default 100 — see the #10602 note below). `min_confidence` and `order_by`
+      are REFUSED on this arm rather than dropped (#12500): both structural arms
+      read through sdk.paginated_query, which declares neither, so an accepted
+      value used to be discarded and rows the caller excluded came back. They
+      are applied on the text= arm only (the fts leg); structural filtering by
+      confidence is Phase 2 in the hybrid-search plan, not a shipped feature.
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
       ignores kind/min_confidence/order_by, and REFUSES `filters=` (see the
@@ -3965,11 +3970,10 @@ def tortoise_query(kind: str | None = None,
       IS applied here, forwarded as the fts leg's include_terminal.
     - tag=<name> mode: a Point reader keyed on the tag only. It has no
       property-filter parameter either, so `filters=` is REFUSED here too rather
-      than dropped (#12455). `kind`/`min_confidence`/`order_by` are NOT applied
-      by this arm: the same accepted-and-dropped class as #12500, which tracks
-      the STRUCTURAL arms — this arm's `kind`/`min_confidence`/`order_by` drop is
-      recorded in #12500's comment thread (its body scopes the structural arms
-      only), and is a known gap rather than a documented feature.
+      than dropped (#12455). `kind`, `min_confidence` and `order_by` are REFUSED
+      on this arm as well (#12500): `query_points_by_tag(tag)` takes the tag and
+      nothing else, and tag mode reads EVERY kind of tagged Point, so a named
+      kind narrows nothing while looking like it did.
     - include_retracted=True surfaces tombstones on every path (structural,
       paginated, text, and tag modes); default False excludes them. Known gap, tracked
       in #12502: the TAG arm's own exclusion is `status != "retracted"` only, so
@@ -4067,6 +4071,61 @@ def tortoise_query(kind: str | None = None,
             f"one. {_ENTITY_TYPE_REMEDY.get(entity_type, _ENTITY_TYPE_REMEDY_FALLBACK)} "
             f"For a structural Point read, omit entity_type or pass 'point' "
             f"(its default).")})
+    # ── #12500: `min_confidence`/`order_by` (and `kind` on the tag arm) ──────
+    # The signature takes `min_confidence` and `order_by`, and the served
+    # description used to present them as general arguments — but ONLY the
+    # `text=` arm consumes them (forwarded into `sdk.tortoise_fts_query`). Both
+    # structural arms call `sdk.paginated_query(kind, skip, limit,
+    # include_retracted, **filters)`, which declares NEITHER parameter
+    # (sdk.py:26582-26585), and the tag arm calls `query_points_by_tag(tag)`,
+    # which takes the tag and nothing else. Measured: `kind="statement",
+    # min_confidence=0.9` reaches the accessor as
+    # `paginated_query(kind='statement', skip=0, limit=100,
+    # include_retracted=False)` — the floor is simply gone and rows below 0.9
+    # come back, the #6146 wrong-answer-indistinguishable-from-right class this
+    # tool has now had removed three times (#12372 `entity_type`, #12455
+    # `filters=`, here).
+    #
+    # This one is NOT forwardable: `docs/plan/2026-08-03-hybrid-search-plan.md`
+    # records the non-text path as **Phase 2** ("structural filtering by
+    # confidence is a separate feature from hybrid search"), so the arguments
+    # were always text-path-only in the design while the served description did
+    # not say so. Teaching `paginated_query` to apply a floor at the
+    # pre-truncation seam would also be an SDK surface change, which this repo's
+    # rule reserves to the owner; filtering AFTER the slice would be a new bug
+    # (a page smaller than `limit`, a `total` that describes another population).
+    # So the arms that cannot apply them REFUSE — the shape #12455 shipped for
+    # `filters=`, placed here for the same two reasons: above the arms, so the
+    # refusal costs no read and cannot serve rows on an error path, and below the
+    # `tag=` precedence split, so a caller passing both keeps a message about the
+    # arm that actually answered.
+    _unapplied: list[str] = []
+    if tag is not None or not text:
+        # Both structural arms share `paginated_query`.
+        if min_confidence is not None:
+            _unapplied.append("min_confidence")
+        if order_by is not None:
+            _unapplied.append("order_by")
+    if tag is not None and kind is not None:
+        # Tag mode reads EVERY kind of tagged Point, so a named kind narrows
+        # nothing while looking like it did.
+        _unapplied.append("kind")
+    if _unapplied:
+        _arm = "tag=" if tag is not None else "structural"
+        _named = " and ".join(_unapplied)
+        _extra = (
+            " Tag mode also reads every kind of tagged Point, so a named `kind` "
+            "narrows nothing." if "kind" in _unapplied and tag is not None else ""
+        )
+        return _SafeError({"error": (
+            f"{_named} is not applied on the {_arm} arm (#12500): the structural "
+            f"arms read through sdk.paginated_query, which takes no confidence floor "
+            f"and no ordering, and tag mode reads a tag and nothing else — so these "
+            f"arguments used to be dropped silently and the caller got rows they "
+            f"excluded, or an order they did not ask for.{_extra} They ARE applied "
+            f"on the text= arm (the fts leg). Pass text= to use them, or drop "
+            f"{_named} for this read."
+        )})
     # ── #12455: `filters=` was ACCEPTED on the `text=` and `tag=` arms and DROPPED
     # `filters` is a STRUCTURAL-path argument. `text=` forwards
     # kind/entity_type/limit/min_confidence/order_by (plus `include_terminal`,
