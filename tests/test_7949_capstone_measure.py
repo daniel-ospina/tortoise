@@ -6143,10 +6143,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"that names none of the block, an entry nor the manifest (by the WORD "
                 f"or by its FILENAME — the population is `_BLOCK_WORDS_WITH_MANIFEST`, "
                 f"so both vocabularies are scanned) is not "
-                f"scanned, and a bare `:NNNN` on a line that names ANOTHER source file "
-                f"is not scanned either (it is that file's cite, and nothing mechanical "
-                f"can tell the two apart — the doc-wide strict arm still catches a "
-                f"manifest-bound cite anywhere).")
+                f"scanned, and ANY number on a line that names ANOTHER source file — "
+                f"`:NNNN`, `N lines down`, `Nth row`, `read 9943` — is not scanned "
+                f"either (that exemption is an EARLY RETURN in "
+                f"`_neighbour_number_strays`, so it is as wide as the line, not as "
+                f"narrow as the separator form: a continuation of that file's cite and "
+                f"a re-typed manifest line are indistinguishable to it — the doc-wide "
+                f"strict arm still catches a manifest-bound cite anywhere, but a line "
+                f"naming the tool and NOT the manifest is caught by neither, and THAT "
+                f"is the shape this residual actually covers).")
         if _LINE_CITE.search(doc_hits[0].replace(ENTRY, "")):
             block_failures.append(
                 "03-test-design.md attaches a LINE NUMBER to "
