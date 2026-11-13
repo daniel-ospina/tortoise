@@ -121,16 +121,16 @@ contain):
 | the tokenizer | `tortoise/sparse.py:662` `tokenize_sparse_query` | splits on **every** `[^a-z0-9]` (`_SPLIT_RE` at `:67`) — **including `_`** |
 | the query term cap | `tortoise/sparse.py:72` `DEFAULT_MAX_OR_TERMS = 12` | 12 terms, longest-first |
 | the degenerate branch | `sparse.py:943` — `if degenerate and not composites:` → `return escape_redisearch_literal(query)` | when ≤1 token survives, the whole query is the **escaped raw string** (⛔ NOT the `max_terms < 1` guard two lines above, whose `return` is byte-identical) |
-| the leg | `tortoise/search_engine.py:2800` `run_fts_query`, Cypher at `:3008-3017` | `CALL db.idx.fulltext.queryNodes('Object', $query) … ORDER BY score DESC, <recency tie> LIMIT` |
-| the tie key | `search_engine.py:2642` `recency_tie_clause` | `coalesce(<recency>,'') DESC, coalesce(<id>,'') DESC` — the **id key is DESC on every label** |
-| the score discard | `tortoise/search_engine.py:4514` `for rank, (pid, _score) in enumerate(ranked)` | **why this is a recall question** |
+| the leg | `tortoise/search_engine.py:2830` `run_fts_query`, Cypher at `:3038-3047` | `CALL db.idx.fulltext.queryNodes('Object', $query) … ORDER BY score DESC, <recency tie> LIMIT` |
+| the tie key | `search_engine.py:2672` `recency_tie_clause` | `coalesce(<recency>,'') DESC, coalesce(<id>,'') DESC` — the **id key is DESC on every label** |
+| the score discard | `tortoise/search_engine.py:4544` `for rank, (pid, _score) in enumerate(ranked)` | **why this is a recall question** |
 | the index | `tortoise/projection/__init__.py:20346` `("Object", "name", "FULLTEXT")` (declared in `_REQUIRED_FULLTEXT_INDEXES`), created by `_create_fulltext_index` (def at `:20774`) from the `_FULLTEXT_INDEX_LABEL_FIELDS` loop at `:21224` | **no `OPTIONS`** → RediSearch defaults (language `english`, default stopwords, default tokenizer) |
 
 ---
 
 ## 2. Method — paired, pinned, controlled, and where the control breaks
 
-**Why recall and not ranking.** `rrf_fusion` discards each leg's score (`search_engine.py:4492`), so on
+**Why recall and not ranking.** `rrf_fusion` discards each leg's score (`search_engine.py:4544`), so on
 the multi-leg read the scorer can only act through `ORDER BY … LIMIT`; the one arm where the magnitude
 survives uses it as a *floor* (`SEARCH-ARCHITECTURE.md` §6.2 says the same). A different scorer is
 therefore a **recall** lever (`#12186` round 2; `#12308` A-3). So M3 reports `recall@k` of the FTS leg

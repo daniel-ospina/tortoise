@@ -54,10 +54,10 @@ from collections import Counter
 from pathlib import Path
 from typing import ClassVar
 
-from tortoise.sparse import UNDERSCORE_ENV
-
 import pytest
 from markdown_it import MarkdownIt
+
+from tortoise.sparse import UNDERSCORE_ENV
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOC_DIR = REPO_ROOT / "docs" / "research" / "2026-11-13-12298-m3-fts-leg"
@@ -1337,15 +1337,20 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # BOTH this locator and the brief's §3.1 row together, never one alone.
     ("tortoise/sparse.py", 943, "if degenerate and not composites:",
      "`sparse.py:943`"),
-    ("tortoise/search_engine.py", 2800, "def run_fts_query(",
-     "`tortoise/search_engine.py:2800`"),
-    ("tortoise/search_engine.py", 3008, "CALL db.idx.fulltext.queryNodes",
-     "`:3008-3017`"),
-    ("tortoise/search_engine.py", 2642, "def recency_tie_clause(",
-     "`search_engine.py:2642`"),
-    ("tortoise/search_engine.py", 4514,
+    # #12360: the four `search_engine.py` rows below were uniformly +30 behind the
+    # tree when this branch picked them up — the drift is ALREADY ON `main` (its
+    # `run_fts_query` sits at 2830, its brief cited 2800), and this branch's own
+    # #12360 insert inside `run_fts_query` moves the two LATE rows a further +22.
+    # Re-derived against the live file, not nudged by a constant.
+    ("tortoise/search_engine.py", 2830, "def run_fts_query(",
+     "`tortoise/search_engine.py:2830`"),
+    ("tortoise/search_engine.py", 3038, "CALL db.idx.fulltext.queryNodes",
+     "`:3038-3047`"),
+    ("tortoise/search_engine.py", 2672, "def recency_tie_clause(",
+     "`search_engine.py:2672`"),
+    ("tortoise/search_engine.py", 4544,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4514`"),
+     "`tortoise/search_engine.py:4544`"),
     ("tortoise/projection/__init__.py", 20346, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:20346`"),
     ("tortoise/projection/__init__.py", 20774, "def _create_fulltext_index(",

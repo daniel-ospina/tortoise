@@ -75,7 +75,7 @@ moved out of the harness and into `tortoise/sparse.py::underscore_run_terms`, ap
 `build_or_query` as a **third additive tail** after the originals, the A4 expansion tail, and
 the `#8933` alias/phrase tails.
 
-`build_or_query` is the one seam: `run_fts_query` (`search_engine.py:2800`) builds through it,
+`build_or_query` is the one seam: `run_fts_query` (`search_engine.py:2830`) builds through it,
 `sdk.tortoise_fts_query` reaches `run_fts_query`, `extractor_v2._fts_rows` reaches
 `sdk.tortoise_fts_query`, and the MCP registry binds `tortoise_search` to
 `sdk_method="tortoise_fts_query"`. One builder, every reader.
