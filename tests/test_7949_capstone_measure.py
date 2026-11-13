@@ -5276,6 +5276,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # uniform shift, and a comment claiming one would be the same carried-forward
         # arithmetic this block exists to refuse. 9949 + 39 + 24 = 10012 for the
         # entry, which is why neither side's number describes a tree that adds BOTH.
+        # `main` then advanced AGAIN (`cd22562c24` -> `abf186f1109a`, the `main`
+        # tip merged in here) and that arm is not uniform either: the entry moves 9973 -> 9987
+        # (+14), `carve_out:` 9847 -> 9861 and `uri_requiring:` 10178 -> 10192 (+14
+        # each), while the FIRST twin moves 6090 -> 6103 and the sdk twin 8489 -> 8502
+        # (+13 each) — one of its fourteen inserted lines lands below the first twin.
+        # Measured on the merged tree, not added up: 10012 + 14 = 10026 for the entry,
+        # 8528 + 13 = 8541 for the sdk twin, 6090 + 13 = 6103 for the first twin, and
+        # 9987 + 39 = 10026 checks the same entry from `main`'s side.
         # ⛔ The pin this branch carried before the merge (9982) was ALSO wrong on
         # its own base — that tree read 9988, six higher — so it is recorded here
         # rather than quietly replaced: a rebase that keeps a stale cite is the same
