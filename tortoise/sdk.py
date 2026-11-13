@@ -41718,9 +41718,15 @@ class TortoiseSDK:
                 # caller's recency order IS in force (measured — the test's own
                 # fixture seeds newest-first, so 4b is a no-op permutation there
                 # and "no movement" inverted the page). The mechanical question is
-                # whether recency WEIGHTING actually bit: at least one row carried
-                # a usable date, so the multiplier could reorder and must not be
-                # demoted. An all-undated pool weighs every row 0 and did nothing.
+                # whether recency WEIGHTING actually bit: at least TWO rows carried
+                # usable dates — a SPREAD — so the multiplier could reorder and
+                # must not be demoted. ⛔ "At least one" is not the predicate:
+                # ``_recency_factors`` returns an all-zero map below two dated rows
+                # (``if len(dated) < 2: return factors``, search_engine.py), because
+                # one date has nothing to rank against. A pool with a single dated
+                # row therefore weighs every row 0, did nothing, and the rerank
+                # RUNS — which is the behaviour ``any(w > 0 …)`` gives, and what
+                # the wording above has to say if a reader is to reproduce it.
                 _recency_applied = any(w > 0 for w in weights.values())
             except Exception as e:
                 _logger.warning("recency weighting failed (%s) — plain RRF", e)
@@ -42882,7 +42888,16 @@ class TortoiseSDK:
             answered = frozenset(
                 pid for pid, sig in (read or {}).items() if sig.get("has_prior"))
             belief_consulted = bool(answered)
-        # Default: RRF relevance order (already in fused order)
+        # Default: RRF relevance order (already in fused order) — with one
+        # exception, and it is not cosmetic: when the #12297 rerank is ON (opt-in)
+        # the ORDER below is the reranker's, while each hit's ``scores.rrf`` is
+        # still ``fused.get(pid)``, the PRE-rerank fused score (set above, before
+        # the rerank reassigns ``result_ids``). The cross-encoder produces a
+        # RANKING, not a value on the RRF scale, so it cannot be folded in; what
+        # would be dishonest is leaving the divergence unstated, because a caller
+        # that sorts by ``scores.rrf`` then gets a different order than the one
+        # returned. The trace's ``rerank`` block records that the order changed;
+        # ``scores.rrf`` deliberately keeps the fused value it always meant.
 
         # #10137: `order_by="confidence"` above sorts on the belief mean — so
         # it DID consult the layer, unless its signal read failed (then every
