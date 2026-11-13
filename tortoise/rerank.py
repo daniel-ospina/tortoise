@@ -112,11 +112,15 @@ DEFAULT_FUSED_RERANK_POOL = 40
 #: ``pool=40, scored=40, unscored=20``; ``tests/test_rerank_pool.py`` pins that
 #: shape at width 2). ⛔ The two readings coincide at EXACTLY ONE width —
 #: ``len(candidates) == rerank_pool`` — because ``unscored`` is ``candidates -
-#: scored`` while the entry's ``pool`` is the bound. Below the bound
-#: ``unscored`` is 0 (plus one per textless row INSIDE the width) while
-#: ``pool - scored`` is the UNUSED part of the bound — nonzero; above the bound
-#: ``unscored`` is the remainder and ``pool - scored`` is 0, because the bound was
-#: filled. So they agree only when the candidate list exactly fills the width. The condition is the list's width, never
+#: scored`` while the entry's ``pool`` is the bound. ⛔ TEXT IS THE OTHER AXIS, so
+#: neither half is exactly zero: a row INSIDE the width that came back textless is
+#: counted unscored but not scored, so below the bound ``unscored`` is one per
+#: textless row inside the width while ``pool - scored`` is the UNUSED part of the
+#: bound, and above the bound ``unscored`` is the rows past the width PLUS one per
+#: textless row inside it while ``pool - scored`` is that same textless count —
+#: with the wiring's own shape (45 candidates, width 40, 3 textless inside) the
+#: entry reads ``pool=40, scored=37, unscored=8``, so ``pool - scored`` is 3, not
+#: 0. The condition is the list's width, never
 #: ``scored == 0``: a degraded arm on a 4-candidate read reports ``pool=40,
 #: scored=0, unscored=4``, where ``pool - scored`` is 40.
 #: Read the bound as the cap, never as an achievement, and read ``unscored`` as

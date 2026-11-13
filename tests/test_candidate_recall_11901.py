@@ -1611,12 +1611,28 @@ def test_the_briefs_lexical_section_recomputes_from_the_artifact(lexical):
                       f"{lo['ndcg_mean_after']:.4f}"):
             assert value in text, (
                 f"§8 does not carry the recomputed pool-{pool} figure {value}")
-        # the figure must sit on a TABLE ROW of its own, not merely appear in the
-        # section's prose: a row whose recall cell was swapped for another
-        # section's number would still be found by the check above.
-        want = (f"{ce['recall_pct_after']:.1f} %", f"{ce['ndcg_mean_after']:.4f}")
-        assert any(all(w in row for w in want) for row in table_rows), (
-            f"§8 has no table row carrying both pool-{pool} figures {want}")
+        # the figures must sit on TABLE ROWS of their own, not merely appear in
+        # the section's prose: a row whose cell was swapped for another section's
+        # number would still be found by the check above.
+        #
+        # ⛔ ALL THREE ARMS, NAME-BOUND. An earlier draft checked the
+        # cross-encoder row only — the two LEXICAL rows are §8's actual subject
+        # and the rows its conclusion rests on, and a corrupted lexical cell
+        # passed (measured: pool-15 `difflib` nDCG 0.9233 → 0.9135, the
+        # cross-encoder's own figure; pool-40 `1.0000` → `0.9500`). The label
+        # substring is load-bearing because the two lexical rows can carry
+        # IDENTICAL values (1.0000 / 0.9233), so value-matching alone would let
+        # one row's numbers be pasted into the other.
+        for arm, label in (("rerank", "cross-encoder"),
+                          ("lexical_difflib", "difflib"),
+                          ("lexical_overlap", "overlap")):
+            exact = arms[arm][pool]["exact"]
+            want = (label,
+                    f"{exact['recall_pct_after']:.1f} %",
+                    f"{exact['ndcg_mean_after']:.4f}")
+            assert any(all(w in row for w in want) for row in table_rows), (
+                f"§8 has no {label} table row carrying the recomputed pool-{pool} "
+                f"figures {want[1:]}")
     # 4. the cost gap §8 prints is the artifact's
     ce_ms = arms["rerank"]["latency"]["ms_per_pair"]
     lo_ms = arms["lexical_overlap"]["latency"]["ms_per_pair"]
