@@ -15,6 +15,7 @@ green.
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -1578,13 +1579,10 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
 
     steps = {step.get("name"): step for step in report["steps"]}
     alarm = steps["What a red here means"]
-    # The comparison, not just the words: only an explicit 1 means "the artifact is
-    # broken". Reverting `!= "1"` to `= "2"` left the suite green, after which a cancelled
-    # canary (no exit code) rendered "### This is a RELEASE finding" (#12363 round 8).
-    assert '!= "1"' in str(alarm), "the alarm must treat anything other than exit 1 as an outage"
-    assert '= "2"' not in str(alarm), (
-        "matching only 2 lets a cancelled canary read as a release finding"
-    )
+    # The comparison is read by `comparison()` below — ONE comparison against ONE literal,
+    # on the variable the step declares. That is what replaced the spelling pins
+    # (`'!= "1"' in str(alarm)`, `'= "2"' not in str(alarm)`) which could not tell a
+    # comparison from a comment, and false-red a semantically identical rewrite.
     assert "needs.canary.outputs.exit_code" in str(alarm.get("env", {}))
     assert "DETECTOR outage" in str(alarm)
     alarm_text = str(alarm.get("run"))
@@ -1593,20 +1591,17 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
         "hit a runner fault, or that state stays unexplained"
     )
     # ⛔ The BODY must be bound to its own PREDICATE, and each predicate to the variable the
-    # step DECLARES (#12363 round 12; cycle-2 and cycle-3 findings, each measured green
-    # before its fix):
-    #   * `'= "0"'` is a SUBSTRING of `'!= "0"'`, so a spelling pin passed with the
-    #     runner-fault predicate INVERTED — exit 1 and exit 2 then both entered the runner-
-    #     fault branch and a REAL release finding was explained as "nothing is owed";
+    # step DECLARES — read as a COMPARISON, never as a spelling. Four measured bypasses are
+    # why; each one left the suite GREEN before the fix that closed it:
+    #   * `'= "0"'` is a SUBSTRING of `'!= "0"'`, so an INVERTED runner-fault predicate
+    #     passed and every non-zero exit was explained as "a runner fault … nothing is owed";
     #   * swapping the two branch BODIES (predicates and order untouched) kept every literal
-    #     assertion true while the exit-0 branch printed "detector outage — do NOT cut a
-    #     release";
+    #     assertion true while the exit-0 branch printed "detector outage";
     #   * a POSITION-only pin accepted a branch testing a variable nothing sets
-    #     (`${CANARY_RC:-}`): dead code, 56 tests green, and every exit-0 runner fault fell
-    #     through to the detector-outage text. The variable is derived from the step's own
-    #     `env:` block now, so a consistent rename still passes and a wrong variable does not.
-    # The predicates are read as LINES, not as one spelling: `[ x = y ]`, `[[ x == y ]]` and
-    # the Yoda form `[ y = x ]` all parse the same way here.
+    #     (`${CANARY_RC:-}`) — dead code, every exit fell through to the outage text;
+    #   * a COMPOUND predicate (`… = "0" ] || … = ""`) or a `:-0` default re-routed the
+    #     ABSENT reading into the runner-fault branch ("nothing is owed"), and a trailing
+    #     `# ${EXIT_CODE}` comment satisfied a substring test over dead code.
     env_key = next(
         (
             key
@@ -1616,6 +1611,35 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
         None,
     )
     assert env_key, "the alarm step must take the canary's exit code in its `env:` block"
+
+    def comparison(line: str, *, label: str) -> tuple[str, str, str]:
+        """(subject, operator, literal) of ONE shell test on this line.
+
+        Tolerant of what does not change meaning — quote style, `=`/`==`/`-eq`, `[[ ]]`, and
+        the Yoda form (`[ "0" = "$x" ]`) — and strict about what does: a SINGLE comparison,
+        whose subject is the variable the step declares with NO literal default. A trailing
+        shell comment is stripped first, so naming the right variable in a comment cannot
+        make a dead branch look alive.
+        """
+        code = line.split("#", 1)[0].strip()
+        assert "&&" not in code and "||" not in code, (
+            f"{label}: a branch predicate must be ONE comparison — a compound test reroutes "
+            f"exit codes without changing the structure this pin reads: {line!r}"
+        )
+        match = re.fullmatch(r"(?:el)?if\s+\[\[?\s*(.+?)\s*\]\]?\s*;?\s*then", code)
+        assert match, f"{label}: not readable as a single `[ … ]` test: {line!r}"
+        for operator in ("!=", "==", "-eq", "="):
+            parts = match.group(1).split(operator)
+            if len(parts) == 2:
+                break
+        else:  # pragma: no cover - the assertion below is the real guard
+            raise AssertionError(f"{label}: no comparison operator in {line!r}")
+        left, right = (part.strip().strip("\"'") for part in parts)
+        normalised = {"-eq": "=", "==": "="}.get(operator, operator)
+        if "$" in left:
+            return left, normalised, right
+        return right, normalised, left
+
     predicates = [
         line.strip()
         for line in alarm_text.splitlines()
@@ -1626,22 +1650,28 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
         "changes which exit codes reach which explanation"
     )
     runner_pred, outage_pred = predicates
-    assert f"${{{env_key}" in runner_pred, (
-        f"the runner-fault predicate must test ${{{env_key}}} — the variable the step itself "
-        f"declares; testing anything else is dead code that never fires: {runner_pred!r}"
+    declared = (f"${env_key}", f"${{{env_key}}}", f"${{{env_key}:-}}")
+
+    subject, operator, literal = comparison(runner_pred, label="runner-fault branch")
+    assert subject in declared, (
+        f"the runner-fault branch must test the variable the step itself declares "
+        f"({declared[1]}), with no literal default: a variable nothing sets is dead code, "
+        f"and `:-<literal>` turns an ABSENT reading into that literal — {runner_pred!r}"
     )
-    assert f"${{{env_key}" in outage_pred, (
-        f"the outage predicate must test ${{{env_key}}} — testing a variable nothing sets "
-        f"makes the branch unreachable: {outage_pred!r}"
+    assert (operator, literal) == ("=", "0"), (
+        f"the runner-fault branch must be a POSITIVE test for 0 — got `{operator} {literal}` "
+        f"in {runner_pred!r}; `!=` there explains a real release finding as a runner fault"
     )
-    assert '"0"' in runner_pred and "!" not in runner_pred, (
-        'the runner-fault branch must be a POSITIVE test for "0" — `!=` inverts it, and then '
-        "every non-zero exit (a real release finding included) is explained as a runner "
-        f"fault that owes nothing: {runner_pred!r}"
+    subject, operator, literal = comparison(outage_pred, label="outage branch")
+    assert subject in declared, (
+        f"the outage branch must test the variable the step itself declares "
+        f"({declared[1]}) with no literal default — testing anything else makes the branch "
+        f"unreachable: {outage_pred!r}"
     )
-    assert '"1"' in outage_pred and "!" in outage_pred, (
-        "the outage branch must test that the exit code is NOT 1, or an exit 2 / a cancelled "
-        f"canary reads as a release finding: {outage_pred!r}"
+    assert (operator, literal) == ("!=", "1"), (
+        f"the outage branch must test that the exit code is NOT 1 — got `{operator} "
+        f"{literal}` in {outage_pred!r}; any other literal lets a cancelled canary or an "
+        "exit 2 read as a RELEASE finding"
     )
 
     def heading_position(heading: str) -> int:
@@ -1878,30 +1908,40 @@ def test_the_canary_cannot_be_SILENCED_without_reding_this_file():
     assert smoke_run.index("GITHUB_OUTPUT") < smoke_run.index('exit "$rc"'), (
         '`echo exit_code=… >> $GITHUB_OUTPUT` must come BEFORE `exit "$rc"`'
     )
-    # ⛔ The PRODUCER end of the chain the close gate now depends on: ONE LIVE LINE must write
-    # the KEY the job output READS, to the output sink. Measured green before this pin's two
-    # fixes, each on its own (#12363 round 12, cycle-2 and cycle-3):
-    #   * `echo "rc=$rc" >> $GITHUB_OUTPUT` — the key renamed; and
-    #   * `# echo "exit_code=$rc" >> $GITHUB_OUTPUT` — the write COMMENTED OUT, which a plain
-    #     substring test cannot see because the text is still there.
-    # Both leave `exit_code` empty forever: nothing closes the release-owed ledger, and every
-    # red files as a detector outage. The line is filtered on being live, so a commented-out
-    # writer cannot satisfy it; the fragment is only the key + `$rc` + the sink, so `echo`,
-    # `printf` and a `tee` append all pass.
+    # ⛔ The PRODUCER end of the chain the close gate now depends on: EXACTLY ONE LIVE LINE
+    # must write the KEY the job output READS, to the output sink, carrying the tool's `$rc`.
+    # Each of these left the suite GREEN before the fix that closed it (#12363 round 12,
+    # cycles 2-4):
+    #   * `echo "rc=$rc" >> $GITHUB_OUTPUT` — the key renamed;
+    #   * `# echo "exit_code=$rc" >> $GITHUB_OUTPUT` — the write COMMENTED OUT, invisible to a
+    #     substring test because the text is still there;
+    #   * `echo "canary_exit_code=$rc"` — a PREFIX rename, which a bare `in` test accepts;
+    #   * a second live `echo "exit_code=0"` after the real one — GitHub keeps the LAST
+    #     assignment, so the verdict is overridden after the pin has looked at the first one.
+    # Every one of them leaves the gate reading something other than what the tool said:
+    # a constant, or nothing at all. The key is matched on a token boundary, the line is
+    # filtered on being live, and there must be exactly one.
     output_key = (
         str(workflow["jobs"]["canary"]["outputs"]["exit_code"])
         .split("steps.canary.outputs.")[1]
         .strip(" }")
     )
     live_lines = [line for line in smoke_run.splitlines() if not line.lstrip().startswith("#")]
-    assert any(
-        f"{output_key}=" in line and "$rc" in line and "GITHUB_OUTPUT" in line
+    writers = [
+        line
         for line in live_lines
-    ), (
-        f"no live line in the canary step writes `{output_key}=…$rc` to $GITHUB_OUTPUT: the "
-        f"job output reads `steps.canary.outputs.{output_key}`, so a renamed key (or a "
-        "commented-out write) leaves it permanently empty — nothing then closes the "
-        "release-owed ledger and every red reads as a detector outage (#12363 round 12)"
+        if "GITHUB_OUTPUT" in line
+        and re.search(rf"(?<![A-Za-z0-9_]){re.escape(output_key)}=", line)
+    ]
+    assert len(writers) == 1, (
+        f"the canary step must write `{output_key}` to $GITHUB_OUTPUT exactly ONCE — the "
+        f"LAST assignment wins, so a second writer silently overrides the verdict the gates "
+        f"read, and no writer leaves it empty forever (nothing then closes the release-owed "
+        f"ledger and every red reads as a detector outage). Found: {writers!r}"
+    )
+    assert re.search(r"\$\{?rc\}?(?![A-Za-z0-9_])", writers[0]), (
+        f"the single write of `{output_key}` must carry the tool's `$rc`, not a constant: "
+        f"{writers[0]!r}"
     )
 
 
