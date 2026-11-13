@@ -572,8 +572,10 @@ def test_add_operator_rejects_non_string_op_type():
             # The `got {op_type!r}` tail is dropped first: it REPRINTS the
             # rejected value, so `b"NAND"` and `["NAND"]` would supply the name
             # to a message whose acceptance clause had been deleted outright
-            # (measured: both still passed the bare-substring form with the
-            # clause gone, so half this assertion rested on the echo).
+            # (measured: with the clause gone, both still satisfied the *NAND*
+            # half of a bare-substring form, so that half rested on the echo —
+            # the *IMPL* half did not, because no rejected value's repr contains
+            # it).
             claim = msg.replace(repr(bad), "")
             # IGNORECASE is load-bearing, not cosmetic: `75c04668c7` folded case
             # here on review because a good-faith reword to `nand or impl` was
