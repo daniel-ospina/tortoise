@@ -6775,7 +6775,7 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     # ⛔ THE NEIGHBOUR ARM MUST NOT REFUSE ANOTHER FILE'S CITE, and both of these were
     # measured RED before `_neighbour_number_strays` existed. They are the natural
     # prose of a maintainer explaining the block's mechanism — and `03-test-design.md`
-    # is the bundle's cite-heavy document (`sdk.py:9938`/`:9991`, `capstone_run.py`),
+    # is the bundle's cite-heavy document (`sdk.py:10064`/`:10117`, `capstone_run.py`),
     # so its neighbours WILL name other modules with line numbers. Both numbers are
     # re-derived at this head (`grep -n subject_binding_available tortoise/sdk.py`) —
     # an earlier revision carried `9867`/`9920`, which is that pair minus 71: a
