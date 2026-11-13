@@ -3942,20 +3942,42 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
     """
     mod = _tool_module()
     seen: list[tuple[str, str | None]] = []
-    # ⛔ The `type` argument, recorded separately (review cycle 13): `tortoise_get_entity`
-    # is called ONCE PER LAYER (points, sources, events), so a pin that matched on the tool
-    # name alone would find the POINTS read and prove nothing about the Event layer.
+    # ⛔ The `type` argument, recorded separately (review cycle 13). `tortoise_get_entity` is
+    # used by the EVENT read only today (all four `_call` sites are inside `_get_entities`;
+    # points go through `tortoise_query`, everything else through `tortoise_graph_overview`),
+    # so this filter is future-proofing, NOT a defence against a points read — an earlier
+    # revision of this comment claimed the latter and that was false (review cycle 14).
     typed: list[tuple[str, str | None]] = []
-    surface = _operator_surface(operators=OPERATOR_ROWS, reported=len(OPERATOR_ROWS))
+    # ⛔ THE LAYER NEEDS A ROW TO RECONCILE (review cycle 14): with an EMPTY layer the
+    # stale and fresh arms are indistinguishable on the artifact, so the value pin below
+    # would have nothing to see.
+    EVENTS = [{"id": "e1", "eventKind": "domain", "content": "an event"}]
+    surface = _operator_surface(operators=OPERATOR_ROWS, reported=len(OPERATOR_ROWS),
+                               events=EVENTS)
+    status_calls = [0]
 
     def recording(name, args=None):
-        seen.append((name, (args or {}).get("section")))
-        typed.append((name, (args or {}).get("type")))
-        return surface(name, args)
+        args = args or {}
+        seen.append((name, args.get("section")))
+        typed.append((name, args.get("type")))
+        payload = surface(name, args)
+        # ⛔ THE FIRST status READ IS TOO EARLY TO VOUCH (review cycle 14). It is the
+        # top-of-verb `counts`, taken BEFORE the 34+-call point walk. Stripping its `Event`
+        # key makes the stale and fresh arms produce DIFFERENT artifacts, which is what
+        # gives the value pin below something to distinguish. Order alone is not enough:
+        # `live_counts = reader.counts()` followed by `read_events(counts)` keeps a `status`
+        # request immediately before the events read while reconciling against the stale
+        # count, and passed the order-only pin with the whole file green and ruff clean.
+        if args.get("section") == "status":
+            status_calls[0] += 1
+            if status_calls[0] == 1:
+                payload = {"counts": {"Point": 1, "Source": 0}}
+        return payload
 
     for verb in ("inventory", "plan"):
         seen.clear()
         typed.clear()
+        status_calls[0] = 0
         monkeypatch.setattr(mod, "_live_call_tool", recording)
         argv = [verb, "--graph", "org_x_g_old", "--no-verify-read",
                 "--out", str(tmp_path / f"{verb}.json")]
@@ -3973,12 +3995,23 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         # That revert is not cosmetic: `counts` predates the 34+-call point walk, so a graph
         # sitting at the bound whose layer shrank mid-walk REFUSES (rc 3) a layer that was
         # read whole, and widens #12445's stale-high window from two requests to the walk.
-        # Pinned on ORDER, like the operator pair, because order is the property.
-        status_at = max(i for i, (name, sec) in enumerate(seen)
-                        if name == "tortoise_graph_overview" and sec == "status")
+        #
+        # ⚠️ THE REQUEST IMMEDIATELY BEFORE the events read — not the LAST `status` request
+        # (review cycle 14): `max(...)` pinned "no status read anywhere AFTER the events",
+        # which is not the property, and a freshness-PRESERVING tidy-up (refresh `counts`
+        # after the walk, for the report) redded this test falsely. Measured.
         events_at = next(i for i, (name, t) in enumerate(typed)
                          if name == "tortoise_get_entity" and t == "events")
-        assert events_at == status_at + 1, (verb, seen, typed)
+        assert events_at >= 1, (verb, seen, typed)
+        assert seen[events_at - 1] == ("tortoise_graph_overview", "status"), (
+            verb, events_at, seen, typed)
+        # ⛔ AND THE VALUE, not just the order (review cycle 14, measured EVASION). A
+        # `status` request immediately before the read proves only that a request was made —
+        # NOT that its answer was used. Under the stale count the layer is filed on the
+        # UNREPORTED arm, so the artifact carries `events_total_reported: None`; under the
+        # fresh count it carries the layer's own length. That difference is the property.
+        out = json.loads((tmp_path / f"{verb}.json").read_text())
+        assert out.get("events_total_reported") == len(EVENTS), (verb, out)
 
 
 def test_the_plan_payload_carries_the_layers_three_fields(monkeypatch, tmp_path):
