@@ -4813,7 +4813,8 @@ _MANIFEST_CITE = re.compile(
 #:
 #: ⛔ IT REFUSES A DIGIT-HEAVY HEAD — EXACTLY, NOT "A HEAD". A hex head whose
 #: first three characters happen to be digits is refused (`9828250732`,
-#: `12345678`); a head that opens with a letter is NOT (`1a0ace24`, `e59e6076`),
+#: `12345678`); a head whose LEADING DIGIT RUN is shorter than three is NOT
+#: (`1a0ace24` — one digit, then a letter; `e59e6076`, which opens with a letter),
 #: because `_NUM` needs `\d{3,}` behind a non-word character. Measured, and pinned
 #: below, rather than claimed wider than the regex is: the contract this arm
 #: actually enforces is "a bare run of 3+ digits", and a hex head that begins with
@@ -4971,10 +4972,13 @@ def _parse_manifest(lines: list[str], failures: list[str]) -> dict | None:
     already in `block_failures`". With an empty manifest there IS no refusal, so
     every `_entries_or_failure` short-circuited and every "holds one" / "hold none"
     guard was suppressed: the whole block arm reported GREEN over a file it never
-    read. A top-level list or scalar was a DIFFERENT outcome and is not the same
-    finding: those parse to a non-`None` `list`/`str` (verified), so the pin went
-    RED — only its diagnostic then said "the key is ABSENT entirely", which is true
-    of every section and names the wrong cause. The parsed TYPE is checked here, at
+    read. A top-level `list` or a NON-NULL scalar (`str`/`int`/`float`/`bool`) was a
+    DIFFERENT outcome and is not the same finding: those parse to a non-`None` value
+    (verified), so the pin went RED — only its diagnostic then said "the key is
+    ABSENT entirely", which is true of every section and names the wrong cause. A
+    bare `null` / `~` document is NOT in that class: it parses to `None` and took the
+    empty-document path, which is why the check below is on the TYPE and not on
+    `is None`. The parsed TYPE is checked here, at
     the ONE place that can see both: a non-mapping parse is a collected finding, and
     so is an empty document, because `None` is not a mapping either.
     """
@@ -6185,7 +6189,7 @@ def test_the_manifest_line_cite_matcher_catches_every_spelling(prose):
     # ⛔ THE HEAD CONTRACT IS DIGIT-HEAVY, NOT "A HEAD" — the comment above `_BARE_NUM`
     # claims the narrower thing, and these four measured shapes are the proof in both
     # directions: a head that OPENS with 3+ digits is refused, one that opens with a
-    # letter (or with two digits) is not, because `_NUM` needs `\d{3,}`.
+    # letter, or with one or two digits, is not, because `_NUM` needs `\d{3,}`.
     ("the entry sat at head `9828250732`", True),
     ("the entry sat at head 12345678", True),
     ("the entry sat at head `1a0ace24`", False),
@@ -6230,11 +6234,16 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
      "the last re-derivation.", ["9943"]),
     ("The `carve_out:` entry in `config/ci-surfaces.yml` moved to 9987 this week.",
      ["9987"]),
-    # ⚠️ THE RESIDUAL, pinned so it cannot widen silently: a bare `:NNNN` on a line
-    # that also names another file is NOT seen. That is the deliberate cost of the
-    # exemption above — nothing mechanical can tell a continuation of that file's cite
-    # from a re-typed manifest line — and the doc-wide STRICT arm still catches a
-    # manifest-bound cite on any line at all.
+    # ⚠️ THE RESIDUAL, pinned so it cannot widen silently: on a line that also names
+    # another source file, ANY number is not seen — with or without a separator, and
+    # INCLUDING a line that names the manifest AND another file, where
+    # `_MANIFEST_FILE`'s subtraction leaves the other file to exempt it (measured:
+    # ``… sits in `config/ci-surfaces.yml` and in `README.md` read 9943`` returns []).
+    # That is the deliberate cost of the exemption above — nothing mechanical can tell
+    # a continuation of that file's cite from a re-typed manifest line — and the
+    # doc-wide STRICT arm still catches a SEPARATOR-bearing manifest cite on any line
+    # at all. A separator-less number on a manifest-plus-another-file line is the one
+    # shape neither arm reaches; it is stated here rather than left to be found.
     ("`capstone_run.py`'s corpus literal; the entry also sat at `:9987`.", []),
 ])
 def test_the_neighbour_arm_admits_another_files_cite_and_still_catches_this_claims(
