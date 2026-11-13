@@ -548,6 +548,54 @@ def test_the_payload_is_redacted_in_the_cli_refusal_arm(monkeypatch, capsys):
     assert json.loads(out)["is_error"] is True, out
 
 
+def test_the_authz_refusals_are_designed_refusals_not_crashes(monkeypatch):
+    """Round 11: the AUTHORIZATION refusals were registered by nobody.
+
+    The dispatch seam classifies them `auth_error` (`_classify_mcp_call_error`), so
+    they are designed refusals — but they are prose with no envelope and were in no
+    list, so `refusal_message` answered None and both consumers reported a SCOPE DENIAL
+    as a crash: `tools/curate_graph.py` re-raised it (uncaught traceback, rc 1, instead
+    of rc 3 with the actionable text) and `tortoise-client call` printed `call failed:`
+    for the most common refusal a scoped key receives.
+
+    Pinned from the PRODUCER's side: the messages are rebuilt from the leads the
+    producers write (`mcp_auth._REFUSAL_AUTHZ_*`), so a reworded producer that drops
+    the constant fails here instead of silently regressing.
+    """
+    from fastmcp.exceptions import ToolError
+
+    from tortoise import curation as C
+    from tortoise import mcp_auth, mcp_client
+
+    wires = (
+        f"{mcp_auth._REFUSAL_AUTHZ_UNKNOWN_TOOL_LEAD}florb — denied "
+        "(not present in the registry).",
+        f"{mcp_auth._REFUSAL_AUTHZ_WRITE_SCOPE_LEAD}tortoise_create_point.",
+        f"{mcp_auth._REFUSAL_AUTHZ_READ_SCOPE_LEAD}tortoise_query.",
+        f"{mcp_auth._REFUSAL_AUTHZ_GRAPH_SCOPED_LEAD}tortoise_org_create.",
+    )
+    for wire in wires:
+        assert mcp_client.refusal_message(wire) == wire, wire
+        assert mcp_client.refusal_message(ToolError(wire)) == wire, wire
+
+    # NON-VACUITY, in the other direction: a lead short enough to match a NEIGHBOUR
+    # would silence a crash page, which is worse than a refusal read as a crash.
+    for not_a_refusal in ("Graph was purged by an operator.",
+                          "Graph limit reached for this workspace.",
+                          "Graph disclosure: 3 rows were read from g1 because …"):
+        assert mcp_client.refusal_message(not_a_refusal) is None, not_a_refusal
+
+    mod = _curate_graph_module("11153_authz")
+
+    def _refuse(*_a, **_k):
+        raise ToolError(wires[1])
+
+    monkeypatch.setattr(mcp_client, "call_tool", _refuse)
+    with pytest.raises(C.CurationRefused) as caught:
+        mod._live_call_tool("tortoise_create_point", {})
+    assert str(caught.value) == wires[1], str(caught.value)
+
+
 def test_a_total_outage_of_the_orientation_summary_is_a_refusal(monkeypatch):
     """`tortoise_overview()` with no `section` must not bury a total outage.
 

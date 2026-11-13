@@ -1505,16 +1505,15 @@ def _enforce_mcp_tool_scope(name: str) -> None:
         # default used to be "read", so a write missing from the parallel list
         # was reachable from a graphs:read-only key.
         raise AuthorizationError(
-            f"Unknown tool {name} — denied (not present in the registry).")
+            f"{_mcp_auth._REFUSAL_AUTHZ_UNKNOWN_TOOL_LEAD}{name} — denied "
+            "(not present in the registry).")
     if entry.writes:
         if "graphs:write" not in have:
             raise AuthorizationError(
-                f"Key lacks graphs:write scope for tool {name}.")
+                f"{_mcp_auth._REFUSAL_AUTHZ_WRITE_SCOPE_LEAD}{name}.")
     elif "graphs:read" not in have and "graphs:write" not in have:
         raise AuthorizationError(
-            f"Key lacks a graph data scope (graphs:read) for tool {name}.")
-
-
+            f"{_mcp_auth._REFUSAL_AUTHZ_READ_SCOPE_LEAD}{name}.")
 def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
     """C5 #2114 (re-review 3): MCP tools that write ORG-level state (the
     DEFAULT graph's onboarding node / pack installs / session-recording
@@ -1526,7 +1525,7 @@ def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
 
     if _current_graph_id.get():
         raise AuthorizationError(
-            f"Graph-scoped keys cannot access {surface}.")
+            f"{_mcp_auth._REFUSAL_AUTHZ_GRAPH_SCOPED_LEAD}{surface}.")
 
 
 #: #2050 — MCP tools that perform a budgeted SENSITIVE OP in-process, mapped to

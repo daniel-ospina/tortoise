@@ -889,6 +889,29 @@ _REFUSAL_GRAPH_TARGET_LEADS = (
     "Graph name ",
 )
 
+#: The leads of the AUTHORIZATION refusals — the ones a scoped or graph-bound key
+#: receives from the dispatch seam itself (`mcp_server._enforce_mcp_tool_scope`,
+#: `_reject_graph_bound_mcp_org_surface`). They are DESIGNED refusals: the seam
+#: classifies them `auth_error` (`_classify_mcp_call_error`), and fastmcp hands their
+#: text to the caller as a bare `ToolError`. They were registered by NOBODY until
+#: round 11, so both consumers reported a scope denial as a crash — `curate_graph`
+#: re-raised it (uncaught traceback, rc 1, instead of rc 3 with the actionable text)
+#: and the CLI printed `call failed:` for the most common refusal a scoped key gets.
+#: ⛔ Each lead is the message's own stable opening INCLUDING the words after the
+#: variable ("for tool …", "cannot access …"): a lead short enough to match a
+#: neighbour is worse than a missing one, because it silences a crash page
+#: (see `_REFUSAL_GRAPH_TARGET_LEADS` for the measured example).
+_REFUSAL_AUTHZ_UNKNOWN_TOOL_LEAD = "Unknown tool "
+_REFUSAL_AUTHZ_WRITE_SCOPE_LEAD = "Key lacks graphs:write scope for tool "
+_REFUSAL_AUTHZ_READ_SCOPE_LEAD = "Key lacks a graph data scope (graphs:read) for tool "
+_REFUSAL_AUTHZ_GRAPH_SCOPED_LEAD = "Graph-scoped keys cannot access "
+_REFUSAL_AUTHZ_LEADS = (
+    _REFUSAL_AUTHZ_UNKNOWN_TOOL_LEAD,      # "… — denied (not present in the registry)."
+    _REFUSAL_AUTHZ_WRITE_SCOPE_LEAD,
+    _REFUSAL_AUTHZ_READ_SCOPE_LEAD,
+    _REFUSAL_AUTHZ_GRAPH_SCOPED_LEAD,
+)
+
 #: The refusal as a caller of a MUTATING tool must read it (#10849).
 #:
 #: ``_TRANSPORT_WAIT_BOUND_MESSAGE`` above is transport-neutral, so on the write
@@ -966,6 +989,7 @@ REFUSAL_PROSE_MESSAGES = (
     _REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE,
     _REFUSAL_RATE_LIMIT_LEAD,
     *_REFUSAL_GRAPH_TARGET_LEADS,
+    *_REFUSAL_AUTHZ_LEADS,
 )
 
 
