@@ -255,11 +255,16 @@ jobs:
       # artifact can go on being broken while every summary says so (#12363 round 5).
       - name: File or refresh the alert issue
         # `exit_code == '0'` means the canary DID reach a verdict: a later step failing
-        # (the transcript upload, say) is the runner's fault. Filing an outage issue for it
-        # would assert "could not evaluate" about a run that evaluated fine, and — because
-        # an exit-1 filing is what resolves the outage ledger — would leave that false
-        # record standing (#12363 round 9). The run page still gets the explanation, via the
-        # alarm's runner-fault branch ABOVE (#12363 rounds 10 and 12).
+        # (the transcript upload, say) is the runner's fault, so filing an issue for it would
+        # assert "could not evaluate" about a run that evaluated fine. The record would also
+        # be wrong in its TEXT, not merely redundant — and the close step below resolves BOTH
+        # ledgers on exactly this run (`exit_code == '0'`), so a wrongly filed issue would
+        # arrive as a duplicate-then-resolution pair on someone's ledger rather than as
+        # anything anyone could act on. (An earlier version of this comment justified the gate
+        # by "an exit-1 filing is what resolves the outage ledger" — true until round 10 moved
+        # the close gate onto the READING, and false here; #12363 final review, P3.) The run
+        # page still gets the explanation, via the alarm's runner-fault branch ABOVE
+        # (#12363 rounds 10 and 12).
         if: ${{ !cancelled() && needs.canary.result != 'success' && needs.canary.outputs.exit_code != '0' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

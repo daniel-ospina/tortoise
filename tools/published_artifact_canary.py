@@ -604,6 +604,18 @@ def render_summary(report: Report) -> str:
 # --------------------------------------------------------------------------
 
 
+#: One opener for every index read, with an EMPTY ProxyHandler so the ambient
+#: `http_proxy`/`https_proxy` are IGNORED — the same transport policy `_clean_env` gives the
+#: child. Module-level rather than per-call so the policy is a single object (and so tests
+#: swap one seam instead of monkeypatching `urlopen`, which this no longer uses).
+#: ⛔ Why it must match the child (#12363 final review, P2): a runner that needs a proxy to
+#: reach PyPI would otherwise read INDEX_OK here while the child's proxy-less pip cannot
+#: reach the index at all and prints pip's ABSENCE vocabulary — routed to FAIL/exit 1,
+#: "a release is owed", an irreversible upload, on every daily run. Proxy-only egress must
+#: read INDEX_UNREADABLE (exit 2, detector outage), which is the truth about it.
+_INDEX_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def fetch_index(package: str, timeout: float) -> tuple[dict[str, Any] | None, str, str]:
     """GET the index JSON. Returns (doc, reason, state).
 
@@ -614,8 +626,20 @@ def fetch_index(package: str, timeout: float) -> tuple[dict[str, Any] | None, st
     """
     url = INDEX_JSON.format(package=package)
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    # ⛔ THE PARENT HOLDS THE CHILD'S TRANSPORT POLICY. `_clean_env` strips every proxy
+    # spelling from the child so no proxy can satisfy the requirement from a mirror — but
+    # `urlopen` honours the AMBIENT `http_proxy`/`https_proxy`. On a box that needs a proxy
+    # to reach PyPI the two then disagree in the worst direction: the child cannot reach the
+    # index and prints pip's ABSENCE vocabulary ("No matching distribution found … (from
+    # versions: none)"), while this function answers INDEX_OK over the proxy — which
+    # `build_report` routes to FAIL ("users cannot even install it; a release is owed"),
+    # exit 1, and a RELEASE-ledger issue asking a human for an irreversible upload, on every
+    # daily run. With the proxy ignored here, that box reads INDEX_UNREADABLE instead: exit
+    # 2, "a DETECTOR outage is not a release signal", which is the truth about it
+    # (#12363 final review, P2). Measured: with `http_proxy=https_proxy=http://127.0.0.1:9`
+    # this opener reaches the index while `_clean_env()` returns no `*proxy*` key at all.
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _INDEX_OPENER.open(request, timeout=timeout) as response:
             payload = response.read()
     except urllib.error.HTTPError as exc:
         state = INDEX_ABSENT if exc.code in (404, 410) else INDEX_UNREADABLE

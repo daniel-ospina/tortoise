@@ -382,7 +382,9 @@ def test_a_truncated_index_body_is_UNREADABLE_not_a_bare_traceback(monkeypatch):
         def read(self):
             raise http.client.IncompleteRead(b"partial", 100)
 
-    monkeypatch.setattr(canary.urllib.request, "urlopen", lambda *a, **k: _Truncated())
+    monkeypatch.setattr(
+        canary, "_INDEX_OPENER", type("_O", (), {"open": lambda self, *a, **k: _Truncated()})()
+    )
     doc, reason, state = canary.fetch_index("tortoise-graph", 5)
     assert doc is None
     assert state == canary.INDEX_UNREADABLE, state
@@ -731,8 +733,12 @@ def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
     consistent rename to `$RUNNER_TEMP/logs/canary` at all five sites passed HERE and failed
     THERE (measured). Two artifacts asserting one fact, disagreeing, is the failure mode
     where neither is authoritative — so that pin was consolidated into this one rather than
-    left beside it. Do not reintroduce a second copy: if a site is added, add it to the
-    tuples below, which is what makes the count five rather than four.
+    left beside it. Do not reintroduce a second copy. If a site is added, register it at one
+    of the FIVE assertion points in the body below — the canary `paired(...)` call, the
+    `publish-pypi.yml`/`build` `paired(...)` call, the `downloads` list, the `log_ref`
+    regex, and the basename comparison against the tool — and update the count in the
+    failure messages. (Five today; there is no single tuple to extend, and an earlier
+    version of this docstring said there was — #12363 final review, P3.)
     """
     import re
 
@@ -1400,15 +1406,17 @@ class _Response:
 
 
 def _fetch_with(monkeypatch, *, payload=None, raises=None):
-    import urllib.error
-    import urllib.request
 
-    def fake_urlopen(request, timeout=None):
+    def fake_open(request, timeout=None):
         if raises is not None:
             raise raises
         return _Response(payload)
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        canary,
+        "_INDEX_OPENER",
+        type("_O", (), {"open": lambda self, *a, **k: fake_open(*a, **k)})(),
+    )
     return canary.fetch_index("tortoise-graph", 5)
 
 
@@ -1994,3 +2002,62 @@ def test_a_FOREIGN_database_under_HOME_does_not_count_as_initialised(tmp_path):
     )
     assert arm.status == canary.FAIL, arm.detail
     assert "created no database" in arm.detail
+
+
+def test_the_index_read_ignores_the_ambient_proxy_the_child_strips(monkeypatch):
+    """The parent and the child must share ONE transport policy (#12363 final review, P2).
+
+    `_clean_env` strips every proxy spelling from the child, so no proxy can satisfy the
+    requirement from a mirror. `urlopen` honours the AMBIENT `http_proxy`/`https_proxy`, so
+    before this the two disagreed on a proxy-egress runner in the worst direction: the child
+    could not reach the index and printed pip's ABSENCE vocabulary, while the parent answered
+    INDEX_OK over the proxy — routed to FAIL/exit 1, "a release is owed", i.e. a request for
+    an irreversible upload, on every daily run.
+
+    Asserted on the OPENER's handler policy (an EMPTY `ProxyHandler` is "ignore the
+    environment") plus the seam that every index read goes through that one object: a
+    behavioural test here would need a proxy to exist, and a monkeypatched `urlopen` is
+    exactly the seam this replaced.
+    """
+    import urllib.request
+
+    for name in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+
+    proxies = [
+        h for h in canary._INDEX_OPENER.handlers if isinstance(h, urllib.request.ProxyHandler)
+    ]
+    # An EMPTY `ProxyHandler` passed to `build_opener` makes it SKIP the default one, and the
+    # default is the only thing that reads `http_proxy`/`https_proxy` — so the assertion is
+    # the ABSENCE of any ProxyHandler. One present with non-empty `.proxies` means the
+    # environment is honoured again, which is the defect this pins.
+    assert proxies == [], (
+        f"the index opener carries a ProxyHandler {proxies!r}, so the ambient proxy environment "
+        "is honoured — a proxy-egress runner would read INDEX_OK here while the child's "
+        "proxy-less pip cannot reach the index at all"
+    )
+
+    # And every read must go through it: patching the module-level opener is enough to
+    # intercept the fetch, which `urlopen`-based code would have bypassed.
+    calls = {}
+
+    class _Resp:
+        def read(self):
+            return b'{"info": {"version": "0.2.0"}}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Opener:
+        def open(self, request, timeout=None):
+            calls["hit"] = getattr(request, "full_url", None)
+            return _Resp()
+
+    monkeypatch.setattr(canary, "_INDEX_OPENER", _Opener())
+    doc, reason, state = canary.fetch_index("tortoise-graph", timeout=1)
+    assert state == canary.INDEX_OK, (reason, state)
+    assert doc == {"info": {"version": "0.2.0"}}
+    assert calls["hit"] and "pypi.org/pypi/tortoise-graph/json" in calls["hit"], calls
