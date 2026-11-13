@@ -139,7 +139,31 @@ Status legend (verified, not inherited): **NEW** · **BUILT-OFF** · **BUILT-MIS
 
 Ordered by (evidence strength × our exposure).
 
-### M-1 ⭐ **A name-entropy / length gate on fuzzy matching** — Zep has it, we have nothing
+### M-1 ⛔ **A name-entropy / length gate on fuzzy matching** — Zep has it, we built it, **it is measured and DECLINED**
+
+> **MEASURED AND DECLINED (2026-11-13, `#12294`, PR `#12302`).** Both forms — our own token-level gate and Zep's
+> verbatim full-name port — were measured on the `#11901` harness (300 names / 419 variant pairs); the **product
+> wiring** was reverted, while the port, the measurement and the guards landed:
+> `docs/research/2026-11-12-11901-candidate-recall/measurement-entropy-gate-12294.json` on `main`
+> (`measured_at 2026-11-13T01:09:35Z`). Gating **costs recall and buys no duplicate protection**: our predicate
+> gates **86** names and the pooled k=15 window loses **80 of them** (6 rescued by the union; at k=3 only 1 is
+> rescued — the artifact's 85-lost cell there is an **upper bound**, since it predates the gate-independent split,
+> and the floor is 73), and `would_attach_before_any_k = 0` for **both** variants — no gated pair binds today, so
+> the gate prevents nothing.
+> ⚠️ **Read the leg before quoting these:** the artifact is **keyword-only** (`retrieval.legs_seen.vector: false`,
+> `window_modes {hybrid: 0, keyword_only: 4376}` — the dense leg was never submitted on that box), so the loss
+> counts *and* `would_attach_before_any_k` describe the lexical read, not the fused production read. What **is**
+> leg-independent is the gate's *selection*, because the predicate reads the mention string, not the window:
+> **86** names gated by our token-level predicate (71 of 180 definite) versus **0 of 180** definite by Zep's
+> verbatim full-name port (`1.5 / 6 / 2`). `#11901`'s own **hybrid** artifact independently measures
+> `variant.attached = 0` at every k (419 pairs, `retrieval.has_embedder: true`), which is what makes "no gated pair
+> binds today" true beyond the keyword-only leg.
+> **So the port does not do the job it is recommended for** — it gates nothing in the bare-definite class this
+> section's own correction below names, while our form gates 71 of 180 there — and the port loses all 15 names it
+> does gate at k=15. ⛔ **Do not dispatch this lever.** Decision and reopening condition: `#12294` (comment
+> `6845910595`); relays on `#12191` (comment `6845986540`) and `#12186` (comment `6846051038`). What stays open is
+> **the precision half for our population**, which has to be built rather than adopted, and is still unmeasured —
+> no constructed negative set exists.
 
 `_has_high_entropy` (`dedup_helpers.py:53-87,80`) refuses MinHash/Jaccard matching for names that are
 **short or low-entropy**: `_NAME_ENTROPY_THRESHOLD = 1.5`, `_MIN_NAME_LENGTH = 6`, `_MIN_TOKEN_COUNT = 2`
@@ -332,7 +356,7 @@ measurement of record — add this brief's corrections as a comment, do not re-o
 | proposed child | one-line scope | falsifier it carries |
 |---|---|---|
 | **N-1 — arm and measure the referentiality gate** (the omitted lever) | run `#5087` R1's measurement: 25 labelled rows + the 12 most-referenced rows a name-pattern rule would delete; then arm `TORTOISE_REFERENTIALITY` and re-measure the duplicate-noun rate on the same 419-pair fixture `#11901` used | **F1** the gate does not move the duplicate rate on the 419-pair fixture → leave it off and close with the number; **F2** it drops a must-keep referent on the 37 rows (`the admin-merge rail` is the named trap, `referentiality.py:37-49`) → the cue is wrong and the class belongs to the seam |
-| **N-2 — the comparison-side fuzzy key + entropy gate** (A1 corrected, + M-1) | reuse the EXISTING fold — `entity_resolver.normalize_entity_name` and `block_key` — and derive only Zep's **fuzzy** (punctuation-stripped) comparison key from it (never rewrite `name`), plus `_has_high_entropy`'s gate on which matcher may fire; reuse `DEFAULT_THRESHOLD = 0.72`, never a second constant. ⛔ **Never mint a third stored key beside `canonical_name` and `aliases[]`** — `#12047`'s review N8/P0 (`docs_miner.py:543-550`) records that as "a second key space in one property", against the "one fold, one key" invariant | **F1** the fuzzy key does not bind the 419-variant class beyond the separator fold `#11901` measured (100 % of in-window separator, 0 % of the 179 article pairs) → the fold is the whole win and the shingle index is not earned; **F2** any auto-link on a low-entropy name → the gate is mis-set |
+| **N-2 — the comparison-side fuzzy key** (A1 corrected) ⛔ **the `+ entropy gate` half of M-1 is MEASURED AND DECLINED (`#12294`, PR `#12302`) — scope the key alone, and answer F2 with evidence rather than by re-adding the gate** | reuse the EXISTING fold — `entity_resolver.normalize_entity_name` and `block_key` — and derive only Zep's **fuzzy** (punctuation-stripped) comparison key from it (never rewrite `name`), **not** `_has_high_entropy`'s gate on which matcher may fire — that half is measured and DECLINED (`#12294`); reuse `DEFAULT_THRESHOLD = 0.72`, never a second constant. ⛔ **Never mint a third stored key beside `canonical_name` and `aliases[]`** — `#12047`'s review N8/P0 (`docs_miner.py:543-550`) records that as "a second key space in one property", against the "one fold, one key" invariant | **F1** the fuzzy key does not bind the 419-variant class beyond the separator fold `#11901` measured (100 % of in-window separator, 0 % of the 179 article pairs) → the fold is the whole win and the shingle index is not earned; **F2** any auto-link on a low-entropy name → the comparison key (or its threshold) is mis-set — the entropy gate is declined (`#12294`), so a hit indicts the key, not a gate |
 | **N-3 — multi-key blocking with pair completeness** (A2 + M-2 + M-3) | union of blocking keys (identity property, exact-normalised, **an alias read** — see A2: `aliases[]` exists but `find_live_holder` has no production caller, so wiring it is part of this key union — name-shingle LSH) with **pair completeness measured** as the metric; report reduction ratio alongside it — ⛔ **and keep Zep's ORDERING: a fuzzy match above the Jaccard threshold resolves deterministically BEFORE the LLM adjudicator (`dedup_helpers.py:321-380`), which is the precision property, not an optimisation** | **F1** pair completeness does not rise above the **current CAPTURE-path blocker set** — FTS via `_find_existing_entity` (`extractor_v2.py:5762-5781`), which does **not** call `block_key` — on the `#11901` population → no blocker needed; **F2** pair *quality* (precision of the union) falls below that same set → the extra keys are noise |
 | **N-4 — the verdict's three bands + hard vetoes + the closure guard** (B1 + M-4) | ⛔ **FIRST: `SAME_AS` is not writable** (`edges.py:717`) and the 2730 brief records it as an **owner question** (`:241`) — so the three-band half's **`SAME_AS`-edge form** cannot dispatch until that ontology decision lands, and a **redirect form is not a substitute** — `resolved_from` is the merge pointer in every **collapsing** identity reader (§7.7 item 4 — eight of round 3's nine; the ninth is the deliberate non-collapsing `_name_holder_ids_same_entity`, and no retrieval reader knows the merge happened, round 3's D-1), so it builds a merge under a different label; the vetoes and the closure guard can in either case. then extend `resolve_entities`' existing two-phase to the ladder's rung 4: merge / link (`SAME_AS`) / new, with grounded-evidence gating (§X4), **and cross-group merge re-verification** (arXiv:2607.26298 lesson 3) as an acceptance criterion, not a follow-up | **F1** no verdict in the mid band ever changes a disposition vs today's exact-only rung → the band earns nothing; **F2** any `SAME_AS` chain of length ≥ 2 that re-verification does not catch → the guard is inert and B1 cannot ship |
 | **N-5 — pre-register the SPLADE leg** (C3, before M3) | write the falsifier the leg currently does not have: what number, on which corpus, would make SPLADE worth a hosted trained model on top of `bm25.py` + the fulltext leg | **F1** M3 fails → close the leg with the evidence (owner-pre-authorised); **F2** M3 passes but SPLADE does not beat `bm25.py`'s arm (already on) → the model is not earned even though the index move is |
