@@ -2965,7 +2965,9 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
                                   # `measurement-noun-path.json` →
                                   # `arms.rerank.latency`). The gate is ONE
                                   # process-wide variable at ONE wiring point
-                                  # shared with interactive search, where the same
+                                  # shared with interactive search AND the ask lane's
+                                  # retrieval (every caller of that read is behind
+                                  # it), where the same
                                   # lever prices at ~3.4 s/query (brief §5) — so
                                   # enabling it here buys BOTH, and the recall gain
                                   # above is bought at that cost. `_valid_time`

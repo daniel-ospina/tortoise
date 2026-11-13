@@ -272,9 +272,17 @@ So the user-search rerank **improves ranking and is not affordable**: 3.4 s per
 query on CPU, per query, in the interactive search path. **The lever earns its gate
 on the noun path only.** This is a scoped recommendation, not a general one — and
 the gate CANNOT enforce that scope: there is one process-wide variable at one wiring
-point shared by both surfaces, so enabling it for the noun path also adds it to
-interactive user search. Default-off does not bound the blast radius of turning it
-on; it only means nothing changes until someone turns it on for everything.
+point, and EVERY caller of this read is on it:
+
+| surface | priced here? |
+|---|---|
+| user search (`tortoise_search` / the SDK read) | yes — §5 above, ≈3.4 s/query |
+| the capture-time noun prior (`extractor_v2._fts_rows`, `limit=3`) | yes — §3/§6 |
+| the **ask lane** (`tortoise/ask_lane.py` reaches the same read with the default `order_by="relevance"`, no recency, a non-empty question) | **no** — and its candidate text is captured TURNS, i.e. the passage-length class priced at 85.227 ms/pair, so arming the gate there costs the same ≈3.4 s/query it costs user search |
+
+Default-off does not bound the blast radius of turning it on; it only means nothing
+changes until someone turns it on for all three — one of which this calibration does
+not price at all.
 
 ---
 

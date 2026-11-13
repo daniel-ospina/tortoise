@@ -41900,7 +41900,10 @@ class TortoiseSDK:
 
         # ── #12297: the FUSED-CANDIDATE-LIST rerank, placed AHEAD of the cut.
         #
-        # This is the ONE wiring point for both surfaces the issue names:
+        # This is the ONE wiring point, so EVERY caller of this read is behind the
+        # gate — the two the issue names, plus the ask lane (``ask_lane`` reaches
+        # this method with the default ``order_by`` and no recency, so it runs the
+        # rerank too; the brief's §5 table states that its cost is NOT calibrated):
         #   * user search — a caller's own ``limit`` (MCP ``tortoise_search`` /
         #     the SDK read);
         #   * the capture-time noun-matching prior — ``extractor_v2._fts_rows``
