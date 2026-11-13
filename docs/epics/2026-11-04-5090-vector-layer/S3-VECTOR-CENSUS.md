@@ -339,8 +339,9 @@ which SCORES the `#11455` clause itself (`test_the_row_VERDICT_reads_the_DEPLOYM
 green, so the artefact `#11086` item 4 is ticked on was pinned nowhere), and one by
 `#12182`'s duplicate-key detector for the CENSUS half
 (`test_the_census_has_no_DUPLICATE_dict_key_in_its_source` — the register half refuses a duplicate at
-import via `load()`, while a dict literal here accepted one silently and kept the LAST entry, which is
-exactly the forward-merge shape that produced this PR's P1)
+import via `load()`, while a dict literal here accepted one silently and kept the LAST entry. That is
+the shape `#11996` actually left on `main`, where only `ruff`'s `F601` saw it post-merge, and which
+`#12284` then had to de-duplicate; this tree's detector is the pytest-lane catcher `#9314` was missing)
 (`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 = 180`). ⚠️ No figure here names what `main` collects TODAY:
 which of those additions are already merged moves with `main`, so any "`main` at N" would be a moving
 reference this paragraph forbids — the total is bound to THIS TREE alone): seven

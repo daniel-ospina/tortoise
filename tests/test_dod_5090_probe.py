@@ -8241,7 +8241,14 @@ def test_the_census_has_no_DUPLICATE_dict_key_in_its_source() -> None:
     tree = ast.parse(src)
     wanted = {"WRITER_CENSUS", "CENSUS_EVIDENCE", "WRITER_LABEL_OVERRIDES"}
     seen: dict[str, list[str]] = {}
-    for node in ast.walk(tree):
+    # ⛔ MODULE TOP LEVEL ONLY (`tree.body`), NOT `ast.walk` (`#12182` review, P2 — measured). The
+    # walk visits a same-named literal ANYWHERE, and `seen[names[0]] = keys` is last-wins, so a
+    # 23-key `WRITER_CENSUS` literal inside a function OVERWROTE the real table and the duplicate in
+    # it became invisible — the final count check then compared 23 against 23 and passed. Reproduced
+    # on this tree: injecting a duplicate key alone reds (correct), and injecting it together with
+    # such a decoy came back CLEAN. These three tables are module-level declarations, so a top-level
+    # scan is both sufficient and the only scope where "the table" is a single object.
+    for node in tree.body:
         if not isinstance(node, ast.AnnAssign | ast.Assign):
             continue
         targets = [node.target] if isinstance(node, ast.AnnAssign) else list(node.targets)
@@ -8258,7 +8265,9 @@ def test_the_census_has_no_DUPLICATE_dict_key_in_its_source() -> None:
             "which one survived and why")
         seen[names[0]] = keys
     # A vacuous pass is the failure mode of a source-reading test: if none of the three literals was
-    # found, nothing was checked. All three exist today.
+    # found AT TOP LEVEL, nothing was checked. All three exist there today, so a MISS means a table
+    # was moved into a scope this detector no longer reads — re-derive it deliberately, do not widen
+    # it back to `ast.walk` (see the decoy above).
     assert set(seen) == wanted, (
         f"these census dict literals were not found in {probe.__file__}: "
         f"{sorted(wanted - set(seen))} — the detector checked nothing for them")

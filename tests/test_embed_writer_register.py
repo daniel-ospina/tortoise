@@ -4652,14 +4652,19 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
     # `UNGATED_CALLS` collision (neither is a builder) still fell through to first-seen, which is
     # source-order-dependent — and LIFO made "first-seen" the lexically LAST binding, so the common
     # `try: import encode_for_store` / `except ImportError: import encode_for_row` idiom resolved to
-    # the seam that never runs and the writer measured `gated`: HIDDEN, and a regression against
-    # `main` for a writer whose live binding is ungated. Both orders must now resolve to `ungated`,
+    # the seam that never runs and the writer measured `gated`: HIDDEN. ⛔ NOT "a regression against
+    # `main`", which is what this note said until `#12182`'s rebase review measured it FALSE —
+    # `origin/main` `f33f5e2c32` has no rank rule and reads `gated` for this arm too, so the ranked
+    # rule closes a pre-existing hide. Both orders must now resolve to `ungated`,
     # which is INSIDE `NEEDS_A_DECLARATION`.
     # ⛔ `#12020` round 8 cycle 5 (P1) — the rank rule was applied INSIDE one `_import_aliases`
     # call while the two maps were merged plainly (`{**module, **writer}`), so a WRITER-scope binding
     # beat the module's whatever its rank — and a writer-scope import is not automatically the live
     # one (`if TYPE_CHECKING:` is this PR's own idiom for a dead one). Measured: a dead writer-scope
-    # SEAM import beat a live module-level BUILDER alias → `gated`, a regression against `main`.
+    # SEAM import beat a live module-level BUILDER alias → `gated`, and the rank-1 variant → `ungated`.
+    # ⛔ Both are `origin/main` `f33f5e2c32`'s OWN answers (measured there: `gated` and `ungated`
+    # respectively), so the ranked merge closes a pre-existing hide and a pre-existing demotion — the
+    # earlier wording called it "a regression against `main`" and the rebase review measured that FALSE.
     "a_dead_WRITER-SCOPE_seam_import_does_not_beat_a_live_MODULE_builder_alias": (
         "from typing import TYPE_CHECKING\n"
         "from tortoise.vector_write import set_embedding_clause as _set\n"
