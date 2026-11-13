@@ -1297,6 +1297,41 @@ def test_an_unscoped_sweep_covers_every_goal_and_reports_truncation(sdk):
     assert capped["truncated"] is True
 
 
+def test_the_AUDIT_path_discloses_its_bound_instead_of_claiming_completeness(sdk):
+    """#11823's class, on the AUDIT half: a caller that reads a capped list as
+    exhaustive hears "clean" from a sweep that never looked.
+
+    ``verdicts()`` returns a bare ``list``, so it has no payload in which a
+    truncation flag could travel — the disclosure is therefore the docstring, and
+    that is what this pins: the bound is REAL (``limit`` bites), and the stated
+    contract names it instead of claiming every judgement in scope. The
+    mechanically readable surface stays :func:`invalidate_stale`, whose
+    ``truncated`` key is pinned by
+    ``test_an_unscoped_sweep_covers_every_goal_and_reports_truncation``.
+    """
+    worlds = [_world(sdk, tag=f"audit-{n}") for n in range(3)]
+    for i, t, g in worlds:
+        _judge(sdk, i, t, g)
+    assert len(verdicts(sdk)) == 3               # the whole scope, no cap hit
+    assert len(verdicts(sdk, limit=2)) == 2      # the cap is REAL, not decorative
+    doc = (verdicts.__doc__ or "").lower()
+    assert "limit" in doc and "truncat" in doc, (
+        "verdicts() must name its bound AND its truncation: it returns a bare "
+        "list, so the docstring is the only place a caller can learn that a "
+        "full-looking answer may have been cut off (#11823)")
+    assert "every live judgement" not in doc, (
+        "verdicts() must not claim completeness it cannot know: the scan is "
+        "capped at `limit` (default 10,000) and the function has no way to "
+        "report whether it hit the cap")
+    lj = (live_judgements.__doc__ or "").lower()
+    assert ("limit" in lj or "10,000" in lj or "10000" in lj), (
+        "live_judgements() makes the same capped read, so its docstring must "
+        "state the bound too")
+    assert "every live judgement" not in lj, (
+        "live_judgements() must not claim EVERY judgement either: it returns "
+        "at most `limit` rows")
+
+
 def test_the_claim_survives_with_a_SECOND_live_judgement_taking_over_the_cache(sdk):
     """Two targets on one goal (D4's 0..n) both produce a judgement. Retiring one
     must leave the goal reading the SURVIVING state, not a cleared cache."""
