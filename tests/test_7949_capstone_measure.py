@@ -5291,7 +5291,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # 9973 at `cd22562c24` — +30 across three landing PRs that each
         # registered lines above it; 9987 at `f1f74135a15b` (+13 at 2237 and +1
         # at 9150, the #12294 name-entropy gate); 10021 at `87c07462a807`, whose
-        # own +34 was made by three commits (32 at 7537, 1 at 1039, 1 at 2237 —
+        # own +34 was made by three commits: 32 at 7537, 1 at 1039, 1 at 2237 —
         # positions read off `87c07462a807` itself; the +32 hunk reads 7535 in the
         # commit that ADDED it (`ea2c41a696`), which is the wrong tree for this
         # sentence, exactly as the #9649 hunk reads 9737 in `276503dad1` and 9759
