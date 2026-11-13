@@ -1120,12 +1120,202 @@ export STUB_SWEEP_BODY='{"status":"error"}'
 run_driver
 assert_eq "$RC" 1 "33a. sweep error exits RED (1)"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "33a. sweep error files SWEEP_NO_COVERAGE"
+# #12264: the OTHER direction of the split, which had no pin at all. `{"status":"error"}`
+# IS a report the app made, so the categorical sentence and the measured-zero incident
+# body are CORRECT here. Collapsing either arm to the UNMEASURED sentence is a
+# one-line edit; without these assertions it stays green while asserting
+# "carried no status" about a body that carried one — the same defect the change
+# exists to prevent, mirrored.
+assert_contains "$OUT" "sweep backed up nothing (status=error)" \
+  "33a. a REPORTED error keeps the categorical terminal line"
+assert_not_contains "$OUT" "no readable sweep report" \
+  "33a. … and is never called an unread body"
+assert_contains "$(cat "$LOG")" "backups are NOT running" \
+  "33a. … and the filed incident states the measured zero"
+assert_not_contains "$(cat "$LOG")" "UNMEASURED" \
+  "33a. … never as an unread body"
+assert_contains "$OUT" "sweep status: error" \
+  "33a. … and the operator's first log line names the status the app sent"
+# The claim split lives on FOUR operator-visible strings (reported log, reported
+# incident TITLE, unreadable log, unreadable TITLE). `$LOG` is the STUB-CALL log
+# (GH/AWS lines); the driver's own `log()` output is `$OUT` — asserting a run-log
+# phrase against `$LOG` passes on the incident title echoed inside the POST body and
+# silently leaves the run log unpinned (#12264 round 8). Pin both surfaces.
+assert_contains "$OUT" "sweep did not back up (status=error)" \
+  "33a. … and the run log names the report it read"
+assert_not_contains "$(cat "$LOG")" "returned no readable report" \
+  "33a. … and the incident TITLE never calls a reported error an unreadable body"
 reset_case
 export STUB_STATUS_BODY="$(status_body true null null)"
 export STUB_SWEEP_BODY='not json at all'
 run_driver
 assert_eq "$RC" 1 "33b. non-JSON sweep body exits RED (1)"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "33b. non-JSON sweep body files SWEEP_NO_COVERAGE"
+# #12264: this is the NORMAL path — the CLI is present (the stub bin provides it),
+# so `SWEEP_REPORT_READ` is never consulted and the terminal arm's catch-all is
+# what speaks. `error` is DERIVED for a body that is not a JSON object, so the run
+# must not file a categorical "backups are NOT running" off it: no report was read,
+# which is why the incident exists, and the aggregate's state is unmeasured.
+assert_not_contains "$(cat "$LOG")" "backups are NOT running" \
+  "33b. … and the filed incident does NOT claim backups are not running off a body it could not read"
+assert_contains "$(cat "$LOG")" "UNMEASURED" \
+  "33b. … stating instead that whether anything was backed up is UNMEASURED"
+assert_contains "$(cat "$LOG")" "returned no readable report" \
+  "33b. … and the incident TITLE names what was actually wrong with the call"
+assert_contains "$OUT" "sweep returned no readable report" \
+  "33b. … and the run log says so too"
+assert_not_contains "$OUT" "did not back up" \
+  "33b. … never as 'did not back up', which is the claim the fix removes"
+assert_contains "$OUT" "no readable sweep report" \
+  "33b. … and the TERMINAL line says so too, instead of 'backed up nothing'"
+assert_not_contains "$OUT" "sweep backed up nothing" \
+  "33b. … which would be a zero this run never measured"
+# Review round 4 (P2-2): the FIRST log line must not print the derived `error` as if
+# the app had said it. Pairs with 33a's positive assertion on the same line.
+assert_contains "$OUT" "sweep status: <unreadable>" \
+  "33b. … and the operator's first log line says unreadable, not the derived status"
+assert_not_contains "$OUT" "sweep status: error" \
+  "33b. … never crediting the app with a status the driver derived itself"
+# #12264 round 6: the first log line must name the SHAPE for the three shapes the
+# driver substitutes — a budget timeout arrived with NO body, so "the body carried no
+# readable status" would describe a body that never came (and the pre-existing rule
+# this file states is "name the SHAPE, and do not fold two different faults into
+# one"). These are the pins for that line.
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_RC=28
+run_driver
+assert_contains "$OUT" "sweep status: driver_timeout" \
+  "33i. a budget timeout names its own shape on the first line"
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_RC=56
+run_driver
+assert_contains "$OUT" "sweep status: transport_error" \
+  "33j. a transport failure names its own shape on the first line"
+assert_not_contains "$OUT" "sweep status: <unreadable>" \
+  "33j. … not the unreadable-body sentence"
+# #12264: a JSON OBJECT with no readable `.status` is the third shape that derives
+# `error` — the app sent no status at all, so this must not be reported as the app
+# having reported one. Neither the categorical incident nor the "SECOND fault"
+# summary claim is available to this run.
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{}'
+run_driver
+assert_eq "$RC" 1 "33c. a JSON object with no status is RED (fail-closed)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "33c. … and still files SWEEP_NO_COVERAGE"
+assert_not_contains "$(cat "$LOG")" "backups are NOT running" \
+  "33c. … without claiming a zero it never measured"
+# #12264 finding 3: a WHITESPACE-ONLY body (a 200 carrying `\r\n` or spaces) used to
+# defeat `[ -z "$RUN" ]`, and jq then read pure whitespace as NO input with exit 0 —
+# so the `|| echo` fallback never fired, the run published a BLANK status, and the
+# catch-all filed a categorical outage. It is the empty exchange it looks like.
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='   '
+run_driver
+assert_eq "$RC" 1 "33d. a whitespace-only sweep body is RED (fail-closed)"
+assert_not_contains "$OUT" "status=)" \
+  "33d. … and never publishes a blank status"
+assert_not_contains "$(cat "$LOG")" "backups are NOT running" \
+  "33d. … and does not claim a zero it never measured"
+assert_not_contains "$OUT" "did not back up (status=)" \
+  "33d. … including the blank-status log line"
+# Review round 3 (P2-4): every assertion above is NEGATIVE, so a driver that dies
+# on this shape with rc=1 satisfies all four while printing nothing. Anchor the
+# arm that must have spoken.
+assert_contains "$OUT" "no sweep report was read (status=empty_response)" \
+  "33d. … and the empty_response arm actually spoke (not a silent early exit)"
+# #12264 round 7: pin the THIRD substituted shape on the first log line too. Without
+# this, keying the line on the curl rc instead of `RUN_SUBSTITUTED` folds a completed
+# exchange that carried no report back into the generic unreadable sentence, and stays
+# fully green (33i/33j only cover the two nonzero-rce shapes).
+assert_contains "$OUT" "sweep status: empty_response" \
+  "33d. … and the first log line names the substituted SHAPE, not the unreadable sentence"
+# #12264 finding 3, the shape the guard's own comment names: `$( )` strips trailing
+# newlines but NOT a `\r`, so a CR-only body is the one that proves the guard uses
+# `[[:space:]]` rather than a literal space. Narrowing the class stays green on the
+# spaces-only fixture above; it would lose the `empty_response` classification here.
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY=$'\r'
+run_driver
+assert_eq "$RC" 1 "33e. a CR-only sweep body is RED (fail-closed)"
+assert_contains "$OUT" "status=empty_response" \
+  "33e. … and is classified as the empty exchange it is, not as an unknown body"
+assert_not_contains "$OUT" "status=)" \
+  "33e. … never publishing a blank status"
+# #12264 finding 2: `{"status":""}` is the shape nearest to `{}` in meaning but it
+# does NOT collapse onto `error` (jq's `//` keeps an empty string), so the flag's
+# blank-status conjunct is the only thing standing between it and the categorical
+# incident (and, with the CLI missing, "a SECOND fault"). Dropping that conjunct
+# stays green on every other fixture. Note it DOES still publish a status —
+# `status=<unreadable>` — which is the honest rendering of an empty one, not a
+# blank field.
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":""}'
+run_driver
+assert_eq "$RC" 1 "33f. an empty status string is RED (fail-closed)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "33f. … and files SWEEP_NO_COVERAGE"
+assert_not_contains "$(cat "$LOG")" "backups are NOT running" \
+  "33f. … without claiming a zero it never measured"
+assert_contains "$(cat "$LOG")" "UNMEASURED" \
+  "33f. … stating that whether anything was backed up is UNMEASURED"
+assert_not_contains "$OUT" "status=)" \
+  "33f. … and never publishes a blank status field"
+assert_contains "$OUT" "status=<unreadable>" \
+  "33f. … naming it unreadable instead"
+# Review round 3 (P2-1): an all-WHITESPACE status is the same shape one character
+# later. A `!= ""` conjunct let `{"status":"   "}` through and it re-made all three
+# claims 33f exists to prevent (categorical incident, published `status=   `, and
+# "a SECOND fault" with the CLI missing). The flag must agree with the body guard.
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"   "}'
+run_driver
+assert_eq "$RC" 1 "33g. a whitespace-only status is RED (fail-closed)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "33g. … and files SWEEP_NO_COVERAGE"
+assert_not_contains "$(cat "$LOG")" "backups are NOT running" \
+  "33g. … without claiming a zero it never measured"
+assert_contains "$(cat "$LOG")" "UNMEASURED" \
+  "33g. … stating that whether anything was backed up is UNMEASURED"
+# Review round 3 (P2-1, second half): the same trim makes a PADDED success report a
+# success. Untrimmed, `{"status":" backed_up"}` fell to the catch-all and filed
+# "backups are NOT running" — the app said the opposite.
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":" backed_up "}'
+run_driver
+assert_eq "$RC" 0 "33h. a PADDED backed_up status is a success, not an outage (exit 0)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues {" \
+  "33h. … so no incident is filed against a graph that was backed up"
+# Review round 6 (non-finding noted as worth a fixture): the trim's BREADTH is what
+# matters, not just the success arm — a padded control status must land on its own
+# arm. `" already_running "` reached the catch-all before the trim and filed the
+# categorical "backups are NOT running" for a held lock.
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":" already_running "}'
+run_driver
+assert_contains "$OUT" "sweep lock held" \
+  "33k. a PADDED control status is recognised as itself, not as an unknown body"
+assert_not_contains "$OUT" "did not back up" \
+  "33k. … so it does not reach the catch-all's categorical claim"
+# Review round 7 (P2): the non-string `.status` family is the whole reason the flag
+# tests the TYPE, and no case used it. Its published token comes off the WIRE, so the
+# terminal line must not attribute it to the driver.
+reset_case
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":123}'
+run_driver
+assert_eq "$RC" 1 "33l. a non-string status is RED (fail-closed)"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "33l. … and files SWEEP_NO_COVERAGE"
+assert_contains "$OUT" "status=123" \
+  "33l. … publishing the value the body carried"
+assert_not_contains "$OUT" "driver's own classification" \
+  "33l. … without crediting the driver with a value that came off the wire"
 
 # ── 34. missing GITHUB_TOKEN → fail closed ─────────────────────────────────
 reset_case
@@ -3443,6 +3633,44 @@ assert_not_contains "$FOUT" "backups are not the part that failed" \
   "118. … and the terminal line does NOT deny the sweep fault the run just measured"
 assert_contains "$FOUT" "SECOND fault" \
   "118. … it names the coverage fault the missing CLI left unfiled"
+# #12264: the line above is the RIGHT claim for `{"status":"error"}` — the app
+# tried and failed, so a coverage fault is a second fault. It is the WRONG claim
+# for a body that is not a JSON object at all (a proxy's HTML 502, a truncated
+# payload): nothing was reported, so the coverage fault the driver's catch-all
+# recorded IS that unparseable body, not a second fault beside it. Both shapes
+# land on the status string `error`, so the split has to be on the body's TYPE.
+# Without this pin, folding the two back together is a one-line edit that stays
+# green — the F2b defect #12225 closed, one shape out.
+export STUB_SWEEP_BODY='<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>'
+set +e
+NJOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+NJRC=$?
+set -e
+assert_eq "$NJRC" 1 "118. a non-JSON sweep body is still RED with the CLI missing"
+assert_contains "$NJOUT" "returned NO report (status=error)" \
+  "118. … and it is reported as no report READ, not as a report that failed"
+assert_not_contains "$NJOUT" "SECOND fault" \
+  "118. … never as a SECOND fault — the coverage fault IS the unparseable body"
+# Review round 2 (P2-7): the negative assertion above passes VACUOUSLY if the arm
+# is never reached at all (a driver that crashes prints neither phrase). Pin the
+# arm's own positive clause too, so the block fails on an unreached summary.
+assert_contains "$NJOUT" "and a coverage fault was recorded — its SWEEP_NO_COVERAGE incident could not be filed" \
+  "118. … and the arm that spoke is the no-report one (not a silent early exit)"
+reset_case
+# #12264: `{}` is the third shape that derives `error` — an object with no readable
+# status. The app reported nothing, so neither the second-fault claim nor a
+# categorical incident is available to this run.
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{}'
+set +e
+OBJOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+OBJRC=$?
+set -e
+assert_eq "$OBJRC" 1 "118. an object with no status string is RED with the CLI missing"
+assert_not_contains "$OBJOUT" "SECOND fault" \
+  "118. … and is not called a SECOND fault — the app reported no status at all"
+assert_contains "$OBJOUT" "the sweep call returned NO report (status=error)" \
+  "118. … and the no-report arm actually spoke (not a silent early exit)"
 # Review C6: `degraded` is backed_up-with-per-graph-errors — the sweep-status case
 # takes `backed_up|degraded ;;` and leaves NO_COVERAGE=0 (suite 31a/46 pin that), so
 # a coverage fault was neither detected nor attempted. The first C5 fix invented
@@ -3812,6 +4040,15 @@ printf '#!/usr/bin/env bash\necho "aws-cli/2.31.27 Python/3.11.9 Linux/exe/%s"\n
 chmod +x "$bindir/aws"
 printf '%s\n' "$bindir" > "$SYNTH_MARKER"
 SYNTH_INSTALLER_EOF
+  # #12263: the tools THIS case adds are `zip` (it builds the fixture archive) and
+  # `unzip` (the SUT's own installer requires curl/unzip/sha256sum). Unguarded, a
+  # host without either aborts the harness under `set -euo pipefail` — with no
+  # summary line at all — or reds 9 assertions that are about the host, not the
+  # driver. Guard both, exactly like the TARCH arm above: a named skip keeps the
+  # suite's verdict.
+  if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+    ok "121. synthetic-archive assertions skipped — zip/unzip is not installed on this host (they build and unpack the fixture archive)"
+  else
   chmod +x "$FIX/inst/build/aws/install"
   ( cd "$FIX/inst/build" && zip -qr "$FIX/inst/serve/archive.zip" aws )
   SYNTH_SHA="$(sha256sum "$FIX/inst/serve/archive.zip" | awk '{print $1}')"
@@ -3858,10 +4095,11 @@ SYNTH_CURL_EOF
     "121. … and the post-check RAN the installed binary and reported its version"
   assert_contains "$(cat "$GP")" "$IROOT/bin" \
     "121. … and its bin dir is appended to GITHUB_PATH, without which the driver never sees it"
+  fi  # zip guard
 fi  # synthetic-install guard
 
 # ── 122. #12135: the REUSE branch's GITHUB_PATH append (review round 6) ──────
-# Case 120 covers the INSTALL path's append, case 119 the no-op, tamper, broken-cache
+# Case 121 covers the INSTALL path's append, case 119 the no-op, tamper, broken-cache
 # and discard paths. Untested until now: the reuse branch. That is the branch a
 # self-hosted host takes on EVERY run after the first — a fresh job's PATH never
 # contains $root/bin, so the `command -v aws` miss at :51 falls through and :67

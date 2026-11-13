@@ -172,10 +172,11 @@ production reader touched):
   directly-built `RecordNode` is counted too;
 * the RUN — `rebuild_from_record` carries the plan's drop beside its write
   counts as TWO report keys of different shapes: `dropped_vectors`, an `int`
-  TOTAL, and `dropped_vector_labels`, the sorted label list (the projection
-  returns them at `tortoise/projection/__init__.py`'s report dict, and
-  `record_restore.RestoreOutcome` types them `int` / `tuple[str, …]`). It also
-  logs a warning **after the write**, and `RestoreOutcome` prints the pair on
+  TOTAL, and `dropped_vector_labels`, the sorted TARGET list — record labels, and
+  since `#12015` a `<relationship:TYPE>` entry for an edge, which is not a label at
+  all (the projection returns them at `tortoise/projection/__init__.py`'s report
+  dict, and `record_restore.RestoreOutcome` types them `int` / `tuple[str, …]`). It
+  also logs a warning **after the write**, and `RestoreOutcome` prints the pair on
   the operator's line and in `as_dict()`. A rebuild that DELETES vectors a
   previous cache held must not read the same as one that lost nothing, and no
   re-run can bring them back: the record row is the only carrier and it is what
@@ -201,6 +202,91 @@ explanation, in both directions, so such a pair reads CACHE-HELD rather than as 
 projection gap whose only sanctioned repair is a re-projection that can no longer
 add the field. The alternative — moving the drop off the read door — was
 rejected: it would restore the "live ≠ rebuild" divergence the drop removes.
+
+### 0.5c A RELATIONSHIP carries no stored vector at all (`#12015`)
+
+§0.5b's rule is about a LABEL no query path serves. An edge is the same defect with
+**no label at all**: `public.relation` rows carry the same open-set `props` bag, the
+writer emits `SET r += $props`, and `chk_relation_props_no_derived` refuses only the
+four EP names — so an `embedding` key in a relation row lands a vector on a
+RELATIONSHIP, where `run_vector_query` (node-only: it validates an `entity_type` and
+derives a NODE label from it) can never reach it. That is `#5090` DoD row 2 again, and
+`hosted_backup._require_served_restore_labels` already refuses the identical shape at
+the DR door in `#11641`'s words — *"a RELATIONSHIP IS THE SAME DEFECT WITH NO LABEL AT
+ALL"* — reporting it as `<relationship:TYPE>`.
+
+So the projection refuses it the same way, at the same two doors:
+
+* `cache_projection.relation_from_row` drops it from the row→view map (so a record read
+  cannot advertise a vector the cache refuses) and records it on
+  `RecordRelation.dropped_vectors`;
+* `cache_projection.relation_statement` keeps its OWN check for a directly-built
+  `RecordRelation` (`record_plan` is public), records it on `Statement.dropped_vectors`
+  and never emits it in `params["props"]`;
+* `ProjectionPlan.dropped_vectors()` reports it as `<relationship:TYPE>` — `#11641`'s
+  spelling — and the operator's line names the right survivor ("the edges are restored",
+  not "the nodes"). ⛔ The KEY FORMAT has one owner:
+  `cache_projection.relationship_target` / `is_relationship_target` /
+  `RELATIONSHIP_TARGET_PREFIX`, because the operator line discriminates an edge entry
+  from a record label by that prefix and a format spelled out at each site can drift and
+  silently classify every entry as a node.
+
+The rule itself is `cache_projection.relation_vector_declined_properties`, which calls
+`stored_vector_props()` **on every call**, so a rebind of this module's
+`STORED_VECTOR_PROPS` moves the rule IMMEDIATELY — that is what the falsifier relies on.
+The one thing that IS bound at import is the owner→module binding itself
+(`from .stored_form import …`): rebinding `stored_form.STORED_VECTOR_PROPS` after
+import does NOT move it, exactly as with `UNSERVED_VECTOR_LABELS`. State the two
+separately — a reader who applies the natural repair for a "plain copy" (hoisting it to
+a module-level `frozenset` at import) breaks the falsifier and reds
+`test_the_declined_edge_property_set_is_DERIVED_not_a_second_list`. It is a function
+rather than a constant for three narrower reasons: there is no arithmetic to compute (so
+a constant would be a plain copy), both edge doors read ONE spelling of it, and the
+instrument's falsifier needs a name to replace. Which properties are vectors is still the
+ONE owner's answer — there is no second list. ⛔ It is NOT an index decision and NOT a
+claim that an edge could never be searched — if an edge vector index ever exists, this
+declaration **and** row 2's served-edge vocabulary
+(`tools/dod_5090_probe.score_path_bullet`) both change: emptying this one alone turns row
+2 `NOT MET` with every `<relationship:TYPE>` in `stored-without-a-query-path`, which is
+the falsifier this rule ships. And the reason it says *no query path* rather than *no
+label* is that the absence is in the READ leg, not in the storage.
+
+⚠️ **The `embedding_verbatim` marker goes with the vector it described.** A relation
+row's tail is an open set, so `embedding` and `embedding_verbatim` can arrive together;
+both doors pop the marker when they withhold a vector, which is `node_statement`'s `and
+not dropped` rule (`#11747`) one object over. A marker with no vector asserts a storage
+FORM for a value the same statement did not write.
+
+⚠️ **Residue, stated rather than discovered — and an incremental re-projection CANNOT
+clear it.** `relation_statement` is additive (`MERGE … SET r += $props`): `SET r += map`
+merges the map's keys and never REMOVEs one it does not carry, so a legacy cache that
+already holds `r.embedding` keeps it however many times the edge is re-MERGEd from a view
+that no longer carries the vector. Nothing on the read side reports it either —
+`record_serve` has no relation read (`NOT_SERVED`), `parity_difference` is label-scoped
+and `record_reconcile` compares nodes.
+
+Do not quote a remedy without these three facts (an earlier draft of this section was
+wrong twice here, `#12015` review):
+
+1. **An edge property-clear route does exist in this tree** — `ep.py`'s message drop
+   emits `MATCH ()-[r:IMPL|NAND]->() REMOVE r.msg_alpha, …`, a named clause on an edge.
+   What does not exist is a verb that clears a *declined vector property* on an edge
+   **in place** — a targeted removal of that one property (`#11070`'s explicit clear is
+   the NODE pair's; the wholesale route is (2), and it removes the edge with it). Measured
+   on FalkorDB,
+   `SET r += {embedding: null}` does clear the property, so either shape could be
+   built; neither is built today.
+2. **A full `record-restore` clears it, but is not an operator remedy on production**:
+   L2's `_assert_test_graph` refuses a server graph whose name does not start
+   `test_`/`tortoise_test`, which is every production cache. It is a remedy for a
+   disposable test graph and for embedded mode (which needs the per-call token).
+3. So on a production cache **no shipped route clears this residue** — the one route that
+   would, (2)'s full `record-restore`, is exactly the route (2) shows is refused on a
+   production graph, so it is not a remedy here. An operator clears the property
+   explicitly (`MATCH ()-[r:TYPE]->() REMOVE r.embedding`). The residue is reported, not
+   promised away — the same shape
+   §0.5b carries for nodes, where the module says "its write is additive … anything
+   else needs an explicit property clear".
 
 ### 0.6 Verification
 

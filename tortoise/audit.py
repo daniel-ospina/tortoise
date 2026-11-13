@@ -1666,7 +1666,20 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # neither-arm row, whose own leading instruction orders exactly that
         # (#12210 review, P3).
         neither_drops = (neither_arm and unread and not live_head)
-        if s["carrier_count"] == 1 and _succ_refused(s):
+        # ⛔ NOT ON A NEUTRAL ROW. This arm's rationale is about the SUCCESSOR ("a
+        # carry needs a successor EP actually reads"), which simply is not why a
+        # neutral edge is DROP — that edge transfers nothing in either direction
+        # (``ep.py``'s ``if not (fwd or bwd)``), so the question never arises and the
+        # fix for the same row orders DELETE. Firing here put three disagreeing
+        # statements in one finding: the fix says "§3.1's disposition is DROP" and
+        # orders the delete, this triage said the DROP is only "for the edge AS
+        # NAMED" and named "a carry needs a successor EP actually reads" (inviting a
+        # carry to a differently-named successor), while the module's own measurement
+        # (the ``unread`` note below) records that carrying a neutral input onto a
+        # live node leaves the bare prior (``effective_n 2.0``) — inert, exactly as
+        # deleting it is. Reachable: a `-` DIRECT edge, or a ``semantics='related'``
+        # operator, whose successor is operator-shaped (#12210 review, P3).
+        if s["carrier_count"] == 1 and _succ_refused(s) and not neutral:
             # ⛔ A CARRY needs a successor EP actually reads — and the check may only
             # say so when the name resolves to ONE carrier (an ambiguous name is the
             # repair's first problem, not a refusal). Where the successor is
@@ -1685,14 +1698,19 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "operator the engine evaluates), never by re-attaching it to a "
                 "successor that cannot carry it")
         elif neither_drops or neutral:
-            why = ("EP assembles no factor for this endpoint in either arm, so the "
-                   "support never counted"
-                   if neither_drops else
-                   f"this edge is {_quoted(s['direction'])} (neutral), so no "
-                   "confidence transfers through it by design")
+            # ⛔ ``neutral`` FIRST, and it decides the SCOPE as well as the reason: on
+            # a neutral edge the successor's readability cannot change the disposition
+            # (the edge transfers nothing either way), so "AS NAMED" would invite a
+            # carry that measures ``effective_n 2.0`` — the bare prior — on the very
+            # row whose ``fix`` says DELETE (#12210 review, P3).
+            why = (f"this edge is {_quoted(s['direction'])} (neutral), so no "
+                   "confidence transfers through it by design"
+                   if neutral else
+                   "EP assembles no factor for this endpoint in either arm, so the "
+                   "support never counted")
             disposal = (
                 f"{why} — the disposition "
-                f"{'for the edge AS NAMED' if neither_drops else 'here'} is DROP, "
+                f"{'for the edge AS NAMED' if (neither_drops and not neutral) else 'here'} is DROP, "
                 "or `pend` (the non-voting "
                 "placeholder) if the claim may still be revisited, and no door "
                 "implements `pend` today. ⛔ A refutation that STILL APPLIES is "
@@ -1725,12 +1743,19 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # the shape cleared too (``effective_n 2.5255`` after both). Naming only the
             # promotion put a true instruction beside a false one in one string
             # (#12210 review, P2).
-            _shape_too = (" AND clear the shape on the endpoint EP refuses "
+            # ⛔ ITS OWN SENTENCE, and it counts its own steps. Splice-joined with
+            # " AND " it followed ``_draft_mech``'s declarative ("…so nothing is
+            # dropped or re-scored") as one clause — "re-scored AND clear the shape"
+            # — the same gerund/imperative weld the sibling arms were fixed for; and
+            # "only both steps" named TWO while the instruction lists three (promote,
+            # clear the shape, move the edge) (#12210 review, P3).
+            _shape_too = (". Clear the shape on the endpoint EP refuses too "
                           "(``tortoise_update_entity(<the active endpoint>, "
                           "{'is_operator': False, 'op_type': None})``) — promoting it "
                           "and moving the edge WHILE that endpoint is still shaped "
-                          "builds no factor either (measured ``confidences {}``), and "
-                          "only both steps together restore it"
+                          "builds no factor either (measured ``confidences {}``), so "
+                          "ALL THREE steps are needed: promote, clear the shape, then "
+                          "move the edge"
                           if neither_arm else "")
             # ⛔ SPLIT BY MECHANISM, as `_chain_tail`/`_successor_note` already do: on
             # the OPERATOR lane the draft is STRIPPED and the factor re-scored over
@@ -1804,8 +1829,22 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # (#12210 review, P3). A refused SUPERSEDED endpoint never carried
                 # belief, so "the same posteriors" is false there; every other row
                 # keeps it.
+                # ⛔ THE OPERATOR LANE MAKES NO ARITY CLAIM. ``sup_refused`` is
+                # reachable on BOTH lanes (``_4b_state``: the operator lane's is the
+                # flag test), and the figure below is a DIRECT-lane measurement — on
+                # an operator row the SAME repair restores one confidence per input
+                # that survives, which this check deliberately does not project
+                # (measured: two inputs → ``[2.5255, 2.5255]``; three inputs →
+                # ``[2.2627, 2.5256, 2.2629]``, i.e. n_conf 3, not 2). Stating a
+                # count there is the arity assertion ``audit.py`` refuses to make
+                # ("The strings therefore do not assert an arity"), and the operator
+                # lane already carries the arity-safe ladder in ``_dropped_input``
+                # (#12210 review, P3).
                 + (" (measured: the carry described above restores two confidences)"
                    if neither_arm else
+                   " (measured: the factor runs again once the edge lands on a "
+                   "node EP reads)"
+                   if s["is_operator"] else
                    " (measured: the prescribed edge onto a live claim successor "
                    "restores two confidences, ``effective_n 2.5255``)"
                    if s["sup_refused"] else
@@ -1993,6 +2032,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # so the draft IS the destination — one promotion away. Withdrawing the name
         # here made the string deny the node its OWN triage and ``_chain_tail`` send
         # the reader to (#12210 review, P2).
+        # ⛔ ``not s["neutral_row"]`` IS DEFENSIVE, and that is stated rather than
+        # implied: every neutral path in this function RETURNS before it consumes
+        # ``dest``/``refused`` (the shape arm guards them with ``"" if neutral``, the
+        # direct arm and the operator arm each hit their own `return … DELETE` first),
+        # so removing the conjunct changes no emitted string and no test can see it —
+        # a mutation that drops it leaves the suite green. It stays so that a future
+        # arm cannot name a RE-POINT destination on a neutral row, where no carry can
+        # transfer anything (#12210 review, P3).
         carrier_unread = (s["carrier_count"] == 1 and not s["neutral_row"]
                           and _succ_unread(s))
         if carrier_unread:

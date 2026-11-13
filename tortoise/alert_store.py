@@ -88,8 +88,29 @@ PLATFORM_ALIASES = ("_", "global")
 _PENDING_PREFIX = "ops/pending-push/"
 _SUPPRESSION_KEY = "ops/suppression.json"
 
+#: The marker this store stamps on the recurrence record it posts when a DEDUPed
+#: incident is observed STILL UNHEALTHY (#12243).
+#:
+#: ⛔ Deliberately NOT the bash driver's exact marker (`OCCURRENCE_MARKER`,
+#: `.github/scripts/registry-cron.sh` → `<!-- dr-occurrence -->`). The driver
+#: publishes a recurrence NUMBER that it derives by COUNTING its own marked
+#: comments, so a second writer posting under the identical marker would inflate
+#: a number the driver states as fact. The two markers share the `dr-occurrence`
+#: prefix, so one `contains("dr-occurrence")` filter finds every recurrence
+#: record whichever writer posted it, while the driver's exact-match count still
+#: sees only its own.
+OCCURRENCE_MARKER = "<!-- dr-occurrence store -->"
+#: The sentinel field holding the UTC date of this store's LAST recurrence
+#: record — a RATE BOUND, never a published count. The sentinel is shared with
+#: the bash driver, which rewrites it, so any number kept there would be reset by
+#: the other writer (the reason the driver counts from the issue: see
+#: `registry-cron.sh`, "The count is read from the ISSUE … never from the R2 dedup
+#: object"). Nothing in this module derives a recurrence number from this field.
+_OCCURRENCE_DAY_FIELD = "last_occurrence_record"
+
 FileIssue = Callable[[str, str], int]      # (title, body) -> issue number
 CloseIssue = Callable[[int, str | None], None]
+CommentIssue = Callable[[int, str], None]  # (issue number, body) -> None
 SearchOpen = Callable[[str, str], list[int]]  # (kind, org_id) -> open issue numbers
 PushTelegram = Callable[[str], None]
 IssueOpen = Callable[[int], bool]           # (issue number) -> still open?
@@ -301,6 +322,7 @@ class AlertStore:
         search_open: SearchOpen,
         push_telegram: PushTelegram,
         issue_open: IssueOpen | None = None,
+        comment_issue: CommentIssue | None = None,
         default_writer: str = WRITER_UNSPECIFIED,
         repo: str,
         assignee: str | None = None,
@@ -310,6 +332,11 @@ class AlertStore:
         self._storage = storage
         self._file = file_issue
         self._close = close_issue
+        # #12243: the recurrence record's ONE egress. Optional: absent means "no
+        # comment channel configured", which is exactly the pre-#12243 behaviour
+        # (DEDUP posts nothing), so every existing construction site — tests
+        # included — keeps working unchanged.
+        self._comment = comment_issue
         self._search = search_open
         self._push = push_telegram
         # #3127: authoritative per-issue state reader. Preferred over the
@@ -522,6 +549,7 @@ class AlertStore:
                     kind, sibling, number,
                 )
                 self._note_still_unhealthy(sibling, state)
+                self._record_occurrence(sibling, state, kind, org_id)
                 return OpenOutcome.DEDUP
         if adopted:
             self._forget(adopted, kind)
@@ -553,6 +581,7 @@ class AlertStore:
                     except Exception as e:
                         logger.warning("dedup: could not drop our own sentinel %s: %s", key, e)
                     self._note_still_unhealthy(sibling, state)
+                    self._record_occurrence(sibling, state, kind, org_id)
                     return OpenOutcome.DEDUP
             self._become_filer(kind, org_id, detail, key, placeholder, writer)
             return OpenOutcome.FILED
@@ -563,6 +592,7 @@ class AlertStore:
             # already filed and still live — nothing to do beyond the #3146
             # unhealthy-observation reset.
             self._note_still_unhealthy(key, existing)
+            self._record_occurrence(key, existing, kind, org_id)
             return OpenOutcome.DEDUP
         # Placeholder (winner died mid-filing): become the filer via GH-search
         # fallback to avoid duplicates.
@@ -591,6 +621,145 @@ class AlertStore:
         """
         if _streak_of(state) > 0:
             self._set_healthy_streak(key, state, 0)
+
+    def _record_occurrence(self, key: str, state: dict[str, Any],
+                           kind: str, org_id: str) -> None:
+        """Record that a DEDUPed incident was observed STILL UNHEALTHY (#12243).
+
+        Every DEDUP return above resets the recovery window and posts NOTHING, so
+        an incident re-observed on every sweep was indistinguishable on GitHub
+        from one that fired once and went quiet — #3907's *"a dedupe that hides
+        the escalation converts noisy into blind"*, fixed on the bash driver
+        (``registry-cron.sh`` → ``gh_record_occurrence``) and never on this side
+        of the same lifecycle. Measured cost (#12136 triage): 21 open
+        ``[DR] DATA_LOSS_CANDIDATE`` issues, ages 23-29 days, **zero comments
+        each** — the fleet's only visibility into "21 of 92 graphs have had no
+        archive for 3+ weeks".
+
+        ADDITIVE ONLY, like its bash twin: it comments and logs, and it NEVER
+        changes the incident lifecycle — no close, no delete, no re-file, and no
+        change to the outcome the caller returns. A failed comment is logged and
+        swallowed: the incident is already LOUD without it, and letting it
+        propagate would turn a failed COMMENT into a failed POLL.
+
+        BOUNDED to one ATTEMPT per incident per UTC day
+        (:data:`_OCCURRENCE_DAY_FIELD`), claimed BEFORE the post: this runs inside
+        the sweep loop for every open incident, so a channel that fails
+        persistently must not re-POST every poll. The bound is the store's own
+        write, in the only place it may trust one; the record itself carries no
+        running number — see :data:`OCCURRENCE_MARKER` for why.
+
+        BEST-EFFORT, in BOTH directions, and each is bounded:
+
+        * **Silence (lost record).** The day is claimed before the post, so a post
+          that fails costs that UTC day's record for that incident — the claim
+          landed, and it is the claim that bounds the attempts. A claim that
+          cannot be WRITTEN costs only that observation: nothing is posted while
+          the write keeps failing, and the first poll after it recovers records.
+          Both are the price of the attempt bound below; the alternative is an
+          unbounded storm.
+        * **Over-report.** The day is a field on a sentinel object shared with the
+          bash driver, which rewrites it with an unconditional GET->PUT (no ETag
+          guard), so a lost update can re-record once later in the day, and two
+          live writer processes can each post once. Bounded and cosmetic.
+
+        What it is NEVER allowed to do is burst: a post happens only when the
+        day's claim was actually written, so neither a failing comment channel nor
+        a failing sentinel write can produce one post per poll.
+        """
+        if self._comment is None:
+            return
+        number = state.get("issue_number")
+        if not number:
+            return
+        # ONE reading of the clock for both the bound and the stamp it records: a
+        # second reading could straddle UTC midnight and stamp tomorrow's time
+        # under today's day.
+        now = self._clock()
+        day = now.date().isoformat()
+        if state.get(_OCCURRENCE_DAY_FIELD) == day:
+            return
+        # ⛔ The day is claimed BEFORE the post, not after: the bound must cap
+        # ATTEMPTS. `open_incident_state` runs once per incident per POLL, so a
+        # channel that fails PERSISTENTLY — a locked issue (403), a
+        # deleted/transferred one (404), a token without `issues: write`, a
+        # secondary rate limit — never clears, and stamping only on success would
+        # re-POST on every poll forever, on the same credential the incident
+        # FILING needs (a starved search makes the store refuse to file, #3029).
+        # That is the write-burst hazard #5143 already bounded on the close path
+        # (`_close_cooldown_min`), so it is bounded here the same way. The cost is
+        # one lost record when a post fails transiently; the alternative is an
+        # unbounded storm.
+        #
+        # ⛔ AND THE CLAIM IS A PRECONDITION OF THE POST, not merely a stamp: if it
+        # cannot be written (a partial R2 outage, a read-capable but
+        # write-refused credential) then no record is posted at all. Posting
+        # anyway would fail open in the mirror direction — an unwritten bound,
+        # re-entered once per poll, is the same unbounded burst the channel-failure
+        # rule above exists to prevent. A missed record is bounded; a burst is not.
+        if not self._set_occurrence_day(key, state, day):
+            return
+        # #3293: the issue comment is a PUBLIC publication sink, so the
+        # caller-supplied half is scrubbed AT THIS BOUNDARY exactly as `_title`
+        # and `_body` scrub it — a future caller cannot publish unredacted text
+        # through this sink.
+        label = redact_for_publication(f"[DR] {kind} — {org_id or '_'}")
+        body = (
+            f"🔁 **Observed again** — `{label}` was still unhealthy at "
+            f"`{now.isoformat()}`. This incident is "
+            "already tracked by this issue, so no duplicate was filed.\n\n"
+            f"{OCCURRENCE_MARKER}"
+        )
+        try:
+            self._comment(int(number), body)
+        except Exception as e:
+            logger.warning(
+                "dedup: recurrence record on issue #%s FAILED (%s) — the incident "
+                "is still on record and still LOUD; this UTC day's record is not "
+                "retried (the bound caps ATTEMPTS, so a persistently failing "
+                "channel costs one post a day, never one a poll)", number, e,
+            )
+            return
+
+    def _set_occurrence_day(self, key: str, state: dict[str, Any], day: str) -> bool:
+        """Compare-and-set the recurrence-record day on a sentinel (#12243).
+
+        Returns True only when the day was actually WRITTEN — the caller posts on
+        that answer alone, because an unwritten bound re-entered once per poll is
+        an unbounded comment burst (see :meth:`_record_occurrence`).
+
+        Same discipline as :meth:`_set_healthy_streak`, for the same reason: the
+        caller's ``state`` is a snapshot taken earlier in the call, so a BLIND
+        write would clobber a sentinel another writer re-filed in between (a NEW
+        ``issue_number``) and orphan that open issue. Written only when the
+        object still matches the snapshot, and not at all when it disappeared
+        (resolved under us).
+
+        Never raises: it ANSWERS instead. Every refusal is logged — a re-file or a
+        failed write at WARNING, a resolved sentinel at INFO — and costs this
+        observation's record, never the poll.
+        """
+        try:
+            current = _read_json(self._storage, key)
+            if not current:
+                logger.info(
+                    "recurrence record: %s is gone (resolved under us) — nothing "
+                    "to record", key,
+                )
+                return False
+            if (current.get("issue_number") != state.get("issue_number")
+                    or current.get("filed_at") != state.get("filed_at")):
+                logger.warning(
+                    "recurrence record: %s changed while we were recording it — "
+                    "leaving it alone (the other writer re-filed)", key,
+                )
+                return False
+            current[_OCCURRENCE_DAY_FIELD] = day
+            _write_json(self._storage, key, current)
+            return True
+        except Exception as e:
+            logger.warning("recurrence record: could not bound %s for %s: %s", key, day, e)
+            return False
 
     def _set_healthy_streak(self, key: str, state: dict[str, Any], value: int) -> None:
         """Compare-and-set ``healthy_streak`` on a sentinel (#3146).
