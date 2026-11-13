@@ -78,8 +78,12 @@ gate holds arm 4 — added on this branch; default OFF so the committed #11901 a
   lines**, harvested **111,059** definite + **10,820** ident + **4,226** path
   distinct names (`population_digest 0aa80dff278c4e58`);
 - population **1,000**, stratified sample **300** = 180 definite / 90 ident / 30
-  path (**60.0 % bare definite descriptions** in the sample, reflecting the
-  audit's 62.3 % share of real `:Object` names);
+  path (**60.0 % bare definite descriptions** in the sample — ⛔ a fixed QUOTA, not a
+  measured mix: those three classes are 88.1 % / 8.6 % / 3.4 % of the harvested
+  population, so the sample deliberately OVERSAMPLES the minority shapes, exactly as
+  #11901's brief states. The audit's 62.3 % is its share of real `:Object` names and is
+  what the sample was sized around; it is **not** what this sample's 60.0 % estimates,
+  and no composite here is a production-mix estimate);
 - per mention, the **real fused read** at pool width P, scored by the **shipped**
   `rerank.CrossEncoderScorer` with **one `score(query, contents)` call**, then
   cut to **3** — the production per-query window `extractor_v2._fts_rows` passes;
@@ -339,9 +343,12 @@ deliberate exception on the write path: it keeps the rerank, under its own
 
 ⛔ And the composition change is **bounded by arithmetic, not by the sweep**: the
 rerank permutes only the scorable head, whose length is the WIDTH
-(`min(len(pool), TORTOISE_FUSED_RERANK_POOL)` — `_pool_n` in `sdk.py`), not the number
-of rows that carried text (`rerank_scored` on the trace entry). A caller reading
-`limit >= that width` gets the same **membership** — while the ORDER of that page did
+(`min(len(candidates), TORTOISE_FUSED_RERANK_POOL)` — `n_scored` in
+`rerank.rerank_pool`), not the number of rows that carried text (`rerank_scored` on the
+trace entry). ⛔ Two different figures, one name apart: the trace's `rerank_pool` key
+reports the CONFIGURED width (`fused_rerank_pool_width()`, `_pool_n` in `sdk.py`), so a
+one-candidate read at width 40 shows `pool=40` while the permuted head was one row. A
+caller reading `limit >= that width` gets the same **membership** — while the ORDER of that page did
 change, `count` on the trace entry being exactly how many positions moved, which is
 also why the lever buys such a caller nothing. That is why the public reads at
 `limit >= 50` are safe today, with the shipped width 40. ⛔ Read the width, not the
