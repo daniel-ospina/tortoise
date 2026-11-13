@@ -85,12 +85,24 @@ The graph is minted fresh by the caller (a random suffix) and closed on exit;
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.12+-only import (this tool imports the retrieval stack, which pins the repo
+# floor) would raise an UNATTRIBUTED ImportError first, which reads as "this tool
+# is broken" rather than "your interpreter is too old" (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/underscore_or_terms_12360.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/underscore_or_terms_12360.py`"
+    )
+
 import argparse
 import collections
 import hashlib
 import json
 import os
-import sys
 import time
 from pathlib import Path
 
