@@ -38,7 +38,8 @@ unusable, and the two failures have different fixes:
 
 This tool measures both, on a real entity-name population, through the real
 code path, so "does the window earn its keep" is answered by a number instead of
-by an argument. Three arms, because the failures have different fixes:
+by an argument. The first three arms exist because the failures have different
+fixes:
 
   ARM 1  RETRIEVAL     a mention that IS the stored name — how often is the node
                        in the window at each k? (widening can help)
@@ -49,6 +50,19 @@ by an argument. Three arms, because the failures have different fixes:
                        point of #11901 is to decide on evidence, not to patch.
   ARM 3  THE UNION     how large is the candidate set a capture actually hands
                        `resolve_entities`? (not `limit` — see below)
+
+  ARM 4  THE GATE      `#12294`'s name-entropy gate: for each name, would the
+                       ported predicate refuse its query, and — the number that
+                       decides the lever — was its CANONICAL in the window the
+                       gate would remove? Two predicates (`zep_full_name`, the
+                       verbatim port, and `shipped`, the same rule applied to
+                       the content tokens the leg actually searches), plus
+                       `gate_variant` (what it removes from the variant pairs)
+                       and `pooled_gate` (whether the OTHER names' queries in a
+                       real capture union rescue a gated name). Measured and
+                       DECLINED — the full record is beside the predicate,
+                       further down this file, and in
+                       `tests/test_name_entropy_12294.py`.
 
 POPULATION — WHAT IS REAL AND WHAT IS NOT (read before quoting a number)
 -----------------------------------------------------------------------
