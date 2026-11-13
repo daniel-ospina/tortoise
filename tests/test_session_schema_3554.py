@@ -1965,7 +1965,7 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     Finding 1 of #12089: the sibling pin's SCOPE paragraph offered *"3 of 39 blocks
     cite a comment id, and v3.33 — the block that landed `D2 — A` for this very
     question — cites none"* as the evidence for narrowing a gate's scope. Measured at head ``7e6baffc5d`` the
-    count is **4 of 39**, and that block DOES cite — the permalink
+    count is **4 of 40**, and that block DOES cite — the permalink
     ``#issuecomment-5619843002`` (``docs/ONTOLOGY-CHANGELOG.md:186`` at that head):
     the citing versions are listed below, one entry per block, and the sentences that
     quote them are checked by this pin. Both halves
@@ -2030,7 +2030,7 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     # ⛔ WHITESPACE IS NORMALISED BEFORE MATCHING, in both the scan text and the
     # docstring: markdown line wrapping is not part of a fact, and a scan that
     # cannot see a re-wrapped sentence reds with a message denying the prose says
-    # what it does (measured: re-wrapping `**4 of 39**\n blocks cite a comment id`
+    # what it does (measured: re-wrapping `**4 of 40**\n blocks cite a comment id`
     # produced "must appear exactly ONCE … found 0", with no second copy anywhere).
     module_source = re.sub(
         r"\s+", " ", Path(__file__).read_text(encoding="utf-8"))
@@ -2544,7 +2544,7 @@ def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
     # ⛔ THE STATED PAIR IS RE-ASSERTED HERE (review finding, measured). The bold arm
     # in `_assert_no_stale_citation_claim` accepts BOTH true pairs — the citing count
     # and its complement — so if the pin's own `stated` assertion were deleted, a
-    # docstring claiming 35 of 39 blocks cite a comment id (4 do) would pass it.
+    # docstring claiming 36 of 40 blocks cite a comment id (4 do) would pass it.
     # Measured: deleting that assertion plus editing the sentence left 57 passed. The
     # sibling's pair is read from its docstring and compared against the block counts
     # the pin itself handed to the sweep arm.
@@ -2574,7 +2574,7 @@ def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
         # ⛔ AND THIS PIN'S OWN DOCSTRING, WHICH THE BOLD ARM CANNOT REFUSE EITHER
         # (review finding, measured). `allowed_bold` accepts the citing count AND its
         # complement in ANY position, so changing this docstring's `count is **4 of
-        # 39**` to `**35 of 39**` — a false claim, since four blocks cite — left the
+        # 39**` to `**36 of 40**` — a false claim, since four blocks cite — left the
         # whole suite at 57 passed. The sentence makes a CITING claim (`the count is
         # <N of M>`), so the citing pair is what it must state.
         # ⛔ AND THE TWO ADJACENT CLAIMS ON THE SAME SENTENCE (review finding,
@@ -2908,8 +2908,8 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
     measured to false-block. Demanding a comment id in EVERY newest block reds
     the next release that touches §4.5 (verified with a synthetic `v3.35`), and
-    the file's practice does not support the demand: **4 of 39** blocks cite a
-    comment id, so **35 of 39** cite none; citing versions: v3.34, v3.33, v3.33, v3.32
+    the file's practice does not support the demand: **4 of 40** blocks cite a
+    comment id, so **36 of 40** cite none; citing versions: v3.34, v3.33, v3.33, v3.32
     — one entry per block, the first of the two v3.33 entries being the block
     that landed `D2 — A`. An unconditional demand reds a legitimate release that
     changes something else. (Re-measured at head
@@ -2925,7 +2925,7 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     BOTH halves were wrong. That block is `docs/ONTOLOGY-CHANGELOG.md:148` (issue
     #11824) and it DOES cite, as the permalink ``#issuecomment-5619843002`` at
     `:186` — an accepted form, enumerated below, in the sentence the old text
-    contradicted. So v3.33 is not evidence for the narrow scope; the 35 blocks that
+    contradicted. So v3.33 is not evidence for the narrow scope; the 36 blocks that
     cite nothing are.)
     What the approval rule actually needs is that no
     release RECORDS owner-approved §4.3 text without naming where that approval
@@ -3012,8 +3012,12 @@ def test_the_approval_arm_refuses_a_bare_or_disclaimed_citation() -> None:
     read from it, never written here — so this file states no id of its own and the
     arm cannot go stale against the file it guards.
     """
-    block = _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
-    assert _quoted_clause(block) is not None, (
+    # ⛔ The §4.3-quoting block is located by SEARCH, not by position: a newer release may
+    # legitimately not touch §4.3 (measured — the v3.35 entry is about §4.1), and reading
+    # `blocks[0]` then asserted against a block that quotes nothing.
+    block = next((b for b in _block_bodies(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+                  if _quoted_clause(b) is not None), None)
+    assert block is not None, (
         "the landed block no longer records the §4.3 clause, so this arm's only "
         "accepting direction cannot be exercised against it")
     identifiers = _citation_ids(block)
@@ -3318,8 +3322,11 @@ def test_the_pin_itself_refuses_a_synthetic_entry_that_disclaims_its_approval(
     entry is shaped exactly like a real release and only the approval half differs.
     """
     clause = _landed_object_lifecycle_clause(ONTOLOGY.read_text(encoding="utf-8"))
+    # ⛔ Located by SEARCH, not position: a newer release may not touch §4.3 at all
+    # (measured — the v3.35 entry is about §4.1 and cites no comment id).
     identifier = _citation_ids(
-        _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")))[0]
+        next(b for b in _block_bodies(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+             if _quoted_clause(b) is not None))[0]
     header = "> **Changelog v3.34 (2026-11-12 — synthetic entry, #12068):**\n"
     cited = (f"> The relay is comment {identifier}: "
              '*"the clause stands as landed"*.\n')

@@ -33,6 +33,34 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.35 (2026-11-13 — the temporal-immutability constraint states the model, not its enforcement):**
+>
+> **Owner approval of the exact changes** is on record in the decision lane for this change; the owner's
+> direction was that `ONTOLOGY.md` states the target model and carries no issue state or change history.
+> **v3.34 → v3.35** because §4.1's statement moves from an enforcement report to a model constraint.
+>
+> **§4.1 now states one constraint and its consequence, and names no door, guard, constant, test or
+> ticket.** The constraint: a terminal claim's temporal record is immutable — its valid-time window
+> (`validFrom`/`validTo` and their precision markers), its transaction-time expiry (`expiredAt`) and its
+> occurrence anchor (`when`) no longer change, while content and metadata stay revisable because a
+> revision is a newer assertion of the same identity rather than a restatement of when the claim held.
+> The consequence: a stored inverted window on a terminal claim cannot be corrected, only reported.
+>
+> **The history this replaced, moved here because this is where it belongs.** The constraint was reached
+> in stages: the lifecycle guard and its terminal predicate (#2498), its extension to `update_point`
+> (#7819), the replay fold's tolerance of a later same-id revision (#3305), the closure of
+> `update_entity`'s Point arm — the door that could resurrect a terminal claim or rewrite its window
+> (#9649) — and the window-validation damage the inverted-window check still reports (#4021). §4.1
+> previously narrated those as enforcement gaps, including that `update_entity` was an unguarded route
+> to the window; that sentence is now false and, per the file's own scope, never belonged in it.
+>
+> **File header gains the rule that prevents the recurrence:** *"No issue state, no change history."*
+> The file names no PR, issue or build status; a reference to when something was decided, fixed or landed
+> is history and lives here. The `Convention` line loses its `(v3.6, #909)` version-and-ticket tail for
+> the same reason.
+
+---
+
 > **Changelog v3.34 (2026-11-12 — issue #11824 — the successor clause becomes a definition of the word):**
 >
 > **Owner approval of the exact changes** is on record on #11824 (comment `6815950417`, the decision relay:
