@@ -207,8 +207,9 @@ caveats before you build a churn story on it:
 - **The window is 7 days** — see `docs/retention-and-deletion.md`
   (`retention.RESTORE_WINDOW_DAYS`). Restore works inside it; after it the purge
   erases the graph's data and every backup artifact, and nothing is recoverable.
-  The control-plane **tombstone row is kept** (audit) and stamped as purged — so
-  the graph's *name* can still be seen while its data is gone. A "restore when the
+  The control-plane **tombstone row is kept** for audit and stamped as purged —
+  but no builder-facing surface shows it: `GET /v1/graphs/trash` stops listing a
+  graph once it is purged. A "restore when the
   customer comes back" flow built on a longer horizon silently finds nothing.
 - **Restore is not callable with your API key.**
   `POST /v1/graphs/trash/{graph_id}/restore` is a *session + owner/admin*
@@ -238,10 +239,12 @@ modelled on, `GRAPH_SCOPED_TEAM_SURFACE` (#2114). The plan/quota gates below the
 keep their pre-existing shape: a **string** `detail`, plus a header where one
 exists (`X-Upgrade-CTA` on the 402, `X-Graph-Quota` on the graph-quota 409 — the
 key-cap 409 carries the string detail and no header at all). Do not write a
-client that assumes `detail.error_code` exists on every error. ⚠️ One more
-string-shaped credential-scope refusal exists on the routes this guide names:
-`GET /v1/team/keys` answers a scoped key without `keys:manage` with
-`403 "Missing keys:manage scope to …"` — a string, not an `error_code`.
+client that assumes `detail.error_code` exists on every error. ⚠️ Two more
+string-shaped credential-scope refusals sit on routes this guide tells you to
+call: `GET /v1/team/keys` answers a scoped key without `keys:manage` with
+`403 "Missing keys:manage scope to …"`, and `DELETE /v1/graphs/{graph_id}`
+answers a key without `graphs:delete` with `403 "Missing graphs:delete scope"`
+— both strings, no `error_code`.
 
 | `error_code` | You did | Remedy |
 |---|---|---|
