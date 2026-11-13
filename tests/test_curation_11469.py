@@ -4746,6 +4746,13 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     _HISTORY = _re.compile(
         r"\b(?:was|were|had been)\s+sized\b|withdrawn|superseded|no longer|used to", _re.I)
 
+    # ⛔ THE VERB FAMILY, not one inflection (PR-review cycle 10, measured): the plan pin
+    # matched only `sized to ...`, so "The read sizes its request to `counts.Event + 1`."
+    # stayed GREEN — while the CODE pin below already guards the `sizes each request to`
+    # phrasing. Two pins disagreeing about what a prescription IS means a
+    # lane reconciling the plan in the code's own voice evades the plan pin.
+    _SIZING = _re.compile(r"siz\w*[^.;:]{0,40}?`counts\.Event \+ 1`", _re.I)
+
     def _prescribes(text: str) -> list[str]:
         """Clauses that state the withdrawn sizing as if it were current.
 
@@ -4758,7 +4765,7 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         """
         return [
             c.strip() for c in _re.split(r"(?<=[.;:,])\s+", text)
-            if "sized to `counts.Event + 1`" in c and not _HISTORY.search(c)
+            if _SIZING.search(c) and not _HISTORY.search(c)
         ]
 
     # ⛔ THE DETECTOR IS SELF-TESTED, because a pin that cannot fail on its own defect is
