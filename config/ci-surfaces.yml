@@ -12327,7 +12327,7 @@ durations:
   # never carry a junit reading yet), so these take the header's flat
   # `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a
   # SHARD-LAYOUT input. MEASURED LOCALLY as context only, not as the weight:
-  # 4.4 s for the whole entity-blocking file (23 cases; hermetic, no DB) and
+  # 4.4 s for the whole entity-blocking file (24 cases; hermetic, no DB) and
   # 3.5 s for the 7 measurement pins. Both are millisecond-scale, so the flat
   # default OVERSTATES them until the refresher re-bases them, which is the safe
   # direction for a shard layout.

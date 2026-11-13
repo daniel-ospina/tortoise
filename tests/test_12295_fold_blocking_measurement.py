@@ -82,6 +82,17 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
         assert _f in str(note), (
             f"code_head_note does not name {_f} — the equivalence claim must be "
             "scoped to the files the measurement exercises")
+    #: ⛔ THE NOTE MUST NAME A DIFFERENT COMMIT THAN THE FIELD. Every arm below is
+    #: keyed on `other != head`; a note that repeats `code_head` ("measured at
+    #: <code_head> — the same commit, so no substitution occurred") therefore
+    #: satisfies the note-shape checks while disclosing nothing, and skips the one
+    #: arm that still has teeth after the rail's squash merge (a fresh clone holds
+    #: NEITHER sha, so dead-sha/absent/dishonest all take the skip path there —
+    #: only this shape check and the equivalence arm can red). A note whose sha is
+    #: the field's own sha is a tautology, not provenance.
+    assert measured.group(0) != head, (
+        f"code_head_note names code_head itself ({head}) — a note that repeats the "
+        "field discloses no substitution, so the equivalence claim is vacuous")
     #: Git is OPTIONAL here: a shallow clone, or an image with no git binary, must
     #: not red a CORRECT artifact — an over-block is the failure this guard must not
     #: add. Where git and BOTH objects are present, require the two commits to be
