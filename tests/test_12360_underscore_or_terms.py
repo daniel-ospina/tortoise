@@ -536,6 +536,22 @@ class TestPin:
         assert len(reaches) == 129 and probe_phrase_rejection(reaches) is None, (
             "the read reaches `'a' * 120` through the literal — refusing it is a "
             "false block")
+        # ⛔ AND THE ALL-DIGIT SHAPE, WHICH `2279d087`/`d0595175` STILL MISSED
+        # (#12368 review round 16, P2). The bare-number acceptance returns None
+        # BEFORE the bound, so every SEPARATOR-FREE ALL-DIGIT token past the bound
+        # was accepted while every non-digit one was refused — measured at
+        # `d0595175`: `'1' * 129` and `'1' * 200` were ACCEPTED, `'a' * 129`
+        # REFUSED. Same false PASS class (the read sends a literal the index
+        # truncates), reached through the branch that returns early. The fix is
+        # ORDER: the bound now runs first, and a number the index CAN hold is
+        # still accepted (the `4820` case pinned elsewhere in this file).
+        assert probe_phrase_rejection("1" * MAX_COMPOSITE_RUN_LEN) is None, (
+            "a 128-byte number is one the index holds — refusing it is a false "
+            "block")
+        for past in (MAX_COMPOSITE_RUN_LEN + 1, 200):
+            digits = "1" * past
+            refusal = probe_phrase_rejection(digits)
+            assert refusal is not None and "128" in refusal, (past, refusal)
         # ⛔ CORRECTED (#12368 review): `_café` is NOT an expansion case. The
         # composite `_caf` is a TRUNCATION of the index term `_café` — the
         # ASCII-only splitter splits at `é` — so nothing holds it and the read

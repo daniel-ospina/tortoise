@@ -1439,16 +1439,6 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # acceptance and the shape guard ask this same question (one predicate per
     # question).
     runs = _indexed_term_runs(token)
-    if len(runs) == 1 and runs[0].isdigit() and token.lower() == runs[0]:
-        # A bare number — the TOKEN is the run, with no punctuation around it.
-        # ⛔ ``token.lower() == runs[0]`` IS THE GUARD, not a formality (#11536
-        # review round 9, P0): a digit RUN proves nothing about the TOKEN, so
-        # ``'4820,'``, ``'50%'``, ``'-4820'`` and ``'(4820)'`` all have one digit
-        # run while the read would send ``4820\,``, ``50\%``, ``\-4820`` and
-        # ``\(4820\)`` — escaped literals the index does not hold, i.e. the
-        # round-7 P0 re-opened by this very branch. MEASURED before the fix:
-        # every one returned None (ACCEPTED) and built an escaped literal.
-        return None
     # Lazy: `sparse` pulls the tokenizer + identifier machinery, and this module
     # is imported by every whole-journal replay engine's trailing sweep.
     from tortoise.sparse import SPARSE_STOPWORDS, build_or_query, tokenize_sparse_query
@@ -1563,6 +1553,27 @@ def probe_phrase_rejection(phrase: str) -> str | None:
                     f"escaped literal the index cannot match, or splits the "
                     f"query into several alternatives instead — pass a SHORTER "
                     f"token")
+    # ⛔ THE BARE-NUMBER ACCEPTANCE COMES *AFTER* THE BOUND (#12368 review round
+    # 16, P2 — a FALSE PASS this ORDERING left open). It used to precede the
+    # bound, so every SEPARATOR-FREE ALL-DIGIT token past the bound was accepted
+    # while every non-digit one was refused. MEASURED at `d0595175`:
+    # `probe_phrase_rejection('1' * 129) is None` and `('1' * 200) is None`, while
+    # `'a' * 129` was refused. The read sends the 129-byte literal, the index
+    # truncates, `queryNodes` returns 0 rows, and the fold certifies "the pre-fix
+    # prose is gone" over a still-present sentence — the same failure class the
+    # bound exists to prevent, reached through the one branch that returns early.
+    # ORDER is the fix; the acceptance itself is right (#11536 round 8) for every
+    # number the index can hold.
+    if len(runs) == 1 and runs[0].isdigit() and token.lower() == runs[0]:
+        # A bare number — the TOKEN is the run, with no punctuation around it.
+        # ⛔ ``token.lower() == runs[0]`` IS THE GUARD, not a formality (#11536
+        # review round 9, P0): a digit RUN proves nothing about the TOKEN, so
+        # ``'4820,'``, ``'50%'``, ``'-4820'`` and ``'(4820)'`` all have one digit
+        # run while the read would send ``4820\,``, ``50\%``, ``\-4820`` and
+        # ``\(4820\)`` — escaped literals the index does not hold, i.e. the
+        # round-7 P0 re-opened by this very branch. MEASURED before the fix:
+        # every one returned None (ACCEPTED) and built an escaped literal.
+        return None
     if (single_run and token.lower() == runs[0]
             and token.lower() in SPARSE_STOPWORDS):
         return ("it is a search stopword; a probe must be a RARE token that "
