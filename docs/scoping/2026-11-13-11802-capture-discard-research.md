@@ -133,7 +133,8 @@ contradiction in favour of the position the read path already records.
 
 `tortoise-capture.ts` (the retention doctrine comment in `writeSpoolEntry`'s too-large arm — the
 `DISCARD_ENTRY_TOO_LARGE` one, which RECORDS and marks terminal rather than unlinking; the separate
-growth-refusal arm below it carries its own comment, quoted in §2.3):
+growth-refusal arm below it records its own variant of the same doctrine in the ledger line's `detail`
+payload — not in a `//` comment — quoted in §2.3):
 
 > **A refusal is a delay the operator can reverse (`--retry-terminal`), an unlink is a loss nobody
 > can.**
@@ -157,8 +158,9 @@ failure — on the transcript. The meta is the one sibling that never got the sa
 - **Precedent arms that keep + record**: `DISCARD_ENTRY_GROWTH_REFUSED` and `DISCARD_SPOOL_SATURATED`
   both write `retained: true` (`tortoise-capture.ts` — `DISCARD_ENTRY_GROWTH_REFUSED` and
   `DISCARD_SPOOL_SATURATED`; the file carries a third `retained: true` arm after this change, and it is
-  this fix's own `DISCARD_META_UNREADABLE`, not a precedent), with the comment "a refused growth is a
-  delay, not a loss".
+  this fix's own `DISCARD_META_UNREADABLE`, not a precedent). The wording "a refused growth is a
+  delay, not a loss" is the growth-refusal arm's ledger `detail` string, not a code comment
+  (`capture_spool.py` carries the Python twin).
 - **A `repair: false` reader** already skips corrupt entries without mutating — a bare
   `if (!repair) continue;` inside `tortoise-capture.ts` `listSpoolEntries` (no comment there; the
   TS *and* Python `repair=False` behaviour is documented on `list_spool_metas`).
