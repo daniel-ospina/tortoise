@@ -4621,9 +4621,12 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
         # ...and it may name the SECTION its cited line must fall INSIDE. Without
         # this, a number re-derived onto a byte-identical entry in a DIFFERENT
         # section stays GREEN while the document's claim goes false: measured on
-        # the `03-test-design.md` `carve_out:` row, whose anchor line also exists
-        # under `core:` and its mirror, so "the anchor is on this line" alone
-        # cannot tell the three apart (#11837 review, P3).
+        # the `03-test-design.md` `carve_out:` row — since RETIRED by #12266, which
+        # holds that entry by symbol + section instead — whose anchor line also
+        # exists under `core:` and its mirror, so "the anchor is on this line"
+        # alone could not tell the three apart (#11837 review, P3). No row in the
+        # current tables passes a 5th element, so this branch is a capability the
+        # next section-scoped cite can use, not a check any row runs today.
         section = row[4] if len(row) > 4 else None
         # ⛔ The label is the SOURCE's real path, not `<key>.py` (#11837 review P3):
         # `ci_surfaces` maps to `config/ci-surfaces.yml`, so the fabricated
@@ -5079,7 +5082,14 @@ _EPIC_CITE_DOCS = {
 _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "search_engine": _REPO / "tortoise/search_engine.py",
-    # `03-test-design.md` cites the manifest's OWN `carve_out:` entry by number.
+    # `03-test-design.md` cites the manifest's OWN `carve_out:` entry — by SYMBOL
+    # since #12266 (`_assert_carve_out_entry_is_pinned_by_symbol`, called from the
+    # tail of `test_the_epic_bundle_cites_the_branch_rederived_resolve`), by a line
+    # number before that: no SINGLE tool and no single hand-written row owns its
+    # position — the 44 lines it travelled are 4 `  - name.py` registrations spliced
+    # by `register_tests`, the 39 hand-authored comment lines around them in the same
+    # `surfaces:` blocks, and one hand-authored `tier1:` row — so the pin stopped
+    # re-staling.
     # ⛔ Registered because #11837 moved it TWICE without a reader: restoring the
     # `core:` line a merge dropped (+6 above it) shifted the entry 9548 -> 9554
     # while the document went on naming 9548, which is the row above — a cite a
@@ -5238,14 +5248,26 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("04-plan.md", "operator / label path", (
             ("25189", "declared = declared_relation_predicates()"),
         ), "sdk"),
-        # The manifest's own `carve_out:` entry, cited from the artifact table.
+        # The manifest's own `carve_out:` entry. ⛔ PRE-#12266 HISTORY — and it is the
+        # history of a row THIS TABLE NO LONGER CONTAINS: the tuple that lived here
+        # pinned a NUMBER, and the paragraphs below record how such a number had to be
+        # re-derived and why that could not be kept. There is no number any more and
+        # there is no row; `_assert_carve_out_entry_is_pinned_by_symbol` (called from
+        # the tail of this test) holds the entry by symbol + section. Read this as the
+        # record of why a number could not be kept, never as an instruction — and do
+        # not read the rows below as its continuation: the next rows are the
+        # `RECONCILE-A1-A2-A5.md` `plan_hierarchy_edges` ones.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
         # anchor text also sits under `core:` and its mirror, so without it a
         # re-derivation onto either stays green while the document's `carve_out:`
-        # claim goes false (measured: 5854 and 8173 both drove this row GREEN).
-        # ⛔ THIS NUMBER IS NOT A CONSTANT OF THE EPIC — it is wherever the last
-        # merge above the entry left it, and it is re-derived at the head this PR
-        # lands on, never copied forward from a run that was green earlier.
+        # claim goes false (measured on the RETIRED row: 5854 and 8173 both drove it
+        # GREEN). That row was its only consumer, so `section` is read by no row in
+        # this table any more — the branch stays for the next cite whose anchor line
+        # is shared across sections, not because a row uses it today.
+        # ⛔ THE NUMBER WAS NEVER A CONSTANT OF THE EPIC — it was wherever the last
+        # merge above the entry left it, re-derived at the head each fix landed on,
+        # never copied forward from a run that was green earlier. That is exactly why
+        # it was retired.
         #
         # The history, because it is why this row carries this much prose:
         # `#12035` re-derived the document here (9635 -> 9714) and its own +3 kept
@@ -5257,11 +5279,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # 83 lines above the entry, and the pin was RED on main and on every diff that
         # selects this file (a `config/*` diff takes `core`).
         #
-        # Re-derive, never copy: read the number the DOCUMENT claims, then measure
+        # The number this row used to carry required a re-derivation it no longer needs:
+        # the old instruction read the number the DOCUMENT claimed, then measured it
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
-        # and the section bounds
+        # with the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # The file is tool-MAINTAINED, not generated from a source of truth:
+        # Both are now the HELPER's own job (`_assert_carve_out_entry_is_pinned_by_symbol`
+        # derives the bounds itself) — do not re-add a number to (re-)satisfy this row.
+        # The file is NOT generated from a source of truth, and `carve_out:` is a
+        # hand-authored column-zero key that no tool writes into.
         # `tools/ci_selection.py::register_tests` reads the text, splices the new
         # entry into the surface's block and writes every other line back verbatim,
         # which is why it also carries hand-authored prose. Either way the property
@@ -5269,56 +5295,25 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # measured on `main` as `#12159` (`33781512b6`) registering
         # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
         # insertion that moved every number below it. That is the class here — a
-        # line-number pin over a number another tool owns, not a citation anyone
-        # mis-copied. ⛔ The `9951` this comment used to defend was never a value
-        # on `main`: it was 9943 + the 8 lines #12060 was predicted to add, and
-        # two other registrations landed first, so the prediction described no
-        # checkable commit — which is why this one number has now been
-        # "re-derived" three times. That is the row's real defect and not a
-        # transcription slip: the number is owned by another tool, so every
-        # landing PR above it is a re-derivation this pin cannot do for itself.
-        #
-        # So it is re-derived from THIS merged tree, and every value below is
-        # stated with the tree it was read from, never carried across a merge:
-        #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
-        #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # 9943 at `9828250732`; 9949 at `ba84fbfabf`, 9965 at `e200623286` and
-        # 9973 at `cd22562c24e4` — +30 across three landing PRs that each
-        # registered test files above it; 9987 at the `main` tip `abf186f1109a`
-        # (+14: a 13-line `surfaces:` block inserted at 2237 and a 1-line
-        # `tier1:` one at 9150); 10005 at this branch alone (`d036b9859960`,
-        # +32 from its one 32-line block at 7522-7553, the +1 it also adds at
-        # 10291 sitting below the entry). At THIS merge — `main` tip
-        # `abf186f1109a`, which already contains #12060's own registrations,
-        # plus this branch's entry, both landing above it — the entry reads
-        # 10019 (+46 = `main`'s +14 and this branch's +32), `carve_out:` opens
-        # 9893 and `uri_requiring:` 10224, so 10019 is inside the section. The
-        # identical text also sits at 6103 and 8534, which is what the 5th
-        # element exists to refuse; the pair shows the two cases over
-        # `9828250732`'s 6082 / 8459. Each insertion below is attributed to the
-        # LANDING COMMIT that made it (measured with `git diff -U0 <a> <b> --
-        # config/ci-surfaces.yml`), and its position is where that commit put it:
-        #   +8  @2725  `cd22562c24` (#12060)   → above BOTH twins
-        #   +6  @6721  `ba84fbfabf` (#11609)   → above the sdk twin only
-        #  +16  @7514  `e200623286` (#11926)   → above the sdk twin only
-        #  +13  @2237  `f1f74135a15b` (#12302, #12294's name-entropy gate) → above BOTH
-        #   +1  @9150  `f1f74135a15b`           → BELOW both twins; it moves neither
-        #  +32  @7522  this branch's own block → above the entry and the sdk twin
-        # ⚠️ Both `f1f74135a15b` rows are read at the main tip `abf186f1109a`, which
-        # carries them but made NEITHER: `git show --stat abf186f1109a --
-        # config/ci-surfaces.yml` is empty, and `f1f74135a15b` is the only commit in
-        # `cd22562c24e4..abf186f1109a` that touches this file. A row naming the span
-        # END rather than the commit would be the same defect one level down: the
-        # number is true and the reader who checks `git show` learns nothing.
-        # ⛔ So the FIRST twin reads 6103 = 6082 + 8 + 13 (only two of the six
-        # insertions are above it, which is why the two twins do not move
-        # together), and the sdk twin reads 8534 = 8459 + 8 + 6 + 16 + 13 + 32.
-        # ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8300) of `surfaces:`, so the resolver's
-        # nearest-column-zero-key rule reports the PARENT: a cite onto 8534 refuses
-        # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
-        # re-derivation onto it does not get told `sdk:` and conclude the guard is
-        # broken.
+        # line-number pin over a number other merges move, not a citation anyone
+        # mis-copied. The entry is NOT pinned here any more (#12266): its line is MOVED
+        # by any insertion above it, so a number in this table re-stales on somebody
+        # else's merge — of the 44 lines it travelled, four are `  - name.py`
+        # registrations spliced by `tools/ci_selection.py::register_tests`, THIRTY-NINE
+        # are hand-authored comment lines around them in the same `surfaces:` blocks, and
+        # the last is a hand-authored `tier1:` row (the #12294 name-entropy gate), which
+        # no registration tool could have written. Measured, it read 9943 at
+        # `9828250732`, then 9949 (+6 @6721), 9965 (+16 @7514), 9973 (+8 @2725), and
+        # **9987 twenty-six seconds after 9973's repair merged** (`f1f74135a1`, +13
+        # @2237 and +1 @9150, #12294 / PR #12302 — not #12246, which does not touch the
+        # file), a **+44** move re-derived at `abf186f1109`. Four re-points of
+        # one number in one day is the row's own defect, not a transcription slip, so the
+        # entry is now held by SYMBOL + SECTION in
+        # `_assert_carve_out_entry_is_pinned_by_symbol` below, called from the tail of
+        # THIS test, which also refuses that document's `carve_out:` row printing a
+        # `config/ci-surfaces.yml:<line>` cite. ⛔ The `9951` this comment used to
+        # defend was never a value on `main`: it was 9943 + the 8 lines #12060 was
+        # predicted to add, so the prediction described no checkable commit.
         # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
         # by the sentence rather than by the number: `:631` is where `main` had it,
         # then #12112 moved it three times (`687`, `695`, `700`) and each move left a
@@ -5352,33 +5347,6 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("700", "planned = plan_hierarchy_edges("),
             ("705", "`plan_hierarchy_edges` returns one"),
         ), "relation_write"),
-        ("03-test-design.md", "`carve_out:` holds **one**", (
-            # re-derived from THIS merged tree (`awk
-            # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
-            # config/ci-surfaces.yml`), never carried forward from either side of
-            # the merge: 9714 -> 9951 -> 9973 -> 10019 is the number's own trail,
-            # and only the last of those describes a tree that adds BOTH parents.
-            # Measured values, not a delta: 9943 at `9828250732`, 9949 at
-            # `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24e4`, 9987 at
-            # the `main` tip `abf186f1109a`, 10005 at this branch alone
-            # (`d036b9859960`), and 10019 merged. ⛔ `9951` is in that list only
-            # because this row printed it — it was a predicted merge-tree value
-            # (9943 + 8), never a line any commit on `main` carried. The deltas
-            # are just where the registrations landed: `main` adds +78 above the
-            # entry by its tip 87c07462a8 (9943 -> 10021: +44 across four landing
-            # PRs at `ba84fbfabf`/`e200623286`/`cd22562c24`/`f1f74135a1`, then +34
-            # across `ea2c41a696`/`a53ba8cf53`/`73c479ce40`) and this branch adds
-            # +13 (a `core:` registration block plus a `slow_files:` row; its
-            # 1-line `durations:` addition falls below the entry), so a row sitting
-            # BELOW every insertion moves by the whole +91: 9943 + 91 = the 10034
-            # this row prints. ⛔ Re-derive on the merged tree — a parent's
-            # PREDICTION is not a value: `main` wrote 10019 into this row from its
-            # own tip and three landings had moved it before the merge. The
-            # `core:` sub-key reads 2235 at 9828250732 and 2236 on the merged tree
-            # (+1, `main`'s own registration above it); `sdk:` moves 8268 -> 8310
-            # (+8 this branch, +34 `main`).
-            ("10034", "- test_pack_logic_writeprobe_11083.py"),
-        ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
         f"only {len(rows)} rows — an emptied table would pass vacuously, and these "
@@ -5391,6 +5359,247 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "an epic-bundle cite names code it does not name, in a document no sweep "
         "reads — re-derive the number from the tree before changing this pin:\n  "
         + "\n  ".join(failures))
+    # #12266: the one cite this table no longer holds — a line number that other
+    # tools and hand-authored rows move. Asserted here rather than as its own test on
+    # purpose: this
+    # file's case count is itself pinned by `config/ci-surfaces.yml`'s durations row
+    # (`test_the_durations_row_quotes_the_case_count_it_weights`), so a new test
+    # function here would red a count that has nothing to do with the change — the
+    # pin lives in the private helper, and the doc cites THIS test as its caller,
+    # because a `path::symbol` cite has to resolve (a cite naming a renamed-away test
+    # is the same defect class this PR fixes; caught in this PR's own review).
+    _assert_carve_out_entry_is_pinned_by_symbol()
+
+
+def _assert_carve_out_entry_is_pinned_by_symbol():
+    """The `carve_out:` entry is held by SYMBOL + SECTION, and `03-test-design.md`'s
+    `carve_out:` row does not print a `config/ci-surfaces.yml:<line>` cite for it.
+
+    ⛔ WHY (#12266). The entry's LINE is moved by other merges: `register_tests`
+    splices `  - name.py` entries into the `surfaces:` blocks ABOVE `carve_out:`, so
+    every PR that registers a test file at all pushes this entry further down. (The
+    `carve_out:` block itself is a hand-authored column-zero key — `register_tests`
+    derives its position from the 2-space-indented `surfaces:` keys and never writes
+    into it, which is why this pin can BOUND the block but cannot own the line.)
+    Measured, the number this bundle used to print:
+
+        9943 at `9828250732` -> 9949 -> 9965 -> 9973 -> 9987 twenty-six seconds
+        after 9973's repair merged (`f1f74135a1`, #12294 / PR #12302, +14 lines)
+
+    Four re-points of one number in a day, each red on a shard whose diff was
+    unrelated to it — a number no single tool moves (`register_tests`' registration
+    splices, plus hand-authored rows). ⛔ And TWO MORE while this PR waited, which is
+    the cleanest measurement of the defect there is: 10021 at `87c07462a8` (+34),
+    then 10076 at `ca74f2375e` (+55) — the `main` tip this branch was rebased onto.
+    At that tip `main`'s own row still printed `:10034`, which on that same tree is a
+    COMMENT line (`git show ca74f2375e:config/ci-surfaces.yml | sed -n '10034p'`),
+    so the row that existed to hold this number was **42 lines adrift on its own
+    tree** and `test_the_epic_bundle_cites_the_branch_rederived_resolve` was RED on
+    `main` — the fifth and sixth re-stale, landing on the fix for the first four.
+    So the
+    entry is pinned where the ownership sits: it must be the ONLY occurrence in
+    `carve_out:`, and the document must not print the entry's LIVE line number in
+    ANY form — qualified, bare, arrowed, `@`-prefixed, bolded or behind a `#L<N>`
+    anchor (see the arm below for why an allow-list of cite shapes was the wrong
+    construction, measured GREEN on seven of nine).
+
+    ⚠️ STATED SCOPE: this reads the ONE row in `03-test-design.md` that asserts
+    "`carve_out:` holds **one**". The refusal is about the entry's **live** line
+    number, not about digits: the row legitimately carries the history
+    `9943 … 9949 … 9965 … 9973 … 9987` (and this docstring carries `10021`/`10076`),
+    and every one of those stays legal, because a
+    headed history value is not a claim about today's tree — only the value the entry
+    occupies NOW is. History rows in OTHER documents likewise legitimately keep the
+    number they were read at — `05-verify.md`'s D5 row records `:9917` → `:9933` at `c7499ac7a7`: `:9917` is
+    what the document's row CITED there and `:9933` is where the entry actually sat, so
+    the pair is one head's stale cite and its same-head correction, not two heads
+    spliced. (`:9933` occurs a SECOND time in that row as the value the bundle's own pin
+    asserted at `0e281a900b`, where the entry had already moved to `:9934` — a different
+    role at a different head, not a second head for this pair. `:9906`, which an earlier
+    revision of this docstring attributed to `9f4c0bde5a`, is the document's cite at an
+    EARLIER head and is not the value at `c7499ac7a7`.)
+    A bare number is not a cite; the file name is what makes a number
+    checkable, and a headed history row is not a claim about today.
+
+    This is `05-verify.md` D5's own rule ("the symbol is authoritative and the line
+    number is a convenience") applied to the one cite whose number a third party
+    moves.
+    """
+    entry = "- test_pack_logic_writeprobe_11083.py"
+    lines = _EPIC_CITE_SOURCES["ci_surfaces"].read_text(
+        encoding="utf-8").splitlines()
+
+    # Section bounds: `carve_out:` up to the next column-zero KEY. A column-zero
+    # `- ` entry or `#` comment does NOT end the block — the block's own entries sit
+    # at column zero (which is why the generic resolver's nearest-key rule needed a
+    # 5th element for this row in the first place). The same bounds are reused below
+    # for the two blocks the row says hold NONE of this file (#12266 review, P2).
+    def _block_bounds(key: str) -> tuple[int, int]:
+        head = next((i for i, ln in enumerate(lines) if ln.startswith(key + ":")), None)
+        assert head is not None, (
+            f"config/ci-surfaces.yml carries no `{key}:` key — the block this pin "
+            f"grades `{key}:` of has been renamed, deleted, or moved, so the claim "
+            f"cannot be graded; re-read the section before trusting it")
+        tail = len(lines)
+        for j in range(head + 1, len(lines)):
+            ln = lines[j]
+            if ln and ln[0] not in (" ", "\t", "-", "#"):
+                tail = j
+                break
+        return head, tail
+
+    def _name(i: int) -> str:
+        """Line `i` as the WRITER reads it — see the comment below the bounds."""
+        return lines[i].strip().split("#", 1)[0].rstrip()
+
+    start, end = _block_bounds("carve_out")
+
+    # ⛔ Match the WRITER's parse, not the raw line. `carve_out:` carries six
+    # hand-authored entries with an inline `#` comment today, and
+    # `tools/ci_selection.py::register_tests` reads a name as
+    # `lines[i].strip()[2:].split("#", 1)[0].rstrip()` (`tools/ci_selection.py:4908`).
+    # An inline comment added to THIS entry must therefore not read as "the entry is
+    # absent", which is the false reason an exact `== entry` reports (#12266 review,
+    # P2). It is also why every family test below reads `_name()`: membership is a
+    # property of the FILE NAME, so an entry whose COMMENT mentions "capstone" is not
+    # a capstone file, and grading the raw line would red the row over prose (#12266
+    # review, P3).
+    hits = [n + 1 for n in range(start, end) if _name(n) == entry]
+    assert len(hits) == 1, (
+        f"`{entry}` appears on {len(hits)} line(s) of the `carve_out:` block "
+        f"({hits}) — the bundle's capstone row states `carve_out:` holds exactly ONE "
+        f"file of this family, and this pin reads both halves of that: this entry "
+        f"occurs once here, and no other family member sits in the block")
+
+    doc = _EPIC_CITE_DOCS["03-test-design.md"].read_text(encoding="utf-8")
+
+    # ⛔ The FAMILY the row counts is defined by the row ABOVE it — "Σ over the
+    # `durations:` rows matching `*capstone*` / `*7949*` / `*v4_declared*` /
+    # `*graph_census*`" — so it is READ from there rather than restated here, and this
+    # pin cannot drift from the document whose claim it grades (#12266 review, P3).
+    family_rows = [ln for ln in doc.splitlines() if "`durations:` rows matching" in ln]
+    assert len(family_rows) == 1, (
+        f"{len(family_rows)} rows of 03-test-design.md define the capstone-adjacent "
+        "family — this pin reads exactly one, and cannot grade `carve_out:` holds "
+        "**one** without it")
+    family = re.findall(r"`\*(\w+)\*`", family_rows[0])
+    assert len(family) >= 3, (
+        f"the capstone-adjacent row names only {family} — the family globs this arm "
+        "reads are gone, so it would grade a population of nothing")
+
+    def _is_family(i: int) -> bool:
+        return _name(i).startswith("- ") and any(g in _name(i) for g in family)
+
+    rows = [ln for ln in doc.splitlines() if "`carve_out:` holds **one**" in ln]
+    assert len(rows) == 1, (
+        f"{len(rows)} rows of 03-test-design.md say `carve_out:` holds **one** — "
+        "this pin reads exactly one and cannot tell which of several it graded")
+    assert "config/ci-surfaces.yml" in rows[0], (
+        "the `carve_out:` row must still name the FILE the entry lives in — the "
+        "symbol alone names no tree to look in")
+    # ⛔ The row's SYMBOL, not just its file (#12266 review, P2). Every check below
+    # reads WHERE the entry is; none read WHICH entry the row names, so the row could
+    # name a different — even non-existent — file and stay GREEN, while the assertion
+    # above the manifest read states this pin is what reads that claim.
+    symbol = entry.removeprefix("- ")
+    assert symbol in rows[0], (
+        f"the `carve_out:` row names no `{symbol}` — it must name the entry this pin "
+        f"holds in `carve_out:`, or the row and the manifest drift apart while every "
+        f"other check here stays GREEN")
+    # ⛔ `split(...)[1]` is NOT "the text after the file". The row mentions
+    # `config/ci-surfaces.yml` TWICE, so that slice is the text BETWEEN the two
+    # mentions — a row that named a different section first still passed it (#12266
+    # review, P2). Require the adjacency the row actually states, so the section this
+    # pin reads is the one claimed OF this file.
+    assert "config/ci-surfaces.yml`'s `carve_out:`" in rows[0], (
+        "the `carve_out:` row must name the SECTION as "
+        "`config/ci-surfaces.yml`'s `carve_out:` — the file name alone does not say "
+        "which block the entry is in, and a section named elsewhere in the same row is "
+        "not the claim this pin reads")
+    stale = re.findall(r"ci-surfaces\.yml:\d+", rows[0])
+    assert not stale, (
+        f"the `carve_out:` row prints {stale} — no single tool and no single "
+        "hand-written row owns that position (4 of the 44 lines are "
+        "`tools/ci_selection.py::register_tests` registrations, 39 are hand-authored "
+        "comment lines in the same `surfaces:` blocks, 1 a hand-authored `tier1:` row), "
+        "so it re-stales on somebody "
+        "else's merge and reds a shard whose diff is unrelated (#12266 settled "
+        "this four times by hand). Cite the symbol and the section instead.")
+    # ⛔ And the SAME rot in every OTHER form the row could print it: a bare
+    # continuation (`` `<N>` ``), an arrow (`:A` → `:B`), an `@` marker (the row
+    # already uses `@2237`), a bolded number, or a GitHub line anchor (`…#L<N>`).
+    # An ALLOW-LIST of cite shapes was the wrong construction once
+    # already — measured GREEN on seven of nine (#12266 review, P2 twice) — so the
+    # rule is now: the entry's LIVE line number must not appear as a STANDALONE
+    # integer anywhere in the row, and must not carry a line-anchor prefix. That is
+    # form-agnostic for ordinary prose and still lets the row state the measured
+    # history (9943 … 9949 … 9965 … 9973 … 9987) and the shas it attributes them to.
+    # The `[0-9A-Za-z_]` boundaries are what keep it off an IDENTIFIER that merely
+    # ends in those digits — `test_pack_logic_writeprobe_11083` must stay legal,
+    # because this pin REQUIRES the row to print it, and `11083` is a reachable live
+    # line for a file that moved 44 lines in a day (#12266 review, P2).
+    live = str(hits[0])
+    live_cites = re.findall(rf"(?<![0-9A-Za-z_]){live}(?![0-9A-Za-z_])", rows[0]) + \
+        re.findall(rf"(?:(?<=#)|\b)L{live}\b", rows[0])
+    assert not live_cites, (
+        f"the `carve_out:` row prints the entry's CURRENT line ({live}) "
+        f"{len(live_cites)}x as a standalone number or behind a line anchor — that is "
+        "the number that re-stales on somebody else's merge (#12266 settled it four "
+        f"times by hand), and it is a cite in whatever form it is dressed: `:{live}`, "
+        f"`→ :{live}`, `@{live}`, `**{live}**`, `#L{live}`. History values stay legal; "
+        "the LIVE one does not, because it is a claim about a tree that has not "
+        "happened yet. Cite the symbol and the section instead.")
+
+    # ⛔ The row's OTHER half — "`uri_requiring:` and `slow_files:` hold none" — is
+    # graded here too (#12266 review, P2). It is true today: the symbol occurs only in
+    # the two `surfaces:` registrations, the `carve_out:` entry itself, and its
+    # `durations:` weight, so neither graded block holds it. Nothing else in the tree
+    # reads that half, so an entry slipped into either block would make the row false
+    # with no check to red.
+    for key in ("uri_requiring", "slow_files"):
+        block_start, block_end = _block_bounds(key)
+        # ⛔ FAMILY **and** this entry (#12266 review, P3). The row says these two
+        # blocks hold none of the capstone files it counts, and the family globs are
+        # read above; grading only `entry` here left a second family member in either
+        # block reading GREEN over a false row — the same false PASS the `carve_out:`
+        # arm below exists to close.
+        #
+        # ⛔ BUT THE FAMILY ALONE IS NOT THE ROW EITHER, and that was the SAME false
+        # PASS one file further in (measured: registering `test_pack_logic_writeprobe_11083.py`
+        # under `slow_files:` left this arm GREEN while the row went false). The entry
+        # this pin holds is **not in the family** — `test_pack_logic_writeprobe_11083.py`
+        # matches none of the four globs the row counts (`capstone`, `7949`,
+        # `v4_declared`, `graph_census`) — so `_is_family()` is False for the very file
+        # the row NAMES, and the `or _name(n) == entry` clause is what covers it. That
+        # is not a hypothetical edit: the entry already carries a `durations:` weight
+        # (`config/ci-surfaces.yml`'s census, 3.4 s), so declaring it slow is exactly
+        # the move a reader would make next.
+        stray = [(n + 1, _name(n)) for n in range(block_start, block_end)
+                 if _is_family(n) or _name(n) == entry]
+        assert not stray, (
+            f"capstone-family entries sit in the `{key}:` block at {stray} — the "
+            f"bundle's capstone row states `uri_requiring:` and `slow_files:` hold "
+            f"NONE of these files (it counts the family, and it names `{entry}`), and "
+            f"this pin is what reads that claim")
+
+    # ⛔ And the row's THIRD claim — "`carve_out:` holds **one**" — is a claim about the
+    # capstone FAMILY, not about this one file (#12266 review, P3). The `hits` arm reads
+    # only whether THIS entry moved, so a second family file registered into
+    # `carve_out:` makes the row false with it green.
+    #
+    # `_name(n) != entry` is DEFENSIVE, not load-bearing: the entry is not in `family`
+    # today (it matches none of the four globs), so no mutation currently reaches this
+    # clause. It is kept because the family is read FROM the document — a row that
+    # added a glob matching this entry would otherwise make the pin count the entry as
+    # a SECOND family file and red on a correct tree.
+    kin = [(n + 1, _name(n)) for n in range(start, end)
+           if _is_family(n) and _name(n) != entry]
+    assert not kin, (
+        f"`carve_out:` holds {len(kin)} OTHER capstone-family entry/entries beyond "
+        f"`{entry}` — {kin} — and the bundle's capstone row states `carve_out:` holds "
+        "**one**. Either the new file is not carve-out and belongs in a gated "
+        "surface, or the row's count is stale; this pin grades the row, so fix "
+        "whichever is wrong rather than deleting the arm")
 
 
 def test_a_cite_that_names_a_directory_names_a_file_that_exists():
