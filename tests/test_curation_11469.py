@@ -3789,7 +3789,8 @@ def test_an_operator_payload_that_is_not_a_row_listing_is_refused(monkeypatch, c
 
 
 @pytest.mark.parametrize("failure", ["refused", "raised", "after_read_refused",
-                                      "after_read_raised", "refused_inside"])
+                                      "after_read_raised", "refused_inside",
+                                      "after_read_unreported"])
 def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
         monkeypatch, capsys, tmp_path, failure):
     """BOTH disarmed census-failure arms carry `read_note` — one state, one spelling.
@@ -3827,6 +3828,10 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
         if section == "structure":
             # `refused_inside` makes the LAYER READ ITSELF refuse: two rows served
             # against three counted, so `read_operators` raises after seeing rows.
+            # `after_read_unreported` omits the count entirely, so the completed read
+            # cannot be reconciled — the `False` half of the tri-state.
+            if failure == "after_read_unreported":
+                return {"total": 1}
             return {"total": 1, "operators": len(OPERATOR_ROWS) + (failure == "refused_inside")}
         if section == "sources":
             if failure == "refused":
@@ -3835,7 +3840,7 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
         if section == "graphs":
             if failure == "after_read_refused":
                 return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
-            if failure == "after_read_raised":
+            if failure in ("after_read_raised", "after_read_unreported"):
                 return {"error": "500 Internal Server Error"}
             return {"result": [{"namespace": "org_x_g_old"},
                                {"namespace": "org_x_g_new"}]}
@@ -3872,6 +3877,16 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
         assert payload["census"] is None, payload
         assert f"read {len(OPERATOR_ROWS)} rows" in (payload["read_failure"] or ""), (
             payload["read_failure"])
+    elif failure == "after_read_unreported":
+        # ⛔ The THIRD state, and the one this artifact could still lie about: the layer
+        # read COMPLETED (`operators_read` is known) but nothing vouched for the count, so
+        # the field is `False` — NOT `null` (that means "no completed read") and NOT
+        # `True` (that means the count reconciled). Unpinned, a mutation collapsing it to
+        # `null` kept the whole suite green while restoring, one sub-state over, the
+        # round-3/5 defect the `after_read_*` arms exist to prevent (round-7 review).
+        assert payload["operators_read"] == len(OPERATOR_ROWS), payload
+        assert payload["operators_total_reported"] is None, payload
+        assert payload["operators_reconciled"] is False, payload
     elif failure.startswith("after_read"):
         # The layer WAS read (and reconciled) before the failing read: the artifact must
         # report the real pair, not `null`.
