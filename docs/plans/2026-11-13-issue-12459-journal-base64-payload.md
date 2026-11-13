@@ -45,7 +45,7 @@ the append path)
 | `tests/test_11821_journal_vector_width.py` (**51 tests** at this head) | the pins P2 must not move: float32 bits, the never-narrowed population, the pre-change replay test at `:518` |
 | `docs/durability-posture.md` **R1** | the embedding **stores** — a replay restores it verbatim and never regenerates it. *"presence is ownership."* |
 | `docs/architecture/STORAGE-ARCHITECTURE.md` §5.2 | the recorded P2 finding already on the books: *"~4× more than base64 of the same information as the float32 the graph itself stores (2,048 B for a 384-d vector)"* — and that it needs its own decision and its own tests |
-| `tools/journal_growth.py` | read **critically** — see §1.1. It cannot report the vector-payload figure. |
+| `tools/journal_growth.py` | read **critically** — see §1.1. It cannot report the vector payload's **on-disk** span (it re-serialises with spaced separators). |
 | #11886 | the ruler defect: the tool attributes bytes by re-serialising with **spaced** separators, so its vector figure and the journal's on-disk figure are on different rulers |
 
 ### External — ⛔ **UNAVAILABLE on this box. Declared, with the errors.**
@@ -82,8 +82,8 @@ the comparables survey. Concretely:
   note. This is the one question the note leaves open, and it does not block the decision: the binding
   constraints here are #5004 and R1, both internal, and a comparable's practice could not reverse either.
 
-**CONTRADICTION TEST (asked first, before cost, quality or fit).** Two recorded positions bind this
-design, and neither may be reversed by adoption:
+**CONTRADICTION TEST (asked first, before cost, quality or fit).** Three recorded positions bind this
+design, and none may be reversed by adoption:
 
 1. **#5004 round-7** — *"a CALLER-owned vector must keep its RAW form. `vecf32()` is the ONE form it must
    not take."* A single uniform float32 encoding for the whole payload **contradicts** it. So the format
@@ -203,8 +203,9 @@ vector is 92 % of the record — and wrong once the non-vector bytes are a third
 the record shrinks *with* its vector, when in fact **734 B** of the record (`2,798 − 2,064`) does not
 shrink at all. Corrected on the creating record: **2.80 GB, saving ≈ $0.33/mo** — where the vector-ratio
 row implies `(5.423 − 2.069) × $0.125 = $0.42`, i.e. the correction is **~22 %** of that quote. Stated
-because a reader would budget from the quote. Whether this line is metered at all is #11758's open
-question.
+because a reader would budget from the quote. Whether this line is metered at all is **not settled
+anywhere**: #11758, the pricing-of-record ticket, closed `COMPLETED` on 2026-11-12 without addressing
+journal bytes, and #4333 (open) counts **node** sets, not journal bytes.
 
 ---
 
@@ -250,35 +251,45 @@ is **loud**, not silently transposed.
 
 ### 2.2 How the length is encoded — and why the count is load-bearing, measured
 
-The element count is in the frame, and it is **not** redundant with the base64 length. Python's
-`base64.b64decode(validate=True)` **silently drops an incomplete trailing quantum** — measured on a real
-384-d payload, sweeping the cut (`p2_base64_probe.py`, verbatim in `measurement.txt`):
+The element count is in the frame, and it is **not** redundant with the base64 length. The hazard is
+**quantum-aligned truncation**, and it is measured on a real 384-d payload (`p2_base64_probe.py`, verbatim
+in `measurement.txt`):
 
 ```
-   cut   decoded    floats   len%4==0   count check (declared n)
-   -4      1,533 B   383.25   False       refuses
-   -8      1,530 B   382.50   False       refuses
-   -12     1,527 B   381.75   False       refuses
-   -16     1,524 B   381.00   True        ACCEPTS (381 floats)
-   -20     1,521 B   380.25   False       refuses
+   cut   chars%4   decoded    floats   len%4==0   count check (declared n)
+   -1    3        refused by b64decode (Incorrect padding)
+   -2    2        refused by b64decode (Incorrect padding)
+   -3    1        refused by b64decode (Invalid base64-encoded string: … cannot be 1 more than a multiple of 4)
+   -4    0          1,533 B   383.25   False       refuses
+   -8    0          1,530 B   382.50   False       refuses
+   -12   0          1,527 B   381.75   False       refuses
+   -16   0          1,524 B   381.00   True        ACCEPTS (381 floats)
+   -20   0          1,521 B   380.25   False       refuses
   count check on the -16 frame: REFUSED (frame declares 384 elements at f32 (1536 B), decoded 1524 B)
 ```
 
-At **−16 characters the decoded length is still a multiple of the element size** (381 whole floats), so a
-length-only check **accepts a silently truncated vector**. Only the declared count refuses it. (This is the
-fail-open direction on the durability artifact: a short vector replayed into the graph is a wrong graph
-with no error anywhere.) `validate=True` is mandatory for the same reason — the default `False` discards
-characters outside the alphabet instead of refusing. The probe asserts that `−16` is the **only** cut of
-the five where a length-only check would accept, so the justification cannot silently stop holding.
+`b64decode` **refuses** a cut that is not a multiple of 4 characters (`Incorrect padding`, or *"cannot be 1
+more than a multiple of 4"*) — so the danger is not a partial quantum. It is the **aligned** cut: 4 base64
+characters are 3 whole bytes, so a body shortened by a multiple of 4 characters is still **valid** base64
+and decodes silently to fewer bytes. Since `3k ≡ 0 (mod 4)` iff `k ≡ 0 (mod 4)`, only every fourth such cut
+leaves a length that is a multiple of the 4-byte element — and at **−16 characters** that is exactly the
+case (1,524 B = **381 whole floats**), so a reader checking only `len(decoded) % 4` **accepts a silently
+truncated vector**. Only the declared count refuses it. (This is the fail-open direction on the durability
+artifact: a short vector replayed into the graph is a wrong graph with no error anywhere.) `validate=True`
+is still mandatory — the default `False` discards characters outside the alphabet instead of refusing. The
+probe asserts both halves: every multiple-of-4 cut decodes silently, and `−16` is the only one of them whose
+decoded length passes a `%4` check.
 
 The reader's four refusals, all measured in the probe:
 
-| corruption | verdict |
-|---|---|
-| truncated body, padding intact | refused (count + length) |
-| one element short, count unchanged | refused (count) |
-| unknown frame version | refused (version) |
-| non-base64 character in body | refused (`validate=True`) |
+```
+== the reader refuses (each raises, none decodes silently short)
+  truncated body, padding intact             REFUSED (ValueError, decoded 1,533 B)
+  one element short, count unchanged         REFUSED (ValueError, decoded 1,532 B)
+  packed f64 under a declared f32            REFUSED (ValueError, decoded 3,072 B)
+  unknown version                            REFUSED (ValueError, decoded 1,536 B)
+  non-base64 character in body               REFUSED (Error)
+```
 
 ### 2.3 What "lossless for the float32 the model emitted" means, precisely — measured
 
@@ -292,10 +303,10 @@ Two different claims get conflated under "lossless", and P2 changes which one ho
 - **P2:** the journal holds **the float32 bits themselves**. There is no rounding to reason about: decode
   gives back exactly the 4 bytes that were packed.
 
-So the acceptance property is stated at the right width: **`base64 → float32 bits == P0 text → float32 bits
-== the producer's float32 bits`**, verified on every vector-bearing record in the corpus
-(`p2_base64_probe.py`, "decode equivalence"). It is **not** float64-value equality with P0's text, and a
-test that asserted that would fail on every element by design.
+That acceptance property is stated at the right width: **`base64 → float32 bits == P0 text → float32 bits
+== the producer's float32 bits`**, verified on **all five** vector-bearing records in the corpus (5 of 39;
+the probe loops every record, not one per type — `p2_base64_probe.py`, "decode equivalence"). It is **not**
+float64-value equality with P0's text, and a test that asserted that would fail on every element by design.
 
 That 9 significant digits suffice for float32 is float32's own structure (24-bit significand ⇒ 9 decimal
 digits round-trip; 8 do not always). Checked rather than cited, on 2,000,000 random float32 values:
@@ -368,17 +379,20 @@ Under the new frame every one of those steps is identical, because the frame is 
   could have hidden from the classifier.
 - `record_types_from_partial`/`_torn_type_key_at_end_of_line` read the fragment's **prefix** for a `"type"`
   key. The frame changes only the `embedding` **value**, which sits deep in the payload — after `type` in
-  every shape (measured: `type` is the first key in **39/39** of the committed corpus's records; the SDK
-  writer inserts it third, at ~80 B). So a tear late enough to keep the type keeps it exactly as today, and
+  every shape (measured: `type` is the first key in **39/39** of the committed corpus's records — the
+  fixture's own order, which `EventLog.append` preserves; the **SDK** writer builds its envelope
+  `event_id, ts, type` (`sdk._emit_event`), so under the writer's compact separators the `"type"` key
+  opens at byte **79** and is third). So a tear late enough to keep the type keeps it exactly as today, and
   a tear before it is already #3316's ambiguous case, which **refuses** rather than guesses. The frame
   moves neither boundary.
 - seals and torn markers are **line-level** artifacts, not payload-level, so nothing about them moves.
 
-**The one new interaction, stated:** a torn record now loses a *larger fraction of its own value* — today a
-tear at 90 % of the line keeps a readable vector prefix that a human could reconstruct; under base64 it
-keeps nothing usable. That is not a change in what is **replayed** (the record was always dropped, never
-half-applied) — it is a change in what is **recoverable by hand** from the fragment. Cost, not correctness;
-recorded under Rollback (§6) as a permanent loss of the format.
+**The one new interaction, stated:** a torn record now loses the same number of *replayed* records (it was
+always dropped, never half-applied), but a human salvaging the fragment can no longer *read* the surviving
+tail — a base64 body truncated on a 4-character boundary still decodes to a **prefix** of the vector
+(measured: −4 chars → 383 floats, −8 → 382, …), but only after the human trims it to that boundary and
+decodes it. So hand-recovery changes **shape**, not existence. Cost, not correctness; recorded under
+Rollback (§6) as a permanent loss.
 
 ---
 
@@ -538,7 +552,7 @@ The frame was chosen so that this question has a cheap answer, which is the stro
 | the format is wrong (base64 turns out to be the wrong choice) | **dual reader**: both shapes stay readable indefinitely, because dispatch is per record and needs no state. The writer reverts to JSON text; journals that already carry frames keep replaying. | **nothing** — no record is rewritten, so no migration is needed in either direction |
 | the frame is withdrawn entirely | a reader that stops decoding still has to keep understanding frames for as long as any frame-bearing journal exists. That reader is a **permanent** obligation of the format. | a second reader path, forever |
 | base64 makes the log un-inspectable in an incident | a decode helper (`tools/journal_decode.py`-shaped) restores human readability on demand; it is a **tool**, not a format change | **human greppability of the vector** — you can no longer read, diff or hand-edit a vector in the log by eye. This is a real, permanent loss and the main non-byte cost of P2. |
-| a tear loses more of a record than before | nothing to recover: the record was never half-applied | **hand-recoverability of a torn record's vector prefix** (§2.6) |
+| a tear loses more of a record than before | nothing to recover: the record was never half-applied | **hand-recoverability of a torn vector**: a base64 body truncated on a 4-char boundary still decodes to a **prefix** of the vector, but only after a human trims it to that boundary and decodes — so hand-recovery changes **shape**, not existence (§2.6) |
 
 **What is permanently lost if the format ships and then is withdrawn:** the simplicity of a single-shape
 journal — every frame-bearing journal is thereafter a second code path that must keep a reader. That cost is
@@ -620,6 +634,22 @@ for path in ("tortoise/log.py", "tortoise/subject_binding.py"):
 for fn in ("_apply_journal_presence", "_journal_presence_state", "_journal_vector"):
     print(fn, "mentions embedding:", "embedding" in inspect.getsource(getattr(s, fn)).lower())
 PY2
+```
+
+# 5. the §2.6 key-order claim: `type` first in all 39 corpus records; the SDK
+#    envelope puts it third
+uv run python - <<'PY3'
+import json
+from tortoise.ids import ulid, now_iso
+recs = [json.loads(l) for l in open("supabase/tests/fixtures/record_projection_journal.jsonl") if l.strip()]
+firsts = [list(r)[0] for r in recs]
+print(f"records {len(recs)}; type is FIRST key in {firsts.count('type')} of {len(recs)}")
+# the SDK writer's envelope order (_emit_event): event_id, ts, type, …
+# COMPACT separators, which is what EventLog.append writes (log.py:1563).
+env = {"event_id": ulid(), "ts": now_iso(), "type": "PointAdded"}
+j = json.dumps(env, separators=(",", ":"))
+print("type key opens at byte", j.index('"type"'), "| key position", list(env).index("type"))
+PY3
 ```
 
 Suites touched by the *design* (none by this document — it changes no code): `test_11821_journal_vector_width`,

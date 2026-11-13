@@ -318,17 +318,26 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
 
     # ── decode equivalence: the float32 bits must not move ──────────────
     print("\n== decode equivalence (float32 bits, not float64 values)")
-    for rtype in VECTOR_TYPES:
-        rec = by_type[rtype]
+    # EVERY vector-bearing record, not one per type: `richest_by_type` collapses
+    # a repeated type, and the corpus holds two PointAdded records.
+    equiv = 0
+    for rec in recs:
         vector = _embedding_vector(rec)
+        width = rec.get("point", {}).get(JOURNAL_VECTOR_WIDTH_KEY) \
+            if isinstance(rec.get("point"), dict) else None
+        if not vector or width != JOURNAL_VECTOR_WIDTH_F32:
+            continue
         text = frame("f32", 4, vector)
         decoded = unframe(text)
         same = as_f32_bits(decoded) == as_f32_bits(vector)
         p0_text_f32 = as_f32_bits([float(np.float32(v)) for v in vector])
         text_equiv = p0_text_f32 == as_f32_bits(vector)
-        print(f"  {rtype:<20} base64→f32 bits == P0 text→f32 bits: {same}"
+        print(f"  {rec.get('type', '?'):<20} {len(vector):>4}-d  "
+              f"base64→f32 bits == P0 text→f32 bits: {same}"
               f"   (P0 text→f32 == producer f32: {text_equiv})")
-        assert same and text_equiv, rtype
+        assert same and text_equiv, rec.get("type")
+        equiv += 1
+    print(f"  {equiv} of {len(recs)} corpus records carry a vector and were verified")
 
     # ── the f64 population: NOT narrowed ────────────────────────────────
     print("\n== the caller-owned / preserved population (#5004 round-7)")
@@ -357,40 +366,59 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
             f"b64:1:f32:{len(vec)}:{body[:-8] + 'AAAA'}",
         "one element short, count unchanged":
             f"b64:1:f32:{len(vec)}:{base64.b64encode(struct.pack('<383f', *vec[:383])).decode()}",
+        "packed f64 under a declared f32":
+            f"b64:1:f32:{len(vec)}:{base64.b64encode(struct.pack(f'<{len(vec)}d', *vec)).decode()}",
         "unknown version": f"b64:2:f32:{len(vec)}:{body}",
         "non-base64 character in body": f"b64:1:f32:{len(vec)}:{'*' * 8 + body[8:]}",
     }
     for label, text in cases.items():
         try:
+            decoded_len = len(base64.b64decode(text.rsplit(":", 1)[1], validate=True))
+        except Exception:  # noqa: BLE001 — an un-decodable body is its own refusal
+            decoded_len = None
+        try:
             unframe(text)
         except Exception as exc:  # noqa: BLE001 — the point is that it raises
-            print(f"  {label:<42} REFUSED ({type(exc).__name__})")
+            where = f", decoded {decoded_len:,} B" if decoded_len else ""
+            print(f"  {label:<42} REFUSED ({type(exc).__name__}{where})")
         else:
             print(f"  {label:<42} ⛔ DECODED — this is a defect")
             return 1
 
     # ── WHY the count is load-bearing: the silent-truncation sweep ──────
-    # A body cut by N base64 chars loses 3*N/4 bytes. Only ONE cut in four
-    # leaves a length that is still a multiple of the element size, so a
-    # reader that checked only `len(decoded) % 4` would accept it.
+    # `b64decode` REFUSES a non-quantum-aligned cut ("Incorrect padding", or
+    # "cannot be 1 more than a multiple of 4"). The silent case is the
+    # QUANTUM-ALIGNED cut: 4 base64 chars = 3 bytes, so a body shortened by a
+    # multiple of 4 chars is still VALID base64 and simply decodes to fewer
+    # bytes. 3k ≡ 0 (mod 4) iff k ≡ 0 (mod 4), so only every FOURTH such cut
+    # leaves a length that is a multiple of the element size — and a reader
+    # checking only `len(decoded) % 4` accepts it.
     print("\n== silent truncation: which cuts a LENGTH-ONLY check would accept")
-    print("   cut   decoded    floats   len%4==0   count check (declared n)")
+    print("   cut   chars%4   decoded    floats   len%4==0   count check (declared n)")
     accepted_by_length_only = []
-    for cut in (4, 8, 12, 16, 20):
+    silent = []
+    for cut in (1, 2, 3, 4, 8, 12, 16, 20):
         try:
             out = base64.b64decode(body[:-cut], validate=True)
         except Exception as exc:  # noqa: BLE001
-            print(f"   -{cut:<4} refused by b64decode ({type(exc).__name__})")
+            print(f"   -{cut:<4} {(len(body) - cut) % 4:<8} refused by b64decode "
+                  f"({exc})")
             continue
+        silent.append(cut)
         elems = len(out) / 4
         len_only = len(out) % 4 == 0
         if len_only:
             accepted_by_length_only.append(cut)
-        print(f"   -{cut:<4} {len(out):>7,} B  {elems:>7.2f}   {str(len_only):<10}  "
+        print(f"   -{cut:<4} {(len(body) - cut) % 4:<8} {len(out):>7,} B  "
+              f"{elems:>7.2f}   {str(len_only):<10}  "
               f"{'ACCEPTS (381 floats)' if len_only else 'refuses'}")
+    if silent != [4, 8, 12, 16, 20]:
+        print(f"  ⛔ unexpected silent cuts {silent} — every multiple-of-4 cut must "
+              f"decode silently (4 base64 chars = 3 whole bytes)")
+        return 1
     if accepted_by_length_only != [16]:
-        print(f"  ⛔ unexpected sweep result {accepted_by_length_only} — the count's "
-              f"justification in the note assumes exactly the -16 cut")
+        print(f"  ⛔ unexpected sweep result {accepted_by_length_only} — only -16 "
+              f"leaves a decoded length that is a multiple of the 4-byte element")
         return 1
     # …and the frame REFUSES that exact cut, because of the count.
     short = f"b64:1:f32:{len(vec)}:{body[:-16]}"

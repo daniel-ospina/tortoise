@@ -77,10 +77,12 @@ of framing (14 B prefix + 2 B of JSON quotes) = **2,064 B**.
 | unknown frame version | refused |
 | non-base64 character in body | refused (`validate=True`) |
 
-The **element count is load-bearing**, measured: `b64decode` silently drops an incomplete trailing
-quantum, and at **−16 characters** the decoded length is still a multiple of the element size (381 whole
-floats) — so a length-only check accepts a silently truncated vector. Only the declared count refuses
-it.
+The **element count is load-bearing**, measured: `b64decode` *refuses* a cut that is not a multiple of 4
+characters, so the hazard is the **quantum-aligned** cut — 4 base64 chars are 3 whole bytes, so a body
+shortened by a multiple of 4 is still valid base64 and decodes silently to fewer bytes. Since `3k ≡ 0
+(mod 4)` iff `k ≡ 0 (mod 4)`, only every fourth such cut leaves a length that is a multiple of the 4-byte
+element, and at **−16 characters** that is exactly the case (1,524 B = **381 whole floats**) — so a
+length-only check accepts a silently truncated vector. Only the declared count refuses it.
 
 ## Reproduce
 
