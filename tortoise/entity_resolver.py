@@ -742,8 +742,8 @@ def _entity_label(graph, node_id: str) -> str | None:
     return None
 
 
-def _survivor_fixpoint(graph, survivor_id: str) -> tuple[str, int]:
-    """``(id, hops)`` of the entity ``survivor_id`` finally names (#12296, M-4).
+def _survivor_fixpoint(graph, survivor_id: str) -> tuple[str, bool]:
+    """``(id, hopped)`` — the entity ``survivor_id`` finally names (#12296, M-4).
 
     ``apply_entity_merge`` must write the redirect onto an entity that is not
     itself retired. Writing ``candidate -> survivor`` where the survivor already
@@ -758,19 +758,21 @@ def _survivor_fixpoint(graph, survivor_id: str) -> tuple[str, int]:
     ``entity_verdict.group_join``'s ``dependents >= 1`` a reliable reading of
     "this target is a group".
 
-    ``hops`` is returned rather than only applied: it is the evidence that a
+    ``hopped`` is returned rather than only applied: it is the evidence that a
     chain existed (`#12186` M-10's *reporting* half), and a caller that expected a
     live survivor learns it was redirected rather than discovering it from a
-    later read. A single-label probe means a lookup that cannot resolve the label
-    returns ``(survivor_id, 0)`` — the caller's own ``_identity_row`` read then
-    raises ``No entity``, which is the honest answer for an id that is not an
-    entity.
+    later read. It is a BOOLEAN, not a hop count, on purpose:
+    ``follow_resolved_from`` already walks to a fixpoint, so counting here would
+    report the length of a chain this function deliberately does not walk. A
+    lookup that cannot resolve the label returns ``(survivor_id, False)`` — the
+    caller's own ``_identity_row`` read then raises ``No entity``, which is the
+    honest answer for an id that is not an entity.
     """
     label = _entity_label(graph, survivor_id)
     if label is None:
-        return str(survivor_id), 0
+        return str(survivor_id), False
     fixed = follow_resolved_from(graph, label, survivor_id)
-    return str(fixed), 0 if str(fixed) == str(survivor_id) else 1
+    return str(fixed), str(fixed) != str(survivor_id)
 
 
 def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
