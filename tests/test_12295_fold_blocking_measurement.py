@@ -116,6 +116,17 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
             return r is not None and r.returncode == 0
 
         other = measured.group(0)
+        #: ⛔ A DEAD SHA IS NOT A SHALLOW CLONE. The skip below is for "could not
+        #: answer"; it must not also cover "answered, and the artifact's head is not
+        #: an object here". When the note's measured commit IS resolvable, history is
+        #: demonstrably present, so an absent `code_head` is the very defect this
+        #: guard exists for — a dead 40-hex sha passing as evidence — not a clone that
+        #: cannot see it.
+        if _has(other) and not _has(head):
+            raise AssertionError(
+                f"code_head {head} is not an object in this repo, while the measured "
+                f"commit {other} is — history is present, so this is a dead sha, not "
+                "a shallow clone")
         if other != head and _has(head) and _has(other):
             scoped = _git("diff", "--quiet", other, head, "--",
                           "tortoise/entity_resolver.py",
