@@ -245,7 +245,10 @@ def _support_entry(sdk, claim_id: str, support_id: str, token: str) -> dict | No
     """Read the claim back through the SHIPPING read path and return the
     support entry that names ``support_id`` (None when the product returned no
     such support — that is the FAIL shape, not an exception)."""
-    hits = sdk.tortoise_fts_query(token, limit=25)
+    # #12297: ``limit=25`` < the rerank's pool width, so with the gate armed
+    # the rerank re-picks which rows survive the cut and this membership lookup
+    # would return the documented FAIL shape for a healthy graph. Opt out.
+    hits = sdk.tortoise_fts_query(token, limit=25, _rerank_candidates=False)
     item = next((h for h in hits if h.get("id") == claim_id), None)
     if item is None:
         return None

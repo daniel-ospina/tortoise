@@ -5687,3 +5687,379 @@ def test_the_merge_leg_drops_a_stated_record_and_that_is_declared(client):
     assert _point_mentions(pid) is None, (
         "the merge leg STORED the record: #11811's declared behaviour changed "
         "— flip this row (and the comment on the leg) with it")
+
+
+class TestThe12120HostedAboutObjectAnchor:
+    """The hosted session-capture `about_entities` anchor (POST /v1/sessions/commit).
+
+    #12047 / #12120 about-anchor site (P2): `_execute_commit_writes`' §6a anchor did
+    `MATCH (p:Point {id:$pid}), (o:Object {name:$name})` — the RAW name — while
+    every writer that produced the Object resolved the folded union (`name` ·
+    `canonical_name` · `aliases`, raw and folded). A claim naming a fold-equivalent
+    spelling of a registered Object therefore matched nothing and the `aboutObject`
+    edge was silently dropped: no warning, no skip record, the attribution simply
+    absent (the SDK's own twin of this loop is pinned in
+    `tests/test_12047_entity_resolution.py`).
+
+    The local twin's recorded disposition — "attach to EVERY carrier, so routing it
+    through a resolver would refuse where capture writes" — still holds: the fix
+    widens the SPELLING key space and still picks no identity.
+    """
+
+    def test_a_fold_colliding_about_name_wires_the_hosted_anchor(self, client):
+        """`about_entities=["the alpha"]` must link the Object `Alpha`.
+
+        The Object is seeded by a PRIOR commit (the realistic order: it is
+        already registered when a later claim mentions it by a variant spelling),
+        and the coordinate is folded-only — `the alpha` appears in NEITHER stored
+        raw property (`name='Alpha'`, `canonical_name='alpha'`), so a raw anchor
+        matches nothing.
+
+        The payload's `entities` entry carries the SAME variant, because the
+        payload validates `about_entities` against it: that entry is the shape the
+        extractor emits for a mention of an already-registered entity, and
+        `create_entity` folds it onto `Alpha` (so the graph still holds ONE Object
+        — the anchor is what must find it).
+        """
+        _seed_objects(client, "s12120-anchor-1", ["Alpha"])
+        raw = _raw_payload(
+            1, session_id="s12120-anchor-2",
+            entities=[{"name": "the alpha", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["the alpha"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object {name:'Alpha'}) "
+            "RETURN count(o)").result_set
+        assert rows and rows[0][0] >= 1, (
+            "the claim's fold-equivalent about name dropped its `aboutObject` "
+            "edge — the hosted anchor resolved on the raw name")
+
+    def test_a_padded_subject_kind_reference_takes_the_drop_on_both_channels(
+            self, client):
+        """Round 18: ONE spelling per decision, on BOTH hosted channels.
+
+        A payload may legally declare a subject-kind entity `"The Team"`
+        (`organization`) beside a padded twin `" The Team "` (Layer-1 checks
+        `about_entities ⊆ entities` by exact string, so `" The Team "` needs its own
+        entry), and then reference `" The Team "`. The reference fold-equals the
+        subject-kind name, so `#1370`/`#4934` say the gated binder owns the
+        attribution and neither channel may write the un-gated `aboutObject` edge —
+        which is what `main`, the local capture path and `near_dup_merge` all do.
+
+        Round 17 stripped the reference but left the DECLARATION raw and left the
+        POINT channel raw, so the two hosted channels disagreed with each other and
+        with `main`: the reference missed the drop and the exact-narrowing arm
+        attached it. Both channels are asserted here, and each half is RED without
+        its own fix.
+        """
+        # The exact-name carrier exists, so a missing edge means the DROP fired —
+        # not that the anchor had nothing to match.
+        _seed_objects(client, "s12120-padsk-1", ["The Team"])
+        raw = _raw_payload(
+            1, session_id="s12120-padsk-2",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": " The Team ", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[" The Team "])],
+            events=[{"id": "ev_" + "8" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": [" The Team "]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        for label in ("Event", "Point"):
+            rows = g.query(
+                f"MATCH (n:{label})-[:aboutObject]->(o:Object {{name:'The Team'}}) "
+                "RETURN count(o)").result_set
+            assert rows and rows[0][0] == 0, (
+                f"a PADDED subject-kind reference wrote the un-gated aboutObject "
+                f"edge on the {label} channel — the #1370/#4934 drop exists "
+                f"precisely to keep the gated binder the only writer here")
+
+    def test_a_padded_SUBJECT_declaration_still_owns_the_attribution(
+            self, client):
+        """Round 18: the DECLARATION side is stripped, not only the reference.
+
+        Both sibling sites strip the subject-name set they build (`sdk.py`,
+        `near_dup_merge.py`). Leaving it raw while the reference is stripped made
+        a declared subject `" The Team "` unreachable — the reference `" The Team "`
+        stripped to `"The Team"`, missed the set, and took the fold-equal arm that
+        attaches to an exact-name carrier, an edge `main` and the local path both
+        refuse. RED without the set strip.
+        """
+        _seed_objects(client, "s12120-padsubj-1", ["The Team"])
+        raw = _raw_payload(
+            1, session_id="s12120-padsubj-2",
+            entities=[{"name": " The Team ", "kind": "organization",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[" The Team "])],
+            events=[{"id": "ev_" + "7" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": [" The Team "]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        for label in ("Event", "Point"):
+            rows = g.query(
+                f"MATCH (n:{label})-[:aboutObject]->(o:Object {{name:'The Team'}}) "
+                "RETURN count(o)").result_set
+            assert rows and rows[0][0] == 0, (
+                f"a PADDED subject DECLARATION did not own the attribution on the "
+                f"{label} channel — the subject-name set must be built from the "
+                f"stripped spelling, as both sibling sites build it")
+
+    def test_an_event_keeps_the_edge_for_an_exact_name_carrier(self, client):
+        """Round 6: F6 holds on the EVENT channel too — narrow, don't drop.
+
+        The reference `the team` fold-equals a declared subject-kind entity
+        `The Team`, and an Object `the team` exists whose name IS the reference:
+        that carrier keeps its `aboutObject` edge (the same rule the Point anchor
+        pins), while a fold-only carrier would not get one.
+        """
+        _seed_objects(client, "s12120-ev-f6-1", ["the team"])
+        raw = _raw_payload(
+            1, session_id="s12120-ev-f6-2",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": "ev_" + "1" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the team"]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (:Event)-[:aboutObject]->(o:Object {name:'the team'}) "
+            "RETURN count(o)").result_set
+        assert rows and rows[0][0] >= 1, (
+            "F6's exact-name carrier lost its Event edge to the fold arm")
+
+    def test_two_exact_name_carriers_are_refused_before_the_arm_sees_them(
+            self, client):
+        """Round 7 — the N≥2 case is UNREACHABLE through this door, and that is pinned.
+
+        The exact-only arm is only reached for a reference that FOLD-equals a
+        declared subject-kind name, so the payload must declare that very spelling
+        (validation) with a NON-subject kind — which means capture REGISTERS it,
+        and two live same-name carriers are refused there first
+        (`AMBIGUOUS_ENTITY_NAME` / route-then-refuse, #3633). Measured on this
+        fixture: 422 with both candidate ids named.
+
+        So the arm can never see two exact carriers today, and its
+        attach-to-every shape (`_targets`, replacing
+        `_exact_rows[0][0] if len(_exact_rows) == 1 else None`) is DEFENSIVE
+        parity with the Point anchor, not a reachable code path. This test pins
+        the boundary: if registration ever stops refusing, the arm's N≥2 case goes
+        live and this test reds, which is the moment to give it a behavioural pin.
+        """
+        _seed_objects(client, "s12120-ev-two-1", ["the team"])
+        _team_sdk()._get_proj().g.query(
+            "CREATE (b:Object {id:'obj-12120-ev-two-b', name:'the team', "
+            "objectKind:'document', status:'live'})")
+        raw = _raw_payload(
+            1, session_id="s12120-ev-two-2",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": "ev_" + "2" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the team"]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 422, resp.text[:800]
+        assert "AMBIGUOUS_ENTITY_NAME" in resp.text, resp.text[:800]
+
+    def test_an_event_skips_a_terminal_exact_name_carrier(self, client):
+        """Round 7: the exact-only arm is LIVE-ONLY, like the resolver it narrows.
+
+        `resolve_fold_name(mention=True)` reads live holders. The narrowed arm
+        replaced it with a raw probe, and an unfiltered probe writes a NEW
+        `aboutObject` edge onto an Object every recall surface excludes — a link
+        the pre-fix code could not create. Reverting the liveness conjunct reds
+        this test with one edge.
+        """
+        _team_sdk()._get_proj().g.query(
+            "CREATE (b:Object {id:'obj-12120-ev-term-b', name:'the team', "
+            "objectKind:'document', status:'superseded', "
+            "supersededBy:'The Team'})")
+        raw = _raw_payload(
+            1, session_id="s12120-ev-term-2",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": "ev_" + "3" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the team"]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (:Event)-[:aboutObject]->(o:Object {id:'obj-12120-ev-term-b'}) "
+            "RETURN count(*)").result_set
+        assert not rows or rows[0][0] == 0, (
+            "the exact-only Event arm wired a terminal carrier: an `aboutObject` "
+            "edge onto a superseded Object no recall surface shows")
+
+    def test_an_event_fold_variant_of_a_subject_kind_name_is_skipped(
+            self, client):
+        """#12120 review round 4: the EVENT channel needs the FOLD arm.
+
+        The Event `about_entities` loop defers to §6a, whose resolver
+        (`resolve_fold_name`) falls back to the writer's folded union, so an
+        exact-only guard left a fold-equivalent spelling of a subject-kind name
+        free to write the un-gated `aboutObject` edge the `#1370`/`#4934` rule
+        forbids. Round 6 corrected that reasoning: this channel does NOT drop the
+        attribution — it defers the reference EXACT-ONLY (§6a), the same
+        narrowing the Point anchor applies, so F6's exact-name carrier keeps its
+        Event edge (the sibling `test_an_event_keeps_the_edge_for_an_exact_name_
+        carrier`) and only a FOLD-ONLY carrier is refused. What this test pins is
+        the fold-only carrier: no edge, and no un-gated `aboutObject` write.
+        """
+        _seed_objects(client, "s12120-ev-narrow-1", ["Acme Corp"])
+        raw = _raw_payload(
+            1, session_id="s12120-ev-narrow-2",
+            entities=[{"name": "Acme Corp", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the acme corp", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": "ev_" + "0" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the acme corp"]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (:Event)-[:aboutObject]->(o:Object) "
+            "WHERE o.name = 'Acme Corp' RETURN count(o)").result_set
+        assert rows and rows[0][0] == 0, (
+            "the Event channel wrote an un-gated aboutObject for a "
+            f"fold-equivalent subject-kind name: {rows}")
+
+    def test_a_fold_variant_of_a_subject_kind_name_skips_the_fold_only_carrier(
+            self, client):
+        """#12120 review round 3: the subject-channel narrowing, hosted side.
+
+        When the reference only FOLD-equals a declared subject-kind name, the
+        widened anchor must attribute only an EXACT-name Object: a fold-only
+        carrier is the un-gated `aboutObject` edge the `#1370`/`#4934` rule
+        forbids, on a spelling the pre-fix raw anchor could not reach.
+        """
+        _seed_objects(client, "s12120-narrow-1", ["Acme Corp"])
+        raw = _raw_payload(
+            1, session_id="s12120-narrow-2",
+            entities=[{"name": "Acme Corp", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the acme corp", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["the acme corp"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object) "
+            "WHERE o.name = 'Acme Corp' RETURN count(o)").result_set
+        assert rows and rows[0][0] == 0, (
+            "a fold-only spelling of a subject-kind name wrote the un-gated "
+            f"aboutObject edge: {rows}")
+
+    def test_an_exact_name_carrier_resolves_to_its_survivor(self, client):
+        """Round 13: the exact-only arm must ask the resolver's THIRD question.
+
+        `resolve_fold_name` runs `_collapse_resolved_holders`, so a merged-away
+        carrier resolves to its SURVIVOR and an entity whose survivor is terminal
+        resolves to NOTHING. The exact-only arm asked only the node-level liveness
+        question, so it attached the Event's edge to the CARRIER — a node the
+        writer's own merge retired — and, once that survivor was retired, wrote a
+        NEW edge where the folded arm refuses. Measured pre-fix on a lane graph:
+        live survivor -> folded `surv`, exact `carrier`; survivor superseded ->
+        folded `None`, exact `carrier`.
+        """
+        g = _team_sdk()._get_proj().g
+        g.query(
+            "CREATE (:Object {id:'obj-r13-surv', name:'Acme Holdings', "
+            "objectKind:'organization', status:'live', "
+            "canonical_name:'acme holdings'}) "
+            "CREATE (:Object {id:'obj-r13-carrier', name:'the team', "
+            "objectKind:'organization', status:'live', "
+            "canonical_name:'team', resolved_from:'obj-r13-surv'})")
+        eid = "ev_" + "2" * 62
+        raw = _raw_payload(
+            1, session_id="s12120-ev-collapse-1",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": eid, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the team"]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        carrier_edges = g.query(
+            "MATCH (:Event)-[:aboutObject]->(o:Object {id:'obj-r13-carrier'}) "
+            "RETURN count(o)").result_set
+        assert carrier_edges and carrier_edges[0][0] == 0, (
+            "the exact-only arm attached the edge to the merged-away CARRIER "
+            f"instead of its survivor: {carrier_edges}")
+        survivor_edges = g.query(
+            "MATCH (:Event)-[:aboutObject]->(o:Object {id:'obj-r13-surv'}) "
+            "RETURN count(o)").result_set
+        assert survivor_edges and survivor_edges[0][0] >= 1, (
+            "the exact-only arm dropped the edge the folded arm would have "
+            f"written on the SURVIVOR: {survivor_edges}")
+
+        # Part 2: the entity is retired, so the folded arm resolves to nothing —
+        # the exact-only arm must refuse on the same evidence, not attach to the
+        # still-live carrier.
+        g.query("MATCH (o:Object {id:'obj-r13-surv'}) "
+                "SET o.status = 'superseded'")
+        eid2 = "ev_" + "3" * 62
+        raw2 = _raw_payload(
+            1, session_id="s12120-ev-collapse-2",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": eid2, "eventKind": "decision",
+                     "content": "e1", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the team"]}])
+        resp2 = _commit(client, raw2)
+        assert resp2.status_code == 200, resp2.text[:800]
+        # The writer mints a NEW incarnation for the name here (a retired
+        # survivor is not a live holder), and that incarnation is a legitimately
+        # distinct entity — what must NOT happen is an edge on the merged-away
+        # CARRIER, which the folded arm's collapse refuses.
+        after = g.query(
+            "MATCH (:Event {eventId:$eid})-[:aboutObject]->(o:Object {id:$cid}) "
+            "RETURN count(o)",
+            params={"eid": eid2, "cid": "obj-r13-carrier"}).result_set
+        assert after and after[0][0] == 0, (
+            "the exact-only arm wrote a NEW edge onto a carrier of a RETIRED "
+            f"entity where the folded arm refuses: {after}")

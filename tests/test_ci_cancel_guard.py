@@ -346,35 +346,151 @@ def test_run_with_a_started_job_is_refused(fixture):
     assert fixture.cancelled() == []
 
 
-def test_a_STILL_QUEUED_job_that_has_STARTED_is_refused(fixture):
-    """The `started_at` disjunct of clause 2, which the status arm cannot cover.
+def test_a_runner_claiming_a_STILL_QUEUED_job_is_refused(fixture):
+    """A run can read `queued` while a runner has ALREADY claimed a job.
 
-    A run can read `queued` while one of its jobs already carries a start stamp —
-    that is the ordinary shape while the queue is draining, and it is the exact
-    case the module docstring's clause 2 names. Asserting it with
-    `status: "in_progress"` (as `test_run_with_a_started_job_is_refused` does)
-    exercises the LOOKUP arm instead, so the `j.get("started_at")` half can be
-    deleted with the suite still green: the job then reads as "no work to
-    destroy", the verdict becomes PERMIT, and a real POST destroys running work.
-    ⛔ MEASURED WITH THIS TEST REMOVED FROM THE RUN: deleting that disjunct left
-    the whole file green. With it in place, deleting it reds THIS test and only
-    this test, while `test_run_with_a_started_job_is_refused` stays green.
-    ⛔ The collected-test COUNTS are deliberately not restated here. A count is a
-    property of the file, not of this arm, so it drifts every time any test is
-    added — this paragraph carried 51 while the file collected 53, which reads as
-    "the pin is vacuous" when it is only stale. `dacd1fc07^` predates BOTH pins and
-    collects 50; that is the one figure here that cannot drift, so it is the only
-    one kept.
+    That is the ordinary shape while the queue is draining, and it is the case the
+    status arm cannot cover — so clause 2 needs a signal that is not `status`.
+
+    ⛔⛔ THIS TEST USED TO ASSERT THE *TIMESTAMP* INSTEAD, AND THAT WAS WRONG (#11045).
+    Its fixture was `status: "queued"` + `started_at` and no `runner_name`, and it
+    required REFUSE on the belief that `started_at` on a queued job means work has
+    begun. MEASURED 2026-11-13 on daniel-ospina/tortoise: GitHub stamps `started_at`
+    at QUEUE time, so **19** non-completed runs carried `started_at` on EVERY job
+    with `runner_name` empty on every job and every status `queued`/`pending` —
+    nothing had been claimed, nothing had run. Reading that field made the guard
+    refuse every run it was ever given, i.e. an inert enforcer whose PERMIT path was
+    dead code.
+
+    ⛔ THE PIN MOVED; THE PROTECTION DID NOT. Its purpose is preserved exactly — "a
+    still-`queued` job that a runner has already claimed must be REFUSED" — and the
+    load-bearing evidence is now `runner_name`, which is the direct observation
+    `started_at` was standing in for. Deleting the `runner_name` arm must red THIS
+    test (the next test, `…queue_time_started_at…`, covers the inverse shape so the
+    two cannot be satisfied by one over-broad reading).
     """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
     fixture.apply("jobs.json", {"total_count": 1, "jobs": [
         {"name": "test (a)", "status": "queued",
-         "started_at": "2026-11-04T13:44:52Z"}]})
+         "started_at": "2026-11-04T13:44:52Z",
+         "runner_name": "pi-runner-x64-1", "completed_at": None}]})
     r = guard(fixture, "41840910128", "--apply")
     assert r.returncode == 3, r.stdout + r.stderr
     assert "job" in r.stdout.lower()
-    assert fixture.cancelled() == [], "a job that had already started was cancelled"
+    assert fixture.cancelled() == [], "a job a runner had claimed was cancelled"
+
+
+def test_a_QUEUE_TIME_started_at_alone_is_NOT_evidence_of_work(fixture):
+    """#11045 — the regression. The measured untouched shape must be PERMITTED.
+
+    Every job: `queued`, `started_at` stamped, `runner_name` empty, `completed_at`
+    null. No runner has claimed it, no step has run, so nothing can be destroyed and
+    the cancel is exactly what the guard exists to authorise (a superseded head).
+
+    ⛔ THIS IS THE CASE THE GUARD REFUSED FOR ITS WHOLE LIFE. Pre-fix this fixture
+    returns `REFUSED — job(s) already started (6 of 6): cancelling would destroy the
+    work`, which is a false statement about the run and a dead permit path: the
+    measured population on 2026-11-13 was 19 such runs, and a queue-clearing lane
+    reading that verdict concludes "nothing is cancellable".
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 6, "jobs": [
+        {"name": n, "status": "queued", "started_at": "2026-11-05T05:27:19Z",
+         "runner_name": "", "completed_at": None}
+        for n in ("surface-guard", "workflow-lint", "changes", "manifest-integrity",
+                  "test (a)", "python-ci-gate")]})
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert fixture.cancelled() == ["41840910128"]
+
+
+def test_a_requeued_unclaimed_job_with_steps_is_PERMITTED(fixture):
+    """`steps` on an UNCLAIMED job belongs to a PREVIOUS attempt (#12421 review F2).
+
+    The question this guard answers is whether the RUN's work is still at risk. A
+    requeued job's retained step list is the work of an attempt that is already gone;
+    what a cancel would destroy is the REQUEUED attempt, and no runner has claimed it
+    (`runner_name: ""`, `completed_at: null`, `status: queued`). So this must be
+    PERMITTED — and the opposite reading has to be a deliberate decision, not an
+    accident of which fields the predicate happens to read.
+
+    ⛔ THE ASYMMETRY WITH `run_reaper.job_work_start` IS INTENTIONAL: that function
+    reads `steps` because its question is WHEN this attempt's work began, and it
+    floors them at the claim stamp for exactly this reason. Reading them here would
+    make the guard refuse a cancel it exists to authorise (both tools agree that
+    `steps` can never ESTABLISH that a job began).
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 2, "jobs": [
+        {"name": "test (a)", "status": "queued", "started_at": "2026-11-05T05:27:19Z",
+         "runner_name": "", "completed_at": None},
+        {"name": "test (b)", "status": "queued", "started_at": "2026-11-05T05:27:19Z",
+         "runner_name": "", "completed_at": None,
+         "steps": [{"name": "Set up job", "status": "completed",
+                    "started_at": "2026-11-05T04:02:11Z",
+                    "completed_at": "2026-11-05T04:02:19Z"}]}]})
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert fixture.cancelled() == ["41840910128"], (
+        "a previous attempt's steps were read as work at risk in the requeued attempt")
+
+
+def test_a_COMPLETED_job_with_no_runner_name_is_refused(fixture):
+    """The `completed_at` arm. A finished job is not cancellable, even when the run
+    still reads `queued` and GitHub has dropped the job's `runner_name`."""
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 2, "jobs": [
+        {"name": "test (a)", "status": "queued", "started_at": "2026-11-04T13:44:52Z",
+         "runner_name": "", "completed_at": None},
+        {"name": "test (b)", "status": "queued", "started_at": "2026-11-04T13:44:52Z",
+         "runner_name": "", "completed_at": "2026-11-04T13:52:11Z"}]})
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "job" in r.stdout.lower()
+    assert fixture.cancelled() == []
+
+
+def test_a_CONTRADICTORY_job_row_is_refused_not_cancelled(fixture):
+    """rev12421 review cycle 4, F2 and F3: the REFUSE side must cover the shapes the
+    docstring names, and each arm must be PINNED in the direction it claims.
+
+    Both rows are contradictory payloads a degraded API surface can produce on a
+    `queued` job whose `runner_name` is empty:
+
+    * (a) `conclusion: "success"` — GitHub sets a conclusion only on a job that RAN.
+      The docstring said "anything unreadable, unknown or contradictory falls on the
+      REFUSE side" while the predicate never read `conclusion`, so this row was
+      CANCELLED. The arm is now `is not None`, so the row refuses.
+    * (b) `completed_at: ""` — an empty-string stamp is not a timestamp, so the row
+      is contradictory too, and `is not None` reads it as FINISHED (refuse). A
+      TRUTHINESS mutation of that arm (the natural "cleanup") reads `""` as
+      not-completed, lets the row through to the status arm, and CANCELS it — with
+      the suite green before this test existed, because no fixture carried an
+      empty-string `completed_at`.
+
+    Both are pinned at the CLI, because that is the guarantee a lane acts on: exit 3
+    and NOTHING cancelled.
+    """
+    for overrides in ({"conclusion": "success"}, {"completed_at": ""}):
+        row = {"name": "test (b)", "status": "queued",
+               "started_at": "2026-11-04T13:44:52Z",
+               "runner_name": "", "completed_at": None}
+        row.update(overrides)
+        fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+        fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+        fixture.apply("jobs.json", {"total_count": 2, "jobs": [
+            {"name": "test (a)", "status": "queued",
+             "started_at": "2026-11-04T13:44:52Z",
+             "runner_name": "", "completed_at": None},
+            row]})
+        r = guard(fixture, "41840910128", "--apply")
+        assert r.returncode == 3, f"{overrides}: " + r.stdout + r.stderr
+        assert fixture.cancelled() == [], (
+            f"{overrides}: a contradictory job row was read as untouched work")
 
 
 def test_no_open_pr_is_refused(fixture):
@@ -916,6 +1032,63 @@ def test_a_non_object_job_status_is_fail_closed(fixture):
     r = guard(fixture, "41840910128", "--apply")
     assert r.returncode == 2, r.stdout + r.stderr
     assert fixture.cancelled() == []
+
+
+@pytest.mark.parametrize("bad", [None, ["queued"], {"s": "queued"}, 7, True])
+def test_the_STARTED_predicate_is_TOTAL_for_an_unreadable_status(bad):
+    """rev12421 review cycle 4, F3: the non-string arm is load-bearing and was unpinned.
+
+    `job_has_started`'s docstring calls its `not isinstance(status, str) -> True` arm
+    load-bearing ("a second caller would inherit that as an aborted pass" — a
+    `TypeError` out of a PURE predicate, not a refusal). But `decide()` raises
+    `Unreadable` on a non-string status BEFORE any job reaches this predicate, and no
+    test called the predicate directly — so DELETING the arm left the whole suite
+    green, and the arm's contract was promised by prose alone. Pinned here on the
+    predicate itself, which is where that contract lives; the CLI path above stays
+    as it is, because it is a different guarantee (refuse the run, not total-ise the
+    row).
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("ccg_under_test", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.job_has_started(
+        {"name": "x", "status": bad, "runner_name": "", "completed_at": None}) is True
+
+
+def test_the_RUNNER_arm_refuses_every_unreadable_shape_and_permits_only_no_runner():
+    """rev12421 review cycle 5, I3: the `runner_name` arm was a TRUTHINESS test.
+
+    GitHub types `runner_name` as a string and sends `""` for "no runner", so `""`,
+    `None` and an ABSENT field are the only shapes that mean "unclaimed". The arm was
+    `if job.get("runner_name"): return True`, so every DEGRADED falsy value — `[]`,
+    `{}`, `0`, `False` — read as "no runner", the row fell through to the status arm,
+    and the run was CANCELLABLE — while the paragraph above promises "anything
+    unreadable, unknown or contradictory falls on the REFUSE side". An unreadable
+    field is not an absent one: a claim we cannot parse must refuse, because the
+    alternative is cancelling work we could not see.
+
+    Pinned on the predicate, like the status totality test above, because `decide()`
+    raises `Unreadable` on a non-string STATUS before any row reaches this arm — the
+    CLI path is a different guarantee (refuse the run), and this one is about the
+    predicate's own totality.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("ccg_under_test_runner", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    base = {"name": "x", "status": "queued", "completed_at": None, "conclusion": None}
+    for bad in ([], {}, 0, False, " ", "\t", ["runner"], {"name": "r"}, 7, True):
+        assert mod.job_has_started(dict(base, runner_name=bad)) is True, (
+            f"runner_name={bad!r} is unreadable or a claim, not 'no runner' — "
+            "the run must not be cancellable on it")
+    for unclaimed in ("", None):
+        assert mod.job_has_started(dict(base, runner_name=unclaimed)) is False, (
+            f"runner_name={unclaimed!r} IS 'no runner' and must stay permissible")
+    assert mod.job_has_started(dict(base)) is False, (
+        "an ABSENT runner_name is 'no runner' and must stay permissible")
 
 
 def test_a_unicode_digit_run_id_is_a_usage_error(fixture):

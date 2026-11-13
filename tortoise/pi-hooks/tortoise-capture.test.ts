@@ -37,6 +37,7 @@ import {
   COHORT_COST_CAP_CODE,
   DISCARD_COUNT_EXCEEDED,
   DISCARD_HTTP_REJECTED,
+  DISCARD_META_UNREADABLE,
   HARNESS,
   MAX_ATTEMPTS,
   MAX_TURNS,
@@ -590,6 +591,53 @@ test("a refused instant does not repost an already-filed entry", async () => {
 
   await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
   assert.equal(server.posts(), 1, "an already-filed entry was re-POSTed");
+});
+
+test("the Python drain's unrecorded-outcome marker survives a Pi re-snapshot (#12379)", () => {
+  // The two legs SHARE this directory, and this leg builds a FRESH meta literal
+  // on every snapshot — so a marker the Python drain stamped
+  // (`extraction_outcome: "unknown"`, #12379) is erased by the next Pi
+  // `turn_end` unless it is carried. That would delete the only durable trace of
+  // a session that can never gain memory points, on the most routine path there
+  // is: the session simply took another turn.
+  const spool = tmpSpool();
+  const sid = "sess-cross-leg-unrecorded";
+  const turns = [{ role: "user" as const, content: "hi" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  // Simulate the Python drain's stamp (this leg never writes it).
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const stamped = JSON.parse(readFileSync(metaPath, "utf8"));
+  writeFileSync(
+    metaPath,
+    `${JSON.stringify({ ...stamped, extraction_outcome: "unknown" }, null, 2)}\n`,
+  );
+
+  // The session grows — the routine re-snapshot that rebuilds the meta.
+  const res = writeSpoolEntry(spool, {
+    ...snapshot(sid, [...turns, { role: "user" as const, content: "one more" }]),
+  });
+  assert.equal(res.written, true, "a grown session must rewrite the entry");
+
+  assert.equal(
+    readSpoolEntry(spool, sid)?.extraction_outcome,
+    "unknown",
+    "the unrecorded-outcome marker was DROPPED by a re-snapshot — the durable " +
+      "trace now survives exactly one turn, and nothing else records the state",
+  );
+});
+
+test("a session with no unrecorded outcome gains no marker on a re-snapshot (#12379)", () => {
+  // The carry is preserve-only: this leg must never INVENT the marker, or
+  // `session health` would name a healthy session as unrecorded.
+  const spool = tmpSpool();
+  const sid = "sess-no-marker";
+  writeSpoolEntry(spool, snapshot(sid, [{ role: "user" as const, content: "hi" }]));
+  writeSpoolEntry(spool, snapshot(sid, [
+    { role: "user" as const, content: "hi" },
+    { role: "user" as const, content: "again" },
+  ]));
+  assert.equal(readSpoolEntry(spool, sid)?.extraction_outcome, undefined);
 });
 
 test("a refused STORED instant does not repost forever (skip + CAS normalise)", async () => {
@@ -3410,6 +3458,161 @@ test("a meta with no usable session_id is corrupt, not a crash", () => {
   const { metas, discards } = listSpoolEntries(spool);
   assert.equal(metas.length, 0);
   assert.equal(discards[0].reason, "corrupt_entry");
+});
+
+// ── #11802: an entry we could not READ is not an entry we may DESTROY ────────
+// The two directions are pinned separately on purpose: a change that stops
+// destroying unreadable entries but also stops quarantining genuinely corrupt
+// ones has not fixed this, it has just moved the loss.
+
+test("an UNREADABLE meta is kept and retried, never quarantined or unlinked (#11802)", () => {
+  // The measured defect: a root-owned spool entry met by a user-owned drain
+  // raised EACCES at `open`. One `catch` collapsed that with a `JSON.parse`
+  // failure, recorded "meta is not valid JSON" about bytes the process never
+  // opened, quarantined the transcript and unlinked the meta — so the entry
+  // could never be filed, by any verb, ever again.
+  //
+  // MUTATION THAT REDS THIS: put the read back inside the `try` that parses
+  // (`raw = JSON.parse(readFileSync(...))`) so a read refusal falls into the
+  // corrupt arm; or drop `retained: true`; or move `continue` below the
+  // quarantine/unlink.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const metaPath = join(spool, "entries", "locked.meta.json");
+  const logPath = join(spool, "entries", "locked.turns.jsonl");
+  const meta = JSON.stringify({ version: 1, session_id: "sess-locked", harness: "pi" });
+  writeFileSync(metaPath, meta);
+  const turns = '{"role":"user","content":"keep me"}\n';
+  writeFileSync(logPath, turns);
+  chmodSync(metaPath, 0o000);
+  try {
+    const { metas, discards } = listSpoolEntries(spool);
+    assert.equal(metas.length, 0, "an unreadable meta is not a readable meta");
+    assert.equal(discards.length, 1, "a read refusal must still be RECORDED, never silent");
+    assert.equal(discards[0].reason, DISCARD_META_UNREADABLE);
+    assert.equal(discards[0].retained, true,
+      "retained: the entry survives, so this is not a lost capture");
+    assert.match(discards[0].detail ?? "", /cannot read/,
+      "the detail must name the READ refusal");
+    assert.doesNotMatch(discards[0].detail ?? "", /not valid JSON/,
+      "the lie #11802 is about: JSON.parse was never reached");
+
+    // NOTHING was destroyed.
+    assert.equal(existsSync(metaPath), true, "the meta must NOT be unlinked");
+    chmodSync(metaPath, 0o600);
+    assert.equal(readFileSync(metaPath, "utf8"), meta, "and must be byte-identical");
+    assert.equal(existsSync(logPath), true, "the live turn log must NOT be quarantined");
+    assert.equal(existsSync(`${logPath}.orphan`), false);
+    assert.equal(readFileSync(logPath, "utf8"), turns);
+
+    // It is RETRYABLE: the very next drain, now able to read, files it.
+    const after = listSpoolEntries(spool);
+    assert.equal(after.metas.length, 1,
+      "once readable the entry is pending again — a read refusal is a delay, not a loss");
+    assert.equal(after.metas[0].session_id, "sess-locked");
+    assert.equal(after.discards.length, 0);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+
+  // The ledger is the durable record, not just the return value.
+  const ledger = readDiscards(spool);
+  assert.equal(ledger.length, 1);
+  assert.equal(ledger[0].reason, DISCARD_META_UNREADABLE);
+  assert.equal(ledger[0].retained, true);
+});
+
+test("a meta that cannot be OPENED for any reason is the same class — EISDIR too (#11802)", () => {
+  // uid-independent companion to the EACCES row above: this proves the arm keys
+  // on "the read threw", not on a hard-coded permission errno (a root-owned
+  // drain would never see EACCES at all, which is exactly how the original
+  // defect stayed invisible).
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries", "adir.meta.json"), { recursive: true });
+  const { metas, discards } = listSpoolEntries(spool);
+  assert.equal(metas.length, 0);
+  assert.equal(discards.length, 1);
+  assert.equal(discards[0].reason, DISCARD_META_UNREADABLE);
+  assert.equal(discards[0].retained, true);
+  assert.equal(existsSync(join(spool, "entries", "adir.meta.json")), true,
+    "a read failure must never remove the entry");
+});
+
+test("a repeatedly unreadable meta records ONCE, not once per turn (#11802)", () => {
+  // The repairing scan runs on the per-TURN write path (`pruneSpool` → here) as
+  // well as every drain, and the entry never becomes readable — so an
+  // unconditional record appends one line per turn, forever, into a file in the
+  // spool root that is counted against no ceiling (#4714's amplification class).
+  //
+  // Each iteration writes a NEW (readable) meta first, because that is what a
+  // real turn does — and it moves `entries/` mtime. Asserting the dedupe on a
+  // STATIC directory passes against a dir-stamp key that suppresses NOTHING on
+  // the per-turn path this exists for (found in review cycle 2).
+  //
+  // MUTATION THAT REDS THIS: use `recordDiscard` instead of `recordRefusal`; or
+  // key the dedupe on `entriesDirStamp` instead of the unreadable stem set.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const metaPath = join(spool, "entries", "locked.meta.json");
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: "s" }));
+  chmodSync(metaPath, 0o000);
+  try {
+    for (let turn = 0; turn < 5; turn++) {
+      // a new session spooled this turn — readable, exactly as in production
+      writeFileSync(
+        join(spool, "entries", `live${turn}.meta.json`),
+        JSON.stringify({ version: 1, session_id: `live${turn}` }),
+      );
+      listSpoolEntries(spool);
+    }
+    const lines = readDiscards(spool).filter((d) => d.reason === DISCARD_META_UNREADABLE);
+    assert.equal(lines.length, 1, `one event, not one per scan — got ${lines.length}`);
+    assert.equal(lines[0].retained, true);
+    assert.match(lines[0].detail ?? "", /cannot read 1 spool meta/);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+});
+
+test("a corrupt meta still QUARANTINES — the read/parse split did not soften this arm (#11802)", () => {
+  // The other direction. A fix that made everything "retryable" would leave a
+  // genuinely corrupt meta wedging the drain on every pass forever.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const metaPath = join(spool, "entries", "bad.meta.json");
+  writeFileSync(metaPath, "{oops");
+  writeFileSync(join(spool, "entries", "bad.turns.jsonl"),
+    '{"role":"user","content":"keep me"}\n');
+  const { metas, discards } = listSpoolEntries(spool);
+  assert.equal(metas.length, 0);
+  assert.equal(discards.length, 1);
+  assert.equal(discards[0].reason, "corrupt_entry",
+    "bytes that were READ and rejected keep the corrupt classification");
+  assert.match(discards[0].detail ?? "", /not valid JSON/,
+    "here the claim is true: the bytes really were read and really did not parse");
+  assert.equal(discards[0].retained, undefined, "corrupt entries are still a loss");
+  assert.equal(existsSync(metaPath), false, "the corrupt meta is still removed (its ledger line is the evidence)");
+  assert.equal(existsSync(join(spool, "entries", "bad.turns.jsonl")), false);
+  assert.equal(existsSync(join(spool, "entries", "bad.turns.jsonl.orphan")), true,
+    "the intact transcript is still QUARANTINED, never deleted");
+});
+
+test("repair:false neither records nor touches an unreadable meta (#11802)", () => {
+  // A health line must not mutate the spool it describes, and "unreadable
+  // counts as pending" (healthScan) is how the read path already reads it.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const metaPath = join(spool, "entries", "locked.meta.json");
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: "s" }));
+  chmodSync(metaPath, 0o000);
+  try {
+    const { metas, discards } = listSpoolEntries(spool, { repair: false });
+    assert.equal(metas.length, 0);
+    assert.equal(discards.length, 0, "a read-only reader writes no ledger line");
+    assert.equal(existsSync(metaPath), true);
+  } finally {
+    chmodSync(metaPath, 0o600);
+  }
 });
 
 test("a transient failure does not clobber turns written during the POST", async () => {

@@ -57,6 +57,45 @@ no fail-safe and no global constant here. The start clock is ``run_started_at``
 ``run_started_at`` and would inflate elapsed by the whole queue wait — biasing a
 cancel tool toward cancelling a healthy run that only just started.
 
+The SAME argument applies to a shard's own clock (`job_work_start`): an
+UNFINISHED shard with no work clock — a job whose status is
+`queued`/`waiting`/`requested`/`pending` — makes the bound **UNDERIVABLE**
+(#11045). ⛔ THE CLASS IS EXACTLY THE STATUS LIST, WITH NO CARVE-OUT FOR A CLAIM
+(rev12421 review cycle 4 F1, closed in cycle 5). An earlier head treated a
+`queued` job carrying an assigned `runner_name` as a claimed job whose
+`started_at` must therefore be its CLAIM time, and handed that stamp out as the
+clock. That is an UNMEASURED inference and it is PERMITTING on a destructive
+path: the shape occurred 0 times in 250 job rows across 50 non-completed runs (measured
+2026-11-13, outside review, cycle 3), so nothing could falsify it — and if
+`started_at` were still the queue stamp the shard would be charged its whole
+queue wait and the run cancelled. Measured on that head: a `queued` job with
+`runner_name="pi-runner-x64-1"` and `started_at` 7200 s old against a 1200 s bound
+→ `cancel reason=verified-overrun shard_elapsed_s=7200`, where the same row with an
+empty `runner_name` is `skip / bound-underivable`. So `runner_name` is not read here
+at ALL: a queued job has no work clock however its runner field reads, which costs
+nothing on the observed population (0 of those 250 rows) and is the only answer a
+tool that CANCELS may give. `ci_cancel_guard.job_has_started` keeps its own
+`runner_name` arm in the OPPOSITE direction (a claim REFUSES a cancel) — both tools
+fail safe, which is why the asymmetry is deliberate rather than an oversight.
+That clockless-shard rule is the dominant skip on a starved fleet: a run whose only
+unfinished shards are queueing is a CAPACITY WAIT. ⛔ AND IT IS THE DEFAULT OUTCOME
+FOR A MIXED MATRIX — one claimed shard plus any queued sibling — which is a
+CAPABILITY LOSS, stated plainly rather than argued away (review E, cycle 2):
+
+  * the claimed sibling IS in_progress and DOES hold a runner slot, so cancelling
+the run would reclaim a slot — the job #6868 exists for;
+  * and pre-fix the tool could make that cancel CORRECTLY, whenever the claimed
+shard won the `max`-ceiling selection, because it was then judged on its own
+claim-time clock. So this is not "the removal of a false-cancel generator": it
+removes correct reclaim of genuinely wedged runs for every matrix that has any
+unclaimed sibling;
+  * it is also AVOIDABLE rather than inherent — the bound can be judged over the
+CLAIMED unfinished shards only (a queued shard can neither be wedged nor supply a
+valid clock), which keeps the correct cancel with no queue-wait risk. That restore
+is filed as a follow-up (it adds a cancel path, so it is not smuggled in here);
+  * nothing is DESTROYED by the gap: it is fail-closed, and a wedge simply persists
+for an operator or another instrument to reclaim.
+
 Exit codes
 ----------
   0  complete (dry-run or apply)
@@ -144,6 +183,12 @@ REASON_NO_WORKFLOW = "workflow-unreadable"
 
 class Incomplete(Exception):
     """A surface could not be read. Nothing is cancelled for that run."""
+
+
+#: Job statuses that POSITIVELY mean the job's work has begun. An allow-list: a
+#: status GitHub has not documented yet must never be read as "begun", because the
+#: only consumer records a work CLOCK and a wrong clock biases toward cancelling.
+BEGUN_JOB_STATUSES = frozenset({"in_progress", "completed"})
 
 
 # ── subprocess / env seams ──────────────────────────────────────────────────
@@ -406,6 +451,126 @@ def job_seconds(job: dict) -> int | None:
     return n if n >= 0 else None
 
 
+def job_work_start(job: dict) -> float | None:
+    """When this job's WORK began (epoch seconds), or None when it has NOT begun.
+
+    ⛔ `started_at` ALONE IS NOT EVIDENCE OF WORK — the same defect `ci_cancel_guard`
+    had (#11045), one layer out, and here it points at a DESTRUCTIVE decision: the
+    returned value becomes `shard_started_at`, the clock `decide()` compares against
+    the shard's own derived bound.
+
+    ⛔ THE STAMP ON AN UNCLAIMED JOB IS **THE JOB'S OWN `created_at`**, and the
+    equality is exact — not "the run's creation", which an earlier draft of this
+    docstring claimed and both reviewers refuted by measurement (2026-11-13):
+
+        run 43433269949  run.created_at = 13:23:45Z
+        test (i)  queued  job.created_at = 13:30:58Z  started_at = 13:30:58Z  runner=(none)  steps=0
+        test (k)  queued  job.created_at = 13:30:58Z  started_at = 13:30:58Z  runner=(none)  steps=0
+        test (f)  in_progress  started_at = 14:00:51Z  runner=pi-runner-vm-6  first_step = 14:01:03Z
+
+    The job's queue-entry moment is 7m13s AFTER its run was created (the matrix
+    expands late), so "equals the run clock" was false. The general rule, MEASURED
+    across 40 non-completed runs on 2026-11-13 — **144 of 144 queued jobs carried
+    `started_at == job.created_at` exactly, and 0 differed** — is: GitHub freezes
+    `started_at` at the moment the job JOINS THE QUEUE and moves it only when a
+    runner CLAIMS the job, at which point it becomes the claim time and sits within
+    a container's setup lag of the first step (1, 1, 2, 2 s measured; 12 s on the
+    one job that pulled an image — MEASURED, not "within 1-2 s" as an earlier draft
+    said). Using the queue stamp as the shard clock charges the shard the ENTIRE
+    queue wait — exactly the overrun this module's `(3b)` comment says must never
+    happen ("a shard that started 5 minutes ago inside a 2h-old run is judged at ~2h
+    and cancelled while healthy").
+
+    ⛔ GATE FIRST, REFINE SECOND. `steps` REFINES the clock of a job already shown to
+    have begun; it never establishes that it began. A requeued job can retain its
+    step list, and reading `steps` first let a `queued`/unclaimed job return a clock,
+    escape the `unstarted` guard, and be cancelled on a clock that included its queue
+    wait — the very outcome this function exists to prevent, and it would have made
+    this predicate disagree with `ci_cancel_guard.job_has_started` (which ignores
+    `steps` entirely) on the same job, in the destructive direction. The evidence
+    order is therefore:
+      1. GATE: a `BEGUN_JOB_STATUSES` status, else None — the job is a CAPACITY
+         WAIT, not a wedge, and a `queued` job's `runner_name` does NOT open this
+         gate (see the module docstring: the claim-derived clock was an unmeasured,
+         permitting inference and it is gone);
+      2. REFINE: the earliest step `started_at`, when the payload carries steps —
+         ⛔ FLOORED AT THE CLAIM STAMP (rev12421 review, F1);
+      3. otherwise the job's own claim-time `started_at`.
+
+    ⛔ AND WITH NO READABLE CLAIM STAMP THERE IS NO CLOCK AT ALL (rev12421 review,
+    cycle 1 F1). An early draft handed out `min(steps)` in that case — the floor's
+    input with the floor bypassed — so a begun job whose `started_at` was absent or
+    unparseable could be judged on a retained step from a PREVIOUS attempt and cancel
+    a shard claimed seconds ago. That was a permitting branch introduced by this
+    change (pre-fix such a job was clockless → `unstarted` → bound underivable → no
+    cancel) and nothing pinned it: replacing it with `None` left the whole suite
+    green. It is now `None`, the fail-closed answer, and the no-claim shape is pinned
+    by `test_STEPS_refine_a_begun_clock_and_never_establish_one` case (d).
+
+    ⛔ THE FLOOR, AND WHY THE GATE ALONE WAS NOT ENOUGH. Gating `steps` behind the
+    begun-check closes the queue-wait hole, but it says nothing about WHICH attempt
+    the steps belong to — and the premise that justifies the gate is that a requeued
+    job CAN RETAIN ITS STEP LIST. If it does, the earliest retained step predates the
+    current claim, so `min(stamps)` returns a clock from the PREVIOUS attempt and the
+    shard is charged the failure+requeue gap: `shard_elapsed_s` inflates, the shard
+    blows past its bound, and a run whose shard was claimed seconds ago is CANCELLED.
+    That is the same class the `(3b)` comment forbids ("a shard that started 5 minutes
+    ago … is judged at ~2h and cancelled while healthy"), reached through the other
+    input. A step cannot START before the attempt that ran it was claimed, so a stamp
+    earlier than `started_at` is residue by construction, and the clock is
+    `max(claim, min(steps))`.
+
+    ⛔ MEASURED 2026-11-13, and it is why this is a one-line floor rather than a
+    redesign: across 164 jobs on 60 recent runs (33 of them carrying step lists),
+    **0 had a first step earlier than the job's claim stamp** and 33/33 were at or
+    after it — the residue shape is real but UNOBSERVED, so the floor changes no
+    live decision and removes the path rather than re-tuning anything.
+    """
+    status = job.get("status")
+    # ONE isinstance arm, and it is load-bearing: set membership on an unhashable
+    # status (a list/dict in a degraded payload) raises TypeError out of this PURE
+    # function, and `decide` is called per candidate with no per-run `except` — so one
+    # bad row aborted the whole sweep (exit 5, no report, decided candidates never
+    # acted on). A non-string status fails to None, the non-cancelling answer.
+    #
+    # ⛔ AND `runner_name` IS NOT READ AT ALL (rev12421 review cycle 4 F1, closed in
+    # cycle 5). The gate used to accept a `queued` job whose `runner_name` was a
+    # non-blank string, on the premise that a claimed job's `started_at` is its CLAIM
+    # time rather than its queue-entry stamp. That premise is UNMEASURED — 0 of 250
+    # job rows across 50 non-completed runs carried a runner while the status was
+    # still unstarted — and it is PERMITTING, measured on the prior head: a
+    # `queued` job with `runner_name="pi-runner-x64-1"` and `started_at` 7200 s old
+    # returned that stamp, the shard escaped `unstarted`, the bound became derivable
+    # (1200 s) and the run was CANCELLED on a queue wait, while the same row with an
+    # empty `runner_name` was `skip / bound-underivable`. Cycle 4 narrowed the test to
+    # `.strip()` and left the inference itself in place; this removes it. A claim is
+    # not a clock this module may cancel on, so the clock is status-only and a queued
+    # job is CLOCKLESS however its runner field reads.
+    if not isinstance(status, str) or status not in BEGUN_JOB_STATUSES:
+        return None
+    claim = _parse_ts(job.get("started_at"))
+    if claim is None:
+        # ⛔ NO CLAIM STAMP, NO CLOCK (rev12421 review, cycle 1 F1) — see the docstring.
+        # The only number left is a step stamp, and a retained step can belong to a
+        # PREVIOUS attempt, which is exactly what the floor below exists to distrust;
+        # with nothing to floor it against, the bound stays UNDERIVABLE and the run is
+        # not cancelled. This is the pre-fix answer, and the non-cancelling one.
+        return None
+    refined = None
+    steps = job.get("steps")
+    if isinstance(steps, list) and steps:
+        stamps = [_parse_ts(s.get("started_at")) for s in steps if isinstance(s, dict)]
+        stamps = [t for t in stamps if t is not None]
+        if stamps:
+            refined = min(stamps)
+    # THE FLOOR: a step cannot predate the claim of the attempt that ran it, so an
+    # earlier stamp is a PREVIOUS attempt's residue (see the docstring) and must not
+    # be charged to this one.
+    if refined is None or refined < claim:
+        return claim.timestamp()
+    return refined.timestamp()
+
+
 def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
                  floor: int) -> dict | None:
     """The run's own derived bound, or ``None`` when it cannot be derived.
@@ -437,13 +602,62 @@ def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
         if job.get("status") != "completed":
             rec["unfinished"] = True
             # THE SHARD'S OWN START CLOCK. A job that is still queued/waiting/
-            # requested has no started_at: it holds no runner slot and has made
+            # requested has no work clock: it holds no runner slot and has made
             # no progress to measure. It is a CAPACITY WAIT, not a wedge, so it
             # must never be counted as an overrun (see the `unstarted` guard
             # below, and the per-shard clock in decide()).
-            ts = _parse_ts(job.get("started_at"))
+            #
+            # ⛔ SO THE CLOCK COMES FROM `job_work_start`, NEVER FROM
+            # `job.get("started_at")` DIRECTLY (#11045). An UNCLAIMED job's stamp is
+            # that JOB's own `created_at` — the moment it entered the runner queue —
+            # NOT the run's creation (measured 2026-11-13: run 43433269949 created
+            # 13:23:45Z, its queued jobs `created_at = started_at = 13:30:58Z`,
+            # 7m13s later; 144 of 144 queued jobs across 40 runs carried that exact
+            # equality). Reading it here made a capacity wait look begun: the shard
+            # escaped the `unstarted` guard, the bound became derivable, and the run
+            # was judged against a clock that included its whole queue wait — the P0
+            # this guard exists to stop. A job that has not begun now stays
+            # CLOCKLESS, which routes it to `unstarted` and makes the bound
+            # UNDERIVABLE. `job_work_start` is monotonically non-cancelling PER JOB:
+            # its every exit yields `None` (no clock, so the bound is underivable) or a
+            # clock LATER-or-equal main's direct `started_at` read — never an earlier
+            # one — so on one job's own row this change can only remove cancels.
+            #
+            # ⛔ THAT IS A STATEMENT ABOUT ONE JOB, NOT ABOUT A SHARD, and the
+            # difference is not academic (rev12421 review cycle 4, F2). `rec` is keyed
+            # by `norm_job_name`, which collapses a two-parameter matrix name, so two
+            # legs share one record and `rec["started_at"] = ts` below only writes
+            # when a clock came back. A leg this change makes CLOCKLESS therefore no
+            # longer overwrites a sibling's clock, while main's direct read always did
+            # — so on a colliding pair the shard can be judged on the EARLIER of the
+            # two, which is a cancel main would not make. That collision is
+            # pre-existing (last-write-wins, order-dependent, in both directions). The
+            # SHAPE DOES EXIST HERE — `mirror-images.yml` names each leg
+            # `mirror (<source>, <target>)`, a genuine two-axis name — but
+            # `norm_job_name` keys on the FIRST axis and those sources are distinct
+            # today (`falkordb/falkordb-server:latest`, `…:v4.20.6`,
+            # `rhysd/actionlint:1.7.12`), so no two legs share a key and the collision
+            # is not reachable AT THIS MOMENT (measured: 0 colliding runs across 110,
+            # rev12421 review cycle 5). ⛔ THAT IS ONE EDIT FROM FALSE: a second
+            # `include:` target for an existing source — the very edit that file's own
+            # comment warns about — makes it live in a workflow this module cancels,
+            # and an earlier draft of this comment claimed no such workflow existed.
+            # Fixing it means deciding deliberately how two legs' work clocks compose,
+            # which adds a cancel path, so it is filed rather than folded in (#12449).
+            #
+            # ⛔ AND AN INTERMEDIATE HEAD OF THIS PR CARRIED A SECOND PERMITTING
+            # BRANCH, which this paragraph used to cite as one that still exists. A
+            # CLAIMED `in_progress` job carrying `steps` but no readable `started_at`
+            # was clocked from `min(steps)` — the floor's own input with the floor
+            # bypassed — so a retained step from a PREVIOUS attempt could cancel a
+            # shard claimed seconds ago. rev12421 review cycle 1 F1 removed it:
+            # `job_work_start` now returns `None` before it reads any step, and the
+            # shape is pinned by test case (d). Within one job's row there is no
+            # permitting path left here — the clock is `max(claim, min(steps))` and
+            # `claim` is required before it is computed.
+            ts = job_work_start(job)
             if ts is not None:
-                rec["started_at"] = ts.timestamp()
+                rec["started_at"] = ts
     if not shards:
         return None
 
