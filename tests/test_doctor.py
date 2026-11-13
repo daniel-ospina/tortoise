@@ -1131,6 +1131,50 @@ class TestDoctorHostedCredential:
         assert "accepted" in hosted, hosted
         assert "❌ Hosted" not in out, out[-1200:]
 
+    def test_the_checkout_local_note_appears_exactly_once_on_every_row(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The provenance note rides EVERY row naming the target, and only once.
+
+        Two regressions this pins at once (fresh review round 16): the
+        authenticated-leg transport row appended it on top of `_combine`'s own
+        append (a 636-char row carrying the disclosure TWICE), and the `/health`
+        refusal row disclosed nothing at all — while the function's comment and
+        `docs/quickstart-cloud.md` both promise the `Hosted` row names the file.
+        Neither shape was pinned: no test counted occurrences.
+        """
+        import json as _json
+        from pathlib import Path as _Path
+
+        (_Path.cwd() / ".tortoise").write_text(_json.dumps(
+            {"api_key": _FAKE_HOSTED_KEY, "api_url": "https://repo.example.test"}))
+
+        # (a) `/health` refuses → the reachability refusal row.
+        def refuse(url, req):
+            raise ConnectionRefusedError("[Errno 111] Connection refused")
+
+        _stub_hosted(monkeypatch, refuse)
+        db_path = str(tmp_path / "note-refusal.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor note refusal seed")
+        _run_doctor([])
+        out = capsys.readouterr().out
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "⚠️" in hosted, out[-1200:]
+        assert hosted.count("checkout-local") == 1, hosted
+
+        # (b) `/health` answers, the authenticated leg resets → the OTHER row.
+        def reset(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise ConnectionResetError("[Errno 104] Connection reset by peer")
+
+        _stub_hosted(monkeypatch, reset)
+        _run_doctor([])
+        out2 = capsys.readouterr().out
+        hosted2 = _row(out2, "Hosted")
+        assert hosted2 is not None and "⚠️" in hosted2, out2[-1200:]
+        assert hosted2.count("checkout-local") == 1, hosted2
+
     def test_a_checkout_local_credential_still_fails_when_the_key_is_revoked(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
         """The documented layout must still red on a revoked key (`./.tortoise`)."""
