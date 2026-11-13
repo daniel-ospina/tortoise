@@ -238,14 +238,19 @@ def _record_when_running(name: str, pid: int, env: dict[str, str],
         `4b1d6cd0d4`).
 
     ⚠️ WHAT THE POLL CAN AND CANNOT REPAIR — stated because the honest answer
-    determines whether a red here blames the code or the box. Of `record`'s two
-    refusal arms, the retryable one is the START-TIME read (`pid_starttime`, "cannot read the
-    start time"); the LIVENESS arm (`kill -0` says ESRCH/EPERM, or the state letter
-    is `Z`) is a process that is gone or a zombie, and no number of retries brings it
-    back. So this is not a fix for "the decoy was OOM-killed on a thrashing runner" —
-    it is a refusal that says WHICH leg refused so the next reader does not have to
-    guess. ⚠️ The loop re-asks on ANY refusal, not only the retryable one (gating it on
-    the arm would make a message an assertion condition, which this file forbids), so a
+    determines whether a red here blames the code or the box. The poll re-asks `record`
+    until it answers or the deadline expires; it never turns a refusal into a success.
+    Of the two arms: the LIVENESS arm (`kill -0` says ESRCH/EPERM, or the state letter
+    is `Z`) is a POSITIVE observation that the process is gone or a zombie, and no number
+    of retries brings it back. The START-TIME arm (`pid_starttime` returned nothing) is
+    only the observation that a READ FAILED — on Linux, `/proc/<pid>/stat` could not be
+    read, which for a child this test spawned means the pid went away before that read
+    (a row it COULD parse cannot produce this refusal at all: a short row yields an empty
+    start and exit 0, so `record` would not refuse). So this is not a fix for "the decoy
+    was OOM-killed on a thrashing runner", and it does not turn a dead pid green: what it
+    buys is a SECOND SAMPLE, plus a refusal that says WHICH leg refused so the next
+    reader does not have to guess. ⚠️ The loop re-asks on ANY refusal (gating it on the
+    arm would make a message an assertion condition, which this file forbids), so a
     liveness refusal costs the full deadline and still fails — correctly.
 
     A refusal that survives the deadline stays a FAILURE: this is a bounded second
@@ -267,7 +272,7 @@ def _refusal_arm(env: dict[str, str], name: str, pid: int) -> str:
     either refusal can fire (`preview-server.sh::cmd_record`), precisely because the
     two arms send the reader to different places. Probing the pid here instead would
     be a measurement of a LATER instant: a decoy that was alive at refusal (the
-    start-time arm — the retryable one this change exists to surface) can be a zombie
+    start-time arm, the one this change exists to surface) can be a zombie
     by the time the message is formatted, and a derived "the decoy died" would then
     invert the attribution in the very message #12039 asks to be legible.
 
@@ -336,17 +341,17 @@ def _refusal_arm(env: dict[str, str], name: str, pid: int) -> str:
     if arm == "no-start-time":
         return ("the START-TIME leg refused (`pid_starttime`): the SUT read no start "
                 "time for the pid — `/proc/<pid>/stat` on Linux, `ps -o lstart=` on a "
-                "host without it. ⚠️ THE WITNESS DOES NOT SAY WHICH OF THIS ARM'S TWO "
-                "CAUSES FIRED, so this names both and neither: the box could not "
-                "PERFORM the read (`/proc` unreadable, or the row unparseable — and a "
-                "`pid_state` that returns EMPTY lands here too, because "
-                "`[[ \"\" != \"Z\" ]]` passes and `pid_starttime` is then what "
-                "refuses), or the pid EXITED AND WAS REAPED between `pid_running` and "
-                "this read — a gap in time that no retry reverses and whose cause is "
-                "the decoy, not the SUT. This is the retryable arm: the poll absorbs a "
-                "window, and a refusal that survives the deadline means one of these "
-                "two — which one is read off the decoy's own exit status and the job "
-                "log, never off this line")
+                "host without it. ⚠️ THIS IS NOT THE SUT MISREADING A ROW: "
+                "`proc_starttime` cannot refuse on a row it could parse — a short row "
+                "yields an EMPTY start and exit 0, so `cmd_record` would write "
+                "`<name>.start` and not refuse at all — so the witness means the READ "
+                "ITSELF failed. That read is `/proc/<pid>/stat`, so the pid went away "
+                "between `pid_running` and this read (a `pid_state` that returned "
+                "EMPTY lands here too: `[[ \"\" != \"Z\" ]]` passes and the "
+                "start-time read is then what refuses), or `/proc` could not be read "
+                "at all. Either way the cause is the box or the decoy — never a wrong "
+                "start time — and the poll does not repair it: a reaped process does "
+                "not come back")
     return f"unrecognised refusal witness {text!r} — the arm is not covered here"
 
 
@@ -1159,22 +1164,19 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     (state_dir / "app.refused").write_text("refused 4242 no-start-time\n")
     starttime = _recorded(dead, 4242, state, timeout=0.0)
     assert "START-TIME leg refused" in starttime, starttime
-    assert "retryable arm" in starttime, starttime
-    # The OTHER arm of the same guard: a caller that really polled DOES name its deadline.
-    # Pinned so "never claim one" cannot be implemented as "never state one".
+    # The OTHER arm of the caller-deadline guard: a caller that really polled DOES name
+    # its deadline. Pinned so "never claim one" cannot be implemented as "never state one".
     assert "refused pid 4242 for 10s:" in _recorded(dead, 4242, state, timeout=10.0)
-    # ⛔ BOTH of the start-time arm's causes, because the witness does not name one.
-    # `cmd_record` writes the same `no-start-time` for a read it could not perform AND
-    # for a pid reaped between `pid_running` and `pid_starttime`; a message claiming the
-    # arm "has ONE cause" would send a reader hunting a SUT `/proc` fault when the decoy
-    # simply exited — the attribution inversion this helper exists to end, one branch
-    # down from where the liveness arm already fixed it.
-    assert "could not PERFORM the read" in starttime, (
-        f"the start-time arm must name the read-failure cause: {starttime}"
+    # ⛔ The reachable cause, and the one that is NOT — `proc_starttime` exits 0 with an
+    # EMPTY start on a row it cannot parse, so `cmd_record` writes `<name>.start` and
+    # never refuses; a message blaming a misread row points a reader at a SUT defect this
+    # leg cannot produce. Pinned positively, because a message that merely omits the claim
+    # is indistinguishable from one that never had it.
+    assert "NOT THE SUT MISREADING A ROW" in starttime, (
+        f"the start-time arm must rule out the row-misread cause: {starttime}"
     )
-    assert "EXITED AND WAS REAPED" in starttime, (
-        "the start-time arm must name the exit-in-the-window cause — the witness "
-        f"cannot distinguish it from a read failure: {starttime}"
+    assert "READ ITSELF failed" in starttime, (
+        f"the start-time arm must name the failed read: {starttime}"
     )
     # …and it still does not BORROW the liveness arm's three-candidate wording: the two
     # arms stay tellable apart, which is the whole point of reading the witness.
