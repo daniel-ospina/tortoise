@@ -284,8 +284,9 @@ journal bytes, and #4333 (open) counts **node** sets, not journal bytes.
 
 **Why per record and not a file header** — this is the constraint that decides it, and it is internal:
 
-- The journal is **append-only**. `EventLog.append`'s torn-tail contract (#5917) is explicit: *"Nothing is
-  truncated or rewritten: sealing is another append"*. A file-level version header would require
+- The journal is **append-only**. `EventLog.append`'s torn-tail contract (#5917) is explicit, at
+  `tortoise/log.py:1402-1403`: *"Nothing is truncated or rewritten — the seal is another append."* A
+  file-level version header would require
   **rewriting existing journals** to add it. That is a different operation (a migration on a file that
   may be tens of GB), on the one artifact whose whole promise is that it is never modified.
 - A file header is also **wrong under an in-place writer upgrade**, which is the deployment's normal
@@ -387,13 +388,27 @@ does not mean**: the committed corpus carries exactly **one** `embedding`, a **2
 — so the five rows are five records sharing one vector, not five corpus vectors, and §2.5 says the same
 ("the vector the probe injects; no corpus record carries it"). The five rows are still the right check
 because the property is **element-wise and therefore vector-independent**: each of the 384 floats must
-survive pack → base64 → unpack. ⛔ **It is not the equality the obvious test would assert.** A float64-VALUE comparison
-(`float(decoded) == float(p0_text)`) cannot tell a faithful encode from a lossy one, because an `f32` value
-**is** exactly a `float64` — so it **passes on this vector, on a degenerate vector, and on a vector that was
-narrowed and re-widened**. The probe prints it passing (`float64-value equality decoded==producer (would
-PASS vacuously): True`) and, beside it, the **negative control** that proves the bits assertion is not
-vacuous: a **1-ULP perturbation** of one element flips it to `False`. The bits are the property because the
-bits are what the graph stores.
+survive pack → base64 → unpack. ⛔ **It is not the equality the obvious test would assert, and which way
+that test fails depends on the TRUTH SIDE** — both arms are computed and asserted in the probe, because
+stating only one of them is how this paragraph was wrong before:
+
+- **against the producer**, `float(decoded) == float(producer)` **passes, 384 of 384**. It cannot
+  discriminate, and not because the numbers agree loosely: an `f32` value **is** exactly a `float64`, so the
+  comparison carries no WIDTH at all — a faithful `f32` pack and any lossless re-encode of the same values
+  satisfy it identically. Vacuous as a *discriminator*.
+- **against P0's un-narrowed decimal text**, the same test **rejects a correct encode — 0 of 384**. The
+  text holds the shortest round-tripping decimal (`0.0012301534`) and the decode holds the `f32` value, so
+  the truth side has to be narrowed to the stored width (`#8615`) before any comparison at all. That is a
+  **false red**, not leniency — the same test is simply measuring the wrong thing from either side.
+
+The probe prints both (`float64-VALUE decoded == producer …: True` / `… == P0 un-narrowed text …: False`),
+and beside them the **negative control** that proves the bits assertion is not vacuous: a **1-ULP
+perturbation** of one element flips it to `False`. ⚠️ **The first draft of that control was itself inert** —
+it printed `float(np.float64(v)) == v` over the producer with `decoded` ABSENT, under a label naming
+`decoded==producer`, so it was a widening identity that no input can falsify and the guard under it could
+never fire: the same class as the round-14 printed control this note reports, one control down. Both arms
+are now driven from a real verified vector and a `False` / `True` where this text says otherwise returns 1.
+The bits are the property because the bits are what the graph stores.
 
 **Two of the three links face the producer, and the third is the frame's own round-trip.** Precisely:
 `decoded f32 == producer f32` and `P0 text→f32 == producer f32` are computed against something **outside**
@@ -589,7 +604,7 @@ Dispatch is on the **value**, per record:
 | `embedding` value in the line | meaning | reader |
 |---|---|---|
 | a JSON **list** | P0 (float32 shortest text) or pre-P0 (float64 text) | unchanged — the existing path |
-| a **string** starting `b64:` | P2 frame | decode per §2; refuse on any of the **five** corruptions |
+| a **string** starting `b64:` | P2 frame | decode per §2; refuse on any of the **six** corruptions |
 | **absent** | pre-#5004 / foreign record | unchanged — recompute is the only behaviour available (R1) |
 | `null` | owned "no vector" | unchanged — the replay must **not** invent one (R1) |
 | a string **not** starting `b64:` | impossible; the seam drops every string | refuse with a message naming the value |

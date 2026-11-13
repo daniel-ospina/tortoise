@@ -348,30 +348,56 @@ def main() -> int:
               f"   P0 text→f32 == producer f32: {p0text_vs_producer}"
               f"   (frame invertible: {invertible})")
         assert b64_vs_producer and p0text_vs_producer and invertible, rec.get("type")
+        # Kept so the float64-VALUE arms below run on a REAL verified vector: the
+        # loop variable `vector` is None once the last record carrying no vector is
+        # reached, and a control that runs on `None` is a control that cannot run.
+        verified_vector = vector
         equiv += 1
     print(f"  {equiv} of {len(recs)} corpus records carry a vector and were verified")
 
-    # ⛔ Why the assertion is on BITS: a float64-VALUE equality test cannot tell a
-    # faithful encoding from a lossy one, because an f32 value IS exactly a
-    # float64 — so it passes on any correct encode, on a degenerate vector, and on
-    # a vector that was narrowed and re-widened. Measured, not assumed:
+    # ⛔ Why the assertion is on BITS, not on float64 VALUES — BOTH arms measured
+    # here, because the first draft of this block computed `float(np.float64(v)) == v`
+    # over the PRODUCER alone: `decoded` never appeared, so a line LABELLED
+    # "decoded==producer" was a widening identity (`f32 ⊂ f64` by definition) that no
+    # input can falsify, and the guard under it could never fire. That is the same
+    # class as the round-14 printed control this note reports, in the control itself.
+    # The two arms say different things, and the direction is the point:
+    #   (a) against the PRODUCER the value test PASSES (384/384) — it cannot
+    #       discriminate, because a faithful `f32` pack and any lossless re-encode of
+    #       the same values satisfy it: an `f32` value IS exactly a `float64`, so the
+    #       comparison carries no width at all. Vacuous as a DISCRIMINATOR.
+    #   (b) against P0's UN-NARROWED decimal text the same test REJECTS a correct
+    #       encode (0/384) — the text holds the shortest round-tripping decimal
+    #       (`0.0012301534`) while the decode holds the `f32` value, so the truth side
+    #       must be narrowed to the stored width (#8615) or a faithful encode reads
+    #       as a failure. A false RED, which is why the same test is not "lenient":
+    #       it is simply measuring the wrong thing from either side.
     producer = [float(x) for x in vec]
-    f64_vacuous = [float(np.float64(v)) for v in producer] == producer
-    print("  float64-value equality decoded==producer (would PASS vacuously):",
-          f64_vacuous)
+    decoded_last = unframe(frame("f32", 4, verified_vector))
+    f64_value_vs_producer = [float(v) for v in decoded_last] == producer
+    f64_value_vs_p0_text = [float(v) for v in decoded_last] == [
+        float(v) for v in verified_vector]
+    print("  float64-VALUE decoded == producer (must PASS — value equality cannot "
+          "see width):", f64_value_vs_producer)
+    print("  float64-VALUE decoded == P0 un-narrowed text (must REJECT a correct "
+          "encode):", f64_value_vs_p0_text)
     # …and the bits assertion CAN fail — a negative control, so it is not vacuous.
     # Both are ASSERTED: a control that is only printed reports a vacuous control
-    # as a pass (that is how round 14's tautology survived). The expectation is
-    # inverted on purpose — a False control means the control is broken.
+    # as a pass (that is how round 14's tautology survived). The expectations are
+    # inverted on purpose — the opposite of what is printed means the control is
+    # broken, not that the note is right.
     perturbed = list(producer)
     perturbed[0] = float(np.nextafter(np.float32(perturbed[0]), np.float32(1e9)))
     control_flips = as_f32_bits(perturbed) == as_f32_bits(producer)
     print("  the same assertion on a 1-ULP perturbation (must be False):",
           control_flips)
-    if not f64_vacuous:
-        print("  ⛔ the float64-value arm is NOT vacuous on this vector — the "
-              "note's claim that it passes vacuously is now false and must be "
-              "re-stated, not silently kept")
+    if not f64_value_vs_producer:
+        print("  ⛔ the float64-VALUE arm no longer passes against the producer — "
+              "the note's claim (a) is false on this vector and must be re-stated")
+        return 1
+    if f64_value_vs_p0_text:
+        print("  ⛔ the float64-VALUE arm now AGREES with P0's un-narrowed text — "
+              "the note's claim (b) (a false red) is false on this vector")
         return 1
     if control_flips:
         print("  ⛔ the 1-ULP negative control did not flip — the bits "

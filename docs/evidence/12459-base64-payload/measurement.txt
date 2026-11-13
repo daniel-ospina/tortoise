@@ -32,7 +32,8 @@
   PointPromoted         384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
   OperatorPromoted      384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
   5 of 39 corpus records carry a vector and were verified
-  float64-value equality decoded==producer (would PASS vacuously): True
+  float64-VALUE decoded == producer (must PASS — value equality cannot see width): True
+  float64-VALUE decoded == P0 un-narrowed text (must REJECT a correct encode): False
   the same assertion on a 1-ULP perturbation (must be False): False
 
 == the caller-owned / preserved population (#5004 round-7)

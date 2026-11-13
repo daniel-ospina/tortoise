@@ -102,10 +102,13 @@ env -u TORTOISE_DB_URI uv run python \
 ```
 
 `measurement.txt` is one run's verbatim output. Exit 0 = measured. The probe **asserts** the three decode links (two of them
-producer-facing, plus the frame round-trip), the `f64` round-trip and its off-grid fixture, the five refusals,
-the sweep's cut set, the declared-count vacuity guard, and **both** vacuity controls for the bit assertion (the
-float64 arm passing and the 1-ULP perturbation flipping) — a printed control is not a control, which is how a
-tautological link survived a round. The remaining lines are printed evidence.
+producer-facing, plus the frame round-trip), the `f64` round-trip and its off-grid fixture, the six refusals
+above, the sweep's cut set, the declared-count vacuity guard, and **all three** controls around the bits
+assertion — the float64-VALUE comparison passing against the producer, the same comparison REJECTING P0's
+un-narrowed text, and the 1-ULP perturbation flipping. ⚠️ Each is asserted, not printed: a printed control is
+not a control — that is how a tautological link survived one round, and the first version of the float64 arm
+was a widening identity with `decoded` absent from it, so its label named a comparison it never computed. The
+remaining lines are printed evidence.
 
 ## External research
 
