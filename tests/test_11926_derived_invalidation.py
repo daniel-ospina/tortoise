@@ -2067,6 +2067,12 @@ def test_a_probe_that_cannot_run_is_REPORTED_on_its_goal_and_the_sweep_survives(
     sdk.delete_entity(made["point_id"])
 
     real_get_proj = sdk._get_proj
+    real_update = sdk.update_entity
+    writes: list[tuple] = []
+
+    def recording(node_id, **props):
+        writes.append((node_id, tuple(sorted(props))))
+        return real_update(node_id, **props)
 
     class _ProbeBoom:
         """Delegates everything EXCEPT the probe query, which raises.
@@ -2095,11 +2101,13 @@ def test_a_probe_that_cannot_run_is_REPORTED_on_its_goal_and_the_sweep_survives(
                 raise RuntimeError("transient probe failure")
             return self._proj.g.query(cypher, params=params, **kwargs)
 
+    sdk.update_entity = recording
     sdk._get_proj = lambda: _ProbeBoom(real_get_proj())
     try:
         report = reconcile_goal_states(sdk)
     finally:
         sdk._get_proj = real_get_proj
+        sdk.update_entity = real_update
 
     # the probe failure is REPORTED, and in the module's own bucket for it
     assert report["counts"]["failed"] == 1, report
@@ -2119,14 +2127,26 @@ def test_a_probe_that_cannot_run_is_REPORTED_on_its_goal_and_the_sweep_survives(
         f"one probe failure discarded the rest of the sweep: {report}")
     assert sdk.get_entity(g["id"]).get("goalState") is None, (
         "the sweep abandoned a repairable goal because another goal's probe raised")
-    # ⛔ THE "no repair happened" HALF IS PINNED BY THE COUNTERS, not by a write
-    # interception (#12457 review, cycle 5, MEASURED). A write-interception
-    # assertion was tried here and DELETED because it cannot vary: the probe raises
-    # BEFORE the `present` branch is reached, so no code path in this arm can write
-    # the probed goal — inserting `sdk.update_entity(goal_id, goalState=None)` into
-    # that branch leaves this test GREEN (measured). `failed == 1` together with
-    # `unaddressable == 0` and `gone == 0` IS reachable: an arm that read the
-    # unverifiable answer as a repair or as a deletion reds one of those rows.
+    # ⛔ A WRITE *ATTEMPT* ON THIS ARM IS THE CONTRACT, not the write's effect: an
+    # unaddressable node cannot actually be written (`_update_entity` iterates the
+    # canonical labels only), so this intercepts the ATTEMPT. The attempt is what
+    # must not happen — the sweep has just said it cannot verify the `gone` answer,
+    # and a blind write from there is the false repair this module forbids.
+    #
+    # ⚠️ THE INTERCEPTOR MUST BE PROVED LIVE before its silence means anything: the
+    # repairable goal IS written, so its call must be recorded.
+    #
+    # ⛔ RETRACTED CLAIM (#12457 review, cycle 5): an earlier version of this comment
+    # said the assertion "cannot vary" and deleted it. That was measured against a
+    # mutant in the `present` branch, which is UNREACHABLE when the probe raises — the
+    # generalisation was false. MEASURED here: `sdk.update_entity(goal_id,
+    # goalState=None)` placed at the TOP of the `gone` arm, before the probe, reds
+    # this row while every counter assertion above stays green, so this is the only
+    # row that observes it.
+    assert [w for w in writes if w[0] == g["id"]], (
+        f"the write interceptor captured nothing — the row below would be vacuous: {writes}")
+    assert [w for w in writes if w[0] == "0000-probe-raise-1"] == [], (
+        f"the sweep attempted a write to a goal whose gone answer it could not verify: {writes}")
 
 
 def test_a_goal_DELETED_mid_sweep_is_reported_GONE_not_repaired(sdk):

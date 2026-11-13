@@ -1012,12 +1012,24 @@ _GONE_PROBE = "MATCH (n) WHERE n.id = $id RETURN n.id LIMIT 1"
 #:
 #: ⚠️ THE COST, stated rather than implied by "one read": the probe carries no
 #: label, so a MISS takes an All-Node scan — ``LIMIT 1`` bounds the ROWS RETURNED,
-#: not the scan (index use requires a labelled branch, the note at
-#: ``projection/__init__.py``). It runs only where the sweep was already about to
-#: write a falsehood, and the label-less candidate scan immediately before it is
-#: the same order of work, so a handful of gone goals is not a cost change. A graph
+#: not the scan. It runs only where the sweep was already about to write a
+#: falsehood, and the label-less candidate scan immediately before it is the same
+#: order of work, so a handful of gone goals is not a cost change. A graph
 #: carrying MANY genuinely-deleted goals makes it O(N) per goal; the honest remedy
 #: there is an ``id`` index over all labels, not weakening this probe.
+#:
+#: ⛔ THIS IS A DELIBERATE DEPARTURE, and it is named here because the shape is
+#: forbidden elsewhere in this codebase: `sdk.py` carries the rule twice, verbatim
+#: as "⛔ LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id AND …`" (its
+#: entity-resolution path and its `_update_entity` write path), because FalkorDB
+#: indexes are label-scoped and an unlabelled pattern can use no label's ``id``
+#: index. This probe breaks that rule on purpose, for the one question a labelled
+#: pattern cannot ask: presence on ANY label — which is exactly what makes a node
+#: unaddressable to the door. ⛔ An earlier version of this comment cited "the note
+#: at projection/__init__.py", which says nothing of the kind (#12457 review, cycle
+#: 5, verified: that module's index notes are about an un-indexed PROP inside a
+#: LABELLED branch); the rule it overrides is the `sdk.py` one above, so an auditor
+#: can tell a measured trade-off from an accident.
 GONE_UNPROVEN = (
     "a node carrying this goal id is still in the graph, but the entity surface "
     "cannot resolve it by that id — it is not on a label resolved by `id` (the "
@@ -1466,12 +1478,15 @@ def invalidate_stale(
     dropped), ``counts`` (including ``failed`` and ``gone``) and ``truncated``
     (true when the scan hit ``limit``, i.e. the sweep did not see the whole graph).
 
-    ``counts.gone`` counts the findings whose goal NO LONGER EXISTS, i.e. the
-    retirement landed but the goal's ``goalState`` cache could not be reconciled
-    because there is no node to reconcile it on. It is not a failure of the
-    retirement (which did land) and not a success of the reconcile (which did not
-    happen) — it is its own bucket, and it exists so a sweep over deleted goals
-    cannot read clean.
+    ``counts.gone`` counts the findings whose goal the GRAPH no longer holds —
+    i.e. the retirement landed but the goal's ``goalState`` cache could not be
+    reconciled because there is no node to reconcile it on. ⛔ It is the door's
+    UN-PROBED answer, so an id the entity surface merely cannot ADDRESS is counted
+    here too, and this docstring used to promise "the goal NO LONGER EXISTS", which
+    the door cannot establish (#12534 owns the code fix; the sweep's wording above
+    is the correct one). It is not a failure of the retirement (which did land) and
+    not a success of the reconcile (which did not happen) — it is its own bucket,
+    and it exists so a sweep over deleted goals cannot read clean.
     """
     found = verdicts(sdk, goal_id=goal_id, indicator_id=indicator_id,
                      target_id=target_id, limit=limit)
