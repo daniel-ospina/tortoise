@@ -1778,7 +1778,7 @@ The check now fails on any of three terms, each an in-memory read:
 |---|---|---|
 | `loop-not-serving` | heartbeat stale **and** work waiting **and** nothing SERVED for `LOOP_STALE_AFTER` (90 s) | the tick alone is not the verdict — #10892's served-request counter (`GET /liveness`) joins it, so a busy loop that is still serving stays green |
 | `data-plane-failed` | the DB probe's last result is fresh and not ok, **or** too old to vouch for anything (30 s window) | the refresher task runs on the loop, so a wedge stops it refreshing — and the check reads it with `peek()`, never `snapshot()`, so the check cannot refresh its own evidence |
-| `requests-refused` | **DENSITY**: ≥ 6 of the 12 ten-second buckets in `TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S` (120 s) hold a refusal, or one bucket holds ≥ 10 (`TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS` / `..._MIN_BREACHES`) | a SUSTAINED stream of refusals is the door failing RIGHT NOW; a sporadic one is the designed answer to a slow call (~2.1% of calls exceed the bound by design), so the statistic must separate sustained from sporadic — which a COUNT cannot, because it bakes in traffic volume: the same incident measured 3.5 refusals/min in one trace and 17/min in another. A density test fires on both and on neither a slow call nor a busy minute. The cumulative total still never folds into a verdict (#10185/#10620), and `/health` reports the window as `refusals` without touching `status`. Disabling is `MIN_BUCKETS=0`; a value above 12 is clamped to 12 (strictest), never read as "off" |
+| `requests-refused` | **SHARE**: ≥ `TORTOISE_WAIT_BOUND_HEALTH_MIN_SHARE` (0.5) of at least `TORTOISE_WAIT_BOUND_HEALTH_MIN_ATTEMPTS` (5) requests offered to the bound were refused inside `TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S` (120 s) | the bound is breached BY DESIGN for ~2.1% of calls, so the verdict must be about the RATIO, not about volume. Both traffic-dependent forms were measured wrong: a count (10 per window) is blind to the first incident trace (3.5 refusals/min) and a bucket-density reds a HEALTHY box as traffic rises (20% of polls at 120 calls/min, 92% at 300, 100% at 600 — crossover ~3.3 req/s), which would fail every deploy. `~2.1%` is ~2.1% at 1 req/s and at 100 req/s, and a failing plane refuses most of what it is offered at any volume. `refusing: null` means NOT DECIDED (no traffic, too few attempts, or the term disabled by `MIN_SHARE=0`) — an idle plane refuses nobody. The cumulative total still never folds into a verdict (#10185/#10620), and `/health` reports the window as `refusals` without touching `status`. Attempts are stamped at the same transport seam that decides a refusal, so the denominator is the same population |
 
 What it deliberately does **not** do: it is still a **top-level** check, so Fly's
 proxy ignores it for routing and a red cannot de-register the machine — it fails
@@ -1808,7 +1808,8 @@ curl -s https://api.premiselabs.co/health | jq '.loop_blocks, .refusals'
 #   "frames": ["hosted_api.py:… in …", …]},
 #  "persist_path": "/data/loop-blocks.jsonl", "enabled": true}
 # {"window_s": 120.0, "total": 70, "by_surface": {"mcp": 14, "rest": 56},
-#  "min_breaches": 10, "refusing": true, …}
+#  "attempts": 78, "share": 0.897, "min_share": 0.5, "min_attempts": 5,
+#  "refusing": true, …}
 ```
 
 ⚠️ **Residual, stated not implied (#12477 review).** The `data-plane-failed` term

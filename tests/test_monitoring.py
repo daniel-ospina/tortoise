@@ -103,6 +103,21 @@ def _fresh_probe_worker():
 
 
 @pytest.fixture(autouse=True)
+def _fresh_refusal_window():
+    """#12477 review round 3: the refusal window AND its attempt denominator are
+    process-global, and now that the verdict is a SHARE (refusals / attempts) a
+    leftover sample from one test is a *decided* verdict in the next — the
+    listener class started answering 503 on `requests-refused` because an
+    earlier class left 9 refusals against 10 attempts behind. Reset for every
+    test in the file, not per class: a window that only some classes reset makes
+    the suite pass or fail on collection order, which is not a gate.
+    """
+    monitoring.reset_wait_bound_breach_window()
+    yield
+    monitoring.reset_wait_bound_breach_window()
+
+
+@pytest.fixture(autouse=True)
 def _fresh_graph_size_worker():
     """#3253 review P2: the DEDICATED graph-size worker is process-lifetime
     too. A test that wedges it (the stalled-taxonomy tests below) would leave
@@ -3301,7 +3316,9 @@ class TestHealthzListener:
         """
         server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
         monitoring.heartbeat_record()
-        for _ in range(monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES):
+        for _ in range(10):
+            monitoring.record_wait_bound_attempt("rest")
+        for _ in range(10):
             monitoring.record_wait_bound_breach(
                 monitoring.WAIT_BOUND_SURFACE_REST)
         try:
@@ -3311,10 +3328,8 @@ class TestHealthzListener:
         assert status == 503, body
         payload = json.loads(body)
         assert "requests-refused" in payload["reasons"]
-        assert payload["recent_breaches"]["total"] >= (
-            monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES)
-        assert payload["recent_breaches"]["by_surface"]["rest"] >= (
-            monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES)
+        assert payload["recent_breaches"]["total"] >= 10
+        assert payload["recent_breaches"]["share"] >= 0.5
 
     def test_one_designed_long_call_refusal_does_not_fail_the_check(self):
         """The opposite failure: a red on every legitimate slow call.
@@ -3325,6 +3340,11 @@ class TestHealthzListener:
         """
         server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
         monitoring.heartbeat_record()
+        # ONE long call among N healthy ones is the designed case: a single
+        # breach in a minute of traffic is a share of ~2%, nowhere near the bar.
+        for _ in range(50):
+            monitoring.record_wait_bound_attempt(
+                monitoring.WAIT_BOUND_SURFACE_MCP)
         monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_MCP)
         try:
             status, body = _http_get(server.server_address[1])
@@ -3353,7 +3373,9 @@ class TestHealthzListener:
         payload = json.loads(body)
         assert payload["recent_breaches"]["total"] == 0
         assert payload["recent_breaches"]["enabled"] is True
-        assert payload["recent_breaches"]["refusing"] is False
+        assert payload["recent_breaches"]["refusing"] is None, (
+            "no traffic inside the window is NOT DECIDED — an idle plane "
+            "refuses nobody, so it must not read as a failure")
 
     def test_unknown_path_is_404(self):
         server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
@@ -5163,56 +5185,60 @@ def test_event_retention_interval_validation(monkeypatch):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestRefusalThresholdEnv:
-    """The env knobs are USER INPUT read on the liveness path — never a raise."""
+class TestServedProgressCoercion:
+    """A registered reader is APP CODE: its value must never reach a comparison raw.
 
-    def test_an_infinite_threshold_does_not_escape_the_resolver(self, monkeypatch):
-        """``inf`` is the intuitive way to write "no limit" and it used to raise
-        ``OverflowError`` out of a resolver that promises it never raises —
-        which the listener then reported as a permanent 503 on a HEALTHY box
-        (measured on this branch before this test existed)."""
-        for var in ("TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES",
-                    "TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS"):
-            monkeypatch.setenv(var, "inf")
-            window = monitoring.wait_bound_breach_window()
-            assert window["error"] is None, window
-            assert window["refusing"] is False
-        assert monitoring.wait_bound_health_min_breaches() == (
-            monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES)
-        assert monitoring.wait_bound_health_min_buckets() == (
-            monitoring.WAIT_BOUND_HEALTH_MIN_BUCKETS)
+    Round 3's mutation check (forwarding ``last_served_age_s`` verbatim) left the
+    suite green, so the listener's guard was not actually enforced by a test.
+    """
 
-    def test_a_huge_finite_threshold_cannot_silently_disable_the_term(self, monkeypatch):
-        """``1e6`` reads as "effectively off" and would make the term inert while
-        appearing to protect the deployment — the same failure in slower form."""
-        monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS", "1e6")
-        now = time.monotonic()
-        for i in range(12):
-            monitoring.record_wait_bound_breach_recent(
-                monitoring.WAIT_BOUND_SURFACE_REST, at=now - i * 10.0)
-        window = monitoring.wait_bound_breach_window()
-        # clamped to the strictest form rather than read as "off"
-        assert window["min_buckets"] == window["buckets_total"] == 12
-        assert window["refusing"] is True
-        # and one bucket short of every bucket is NOT a red on the density arm
-        monitoring.reset_wait_bound_breach_window()
-        for i in range(11):
-            monitoring.record_wait_bound_breach_recent(
-                monitoring.WAIT_BOUND_SURFACE_REST, at=now - i * 10.0)
-        relaxed = monitoring.wait_bound_breach_window()
-        assert relaxed["buckets"] == 11
-        assert relaxed["refusing"] is True, "the 11-breach burst still trips"
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        yield
+        monitoring.set_served_progress_source(None)
 
-    def test_zero_disables_the_term_and_says_so(self, monkeypatch):
-        monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS", "0")
-        monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES", "0")
-        now = time.monotonic()
-        for i in range(12):
-            monitoring.record_wait_bound_breach_recent(
-                monitoring.WAIT_BOUND_SURFACE_REST, at=now - i * 10.0)
-        window = monitoring.wait_bound_breach_window()
-        assert window["refusing"] is False
-        assert window["min_buckets"] == 0 and window["min_breaches"] == 0
+    def test_a_non_numeric_age_is_unmeasured_not_forwarded(self):
+        monitoring.set_served_progress_source(lambda: {"last_served_age_s": "nope"})
+        got = monitoring.served_progress()
+        assert got["last_served_age_s"] is None
+        assert got["error"] and "not a number" in got["error"]
+
+    def test_a_numeric_string_is_coerced_rather_than_rejected(self):
+        """A usable number in a string is still a usable number — the guard is
+        about values that cannot be compared, not about JSON tidiness."""
+        monitoring.set_served_progress_source(lambda: {"last_served_age_s": "12"})
+        got = monitoring.served_progress()
+        assert got["last_served_age_s"] == 12.0
+        assert got["error"] is None
+
+    def test_non_finite_and_negative_ages_are_unmeasured(self):
+        for bad in (float("nan"), float("inf"), -1.0, {"x": 1}, [1]):
+            monitoring.set_served_progress_source(
+                lambda bad=bad: {"last_served_age_s": bad})
+            got = monitoring.served_progress()
+            assert got["last_served_age_s"] is None, bad
+            assert got["error"], bad
+
+    def test_a_valid_age_survives_the_coercion(self):
+        monitoring.set_served_progress_source(lambda: {"last_served_age_s": 3.5,
+                                                       "served": 7})
+        got = monitoring.served_progress()
+        assert got["last_served_age_s"] == 3.5
+        assert got["served"] == 7
+        assert got["error"] is None
+
+    def test_a_bad_age_never_breaks_the_listener(self):
+        """The dark-check class: a raise inside `do_GET` answers NOTHING."""
+        monitoring.heartbeat_record()
+        monitoring.set_served_progress_source(lambda: {"last_served_age_s": "nope"})
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.stop_health_listener()
+        assert status in (200, 503), body
+        payload = json.loads(body)
+        assert payload["status"] in ("ok", "stale")
 
 
 class TestLoopBlockEvidence:
@@ -5317,6 +5343,46 @@ class TestLoopBlockEvidence:
         assert report["persist_path"] is None
         assert report["persist_error"] is None
 
+    def test_a_block_in_the_hysteresis_band_is_not_yet_a_capture(self, monkeypatch):
+        """The band is the CLOSE point, never the OPEN point.
+
+        Measured before this test existed: with ``threshold_s=5`` a legitimate
+        3 s pass was captured on EVERY pass (10 captures and 10 WARNINGs in 2 s),
+        because the episode opened at ``threshold/2``. Round 3's mutation check
+        (deleting the open-at-threshold guard) left the whole suite green, so the
+        property is pinned here against the sampler's own clock rather than
+        against a live sleep race.
+        """
+        monitoring._reset_loop_blocks()
+        # 3.0 s: above threshold/2 (2.5), below the threshold (5.0)
+        monkeypatch.setattr(monitoring, "loop_heartbeat_age", lambda: 3.0)
+        stop = threading.Event()
+        sampler = monitoring.start_loop_block_sampler(
+            threshold_s=5.0, poll_interval=0.02, stop_event=stop)
+        try:
+            time.sleep(0.3)
+        finally:
+            stop.set()
+            sampler.join(timeout=2)
+        assert monitoring.loop_block_report()["episodes"] == 0, (
+            "an age inside the hysteresis band must not open an episode")
+
+    def test_an_age_past_the_threshold_IS_captured(self, monkeypatch):
+        """The control: same seam, age past the threshold."""
+        monitoring._reset_loop_blocks()
+        monkeypatch.setattr(monitoring, "loop_heartbeat_age", lambda: 6.0)
+        stop = threading.Event()
+        sampler = monitoring.start_loop_block_sampler(
+            threshold_s=5.0, poll_interval=0.02, stop_event=stop)
+        try:
+            time.sleep(0.3)
+        finally:
+            stop.set()
+            sampler.join(timeout=2)
+        report = monitoring.loop_block_report()
+        assert report["episodes"] >= 1
+        assert report["last"]["loop_age_s"] >= 5.0
+
     def test_the_sampler_captures_a_blocked_loop_and_not_a_healthy_one(self):
         """End-to-end over the real sampler: one episode, one capture.
 
@@ -5373,13 +5439,18 @@ class TestWaitBoundBreachWindow:
     def test_the_window_counts_only_recent_breaches(self):
         monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_REST)
         monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_MCP)
+        # ⚠️ The window is BUCKET-granular (±one bucket, 10 s) by design — the
+        # bucket dict is what keeps a per-request denominator O(1) and bounded —
+        # so the "old" stamp is placed a whole extra bucket beyond the edge.
         monitoring.record_wait_bound_breach_recent(
             monitoring.WAIT_BOUND_SURFACE_REST,
-            at=time.monotonic() - (monitoring.WAIT_BOUND_HEALTH_WINDOW_S + 5))
+            at=time.monotonic() - (monitoring.WAIT_BOUND_HEALTH_WINDOW_S + 30))
         window = monitoring.wait_bound_breach_window()
-        assert window["total"] == 2
-        assert window["by_surface"] == {"mcp": 1, "rest": 1}
-        assert window["refusing"] is False, "one or two breaches is a long call"
+        assert window["total"] == 2, window
+        assert window["by_surface"]["mcp"] == 1
+        assert window["refusing"] is None, (
+            "two refusals with no attempts recorded is below the sample floor — "
+            "reported, not decided")
         assert window["last_breach_age_s"] is not None
         assert window["error"] is None
 
@@ -5404,66 +5475,176 @@ class TestWaitBoundBreachWindow:
         assert counts["by_surface"]["rest"] >= 1
         assert monitoring.wait_bound_breach_window()["total"] >= 1
 
-    def test_a_SPORADIC_tail_never_reaches_the_density_threshold(self):
-        """The false-red this term must never produce.
+    def test_the_verdict_is_independent_of_traffic_VOLUME(self):
+        """⛔ THE DEFECT THIS TERM HAD TWICE, and the test that pins the fix.
 
-        The transport bound is breached BY DESIGN for ~2.1% of calls. Those
-        breaches land one per 10 s bucket at most, so a whole window of them
-        reaches a handful of buckets — below the threshold — while a failing
-        plane fills 12 of 12. Calibrating on a COUNT instead made the verdict
-        depend on traffic volume: the same incident measured 3.5/min and 17/min
-        in two traces, so a count threshold tuned to one is blind to the other.
+        The repo's own designed breach rate is ~2.1% of calls (#10185: p99
+        22,476 ms against a 10 s bound). Both previous designs were functions of
+        volume, and both were measured wrong in opposite directions:
+
+        * a COUNT (10 per 120 s) is blind at 3.5 refusals/min and red at 17/min;
+        * a DENSITY (6 of 12 buckets) reds a HEALTHY box as traffic rises — a
+          bucket fills if ANY call breaches, so at 2.1% the chance a bucket
+          fills is 1-(1-0.021)^N per 10 s: 20% of polls at 120 calls/min, 92% at
+          300, 100% at 600 (crossover ~3.3 req/s). That fails every deploy.
+
+        A SHARE is invariant: ~2.1% of traffic refused is ~2.1% at 1 req/s and
+        at 100 req/s. This test walks both traffic levels at the designed rate
+        and asserts the verdict does not move.
         """
-        now = time.monotonic()
-        # A realistic 2.1% tail over a busy minute: three refusals spread across
-        # three buckets out of twelve (a 5-calls-per-bucket rate gives ~0.1
-        # breaches per bucket, so a whole window holds a couple).
-        for i in (2, 7, 11):
-            monitoring.record_wait_bound_breach_recent(
-                monitoring.WAIT_BOUND_SURFACE_REST, at=now - i * 10.0 - 1.0)
+        for attempts in (200, 2000):
+            monitoring.reset_wait_bound_breach_window()
+            breaches = max(1, int(round(attempts * 0.021)))
+            for _ in range(attempts):
+                monitoring.record_wait_bound_attempt("rest")
+            for _ in range(breaches):
+                monitoring.record_wait_bound_breach_recent("rest")
+            window = monitoring.wait_bound_breach_window()
+            assert window["attempts"] == attempts
+            assert window["share"] < monitoring.WAIT_BOUND_HEALTH_MIN_SHARE
+            assert window["refusing"] is False, (
+                f"a {window['share']:.3f} refusal share over {attempts} requests "
+                f"is the designed slow-call tail, not a failure")
+        # the same ratio at a low volume, where 2.1% rounds to a fraction
+        monitoring.reset_wait_bound_breach_window()
+        for _ in range(500):
+            monitoring.record_wait_bound_attempt("rest")
+        for _ in range(10):
+            monitoring.record_wait_bound_breach_recent("rest")
         window = monitoring.wait_bound_breach_window()
-        assert window["buckets"] == 3, window
-        assert window["buckets_total"] == 12
-        assert window["total"] == 3, "the count alone says nothing"
-        assert window["refusing"] is False, (
-            "a sporadic tail is the bound working as designed, not a failure")
+        assert window["share"] == 0.02
+        assert window["refusing"] is False
+
+    def test_a_plane_refusing_MOST_of_what_it_is_offered_is_the_verdict(self):
+        """#12477's measured shape: every authenticated data request refused.
+
+        Measured 2026-11-13T20:06-20:12Z: `/v1/search` and `/v1/points` 504 at
+        12-19 s while `wait_bound_breaches.total` ran 199 -> 256 in ~4 min. That
+        is a refusal SHARE near 1, which the term must call red at ANY volume —
+        including the low-traffic shape of the FIRST trace (3.5 refusals/min),
+        which a count threshold missed entirely.
+        """
+        for attempts, breaches in ((6, 5), (60, 50), (600, 540)):
+            monitoring.reset_wait_bound_breach_window()
+            for _ in range(attempts):
+                monitoring.record_wait_bound_attempt("rest")
+            for _ in range(breaches):
+                monitoring.record_wait_bound_breach_recent("rest")
+            window = monitoring.wait_bound_breach_window()
+            assert window["refusing"] is True, (
+                f"{breaches}/{attempts} refused must be red; got {window}")
+
+    def test_too_small_a_sample_is_not_a_verdict(self):
+        """1 refusal out of 1 attempt is a share of 1.0 and says nothing.
+
+        A red needs a denominator worth dividing by, or a single cold-start
+        request reds the machine.
+        """
+        monitoring.record_wait_bound_attempt("rest")
+        monitoring.record_wait_bound_breach_recent("rest")
+        window = monitoring.wait_bound_breach_window()
+        assert window["share"] == 1.0
+        assert window["refusing"] is None, (
+            "below the attempt floor the share is reported, never decided")
+
+    def test_a_quiet_box_with_no_traffic_never_reds(self):
+        window = monitoring.wait_bound_breach_window()
+        assert window["attempts"] == 0
+        assert window["share"] is None
+        assert window["refusing"] is None
+
+
+class TestRefusalThresholdEnv:
+    """The env knobs are USER INPUT read on the liveness path — never a raise."""
+
+    def test_a_SPORADIC_tail_over_a_busy_minute_is_not_the_verdict(self):
+        """The designed 2.1% slow-call tail, at the traffic level that broke the
+        two earlier designs of this term.
+
+        This test exists because the DENSITY version was measured WRONG here: a
+        bucket fills if any call in it breaches, so at ~2.1% and ~120 calls/min a
+        healthy box crossed "6 buckets" on ~20% of polls (92% at 300/min). The
+        SHARE is ~2.1% at every volume, so the assertion is now about the ratio.
+        """
+        attempts, breaches = 240, 5      # 240 calls in the window, 2.1% refused
+        for _ in range(attempts):
+            monitoring.record_wait_bound_attempt("rest")
+        now = time.monotonic()
+        for i in range(breaches):
+            monitoring.record_wait_bound_breach_recent(
+                "rest", at=now - (i + 1) * 12.0)
+        window = monitoring.wait_bound_breach_window()
+        assert window["attempts"] == attempts
+        assert window["total"] == breaches
+        assert window["buckets"] == breaches, (
+            "spread across the window, one breach per bucket — the shape that "
+            "filled most buckets once traffic rose")
+        assert window["share"] <= 0.03
+        assert window["refusing"] is False, window
 
     def test_a_SUSTAINED_refusal_stream_is_the_verdict(self):
-        """#12477's measured shape: breaches in essentially every bucket.
+        """A plane refusing MOST of what it is offered, at any volume.
 
-        Both incident traces (70 in ~20 min, 57 in ~3.4 min) fill the window;
-        the density test must fire on BOTH — that is the whole point of not
-        calibrating on a count.
+        Both incident traces are this shape: 3.5 refusals/min and 17/min look
+        completely different as counts and identical as shares.
         """
-        now = time.monotonic()
-        for i in range(12):
-            monitoring.record_wait_bound_breach_recent(
-                monitoring.WAIT_BOUND_SURFACE_REST, at=now - i * 10.0)
-        window = monitoring.wait_bound_breach_window()
-        assert window["buckets"] == 12
-        assert window["refusing"] is True
+        for attempts in (8, 80):
+            monitoring.reset_wait_bound_breach_window()
+            for _ in range(attempts):
+                monitoring.record_wait_bound_attempt("rest")
+            for _ in range(attempts - 1):
+                monitoring.record_wait_bound_breach_recent("rest")
+            window = monitoring.wait_bound_breach_window()
+            assert window["share"] >= 0.8
+            assert window["refusing"] is True, window
 
-    def test_one_bucket_with_a_burst_is_also_the_verdict(self):
-        """A plane refusing 10 requests inside ten seconds is failing, however
-        narrow the window it spans."""
-        now = time.monotonic()
-        for _ in range(monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES):
-            monitoring.record_wait_bound_breach_recent(
-                monitoring.WAIT_BOUND_SURFACE_MCP, at=now - 1.0)
-        window = monitoring.wait_bound_breach_window()
-        assert window["buckets"] == 1
-        assert window["refusing"] is True
-
-    def test_a_stream_of_refusals_is_the_verdict_and_one_is_not(self):
-        """A designed long call is not a red; a STREAM of refusals is."""
-        for _ in range(monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES - 1):
-            monitoring.record_wait_bound_breach(
-                monitoring.WAIT_BOUND_SURFACE_MCP)
-        assert monitoring.wait_bound_breach_window()["refusing"] is False
+    def test_the_cumulative_counter_still_never_gains_a_verdict_key(self):
+        """`counts()` stays a NUMBER; the verdict lives in the window resolver."""
         monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_MCP)
+        assert set(monitoring.wait_bound_breach_counts()) == {
+            "total", "by_surface", "error"}
+
+    def test_an_infinite_threshold_does_not_escape_the_resolver(self, monkeypatch):
+        """``inf`` is the intuitive way to write "no limit" and it used to raise
+        ``OverflowError`` out of a resolver that promises it never raises —
+        which the listener then reported as a permanent 503 on a HEALTHY box
+        (measured on this branch before this test existed)."""
+        for var in ("TORTOISE_WAIT_BOUND_HEALTH_MIN_ATTEMPTS",):
+            monkeypatch.setenv(var, "inf")
+            window = monitoring.wait_bound_breach_window()
+            assert window["error"] is None, window
+            assert window["refusing"] is None
+        monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_MIN_SHARE", "inf")
         window = monitoring.wait_bound_breach_window()
-        assert window["refusing"] is True
-        assert window["total"] >= monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES
+        assert window["error"] is None, window
+        assert window["min_share"] == monitoring.WAIT_BOUND_HEALTH_MIN_SHARE
+        assert monitoring.wait_bound_health_min_attempts() == (
+            monitoring.WAIT_BOUND_HEALTH_MIN_ATTEMPTS)
+
+    def test_a_share_above_one_is_refused_not_trusted(self, monkeypatch):
+        """A share is a fraction; ``5`` would make the term unreachable forever
+        while looking like a stricter setting."""
+        monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_MIN_SHARE", "5")
+        assert (monitoring.wait_bound_health_min_share()
+                == monitoring.WAIT_BOUND_HEALTH_MIN_SHARE)
+        for _ in range(10):
+            monitoring.record_wait_bound_attempt("rest")
+        for _ in range(9):
+            monitoring.record_wait_bound_breach_recent("rest")
+        window = monitoring.wait_bound_breach_window()
+        assert window["share"] == 0.9
+        assert window["refusing"] is True, "a 90% refusal share is a failure"
+
+    def test_zero_disables_the_term_and_says_so(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_MIN_SHARE", "0")
+        for _ in range(10):
+            monitoring.record_wait_bound_attempt("rest")
+            monitoring.record_wait_bound_breach_recent("rest")
+        window = monitoring.wait_bound_breach_window()
+        assert window["min_share"] == 0.0
+        assert window["refusing"] is None, (
+            "disabled is NOT DECIDED, never a silent True/False")
+
 
     def test_a_malformed_window_falls_back_to_the_default(self, monkeypatch):
         monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S", "not-a-number")

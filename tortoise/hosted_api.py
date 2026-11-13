@@ -5621,6 +5621,21 @@ class WaitBoundMiddleware:
             await send(message)
 
         t0 = time.monotonic()
+        # #12477: count the OFFERED TRAFFIC this bound applies to. The refusal
+        # verdict is a SHARE (refusals / attempts), and without a denominator it
+        # is a function of volume instead of a failure rate — which is how two
+        # earlier versions of that term were measured wrong (blind at 3.5
+        # refusals/min here, red on a HEALTHY box at 3.3 req/s there). Stamped at
+        # the same seam that decides the refusal, so numerator and denominator
+        # describe the same population: exempt routes returned above and are
+        # never counted on either side.
+        try:
+            _monitoring.record_wait_bound_attempt(
+                _monitoring.WAIT_BOUND_SURFACE_MCP
+                if _is_jsonrpc_surface(route_path)
+                else _monitoring.WAIT_BOUND_SURFACE_REST)
+        except Exception:  # measurement must never be a new failure mode
+            _logger.debug("wait-bound attempt count failed", exc_info=True)
         # #3834 F1: stamp the TRANSPORT arrival so the MCP dispatch seam —
         # ``mcp_server._await_under_mcp_wait_bound``, which is what actually
         # bounds a tool call because Streamable-HTTP starts the SSE response
@@ -7315,7 +7330,11 @@ async def health():
     try:
         refusals = _monitoring.wait_bound_breach_window()
     except Exception as exc:  # a monitoring read must never 5xx
-        refusals = {"error": f"unreadable: {type(exc).__name__}", "refusing": None}
+        # the resolver never raises by contract; this arm exists so an
+        # unreadable channel reports `refusing: null` (NOT DECIDED) rather than
+        # a number nobody measured.
+        refusals = {"error": f"unreadable: {type(exc).__name__}",
+                    "refusing": None}
     try:
         loop_blocks = loop_block_report()
     except Exception:  # a monitoring read must never 5xx

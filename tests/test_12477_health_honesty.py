@@ -215,11 +215,13 @@ def test_health_reports_the_refusal_window_without_touching_status():
     "not now" where `/health` is not.
     """
     clean = asyncio.run(hosted_api.health())
-    for _ in range(monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES):
+    for _ in range(10):
+        monitoring.record_wait_bound_attempt(monitoring.WAIT_BOUND_SURFACE_REST)
         monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_REST)
     body = asyncio.run(hosted_api.health())
     refusals = body["refusals"]
-    assert refusals["total"] >= monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES
+    assert refusals["total"] >= 10
+    assert refusals["share"] == 1.0
     assert refusals["by_surface"]["rest"] >= 1
     assert refusals["refusing"] is True
     # ⛔ THE DECISION, PINNED: `status` is IDENTICAL before and after the window
@@ -247,4 +249,6 @@ def test_a_historical_breach_does_not_appear_in_the_window():
         at=time.monotonic() - (monitoring.WAIT_BOUND_HEALTH_WINDOW_S + 30))
     body = asyncio.run(hosted_api.health())
     assert body["refusals"]["total"] == 0
-    assert body["refusals"]["refusing"] is False
+    assert body["refusals"]["refusing"] is None, (
+        "no traffic in the window is NOT DECIDED — never a silent False that "
+        "reads as a clean measurement")
