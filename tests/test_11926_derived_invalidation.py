@@ -1575,6 +1575,14 @@ def test_dry_run_writes_nothing_and_names_what_it_would_retire(sdk):
     report = invalidate_stale(sdk, goal_id=g["id"], dry_run=True)
     assert report["dryRun"] is True
     assert report["counts"]["stale"] == 1
+    # ⛔ `counts.undecidable` IS PINNED WHERE IT CAN FAIL (#12315 review). A sweep
+    # over one stale finding decides that finding, so nothing is undecidable and
+    # the counter must read 0 — and here `stale == 1` is asserted just above, so a
+    # drift in the counts EXPRESSION (anything that folds `stale` into
+    # `undecidable`) reds this line. The same assertion placed on a shape whose
+    # `stale` count is already pinned by sibling literals could not fail, which is
+    # why it lives on the dry-run sweep and not on the retirement arms.
+    assert report["counts"]["undecidable"] == 0, report["counts"]
     assert report["invalidated"] == []
     assert sdk.get_entity(made["point_id"])["status"] == "live"
     assert sdk.get_entity(g["id"])["goalState"] == "met"
