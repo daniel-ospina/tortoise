@@ -3942,14 +3942,20 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
     """
     mod = _tool_module()
     seen: list[tuple[str, str | None]] = []
+    # ⛔ The `type` argument, recorded separately (review cycle 13): `tortoise_get_entity`
+    # is called ONCE PER LAYER (points, sources, events), so a pin that matched on the tool
+    # name alone would find the POINTS read and prove nothing about the Event layer.
+    typed: list[tuple[str, str | None]] = []
     surface = _operator_surface(operators=OPERATOR_ROWS, reported=len(OPERATOR_ROWS))
 
     def recording(name, args=None):
         seen.append((name, (args or {}).get("section")))
+        typed.append((name, (args or {}).get("type")))
         return surface(name, args)
 
     for verb in ("inventory", "plan"):
         seen.clear()
+        typed.clear()
         monkeypatch.setattr(mod, "_live_call_tool", recording)
         argv = [verb, "--graph", "org_x_g_old", "--no-verify-read",
                 "--out", str(tmp_path / f"{verb}.json")]
@@ -3960,6 +3966,19 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         # the layer read is the ONLY `tortoise_search` this run makes
         layer_at = next(i for i, (name, _) in enumerate(seen) if name == "tortoise_search")
         assert layer_at == count_at + 1, (verb, seen)
+        # ⛔ THE EVENT LAYER'S OWN FRESH COUNT (review cycle 13, measured UNPINNED). The
+        # operator pair above was pinned, but the Event layer — added OVER it — was not,
+        # and `read_events(reader.counts())` could be reverted to `read_events(counts)` at
+        # either verb with the whole file still GREEN (measured: 240 passed, 0 failed).
+        # That revert is not cosmetic: `counts` predates the 34+-call point walk, so a graph
+        # sitting at the bound whose layer shrank mid-walk REFUSES (rc 3) a layer that was
+        # read whole, and widens #12445's stale-high window from two requests to the walk.
+        # Pinned on ORDER, like the operator pair, because order is the property.
+        status_at = max(i for i, (name, sec) in enumerate(seen)
+                        if name == "tortoise_graph_overview" and sec == "status")
+        events_at = next(i for i, (name, t) in enumerate(typed)
+                         if name == "tortoise_get_entity" and t == "events")
+        assert events_at == status_at + 1, (verb, seen, typed)
 
 
 def test_the_plan_payload_carries_the_layers_three_fields(monkeypatch, tmp_path):
