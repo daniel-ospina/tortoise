@@ -2306,6 +2306,61 @@ def test_the_BFF_publishes_the_SAME_fingerprint_the_AS_computes() -> None:
     assert set(configured) == set(consent_token_key_health()), configured
 
 
+def test_the_mint_route_and_the_fingerprint_route_read_the_key_from_the_SAME_accessor() -> None:
+    """The Pages half's equivalent of "the AS cannot drift from its verifier".
+
+    On the AS the reading provably cannot drift: `/health` calls
+    `consent_token.consent_token_key_health()`, the same module the VERIFIER uses, and a pin in
+    `test_consent_key_fingerprint_10488.py` asserts that helper holds no `hashlib` of its own.
+
+    The Pages half had no such guarantee: `api/consent/token.ts` and `api/consent/key.ts` each read
+    `env.CONSENT_TOKEN_SECRET` for themselves, with nothing enforcing that the two reads resolve to
+    the same bytes. A future edit that derived one of them differently (trimming, a build-time
+    fallback, a second env name) would publish a fingerprint of bytes the mint no longer signs with —
+    a GREEN AGREEMENT in front of a broken bridge, the exact failure this mechanism exists to expose.
+
+    ⛔ So this is a SOURCE pin, not a behaviour pin, and deliberately so: the guarantee is about where
+    the value comes from, which a behavioural test cannot see (both routes would still work with two
+    independent reads, until the day they diverge). `consentSecret()` is the one accessor; neither
+    route may read the variable itself.
+    """
+    functions = REPO / "website/apps/dashboard/functions"
+    mint = (functions / "api/consent/token.ts").read_text(encoding="utf-8")
+    publish = (functions / "api/consent/key.ts").read_text(encoding="utf-8")
+    def code_lines(source: str) -> list[str]:
+        """Every line that is CODE, so a comment explaining the rule cannot satisfy or break it.
+
+        Crude on purpose (a `//` or block-comment line), and named so its limit is visible: a TRAILING
+        `//` comment on a real statement is not stripped, which can only make this test stricter.
+        """
+        stripped = []
+        in_block = False
+        for line in source.splitlines():
+            bare = line.strip()
+            if in_block:
+                if bare.endswith("*/") or bare.startswith("*"):
+                    in_block = not bare.endswith("*/")
+                    continue
+                continue
+            if bare.startswith("/*"):
+                in_block = not bare.endswith("*/")
+                continue
+            if bare.startswith(("//", "*")):
+                continue
+            stripped.append(line)
+        return stripped
+
+    for name, source in (("token.ts", mint), ("key.ts", publish)):
+        code = "\n".join(code_lines(source))
+        assert "consentSecret(" in code, f"{name} does not go through the shared accessor"
+        assert "env.CONSENT_TOKEN_SECRET" not in code, (
+            f"{name} reads env.CONSENT_TOKEN_SECRET directly — the second independent read is how the "
+            "mint and the published fingerprint can one day describe different bytes"
+        )
+    bridge = (functions / "_shared/auth/consent-bridge.ts").read_text(encoding="utf-8")
+    assert "export function consentSecret(" in bridge, "the shared accessor is gone"
+
+
 def test_a_DIFFERENT_key_publishes_a_DIFFERENT_fingerprint() -> None:
     """The reading must MOVE with the key, or a split would be invisible for ever."""
     out = _run("consent_key")

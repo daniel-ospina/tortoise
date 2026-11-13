@@ -32,8 +32,9 @@
 # the next tick repeats the reading (the same reason `deploy-staleness.yml` gives). Its own
 # concurrency group with `cancel-in-progress: false` means a run is never superseded mid-flight.
 #
-# IT CANNOT BLOCK A MERGE, AND THE ISSUE IS THE SIGNAL. A `schedule`-event run is a NON-CODE event
-# (the merge rail's `NON_CODE_EVENTS` set excludes `schedule`), so a red tick never gates a PR. The
+# IT CANNOT BLOCK A MERGE, AND THE ISSUE IS THE SIGNAL. A `schedule`-event run is a NON-CODE event —
+# `schedule` is a MEMBER of the merge rail's `NON_CODE_EVENTS` (`tools/merge_throughput.py`), which is
+# what EXCLUDES it from the merge decision — so a red tick never gates a PR. The
 # monitor's output is the issue `.github/scripts/auto-file-issue.sh` files — ONE issue per streak,
 # with recurrences commented on it, closed when the reading recovers. That substrate is reused
 # deliberately: the #2706/#3907 lesson is that a title embedding a run id files a duplicate on every
@@ -90,13 +91,16 @@ jobs:
         with:
           persist-credentials: false
       # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
-      # The alert is filed by `.github/scripts/auto-file-issue.sh`, which calls `gh`. `runs-on:
-      # ubuntu-latest` is normally a hosted image WITH `gh`, but the fallback pool carries the same
-      # label on a bare runner whose service PATH is a minimal non-login one, where the call would
-      # die `exit 127` — reading as an instrument fault instead of a verdict. Provide the tool or
-      # fail NAMING it, before the check's own logic runs.
-      - name: Runner tool contract — provide gh (#9018)
-        run: bash .github/scripts/runner-tools.sh ensure gh
+      # The alert is filed by `.github/scripts/auto-file-issue.sh`, which calls `gh` AND `jq`
+      # (`af_have_gh` requires both). `runs-on: ubuntu-latest` is normally a hosted image WITH both,
+      # but the fallback pool carries the same label on a bare runner whose service PATH is a minimal
+      # non-login one, where the call would die `exit 127` — reading as an instrument fault instead
+      # of a verdict. Provide the tools or fail NAMING them, before the check's own logic runs.
+      # ⛔ `jq` is named HERE even though the sibling monitors that call the same substrate ensure
+      # only `gh`: without it the filing step fails at `af_have_gh` with "gh and jq are required",
+      # i.e. the alert cannot be filed at all — and this workflow's whole output IS the alert.
+      - name: Runner tool contract — provide gh + jq (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh jq
       # `tools/consent_key_check.py` is stdlib-only; this pin supplies the >=3.12 interpreter every
       # tool in `tools/` requires (#5128).
       - uses: actions/setup-python@v5
@@ -133,7 +137,15 @@ jobs:
       - name: Auto-file the drift (monitor signal — never blocks merges)
         # `always()` so a RED reading still files: the reading is the artifact, and the auto-file step
         # must run on the failing path it exists for. The GREEN path resolves a standing issue.
-        if: always()
+        # ⛔ `outcome != 'skipped'` is a SECOND condition, and it is not belt-and-braces: an
+        # `always()` step also runs when an EARLIER step failed, and if `checkout` or `setup-python`
+        # failed then the compare step never ran — there is no `/tmp/consent-key.json`, and the
+        # fallback below would fabricate `{"verdict": "UNVERIFIABLE"}` into an issue body that
+        # presents it as "The reading (this run)" while pointing an operator at the two PRODUCTION
+        # deployments for what is a runner fault. A step that ran and failed has outcome `failure`,
+        # not `skipped`, so the red path this step exists for is untouched: the run is simply RED
+        # with no issue, and the failing run IS the alert (that substrate's own doctrine).
+        if: always() && steps.check.outcome != 'skipped'
         env:
           # Actions exposes the token only as a CONTEXT, never as an env var (#3092), and
           # `auto-file-issue.sh` asserts the author from the write's own response (a PAT files as its
@@ -192,13 +204,23 @@ jobs:
             echo
             echo '### If it IS a key mismatch — THREE steps, because Pages bakes env at deploy time'
             echo
-            echo '1. `fly secrets set CONSENT_TOKEN_SECRET=<value>` (or land the `deploy-hosted` run that'
-            echo '   stages it from the repo secret).'
+            echo '1. **Rotate the GitHub repo secret** — `gh secret set CONSENT_TOKEN_SECRET` — then land'
+            echo '   (or `workflow_dispatch`) the `deploy-hosted` run so Fly picks it up.'
+            echo '   ⛔ `fly secrets set` ALONE IS NOT ENOUGH: `.github/scripts/fly-managed-secrets.txt`'
+            echo '   declares `CONSENT_TOKEN_SECRET gh-secret:CONSENT_TOKEN_SECRET`, so every'
+            echo '   `deploy-hosted` run re-stages the GitHub value and silently REVERTS a hand-set Fly'
+            echo '   value — after you had seen `AGREE`.'
             echo '2. Set the SAME value on the `tortoise-dashboard` Cloudflare Pages project.'
             echo '3. **REDEPLOY Pages.** A corrected dashboard value does not reach an already-deployed'
             echo '   Function — measured 2026-11-01, and it is the step with no reminder.'
             echo
             echo 'Then re-run `uv run python tools/consent_key_check.py` and require `AGREE`.'
+            echo
+            echo '⛔ **BETWEEN STEP 1 AND STEP 3 THIS ALERT IS EXPECTED.** Pages bakes env at deploy time,'
+            echo 'so a correct rotation reads as `MISMATCH` for exactly as long as it takes to redeploy'
+            echo 'Pages. That is the rotation in progress, not a second regression — finish step 3 rather'
+            echo 'than re-rotating. (§2.5 states the same thing, so the alert and the runbook cannot'
+            echo 'disagree.)'
             echo 'See `docs/engineering/auth/consent-identity-bridge.md` §2.5.'
             echo
             echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"

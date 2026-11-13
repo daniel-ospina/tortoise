@@ -221,11 +221,17 @@ _MIN_SECRET_BYTES = 32
 #:    attacker can ENUMERATE is already lost without this field** — the 32-byte floor
 #:    (`_MIN_SECRET_BYTES`, an implementation floor, NOT a §2.3 requirement — §8 records that) exists
 #:    for precisely the guessable-key case;
-#:  * it gives an attacker who GUESSES nothing they do not already have: the guess can be checked
+#:  * it gives an attacker who GUESSES nothing they did not already have a way to CHECK, and that
+#:    is the honest form of the argument, not "hashes are safe": any guess can already be tested
 #:    against the live verifier in one request (``GET /oauth/consent/preview`` answers
-#:    ``signature does not verify``), so the fingerprint is a strictly worse oracle than the one
-#:    this deployment already exposes by design. That is the argument, not an assertion that
-#:    "hashes are safe";
+#:    ``signature does not verify``). ⛔ BUT THE TWO ORACLES ARE NOT EQUALLY EXPENSIVE, and an
+#:    earlier cut of this comment claimed they were: the live one is rate-limited
+#:    (``RateLimitMiddleware``, 100/min) and logged, while 48 published bits let the same guess be
+#:    checked OFFLINE in microseconds. So the safety argument has a PRECONDITION — the key is
+#:    RANDOM, not merely ≥32 bytes — and ``_MIN_SECRET_BYTES`` above states plainly that it cannot
+#:    establish that (`"passwordpasswordpasswordpassword"` clears it and is ~2^19 guesses). For a
+#:    key that is already guessable, this field makes an existing forgery CHEAP rather than slow; it
+#:    does not make a forgery possible. §8 records the precondition where an operator reads it;
 #:  * 48 bits makes a COLLISION between two independently generated keys ~2^-48 — and a collision
 #:    is the only way this signal can lie. A rotation that produced a colliding prefix would report
 #:    agreement on two different keys; at 12 hex that is a 1-in-281-trillion event per rotation, and
@@ -244,7 +250,10 @@ CONSENT_KEY_FINGERPRINT_HEX_CHARS = 12
 #: arbitrary string a misconfigured (or hostile) surface put in the field — see
 #: ``tools/consent_key_check.py``. ⛔ Lowercase only: both halves emit ``hexdigest()[:12]``, and a
 #: case-insensitive compare would hide a producer that started emitting something else.
-CONSENT_KEY_FINGERPRINT_RE = re.compile(rf"^[0-9a-f]{{{CONSENT_KEY_FINGERPRINT_HEX_CHARS}}}$")
+#: ⛔ ``\Z``, NOT ``$``: Python's ``$`` also matches immediately before a TRAILING NEWLINE, so
+#: ``"<12 hex>\n"`` would pass a ``$``-anchored gate, print a broken log line and compare as a
+#: MISMATCH — sending an operator to rotate a key that is not wrong. Matched with ``.match()``.
+CONSENT_KEY_FINGERPRINT_RE = re.compile(rf"[0-9a-f]{{{CONSENT_KEY_FINGERPRINT_HEX_CHARS}}}\Z")
 
 #: The PROVISIONING reason codes (§2.5) — a CLOSED set, deliberately free of numbers. ⛔ Five, not
 #: every value `/health` can publish: `hosted_api._consent_token_key_health()` adds `unreadable`
