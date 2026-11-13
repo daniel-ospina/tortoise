@@ -368,6 +368,41 @@ class TestDoctorHostedCredential:
         # is "what would I send", which needs no network.
         assert _row(out, "Credentials") is not None
 
+    def test_an_absent_offline_attribute_still_dials(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """An args object with NO `offline` means DIAL — pinned at the consumer.
+
+        `_cmd_doctor` reads the flag with `getattr(args, "offline", False)` so
+        that a bare `Namespace(cmd="doctor")` (#703) keeps the hosted probe ON.
+        That default was pinned only through `_cmd_onboard`: flipping it to
+        `True` at the `_doctor_hosted_rows(...)` call left the whole suite green
+        (fresh review round 10), and it is exactly the false-clean #11912 exists
+        to remove — such a caller would print "not probed" instead of dialling.
+        This drives `_cmd_doctor` directly, so the default itself is asserted.
+        """
+        import argparse as _argparse
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        calls = _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}')
+            if url.endswith("/health") else
+            _FakeResponse(200, b'{"org_id":"org-9"}')))
+        db_path = str(tmp_path / "bare-ns.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor bare namespace seed")
+
+        from tortoise.__main__ import _cmd_doctor
+        _cmd_doctor(_argparse.Namespace(cmd="doctor"))
+        out = capsys.readouterr().out
+
+        # The probe RAN: an absent `offline` must not be read as "skip".
+        assert calls, "a bare Namespace must still dial the hosted probe"
+        assert any("/health" in url for url, _t in calls), calls
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "not probed" not in hosted, hosted
+        assert "✅" in hosted or "❌" in hosted, hosted
+
     def test_graph_scoped_403_is_information_not_a_failure(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
         """A graph-scoped key is refused BY DESIGN — it must not be called broken.

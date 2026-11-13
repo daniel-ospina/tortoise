@@ -15524,8 +15524,9 @@ def main(argv: list[str] | None = None) -> int:
     # without paying that probe's whole timeout budget.
     onboard.add_argument(
         "--offline", action="store_true", default=False,
-        help="Do not probe the hosted endpoint in the final health check "
-             "(no network requests), as `tortoise doctor --offline`",
+        help="Do not probe the HOSTED endpoint in the final health check (no "
+             "request to it); the graph-health probe still dials the configured "
+             "DB target. Same as `tortoise doctor --offline`",
     )
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
