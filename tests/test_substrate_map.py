@@ -1682,7 +1682,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     `d06c001ff9` and had drifted since), #12015's edge-vector prose — three lines in
     that same `hosted_backup.py` bound plus one in `tortoise/cache_projection.py`
     (another file the population had not previously reached) — and **#11928**'s
-    three lines in `tortoise/live.py:608,618` and
+    three lines in `tortoise/live.py:965,975` and
     `tortoise/why.py:200` (`live.KIND_PROPERTIES`' scope note, `kind_expression`'s
     docstring, `_entity_label`'s record of the derived map) — the first move whose
     point is a WIDENING rather than a retirement. Each move is the mechanism
