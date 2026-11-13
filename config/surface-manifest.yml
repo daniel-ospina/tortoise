@@ -906,13 +906,13 @@ approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
-# ⚠️ `counts` is DERIVED by `render` from the TREE the cut ran in; `cut_at_commit` only
-# records the commit passed to `cut --commit`, which must be a DEFAULT-BRANCH sha so the
-# citation survives a squash-merge (#11057 review F1). So the two can legitimately
-# DISAGREE, and they are graded by different properties — `counts` is compared by the
-# DERIVATION property, while `cut_at_commit` is excluded from that drift check and graded
-# only by the provenance property (that it RESOLVES). Do not read the
-# pair as one snapshot. They disagreed for a while (#4282 deleted 26 dead public SDK
+# ⚠️ `counts` is DERIVED by `cut` (and re-derived by `check`) from the TREE the cut ran in;
+# `cut_at_commit` only records the commit passed to `cut --commit`, which must be a
+# DEFAULT-BRANCH sha so the citation survives a squash-merge (#11057 review F1). So the two
+# can legitimately DISAGREE, and they are graded by different properties — `counts` is
+# compared by the DERIVATION property, while `cut_at_commit` is excluded from that drift
+# check and graded only by the provenance property (that it RESOLVES and SURVIVES). Do not
+# read the pair as one snapshot. They disagreed for a while (#4282 deleted 26 dead public SDK
 # methods at `45eefb26c`, so `sdk_public_methods` stayed 124 while `tools` still read
 # 72: the counts came from a lane tree, the sha from the branch). #11609 batch 1 cut a
 # lane tree with four no-destination MCP tools removed and recorded `origin/main`, so
