@@ -28,10 +28,10 @@ thing under test. So:
   ``test_builder_keeps_the_door_agnostic``.
 
 The ``_or_terms`` helper is the same phrase-aware splitter
-``tests/test_identifier_tokens_8933.py`` uses, repeated here deliberately: a
-phrase term (``"err 4032"``) contains no ``|``, so a naive ``.split("|")`` is
-correct, but ``str.split()`` would break it into words and quietly stop
-checking adjacency.
+``tests/test_identifier_tokens_8933.py`` uses — copied verbatim, ``strip``/filter
+and all — repeated here deliberately: a phrase term (``"err 4032"``) contains no
+``|``, so a naive ``.split("|")`` is correct, but ``str.split()`` would break it
+into words and quietly stop checking adjacency.
 """
 
 from __future__ import annotations
@@ -79,8 +79,18 @@ requires_live = pytest.mark.skipif(
 
 
 def _or_terms(query: str) -> list[str]:
-    """Split an OR-union query into its terms, keeping a PHRASE whole."""
-    return query.split("|")
+    """Split an OR-union query into its terms, keeping a PHRASE whole.
+
+    ⛔ THE BODY IS COPIED VERBATIM from :func:`tests.test_identifier_tokens_8933`'
+    helper, and the module docstring says so (P2, `#12368` review): a bare
+    ``query.split("|")`` is the same FUNCTION for every term that carries no
+    padding, and different for one that does — MEASURED,
+    ``build_or_query('a_b ')`` is ``'a_b |a_b'``, whose raw split is
+    ``['a_b ', 'a_b']`` and whose stripped split is ``['a_b', 'a_b']``. A docstring
+    that claims the two are the same splitter has to be true of the shape the
+    branch under test emits, not only of the tidy ones.
+    """
+    return [t.strip() for t in query.split("|") if t.strip()]
 
 
 # ── the emitted-query assertions (the trap) ────────────────────────────────

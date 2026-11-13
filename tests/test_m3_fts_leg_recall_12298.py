@@ -1313,8 +1313,9 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # does not describe (#12368 review, P2). The symbol is the `if`, because two
     # `return escape_redisearch_literal(query)` lines exist and `next()` takes the
     # FIRST; pinning the guard makes the lookup unique and still reds if the branch
-    # moves or is deleted. It reads 943 because the #12368 P2 comment repair above
-    # the branch added five lines — this pin is exactly what caught that, so move
+    # moves or is deleted. It reads 943 because the two #12368 comment repairs above
+    # the branch added eleven lines in total (932 -> 937 -> 943) — this pin is exactly
+    # what caught each of them, so move
     # BOTH this locator and the brief's §3.1 row together, never one alone.
     ("tortoise/sparse.py", 943, "if degenerate and not composites:",
      "`sparse.py:943`"),
