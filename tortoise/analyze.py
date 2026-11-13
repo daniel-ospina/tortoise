@@ -1,8 +1,15 @@
-"""Template-based NL→Cypher graph analysis (the engine under `analyze`).
+"""Template-based NL→Cypher graph analysis (the `analyze()` engine).
 
-⛔ The MCP tool that fronted this — `tortoise_analyze` — was ARCHIVED in #11609
-batch 1 (no destination in the approved surface). The engine is still live for
-SDK/CLI callers; only the MCP door is gone.
+⛔ NO LIVE DOOR. `analyze()` was fronted by the MCP tool `tortoise_analyze`, which
+#11609 batch 1 ARCHIVED (no destination in the approved surface) — and it has no
+other door: it is not a `TortoiseSDK` method, no CLI verb calls it, no REST route
+calls it, and outside `tests/` its only importer is the archived handler. Do not
+describe it as "still live for SDK/CLI callers": it is not, and the follow-up
+question — archive the engine too, or re-open a door — is open, not answered.
+
+What keeps this module in the product is its HELPERS, which live code imports:
+`mean_grounding` / `grounding_snapshot` (`mining.py`), `_LLM_PROVIDERS`
+(`hosted_api.py`) and `_bfs_select_operators` (`dream.py` cites and mirrors it).
 Template Cypher + LLM for intent classification and result synthesis.
 No LLM-Cypher generation (rejected: 61% accuracy, 40% silent errors).
 """
@@ -602,8 +609,9 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
     anchors, direction/rel-filter constrained). For explicit k the operator
     cap (op_cap, default 200) stays a mid-BFS safety bound; for None the cap
     is lifted (genuine full closure) — internal callers only (the
-    user-facing analyze door kept an explicit k; its MCP form was archived in
-    #11609 batch 1).
+    user-facing analyze door passed an explicit k while it existed; its MCP form
+    was archived in #11609 batch 1 and no other door was opened — see this
+    module's header).
 
     op_cap (#1241, epic 903-C3): truncation bound for explicit-k runs. The
     stale-first scheduler passes its per-pass operator budget through so an
