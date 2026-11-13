@@ -1503,11 +1503,19 @@ def test_a_timeout_KEEPS_the_output_the_command_had_already_produced(tmp_path):
     """The hung-command state is the one the alarm most needs to explain, and it used to
     arrive as a bare `$ …` line — i.e. as silence (round 17).
 
-    On POSIX `subprocess.run` re-raises `TimeoutExpired` WITHOUT the child's output, so
-    appending `exc.stdout` there is a no-op; the default runner drains the pipe instead
-    (`canary._communicate_runner`). This case pins what the transcript must carry when a
-    runner CAN supply it, and the next one pins that a runner which cannot is not left
-    looking like a quiet command.
+    ⛔ MEASURED (3.12.3, round 18) — the OPPOSITE of what this docstring said until now:
+    `subprocess.run(..., text=True, timeout=T)` DOES attach the killed child's output on
+    POSIX, as **bytes** (`_check_timeout` joins the raw sequences), which is why the
+    handler decodes it. There is no `_communicate_runner` and no drain: that runner was
+    added on the false premise above and DELETED, because its post-kill `communicate()`
+    reads to EOF — which never arrives while a grandchild inherits the pipe — so the
+    per-command budget could be defeated (measured: a 2 s budget returned after 25 s, and
+    never at all with a `start_new_session` daemon).
+
+    A reader who trusts the old text removes the `isinstance(stream, bytes)` decode and
+    gets `TypeError: expected str instance, bytes found` at `runner=subprocess.run`, or
+    re-adds the drain and re-opens the hang. That is why the stale claim is corrected here
+    rather than left as history.
     """
 
     def boom(cmd, **kwargs):
