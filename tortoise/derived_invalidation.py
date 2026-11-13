@@ -994,8 +994,12 @@ def invalidate_stale(
     each :meth:`Invalidation.as_dict`), ``invalidated`` (what
     :func:`invalidate` returned, per finding — including a per-finding ``error``
     when one retirement refused, so the rest of the sweep's results survive; such
-    a record carries ``error`` and neither ``cache`` nor ``found``, so a consumer
-    asking "was the claim there?" tests ``found is False`` and not falsiness),
+    a record carries ``error``, ``found: None`` — the sweep cannot say whether the
+    claim was there, because the retirement raised before its read concluded — and
+    no ``cache``, because no reconcile ran. ``found`` is PRESENT on every shape,
+    so ``record["found"]`` never raises: ``False`` is the absent arm, ``True`` a
+    claim the retirement read, ``None`` the refusal. Never test falsiness —
+    ``None`` and ``False`` are different facts),
     ``undecidable`` (verdicts the module could not decide — surfaced, never
     dropped), ``counts`` (including ``failed`` and ``gone``) and ``truncated``
     (true when the scan hit ``limit``, i.e. the sweep did not see the whole graph).
@@ -1024,8 +1028,10 @@ def invalidate_stale(
     a claim whose terminal predicate was the legacy ``outdated`` flag reports
     whatever its status property holds (``None``, or a stale word such as
     ``live``), so that field cannot separate it from the absent arm. A retirement
-    that REFUSED carries ``error`` and neither ``cache`` nor ``found``, so test
-    ``found is False`` rather than falsiness.
+    that REFUSED carries ``error``, ``found: None`` and no ``cache``; ``found`` is
+    present on all three shapes, so test ``found is False`` (absent arm), ``is
+    True`` (read arms) or ``is None`` (refused — unknown, read ``error``) rather
+    than falsiness, which cannot tell ``False`` from ``None``.
 
     ⚠️ That rule does NOT hold for ``dry_run=True``, and the asymmetry is
     by design rather than an unhandled arm: a dry run retires nothing, so
@@ -1055,9 +1061,20 @@ def invalidate_stale(
             try:
                 invalidated.append(invalidate(sdk, inv, at=at))
             except Exception as exc:
+                # ⛔ `found` IS PRESENT HERE, AS `None`, AND NOT OMITTED (#12315).
+                # A refused retirement raised BEFORE its read concluded, so the
+                # honest answer to "was the claim there?" is unknown — not the
+                # absent arm's `False` (that arm returns from `invalidate`, it
+                # does not raise) and not `True`. Omitting the key made the
+                # documented discriminator `record["found"]` a KeyError on
+                # exactly the shape a caller reads first when something failed;
+                # #7818 settled the same question the same way on the read
+                # surface (`found` is never absent — an absent key reads as
+                # honest absence). `cache` stays absent: no reconcile ran.
                 invalidated.append({
                     "invalidated": False,
                     "alreadyRetired": False,
+                    "found": None,
                     "judgementId": inv.judgement_id,
                     "reason": inv.reason,
                     "detail": inv.detail,

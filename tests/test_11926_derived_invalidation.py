@@ -1547,6 +1547,14 @@ def test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep(sdk):
     failed = [r for r in report["invalidated"] if r.get("error")]
     assert len(failed) == 1 and "refused on purpose" in failed[0]["error"]
     assert len(report["invalidated"]) == 2
+    # ⛔ THE DOCUMENTED DISCRIMINATOR IS TOTAL (#12315). The docstring tells a
+    # caller to separate the absent arm from the read arms on `found`, and this
+    # is the one record a caller reads first when the sweep reported a failure:
+    # while the key was omitted here, `record["found"]` was a KeyError and
+    # `.get("found")` read `None` — indistinguishable from an unnamed bucket,
+    # which is the #12315 defect class one level out. `None` is the honest
+    # answer: the retirement raised before its read concluded.
+    assert failed[0]["found"] is None, failed[0]
 
 
 # ── 8. the sweep: scope, limit, dry run, and no re-derivation ────────────
