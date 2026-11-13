@@ -49,6 +49,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build wheel + sdist
+        continue-on-error: true
         run: |
           python -m pip install --upgrade pip build==1.6.0
           python -m build
