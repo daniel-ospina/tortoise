@@ -4881,6 +4881,18 @@ _MANIFEST_CITE = re.compile(
 #: that is the direction this pin prefers (the sentence is not where a line count
 #: belongs), and it is the only sentence this arm reads.
 _BARE_NUM = re.compile(_LEADING_NUM_NO_POSITION)
+#: ⛔ TWO PATTERNS, TWO QUESTIONS, AND SWAPPING THEM IS A BUG IN EITHER DIRECTION.
+#: The CLAIM sentence asks "is any number here?" and its contract is that the answer
+#: is no — so it uses the POSITIONAL-strict pattern above and refuses the whole
+#: unit-noun class. A NEIGHBOUR line asks "does this line re-state the claim's
+#: position?" and the same document legitimately counts things beside the manifest's
+#: name — `— 155 lines of rows`, `lists 60 entries`, `row: 166 s` — so it must stay
+#: UNIT-AWARE. Measured: giving the neighbour arm the strict pattern refused all three
+#: of those (false reds), while giving the claim sentence the unit-aware one let
+#: `— its 9987th line` through (the false pass). An ORDINAL is caught by BOTH (the
+#: digit run is all `_NUM` needs), which is why the strictness can differ here without
+#: losing the class that matters.
+_BARE_NUM_UNIT_AWARE = re.compile(_LEADING_NUM)
 
 #: ⛔ A LONE FOUR-DIGIT 19xx/20xx RUN IS A YEAR AS OFTEN AS A LINE NUMBER, and the bare
 #: arm cannot tell them apart — so it refuses the year rather than punishing prose that
@@ -4899,6 +4911,21 @@ def _bare_number_hits(text: str) -> list[str]:
 #: The block's own names. A line carrying one of these is a line that TALKS ABOUT the
 #: block, and it is the population the neighbour arm scans.
 _BLOCK_WORDS = re.compile(r"carve[_-]?out|carve out|\b(?:entry|block|manifest)\b")
+#: ⛔ …AND THE MANIFEST'S OWN FILENAME BELONGS IN THE POPULATION, because this arm's
+#: failure message promises a line number "must not reappear ANYWHERE in the
+#: document" and `_MANIFEST` already treats `ci-surfaces.yml` as the manifest — while
+#: this gate did not, so the loop below `continue`d before `_neighbour_number_strays`
+#: ever ran on the most natural such line (#12369 review, P2, measured GREEN):
+#:
+#:     Re-derived again: `config/ci-surfaces.yml` — its 9987th line at this head.
+#:
+#: The identical sentence with the WORD "manifest" instead of the filename was
+#: scanned and red, which is the inconsistency: one vocabulary admitted, the other
+#: not, for the same file. An ORDINAL (`9987th line`) is unambiguously a POSITION —
+#: not the count-ambiguous `number + lines` residual the regex states — so a line
+#: naming this file must be scanned whatever spelling follows.
+_BLOCK_WORDS_WITH_MANIFEST = re.compile(
+    rf"(?:{_BLOCK_WORDS.pattern})|{_MANIFEST}")
 #: ⛔ …AND SO DOES A LINE THAT NAMES THE ENTRY. The block's own vocabulary is only
 #: half the population: the most natural way to put the number back names the FILE,
 #: not the block —
@@ -4955,8 +4982,14 @@ def _neighbour_number_strays(line: str) -> list[str]:
     if _OTHER_FILE.search(_MANIFEST_FILE.sub("", line)):
         return []
     stray = [m.group(0) for m in _LINE_CITE.finditer(line)]
-    stray += [n for n in _bare_number_hits(line) if n not in stray]
+    stray += [n for n in _bare_number_hits_unit_aware(line) if n not in stray]
     return stray
+
+
+def _bare_number_hits_unit_aware(text: str) -> list[str]:
+    """The UNIT-AWARE hits — counts stay green. See `_BARE_NUM_UNIT_AWARE`."""
+    return [m.group(0) for m in _BARE_NUM_UNIT_AWARE.finditer(text)
+            if not _BARE_YEAR.match(m.group(0))]
 
 
 def _stray_entry_finding(sentence: str, entry: str) -> str | None:
@@ -6035,7 +6068,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         for other_line in doc_lines:
             if other_line == doc_hits[0]:
                 continue
-            if not (_BLOCK_WORDS.search(other_line)
+            if not (_BLOCK_WORDS_WITH_MANIFEST.search(other_line)
                     or _ENTRY_STEMS.search(other_line)):
                 continue
             stray = _neighbour_number_strays(other_line.replace(ENTRY, ""))
@@ -6054,7 +6087,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"registration `tools/ci_selection.py::register_tests` splices above "
                 f"it). Keep the claim in one place and print no number. ⚠️ TWO RESIDUALS, "
                 f"both stated rather than left to be discovered: a number on a line "
-                f"that names neither the block, an entry nor the manifest is not "
+                f"that names none of the block, an entry nor the manifest (by the WORD "
+                f"or by its FILENAME — the population is `_BLOCK_WORDS_WITH_MANIFEST`, "
+                f"so both vocabularies are scanned) is not "
                 f"scanned, and a bare `:NNNN` on a line that names ANOTHER source file "
                 f"is not scanned either (it is that file's cite, and nothing mechanical "
                 f"can tell the two apart — the doc-wide strict arm still catches a "
@@ -6370,6 +6405,55 @@ def test_the_neighbour_population_includes_the_line_that_names_the_entry():
              "(its `entry_lines` loop, `:4906`)")
     assert _neighbour_number_strays(prose) == [], (
         "a cite of another module on a neighbouring line must stay green")
+
+
+def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file():
+    """A line naming `ci-surfaces.yml` is a line about the claim — measured GREEN when not.
+
+    ⛔ WHY (#12369 review, P2, measured). The population gate admitted the block's
+    vocabulary and the entry's name, but NOT the manifest's FILENAME — while
+    `_MANIFEST`, which the doc-wide arm already binds on, treats `ci-surfaces.yml`
+    as the manifest. So the loop `continue`d before `_neighbour_number_strays` ran,
+    and the most natural way to put the number back stayed green:
+
+        Re-derived again: `config/ci-surfaces.yml` — its 9987th line at this head.
+
+    The identical sentence with the WORD "manifest" instead of the filename WAS
+    scanned and red. One vocabulary admitted, the other not, for the same file — and
+    the arm's own failure message promises a line number "must not reappear ANYWHERE
+    in the document". An ORDINAL (`9987th line`) is unambiguously a POSITION, not the
+    count-ambiguous `number + lines` residual the regex states, so no spelling
+    exemption applies here.
+
+    The second assertion is the one that would have caught it originally: being in the
+    POPULATION is not the same as yielding a finding, and only the second is the arm
+    working.
+    """
+    # ⛔ THESE THREE, not `` — 9987 lines into the manifest ``: the neighbour arm is
+    # deliberately UNIT-AWARE (`_bare_number_hits_unit_aware`), because a COUNT beside
+    # the manifest's name is ordinary prose this document writes. That `lines` spelling
+    # is a POSITION only when a positional TAIL follows, and it is the DOC-WIDE arm's
+    # `_POSITION_TAIL` alternative that catches it — measured, and asserted in the
+    # `_MANIFEST_CITE` spelling test instead of here, so neither arm claims the other's
+    # work. An ORDINAL is the spelling BOTH can see, which is why it leads.
+    for line in (
+            "Re-derived again: `config/ci-surfaces.yml` — its 9987th line at this head.",
+            "`ci-surfaces.yml` holds that row, which read 9943 last week.",
+            "`config/ci-surfaces.yml` — read 9943 yesterday",
+            "see `ci-surfaces.yml`, line 9987"):
+        assert _BLOCK_WORDS_WITH_MANIFEST.search(line), (
+            f"{line!r} is not in the neighbour population — a line naming the "
+            f"manifest's FILENAME is a line about this claim, or the rot returns "
+            f"uncaught in the document's own words")
+        assert _neighbour_number_strays(line), (
+            f"{line!r} is in the population but yields no stray — the arm is inert")
+    # …and the widening must not drag the manifest's ORDINARY prose in: a count beside
+    # the filename is not a cite, and `_UNIT` is what keeps it green.
+    for count in ("`config/ci-surfaces.yml` — 155 lines of rows",
+                  "`config/ci-surfaces.yml` lists 60 entries in `carve_out:`",
+                  "`config/ci-surfaces.yml`'s `durations:` row: 166 s"):
+        assert _neighbour_number_strays(count) == [], (
+            f"a COUNT beside the manifest's name must stay green: {count!r}")
 
 
 def test_the_two_cite_arms_are_complementary_not_duplicate():
