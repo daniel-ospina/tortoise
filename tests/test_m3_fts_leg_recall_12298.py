@@ -1028,11 +1028,34 @@ def test_the_degraded_leg_refusal_is_WIRED_at_every_shipped_leg_call(tool_mod) -
         f"{len(legs)} `run_fts_query` call(s) but only {len(refusals)} "
         "`_refuse_degraded_legs` call(s) — an unguarded shipped-leg call books a "
         "degraded read as a measurement")
+    traces = {}
     for call in legs:
-        kw = {k.arg for k in call.keywords}
+        kw = {k.arg: k.value for k in call.keywords}
         assert "leg_trace" in kw, (
             "a `run_fts_query` call does not pass `leg_trace=` — the trace stays "
             "empty and `_refuse_degraded_legs` becomes a silent no-op")
+        assert isinstance(kw["leg_trace"], ast.Name), (
+            "`leg_trace=` must be a named list the refusal can also read, not an "
+            "inline expression")
+        traces[call.lineno] = kw["leg_trace"].id
+    # ⛔ Identity, not a count (#12349 review cycle 5/6): passing `leg_trace=trace`
+    # and then refusing on a DIFFERENT list leaves the refusal reading an empty
+    # trace. Each refusal's first argument must be the same NAME the nearest
+    # preceding measured call handed to `leg_trace=`.
+    for refusal in refusals:
+        first = refusal.args[0] if refusal.args else None
+        assert isinstance(first, ast.Name), (
+            f"`_refuse_degraded_legs` at line {refusal.lineno} must be handed a "
+            "named trace, not an expression")
+        prior = [ln for ln in traces if ln < refusal.lineno]
+        assert prior, (
+            f"`_refuse_degraded_legs` at line {refusal.lineno} has no measured "
+            "`run_fts_query` call before it")
+        want = traces[max(prior)]
+        assert first.id == want, (
+            f"`_refuse_degraded_legs` at line {refusal.lineno} refuses on "
+            f"{first.id!r} but the leg wrote its trace to {want!r} — the refusal "
+            "would read an empty list and pass every degraded read")
     # The fixture loop is the second published verdict that rests on this leg.
     assert len(refusals) >= len(legs), (
         "both the recall sweep AND the #8933 fixture loop must guard the shipped "
