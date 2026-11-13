@@ -8054,7 +8054,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     # nothing, and a dead arm shrinks to the arms that still match, so `= 999` stayed
     # green while the comment claimed all three were pinned).
     statements += [int(n) for n in re.findall(r"= (\d+)`", text)]
-    # The splits paragraph's `to the same `186` the pin re-derives` clause — the fourth
+    # The splits paragraph's `to the same `187` the pin re-derives` clause — the fourth
     # statement of the same figure, and the one an earlier revision of this pin missed.
     statements += [int(n) for n in
                    re.findall(r"to the same `(\d+)` the pin re-derives", text)]
