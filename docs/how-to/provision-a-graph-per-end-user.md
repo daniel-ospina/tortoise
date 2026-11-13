@@ -204,12 +204,12 @@ curl -s -X DELETE "https://app.premiselabs.co/v1/graphs/$GRAPH_ID?org_id=$ORG_ID
 This is a **soft delete** — a tombstone, not an erasure — but read the three
 caveats before you build a churn story on it:
 
-- **The window is 7 days** (`retention.RESTORE_WINDOW_DAYS`). Restore works inside
-  it; after it the purge erases the graph's data and every backup artifact, and
-  nothing is recoverable. The control-plane **tombstone row is kept** (audit) and
-  stamped as purged — so the graph's *name* can still be seen while its data is
-  gone. A "restore when the customer comes back" flow built on a longer horizon
-  silently finds nothing.
+- **The window is 7 days** — see `docs/retention-and-deletion.md`
+  (`retention.RESTORE_WINDOW_DAYS`). Restore works inside it; after it the purge
+  erases the graph's data and every backup artifact, and nothing is recoverable.
+  The control-plane **tombstone row is kept** (audit) and stamped as purged — so
+  the graph's *name* can still be seen while its data is gone. A "restore when the
+  customer comes back" flow built on a longer horizon silently finds nothing.
 - **Restore is not callable with your API key.**
   `POST /v1/graphs/trash/{graph_id}/restore` is a *session + owner/admin*
   surface, so it is a dashboard/operator step, not something your server can do
@@ -238,7 +238,10 @@ modelled on, `GRAPH_SCOPED_TEAM_SURFACE` (#2114). The plan/quota gates below the
 keep their pre-existing shape: a **string** `detail`, plus a header where one
 exists (`X-Upgrade-CTA` on the 402, `X-Graph-Quota` on the graph-quota 409 — the
 key-cap 409 carries the string detail and no header at all). Do not write a
-client that assumes `detail.error_code` exists on every error.
+client that assumes `detail.error_code` exists on every error. ⚠️ One more
+string-shaped credential-scope refusal exists on the routes this guide names:
+`GET /v1/team/keys` answers a scoped key without `keys:manage` with
+`403 "Missing keys:manage scope to …"` — a string, not an `error_code`.
 
 | `error_code` | You did | Remedy |
 |---|---|---|
