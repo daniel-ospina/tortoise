@@ -841,9 +841,11 @@ persists a merge.
    identity path (`:589-594`). `dedup_reviewed='link'` would be **read by nothing that acts on it** — and
    the exhaustive form of that claim does not hold, so state the narrow one. The readers that *branch* on the
    value are `'merge'` (`entity_resolver.py:227`, `:694`, `sdk.py:23664`, `:23674`, `:24487`) and `'reject'`
-   (`entity_resolver.py:229`, `sdk.py:24557`); the one generic read is `reviewed == action` (`sdk.py:24482`,
+   (`entity_resolver.py:229`, `sdk.py:24557`); the generic reads are `reviewed == action` (`sdk.py:24482`,
    `reviewed` set at `:24471`, `action` the caller's free string on `approve_merge`, `:24303`), which echoes the
-   stored value back as `already_reviewed` rather than giving it semantics. So a `'link'` write would gain no
+   stored value back as `already_reviewed` rather than giving it semantics — plus two value-preserving echoes
+   that give the value no semantics either: the entity scan's projection (`entity_resolver.py:211`, `:273`) and
+   `review_verdicts`' rollback restore (`review_verdicts.py:383`, `:484-486`). So a `'link'` write would gain no
    behaviour the `'merge'` write does not already have: an unlabelled merge, not a link-without-merge band. ⛔ **N-4's dispatch readiness is therefore
    unchanged**: the mid band still needs the `SAME_AS` edge (the 2730 owner question) or a distinct read path
    for a linked-not-merged pair. Declare that, do not assume a redirect buys it —
