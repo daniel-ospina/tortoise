@@ -14053,7 +14053,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # PREFIXED form `extractor_v2.py:12397`; this is the only statement without a file token,
     # so exactly one bare occurrence is the claim.
     assert re.findall(rf"(?<!extractor_v2\.py):{_relations_cite}", text) == [f":{_relations_cite}"], (
-        "the reproduction block must state the live number `:11524` exactly once as a BARE "
+        "the reproduction block must state the live number `:{_relations_cite}` exactly once as a BARE "
         "cite — re-stale it and this record's only reproduction path points at a dead line")
     # ⛔ DIRECTION FLIPPED with the correction this arm forced. The comment at this line used to
     # read "nothing in this tree consumes `result[\"relations\"]`" — a claim that was FALSE from the

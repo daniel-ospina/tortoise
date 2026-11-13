@@ -2712,11 +2712,12 @@ to answer.
 > this record ships with.
 
 - ⚠️ **An offset cannot describe the move, which is why every line below was opened.** The
-  `result["classify_later"]` block moved `+971` while `_collect_classify_items` moved `+873` on the
+  `result["classify_later"]` block was displaced `+923` and `_collect_classify_items` `+825` on the
   same tree — two regions of one file moved by different amounts, so a single offset is wrong at one
-  of them. The decomposition, measured line by line across the two commits: `42409813a7` (`#12348`)
-  introduced `+971/-48` and moved the block `14640` → `15563` and the collector `11857` → `12682`;
-  `b85194d6bc` (`#12343`) then added 48 above both, giving `15611` and `12730`.
+  of them. (`#12348`'s `+971/-48` is an INSERTION count, not a displacement; the block's own travel is
+  `14640` → `15563`.) The decomposition, measured line by line across the two commits: `42409813a7`
+  (`#12348`) introduced `+971/-48` and moved the block `14640` → `15563` and the collector
+  `11857` → `12682`; `b85194d6bc` (`#12343`) then added 48 above both, giving `15611` and `12730`.
 - **New value — measured on `main` at `5bacb44e0b`, by opening each line:**
   `_collect_classify_items` at `:12730`, extent `:12730-12752` (`def` to `return items`); the two
   `if items:` gates at `:15149`/`:15302`; the two fail-open `except` arms at `:15162`/`:15313`; the
@@ -2762,10 +2763,10 @@ to answer.
 > on the content they claim.
 
 - **The move is uniform for THIS wave, which is why a mapping is legitimate here and was not at
-  §10.30.** `+3` describes every one of the thirteen carriers; the §10.30 wave was the one where an
-  offset could not work (`+971` vs `+873` in one file). Each new value was still confirmed by opening
-  the line, never by adding three.
-- **The mapping**, all thirteen, old (at `5bacb44e0b`) → new (this tree):
+  §10.30.** `+3` describes every one of the twelve carriers; the §10.30 wave was the one where an
+  offset could not work (displacements of `+923` and `+825` in one file). Each value was still
+  confirmed by opening the line, never by adding three.
+- **The mapping**, all twelve, old (at `5bacb44e0b`) → new (this tree):
   `_extract_session_v2` `18022`→`18025`; `proj.link_source_to_event(` `19449`→`19452`;
   `relation_write = apply_relation_edges(` `19009`→`19012`; `from tortoise.relation_write import
   apply_relation_edges` `19008`→`19011`; the `#10999` TRANSPORT-ONLY comment `18996`→`18999`;
