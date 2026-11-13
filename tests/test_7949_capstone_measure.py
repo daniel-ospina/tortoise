@@ -5270,12 +5270,18 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
     not "unify" these three readers.
 
     The hand scan it replaces also could not see an INDENTED entry: this very
-    test file is registered that way under the `core:` mirror of `surfaces:`
-    (measured with `parse_manifest_text`: `core` holds it, `sdk` does not — that
-    mirror holds 128 entries and none of them is this file) — the
-    same filename indented, which a scan that only looks at
-    column 0 cannot see — and a scan that misses those cannot honestly claim a
-    section "holds none". (Those mirrors are inside a block `register_tests` DOES
+    test file is registered that way under `surfaces:`, which is a mapping of
+    eight indented surface blocks, and it is in the `core` block (`898` entries)
+    AND in the `sdk` block (`128` entries) — measured at this head with
+    `parse_manifest_text` (`m["surfaces"]["sdk"]`, index 30; the raw line is
+    `config/ci-surfaces.yml:8536`, inside the `sdk:` block opened at `:8412`).
+    ⚠️ An earlier revision of this paragraph said "`core` holds it, `sdk` does
+    not — that mirror holds 128 entries and none of them is this file", which
+    the tree refutes: `sdk` IS the 128-entry mirror and it DOES hold the file.
+    The fact the paragraph needs is the one that survived the correction — the
+    registration is INDENTED, so a scan that only reads column 0 cannot see it —
+    and a scan that misses those cannot honestly claim a section "holds none".
+    (Those mirrors are inside a block `register_tests` DOES
     write, so their line numbers move on the next registration; naming them by
     block is the same rule this paragraph applies to the `carve_out:` claim.)
 
