@@ -153,26 +153,11 @@ def _num(cell: str) -> float:
     return float(m.group())
 
 
-def _scoped(brief: str, heading: str) -> str:
-    """The whitespace-flattened text of ONE markdown section — and only that one.
+def _scope_slice(brief: str, heading: str) -> str:
+    """The RAW text of one markdown section — the slice `_scoped` flattens.
 
-    ⛔ THE ROOT FIX for a class that survived three review rounds (#12349 rounds
-    14-16). A pin that asserts `"<a published number>" in <the whole document>`
-    is satisfied by a copy of that number ANYWHERE — so the section the pin is
-    named after can be falsified in place while every gate stays green, provided
-    the true text also appears in another section. That is not hypothetical: a
-    planted restatement turned §2's census (M-A2), §3.3's decomposition (M-B1..3),
-    §3.5's fixture summary (M-C1) and §0's Reading-2 bullet (M-D1) green while
-    each was contradicted in its own section.
-
-    Two properties make this the scope and not a substring of a scope:
-
-    * HEADING-ANCHORED on the RAW document — `^## <heading>.` at a line start —
-      before any flattening, so a MENTION of `## 2. ` inside prose cannot open a
-      scope (M-A4: flattening first made a §1 mention indistinguishable from the
-      heading, and §2's whole block was then satisfied from §1's tail).
-    * EXACTLY ONE such heading is required. A second `## 2.` is a document
-      defect the pin should report, not something to resolve by taking `[1]`.
+    Raw is what a table parse needs (`_table` reads lines), so the two forms are
+    one derivation, not two: `_scoped` is this, flattened.
     """
     level = "##" if re.match(r"\d+$", heading) else "###"
     # A TOP-LEVEL section OWNS its subsections: end at the next `##` only, not at
@@ -188,7 +173,41 @@ def _scoped(brief: str, heading: str) -> str:
     assert len(starts) == 1, (
         f"the brief carries {len(starts)} `{level} {heading}.` headings — the pin "
         "cannot tell which section it is reading")
-    return " ".join(hit.group(0).split())
+    # The slice must END at a heading (the lookahead above) or at EOF — never by
+    # running off the end of a document whose next heading is written in a form
+    # this helper cannot see. That second case is a real leak (#12349 round 17,
+    # P2: a setext `3. Results` / `----------` made `_scoped(brief, "2")` 14 740
+    # chars, i.e. §2 PLUS §3's body) and it is what
+    # `test_the_brief_uses_only_heading_forms_the_scope_helper_can_see` exists to
+    # refuse from the other side.
+    assert hit.end() == len(brief) or re.match(end, brief[hit.end():]), (
+        f"the `{heading}` scope ended in the middle of the document without a "
+        "heading — refusing a scope that may have run past its section")
+    return hit.group(0)
+
+
+def _scoped(brief: str, heading: str) -> str:
+    """The whitespace-flattened text of ONE markdown section — and only that one.
+
+    ⛔ THE ROOT FIX for a class that survived three review rounds (#12349 rounds
+    14-16). A pin that asserts `"<a published number>" in <the whole document>`
+    is satisfied by a copy of that number ANYWHERE — so the section the pin is
+    named after can be falsified in place while every gate stays green, provided
+    the true text also appears in another section. That is not hypothetical: a
+    planted restatement turned §2's census (M-A2), §3.3's decomposition (M-B1..3),
+    §3.5's fixture summary (M-C1) and §0's Reading-2 bullet (M-D1) green while
+    each was contradicted in its own section.
+
+    Two properties make this the scope and not a substring of a scope:
+
+    * HEADING-ANCHORED on the RAW document — `^## <heading>` at a line start —
+      before any flattening, so a MENTION of `## 2. ` inside prose cannot open a
+      scope (M-A4: flattening first made a §1 mention indistinguishable from the
+      heading, and §2's whole block was then satisfied from §1's tail).
+    * EXACTLY ONE such heading is required. A second `## 2.` is a document
+      defect the pin should report, not something to resolve by taking `[1]`.
+    """
+    return " ".join(_scope_slice(brief, heading).split())
 
 
 # ── 1. the defect claim, asserted against the shipped tokenizer ─────────────
@@ -1028,6 +1047,43 @@ def test_brief_fixture_table_is_the_artifact(artifact, brief: str) -> None:
         f"{fx['reachable']} of {n}")
 
 
+def test_the_brief_uses_only_heading_forms_the_scope_helper_can_see(
+        brief: str) -> None:
+    """`_scoped` anchors on `^## `/`^### `. Any OTHER heading form is INVISIBLE.
+
+    ⛔ A guard on the pins' own INSTRUMENT (#12349 round 17, P2), and the leak it
+    prevents was measured, not imagined: with §3's heading written as a setext
+    (`3. Results` followed by `----------`), `_scoped(brief, "2")` returned
+    14 740 characters — §2 PLUS §3's body — so a restatement planted under that
+    heading satisfied every §2 pin. `##3. Results` (no space after the marker) did
+    the same. The failure is silent in the other direction: the returned slice
+    still looks like a scope.
+
+    The brief uses none of these forms today; this test is what keeps it so. The
+    INVERSE hazard — a `## `-prefixed line inside a fenced block truncates a
+    section — is fail-closed (every §-scoped pin here is a presence assertion, so
+    it reds loudly) and is deliberately not refused.
+    """
+    lines = brief.splitlines()
+    end_fm = 0                       # YAML frontmatter is delimited by `---`
+    if lines and lines[0].strip() == "---":
+        end_fm = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    for i, line in enumerate(lines):
+        if i <= end_fm:
+            continue
+        assert not re.match(r"^#{2,6}(?!#| )", line), (
+            f"line {i + 1}: {line[:50]!r} is a hash heading with no space after "
+            "the marker, so `_scoped` cannot see it and a scope may run past its "
+            "own section")
+    for i in range(end_fm + 1, len(lines)):
+        if re.fullmatch(r"(?:-{3,}|={3,})\s*", lines[i]) and lines[i - 1].strip():
+            raise AssertionError(
+                f"line {i + 1}: a bare `{lines[i].strip()}` under the prose line "
+                f"{lines[i - 1][:50]!r} is a SETEXT heading — it turns that prose "
+                "into a heading `_scoped` cannot see, and the preceding section's "
+                "scope then runs past its own boundary")
+
+
 def test_brief_census_and_identifier_decomposition_are_the_artifact(
         artifact, population, brief: str) -> None:
     """§2's control break and §3.3's identifier decomposition — recomputed.
@@ -1056,13 +1112,23 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     # that a restatement can also carry.
     section2 = _scoped(brief, "2")
     sentences2 = re.split(r"(?<=\.)\s+", section2)
-    census_re = (rf"(?<!\d){census['degenerate']} of the {census['queries']} "
-                 r"queries are degenerate")
-    assert len(re.findall(census_re, section2)) == 1, (
-        "§2 must state its degenerate-query census EXACTLY ONCE — "
-        f"`terms_census` records {census['degenerate']} of {census['queries']}, "
-        f"and §2 carries {len(re.findall(census_re, section2))} such statements")
-    census_sentence = next(s for s in sentences2 if re.search(census_re, s))
+    # ⛔ UNIQUENESS IS ABOUT THE CLAIM'S SHAPE, NOT ABOUT THE TRUE TEXT
+    # (#12349 round 17, P1). The previous cut counted occurrences of the TRUE
+    # statement, so a FALSE census statement elsewhere in §2 was invisible and
+    # `next(...)` then read the planted true one — measured: `226 of the 300` in
+    # §2's disclosure sentence plus `126 of the 300` in an added §2 restatement
+    # kept all 72 green. So: exactly ONE census-SHAPED statement in §2, and it
+    # must carry the artifact's numbers.
+    census_shape = r"(?<!\d)\d+ of the \d+ queries are degenerate"
+    census_true = (f"{census['degenerate']} of the {census['queries']} "
+                   "queries are degenerate")
+    assert re.findall(census_shape, section2) == [census_true], (
+        "§2 must state its degenerate-query census EXACTLY ONCE, and to the "
+        f"artifact's numbers ({census_true!r}) — §2 carries "
+        f"{re.findall(census_shape, section2)}. A second, FALSE statement is "
+        "what let a restatement satisfy this pin while §2's own sentence was "
+        "falsified (round 17, P1)")
+    census_sentence = next(s for s in sentences2 if re.search(census_shape, s))
     # ⛔ §2's DEGENERATE CLASS SPLIT is published ("108 `definite` … and 18
     # ident — none of them a path") and was unpinned while §2's census is
     # described as compared CELL BY CELL (#12349 review, P2-2): rewriting those
@@ -1076,6 +1142,11 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
         f"the degenerate ids cover {sum(deg.values())} of the census's "
         f"{census['degenerate']} — the split below would then describe a "
         "different population")
+    # ⛔ The split clauses are read from the CENSUS SENTENCE — the one statement
+    # located by shape above — not from anywhere in §2: §2 legitimately carries a
+    # SECOND `definite`/`ident` pair (the 300-name sample stratification, 180/90),
+    # so a section-wide "every statement agrees" rule would red on correct prose.
+    # The artifact-side split it must agree with is the DEGENERATE one.
     assert re.search(rf"(?<!\d){deg['definite']} `definite`", census_sentence), (
         f"§2's own census sentence must state {deg['definite']} `definite` "
         f"degenerate queries — recomputed from `degenerate_ids` and the pinned "
@@ -1125,9 +1196,11 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
         "§2 must DISCLOSE the control break — the degenerate rows are where "
         "the two Postgres arms cannot differ, and deleting that sentence leaves "
         "the split stated without the reason it matters")
-    # §0's subset row states BOTH recalls, and §0 is where a reader quotes from.
+    # §0's subset row states BOTH recalls, and §0 is where a reader quotes from —
+    # read from §0's SLICE, like every other pin here (round 17, P2: the previous
+    # form read the whole document, so the comment above was wider than the code).
     subset_row = next(
-        (r for r in _table(brief, "recall@3", "Δ vs shipped")
+        (r for r in _table(_scope_slice(brief, "0"), "recall@3", "Δ vs shipped")
          if "subset" in _plain(r[0]).lower()), None)
     assert subset_row is not None, "§0 no longer carries the subset row"
     base, arm = (round(_num(p), 4) for p in _plain(subset_row[1]).split("vs"))
@@ -1984,7 +2057,7 @@ def test_brief_states_what_the_reuse_guards_actually_do(brief_text) -> None:
     population plus leftover rows) AND a disclosure of the case that is still
     accepted. Over-claiming and under-claiming are the same failure.
     """
-    flat = " ".join(brief_text.replace("**", "").split())
+    flat = _scoped(brief_text, "2").replace("**", "")
     assert "refuses a graph whose population differs, or that population plus leftover rows" in flat, (
         "§2 must state exactly what the reuse guards refuse — the harness refuses "
         "a DIFFERENT population (`==` index wait + total `:Object` count), not "
