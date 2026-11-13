@@ -34,7 +34,7 @@ load. Fell through to `web_search` with `model="sonar"` named explicitly.
 |---|---|---|
 | [Model card — `cross-encoder/ms-marco-MiniLM-L6-v2`](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2) | "This model was trained on the **MS Marco Passage Ranking** task"; the published examples pair a **natural-language question** ("How many people live in Berlin?") with a **~20-token passage**; TREC-DL19 nDCG@10 **74.30**, MS MARCO dev MRR@10 **39.01** | Documents the training distribution — **question → passage**. It says nothing about noun-phrase → noun-phrase, so it neither licenses nor forbids transfer to our shape. |
 | [BEIR — Thakur et al., NeurIPS 2021](https://datasets-benchmarks-proceedings.neurips.cc/paper/2021/file/65b9eea6e1cc6bb9f0cd2a47751a186f-Paper-round2.pdf) | In-domain scores are **not a reliable indicator** of out-of-domain behaviour; rerankers are the strongest zero-shot family but they degrade | The 74.30 above is **not** a predictor for our corpus. Transfer must be measured, not assumed. |
-| [In Defense of Cross-Encoders for Zero-Shot Retrieval — arXiv 2212.06121](https://arxiv.org/abs/2212.06121) | Cross-encoders "largely outperform bi-encoders of similar size"; gains from scale are "marginal in-domain, but **much larger in new domains**"; early query–document interaction drives generalisation | Transfer is **expected in direction** (a true match still outranks an unrelated one) and **unknown in magnitude**. |
+| [In Defense of Cross-Encoders for Zero-Shot Retrieval — arXiv 2212.06121](https://arxiv.org/abs/2212.06121) | Cross-encoders "largely outperform bi-encoders of similar size in several tasks"; on scale, "increasing model size results in marginal gains on in-domain test sets, but much larger gains in new domains never seen during fine-tuning"; the "number of parameters and early query-document interactions of cross-encoders play a significant role in the generalization ability" | Transfer is **expected in direction** (a true match still outranks an unrelated one) and **unknown in magnitude**. |
 
 **Verdict: PLAUSIBLE, NOT DOCUMENTED — so measure.** The primary sources
 establish that a cross-encoder of this family transfers out-of-domain *better
@@ -316,7 +316,7 @@ list. The four mechanisms are NOT the same fact:
   permutation that sort discards, so it cannot change the page at all and would pay a
   model load for nothing).
 - **Consumed as a SET, never as a page** — `_review_pool` (a `{pid: …}` membership
-  map; `review_add` orders its own suggestions) and `_resolve_subgraph_seed` (an
+  map; `_review_add` orders its own suggestions) and `_resolve_subgraph_seed` (an
   expansion START set). Neither keeps an order, so "re-picked page" is not the harm
   there; the harm is membership, which is the same class the probes below guard.
   ⛔ Arithmetic also rules `_review_pool` out on its own: it reads `limit=200`,

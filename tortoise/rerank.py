@@ -164,7 +164,9 @@ def fused_rerank_model() -> str:
     """#12297's model name — its own env namespace, the same default model.
 
     ``load_scorer`` caches by NAME, so when both gates are on they share ONE
-    loaded cross-encoder rather than paying a second 20 s load."""
+    loaded cross-encoder rather than paying a second load — measured ~6.4 s from
+    the local HF cache on this box (a one-off observation, not an artifact field;
+    brief section 6 bounds it as mechanism, not as a number to quote)."""
     return (os.environ.get(FUSED_RERANK_MODEL_ENV, RERANK_MODEL_DEFAULT)
             .strip() or RERANK_MODEL_DEFAULT)
 
