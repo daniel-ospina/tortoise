@@ -127,7 +127,17 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
                 f"code_head {head} is not an object in this repo, while the measured "
                 f"commit {other} is — history is present, so this is a dead sha, not "
                 "a shallow clone")
-        if other != head and _has(head) and _has(other):
+        if other != head:
+            #: ⛔ AN ABSENT OBJECT IS "COULD NOT MEASURE", NOT A PASS. A fresh clone
+            #: of `main` after the squash-merge has neither sha (one is a branch
+            #: commit, the other is dangling), so silently skipping the comparison
+            #: here would disarm the guard in the NORMAL CI shape — the same
+            #: fail-open as the timeout arm. SKIP is visible and is still not a red,
+            #: so a correct artifact is never over-blocked.
+            for _sha, _why in ((head, "code_head"), (other, "the head the note names")):
+                if not _has(_sha):
+                    pytest.skip(f"{_why} ({_sha}) is not an object in this clone — "
+                                "code_head equivalence UNVERIFIED")
             scoped = _git("diff", "--quiet", other, head, "--",
                           "tortoise/entity_resolver.py",
                           "tortoise/entity_blocking.py",

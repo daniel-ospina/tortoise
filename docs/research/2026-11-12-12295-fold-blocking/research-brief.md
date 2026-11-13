@@ -13,8 +13,8 @@ provenance claim is stated as the diff rather than as a summary of it: (a) DOCST
 `07033dd926cc` moves the `emitted:` note and `3e75c65c71a8` adds the `complete=True` note;
 (b) LABELS — `ebf7b13fc3cd` renames the `lsh_bands` docstring label and the `stats()` counter key
 `keys` -> `key_memberships`, and `f7c0e819f4` adds a `candidates(label=None)` LABEL FALLBACK in
-`entity_blocking.py`. The fallback is the only statement-level change in those files after
-`437d5d17a5f5`, and this run never reaches it: the harness calls
+`entity_blocking.py`. Apart from that counter-key RENAME, the fallback is the only statement change in those
+files after `437d5d17a5f5`, and this run never reaches it: the harness calls
 `index.candidates(surface, label="Object")` (`tools/candidate_recall_11901.py:717`), so the
 `label is None` branch is not taken. No statement in `entity_resolver.py` or `extractor_v2.py`
 moved after `437d5d17a5f5`.
@@ -37,7 +37,7 @@ and it is the reason no new field, no new fold and no second source of truth app
 
 | mechanism | where | what it does |
 |---|---|---|
-| `normalize_entity_name` | `entity_resolver.py:141` | NFKC → casefold → drop a leading **article** → non-word run → space → whitespace collapse |
+| `normalize_entity_name` | `entity_resolver.py:156` | NFKC → casefold → drop a leading **article** → non-word run → space → whitespace collapse |
 | write doors that persist it as `canonical_name` | `sdk.py:45886` (the `_emit` funnel), `api.py:2628` (`add_subject`), `api.py:2671` (`add_object`), `sdk.py:47229` (a real rename) | filled at every door, `setdefault`, so a caller-supplied fold wins |
 | the projection | `projection/entities.py:5094` (ON CREATE, objects) / `:4958` (subjects), coalesce fill at `:5101` / `:4975` | `canonical_name` is written ON CREATE only, so a re-mention cannot rewrite the key that resolved it |
 | identity | `projection/entities.py:4907` (`merge_key = "id"`) | `name` is a mutable natural key; the id is the identity (`#3584`/`#3590`) |

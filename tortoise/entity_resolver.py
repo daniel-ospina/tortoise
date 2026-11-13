@@ -80,7 +80,9 @@ missed by blocking. ⛔ The bound the prefix alone imposed is GONE (#12295): a p
 whose folded names share no 3-character prefix is no longer excluded — that is
 exactly what the ``T`` (word order / transposition) and ``S`` (typo and separator
 classes) keys reach, and `test_the_scan_finds_a_transposition_the_single_prefix_key_could_not`
-pins it. ``P`` is kept byte-identical to the pre-#12295 single key, so the block
+pins it. ``E`` is always present; ``P`` is added only where the fold is at least
+``MIN_BLOCK_CHARS`` long, and there it is byte-identical to the pre-#12295 single
+key, so the block
 set is a strict superset of `main`'s. The scan applies NO size cap
 (:data:`tortoise.entity_blocking.MAX_BLOCK_SIZE` bounds one QUERY's candidate list
 only, and an oversized block is skipped and REPORTED there).
@@ -453,6 +455,21 @@ def entity_candidates(graph, *, limit: int | None = 50,
         #: key as a strict superset of ``main``'s PAIRS — it is a superset of the
         #: blocks (nothing is blocked less), and its reduction shows a strictly
         #: better match where it differs.
+        #: ⛔ AND ONE ARM CAN MAKE A ROW UNMERGEABLE, not merely undecided. The
+        #: ``settled`` skip below is PER BLOCK, so a pair one block suppressed is
+        #: re-compared in a later block that the union adds. With three or more
+        #: spellings of ONE entity (``plan_doc`` / ``plan-doc`` / ``the plan doc``,
+        #: all folding to ``plan doc``) the newest candidate can gain a second 1.0
+        #: row against a SIBLING DUPLICATE, become ``ambiguous``/``tied_with``, and
+        #: ``entity_pair_for`` then raises on it — so ``approve_merge`` can never
+        #: merge it, where ``main`` merged it cleanly, and the queue reports
+        #: "matches 2 survivors" when both survivors are the same entity. Measured
+        #: over 500 duplicate-heavy populations: 52 candidates moved from mergeable
+        #: to ``ambiguous``, 0 rows lost, 0 displaced to a lower-scoring survivor.
+        #: That is deliberate and it is the SAFE direction (#2730 §6.7: a false
+        #: merge is invisible, a false split is cheap), but it is a real loss of
+        #: mergeability on duplicate-heavy data, so it is stated rather than
+        #: implied by the word "fail-CLOSED".
         #: ⛔ The dedupe is checked at the TOP of the pair loop, before the vector
         #: lookup, the length prune and ``similarity``: a dedupe placed after them
         #: skips only the append, and the repeated comparison it was added to avoid
