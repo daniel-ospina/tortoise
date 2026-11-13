@@ -4745,9 +4745,27 @@ _UNIT_WORDS = (r"s|sec|secs|seconds|ms|us|µs|min|mins|h|hr|hrs|hour|hours|days?
 #: list, EVERY spelling of a line position written with a unit noun was GREEN while
 #: `:9987` was RED — one arm, two spellings, opposite verdicts (#12369 review, P2).
 _UNIT_POSITION_WORDS = r"lines|rows"
+#: The words that make a `lines`/`rows` phrase a POSITION rather than a count.
+#: ⛔ `in` IS A TAIL ONLY AT THE END OF A CLAUSE (#12369 review, P2). A bare `rows in.`
+#: is a position (`the entry reads 9987 rows in.` — measured GREEN before this), while
+#: `155 lines in the summary` is a COUNT and must stay green. The lookahead is what
+#: separates them, so the alternative is punctuation/end-anchored rather than a word.
+_POSITION_TAIL = (r"(?:into|down|deep|below|above|from\s+the\s+top|"
+                  r"in(?=[.,;:!?)\]]|$)|"
+                  r"of\s+the\s+(?:manifest|file))")
 #: Used where a POSITION must be refused: everything is a unit except `lines`/`rows`.
 _UNIT_NO_POSITION = rf"(?!\s*(?:(?:{_UNIT_WORDS})\b|%))"
 _UNIT = rf"(?!\s*(?:(?:{_UNIT_WORDS}|{_UNIT_POSITION_WORDS})\b|%))"
+#: ⛔ THE THIRD VARIANT, AND IT EXISTS BECAUSE THE FIRST TWO ARE EACH WRONG ON A
+#: DIFFERENT LINE (#12369 review, P2 — measured red->GREEN->red, so this closes a
+#: regression the previous fix introduced, not a hypothetical). A NEIGHBOUR line needs
+#: `lines`/`rows` to be a UNIT when the phrase is a COUNT (`— 155 lines of rows`, the
+#: document's ordinary prose, which `_UNIT_NO_POSITION` refuses) and a POSITION when a
+#: positional TAIL follows (`9987 lines into the block`, which `_UNIT` misses because
+#: it rejects the whole class). So the tail is tested INSIDE the exemption: refuse the
+#: match when `lines`/`rows` follows and is NOT itself followed by a tail.
+_UNIT_NEIGHBOUR = (rf"(?!\s*(?:(?:{_UNIT_WORDS})\b|%))"
+                   rf"(?!\s*(?:{_UNIT_POSITION_WORDS})\b(?!\s*{_POSITION_TAIL}\b))")
 #: ⛔ `(?!,\d)` IS LOAD-BEARING: without it the thousands-separated alternative
 #: BACKTRACKS to a prefix, so `1,320,023 bytes` matched as the integer `1,320` and was
 #: reported as a line cite. The existing pass-fixture never showed it because its
@@ -4756,11 +4774,15 @@ _NUM = rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT}(?![\d])(?!,\d)(?!\.\d)(?!-\
 #: The same integer, with `lines`/`rows` treated as POSITIONS rather than units.
 _NUM_NO_POSITION = (
     rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT_NO_POSITION}(?![\d])(?!,\d)(?!\.\d)(?!-\d)(?!:\d)")
+#: …and the NEIGHBOUR variant: `lines`/`rows` is a unit only when no tail follows.
+_NUM_NEIGHBOUR = (
+    rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT_NEIGHBOUR}(?![\d])(?!,\d)(?!\.\d)(?!-\d)(?!:\d)")
 #: ⛔ THE `.` IN THIS LOOKBEHIND IS LOAD-BEARING: without it a DECIMAL FRAGMENT is
 #: read as an integer (`1.093 %` matched `093`), contradicting the rule stated three
 #: paragraphs up. Reproduced, then closed.
 _LEADING_NUM = rf"(?<![\w#.]){_NUM}"
 _LEADING_NUM_NO_POSITION = rf"(?<![\w#.]){_NUM_NO_POSITION}"
+_LEADING_NUM_NEIGHBOUR = rf"(?<![\w#.]){_NUM_NEIGHBOUR}"
 _WRAP = r"[`*]*"
 _SEP = r"(?::|#L|—|–|\bL\.?|\b(?:at|on|line|lines|row|rows|entry|entries|of)\b)"
 #: ⛔ THE GAP IS BOUNDED, AND THE BOUND USED TO TRUNCATE SILENTLY — the module's own
@@ -4835,7 +4857,6 @@ _MANIFEST = r"(?:ci-surfaces\.yml|the\s+manifest)"
 #: Residual, stated: a bare `9987 lines` with no tail is genuinely ambiguous with a
 #: count and is NOT caught here; on the CLAIM sentence it is, because that arm has no
 #: count exemption at all (`_BARE_NUM`).
-_POSITION_TAIL = r"(?:into|down|deep|below|above|from\s+the\s+top|of\s+the\s+(?:manifest|file))"
 _MANIFEST_CITE = re.compile(
     rf"{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_NUM}{_WRAP}"
     rf"|(?<![\w.]){_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}{_MANIFEST}"
@@ -4892,7 +4913,7 @@ _BARE_NUM = re.compile(_LEADING_NUM_NO_POSITION)
 #: `— its 9987th line` through (the false pass). An ORDINAL is caught by BOTH (the
 #: digit run is all `_NUM` needs), which is why the strictness can differ here without
 #: losing the class that matters.
-_BARE_NUM_UNIT_AWARE = re.compile(_LEADING_NUM)
+_BARE_NUM_NEIGHBOUR = re.compile(_LEADING_NUM_NEIGHBOUR)
 
 #: ⛔ A LONE FOUR-DIGIT 19xx/20xx RUN IS A YEAR AS OFTEN AS A LINE NUMBER, and the bare
 #: arm cannot tell them apart — so it refuses the year rather than punishing prose that
@@ -4982,13 +5003,21 @@ def _neighbour_number_strays(line: str) -> list[str]:
     if _OTHER_FILE.search(_MANIFEST_FILE.sub("", line)):
         return []
     stray = [m.group(0) for m in _LINE_CITE.finditer(line)]
-    stray += [n for n in _bare_number_hits_unit_aware(line) if n not in stray]
+    stray += [n for n in _bare_number_hits_neighbour(line) if n not in stray]
     return stray
 
 
-def _bare_number_hits_unit_aware(text: str) -> list[str]:
-    """The UNIT-AWARE hits — counts stay green. See `_BARE_NUM_UNIT_AWARE`."""
-    return [m.group(0) for m in _BARE_NUM_UNIT_AWARE.finditer(text)
+def _bare_number_hits_neighbour(text: str) -> list[str]:
+    """The NEIGHBOUR hits — a COUNT stays green, a position with a TAIL does not.
+
+    Three patterns for three questions (#12369 review, P2), and the third exists
+    because the first two were each wrong on a real line: `_BARE_NUM` (claim
+    sentence) refuses every `lines`/`rows` phrase, which false-reds the document's
+    own `— 155 lines of rows`; the plain unit-aware `_NUM` misses `9987 lines into
+    the block`, which was a measured red->GREEN regression. This one refuses the
+    phrase only when NO positional tail follows.
+    """
+    return [m.group(0) for m in _BARE_NUM_NEIGHBOUR.finditer(text)
             if not _BARE_YEAR.match(m.group(0))]
 
 
@@ -6057,9 +6086,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # of the block's own names: the token in either spelling, or `entry` / `block`
         # / `manifest`.
         #
-        # Measured at this head: all four of those occur on exactly ONE line — the
-        # claim's — so the population is EMPTY on the current document and the
-        # widening cannot change its verdict. It only closes the hole above.
+        # ⛔ "THE POPULATION IS EMPTY, SO WIDENING IT CANNOT CHANGE THE VERDICT" WAS
+        # WRONG, and a fresh-context review measured it (#12369, P3): widening the
+        # gate to the manifest's FILENAME admits TWO non-claim lines at this head —
+        # the claim table's `durations:` note and the eval-lane row — so the verdict
+        # is preserved by MEASUREMENT, not by emptiness. Both yield `[]` from
+        # `_neighbour_number_strays`, which is what actually keeps the document green;
+        # a comment asserting the population is empty would have been the reassuring
+        # kind of wrong. The widening earns its place by scanning those two lines
+        # harmlessly while catching the `9987th line` spelling on them.
         # The scanning itself is `_neighbour_number_strays` (module level, and pure),
         # which is where the "another file's cite is not this claim's" rule and its
         # two measured false reds live — and where the rule is PINNED, because a rule
@@ -6451,9 +6486,26 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
     # the filename is not a cite, and `_UNIT` is what keeps it green.
     for count in ("`config/ci-surfaces.yml` — 155 lines of rows",
                   "`config/ci-surfaces.yml` lists 60 entries in `carve_out:`",
-                  "`config/ci-surfaces.yml`'s `durations:` row: 166 s"):
+                  "`config/ci-surfaces.yml`'s `durations:` row: 166 s",
+                  "the block is 155 lines in the summary"):
         assert _neighbour_number_strays(count) == [], (
             f"a COUNT beside the manifest's name must stay green: {count!r}")
+    # ⛔ THE TAIL-GATED CLASS — a measured red->GREEN REGRESSION the first version of
+    # this fix introduced (#12369 review, P2). Swapping the neighbour arm to the plain
+    # unit-aware matcher kept the counts green above and ALSO stopped catching a
+    # position spelled `N lines`/`N rows` on a line that names the block or the entry
+    # but not the manifest. `_UNIT_NEIGHBOUR` tests the tail INSIDE the exemption, so
+    # both halves are pinned here rather than only the half that was easy.
+    for position in (
+            "The `carve_out:` entry sits 9987 lines into the block at this head.",
+            "The `carve_out:` entry sits at 9987 lines into the block at this head.",
+            "That `carve_out:` entry is 9987 rows down from the top.",
+            "the block's entry, 9987 lines deep, is the one this claims",
+            "The write-probe row is 9987 lines below the `surfaces:` block.",
+            "The `carve_out:` entry reads 9987 rows in."):
+        assert _neighbour_number_strays(position), (
+            f"a POSITION with a tail must be scanned as a cite: {position!r} — "
+            f"`lines`/`rows` is a unit only when NO tail follows it")
 
 
 def test_the_two_cite_arms_are_complementary_not_duplicate():
