@@ -41889,6 +41889,10 @@ class TortoiseSDK:
             _pool_ids = result_ids[:_pool_n]
             _pool_texts = _fetch_rerank_pool_texts(
                 graph, entity_type, graph_label, id_field, _pool_ids)
+            # Defined for BOTH branches: the honest arm below asks "was anything
+            # scored", which must be a value (not a NameError) when the read
+            # returned nothing at all.
+            _scored_rows: list[dict] = []
             if _pool_texts:
                 # ⛔ A ROW THE READ DID NOT RETURN IS NOT SCORED. An id the read
                 # excluded (a :Source without ``documentKind``, an operator on
@@ -41910,25 +41914,35 @@ class TortoiseSDK:
                 _scored_rows = [{"id": pid, "content": _pool_texts[pid]}
                                 for pid in _scored_ids]
                 _scored_n = len(_scored_rows)
-                _rows = _scored_rows + [
-                    {"id": pid, "content": ""}
-                    for pid in _pool_ids if pid not in set(_scored_ids)
-                ]
-                # ⛔ THE UNSCORED TAIL RIDES ALONG. Handing ``rerank_pool`` only
-                # the scored head made its ``unscored`` count structurally ZERO
-                # — the stats said "nothing went unscored" while every candidate
-                # past the width had gone unscored — which is the silent-cap
-                # defect reproduced INSIDE the disclosure. The tail's content is
-                # never read (it is not scored); it is here so the count is true.
-                _rows += [{"id": pid, "content": ""}
-                          for pid in result_ids[_pool_n:]]
-                _reranked, _rr_stats = rerank_pool(query, _rows, pool=_scored_n)
-                if _rr_stats.get("applied"):
-                    # ``rerank_pool`` is a permutation of what it was handed — the
-                    # scored head reordered, the unscored tail in its retrieval
-                    # order — so the read's id set is unchanged.
-                    result_ids = [r["id"] for r in _reranked]
-            else:
+                # ⛔ GUARD ON THE SCORED HEAD, NOT ONLY ON ``_pool_texts``.
+                # ``rerank_pool`` resolves ``pool`` through ``_clamp_int``, whose
+                # ``< 1`` rule turns a ZERO into the DEFAULT width (40) — so a read
+                # that returned rows but no USABLE text (every property null) would
+                # score the whole list of empty-content rows and report
+                # ``scored = len(rows)``, reproducing the very inversion above with
+                # a clean-looking trace. Falling through to the honest
+                # ``pool_text_read_failed`` arm is the correct report: this pool has
+                # nothing to score.
+                if _scored_rows:
+                    _rows = _scored_rows + [
+                        {"id": pid, "content": ""}
+                        for pid in _pool_ids if pid not in set(_scored_ids)
+                    ]
+                    # ⛔ THE UNSCORED TAIL RIDES ALONG. Handing ``rerank_pool`` only
+                    # the scored head made its ``unscored`` count structurally ZERO
+                    # — the stats said "nothing went unscored" while every candidate
+                    # past the width had gone unscored — which is the silent-cap
+                    # defect reproduced INSIDE the disclosure. The tail's content is
+                    # never read (it is not scored); it is here so the count is true.
+                    _rows += [{"id": pid, "content": ""}
+                              for pid in result_ids[_pool_n:]]
+                    _reranked, _rr_stats = rerank_pool(query, _rows, pool=_scored_n)
+                    if _rr_stats.get("applied"):
+                        # ``rerank_pool`` is a permutation of what it was handed —
+                        # the scored head reordered, the unscored tail in its
+                        # retrieval order — so the read's id set is unchanged.
+                        result_ids = [r["id"] for r in _reranked]
+            if not _scored_rows:
                 # ⛔ AN OPTED-IN LEVER THAT DID NOTHING MUST SAY SO. The pool
                 # text read is best-effort (it returns {} on any graph error),
                 # so without this arm a transient failure made the trace

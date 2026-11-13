@@ -286,7 +286,13 @@ class _FakeGraph:
 
 
 @pytest.mark.parametrize("entity_type,label,id_field,fragments", [
-    ("point", "Point", "id", ["MATCH (n:Point)", "n.id IN $ids"]),
+    # ⛔ THE COALESCE IS PINNED HERE OR NOWHERE: reverting it to ``n.content``
+    # leaves every other test in this file green, because no other test produces a
+    # ``:Point`` whose ``content`` is null — and an operator is exactly that row
+    # (``create_operator`` writes ``label``/``op_type``/``direction`` and no
+    # ``content``), so the revert scores it on ``""``.
+    ("point", "Point", "id", ["MATCH (n:Point)", "n.id IN $ids",
+                             "coalesce(n.content, n.label, '')"]),
     ("event", "Event", "eventId", ["MATCH (n:Event)", "n.eventId IN $ids"]),
     ("object", "Object", "id", ["MATCH (n:Object)", "n.id IN $ids"]),
     # the two restated predicates, pinned so they cannot drift from step 7
@@ -369,8 +375,71 @@ def _seed(sdk, n):
                          entity_type="point")
 
 
+def _id(obj):
+    return obj["id"] if isinstance(obj, dict) else obj.id
+
+
 def _rerank_entries(trace):
     return [e for e in trace if e.get("leg") == "rerank"]
+
+
+def test_a_point_pool_scores_an_operator_on_its_LABEL(sdk):
+    """An operator carries NO ``content``, so the point read used to hand the
+    scorer ``""`` for it — and a cross-encoder ranks an empty passage ABOVE an
+    unrelated real one, so the operator was demoted below every filler.
+
+    Behavioural against a real store, not against the query text: ``create_operator``
+    writes ``label``/``op_type``/``direction`` only, so a revert to ``n.content``
+    returns ``""`` here and THIS is what reds.
+    """
+    a = sdk.create_point(kind="statement", content="zebrafish husbandry protocol A")
+    b = sdk.create_point(kind="statement", content="zebrafish husbandry protocol B")
+    op = sdk.create_operator(
+        op_type="IMPL", source_id=_id(a), target_ids=[_id(b)],
+        label="zebrafish husbandry protocol OPERATOR")
+    op_id = _id(op)
+
+    graph = sdk._get_proj().g
+    out = sdk_mod._fetch_rerank_pool_texts(graph, "point", "Point", "id", [op_id])
+    assert out.get(op_id) == "zebrafish husbandry protocol OPERATOR", out
+
+
+def test_a_row_the_read_did_NOT_RETURN_is_never_scored(sdk, monkeypatch):
+    """The other half of the empty-row rule: an id the read did not return is not
+    a row with empty text — it is no row at all.
+
+    ``_rows`` was once built as ``_pool_texts.get(pid, "")`` over the pool IDS, so
+    an excluded id reached the cross-encoder as ``""`` and outranked real passages.
+    No fixture produces an excluded id, so the exclusion is injected here and what
+    the SCORER receives is asserted directly.
+    """
+    _seed(sdk, 5)
+    real_fetch = sdk_mod._fetch_rerank_pool_texts
+    texts_seen: list[list[str]] = []
+
+    class _Recording:
+        def score(self, query, texts):
+            texts_seen.append(list(texts))
+            return [0.0 for _ in texts]
+
+    def _drops_the_last(graph, entity_type, graph_label, id_field, ids):
+        out = real_fetch(graph, entity_type, graph_label, id_field, ids)
+        if len(out) > 1:
+            out.pop(sorted(out)[-1])
+        return out
+
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    monkeypatch.setattr(sdk_mod, "_fetch_rerank_pool_texts", _drops_the_last)
+    _inject(_Recording(), monkeypatch)
+    trace: list[dict] = []
+    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=5,
+                           leg_trace=trace)
+
+    entry = _rerank_entries(trace)[0]
+    assert texts_seen, "the scorer never ran, so this test proves nothing"
+    assert "" not in texts_seen[0], texts_seen[0]
+    assert entry[rerank.RERANK_SCORED_KEY] == len(texts_seen[0])
+    assert entry[rerank.RERANK_UNSCORED_KEY] >= 1
 
 
 def test_the_wiring_is_a_permutation_and_discloses_the_cap(
@@ -561,12 +630,17 @@ def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
     """
     nonce = uuid.uuid4().hex[:8]
     q = f"zebrafish {nonce}"
-    # Filler passages all contain the query terms, so fusion has every reason to
-    # rank them; the marker contains them too but is otherwise unremarkable, so
-    # its survival must come from the SCORER, not from lexical accident.
+    # ⛔ THE PREMISE MUST BE CONSTRUCTED, NOT ASSUMED. Filler passages repeat the
+    # query terms THREE times each; the marker carries them once and is longer.
+    # Fusion is term-frequency weighted, so the fillers outrank the marker by
+    # construction — measured on this box: ONE occurrence per filler put the
+    # marker FIRST in a 6-doc corpus (so the `limit=2` cut contained it and the
+    # premise assertion below failed), while three occurrences place it LAST.
+    # Without the repetition the test is testing which way the ranker happened to
+    # break. The marker's survival must come from the SCORER.
     for i in range(5):
         sdk.create_point(kind="statement",
-                         content=f"{q} filler passage number {i}")
+                         content=f"{q} {q} {q} filler passage number {i}")
     marker = sdk.create_point(
         kind="statement",
         content=f"{q} — the exact zebrafish husbandry protocol for the marker")
@@ -610,10 +684,21 @@ def test_a_row_returned_with_NO_TEXT_is_not_scored(sdk, monkeypatch):
     for i in range(4):
         sdk.create_point(kind="statement", content=f"{q} real passage {i}",
                          entity_type="point")
-    blank = sdk.create_point(kind="statement", content="", entity_type="point")
+    # ⛔ THE STUBBED ROW MUST BE RETRIEVABLE, or the test proves nothing: a point
+    # created with ``content=""`` has no terms to match, so it never enters the
+    # pool and the injection below never fires (measured here: ``unscored=0``, the
+    # test failing at its own premise rather than at the behaviour). Its CONTENT
+    # therefore matches the query so fusion retrieves it, and the injected read
+    # returns ``""`` for it — which is exactly what the real read does for a row
+    # whose text property is null.
+    blank = sdk.create_point(kind="statement",
+                             content=f"{q} stubbed passage with no text property",
+                             entity_type="point")
     blank_id = blank["id"] if isinstance(blank, dict) else blank.id
 
     real_read = sdk_mod._fetch_rerank_pool_texts
+
+    injected: list[bool] = []
 
     def _with_a_blank(
         graph, entity_type, graph_label, id_field, ids,
@@ -621,6 +706,7 @@ def test_a_row_returned_with_NO_TEXT_is_not_scored(sdk, monkeypatch):
         out = real_read(graph, entity_type, graph_label, id_field, ids)
         if blank_id in ids:
             out[blank_id] = ""          # what the read itself produces
+            injected.append(True)
         return out
 
     monkeypatch.setattr(sdk_mod, "_fetch_rerank_pool_texts", _with_a_blank)
@@ -629,5 +715,8 @@ def test_a_row_returned_with_NO_TEXT_is_not_scored(sdk, monkeypatch):
     trace: list[dict] = []
     sdk.tortoise_fts_query(q, entity_type="point", limit=4, leg_trace=trace)
     entry = _rerank_entries(trace)[0]
+    # THE PREMISE, ASSERTED: the blank row reached the read. Without this the
+    # assertions below pass vacuously on a pool that never contained it.
+    assert injected, "the stubbed row never entered the pool, so nothing was tested"
     assert entry[rerank.RERANK_UNSCORED_KEY] >= 1, entry
     assert entry[rerank.RERANK_SCORED_KEY] <= 4, entry
