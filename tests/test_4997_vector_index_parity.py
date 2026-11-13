@@ -489,9 +489,11 @@ def test_none_result_set_means_not_measured():
     deliberately NOT asserted here: on a virgin projection `_bare()` leaves the
     served half `None` too, so the assertion cannot catch the mutation that
     matters in this method — a dropped `self._vector_index_served_labels = None`
-    reset. A COHERENCE ASSERTION placed here would red a lane that clears the
-    indexed half while leaving the served half populated, and that is a real
-    shape; it just belongs to a pin that populates the pair first. The guards are
+    reset. What a coherence assertion placed HERE *could* red is the opposite
+    shape — a lane that POPULATES the served half while indexing nothing — and
+    that is already caught by the two guards below; it cannot see the dropped
+    reset, which is why that one belongs to a pin that populates the pair
+    first. The guards are
     `test_unmeasured_pair_is_none_in_both_halves`, which proves each `None` lane
     RAN from its own log line (`"inventory read failed"` /
     `"inventory unavailable (empty response)"`), and
@@ -707,14 +709,14 @@ def test_a_store_with_no_gap_does_not_warn(caplog):
 # The pin above is unchanged in SUBSTANCE — "no gap ⇒ no gap report" still
 # holds, and that substance sentence is the only part of plan §6.1 cited here —
 # but its CAPTURE LEVEL is INFO, not WARNING. ⛔ Do NOT follow §6.1 as a clean
-# record: its `logging.WARNING` sentence is STALE (the pin was already INFO on
-# main via #11660 review F1, 583c19a25a9b), so only that substance survives,
-# not the sentence. That same F1 moved the ARMED (retired) gap report to a
-# retirement INFO; the UNARMED report keeps its WARNING, which is the split
-# `_gap_level()` above reads from `vector_index_retired()`. The header said
-# "captures at WARNING" over a pin that no longer takes one, which is the same
-# defect class this file's sibling pins were fixed for (#11660 review F1 raised
-# their capture level): it sends the next reader to check the wrong half.
+# record: its "captures at `logging.WARNING` … should survive unchanged"
+# sentence is STALE. The ARMED (retired) gap report is INFO by #11642; #11660
+# review F1 kept its `#4997` marker and raised the PINS that still demanded a
+# WARNING, which is where this one's INFO comes from (583c19a25a9b). The
+# UNARMED report keeps its WARNING — the split `_gap_level()` above reads from
+# `vector_index_retired()`. The header said "captures at WARNING" over a pin
+# that no longer takes one: the same defect class the sibling pins were fixed
+# for, and it sends the next reader to check the wrong half.
 #
 # What #11087 ends is the SILENCE — the same store must now report the
 # serves/indexes pair at INFO, and so must a store that HAS a gap (which also
