@@ -3020,7 +3020,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # `${census_lever}` three lines above names the retry route, so one payload carried two
         # incompatible causes. Nothing pinned this text (the alert is a shell `echo`, not a
         # Python reason line), so the reword was silent — a revert measured GREEN.
-        ("workflow", "so the count is an UPPER BOUND on executing work rather than a census of it"),
+        ("workflow", "so the count is an UPPER BOUND on executing work among the runs it READ"),
         # ⛔ AND THE HEADER'S OWN CAUSE (c), same class one paragraph up (#12166 review round 17).
         # It attributed the unwitnessed census to "#12037's own defect returned by the probe
         # budget" while naming a NON-budget lever two sentences later. Reverting the whole
@@ -3038,7 +3038,11 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # sentence, since a settle-downgraded run WAS read. No needle reached it: the suite was
         # GREEN with the two-route gloss and again with the three-route gloss plus the wrong
         # conclusion, so the presence pin is what keeps the conclusion honest.
-        ("module", "pr_running count in this state is an UPPER BOUND on executing work"),
+        # ⛔ AND THE QUALIFIER IS LOAD-BEARING, not decoration (#12166 review round 25): with the
+        # IN-PROGRESS feed cut, runs that ARE executing were never read, so the same reading is a
+        # LOWER bound — and the reason list's first line says exactly that for that shape. The
+        # pin carries the qualifier so dropping it reds.
+        ("module", "pr_running count in this state is an UPPER BOUND on executing work AMONG"),
         # ⛔ THE TWO-ARM HEADLINE, pinned for the same reason (round 23): reverting it to
         # the old universal "`OK` — but only when the PR wait was MEASURED …" measured
         # GREEN, so the claim could come back silently.

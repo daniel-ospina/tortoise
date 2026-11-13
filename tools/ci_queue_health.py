@@ -98,8 +98,10 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               for ``JOB_SETTLE_SECONDS`` — it, not the callee, holds the run
               projection); and the probe BUDGET. ⛔ NO ROUTE COUNT IS GIVEN:
               only the LAYER count is stable (see `pr_running_unmeasured`). So the
-              ``pr_running`` count in this state is an UPPER BOUND on executing work and
-              cannot certify health.
+              ``pr_running`` count in this state is an UPPER BOUND on executing work AMONG
+              THE RUNS IT READ and cannot certify health — ⛔ and it is a LOWER bound when the
+              IN-PROGRESS feed was cut (runs that were executing may never have been read; the
+              reason list's first line says so for that reading, #12166 review round 25).
               ⛔ AND NOT "the status-string census": that is what the BUDGET layer leaves
               (nothing was read about those runs), while a run the settle gate downgraded
               WAS read — naming the whole population that way is false for it, and it is
@@ -1343,7 +1345,8 @@ def _executing_claim(pr_running: int, pr_running_unmeasured: int) -> str:
             f"PR CI is REPORTED executing ({pr_running} run(s)) — NONE of them was "
             "MEASURED to be executing: each is counted only because its execution was not "
             "disproved (the read FAILED, the read did not prove the run idle, or the probe "
-            "budget never reached it), so this is a census UPPER BOUND, not a job-level "
+            "budget never reached it), so this is a census UPPER BOUND on the runs it read, "
+            "not a job-level "
             "proof"
         )
     return f"PR CI IS executing ({pr_running} run(s))"
@@ -1657,7 +1660,8 @@ def classify_queue(
             reasons.append(
                 f"PR-UNWITNESSED: all {pr_running} run(s) counted in pr_running were UNMEASURED "
                 f"{_unmeasured_because(unmeasured_unprobed, unmeasured_unread)}, so "
-                "the count is an UPPER BOUND, not a census of executing work (it is not "
+                "the count is an UPPER BOUND on the runs this reading SAW, not a census of "
+                "executing work (it is not "
                 "necessarily the pre-#12037 status-string reading either — the settle gate can "
                 "withhold a proof from a run that WAS read); with no run PROVED to be executing, "
                 "health is neither witnessed nor "
