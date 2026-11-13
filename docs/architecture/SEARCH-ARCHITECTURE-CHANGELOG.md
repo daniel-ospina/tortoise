@@ -67,3 +67,41 @@ required shard, so the violation made every PR on the repository unmergeable.
   above — and lost the `✅ FIXED (#11702)` header and the "used to answer… replaced it" framing.
 - Nothing about the rule's content, its surface list, or `tests/test_11702_absent_belief_state.py`'s
   coverage was dropped or loosened; the guard was not widened and `DESIGN_DOCS` was not narrowed.
+
+---
+
+## `#12298` — M3 measured: the text index does not move, and the recall gap was never the scorer
+
+`SEARCH-ARCHITECTURE.md` §6.2 defers the text index behind measure **M3** — *"a BM25-capable Postgres
+option with score distributions, not only ranks, plus the identifier fixture"* — and §1.5's M3 row
+states the same. `#12298` ran that measurement on the `#11901` corpus with its instrument
+(`tools/m3_fts_leg_recall.py`, artifacts in
+`docs/research/2026-11-13-12298-m3-fts-leg/`), and its result **keeps §6.2 as written**.
+
+**The numbers** (300 names, paired — same pinned population, one run, both backends):
+
+| arm | recall@3 | Δ vs shipped | paired p |
+|---|---|---|---|
+| shipped `db.idx.fulltext` (RediSearch TF-IDF) | 0.7133 | — | — |
+| ParadeDB `pg_search` BM25, **same query terms** | 0.7267 | +1.33 pts | 0.34 |
+| ParadeDB `pg_search` BM25, its own analyser | 0.9700 | +25.67 pts | <0.001 |
+| **the shipped index**, query with the `_`-preserving runs added | 0.9633 | +25.00 pts | <0.001 |
+
+**What that says, in the decision's own terms.** The scorer is not the constraint: with the query terms
+held constant, swapping TF-IDF for BM25 moves recall@3 by 1.33 points on 10 discordant pairs (p = 0.34)
+and by **zero** at k = 15. The 25-point swing the deployable arm shows is real, is **not BM25**, and is
+reproducible **inside the current index** — so an index migration earns no recall return, which is what
+§6.2's deferral exists to establish. The measurement therefore also closes **C3 (SPLADE)** in epic
+`#12186`: a learned-sparse representation would re-index a vocabulary of its own and so would *mask* the
+contract defect below rather than fix it, at a neural pass per query.
+
+**The defect it found, stated as a design fact rather than as tracker state.** RediSearch treats `_` as a
+word character; `sparse.tokenize_sparse_query` (`tortoise/sparse.py:381`, splitting on `[^a-z0-9]` at
+`:71`) does not. So for a stored name `web_search` the leg issues `search|web` — two terms the index does
+not contain — and the class of `snake_case` names is unretrievable by its own name (`recall@3 = 0.20`,
+21 empty result sets). This is the mechanism behind `#11901`'s measured identifier failure and its
+`rows_zero`. The repair is additive (the `#8933` alias pattern — an OR alternative, never a removed
+term), it is **measured in this harness and not shipped**: a query-bytes change touches every label and
+reverts part of `#2070`'s byte-identity control, so it needs its own review with the number in front of
+it. At production class shares (definite 62.3 %, identifier 2.2–9.0 %, path share unrecorded) the
+predicted gain is **≈ +1.6 to +6.7 recall@3 points**, concentrated in code-shaped names.
