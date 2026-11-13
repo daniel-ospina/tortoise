@@ -149,7 +149,10 @@ Ordered by (evidence strength × our exposure).
 > gates **86** names and the pooled k=15 window loses **80 of them** (6 rescued by the union; at k=3 only 1 is
 > rescued — the artifact's 85-lost cell there is an **upper bound**, since it predates the gate-independent split,
 > and the floor is 73), and `would_attach_before_any_k = 0` for **both** variants — no gated pair binds today, so
-> the gate prevents nothing.
+> the gate prevents no **false attach**. ⛔ **Do not restate that as "the gate prevents nothing"**: it still gates
+> **157 of the 419** variant pairs for our form and **83** for the port — a large blast radius, zero measured yield
+> on this fixture. `#12191`'s relay (`6845986540`, item 3) corrects that shorthand by name, and this line is the
+> shape it warns about.
 > ⚠️ **Read the leg before quoting these:** the artifact is **keyword-only** (`retrieval.legs_seen.vector: false`,
 > `window_modes {hybrid: 0, keyword_only: 4376}` — the dense leg was never submitted on that box), so the loss
 > counts *and* `would_attach_before_any_k` describe the lexical read, not the fused production read. What **is**
