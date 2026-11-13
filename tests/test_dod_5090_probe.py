@@ -618,7 +618,7 @@ def test_the_row_two_MEASURES_the_EDGE_vector_door(monkeypatch):
     # quoted: this file collects a different number today, so any unscoped figure here would
     # be the stale-measurement defect the §6 note below forbids — the reason this note
     # names no live count at all is that a forward merge moves it, `#12281`'s own
-    # `183 -> 186` being the demonstration). Without it, "41 edge types
+    # `183 -> 187` being the demonstration). Without it, "41 edge types
     # measured, none stores a vector" and "the edge arm never ran" are the SAME printed
     # evidence — `stored-without-a-query-path: none`
     # / `MET` — which is the rule the neighbouring notes already state: a `MET` must not
@@ -8849,6 +8849,12 @@ def test_no_module_declares_the_same_dict_key_twice():
     assert set(_MIN_MODULES) == set(_DUP_KEY_ROOTS), (
         "every scanned root needs a non-vacuity floor — "
         f"roots={sorted(_DUP_KEY_ROOTS)}, floors={sorted(_MIN_MODULES)}")
+    # ⛔ …and a floor of ZERO is the same hole: `per_root[name] >= 0` is true for a walk
+    # that yielded nothing, so `{n: 0 for n in _DUP_KEY_ROOTS}` satisfies the loop below
+    # while making the non-vacuity claim vacuous — measured GREEN before this assert
+    # existed. The comment says "non-zero"; this is the line that enforces it.
+    assert all(floor > 0 for floor in _MIN_MODULES.values()), (
+        f"every floor must be non-zero, or a root that yields nothing passes — {_MIN_MODULES}")
     # ⛔ THE REPO ROOT COMES FROM THE FILE, NOT THE CWD (#12265 review):
     # `Path(root).rglob` resolves against the invocation directory, so a run from
     # `tests/` scanned 0 modules and red this guard on a CORRECT tree. This is the

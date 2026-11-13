@@ -352,10 +352,12 @@ the input-derived variant left the split unmoved), and four by `#12265`'s genera
 pin (`test_the_duplicate_key_detector_catches_a_duplicate`,
 `test_no_module_declares_the_same_dict_key_twice`,
 `test_the_scan_REPORTS_a_duplicate_it_finds` and
-`test_the_scan_root_is_the_REPO_not_the_process_cwd` — the falsifier, the scan over `tortoise/`,
-`tools/` and `tests/`, and the RED arm driven over a planted tree (a duplicate must be NAMED with
-its file and both line numbers, an unparseable module must be named rather than skipped green, and
-a clean module must contribute nothing) — and the scan's reach is deliberately not "repo-wide" and
+`test_the_scan_root_is_the_REPO_not_the_process_cwd` — the detector's own RED case, the scan over
+`tortoise/`, `tools/` and `tests/`, the RED arm driven over a planted tree (a duplicate must be NAMED
+with its file and both line numbers, an unparseable module must be named rather than skipped green,
+and a clean module must contribute nothing), and the `chdir` falsifier for the scan's root (which
+`c423d40973` hoisted into `_guard_root()` so a `Path.cwd()` regression reds instead of passing) —
+and the scan's reach is deliberately not "repo-wide" and
 asserts no repo-wide file count: it pins only a per-root floor (`_MIN_MODULES`: 100 / 50 / 500) so a
 renamed or vanished root fails instead of narrowing silently (`battery/`, `graph-scripts/`, `docs/`,
 `eval/` and several smaller roots sit outside the three it walks, and a file count there has already
