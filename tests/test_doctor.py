@@ -42,6 +42,41 @@ def clear_db_env(monkeypatch):
     return monkeypatch
 
 
+#: The marker this MODULE's egress guard raises, so a test can tell that the
+#: module guard — not the suite-wide one in `tests/conftest.py` — blocked the
+#: dial. They must not share a sentence: `tests/conftest.py` raises
+#: `network disabled in tests (...)` too, so an assertion on that shared substring
+#: stays green when this module's fixture is deleted, and the test that exists to
+#: pin the module guard would pin nothing (PR #12371 review, cycle 4).
+_MODULE_EGRESS_MARKER = "blocked by tests/test_doctor.py::_no_hosted_egress"
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_hosted_credential(monkeypatch):
+    """The module's premise: no hosted credential exists unless a TEST supplies one.
+
+    `doctor` became credential-aware in #11912, and `_resolve_config_path()`
+    reads `TORTOISE_API_KEY` **before** any store — so on a box that exports it
+    (every fleet cell does), `HOME` isolation alone no longer makes a test
+    credential-free. Measured on this PR's own head: with the ambient key set,
+    `TestDoctorPreInit::test_no_flags_fresh_machine_reports_not_set_up` read
+    `❌ Hosted: endpoint unreachable …` through this module's blocked transport,
+    so `rc` became 1 and its `assert rc == 0` failed; `env -u TORTOISE_API_KEY`
+    turned the same tree green (PR #12371 review, cycle 4).
+
+    This is the #3695/#5477 rule the suite already applies to the provider gate:
+    a test whose premise is "nothing is configured" is asserting on the ambient
+    shell unless it scrubs EVERY variable the resolver honours — for this
+    resolver that is `TORTOISE_API_KEY` and `TORTOISE_API_URL`, and nothing else
+    (`tortoise/__main__.py::_resolve_config_path`). Tests that need a credential
+    supply one afterwards, by file or by `monkeypatch.setenv`; an autouse fixture
+    is applied before a test's own fixture, so they still win.
+    """
+    for var in ("TORTOISE_API_KEY", "TORTOISE_API_URL"):
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
 @pytest.fixture(autouse=True)
 def _no_hosted_egress(monkeypatch):
     """#11912: `doctor` now probes the hosted endpoint when a credential resolves.
@@ -61,7 +96,7 @@ def _no_hosted_egress(monkeypatch):
 
     def _blocked(req, *a, **k):
         url = getattr(req, "full_url", req)
-        raise urllib.error.URLError(f"network disabled in tests ({url})")
+        raise urllib.error.URLError(f"{_MODULE_EGRESS_MARKER} ({url})")
 
     monkeypatch.setattr(_main, "_DOCTOR_URLOPEN", _blocked)
     return monkeypatch
@@ -1854,12 +1889,14 @@ class TestDoctorHostedCredentialRows:
         """
         self._store(tmp_path, "tt_" + "z" * 40)
         # NOTE: no `_install` here — the autouse fixture's blocked `urlopen` is
-        # the thing under test.
+        # the thing under test. The assertion names THIS module's marker, which
+        # the suite-wide guard in `tests/conftest.py` does not raise: a shared
+        # substring would stay green with this fixture deleted (cycle 4).
         rc = _run_doctor([])
         out = capsys.readouterr().out
 
         assert "❌ Hosted" in out, out
-        assert "network disabled in tests" in out, out
+        assert _MODULE_EGRESS_MARKER in out, out
         assert rc == 1
 
     def test_offline_probes_nothing_but_still_names_the_credential(
