@@ -4925,9 +4925,13 @@ _MANIFEST_CITE = re.compile(
 #: giving opposite verdicts for the same claim, on the one sentence whose contract says
 #: it carries no number at all. `_LEADING_NUM_NO_POSITION` closes that whole class
 #: rather than adding the four spellings to a list. Residual, stated: a genuine COUNT
-#: whose noun is `lines`/`rows` on THIS sentence (`— 155 lines`) is now refused too;
-#: that is the direction this pin prefers (the sentence is not where a line count
-#: belongs), and it is the only sentence this arm reads.
+#: whose noun is `lines`/`rows` is now refused too (`— 155 lines`), on the CLAIM
+#: sentence AND on every neighbour line — `_bare_number_hits_neighbour` calls this
+#: same matcher, so "it is the only sentence this arm reads" would be false. The
+#: cost is a FALSE RED on a genuine line/row count in that population, which is the
+#: direction this pin prefers: a count does not belong on a line that states where
+#: the entry is. ⚠️ `entries` is in `_UNIT_POSITION_WORDS`, NOT `_UNIT_WORDS`, so a
+#: `… 898 entries` tail is refused here while `… 166 s` is not.
 _BARE_NUM = re.compile(_LEADING_NUM_NO_POSITION)
 #: ⛔ ONE MATCHER NOW, AND IT IS THE STRICT ONE — on BOTH surfaces. The CLAIM
 #: sentence asks "is any number here?" and its contract is that the answer is no; a
@@ -5299,8 +5303,9 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
     head with `parse_manifest_text`: THIS module (`test_7949_capstone_measure.py`) is
     registered indented in `core` (898 entries) and is NOT in `sdk` (128 entries);
     the ENTRY (`test_pack_logic_writeprobe_11083.py`) is registered indented in BOTH
-    (`core` index 653, `sdk` index 30, raw line `config/ci-surfaces.yml:8536` in the
-    block opened at `8302`). ⚠️ THAT DISTINCTION IS THE WHOLE POINT AND AN EARLIER
+    (`core` index 653, `sdk` index 30 — INDICES, and the indices are what a test can
+    assert; the LINE numbers of both rows move on the next registration, so none is
+    printed here). ⚠️ THAT DISTINCTION IS THE WHOLE POINT AND AN EARLIER
     REVISION LOST IT: the paragraph conflated the two files and then added a
     `⚠️ CORRECTED` marker asserting the tree refuted "sdk does not hold it" — which
     is TRUE of this module and FALSE of the entry. A marker that declares a correct
@@ -6916,6 +6921,25 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
     (lambda doc, man: (doc, man.replace(
         "\ncarve_out:\n", "\ncarve_out:\ncarve_out:\n", 1)),
      "the duplicate-key refusal"),
+    # ⛔ FOUR ARMS THAT HAD NO CASE. A review deleted each of them and the suite came
+    # back at baseline while the exact fail-open the code says it closes returned
+    # (measured end-to-end). `_HOLD_NONE`'s tail lookahead is here for the same
+    # reason `_ONE_ENTRY`'s was: a refusal with no case is an unpinned refusal.
+    (lambda doc, man: (doc.replace(
+        "`uri_requiring:` and `slow_files:` hold none",
+        "`uri_requiring:` and `slow_files:` hold none, apart from one in `slow_files:`.",
+        1), man),
+     "`_HOLD_NONE`'s tail lookahead (a qualifier after `hold none`)"),
+    (lambda doc, man: (doc, man.replace(
+        "\nslow_files:\n",
+        "\nslow_files:\n- tests/test_pack_logic_writeprobe_11083.py\n", 1)),
+     "the basename comparison (a PATH-PREFIXED entry in `slow_files:`)"),
+    (lambda doc, man: (doc, ""),
+     "the empty-manifest refusal (`_parse_manifest` returns None)"),
+    (lambda doc, man: (doc, man.replace("\ncarve_out:\n", "\n", 1).replace(
+        "\nuri_requiring:\n", "\ncarve_out:\n- test_pack_logic_writeprobe_11083.py\n"
+        "\nuri_requiring:\n", 1)),
+     "the `surfaces:`-above-`carve_out:` ordering arm"),
     # ⛔ THE TWO THE SAME REVIEW FOUND AS FAIL-OPENS, so they get a case like the
     # rest: each is RED here and GREEN if the arm it names is deleted.
     (lambda doc, man: (doc.replace(
