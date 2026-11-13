@@ -1824,6 +1824,29 @@ def test_a_goal_with_no_ID_cannot_be_repaired_and_is_COUNTED_not_dropped(sdk):
     assert standing and standing[0][0] == "met", standing
 
 
+def test_a_CAPPED_window_with_a_dropped_row_still_reports_TRUNCATED(sdk):
+    """The two disclosures must compose (#12412 review, cycle 4, measured).
+
+    `truncated` was computed AFTER the identity filter, so a scan whose window was
+    capped and whose overflow row happened to be the unaddressable one reported
+    `truncated: False` — an exhaustive-looking payload over goals never fetched,
+    which is the #11823 class this module exists to close. The count of
+    unaddressable candidates is window-scoped by nature; the flag is what says the
+    window itself was capped, so the flag has to read the UNFILTERED rows.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (n:Object {goalState:'met', url:'https://example.test/cap-no-id'})")
+    for n in range(2):
+        i, t, g = _world(sdk, tag=f"sweep-cap-{n}")
+        made = _judge(sdk, i, t, g)
+        sdk.delete_entity(made["point_id"])
+    report = reconcile_goal_states(sdk, limit=2)
+    assert report["counts"]["scanned"] == 2, report
+    assert report["truncated"] is True, (
+        "a capped scan reported itself exhaustive because the row it dropped was "
+        f"the unaddressable one: {report}")
+
+
 def test_the_repair_sweep_dry_run_writes_nothing_and_names_what_it_would_clear(sdk):
     i, t, g = _world(sdk, tag="sweep-dry-run")
     made = _judge(sdk, i, t, g)
