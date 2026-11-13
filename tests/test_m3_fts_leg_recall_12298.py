@@ -1489,7 +1489,14 @@ def test_the_reuse_count_guard_is_wired(tool_mod) -> None:
         ops = {type(o).__name__ for o in node.test.ops}
         if "total" not in operands or "len(rows)" not in operands:
             continue
-        if not ops & {"NotEq", "Gt", "Lt"}:
+        # ⛔ `!=` ONLY. An earlier revision also accepted `>`/`<`, and `<` is the
+        # operator that ACCEPTS an over-full graph — the 305-vs-300 confound the
+        # guard exists to stop — while the run merely refuses later on a 60 s
+        # index-wait timeout (#12349 review cycle 10, measured: `int(total) <
+        # len(rows)` left the suite green).
+        if ops != {"NotEq"}:
+            continue
+        if [ast.unparse(o) for o in node.test.comparators] != ["len(rows)"]:
             continue
         if any(isinstance(b, ast.Raise) for b in node.body):
             guards.append(node)
@@ -1497,6 +1504,71 @@ def test_the_reuse_count_guard_is_wired(tool_mod) -> None:
         "the total count is queried but never COMPARED-and-REFUSED — the guard "
         "must be an `if <count> != len(rows): raise SystemExit(...)`; a substring "
         "match would also accept the block commented out or under `if False:`")
+
+
+def test_the_fixture_rows_are_inserted_after_the_sweep_and_then_waited(tool_mod) -> None:
+    """The #8933 fixture read must run on a COMPLETE index, and never feed the sweep.
+
+    ⛔ This is the lane's headline result — "the shipped leg cannot reach
+    `abc_def`" — so its two orderings are load-bearing and neither was pinned.
+    Measured at this head (#12349 review cycle 10): DELETING the second
+    `_wait_indexed(proj, len(rows) + len(FIXTURES))` left 65 passed, so the
+    fixture ranks could be read against an index FalkorDB has not caught up on
+    yet — which books a present name as unreachable, i.e. publishes a FALSE
+    capability failure. Separately, HOISTING the fixture upserts above the
+    recall sweep also left 65 passed, which runs the sweep over 305 documents
+    while `index_numDocuments` still records the first wait's 300: a
+    contaminated population with nothing in the artifact able to show it (the
+    very confound §3.5 and `measurement_notes` disclose).
+    """
+    import ast
+
+    tree = ast.parse(TOOL.read_text())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "arm_falkordb"), None)
+    assert fn is not None, "arm_falkordb is the measurement's sweep"
+
+    def _for_over(name):
+        return [n for n in ast.walk(fn)
+                if isinstance(n, ast.For) and isinstance(n.iter, ast.Name)
+                and n.iter.id == name]
+
+    # ⛔ Identified by WHAT THEY DO, not by position. `for row in rows` appears
+    # TWICE in this function — the population upsert (~:593) and the recall sweep
+    # (~:649) — so a positional read picks the wrong one and the pin goes green
+    # on a hoisted fixture loop (measured: the first version of this pin did
+    # exactly that). The sweep is the one that queries the leg; the fixture
+    # upsert is the one that writes, and `for ... in FIXTURES` also appears
+    # twice (the upsert, then the fixture QUERY loop), so it is the
+    # `_upsert_object` one.
+    sweeps = [n for n in _for_over("rows")
+              if any(isinstance(c, ast.Call)
+                     and (getattr(c.func, "id", None) in ("run_fts_query", "_fts_cypher"))
+                     for c in ast.walk(n))]
+    upserts = [n for n in _for_over("FIXTURES")
+               if any(isinstance(c, ast.Call)
+                      and getattr(c.func, "attr", None) == "_upsert_object"
+                      for c in ast.walk(n))]
+    assert sweeps, "the recall sweep (a `for row in rows` that queries the leg) is gone"
+    assert upserts, "the #8933 fixture upsert loop is gone"
+
+    sweep_line = min(n.lineno for n in sweeps)
+    upsert_line = min(n.lineno for n in upserts)
+    assert upsert_line > sweep_line, (
+        f"the fixture upserts (line {upsert_line}) run BEFORE the recall sweep "
+        f"(line {sweep_line}) — the sweep then runs over 305 documents while "
+        "`index_numDocuments` still records the first wait's 300")
+
+    waits = [c for c in ast.walk(fn)
+             if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "_wait_indexed"]
+    after = [c for c in waits if c.lineno > upsert_line]
+    assert after, (
+        "there is no `_wait_indexed(...)` after the fixture upserts — the "
+        "fixture query can then run against an index FalkorDB has not finished "
+        "building, booking a present name as a capability failure")
+    assert any(any("FIXTURES" in ast.unparse(a) for a in c.args) for c in after), (
+        "the post-fixture wait does not cover the fixture rows — it must "
+        "expect `len(rows) + len(FIXTURES)` documents")
 
 
 def test_brief_states_what_the_reuse_guards_actually_do(brief_text) -> None:
