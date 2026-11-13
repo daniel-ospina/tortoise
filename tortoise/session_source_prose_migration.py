@@ -1466,6 +1466,38 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # over-claimed as a result.
     deferred = "_" in token and not any(
         not (ch.isalnum() or ch == "_") for ch in token)
+    # ⛔ …BUT NOT THE LONE `_` (#12368 review, P1 — a FALSE PASS the deferral
+    # above opened, measured against a live lane). ``deferred`` admits EVERY
+    # ``_``-only token, and ``build_or_query('_') == '_'`` with ``_`` outside the
+    # escape set, so the read sends the bare ``_`` — which the index answers with
+    # ZERO rows even when an ``:Object`` literally NAMED ``_`` is indexed.
+    # MEASURED (one ``:Object`` per shape, each queried by its own name through
+    # the real ``run_fts_query`` on a live FalkorDB 4.20.6, over the twelve
+    # accepted ``_``-only shapes): ``'_'`` is the ONLY unreachable one —
+    # ``'__'``, ``'___'``, ``'____'``, ``'_____'``, ``'_a'``, ``'a_'``, ``'_1'``,
+    # ``'1_'``, ``'_a_'``, ``'a__b'``, ``'0_'`` each return their own record. And
+    # the term is really there: ``queryNodes('Object','\\_')`` returns the record
+    # named ``_`` where ``queryNodes('Object','_')`` returns nothing. So the bare
+    # token addresses no term, and accepting it certifies ``ran=True, leaked=[]``
+    # over a still-present sentence — the class this bound work exists to close.
+    #
+    # ⚠️ ``origin/main`` REFUSED this token too, but by ACCIDENT and for a FALSE
+    # reason — "it tokenises to 0 term(s) []; the FTS read OR-joins multi-term
+    # input", where there are no OR terms. The deferral above exists to stop
+    # exactly that misattribution, so this refusal is not a revert: it states the
+    # measured reason, and it is scoped to the ONE shape measured unreachable —
+    # refusing the other eleven on the same story would be a false block of the
+    # class review round 7 repaired.
+    if token == "_":
+        return ("it is a single `_`, and the index answers that query with ZERO "
+                "rows even when a record is literally named `_` (#12368 review, "
+                "MEASURED on a live index, twelve accepted `_`-only shapes each "
+                "queried by its own name: `_` is the only unreachable one, "
+                "`__`/`___`/`_a`/`a_`/`1_` all return their record, and "
+                "`queryNodes('Object','\\_')` finds the record named `_` where "
+                "`queryNodes('Object','_')` finds nothing) — a probe the read "
+                "cannot answer certifies 'the pre-fix prose is gone' over a "
+                "still-present sentence, so pass a LONGER token")
     # ⛔ …BUT NOT PAST THE COMPOSITE BOUND (#12360 review round 8, P3). Deferring
     # EVERY `_`-only token accepted `'a'*129 + '_b'`: the composites are dropped
     # above that bound, so the read sends the whole 131-char string as ONE escaped
@@ -1637,9 +1669,14 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # in the backstop below (which refuses it when the read emits several terms).
     # ⛔ Not a licence for other separators: for `-`, `,`, `:` … the index really
     # does split, so no single-term probe exists and this branch still refuses.
-    has_us = "_" in token
-    other_sep = any(not (ch.isalnum() or ch == "_") for ch in token)
-    if len(runs) > 1 and not (has_us and not other_sep):  # == `not deferred`
+    # ⛔ THE PREDICATE IS NOT RE-DERIVED HERE (#12368 review, P2). This branch
+    # used to rebuild it inline (``has_us and not other_sep``) with a comment
+    # admitting it was ``== `not deferred` `` — and this file's own rule, stated
+    # 200 lines below, is that TWO PREDICATES FOR ONE QUESTION IS THE BUG: an edit
+    # to ``deferred`` (the lone-`_` refusal above, or a future separator) would
+    # have left this copy stale and split the guard into two answers. Reading
+    # ``deferred`` is byte-identical today and makes the next edit propagate.
+    if len(runs) > 1 and not deferred:
         return (f"it splits into {len(runs)} alphanumeric runs {runs!r}; the "
                 f"FTS index splits on every non-alphanumeric character EXCEPT "
                 f"`_` (which it treats as a word character, #12360), so a token "

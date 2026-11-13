@@ -2955,6 +2955,59 @@ def test_a_token_the_read_would_ESCAPE_is_REFUSED(monkeypatch, capsys):
     assert "cannot serve as an FTS probe" in capsys.readouterr().err
 
 
+def test_a_LONE_UNDERSCORE_probe_is_REFUSED(monkeypatch, capsys):
+    r"""#12368 review, P1: the `_`-deferral admitted a probe the read cannot answer.
+
+    (1) FAILS on the committed tree before this fix: `deferred` admits every
+        `_`-only token, and `build_or_query('_') == '_'` with `_` outside
+        `escape_redisearch_literal`'s set — so the read sends the bare `_`, which
+        the index answers with ZERO rows even when an `:Object` literally NAMED
+        `_` is indexed. `probe_phrase_rejection('_')` returned None (ACCEPTED),
+        so `--dry-run --assert-clean --probe-phrase _` certified 'the pre-fix
+        prose is gone' over a still-present sentence.
+    (2) MEASURED on a live FalkorDB 4.20.6 (one `:Object` per shape, each queried
+        by its own name through the real `run_fts_query`), over the twelve
+        accepted `_`-only shapes: `_` is the ONLY unreachable one — `__`, `___`,
+        `____`, `_____`, `_a`, `a_`, `_1`, `1_`, `_a_`, `a__b`, `0_` each return
+        their own record. And the term really is there: `queryNodes('Object',
+        '\\_')` returns the record named `_` where `queryNodes('Object', '_')`
+        returns nothing.
+    (3) POLARITY THAT MUST NOT GO RED: the eleven reachable `_` shapes stay
+        accepted. Refusing them on the same story would be the false block that
+        #12360's review round 7 repaired, and `origin/main`'s refusal of ALL of
+        them (for the false reason "it tokenises to 0 term(s)") is exactly what
+        that round removed.
+    """
+    from tortoise.session_source_prose_migration import probe_phrase_rejection
+
+    why = probe_phrase_rejection("_")
+    assert why, (
+        "a lone `_` was accepted as a probe — the read sends the bare `_`, the "
+        "index answers 0 rows for it, and the guard would then certify over a "
+        "still-present sentence")
+    assert "ZERO" in why or "zero" in why, why
+
+    # ⛔ THE MESSAGE MUST NOT BE THE PRE-FIX ONE. `origin/main` refused `_` while
+    # claiming "OR-joins multi-term input" for a token whose read emits ONE
+    # literal; this refusal exists because the probe cannot be ANSWERED.
+    assert "OR-joins" not in why, (
+        f"the refusal fell through to the term-count branch and repeats the "
+        f"false reason #12360 round 7 removed: {why!r}")
+
+    for accepted in ("__", "___", "____", "_____", "_a", "a_", "_1", "1_",
+                     "_a_", "a__b", "0_", "a_b", "a_bc", "x_axis", "A_B"):
+        assert probe_phrase_rejection(accepted) is None, (
+            f"{accepted!r} was refused — the index holds it as ONE term and its "
+            f"own record is reachable, so refusing it is a false block")
+
+    # The argv arm refuses it too, so no run can certify on a dead probe.
+    _export_a_record_dsn(monkeypatch)
+    _install_cli(monkeypatch, _RecordingGraph([(_post_fix_node(),)]),
+                 ["--dry-run", "--assert-clean", "--probe-phrase", "_"])
+    assert _cli.main() == 2
+    assert "cannot serve as an FTS probe" in capsys.readouterr().err
+
+
 def test_classify_fts_hits_REQUIRES_the_phrase_so_no_proof_can_be_dropped():
     """#11536 review round 7, P2: the default silently dropped two of three proofs.
 
