@@ -195,8 +195,10 @@ def test_the_refusal_names_the_surface_that_can_serve_it(stub_factory) -> None:
     assert "tortoise_search" in message, (
         f"the refusal must name the surface that CAN enumerate operators: {message!r}"
     )
-    assert "operator" in message, (
-        f"the refusal must name the value it refused: {message!r}"
+    from tortoise.mcp_server import _ENTITY_TYPE_REMEDY
+    assert _ENTITY_TYPE_REMEDY["operator"] in message, (
+        "the refusal must carry the operator REMEDY, not merely the word: the "
+        f"message prefix already spells entity_type='operator'. {message!r}"
     )
 
 
@@ -350,13 +352,21 @@ def _message_for(entity_type: str) -> str:
 
 
 def test_the_remedy_for_operator_is_the_call_that_lists_the_layer() -> None:
-    """`operator` is the ONE type whose bare search enumerates its layer.
+    """`operator` is the one type a search CAN enumerate — with an explicit limit.
 
-    Fails on the literal call string; that call is what `tools/curate_graph.py`
-    uses to read 3,727 operator rows in one request, so it is measured, not
-    hopeful.
+    `tortoise_search` defaults to `limit=10`, has no offset walk, and slices at
+    `limit` (`sdk.py`: `result_ids = result_ids[:limit]`), returning a bare list
+    with no total/hasMore — so a limit-less call answers a SILENTLY TRUNCATED
+    layer, the same false-PASS class this guard removes. `tools/curate_graph.py`
+    reads the 3,727-row layer as `tortoise_search(entity_type="operator",
+    limit=OPERATOR_READ_CEILING)`, measured.
+    Fails on the `, limit=` in the literal call string: a limit-less remedy
+    (which would truncate at 10) reds here, and that is the point.
     """
-    assert "tortoise_search(entity_type='operator')" in _message_for("operator")
+    message = _message_for("operator")
+    assert "tortoise_search(entity_type='operator', limit=" in message, (
+        f"a limit-less search answers a truncated layer as if complete: {message!r}"
+    )
 
 
 @pytest.mark.parametrize("entity_type,expected", [
@@ -448,3 +458,51 @@ def test_the_vocabulary_refusal_is_the_owners_message(stub_factory) -> None:
     expected = (f"Invalid entity_type: {'banana'!r}. Must be one of "
                 f"{sorted(VALID_ENTITY_TYPES)}.")
     assert message == expected, f"the owner's message was re-typed: {message!r}"
+
+
+# ── review round 2: one invalid value, one answer, on EVERY arm ─────────────
+
+
+def test_an_invalid_value_gets_the_owners_message_on_the_text_arm_too(stub_factory) -> None:
+    """The vocabulary check is above the arms, so the `text=` arm cannot answer
+    with the SDK's own re-typed copy.
+
+    Before the hoist, `text=...` + `entity_type="banana"` surfaced
+    `entity_type must be 'point', 'event', …` from `sdk.py:40830` while the
+    structural arms surfaced the owner's message — one invalid value, two
+    answers. Fails on exact-string equality with `security.validate_entity_type`.
+    """
+    from tortoise.mcp_server import tortoise_query
+    from tortoise.security import VALID_ENTITY_TYPES
+    stub = stub_factory()
+
+    result = tortoise_query(text="promotion", entity_type="banana", limit=1)
+
+    expected = (f"Invalid entity_type: {'banana'!r}. Must be one of "
+                f"{sorted(VALID_ENTITY_TYPES)}.")
+    assert result["error"] == expected, f"the text arm answered differently: {result!r}"
+    assert stub.calls == [], "an invalid entity_type must not reach the fts leg"
+
+
+def test_a_vocabulary_member_with_no_remedy_refuses_instead_of_raising(
+        stub_factory, monkeypatch) -> None:
+    """`_ENTITY_TYPE_REMEDY` is read with a fallback, so a missing entry is a
+    REFUSAL, not a `KeyError` escaping the tool body.
+
+    The docstring promises a structured error dict for validation violations;
+    only a test (the coverage test above) stood between a future vocabulary
+    addition and an unhandled exception. Fails on `_is_refusal(result)`; the
+    fixture reaches it by deleting the one entry the call needs.
+    """
+    from tortoise import mcp_server
+    stub_factory()
+    monkeypatch.delitem(mcp_server._ENTITY_TYPE_REMEDY, "operator")
+
+    result = mcp_server.tortoise_query(entity_type="operator", offset=0, limit=5)
+
+    assert _is_refusal(result), (
+        f"a missing remedy must still be a refusal, not an exception: {result!r}"
+    )
+    assert "No bulk enumeration" in result["error"], (
+        f"the fallback remedy was not used: {result['error']!r}"
+    )

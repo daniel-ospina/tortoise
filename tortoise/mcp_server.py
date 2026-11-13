@@ -3772,8 +3772,11 @@ def _public_filters(filters: Any) -> dict:
 #: why the generic advice looked plausible when this was written.
 _ENTITY_TYPE_REMEDY: dict[str, str] = {
     "operator": (
-        "Enumerate it with tortoise_search(entity_type='operator'), which "
-        "lists the whole reasoning layer in one call."),
+        "Enumerate it with tortoise_search(entity_type='operator', "
+        "limit=10000) — one call at the SDK's maximum. That tool has no "
+        "offset walk and slices at `limit` (default 10), so a limit-less "
+        "call answers a SILENTLY TRUNCATED layer, and a layer above 10,000 "
+        "rows has no single-call read."),
     "event": (
         "Enumerate it with tortoise_get_entity(None, type='events', "
         "limit=...) — one call, reconcilable against the graph's own Event "
@@ -3792,6 +3795,14 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "tortoise_search(entity_type='subject', kind=...) enumerates only the "
         "kinds you name."),
 }
+
+#: #12372 — the remedy for a vocabulary member that arrives without an entry: a
+#: refusal, never a `KeyError` out of the tool body (the docstring promises a
+#: structured error dict for validation violations, and only a test — not the
+#: code — would otherwise stand between the two).
+_ENTITY_TYPE_REMEDY_FALLBACK = (
+    "No bulk enumeration is known for this entity type yet; its size is in "
+    "tortoise_graph_overview.")
 
 
 # ⚠️ DOC NOTE (#10063) — the docstring below opens with "structural exact-match
@@ -3828,8 +3839,8 @@ def tortoise_query(kind: str | None = None,
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
       ignores kind/filters/min_confidence/order_by; a non-Point `entity_type`
       is REFUSED there (and on the structural arms) rather than dropped —
-      those arms read the Point label only, so use tortoise_search to
-      enumerate any other entity type (#12372).
+      those arms read the Point label only, and the refusal names the
+      per-type enumerator to use instead (#12372).
     - Pagination: pass offset=/limit= (or 1-based page=). When offset=/page= is
       set, returns {results, total, hasMore} (previously
       tortoise_paginated_query); a plain list is returned otherwise. `limit`
@@ -3894,22 +3905,25 @@ def tortoise_query(kind: str | None = None,
         # different ways depending on which arm a caller happened to use.
         # Resolved HERE, above every arm, so all of them see one value.
         entity_type = "point"
-    if entity_type != "point" and (tag is not None or not text):
-        from tortoise.security import validate_entity_type
+    # The vocabulary refusal is the OWNER's (tortoise/security.py), and it is
+    # asked ONCE, above every arm — a per-arm copy is how one invalid value ends
+    # up with two different messages (`text=` used to surface the SDK's own
+    # re-typed copy from sdk.py:40830 while the structural arms surfaced this
+    # one), and a second copy of the message is what drifts. `point` is a
+    # member, so the served path cannot be blocked here.
+    from tortoise.security import validate_entity_type
 
-        # The vocabulary refusal is the OWNER's (tortoise/security.py) — a second
-        # copy of its message is what drifts, and this very function argues that
-        # for the reserved-filter set a few branches down.
-        try:
-            validate_entity_type(entity_type)
-        except ValueError as exc:
-            return _SafeError({"error": str(exc)})
+    try:
+        validate_entity_type(entity_type)
+    except ValueError as exc:
+        return _SafeError({"error": str(exc)})
+    if entity_type != "point" and (tag is not None or not text):
         return _SafeError({"error": (
             f"entity_type={entity_type!r} is not served on this path: "
             f"tortoise_query's structural and tag arms read the Point label "
             f"only, and this argument used to be dropped silently (#12372), "
             f"answering the Points population as if it were the requested "
-            f"one. {_ENTITY_TYPE_REMEDY[entity_type]} "
+            f"one. {_ENTITY_TYPE_REMEDY.get(entity_type, _ENTITY_TYPE_REMEDY_FALLBACK)} "
             f"For a structural Point read, omit entity_type or pass 'point' "
             f"(its default).")})
     if tag is not None:
