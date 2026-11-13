@@ -8586,7 +8586,7 @@ def _constant_key_value(node: ast.expr) -> tuple[bool, object]:
 
 
 def _duplicate_constant_key_sites(
-        source: str, filename: str = "<string>") -> list[tuple[int, int, str]]:
+        source: str | bytes, filename: str = "<string>") -> list[tuple[int, int, str]]:
     """`(first_lineno, duplicate_lineno, key)` for every duplicated dict-literal key.
 
     The `seen` map is keyed on the VALUE, not on a type-prefixed spelling of it, so
@@ -8617,6 +8617,13 @@ def _duplicate_constant_key_sites(
     threaded into
     `ast.parse` so an unparseable module names ITSELF instead of `<unknown>` — the
     same "a hole is a hole, not a zero" rule this file's predicate-count test states.
+
+    ⛔ `source` may be BYTES on purpose: the scan hands it the file's raw bytes, so
+    CPython's own source decoding applies (a PEP 263 coding cookie and a UTF-8 BOM are
+    legal source). Decoding as UTF-8 first would report a file the interpreter reads
+    fine as a hole — measured: a `latin-1` cookie read `UNREADABLE (UnicodeDecodeError)`
+    and a BOM read `UNPARSEABLE (U+FEFF at line 1)`, both of which `ast.parse(bytes)`
+    accepts.
     """
     sites: list[tuple[int, int, str]] = []
     for node in ast.walk(ast.parse(source, filename=filename)):
@@ -8743,9 +8750,11 @@ def _scan_declaration_roots(root: Path) -> tuple[list[str], dict[str, int]]:
     """`(violation messages, modules FOUND per root)` over `_DUP_KEY_ROOTS` under `root`.
 
     ⚠️ "found", not "read": the per-root counter is incremented BEFORE the read, so a
-    module that fails to decode is counted here while its own message says
+    module that cannot be READ is counted here while its own message says
     `UNREADABLE (…), not scanned`. Stated because these counts are what satisfy the
-    per-root floors — i.e. the guard's non-vacuity claim.
+    per-root floors — i.e. the guard's non-vacuity claim. A module that cannot be
+    DECODED is a different case now that the read hands `ast.parse` raw bytes: it
+    surfaces as a `SyntaxError` and says `UNPARSEABLE`, never `UNREADABLE`.
 
     Hoisted out of the test so the REPORTING path can be driven: on a real tree
     `violations` is empty, so the message formatting, the `relative_to` naming and the
@@ -8760,8 +8769,14 @@ def _scan_declaration_roots(root: Path) -> tuple[list[str], dict[str, int]]:
             rel = path.relative_to(root)
             scanned_here += 1
             try:
-                source = path.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError) as exc:  # a hole is a hole, not a zero
+                # ⛔ BYTES, not text: `read_text(encoding="utf-8")` is STRICTER than
+                # CPython — a PEP 263 coding cookie and a UTF-8 BOM are legal source, and
+                # decoding it ourselves reported both as holes (measured). Handing the
+                # bytes to `ast.parse` makes the interpreter the decoder, so an
+                # UNREADABLE verdict now means what its name says: the file could not be
+                # READ (permissions, a directory), not that it is unusual source.
+                source = path.read_bytes()
+            except OSError as exc:  # a hole is a hole, not a zero
                 violations.append(f"{rel}: UNREADABLE ({exc.__class__.__name__}), not scanned")
                 continue
             try:
@@ -8846,11 +8861,15 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
         "}\n", encoding="utf-8")
     # A module that cannot be parsed must be NAMED, never skip silently to a green.
     (tmp_path / "tests" / "broken.py").write_text("def (:\n", encoding="utf-8")
-    # …and neither may one that cannot be DECODED: the UNREADABLE arm is the one whose
+    # …and neither may a module that cannot be READ: the UNREADABLE arm is the one whose
     # own comment states the doctrine ("a hole is a hole, not a zero"), so leaving it
     # undriven would make that comment the only thing behind it — and its failure mode
     # is a FALSE GREEN (the file is counted as scanned, contributes no violation, and
-    # satisfies the per-root floor).
+    # satisfies the per-root floor). A DIRECTORY named `*.py` is the readable-shape case
+    # that survives the bytes fix: `read_bytes` raises `IsADirectoryError`, an OSError.
+    (tmp_path / "tools" / "adir.py").mkdir()
+    # …and non-UTF-8 BYTES are legal source shapes, not holes: CPython decodes them, so
+    # this one must land in UNPARSEABLE (its own decode error), never UNREADABLE.
     (tmp_path / "tools" / "binary.py").write_bytes(b"\xff\xfe\n")
     # …nor may a PARSE failure that carries no line number read as a LOCATED defect: a NUL
     # byte raises a `SyntaxError` whose `lineno` is None, so an unconditional render
@@ -8861,7 +8880,7 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
 
     # `binary.py` still counts as SCANNED (the counter runs before the read), which is
     # exactly why the report — not the count — is what has to name it.
-    assert per_root == {"tortoise": 1, "tools": 3, "tests": 1}, per_root
+    assert per_root == {"tortoise": 1, "tools": 4, "tests": 1}, per_root
     # The key is rendered with `repr`, so `1` and `'1'` stay distinguishable in the
     # report — the whole reason that spelling was chosen over `str(value)`.
     assert any(
@@ -8869,8 +8888,12 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
     ), violations
     assert any(v.startswith("tests/broken.py: UNPARSEABLE") for v in violations), violations
     assert any(
-        v.startswith("tools/binary.py: UNREADABLE (UnicodeDecodeError)") for v in violations
+        v.startswith("tools/adir.py: UNREADABLE (IsADirectoryError)") for v in violations
     ), violations
+    # ⛔ A file CPython CAN decode is never reported as unreadable: the bytes arm above
+    # means a non-UTF-8 file is a PARSE failure with its own message, not a hole.
+    assert any(v.startswith("tools/binary.py: UNPARSEABLE") for v in violations), violations
+    assert not any("binary.py: UNREADABLE" in v for v in violations), violations
     # ⛔ A parse failure with no line number must say UNKNOWN, never `None`: a NUL byte's
     # `SyntaxError.lineno` is None, and "at line None" reads as a location that is not
     # there — the same misattribution, one field down (#12265 round 4).
