@@ -505,8 +505,8 @@ def test_an_already_terminal_claim_reconciles_the_goal_the_CLAIM_names(sdk):
 
     The shape is real and supported (the legacy-flag pin above builds it): an
     `Invalidation(judgement_id=…)` with no `goal_id`, over a claim retired out of
-    band, so `verdicts`/`invalidate_stale` never sees it again and NOTHING else
-    repairs the goal's displayed word (#12336). MEASURED by review: reading the
+    band, so `verdicts`/`invalidate_stale` never sees it again and no automatic
+    path repairs the goal's displayed word (#12336). MEASURED by review: reading the
     id from `invalidation.goal_id` alone made this case report
     `cache.checked: False` while `goalState` still read `met` — and a skipped
     check moves neither `counts.failed` nor `counts.gone`, so the sweep read
