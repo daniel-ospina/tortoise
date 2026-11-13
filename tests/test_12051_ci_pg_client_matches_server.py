@@ -1083,10 +1083,46 @@ def _effective_shell(job: dict | None, step: dict) -> str:
     return "\n".join([default_shell, str(step.get("shell") or "")])
 
 
-def _executed_lines(job: dict | None, step: dict) -> list[str]:
-    """Every line the step EXECUTES: its `shell:` argv plus its `run:` script."""
+def _ambiguous_comment_cut(line: str) -> str:
+    """`line` cut at its first `#` in a word position, ignoring quotes/scopes.
 
-    return (_effective_shell(job, step) + "\n" + _run_commands(step)).splitlines()
+    ⛔ A `#` WHOSE DATA-NESS THIS SCANNER CANNOT DECIDE MUST BE READ BOTH WAYS
+    (#12279 FINAL REVIEW 2, P0 — the follow-up to the nested-quote fix, measured).
+    Keeping the tail for a `#` that bash reads as DATA (the nested-quote P1) makes
+    the words after it ordinary OPERANDS, so a destination stops being "the last
+    path" and a complete replacement goes GREEN against `main`:
+
+        cp -a "${b}/17/bin/." "${b}/16/bin/" # restore the client
+
+    The opposite reading (cut at the `#`, what `main` did) loses a replacement that
+    follows genuinely-data `#`. Neither reading is right, so the rule is
+    **refuse if EITHER reading refuses** — `_executed_lines` emits both.
+    """
+
+    for index, char in enumerate(line):
+        if char == "#" and (index == 0 or line[index - 1] in " \t;&|("):
+            return line[:index]
+    return line
+
+
+def _executed_lines(job: dict | None, step: dict) -> list[str]:
+    """Every line the step EXECUTES: its `shell:` argv plus its `run:` script.
+
+    ⛔ PLUS THE OPPOSITE READING of every line whose trailing `#` is ambiguous
+    (#12279 FINAL REVIEW 2, P0). A rule arm is a refusal, so scanning both
+    readings can only over-refuse — and over-refusing is the direction this guard
+    is allowed to be wrong in. Scanning only the kept reading let a replacement
+    through whenever the words after an ambiguous `#` stopped the destination from
+    looking like "the last path token".
+    """
+
+    lines = (_effective_shell(job, step) + "\n" + _run_commands(step)).splitlines()
+    out = list(lines)
+    for line in lines:
+        cut = _ambiguous_comment_cut(line)
+        if cut != line:
+            out.append(cut)
+    return out
 
 
 def _client_dir_mentions(steps: list[dict], job: dict | None = None) -> list[tuple[int, str, int | None]]:
@@ -6353,6 +6389,23 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         "a quoted terminator followed by a line continuation was not read as a "
         f"terminator: {_bare_terminator(_continued)!r} (bash runs the replacement)"
     )
+
+    # ⛔ THE OPPOSITE READING OF AN AMBIGUOUS `#` MUST ALSO REFUSE (#12279 FINAL
+    # REVIEW 2, P0, measured RED→GREEN vs main): keeping the tail for a `#` bash
+    # reads as DATA is right for the comment rule, but it made the words after it
+    # ordinary OPERANDS — so the destination stopped being "the last path" and a
+    # COMPLETE replacement went GREEN. These are the natural spellings of the very
+    # regression this guard exists to catch.
+    for live, why in (
+        ('cp -a "${b}/17/bin/." "${b}/16/bin/" # restore the client', "a braced destination"),
+        ('sudo rsync -a "${b}/17/bin/" "${b}/16/bin/" # keep in sync', "the rsync carriage"),
+        ('echo "b=${b}"; cp -a "$b/17/bin/." "$b/16/bin/" # x', "an `echo` before the copy"),
+    ):
+        step = {"run": f"b=/usr/lib/postgresql; {live}"}
+        assert any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
+            f"a replacement followed by a trailing comment survived with {why}: "
+            "the `#` is ambiguous, so the line must be graded BOTH ways"
+        )
 
     # CONTROL: a GROUP-closing `)` IS an operator, so the rest of the line is a
     # comment and must be dropped (bash prints only `x` for the same line).
