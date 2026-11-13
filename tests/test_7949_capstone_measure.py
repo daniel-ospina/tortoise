@@ -5085,8 +5085,9 @@ _EPIC_CITE_SOURCES = {
     # `03-test-design.md` cites the manifest's OWN `carve_out:` entry — by SYMBOL
     # since #12266 (`_assert_carve_out_entry_is_pinned_by_symbol`, called from the
     # tail of `test_the_epic_bundle_cites_the_branch_rederived_resolve`), by a line
-    # number before that: the entry's line is owned by
-    # `tools/ci_selection.py::register_tests`, so the pin stopped re-staling.
+    # number before that: no SINGLE tool owns its position — `register_tests`'
+    # registration splices account for 43 of the 44 lines it had travelled and a
+    # hand-authored `tier1:` row for the last — so the pin stopped re-staling.
     # ⛔ Registered because #11837 moved it TWICE without a reader: restoring the
     # `core:` line a merge dropped (+6 above it) shifted the entry 9548 -> 9554
     # while the document went on naming 9548, which is the row above — a cite a
@@ -5353,8 +5354,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "an epic-bundle cite names code it does not name, in a document no sweep "
         "reads — re-derive the number from the tree before changing this pin:\n  "
         + "\n  ".join(failures))
-    # #12266: the one cite this table no longer holds — a line number owned by
-    # another tool. Asserted here rather than as its own test on purpose: this
+    # #12266: the one cite this table no longer holds — a line number that other
+    # tools and hand-authored rows move. Asserted here rather than as its own test on
+    # purpose: this
     # file's case count is itself pinned by `config/ci-surfaces.yml`'s durations row
     # (`test_the_durations_row_quotes_the_case_count_it_weights`), so a new test
     # function here would red a count that has nothing to do with the change — the
@@ -5428,6 +5430,10 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
                 break
         return head, tail
 
+    def _name(i: int) -> str:
+        """Line `i` as the WRITER reads it — see the comment below the bounds."""
+        return lines[i].strip().split("#", 1)[0].rstrip()
+
     start, end = _block_bounds("carve_out")
 
     # ⛔ Match the WRITER's parse, not the raw line. `carve_out:` carries six
@@ -5436,16 +5442,36 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     # `lines[i].strip()[2:].split("#", 1)[0].rstrip()` (`tools/ci_selection.py:4908`).
     # An inline comment added to THIS entry must therefore not read as "the entry is
     # absent", which is the false reason an exact `== entry` reports (#12266 review,
-    # P2).
-    hits = [n + 1 for n in range(start, end)
-            if lines[n].strip().split("#", 1)[0].rstrip() == entry]
+    # P2). It is also why every family test below reads `_name()`: membership is a
+    # property of the FILE NAME, so an entry whose COMMENT mentions "capstone" is not
+    # a capstone file, and grading the raw line would red the row over prose (#12266
+    # review, P3).
+    hits = [n + 1 for n in range(start, end) if _name(n) == entry]
     assert len(hits) == 1, (
         f"`{entry}` appears on {len(hits)} line(s) of the `carve_out:` block "
         f"({hits}) — the bundle's capstone row states `carve_out:` holds exactly ONE "
-        f"**of this file**, and this pin is what reads that claim (it does not count "
-        f"the block's other entries)")
+        f"file of this family, and this pin reads both halves of that: this entry "
+        f"occurs once here, and no other family member sits in the block")
 
     doc = _EPIC_CITE_DOCS["03-test-design.md"].read_text(encoding="utf-8")
+
+    # ⛔ The FAMILY the row counts is defined by the row ABOVE it — "Σ over the
+    # `durations:` rows matching `*capstone*` / `*7949*` / `*v4_declared*` /
+    # `*graph_census*`" — so it is READ from there rather than restated here, and this
+    # pin cannot drift from the document whose claim it grades (#12266 review, P3).
+    family_rows = [ln for ln in doc.splitlines() if "`durations:` rows matching" in ln]
+    assert len(family_rows) == 1, (
+        f"{len(family_rows)} rows of 03-test-design.md define the capstone-adjacent "
+        "family — this pin reads exactly one, and cannot grade `carve_out:` holds "
+        "**one** without it")
+    family = re.findall(r"`\*(\w+)\*`", family_rows[0])
+    assert len(family) >= 3, (
+        f"the capstone-adjacent row names only {family} — the family globs this arm "
+        "reads are gone, so it would grade a population of nothing")
+
+    def _is_family(i: int) -> bool:
+        return _name(i).startswith("- ") and any(g in _name(i) for g in family)
+
     rows = [ln for ln in doc.splitlines() if "`carve_out:` holds **one**" in ln]
     assert len(rows) == 1, (
         f"{len(rows)} rows of 03-test-design.md say `carve_out:` holds **one** — "
@@ -5487,36 +5513,24 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     # with no check to red.
     for key in ("uri_requiring", "slow_files"):
         block_start, block_end = _block_bounds(key)
-        stray = [n + 1 for n in range(block_start, block_end)
-                 if lines[n].strip().split("#", 1)[0].rstrip() == entry]
+        # ⛔ FAMILY, not just this symbol (#12266 review, P2). The row says these two
+        # blocks hold none of the capstone files it counts, and the family globs are
+        # read above; grading only `entry` here left a second family member in either
+        # block reading GREEN over a false row — the same false PASS the `carve_out:`
+        # arm below exists to close.
+        stray = [(n + 1, _name(n)) for n in range(block_start, block_end)
+                 if _is_family(n)]
         assert not stray, (
-            f"`{entry}` sits in the `{key}:` block at {stray} — the bundle's capstone "
-            f"row states `uri_requiring:` and `slow_files:` hold NONE of this file, "
-            f"and this pin is what reads that claim")
+            f"capstone-family entries sit in the `{key}:` block at {stray} — the "
+            f"bundle's capstone row states `uri_requiring:` and `slow_files:` hold "
+            f"NONE of these files, and this pin is what reads that claim")
 
     # ⛔ And the row's THIRD claim — "`carve_out:` holds **one**" — is a claim about the
-    # capstone FAMILY, not about this one file (#12266 review, P3). The two arms above
-    # read only whether THIS entry moved; neither reads the count the row states, so a
-    # second capstone-family file registered into `carve_out:` makes the row false with
-    # every arm green — the same false PASS the sibling `uri_requiring:` /
-    # `slow_files:` loop above exists to close. The family is READ from the row that
-    # defines it ("Σ over the `durations:` rows matching `*capstone*` / `*7949*` /
-    # `*v4_declared*` / `*graph_census*`"), so this arm cannot drift from the document
-    # whose claim it grades.
-    family_rows = [ln for ln in doc.splitlines() if "`durations:` rows matching" in ln]
-    assert len(family_rows) == 1, (
-        f"{len(family_rows)} rows of 03-test-design.md define the capstone-adjacent "
-        "family — this pin reads exactly one, and cannot grade `carve_out:` holds "
-        "**one** without it")
-    family = re.findall(r"`\*(\w+)\*`", family_rows[0])
-    assert len(family) >= 3, (
-        f"the capstone-adjacent row names only {family} — the family globs this arm "
-        "reads are gone, so it would grade a population of nothing")
-    kin = [(n + 1, lines[n].strip())
-           for n in range(start, end)
-           if lines[n].strip().startswith("- ")
-           and lines[n].strip().split("#", 1)[0].rstrip() != entry
-           and any(glob in lines[n] for glob in family)]
+    # capstone FAMILY, not about this one file (#12266 review, P3). The `hits` arm reads
+    # only whether THIS entry moved, so a second family file registered into
+    # `carve_out:` makes the row false with it green.
+    kin = [(n + 1, _name(n)) for n in range(start, end)
+           if _is_family(n) and _name(n) != entry]
     assert not kin, (
         f"`carve_out:` holds {len(kin)} OTHER capstone-family entry/entries beyond "
         f"`{entry}` — {kin} — and the bundle's capstone row states `carve_out:` holds "
