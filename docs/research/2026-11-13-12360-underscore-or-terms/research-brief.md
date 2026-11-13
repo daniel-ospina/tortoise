@@ -90,10 +90,14 @@ mechanism are on the **emitted** `$query` parameter of the Cypher that reaches
 ⚠️ Scoped, not "every assertion" (#12368 review): only three tests capture the issued
 Cypher (`TestTheEmittedQueryCarriesTheComposite::test_run_fts_query_emits_the_composite`,
 `::test_the_label_route_is_the_production_one`,
-`TestBothSurfacesPassTheRawQuery::test_builder_keeps_the_door_agnostic`). The remaining
-classes — `TestPin`, `TestAdditive`, `TestRunTerms` and the artifact pins — assert the
-builder's RETURN VALUE, which is legitimate only because `run_fts_query` passes it through
-verbatim (and that seam is itself pinned). The test module's own docstring draws this
+`TestBothSurfacesPassTheRawQuery::test_builder_keeps_the_door_agnostic`). The remaining classes listed here — `TestPin`, `TestAdditive`, `TestRunTerms` and the artifact
+pins — assert the builder's RETURN VALUE, which is legitimate only because `run_fts_query`
+passes it through verbatim (and that seam is itself pinned). ⚠️ NOT an exhaustive partition
+(second review): `TestLiveReachability` asserts live `run_fts_query` ids against a real index
+(neither Cypher capture nor builder return), `TestHarnessStatistics` asserts the McNemar/NDCG
+arithmetic, and three tests inside the two "capturing" classes do not capture at all
+(`test_the_composite_is_the_term_the_index_holds`, `test_it_rides_the_same_seam_the_fused_read_calls`,
+`test_capture_prior_door_hands_over_the_raw_query`). The test module's own docstring draws this
 distinction; an earlier revision of this paragraph claimed the stronger, false version.
 
 Three properties the port keeps:

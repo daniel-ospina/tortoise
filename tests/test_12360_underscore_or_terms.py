@@ -37,6 +37,7 @@ checking adjacency.
 from __future__ import annotations
 
 import os
+import unicodedata
 
 import pytest
 
@@ -278,14 +279,46 @@ class TestAdditive:
         """
         from tortoise.session_source_prose_migration import probe_phrase_rejection
 
-        for word in ("año_actual", "the_café", "_café", "dé_installer",
-                     "x_café"):
+        shapes = ("año_actual", "the_café", "_café", "dé_installer", "x_café")
+        for word in shapes:
             monkeypatch.setenv(UNDERSCORE_ENV, "0")
             before = build_or_query(word)
             assert probe_phrase_rejection(word) is None, word
             monkeypatch.setenv(UNDERSCORE_ENV, "1")
             assert build_or_query(word) == before, word
             assert probe_phrase_rejection(word) is None, word
+
+        # ⚠️ DECOMPOSED (NFD) input, asserted on the property THIS fix owns
+        # (#12368 second review). A combining mark is not alphanumeric, so an
+        # `isalnum()`-only abutment test left the false block in place for NFD:
+        # NFD `_café` is `_cafe` + U+0301 and the splitter truncating at the mark
+        # emitted `_cafe` — REFUSED on the ON arm, ACCEPTED on the OFF arm.
+        # ⛔ The property is therefore "the switch cannot move NFD bytes OR the
+        # probe verdict", NOT "NFD is accepted": NFD `año_actual` is `an` + U+0303 +
+        # `o_actual`, and `probe_phrase_rejection` refuses it on BOTH arms through
+        # its ORDINARY run-count branch (U+0303 is not `_`, so `deferred` is False).
+        # That is a PRE-EXISTING refusal this PR neither causes nor repairs — out of
+        # scope here, and pinned as "same on both arms" so it cannot be mistaken for
+        # a control either. A separate issue should scope it.
+        for word in shapes:
+            nfd = unicodedata.normalize("NFD", word)
+            monkeypatch.setenv(UNDERSCORE_ENV, "0")
+            off_built, off_ok = build_or_query(nfd), (
+                probe_phrase_rejection(nfd) is None)
+            monkeypatch.setenv(UNDERSCORE_ENV, "1")
+            assert build_or_query(nfd) == off_built, word
+            assert (probe_phrase_rejection(nfd) is None) == off_ok, word
+
+        # …and the abutment test must NOT over-reach into a real SEPARATOR: NBSP and
+        # thin space are non-ASCII but they separate, so the run after one really is
+        # an index term and its composite must still be emitted.
+        for sep in ("\u00a0", "\u2009"):
+            word = f"{sep}b_c"
+            monkeypatch.setenv(UNDERSCORE_ENV, "0")
+            before = build_or_query(word)
+            monkeypatch.setenv(UNDERSCORE_ENV, "1")
+            assert build_or_query(word) != before, (word, before)
+            assert "b_c" in _or_terms(build_or_query(word)), word
 
         # …and the refusal must NOT over-reach: a pure-ASCII word still gains its
         # composite, which is the mechanism this PR exists for.

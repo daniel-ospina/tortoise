@@ -35,6 +35,7 @@ issue #1791) so a degenerate input like ``10:00`` parses instead of raising
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .env_truthy import env_flag
 
@@ -259,6 +260,28 @@ _COMPOSITE_SPLIT_RE = re.compile(r"[^A-Za-z0-9_]+")
 #: :data:`_COMPOSITE_SPLIT_RE`'s separator spans do not — see
 #: :func:`underscore_run_terms`' truncation refusal (#12368 review).
 _COMPOSITE_RUN_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _continues_a_word(ch: str) -> bool:
+    """Is *ch* part of the same INDEX word as an abutting ASCII run?
+
+    Used by :func:`underscore_run_terms` to refuse a run that
+    :data:`_COMPOSITE_SPLIT_RE` produced by TRUNCATING a longer Unicode word
+    (#12368 review). Two kinds of character continue a word:
+
+    * an ALPHANUMERIC (``ñ``, ``é``, ``Ω``) — the obvious case; and
+    * a COMBINING MARK (``U+0301`` and friends), which is NOT alphanumeric but
+      composes onto the preceding letter. Without this arm a DECOMPOSED (NFD)
+      spelling still emitted the truncation — measured: the NFD spelling of
+      ``_café`` built the literal plus ``_cafe`` as a second alternative, and the
+      probe guard REFUSED it while the switch-OFF arm accepted it.
+
+    ⛔ NOT ``not ch.isascii()``: U+00A0 (NBSP) and U+2009 (thin space) are
+    non-ASCII SEPARATORS, so ``'<NBSP>b_c'`` genuinely holds ``b_c`` as an index
+    term and skipping it would lose recall — the defect this module repairs. A
+    combining mark JOINS a word; a non-ASCII space SEPARATES one.
+    """
+    return ch.isalnum() or bool(unicodedata.combining(ch))
 
 def identifier_tokens_enabled() -> bool:
     """Is identifier preservation on for this process? (#8933)
@@ -489,7 +512,13 @@ def underscore_run_terms(text: str) -> list[str]:
       the index could match) and keeps a `_` token that is ONE index term
       PROBE-ABLE — emitting the fragment made the read send two alternatives, so
       the probe guard refused a valid probe (measured false block on
-      ``año_actual``/``the_café``/``_café``/``dé_installer``/``x_café``).
+      ``año_actual``/``the_café``/``_café``/``dé_installer``/``x_café``, in both
+      the precomposed and the NFD spelling).
+      ⚠️ Scoped to THIS drop (#12368 second review): it keeps *this refusal*
+      additive, and it is the only bullet here that is non-lossy. The two bounds
+      below are both DECLARED LOSSY (``___``, and a run past
+      ``MAX_COMPOSITE_RUN_LEN``), so 'additive in the only sense that matters' was
+      an over-general that the surrounding text already contradicts.
 
     * no alphanumeric character in the run -> dropped (``___``), and it is
       **LOSSY TOO** — corrected by measurement (#12360 review round 8): the
@@ -533,13 +562,24 @@ def underscore_run_terms(text: str) -> list[str]:
     # `año_actual`/`the_café`/`_café`/`dé_installer`/`x_café`, every one of which
     # is a valid, reachable ONE-index-term probe the switch-OFF arm accepted: a
     # FALSE BLOCK, measured on both arms. A run is therefore emitted only when
-    # nothing alphanumeric ABUTS it, i.e. when the splitter did not truncate a
+    # nothing WORD-CONTINUING abuts it, i.e. when the splitter did not truncate a
     # longer Unicode word.
+    #
+    # ⚠️ "WORD-CONTINUING" IS `isalnum() OR A COMBINING MARK`, deliberately NOT
+    # `not ch.isascii()` (#12368 second review). A COMBINING MARK (`Mn`) is not
+    # alphanumeric, so an `isalnum()`-only test STILL emitted the truncation for
+    # DECOMPOSED (NFD) text — measured on the NFD spelling of the very shape this
+    # fix exists for, where the probe was REFUSED on the ON arm and accepted on
+    # the OFF arm. Widening instead to "any non-ASCII neighbour" would be WORSE in
+    # the other direction: U+00A0 (NBSP) and U+2009 (thin space) are non-ASCII
+    # SEPARATORS, so `<NBSP>b_c` really does hold `b_c` as an index term and
+    # skipping it would LOSE recall. Both arms live in :func:`_continues_a_word`;
+    # neither is guessed.
     for match in _COMPOSITE_RUN_RE.finditer(text):
         run = match.group(0)
         start, end = match.span()
-        if (start > 0 and text[start - 1].isalnum()) or (
-                end < len(text) and text[end].isalnum()):
+        if (start > 0 and _continues_a_word(text[start - 1])) or (
+                end < len(text) and _continues_a_word(text[end])):
             continue
         if len(run) < 2 or "_" not in run:
             continue
