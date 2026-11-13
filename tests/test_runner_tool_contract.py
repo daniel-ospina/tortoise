@@ -3410,8 +3410,10 @@ def _one_sided_workflow_pattern_constants(
         #: requirement costs nothing, for two separate reasons — do not read either as the other:
         #: `.sh`/`.py` pattern tuples never reach the symmetry test at all, they are dropped by the
         #: extension-substring filter on `patterns` just below; and a constant is skipped by the
-        #: symmetry test only when BOTH arms open nothing, so `("release*.yml",)` — which matches
-        #: neither witness stem — still REDS, via the spelling arm (measured, review round 11).
+        #: symmetry test only when the two arms AGREE — both open nothing (a pattern that neither
+        #: matches nor spells an extension) OR both open (a complete pair, e.g. one tuple holding
+        #: both extensions, which stays CLEAN by design below) — so `("release*.yml",)`, which
+        #: matches neither witness stem, still REDS via the spelling arm (measured, review round 12).
         patterns = [
             member
             for member in members
@@ -3524,6 +3526,11 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         review (`glob.glob(str(WORKFLOWS) + "/*.yml")`, whose receiver is the stdlib module and
         whose argument merely MENTIONS the directory) was a fail-open. The module has no such
         glob today; if one is ever needed, declare it here rather than widening the filter.
+        ⛔ EXCEPT a pattern with NO wildcard: `cfg.glob("main.yml")` is a SINGLE-FILE reference,
+        not an extension-class enumeration, so it stays CLEAN (`_glob_matches` and
+        `_spells_one_extension` both require a wildcard, measured), while `cfg.glob(
+        "config/*.yml")` reds. Carried from review round 7, which recorded it on #12238 as a
+        deferred follow-up; stated here because this list is where reach is declared.
 
     Stated because a structural pin invites over-reading: over-claiming, not escaping, is what
     review rounds 2 and 3 both caught here. The tuple is asserted here too (bottom), so a dropped
