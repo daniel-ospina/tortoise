@@ -1249,8 +1249,11 @@ def reconcile_goal_states(
       arm therefore probes the graph once (:data:`_GONE_PROBE`) and re-buckets a
       node that is still present as ``unaddressable``; only a node the graph no
       longer holds is reported ``gone`` (:data:`GONE_UNPROVEN`);
-    * ``failed`` — the reconcile could not run or its write was refused. A sweep
-      may not read clean while a goal still displays a word it could not repair;
+    * ``failed`` — the reconcile could not run, its write was refused, or its
+      ``gone`` answer could not be VERIFIED (the :data:`_GONE_PROBE` read raised, so
+      the sweep could not tell a deletion from an id the surface cannot address).
+      A sweep may not read clean while a goal still displays a word it could not
+      repair;
     * ``notDurable`` — goals the sweep DECLINED because their repair cannot be
       durable (a node carrying the unwrapped POINT write branch), each holding a
       derived word. It is not a failure and not a repair: it is the population
@@ -1366,10 +1369,10 @@ def reconcile_goal_states(
             # the `latest_judgement` and door calls above honour — see the
             # docstring's "A FAILED SCAN RAISES … unlike a PER-GOAL failure").
             # Letting it escape would discard `goals` for every goal already
-            # reconciled in this sweep, which is a throw-away a caller cannot
-            # diagnose. `failed` is the module's own word for "the reconcile could
-            # not run", and a sweep may not read clean over a word it could not
-            # account for.
+            # reconcile in this sweep, which is a throw-away a caller cannot
+            # diagnose. `failed` is the module's own word for "this goal could not
+            # be accounted for", and a sweep may not read clean over a word it
+            # could not account for.
             try:
                 present = sdk._get_proj().g.query(
                     _GONE_PROBE, params={"id": goal_id},

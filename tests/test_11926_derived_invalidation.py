@@ -2046,16 +2046,33 @@ def test_a_probe_that_cannot_run_is_REPORTED_on_its_goal_and_the_sweep_survives(
     The probe is distinguished from the SCAN by its query text, not by call order:
     both go through `sdk._get_proj().g.query`, and failing the wrong one would test
     the wrong contract (a scan failure is SUPPOSED to raise).
+
+    ⛔ THE PROBED GOAL'S ID SORTS FIRST ON PURPOSE. The scan orders by `n.id`
+    (`_GOAL_STATE_CANDIDATES`: ``ORDER BY n.id``) and a goal minted by the SDK gets a
+    ULID id (``ids.ulid()`` = ``<ts-hex>-<uuid>``, so its first char is a lowercase
+    hex digit). With an id like ``probe-raise-1`` the REPAIRABLE goal is scanned
+    first, so `repaired == 1` is already satisfied before the probe ever raises and
+    the isolation half of this test cannot fail: a fix that recorded the failure and
+    then ABANDONED the loop (`break`, a `return` inside the ``except``) would pass
+    every assertion below. ``0000-probe-raise-1`` sorts before any hex-digit ULID,
+    which is what makes `repaired == 1` the discriminator it is titled as (#12457
+    review, cycle 3).
     """
     # the goal whose `gone` answer will be probed: id present, unaddressable label
     sdk._get_proj().g.query(
-        "CREATE (n:Widget {id:'probe-raise-1', goalState:'met'})")
+        "CREATE (n:Widget {id:'0000-probe-raise-1', goalState:'met'})")
     # a second, perfectly repairable goal that must still be reconciled
     i, t, g = _world(sdk, tag="sweep-probe-raise")
     made = _judge(sdk, i, t, g)
     sdk.delete_entity(made["point_id"])
 
     real_get_proj = sdk._get_proj
+    real_update = sdk.update_entity
+    writes: list[tuple] = []
+
+    def recording(node_id, **props):
+        writes.append((node_id, tuple(sorted(props))))
+        return real_update(node_id, **props)
 
     class _ProbeBoom:
         """Delegates everything EXCEPT the probe query, which raises.
@@ -2084,11 +2101,13 @@ def test_a_probe_that_cannot_run_is_REPORTED_on_its_goal_and_the_sweep_survives(
                 raise RuntimeError("transient probe failure")
             return self._proj.g.query(cypher, params=params, **kwargs)
 
+    sdk.update_entity = recording
     sdk._get_proj = lambda: _ProbeBoom(real_get_proj())
     try:
         report = reconcile_goal_states(sdk)
     finally:
         sdk._get_proj = real_get_proj
+        sdk.update_entity = real_update
 
     # the probe failure is REPORTED, and in the module's own bucket for it
     assert report["counts"]["failed"] == 1, report
@@ -2097,22 +2116,30 @@ def test_a_probe_that_cannot_run_is_REPORTED_on_its_goal_and_the_sweep_survives(
     assert report["counts"]["gone"] == 0, (
         f"a probe that could not run was believed as a deletion: {report}")
     failed = _only([r for r in report["goals"] if r.get("error")])
-    assert failed["goalId"] == "probe-raise-1", failed
+    assert failed["goalId"] == "0000-probe-raise-1", failed
     assert "transient probe failure" in failed["error"], failed
-    # ⛔ THE ISOLATION HALF — this is what an unguarded probe destroys
+    # ⛔ THE ISOLATION HALF — this is what an unguarded probe destroys. It is a
+    # real assertion ONLY because the probed goal sorts FIRST (see the docstring),
+    # so a loop abandoned after the failure leaves `repaired` at 0.
+    assert report["counts"]["scanned"] == 2, (
+        f"the sweep stopped scanning after the probe failure: {report}")
     assert report["counts"]["repaired"] == 1, (
         f"one probe failure discarded the rest of the sweep: {report}")
     assert sdk.get_entity(g["id"]).get("goalState") is None, (
         "the sweep abandoned a repairable goal because another goal's probe raised")
-    # and the probed goal's word must still stand: nothing may read clean over a
-    # goal whose cache could not be accounted for. ⛔ READ IT FROM THE GRAPH, not
-    # through `get_entity` — this node is unaddressable by the entity surface, which
-    # is the whole premise of the PR, so the door answers `{}` for it and a
-    # door-read assertion would pass vacuously (`{}` has no `goalState`).
-    standing = sdk._get_proj().g.query(
-        "MATCH (n {id:'probe-raise-1'}) RETURN n.goalState").result_set
-    assert standing and standing[0][0] == "met", (
-        f"the sweep touched a goal whose gone answer it could not verify: {standing}")
+    # nothing may read clean over a goal it could not account for. ⛔ THIS IS A
+    # WRITE-INTERCEPTION ASSERTION, not a re-read of the word: as the sibling test
+    # above states, an unaddressable node cannot be WRITTEN, so "the word still reads
+    # met" cannot vary under any mutation of this diff and would be dead weight. A
+    # recorded write CAN vary — a mutant that repaired the unverifiable goal anyway
+    # reds here.
+    # ⛔ THE INTERCEPTOR MUST BE PROVED LIVE before its silence means anything: an
+    # interceptor that captured nothing would make the negative assertion below
+    # vacuous. The repairable goal IS written, so its write must be recorded.
+    assert [w for w in writes if w[0] == g["id"]], (
+        f"the write interceptor captured nothing — the assertion below would be vacuous: {writes}")
+    assert [w for w in writes if w[0] == "0000-probe-raise-1"] == [], (
+        f"the sweep wrote to a goal whose gone answer it could not verify: {writes}")
 
 
 def test_a_goal_DELETED_mid_sweep_is_reported_GONE_not_repaired(sdk):
