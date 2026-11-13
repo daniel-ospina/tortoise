@@ -216,7 +216,6 @@ def _pair_bands(raw: np.ndarray, comp: np.ndarray) -> dict:
 
 
 def _topk_displacement(raw: np.ndarray, comp: np.ndarray, qidx: list[int]) -> dict:
-    n = raw.shape[0]
     displaced = 0
     queries_with_displacement = 0
     relevant_in_raw_k = 0
@@ -511,7 +510,8 @@ def main(argv: list[str]) -> int:
     census = _load_census()
     meta = {"endpoint": ""}
     if args.cache and os.path.exists(args.cache):
-        rows = [json.loads(line) for line in open(args.cache, encoding="utf-8")]
+        with open(args.cache, encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh]
         about = sorted({k for r in rows for k in r if k.lower().startswith("about")})
         meta = {
             "source": f"cache:{args.cache}",
