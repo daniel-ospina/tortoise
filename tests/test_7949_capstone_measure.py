@@ -5312,8 +5312,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `_assert_carve_out_entry_is_pinned_by_symbol` below, called from the tail of
         # THIS test, which also refuses that document's `carve_out:` row printing a
         # `config/ci-surfaces.yml:<line>` cite. ⛔ The `9951` this comment used to
-        # defend was never a value on `main`: it was 9943 + the 8 lines #12060 was
-        # predicted to add, so the prediction described no checkable commit.
+        # defend was never the ENTRY's position on `main` — `main`'s own row did print
+        # it (`cd22562c24e4`, where the entry sat at 9973): it was 9943 + the 8 lines
+        # #12060 was predicted to add, so the prediction described no checkable commit.
+        # A number the document PRINTED and a number the entry OCCUPIED are two
+        # different claims, and the pin is about the second.
         # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
         # by the sentence rather than by the number: `:631` is where `main` had it,
         # then #12112 moved it three times (`687`, `695`, `700`) and each move left a
@@ -5352,13 +5355,6 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         f"only {len(rows)} rows — an emptied table would pass vacuously, and these "
         "are the cites the review found wrong on the pre-fix documents plus the "
         "consume pair that sat beside them")
-    sources = {name: path.read_text(encoding="utf-8").splitlines()
-               for name, path in _EPIC_CITE_SOURCES.items()}
-    failures = _pin_row_failures(rows, _EPIC_CITE_DOCS, sources)
-    assert not failures, (
-        "an epic-bundle cite names code it does not name, in a document no sweep "
-        "reads — re-derive the number from the tree before changing this pin:\n  "
-        + "\n  ".join(failures))
     # #12266: the one cite this table no longer holds — a line number that other
     # tools and hand-authored rows move. Asserted here rather than as its own test on
     # purpose: this
@@ -5368,7 +5364,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # pin lives in the private helper, and the doc cites THIS test as its caller,
     # because a `path::symbol` cite has to resolve (a cite naming a renamed-away test
     # is the same defect class this PR fixes; caught in this PR's own review).
+    # ⛔ AND IT IS CALLED **BEFORE** `assert not failures` ON PURPOSE — THE ORDER IS
+    # LOAD-BEARING, so do not tidy it down beside that assert. This test is RED on
+    # `main` for an unrelated row (`04-plan.md`'s `tortoise/sdk.py:25189`, #11556), and
+    # an `assert` that raises ends the test: placed after it, this pin was **never
+    # executed at the head that merged** and every arm below was unexercised — measured
+    # by appending a `config/ci-surfaces.yml:10076` cite to the document's row,
+    # which is exactly the cite the pin exists to refuse, and getting the same single
+    # `sdk.py:25189` message with no mention of the `carve_out:` row. A guard that a
+    # neighbouring red row switches off is not a guard (#12266 review).
     _assert_carve_out_entry_is_pinned_by_symbol()
+    sources = {name: path.read_text(encoding="utf-8").splitlines()
+               for name, path in _EPIC_CITE_SOURCES.items()}
+    failures = _pin_row_failures(rows, _EPIC_CITE_DOCS, sources)
+    assert not failures, (
+        "an epic-bundle cite names code it does not name, in a document no sweep "
+        "reads — re-derive the number from the tree before changing this pin:\n  "
+        + "\n  ".join(failures))
 
 
 def _assert_carve_out_entry_is_pinned_by_symbol():
