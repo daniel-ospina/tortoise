@@ -1535,7 +1535,8 @@ def test_an_ALREADY_TERMINAL_claim_also_reconciles_the_goal_word(sdk):
     """#12336's second door-side half, on the arm that used to skip it entirely.
 
     A claim retired OUT OF BAND (a direct status write, a purge) leaves the goal's
-    ``goalState`` word naming it, and the door is the only thing that can clear it:
+    ``goalState`` word naming it, and no AUTOMATIC path clears it (the repair
+    route is the public, idempotent ``reconcile_goal_state_cache``):
     ``invalidate_stale`` scans LIVE claims, so the goal is never a finding again.
     MEASURED before this round: ``goalState`` stayed ``met``, and the finding
     carried NO ``cache`` key at all — so `(r.get("cache") or {})` read clean and
@@ -1942,7 +1943,7 @@ def test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep(sdk):
     # carries nothing about the read (the `claim is None` refusal does name itself
     # — "could not read judgement" — but the sweep does not parse prose).
     assert failed[0]["found"] is None, failed[0]
-    # ⛔ AND `cache` IS THE ONE KEY A REFUSAL STILL OMITS, which is correct rather
+    # ⛔ AND `cache` IS A KEY A REFUSAL STILL OMITS, which is correct rather
     # than untidy: no reconcile ran, so there is no report to carry — but an
     # absent key must never be the whole answer, which is why `found` is present
     # above. Pinned here because nothing else fails if a plausible `cache` is
