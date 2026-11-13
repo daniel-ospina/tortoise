@@ -245,6 +245,7 @@ def _unscoped_heading_forms(doc: str,
                     "PRECEDING section's scope runs past its own boundary "
                     "through it")
     rendered = set(_rendered_heading_lines(doc, skip))
+    code_lines = _code_block_lines(doc)
     for i, line in enumerate(lines):
         # ⛔ NOT `readable.match(line)`: `_scope_slice`'s terminator is `^## `
         # (and `^#{2,3} ` for a level-3 scope) whatever the heading SAYS, so a
@@ -263,6 +264,32 @@ def _unscoped_heading_forms(doc: str,
             flag(i, "looks like a readable section opener but is not a heading "
                     "CommonMark renders (a `## ` inside a fenced block, say) — it "
                     "TRUNCATES the preceding section's scope")
+        elif i in code_lines and re.match(
+                r"^[ \t]*(?:(?:>|[-*+]|\d{1,9}[.)])[ \t]+)?[ \t]*"
+                r"(?:#{1,6}(?:[ \t]|$)|<h[1-6][\s>/])", line, re.IGNORECASE):
+            # ⛔ DERIVED FROM THE PARSER, not a fourth regex: ANY `#`-run or `<hN>`
+            # inside a code block (fenced or indented) is a line `_scope_slice`
+            # cannot see and the parser does not render, so the PRECEDING section's
+            # scope runs past it. Round 21's arm required the `#` run IMMEDIATELY
+            # after the indent, so `<indent><container marker>` + `## 3.` walked
+            # straight through it — measured on the real brief: `    1. ## Restated
+            # finding`, `\t- ## Restated finding` and `    <h2>Restated
+            # finding</h2>` left 105 tests GREEN with §2's published claim
+            # falsified.
+            #
+            # ⛔ THE `#` RUN OR `<hN>` MUST BE THE LINE'S FIRST TOKEN (after an
+            # optional indent and an optional container marker). This repo's own
+            # fenced examples carry TRAILING `#` comments — `'web_search' ->
+            # [['web_search', 8.0]]   # the index …` in the brief, `graph window =
+            # 0.75 · p   # a graph …` in SEARCH-ARCHITECTURE.md — and refusing
+            # every `#` inside a code block flagged all five of them, i.e. it
+            # over-blocked exactly the documents this guard protects. A line whose
+            # FIRST token is the hash run is a heading-shaped line smuggled into
+            # code; a trailing comment is prose.
+            flag(i, "is a `#` run or `<hN>` inside a CODE BLOCK (fenced or "
+                    "indented) — the parser renders no heading and `_scope_slice` "
+                    "sees no boundary, so the PRECEDING section's scope runs "
+                    "past it")
         elif re.match(r"^(?: {4,}|\t| {1,3}\t)#{1,6}(?:[ \t]|$)", line):
             # ⛔ INDENTED CODE, the arm the docstring used to call fail-closed
             # (#12349 round 21, P2). 4+ spaces or a tab makes the line an indented
@@ -299,6 +326,24 @@ def _unscoped_heading_forms(doc: str,
                     "run length and allows 1-3 spaces of indent) — it turns that "
                     "prose into a heading `_scope_slice` cannot see")
     return bad
+
+
+def _code_block_lines(doc: str) -> set[int]:
+    """0-based lines the parser renders as CODE (fenced or indented).
+
+    A `#` run or an `<hN>` on one of these lines is TEXT, not a section: it is
+    invisible to `_scope_slice` (column-0 anchored) and to
+    `_rendered_heading_lines` (which lists only `heading_open`), so the preceding
+    section absorbs everything after it. Asking the parser where the code blocks
+    are is the derived form of the question; a regex over indent widths requires
+    the marker to sit immediately after the indent, and round 21 measured that
+    `<indent><container marker>## 3.` walks through such a rule.
+    """
+    out: set[int] = set()
+    for tok in MarkdownIt("commonmark").parse(doc):
+        if tok.type in ("fence", "code_block") and tok.map:
+            out.update(range(tok.map[0], tok.map[1]))
+    return out
 
 
 def _assert_only_readable_headings(doc: str, readable: re.Pattern,
@@ -1232,7 +1277,7 @@ _READABLE_HEADING = re.compile(r"^(?:# [^#\s].*|## \d+\. .*|### \d+\.\d+ .*)$")
 # character". A `)` item is invisible to `_scope_slice`, so a section opened
 # behind one leaks exactly like the `-`/`*`/`+`/`>` cases (measured: falsify
 # §2, restate under `1) <h2>…</h2>` -> 101 green before this line).
-_BLOCK_PREFIX = r"(?: {0,3}(?:>[ \t]?|[-*+][ \t]+|\d+[.)][ \t]+))* {0,3}"
+_BLOCK_PREFIX = r"(?: {0,3}(?:>[ \t]?|[-*+][ \t]+|\d{1,9}[.)][ \t]+))* {0,3}"
 
 
 def test_the_brief_uses_only_heading_forms_the_scope_helper_can_see(
@@ -1293,6 +1338,13 @@ LOOKALIKE_BUT_UNREADABLE = [
     "1) ##3. Results",                  # `)`-marked item, no space after the run
     "    ## 3. Results",                # INDENTED CODE: renders nothing, bounds nothing
     "\t## 3. Results",                  # … tab-indented
+
+    "    1. ## 3. Results",             # … indented, behind an ordered marker
+    "    1) ## 3. Results",             # … behind a `)`-marked one
+    "\t- ## 3. Results",                # … tab-indented, behind a bullet
+    "\t> ## 3. Results",                # … tab-indented, behind a quote
+    "    <h2>3. Results</h2>",          # … indented raw HTML heading
+    "\t<h2>3. Results</h2>",            # … tab-indented raw HTML heading
 ]
 
 
