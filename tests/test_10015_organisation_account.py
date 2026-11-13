@@ -111,14 +111,27 @@ class TestPlanBlockEncoding:
         assert "limit" not in block, "a missing limit must not become `null` (= unlimited)"
         assert "at_cap" not in block
 
-    @pytest.mark.parametrize("unreadable", ["many", "1000.0", float("inf"), True])
+    @pytest.mark.parametrize("unreadable", ["many", "1000.0", float("inf")])
     def test_an_unreadable_limit_is_absent(self, unreadable):
         block = encode_plan_block({"max_points": unreadable}, "points", used=1)
         assert "limit" not in block, (
-            f"{unreadable!r} is not a quantity — the gate refuses it, so the read "
-            "must publish no number rather than coerce or default one"
+            f"{unreadable!r} is not a quantity the gate can coerce — it coerces with "
+            "`int()` and refuses what that cannot read, so the read must publish no "
+            "number rather than coerce or default one"
         )
         assert "at_cap" not in block
+
+    def test_a_bool_mirrors_the_gate_rather_than_inventing_a_state(self):
+        """`True` is an `int` subclass, and the GATE coerces it to a cap of 1.
+
+        Measured: `enforce_org_limit({"max_points": True}, "points")` raises
+        `QuotaExceededError … limit reached (1)`. So the read must encode 1 rather than
+        report "unknown" — a read that says nothing about an account the gate is
+        already refusing is the inverse of the fail-open this helper prevents.
+        """
+        block = encode_plan_block({"max_points": True}, "points", used=3)
+        assert block["limit"] == 1
+        assert block["at_cap"] is True
 
     def test_an_integer_formatted_string_is_honoured_like_the_gate(self):
         # `enforce_org_limit` coerces `"1000"` -> 1000 and enforces it; the read
@@ -226,6 +239,31 @@ class TestReply:
     def test_a_bound_tenant_with_no_account_row_returns_none(self, sdk):
         sdk._record_tenant = ("no-such-org-id", "g-10015")
         assert sdk.get_organisation_account() is None
+
+    def test_an_account_the_gates_cannot_see_is_refused_not_reported_absent(
+        self, tmp_path, monkeypatch,
+    ):
+        """The two-control-plane case: a row `org_get` finds but the gates never read.
+
+        `resolve_org_limits` resolves the registry through
+        `_make_sdk(namespace="registry")` and the ambient env, never this handle — so an
+        SDK opened on its own `db_path=` holds Team rows the plan gates cannot see.
+        Reporting `None` there would claim the caller's account does not exist, and
+        publishing the OTHER store's cap for the same id would be a money-surface
+        fail-open. It must refuse and name the mismatch.
+        """
+        # The gates read a DIFFERENT store from the one this SDK is opened on.
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "the-gates-store.db"))
+        own = TortoiseSDK(db_path=str(tmp_path / "this-handles-store.db"),
+                          namespace="registry")
+        team = own.org_create("split-store-10015")
+        assert own.org_get(team["id"]) is not None   # the caller CAN see it
+        own._record_tenant = (team["id"], "g-10015")
+        with pytest.raises(ControlPlaneError) as exc:
+            own.get_organisation_account()
+        assert "control plane" in str(exc.value)
+        assert team["id"] in str(exc.value)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

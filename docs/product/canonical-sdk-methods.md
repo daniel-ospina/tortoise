@@ -22,7 +22,7 @@ related:
 
 **Read this for coverage, not for names.** This document is two things: an **inventory of all 125
 methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and,
-alongside that, an **earlier target sketch** (32 groups over 123 live members). The 26 names that left
+alongside that, an **earlier target sketch** (32 groups over 124 live members). The 26 names that left
 the surface on 2026-10-27 are recorded in *Removed from the surface* below rather than in a group.
 
 > ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` (40 methods), not this document.**
@@ -401,7 +401,7 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 **Where this lands for us.** 150 public methods on one flat class was ~5.6× the largest flat
 surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
-**collapse the aliases**. The sketch above does exactly that: **32 groups over 123 live
+**collapse the aliases**. The sketch above does exactly that: **32 groups over 124 live
 members** (149 when it was written; the 26 deleted names took 26 members with them) — 26 memory-facing
 (R1–R9, W1–W17) and 6 control-plane namespaces (N1–N6) —
 reached by grouping and merging; the retired primitives stop resolving — a call raises with the

@@ -542,15 +542,6 @@ def encode_plan_block(limits: dict | None, resource: str = "points",
     distinguishes. There are three of them, and collapsing any two is the
     defect this function exists to prevent:
 
-    ====================  ====================  ==================================
-    ``limits[<key>]``     emitted ``limit``     means
-    ====================  ====================  ==================================
-    a number              that number           a bounded allowance
-    ``None`` (PRESENT)    ``None``              **unlimited** (#4010 / #683)
-    ABSENT                *the key is absent*   **UNKNOWN — fail-closed**
-    unreadable            *the key is absent*   **UNKNOWN — fail-closed**
-    ====================  ====================  ==================================
-
     Row 2 is ``resolve_org_limits``' documented contract: a key that is PRESENT
     with ``None`` means unlimited — ``billing.apply_limits`` writes NULL for
     exactly that, and ``enforce_org_limit`` skips on it. Rows 3 and 4 are the
@@ -567,6 +558,10 @@ def encode_plan_block(limits: dict | None, resource: str = "points",
     limit" — a fail-open on a money surface. The presence test is the point,
     and it is pinned by ``tests/test_10015_organisation_account.py``.
 
+    A ``bool`` is an ``int`` subclass, so ``True`` encodes as a cap of 1 — which
+    is what the gate ENFORCES (it coerces with ``int()`` and has no bool guard),
+    and the read mirrors the gate rather than inventing a fourth state.
+
     ``used`` is the count the gate would compare (``count_org_usage``), or
     ``None`` when it could not be read — never a false ``0`` (#4331: a failed
     read is not a genuine zero). ``at_cap`` is emitted only when it can be
@@ -578,10 +573,17 @@ def encode_plan_block(limits: dict | None, resource: str = "points",
     """
     key = _RESOURCE_LIMIT_KEYS.get(resource)
     if key is None:
-        # Mirrors `enforce_org_limit`'s own refusal: a resource with no declared
-        # limit key (including the DERIVED caps) cannot be encoded, and guessing
-        # a key would be how the two surfaces drift apart.
-        raise QuotaCheckError(f"unknown quota resource: {resource!r}")
+        # ⛔ NOT the gate's refusal — `enforce_org_limit` DOES serve the DERIVED caps
+        # (`documents`, whose limit is `max_points × _DOCUMENTS_FROM_POINTS_FACTOR`,
+        # `DERIVED_CAP_RESOURCES`). This encoder covers the resources whose cap is a
+        # plain key in the limits dict, which is every resource the account read
+        # reports today (`points`); a derived cap needs its own branch here before it
+        # can be encoded, and guessing one would be how the two surfaces drift apart.
+        raise QuotaCheckError(
+            f"no encodable limit key for resource {resource!r} "
+            f"(the derived caps, {sorted(DERIVED_CAP_RESOURCES)}, need their own "
+            "branch — the write gate DOES enforce them)"
+        )
     block: dict = {
         "resource": resource,
         "used": int(used) if used is not None else None,
@@ -593,10 +595,6 @@ def encode_plan_block(limits: dict | None, resource: str = "points",
     if limit is None:
         block["limit"] = None
         block["at_cap"] = False
-        return block
-    if isinstance(limit, bool):
-        # A bool is an int subclass, so `int(True)` would publish a cap of 1.
-        # The gate refuses it as unreadable; the read publishes no number.
         return block
     try:
         limit = int(limit)

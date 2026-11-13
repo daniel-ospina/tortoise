@@ -45746,9 +45746,13 @@ class TortoiseSDK:
         it never falls back to a guess, because a guessed org is a
         cross-tenant read that happens to return well-formed data.
 
-        Returns ``None`` when the tenant is bound but no account row exists
-        (mirrors ``org_get``'s contract), and raises ``ControlPlaneError`` when
-        no tenant is bound at all.
+        Returns ``None`` when no account row exists — in THIS SDK's control plane
+        and in the one the plan's write gates read. When the two disagree (a Team
+        row visible to ``org_get`` but not to ``quota.resolve_org_limits``) the
+        method REFUSES with ``ControlPlaneError`` naming the mismatch rather than
+        reporting an account that plainly exists as absent, and rather than
+        publishing another store's cap for the same id. It also raises
+        ``ControlPlaneError`` when no tenant is bound at all.
 
         The reply — every field reuses vocabulary the quota surfaces already
         own, so the pre-write read and the 402 that follows it line up::
@@ -45815,7 +45819,26 @@ class TortoiseSDK:
             # cap reported here is the cap they enforce, not a second opinion.
             limits = resolve_org_limits(org_id)
         except OrgNotFoundError:
-            # A bound tenant with no account row: a state, not a fault (#9567).
+            # A bound tenant with no row in the registry the GATES read is a STATE
+            # (#9567), not a fault — but it is only honest to report it as "no
+            # account" when the caller's own control plane agrees it does not
+            # exist. `resolve_org_limits` resolves the registry through
+            # `_make_sdk(namespace="registry")` (TORTOISE_DB_URI / TORTOISE_DB_PATH),
+            # NEVER this handle — so a deployment can hold a Team row in a store the
+            # gates will not read (an embedded `db_path=` store: `org_get` finds the
+            # row, the gates never see it). Answering `None` there would be a
+            # factual claim about the caller's account made from a store that
+            # cannot see it — and silently substituting a DIFFERENT store's cap for
+            # the same org id would be a fail-open on the money surface. Fail closed
+            # and name the mismatch instead.
+            if self.org_get(org_id) is not None:
+                raise ControlPlaneError(
+                    f"get_organisation_account cannot answer for {org_id!r}: the "
+                    "account exists in this SDK's control plane but not in the one "
+                    "the plan's write gates read (quota.resolve_org_limits resolves "
+                    "the registry through TORTOISE_DB_URI / TORTOISE_DB_PATH, not "
+                    "this handle). Point this process at the store the gates read."
+                ) from None
             return None
         used: int | None = None
         try:
