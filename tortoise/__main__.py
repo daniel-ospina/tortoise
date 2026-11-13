@@ -3196,6 +3196,21 @@ def _redact_credential_fragments(text: str, uri: str | None) -> str:
             fragment = form.split(":", 1)[1]
             fragments.add(fragment)
             fragments.add(_unquote(fragment))
+    # ⛔ A `?selector` / `#fragment` tail is a credential carrier: `_mask_display_target`
+    # and `_redact_db_value` both CUT it, and this function has to as well — a
+    # `?password=…` with no colon added no fragment, so the whole value passed
+    # through and `Graph: health` printed it (pre-existing on that arm, but the
+    # sibling rows already redact the same value, so the two disagreed about a
+    # credential on one screen — #12428 review).
+    for sep in ("#", "?"):
+        if sep in uri:
+            _tail = uri.split(sep, 1)[1]
+            fragments.add(_tail)
+            if "=" in _tail:
+                fragments.add(_tail.split("=", 1)[1])
+    _cut = uri.split("#", 1)[0].split("?", 1)[0]
+    if _cut and _cut != uri:
+        text = text.replace(uri, _cut + "…")
     # ⛔ A minimum length for the BLANKET replace: a one-character password would
     # otherwise rewrite every occurrence of that character in the message. A SHORT
     # fragment is still redacted — but only where it stands alone as a token

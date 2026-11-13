@@ -1856,3 +1856,26 @@ def test_a_file_supplied_bad_value_is_not_called_an_unloadable_file(capsys, _iso
 
     assert "cannot be loaded at all" not in out, out
     assert "the value it rejects is the one this `.env` supplied" in out, out
+
+
+def test_a_query_selector_credential_is_cut_from_the_health_row():
+    """`?password=…` carries a credential and has no colon.
+
+    Measured with `TORTOISE_DB_URI=./g.db?password=PwABCD`: `doctor` printed
+    `Relative DB path './g.db?password=PwABCD' rejected` in clear, while
+    `config show` cut the same value to `'./g.db…'` — two rows disagreeing about a
+    credential on one screen (#12428 review).
+    """
+    from tortoise.__main__ import _redact_credential_fragments
+
+    value = "./g.db?password=PwABCD"
+    out = _redact_credential_fragments(
+        f"Relative DB path '{value}' rejected", value)
+
+    assert "PwABCD" not in out, out
+    assert "'./g.db…'" in out, out
+
+    # …and a plain value is still untouched.
+    plain = "relative.db"
+    message = f"Relative DB path '{plain}' rejected"
+    assert _redact_credential_fragments(message, plain) == message
