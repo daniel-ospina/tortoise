@@ -1,0 +1,386 @@
+"""#12360 — the ``_``-preserving OR term, pinned on the EMITTED query.
+
+WHY THIS FILE EXISTS
+--------------------
+RediSearch treats ``_`` as a **word character**; ``sparse.tokenize_sparse_query``
+splits on it (``_SPLIT_RE = [^a-z0-9]+``). So a stored ``web_search`` is ONE
+term to the index while the leg emitted ``search|web`` — two terms the index
+never holds — and the record was unretrievable by its own name. Measured on
+``#12298``'s pinned 300-name population: candidate recall@3 **0.7133 -> 0.9633**
+(+25.00 pts, p < 0.001, 75 gains / 0 losses).
+
+⛔ **THE TRAP THIS FILE GUARDS, and why the assertions are written this way.**
+``run_fts_query`` **rebuilds** the query through ``build_or_query``
+(``search_engine.py``, the R2/#1541 leg), so a term set handed to it is
+re-tokenised straight back — ``#12298``'s first harness arm passed
+``search|web|web_search`` and measured **+0.33 pts**, the harness destroying the
+thing under test. So:
+
+* the mechanism lives INSIDE ``build_or_query`` (one seam, every caller), and
+* every assertion below is on the string that reaches ``db.idx.fulltext.queryNodes``
+  (the ``$query`` parameter of the issued Cypher), NEVER on the input that was
+  handed to the builder. A test of the input would pass over a path that never
+  sends it.
+
+The ``_or_terms`` helper is the same phrase-aware splitter
+``tests/test_identifier_tokens_8933.py`` uses, repeated here deliberately: a
+phrase term (``"err 4032"``) contains no ``|``, so a naive ``.split("|")`` is
+correct, but ``str.split()`` would break it into words and quietly stop
+checking adjacency.
+"""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from tortoise.sparse import (
+    MAX_ALIASES_PER_POINT,
+    MAX_IDENTIFIER_LEN,
+    UNDERSCORE_ENV,
+    build_or_query,
+    tokenize_sparse_query,
+    underscore_run_terms,
+)
+
+# ── live-FalkorDB availability (the #6673 docker-lane probe) ───────────────
+# Mirrors tests/test_identifier_tokens_8933.py: the docker lane is the DEFAULT
+# lane, so the reachability test runs on the standard local/CI services job and
+# skips gracefully in an embedded-only run instead of reding it.
+_LANE_URI = os.environ.get("TORTOISE_DB_URI") or \
+    __import__("tests._live_utils", fromlist=["x"]).docker_uri(
+        "tortoise_test_12360")
+LIVE = False
+_old = os.environ.get("TORTOISE_DB_URI")
+try:
+    from tortoise.projection import FalkorProjection as _FP
+
+    os.environ["TORTOISE_DB_URI"] = _LANE_URI
+    _probe = _FP.from_uri(_LANE_URI)
+    _probe.close()
+    LIVE = True
+except Exception:
+    LIVE = False
+finally:
+    if _old is not None:
+        os.environ["TORTOISE_DB_URI"] = _old
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
+requires_live = pytest.mark.skipif(
+    not LIVE, reason="requires a live FalkorDB FTS lane (docker services job)")
+
+
+def _or_terms(query: str) -> list[str]:
+    """Split an OR-union query into its terms, keeping a PHRASE whole."""
+    return query.split("|")
+
+
+# ── the emitted-query assertions (the trap) ────────────────────────────────
+
+class _CapturingGraph:
+    """A graph double that records the Cypher + params of every query."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    def query(self, cypher, params=None, timeout=None):  # noqa: ARG002
+        self.calls.append((cypher, dict(params or {})))
+
+        class _R:
+            result_set: list = []
+
+        return _R()
+
+    @property
+    def sent(self) -> list[str]:
+        return [p["query"] for _c, p in self.calls if "query" in p]
+
+
+class TestTheEmittedQueryCarriesTheComposite:
+    """The term must survive to ``$query`` — the failure mode #12298 recorded."""
+
+    def test_run_fts_query_emits_the_composite(self):
+        from tortoise.search_engine import run_fts_query
+
+        g = _CapturingGraph()
+        run_fts_query(g, "web_search", entity_type="point", limit=3)
+        assert len(g.sent) == 1, g.calls
+        emitted = g.sent[0]
+        assert "web_search" in _or_terms(emitted), (
+            "the composite never reached the index query — `run_fts_query` "
+            f"re-tokenised it away: {emitted!r}")
+
+    def test_the_label_route_is_the_production_one(self):
+        from tortoise.search_engine import run_fts_query
+
+        g = _CapturingGraph()
+        run_fts_query(g, "web_search", entity_type="point", limit=3)
+        cypher, params = g.calls[0]
+        assert "db.idx.fulltext.queryNodes('Point', $query)" in cypher, cypher
+        assert params["query"].count("web_search") == 1, params
+
+    @pytest.mark.parametrize("query,composite", [
+        ("web_search", "web_search"),
+        ("abc_def", "abc_def"),
+        ("test_7949_capstone_verdict_check", "test_7949_capstone_verdict_check"),
+        ("tests/test_ci_selection.py", "test_ci_selection"),
+        ("web_search and test_ci_selection", "test_ci_selection"),
+    ])
+    def test_the_composite_is_the_term_the_index_holds(self, query, composite):
+        assert composite in _or_terms(build_or_query(query)), build_or_query(query)
+
+    def test_it_rides_the_same_seam_the_fused_read_calls(self):
+        """The SDK/MCP door and the capture prior reach ONE builder (#12360)."""
+        import inspect
+
+        from tortoise import search_engine
+
+        src = inspect.getsource(search_engine.run_fts_query)
+        assert "build_or_query(" in src, (
+            "run_fts_query no longer builds through build_or_query — the "
+            "composite seam moved and this pin is measuring nothing")
+
+
+# ── both surfaces ─────────────────────────────────────────────────────────
+
+class TestBothSurfacesPassTheRawQuery:
+    """The fix must reach the capture prior AND the MCP/SDK search door.
+
+    Both ride ``run_fts_query``: the MCP tool ``tortoise_search`` is registered
+    with ``sdk_method="tortoise_fts_query"`` (``tool_registry.py``) and the
+    capture prior is ``extractor_v2._fts_rows`` -> ``sdk.tortoise_fts_query``.
+    What this pins is the HALF that can silently regress: neither door may
+    pre-tokenise the text, because a door that hands a split term list down
+    cannot be repaired by any later builder.
+    """
+
+    def test_capture_prior_door_hands_over_the_raw_query(self):
+        from tortoise.extractor_v2 import _fts_rows
+
+        seen: list[dict] = []
+
+        class _FakeSDK:
+            def tortoise_fts_query(self, query, **kw):
+                seen.append({"query": query, **kw})
+                return []
+
+        _fts_rows(_FakeSDK(), "object", "web_search", limit=3)
+        assert seen, "the capture prior never reached the FTS seam"
+        assert seen[0]["query"] == "web_search", (
+            "the capture prior re-tokenised BEFORE the seam: "
+            f"{seen[0]['query']!r}")
+        assert "web_search" in _or_terms(build_or_query(seen[0]["query"])), (
+            "the term the prior hands down is lost by the builder")
+
+    def test_builder_keeps_the_door_agnostic(self):
+        """``run_fts_query`` must not pre-split: it passes ``query`` through."""
+        from tortoise.search_engine import run_fts_query
+
+        g = _CapturingGraph()
+        run_fts_query(g, "web_search", entity_type="object", limit=3)
+        assert "web_search" in g.sent[0].split("|")
+
+
+# ── additive: the zero-regression property is structural ──────────────────
+
+_QUERIES = [
+    "web_search",
+    "abc_def",
+    "test_7949_capstone_verdict_check",
+    "tests/test_ci_selection.py",
+    "error ERR-4032 on deploy",
+    "gym schedule",
+    "what's my fastest 5k",
+    "PR #12298",
+    "the capstone_verdict check",
+    "   ",
+    "",
+]
+
+
+class TestAdditive:
+    def test_no_term_of_the_old_query_is_lost(self, monkeypatch):
+        for q in _QUERIES:
+            monkeypatch.setenv(UNDERSCORE_ENV, "0")
+            before = _or_terms(build_or_query(q))
+            monkeypatch.setenv(UNDERSCORE_ENV, "1")
+            after = _or_terms(build_or_query(q))
+            missing = [t for t in before if t not in after]
+            assert not missing, (
+                f"additive contract broken for {q!r}: {missing} vanished "
+                f"({before} -> {after})")
+
+    def test_byte_identical_without_an_inner_underscore(self, monkeypatch):
+        for q in ["gym schedule", "error ERR-4032 on deploy", "PR #12298",
+                  "what's my fastest 5k", ""]:
+            monkeypatch.setenv(UNDERSCORE_ENV, "0")
+            before = build_or_query(q)
+            monkeypatch.setenv(UNDERSCORE_ENV, "1")
+            assert build_or_query(q) == before, q
+
+    def test_the_shipped_8933_bytes_are_untouched(self):
+        # The #8933 pin's own byte assertion, re-stated here so a future edit
+        # to this tail cannot silently move THAT contract either.
+        assert build_or_query("ERR-4032") == 'err|err4032|"err 4032"'
+
+    def test_composites_ride_after_the_original_terms(self):
+        terms = _or_terms(build_or_query("web_search"))
+        assert terms[-1] == "web_search", terms
+        assert terms[:2] == ["search", "web"], terms
+
+
+# ── the pin: reds if the `_`-preserving OR form is dropped ─────────────────
+
+class TestPin:
+    def test_pin_reds_without_the_composite(self, monkeypatch):
+        """The whole mechanism, in one assertion per shape.
+
+        This is the test the issue asks for: drop the tail from
+        ``build_or_query`` and every one of these reds, because the composite is
+        the only term in the emitted union that the index holds for a
+        ``snake_case`` name.
+        """
+        monkeypatch.setenv(UNDERSCORE_ENV, "1")
+        for q in ["web_search", "abc_def", "test_7949_capstone_verdict_check",
+                  "tests/test_ci_selection.py"]:
+            assert underscore_run_terms(q) == [q.split("/")[-1].split(".")[0]], q
+            assert underscore_run_terms(q)[0] in _or_terms(build_or_query(q)), q
+
+    def test_kill_switch_restores_the_pre_12360_bytes(self, monkeypatch):
+        monkeypatch.setenv(UNDERSCORE_ENV, "0")
+        assert build_or_query("web_search") == "search|web"
+        assert build_or_query("abc_def") == "abc|def"
+
+    def test_the_switch_defaults_on(self, monkeypatch):
+        monkeypatch.delenv(UNDERSCORE_ENV, raising=False)
+        assert "web_search" in _or_terms(build_or_query("web_search"))
+
+    def test_a_garbage_switch_value_is_the_default_not_off(self, monkeypatch):
+        monkeypatch.setenv(UNDERSCORE_ENV, "yes please")
+        assert "web_search" in _or_terms(build_or_query("web_search"))
+
+
+# ── the extractor's own contract ──────────────────────────────────────────
+
+class TestRunTerms:
+    @pytest.mark.parametrize("text,want", [
+        ("web_search", ["web_search"]),
+        ("WEB_SEARCH", ["web_search"]),
+        ("abc_def", ["abc_def"]),
+        ("tests/test_ci_selection.py", ["test_ci_selection"]),
+        ("web_search and test_ci_selection", ["web_search", "test_ci_selection"]),
+        ("ERR-4032", []),          # no `_` — already a token the tokenizer emits
+        ("gym schedule", []),
+        ("a_b", ["a_b"]),
+    ])
+    def test_terms(self, text, want):
+        assert underscore_run_terms(text) == want, text
+
+    def test_underscore_only_runs_are_dropped(self):
+        # `___` can carry no index term; sending it unescaped is an unmeasured
+        # query shape for no possible match.
+        assert underscore_run_terms("___") == []
+        assert underscore_run_terms("a ___ b") == []
+
+    def test_length_bound(self):
+        long_run = "a_" + "b" * MAX_IDENTIFIER_LEN
+        assert underscore_run_terms(long_run) == []
+        at_bound = "a_" + "b" * (MAX_IDENTIFIER_LEN - 2)
+        assert underscore_run_terms(at_bound) == [at_bound]
+
+    def test_budget_bound(self):
+        runs = " ".join(f"n_{i}_x" for i in range(MAX_ALIASES_PER_POINT + 4))
+        assert len(underscore_run_terms(runs)) == MAX_ALIASES_PER_POINT
+
+    def test_deduped(self):
+        assert underscore_run_terms("web_search web_search") == ["web_search"]
+
+    def test_deduped_against_the_plain_terms(self):
+        # `a_b` where `a_b` is already a plain token: impossible today (the
+        # tokenizer splits it), and the dedupe is the guard that keeps the
+        # union honest if that ever changes.
+        q = build_or_query("web_search")
+        assert q.split("|").count("web_search") == 1, q
+
+    def test_the_terms_carry_no_redisearch_special(self):
+        from tortoise.sparse import _REDI_SEARCH_SPECIAL
+
+        for t in underscore_run_terms("tests/test_ci_selection.py a-b_c"):
+            assert not _REDI_SEARCH_SPECIAL.search(t), t
+
+    def test_tokenizer_still_splits_this_is_a_query_side_repair(self):
+        # The write/fallback sides keep the split: this fix must NOT be read as
+        # a tokenizer change (a wider blast radius, rejected on #12350).
+        assert tokenize_sparse_query("web_search") == ["web", "search"]
+
+
+# ── the real path, on a real graph ────────────────────────────────────────
+
+@requires_live
+class TestLiveReachability:
+    """``abc_def`` is #12298's crispest case: ZERO rows for its own name.
+
+    Run on the real index, through ``run_fts_query``, with the switch the only
+    difference between the two arms — i.e. the before/after the falsifier asks
+    for, at fixture scale (the population-scale numbers are in
+    ``tools/underscore_or_terms_12360.py``'s artifact).
+    """
+
+    @pytest.fixture()
+    def proj(self):
+        import uuid
+
+        _FP.from_uri(_LANE_URI)  # probe
+        p = _FP.from_uri(_LANE_URI, graph_name=f"test_12360_{uuid.uuid4().hex[:8]}")
+        yield p
+        p.close()
+
+    @staticmethod
+    def _wait_indexed(proj, expected: int, timeout_s: float = 60.0) -> None:
+        """FalkorDB builds the fulltext index on a BACKGROUND cycle.
+
+        A query issued straight after the writes can book a present name as a
+        miss — the harness artefact #12360's scope item 3 names, in the worst
+        direction. A timeout is a refusal, never a proceed.
+        """
+        import time
+
+        t0 = time.time()
+        last = -1
+        while time.time() - t0 < timeout_s:
+            for row in proj.g.query("CALL db.indexes()").result_set:
+                if not row or row[0] != "Object":
+                    continue
+                stats = next((c for c in row
+                              if isinstance(c, dict) and "numDocuments" in c), None)
+                last = int(stats["numDocuments"]) if stats else -1
+                break
+            if last >= expected:
+                return
+            time.sleep(0.2)
+        raise AssertionError(
+            f"the Object index reports {last} documents of {expected} after "
+            f"{timeout_s}s — a query now would book a present name as a miss")
+
+    def test_abc_def_is_findable_and_was_not_before(self, proj, monkeypatch):
+        from tortoise.search_engine import run_fts_query
+
+        proj._upsert_object({"id": "o-12360-abc", "name": "abc_def",
+                             "object_kind": "core:other"})
+        self._wait_indexed(proj, 1)
+
+        monkeypatch.setenv(UNDERSCORE_ENV, "1")
+        ids = [i for i, _s in run_fts_query(proj.g, "abc_def",
+                                            entity_type="object", limit=3)]
+        assert "o-12360-abc" in ids, (
+            "the composite OR term did not reach the index — "
+            f"emitted {build_or_query('abc_def')!r}, got {ids!r}")
+
+        monkeypatch.setenv(UNDERSCORE_ENV, "0")
+        before = [i for i, _s in run_fts_query(proj.g, "abc_def",
+                                               entity_type="object", limit=3)]
+        assert "o-12360-abc" not in before, (
+            "the OFF arm found the record — the fixture is not measuring the "
+            f"defect ({before!r}); if the tokenizer changed, re-measure #12360")

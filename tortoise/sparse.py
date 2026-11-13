@@ -217,6 +217,20 @@ MIN_DIGIT_SEGMENT_LEN = 2
 MAX_ALIASES_PER_POINT = 8
 
 
+#: #12360: the COMPOSITE-RUN switch. Same shape and same reason as
+#: :data:`IDENTIFIER_ENV` — the mechanism ships ON, and this is the fail-safe
+#: BISECT switch the #8933 ruling asked for, so a batch whose aggregate
+#: retrieval disappoints can be bisected without a revert. Resolved through
+#: :func:`tortoise.env_truthy.env_flag` (unset/blank/garbage -> the default),
+#: so a typo can never silently turn it on OR off.
+UNDERSCORE_ENV = "TORTOISE_UNDERSCORE_TERMS"
+
+#: The splitter for the composite runs: on anything that is NOT a word
+#: character (``[A-Za-z0-9_]``). The NEGATION is the whole point — it is
+#: :data:`_SPLIT_RE` with ``_`` admitted, so a ``snake_case`` name stays ONE
+#: run here where the tokenizer above breaks it into segments.
+_COMPOSITE_SPLIT_RE = re.compile(r"[^A-Za-z0-9_]+")
+
 def identifier_tokens_enabled() -> bool:
     """Is identifier preservation on for this process? (#8933)
 
@@ -224,6 +238,17 @@ def identifier_tokens_enabled() -> bool:
     the bisect switch, not the feature flag. See :data:`IDENTIFIER_ENV`.
     """
     return env_flag(IDENTIFIER_ENV, True)
+
+
+def underscore_terms_enabled() -> bool:
+    """Is the composite-run OR term on for this process? (#12360)
+
+    Default ON, bisect switch ``TORTOISE_UNDERSCORE_TERMS``; see
+    :data:`UNDERSCORE_ENV`. The switch exists so the before/after measurement
+    can run the SAME production path twice (the falsifier on #12360 is about
+    the real path, not about a harness arm).
+    """
+    return env_flag(UNDERSCORE_ENV, True)
 
 
 def _identifier_segments(span: str) -> list[str]:
@@ -360,6 +385,93 @@ def identifier_phrase_terms(text: str, *, space_separated: bool = True) -> list[
             # rather than only failing this one. The bound is already more
             # discrimination than one query can carry; the tail is a raise, not
             # a rewrite.
+            if len(out) >= MAX_ALIASES_PER_POINT:
+                break
+    return out
+
+
+def underscore_run_terms(text: str) -> list[str]:
+    """#12360: the ``_``-PRESERVING runs of a query, lowercased, in source order.
+
+    This is a **query/index CONTRACT repair**, not a tokenizer change, and the
+    measurement is the reason it lives here rather than in
+    :func:`tokenize_sparse_query`.
+
+    ⛔ The defect it repairs (MEASURED on #12298, artifact
+    ``docs/research/2026-11-13-12298-m3-fts-leg/``): **RediSearch treats ``_``
+    as a word character and this module's tokenizer does not**
+    (:data:`_SPLIT_RE`). So for a stored ``web_search`` the index holds ONE
+    term, ``web_search``, while :func:`build_or_query` emits ``search|web`` —
+    two terms the index never contains — and the record is unretrievable BY
+    ITS OWN NAME. Probe on a live FalkorDB 4.20.6, verbatim::
+
+        'web_search'                       -> [['web_search', 8.0]]   # the index's term
+        'web'                              -> []                      # our first OR term
+        'selection'                        -> []
+        'test_7949_capstone_verdict_check' -> []                      # 4 segments, never a term
+
+    So every ``snake_case`` name is unretrievable by its own name: the query is
+    well-formed and matches terms the index never holds. Measured on a pinned
+    300-name population (#11901's instrument, ``:Object`` label, the FTS leg in
+    isolation): candidate recall@3 **0.7133 -> 0.9633** (+25.00 pts, exact
+    two-sided McNemar p < 0.001) with **75 gains and ZERO losses**, and 21 empty
+    result sets -> 0. The identifier class goes 0.2000 -> 0.9444 and paths
+    0.6667 -> 0.9333.
+
+    ⚠️ Why the repair is ADDITIVE and lives in the QUERY:
+
+    * **Additive only** — this function's terms are appended as further OR
+      alternatives, so no term is ever removed and a query that matched before
+      still matches. That is what makes the zero-loss column structural rather
+      than lucky, and it is the same safety argument the #8933 alias tail
+      rides.
+    * **The stored side needs no change** — the index already holds the
+      composite (RediSearch tokenised the stored text that way), so this
+      reaches records written BEFORE this change existed. Changing
+      :func:`tokenize_sparse_query` to keep ``_`` was REJECTED: it would change
+      the fallback stacks' vocabularies and the pseudo-relevance-feedback
+      expansion path too, a much wider blast radius for the same recall.
+    * ⛔ **A composite is NOT an :func:`identifier_alias`** and must not be
+      minted by that normaliser: ``identifier_alias``'s contract is that the
+      SAME function runs on the write and read paths. The composite is the
+      index's own term, so nothing is written; running it through the alias
+      normaliser would produce ``websearch`` — a third term the index also does
+      not hold.
+
+    The run test is the measured arm's, verbatim (``tools/m3_fts_leg_recall.py``
+    ``recovery_terms``): a maximal run of ``[A-Za-z0-9_]`` that still carries an
+    ``_`` and is at least 2 characters. A run WITHOUT ``_`` is already a term
+    the tokenizer emits, so re-sending it would only duplicate one (and
+    duplicates are the caller's problem — :func:`build_or_query` dedupes).
+
+    Two deliberate HARDENINGS over the measurement arm, both of which can only
+    drop a term that could never match, and both declared rather than silent:
+
+    * no alphanumeric character in the run -> dropped (``___``);
+    * ``len(run) > MAX_IDENTIFIER_LEN`` -> dropped, the same 48-character bound
+      the alias mechanism uses. The measured population's longest run is
+      ``test_7949_capstone_verdict_check`` (31), so this bound moved nothing.
+    """
+    if not text:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for run in _COMPOSITE_SPLIT_RE.split(text):
+        if len(run) < 2 or "_" not in run:
+            continue
+        if len(run) > MAX_IDENTIFIER_LEN:
+            continue
+        if not any(c.isalnum() for c in run):
+            continue
+        term = run.lower()
+        # Capped for the same reason the alias/phrase tails are: the OR budget
+        # must stay a BOUND (a query with 3,000 underscore runs would otherwise
+        # mint 3,000 OR terms, and an over-limit query is recorded as an FTS
+        # FAILURE — ``_breaker_record("fts", False)`` — i.e. it degrades later
+        # searches instead of only failing this one).
+        if term not in seen:
+            seen.add(term)
+            out.append(term)
             if len(out) >= MAX_ALIASES_PER_POINT:
                 break
     return out
@@ -559,8 +671,18 @@ def build_or_query(
     term, so a query that matched before still matches. The phrase is what
     makes the fix work on records written BEFORE the write-side alias existed.
     Each tail is capped at ``MAX_ALIASES_PER_POINT``, so the OR budget stays a
-    BOUND (originals ≤ ``max_terms`` + expansion ≤ 8 + 8 aliases + 8 phrases)
-    rather than growing with the query's input.
+    BOUND (originals ≤ ``max_terms`` + expansion ≤ 8 + 8 aliases + 8 phrases +
+    8 composite runs) rather than growing with the query's input.
+
+    #12360 (measured on #12298): a THIRD additive tail — the ``_``-PRESERVING
+    composite runs (:func:`underscore_run_terms`). RediSearch treats ``_`` as a
+    word character, so a stored ``web_search`` is ONE index term while the
+    tokenizer above split it into ``web``/``search``: the leg emitted two terms
+    the index never holds and the record was unretrievable by its own name.
+    Appending the composite as a further OR alternative recovers it with zero
+    regressions (candidate recall@3 0.7133 -> 0.9633 on a pinned 300-name
+    population, 75 gains / 0 losses, p < 0.001). Byte-identical for every query
+    without an inner ``_``.
     """
     # #8933: the identifier terms are computed SEPARATELY from the capped
     # original set, so they can never consume one of its slots — the A4
@@ -586,7 +708,17 @@ def build_or_query(
     # the pre-#8933 degenerate behaviour exactly (`not aliases and not phrases`
     # makes it `len(tokens) <= 1`) while never taking the raw branch while an
     # identifier term exists.
-    if max_terms < 1 or (len(tokens) <= 1 and not aliases and not phrases):
+    # #12360: the ``_``-PRESERVING composite runs — computed from the RAW query
+    # for the same reason the identifiers are (an already-split term list cannot
+    # be un-split): the tokenizer above destroyed the very thing that must be
+    # emitted. See :func:`underscore_run_terms` for the measured defect and why
+    # this is a query-side repair rather than a tokenizer change. They count in
+    # the degenerate predicate for the same reason the aliases do — an
+    # underscore-ONLY input (`__` between two stopwords) that reaches the raw
+    # branch would send the composite ESCAPED, and the index holds it unescaped.
+    composites = underscore_run_terms(query) if underscore_terms_enabled() else []
+    if max_terms < 1 or (len(tokens) <= 1 and not aliases and not phrases
+                        and not composites):
         return escape_redisearch_literal(query)
     tokens.sort(key=len, reverse=True)  # stable — ties keep source order
     original = tokens[:max_terms]
@@ -602,7 +734,7 @@ def build_or_query(
     # ADJACENT can match, so it raises the exact record's score on records
     # already indexed — a query that matched before still matches.
     present = set(terms)
-    for term in aliases + phrases:
+    for term in aliases + phrases + composites:
         if term not in present:
             present.add(term)
             terms.append(term)
