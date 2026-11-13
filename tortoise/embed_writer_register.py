@@ -1013,9 +1013,10 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "MERGE is delegated, and the only label it names is the `\"Source\"` literal it hands "
             "that delegate. `#12180` owns the "
             "finding that this writer arrived on `main` undeclared by `#12113`. \u26d4 That guard "
-            "is no longer RED — `#12016` landed a SECOND declaration for this same key, `#11996` "
-            "landed a THIRD, and `load()` refuses the duplicate at import (`#12182` review cycles "
-            "6/9); THIS entry is the survivor. \u26d4 Its survival is NOT a claim that `#12016`'s copy "
+            "is no longer RED — `#12016` landed the FIRST declaration for this same key and "
+            "`#11996` a SECOND, i.e. the duplicate, and `load()` refuses it at import (`#12182` "
+            "review cycles 6/9, re-counted in cycle 17: the maximum either table ever held was "
+            "TWO, one per dict); THIS entry is the survivor. \u26d4 Its survival is NOT a claim that `#12016`'s copy "
             "was wrong: the passthrough it described is real (see the correction above), and the "
             "pair is deleted for being a DUPLICATE, which is what makes the register unimportable",
             "#5004",
