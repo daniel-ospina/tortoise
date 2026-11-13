@@ -770,10 +770,17 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     # the list is exactly what `assert len(children) == 2` is about to reject when the
     # poll timed out, and a child forked after the last sample is in the group but not in
     # the list — SIGKILL to the supervisor does not reach it. Measured: omitting one
-    # enumerated child from the reap left `sleep 120` (ppid 1) behind.
-    own = _spawn(["bash", "-c", "sleep 120 & sleep 120"], tmp_path)
+    # enumerated child from the reap left that child (still `ppid` = the supervisor, which
+    # was killed but not waited) behind.
+    #
+    # ⛔ AND THE SPAWN ITSELF IS INSIDE THE `try:` (#12227 review cycle 10). `_spawn` can
+    # raise (`OSError` under fork pressure); with `own` created before the guard, that
+    # raise ran no teardown and leaked the PEER decoy, which is already alive at this
+    # point. `own is None` is the "no tree was created" case.
+    own = None
     children: list[int] = []
     try:
+        own = _spawn(["bash", "-c", "sleep 120 & sleep 120"], tmp_path)
         _wait_alive(own.pid)
         deadline = time.time() + 5
         while time.time() < deadline and len(_child_pids(own.pid)) < 2:
@@ -784,7 +791,8 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         recorded = _record_when_running("app", own.pid, env=state)
         assert recorded.returncode == 0, _recorded(recorded, own.pid, state)
     except BaseException:
-        _reap_group(own.pid)
+        if own is not None:
+            _reap_group(own.pid)
         _reap(peer.pid)
         raise
     result = None
@@ -817,7 +825,8 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
             "ERR_CONNECTION_REFUSED"
         )
     finally:
-        _reap_group(own.pid)
+        if own is not None:
+            _reap_group(own.pid)
         _reap(peer.pid)
 
 
