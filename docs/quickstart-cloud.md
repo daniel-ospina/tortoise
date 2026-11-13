@@ -180,9 +180,12 @@ air-gapped runner (the local graph-health probe still dials the configured DB ta
 failure — the key is valid, its scope is narrower by design — and a `503`/`429` from
 `/v1/team` is reported as a *service* refusal (capacity or rate limit) that leaves the key
 unproven rather than wrong, so a capacity blip does not red a healthy setup. When the
-identity comes from the checkout-local `./.tortoise` that `init --api-key` wrote, both rows
-say so: that is still the credential every command run in that directory would use, and the
-report names the file rather than implying it is your global one.
+identity comes from the checkout-local `./.tortoise` that `init --api-key` wrote, the
+`Hosted` row says so and names the file instead of implying it is your global one. That
+file is what `doctor` (and the ordinary CLI commands) resolve here — it is **not** a
+transmission credential: `session capture`/`probe`/`verify`/`list`/`view`/`drain` and
+`sessions import` deliberately skip a repo-supplied `./.tortoise` (#3660), so pointing one
+does not route your transcripts anywhere.
 
 Everyday commands:
 

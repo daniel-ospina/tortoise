@@ -210,24 +210,21 @@ _FAKE_HOSTED_KEY = "t" + "t_" + "FAKEKEY0000000000000000000000"
 _FAKE_ENV_KEY = "t" + "t_" + "ENVKEY00000000000000000000000"
 
 
-def _expected_health_timeout() -> int:
-    from tortoise.__main__ import _DOCTOR_HEALTH_TIMEOUT_S
-    return _DOCTOR_HEALTH_TIMEOUT_S
+#: The shipped probe bounds, as LITERALS on purpose. Reading them back from the
+#: module under test makes the assertion compare a constant with itself, which
+#: is green for ANY value — a retry narrowed to 3s, i.e. narrower than both first
+#: attempts, reintroduces the cold-start misgrade and passed (fresh review round
+#: 11). These numbers are the contract; changing them must red this test.
+_EXPECTED_HEALTH_TIMEOUT_S = 5
+_EXPECTED_TEAM_TIMEOUT_S = 10
+_EXPECTED_TEAM_RETRY_TIMEOUT_S = 30
 
 
-def _expected_health_retry_timeout() -> int:
-    from tortoise.__main__ import _DOCTOR_TEAM_RETRY_TIMEOUT_S
-    return _DOCTOR_TEAM_RETRY_TIMEOUT_S
-
-
-def _expected_team_timeout() -> int:
-    from tortoise.__main__ import _DOCTOR_TEAM_TIMEOUT_S
-    return _DOCTOR_TEAM_TIMEOUT_S
-
-
-def _expected_team_retry_timeout() -> int:
-    from tortoise.__main__ import _DOCTOR_TEAM_RETRY_TIMEOUT_S
-    return _DOCTOR_TEAM_RETRY_TIMEOUT_S
+def _assert_retry_widens(attempts: list[int], first: int, retry: int) -> None:
+    assert attempts == [first, retry], attempts
+    assert retry > first, (
+        f"the retry bound ({retry}s) must EXCEED the first attempt ({first}s), or "
+        "the retry re-introduces the cold-start failure it exists to prevent")
 
 
 class TestDoctorHostedCredential:
@@ -642,8 +639,9 @@ class TestDoctorHostedCredential:
         # (fresh review round 5 — `Request` has no `.timeout`, so the old
         # assertion recorded None and pinned nothing).
         health_calls = [(u, t) for u, t in calls if u.endswith("/health")]
-        assert [t for _u, t in health_calls] == [
-            _expected_health_timeout(), _expected_health_retry_timeout()], health_calls
+        _assert_retry_widens([t for _u, t in health_calls],
+                             _EXPECTED_HEALTH_TIMEOUT_S,
+                             _EXPECTED_TEAM_RETRY_TIMEOUT_S)
         hosted = _row(out, "Hosted")
         assert hosted is not None and "✅" in hosted, out[-1500:]
         assert "first attempt timed out" in hosted, hosted
@@ -806,8 +804,9 @@ class TestDoctorHostedCredential:
 
         team_calls = [(u, t) for u, t in all_calls if u.endswith("/v1/team")]
         assert len(team_calls) == 2, team_calls  # one attempt + one bounded retry
-        assert [t for u, t in team_calls] == [
-            _expected_team_timeout(), _expected_team_retry_timeout()], team_calls
+        _assert_retry_widens([t for _u, t in team_calls],
+                             _EXPECTED_TEAM_TIMEOUT_S,
+                             _EXPECTED_TEAM_RETRY_TIMEOUT_S)
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1500:]
         assert "no answer in 10s" in hosted and "on retry" in hosted, hosted
@@ -1217,8 +1216,8 @@ class TestDoctorHostedCredential:
         assert password not in out, "the api_url password reached the transcript"
         # The endpoint ANSWERED /health, so a reset on the authenticated leg is a
         # service blip: unproven, not a broken key (round 7).
-        assert "⚠️" in hosted and "UNPROVEN" not in hosted, hosted
-        assert "could not complete" in hosted, hosted
+        assert "⚠️" in hosted, hosted
+        assert "could not complete" in hosted and "SERVICE" in hosted, hosted
 
     def test_a_refusal_body_that_echoes_the_request_is_scrubbed(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
