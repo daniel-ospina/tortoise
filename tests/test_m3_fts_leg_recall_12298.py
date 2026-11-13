@@ -1017,6 +1017,32 @@ def test_the_degraded_leg_refusal_is_WIRED_at_every_shipped_leg_call(tool_mod) -
                 and (getattr(n.func, "id", None) == name
                      or getattr(n.func, "attr", None) == name)]
 
+    def _innermost_loop(call, fn):
+        """The innermost ``for``/``while`` body the call sits in, or ``None``.
+
+        ⛔ SCOPE, not line order (#12349 review cycle 8). The previous attempt
+        asserted the refusal came before the NEXT measured call by line number —
+        which is **unsatisfiable**: any call after the paired one is also after the
+        refusal's own line, so the assertion could never fire, and a refusal
+        hoisted out of the inner loop stayed GREEN. Measured by the reviewer:
+        hoisting it to the end of the row loop left 900 of 1200 measured reads
+        unguarded with the pin reporting OK. Two call sites 40 lines apart cannot
+        see a 14-line hoist; their ENCLOSING BLOCKS can.
+        """
+        found = []
+
+        def walk(node, cur):
+            for child in ast.iter_child_nodes(node):
+                nxt = (child if isinstance(child, (ast.For, ast.While,
+                                                   ast.AsyncFor))
+                       else cur)
+                if child is call:
+                    found.append(cur)
+                walk(child, nxt)
+
+        walk(fn, None)
+        return found[0] if found else None
+
     def _is_warmup(call) -> bool:
         """The pre-wait warm query, whose RESULT is discarded.
 
@@ -1060,18 +1086,21 @@ def test_the_degraded_leg_refusal_is_WIRED_at_every_shipped_leg_call(tool_mod) -
             "`run_fts_query` call before it")
         owner = max(prior)
         want = traces[owner]
-        # ⛔ INSIDE THE SAME BLOCK, not merely after the call (#12349 review
-        # cycle 7): moving the refusal out of the loop body left 299 of 300
-        # measured reads unguarded and the pairing check GREEN. A refusal that
-        # belongs to a measured call comes before the NEXT measured call — i.e.
-        # between the call that wrote the trace and the one after it.
-        nxt = [ln for ln in traces if ln > owner]
-        if nxt:
-            assert refusal.lineno < min(nxt), (
-                f"`_refuse_degraded_legs` at line {refusal.lineno} comes AFTER "
-                f"the next measured `run_fts_query` call at line {min(nxt)} — it "
-                "has been hoisted out of the loop body, so the reads between "
-                "them are unguarded")
+        # ⛔ The refusal must sit in the SAME innermost loop as the measured call
+        # it guards. That is what makes it run once per measured read; a refusal
+        # hoisted one scope out runs once per ROW and silently leaves every k but
+        # the last unguarded.
+        # NEAREST preceding call with that trace name — both loops use a local
+        # called `trace`, so the name alone does not disambiguate them.
+        leg_call = max((c for c in legs
+                        if any(k.arg == "leg_trace" and k.value.id == want
+                               for k in c.keywords) and c.lineno < refusal.lineno),
+                       key=lambda c: c.lineno)
+        assert _innermost_loop(refusal, sweep) is _innermost_loop(leg_call, sweep), (
+            f"`_refuse_degraded_legs` at line {refusal.lineno} is in a different "
+            f"loop body from the `run_fts_query` call at line {leg_call.lineno} "
+            "it guards — it has been hoisted out, so the reads in between are "
+            "unguarded while this pin reports OK")
         assert first.id == want, (
             f"`_refuse_degraded_legs` at line {refusal.lineno} refuses on "
             f"{first.id!r} but the leg wrote its trace to {want!r} — the refusal "
