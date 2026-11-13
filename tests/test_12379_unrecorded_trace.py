@@ -62,10 +62,11 @@ STORE_ONLY_BODY = {"confirmed": "UNEXTRACTED",
                    "extraction_mode": _CAPTURE_NO_PROVIDER_MODE}
 
 
-def _snapshot(session_id: str = SESSION) -> Snapshot:
+def _snapshot(session_id: str = SESSION,
+              turns: list[dict] | None = None) -> Snapshot:
     return Snapshot(
         session_id=session_id,
-        turns=list(TURNS),
+        turns=list(TURNS) if turns is None else turns,
         source="t.pi.jsonl",
         machine_id="m" * 64,
         harness="pi",
@@ -124,6 +125,39 @@ def test_the_unrecorded_marker_survives_on_the_spool_entry(tmp_path):
     assert unrecorded_captures(tmp_path) == [SESSION]
 
 
+def test_the_unrecorded_marker_is_STICKY_across_a_replay_filing(tmp_path):
+    """A later re-capture cannot resolve the state, so it must not erase the trace.
+
+    The routine `--resume`/`clear`/`compact` path re-captures a grown transcript;
+    the server answers `replayed` ("already captured") because its re-capture
+    gate requires a RECORDED failure (`prior_capture_ok is False`) and this
+    session's outcome is NULL — so a re-POST replays rather than re-extracts and
+    the condition PERSISTS. Measured in review: clearing the marker on a
+    marker-absent body deleted the only trace while the session still had no
+    recorded outcome.
+
+    MUTATIONS THAT RED THIS: `else: fresh.pop(UNRECORDED_OUTCOME_KEY, None)`
+    (the marker disappears on the second filing) — the pre-fix shape."""
+    write_spool_entry(tmp_path, _snapshot())
+    flush_spool(tmp_path, _post(UNRECORDED_BODY), now=1000.0)
+    assert unrecorded_captures(tmp_path) == [SESSION]
+
+    # The transcript grows, so the entry is unfiled by the new content and is
+    # re-POSTed; the server answers `replayed` — no outcome evidence at all.
+    write_spool_entry(tmp_path, _snapshot(
+        turns=[*TURNS, {"role": "user", "content": "one more turn"}]))
+    replay = flush_spool(tmp_path,
+                         _post({"session_id": SESSION, "mode": "replayed"}),
+                         now=2000.0)
+
+    assert replay.filed == 1
+    assert unrecorded_captures(tmp_path) == [SESSION], (
+        "a replayed re-capture says the turns are already stored — it does NOT "
+        "say the extraction outcome was recorded, and a NULL-outcome session can "
+        "never be re-extracted by a re-POST")
+    assert capture_backlog.sessions() == []
+
+
 def test_a_known_store_only_outcome_is_not_counted_as_unrecorded(tmp_path):
     """The #4188 / #4258 direction survives: a keyless capture is a KNOWN
     negative, it keeps its deferral, and it must not be relabelled `unrecorded`.
@@ -146,11 +180,63 @@ def test_an_unrecorded_outcome_prices_nothing(tmp_path):
 
     MUTATIONS THAT RED THIS: record the state through
     `capture_backlog.record_not_processed` (the #12362 bug returns — a priced
-    offer to re-extract a session that may already have extracted)."""
+    offer to re-extract a session that may already have extracted).
+
+    ⚠️ `_flush_one` never touches the ledger, so the PRICED writer for this leg
+    is `__main__._record_drain_deferrals` — the assertion for THAT path lives in
+    `test_session_drain_records_no_priced_deferral`, not here (a review finding:
+    pinning the claim only on the path with no writer proved nothing)."""
     write_spool_entry(tmp_path, _snapshot())
     flush_spool(tmp_path, _post(UNRECORDED_BODY), now=1000.0)
 
     assert capture_backlog.sessions() == []
+
+
+def test_session_drain_records_no_priced_deferral(tmp_path, monkeypatch):
+    """#12362's decision, pinned on the path that actually PRICES (#12379 review).
+
+    `_record_drain_deferrals` is the spool leg's ONE priced writer, and it runs
+    INSIDE `_cmd_session_drain` — the `flush_spool`-only test above cannot see it.
+    A PENDING body must record nothing there, or a session that may already have
+    extracted is offered a re-extraction priced at its turn count.
+
+    MUTATIONS THAT RED THIS: add an `outcome_unrecorded` arm to
+    `_record_drain_deferrals` that calls `_record_backlog_deferral` (verified in
+    review: it left the original suite green)."""
+    from tortoise import __main__ as main
+
+    write_spool_entry(tmp_path, _snapshot())
+    monkeypatch.setattr(main, "_session_post",
+                        lambda api_key, api_url: _post(UNRECORDED_BODY))
+
+    assert main._cmd_session_drain("tt_test_key", "https://api.example") == 0
+    assert capture_backlog.sessions() == [], (
+        "an unrecorded outcome must never become a priced deferral")
+
+
+def test_the_drain_line_bounds_the_session_ids(tmp_path, monkeypatch, capsys):
+    """`flush_spool` has no per-pass attempt cap and the spool holds 20 000
+    entries, so one unbounded join could render twenty thousand ids into a single
+    stderr line.
+
+    MUTATIONS THAT RED THIS: join the whole list (the line grows with the spool),
+    or use `'..., '` as the separator (it reads as a truncation marker on an id
+    that was not truncated, and disagrees with the health line's rendering)."""
+    from tortoise import __main__ as main
+
+    for i in range(4):
+        write_spool_entry(tmp_path, _snapshot(session_id=f"sess-unrecorded-{i}"))
+    monkeypatch.setattr(main, "_session_post",
+                        lambda api_key, api_url: _post(UNRECORDED_BODY))
+
+    assert main._cmd_session_drain("tt_test_key", "https://api.example") == 0
+
+    err = capsys.readouterr().err
+    line = next(ln for ln in err.splitlines()
+                if ln.startswith("spool drain: outcome unrecorded"))
+    assert "outcome unrecorded 4" in line, line
+    assert "+1 more" in line, line
+    assert "...," not in line, line
 
 
 def test_session_drain_names_the_unrecorded_count_and_the_session(tmp_path,
@@ -162,9 +248,12 @@ def test_session_drain_names_the_unrecorded_count_and_the_session(tmp_path,
     discards this stderr — which is why the durable half above exists. On a
     hand-run drain this line is what tells the operator to look.
 
-    MUTATIONS THAT RED THIS: drop the counter from the drain's summary line (the
-    measured silence), or drop it from the print's gate condition (a pass whose
-    ONLY event is an unrecorded filing prints nothing at all)."""
+    MUTATIONS THAT RED THIS: drop the `outcome unrecorded` block from the drain
+    (`filed 1 …` and silence return — the measured state). NOTE the summary line
+    needs no term in its own gate: `summary.attempted` is incremented before the
+    POST, so an unrecorded-only pass always passes the pre-existing gate (a
+    review finding — the extra `or summary.unrecorded` term was dead and is
+    gone)."""
     from tortoise import __main__ as main
 
     write_spool_entry(tmp_path, _snapshot())

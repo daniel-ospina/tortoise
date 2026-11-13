@@ -1137,6 +1137,14 @@ export interface SpoolMeta {
    *  equal. */
   filed_stamp?: number;
   filed_at?: string;
+  /** #12379: the Python drain filed this entry with an extraction outcome the
+   *  server never recorded (`extraction_outcome: "unknown"`). Written ONLY by
+   *  that leg; this one PRESERVES it across snapshots, because a growing session
+   *  rewrites the meta on every turn and the state is not resolved by a new turn
+   *  (a NULL-outcome session replays instead of re-extracting). Without the carry
+   *  a Python-stamped entry loses its only durable trace the next time the Pi leg
+   *  re-snapshots it — the two legs share this directory. */
+  extraction_outcome?: string;
   /** #7708: set when a PERMANENT HTTP refusal was recorded. The entry is KEPT
    *  but `flushSpool` skips it — terminal, never destructive. Cleared when a
    *  later snapshot REBUILDS the meta (genuinely new content → a fresh,
@@ -2064,6 +2072,17 @@ export function writeSpoolEntry(
     // (attempts=0) and a genuinely fresh entry starts at zero.
     attempts: clampAttempts(prior?.attempts),
     next_attempt_at_ms: carriedWindow(prior?.next_attempt_at_ms),
+    // #12379: the Python drain's "extraction outcome was never recorded" marker
+    // is CARRIED, not rebuilt. This leg never WRITES it (the drain that stamps
+    // it is `capture_spool._flush_one`), but the two legs share this directory
+    // and a growing session rewrites the meta on EVERY turn — so a fresh meta
+    // literal without this carry would erase a Python-stamped entry's only
+    // durable trace on the next Pi snapshot. Sticky on purpose: a new turn does
+    // not resolve the state (a NULL-outcome session replays rather than
+    // re-extracts), and only `session view` can say the server's state changed.
+    ...(prior?.extraction_outcome === "unknown"
+      ? { extraction_outcome: "unknown" }
+      : {}),
     // A lane UPGRADE also invalidates the filing marker: `filed_key` is
     // content-derived (the lane is not part of it), so an entry already filed
     // lane-less would otherwise keep its marker and be skipped by the drain

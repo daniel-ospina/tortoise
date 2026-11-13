@@ -387,7 +387,7 @@ class FlushSummary:
     #: recorded the extraction outcome (see :func:`outcome_unrecorded`). The
     #: session ids are kept beside the count because a number with no id is not
     #: actionable — the surviving trace a human can act on is the marker on the
-    #: entry itself (``count_unrecorded_captures``), and this pair is what the
+    #: entry itself (``unrecorded_captures``), and this pair is what the
     #: drain's own line names.
     unrecorded: int = 0
     unrecorded_sessions: list[str] = field(default_factory=list)
@@ -1699,6 +1699,21 @@ def write_spool_entry(
         "attempts": _attempts(prior or {}),
         "next_attempt_at_ms": _carried_window(prior or {}),
     }
+    # #12379: the "extraction outcome was never recorded" marker is STICKY.
+    # Carried forward across snapshots like the backoff above, because a growing
+    # session rewrites this meta on EVERY turn and the state it describes is not
+    # resolved by a new turn: the server's re-capture gate requires a RECORDED
+    # failure (`prior_capture_ok is False`), so a NULL-outcome session replays
+    # instead of re-extracting, however many times it is sent. Without this carry
+    # the only durable trace of a session that can never gain memory points would
+    # vanish on its next turn (measured in review). Only the drain's own filing
+    # stamps it; nothing CLEARS it, because only `session view` can say the
+    # server's state changed. ⛔ MIRRORED on the Pi leg — `writeSpoolEntry` in
+    # `tortoise/pi-hooks/tortoise-capture.ts` carries the same key forward, since
+    # the two legs share this directory and its fresh meta literal would otherwise
+    # erase a Python-stamped entry's marker (the cross-leg gap a reviewer proved).
+    if (prior or {}).get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE:
+        meta[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
     # Set-only-when-present, FIRST-WRITER-WINS, and — unlike `model` below,
     # which is never carried forward — carried forward across snapshots. The
     # `prior` lane wins when both are set, so a later snapshot can only FILL IN
@@ -2404,34 +2419,40 @@ def unrecorded_captures(root: Path) -> list[str] | None:
     Ids, not a bare count: a number a user cannot resolve to a session is a
     fact they cannot act on, and the entry is the only thing left that names it.
 
-    Read-only and TOTAL, like :func:`count_pending_captures`: a meta this leg
-    cannot parse is skipped (it cannot be read as an unrecorded capture either),
-    and ``None`` means the spool could not be LISTED — an unreadable directory is
-    not an empty one.
+    Read through the SAME read-only scanner the health line uses
+    (``list_spool_metas(repair=False)``), so this cannot disagree with the
+    ``queued``/``saturated`` reading about an unparseable meta, and a probe id is
+    skipped exactly as the ledger writer skips it (``session view`` cannot resolve
+    a synthetic probe). ``None`` means the spool could not be LISTED — an
+    unreadable directory is not an empty one.
 
     Includes an entry stamped and then left unfiled by a compare-and-swap miss:
     that session's outcome is just as unrecorded, and the next pass re-posts it.
     """
     try:
-        names = sorted(os.listdir(_entries_dir(root)))
-    except FileNotFoundError:
-        return []
+        metas, discards = list_spool_metas(root, repair=False)
     except OSError:
         return None
+    if any(d.get("reason") == DISCARD_SPOOL_UNREADABLE for d in discards):
+        return None
+    return _unrecorded_from_metas(metas)
+
+
+def _unrecorded_from_metas(metas: list[dict]) -> list[str]:
+    """The #12379 ids among already-parsed metas — one reading, no second walk."""
     found: list[str] = []
-    for name in names:
-        if not name.endswith(".meta.json"):
-            continue
-        try:
-            meta = json.loads((_entries_dir(root) / name).read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError):
-            continue
+    for meta in metas:
         if not isinstance(meta, dict):
             continue
         if meta.get(UNRECORDED_OUTCOME_KEY) != UNRECORDED_OUTCOME_VALUE:
             continue
-        sid = meta.get("session_id") or name[: -len(".meta.json")]
-        found.append(str(sid))
+        sid = str(meta.get("session_id") or "")
+        if not sid or is_probe_session_id(sid):
+            # A synthetic `session verify` probe is never filed by a drain and
+            # `session view` cannot resolve it, so naming it would be a dead end
+            # (`_record_backlog_deferral` skips it for the same reason).
+            continue
+        found.append(sid)
     return found
 
 
@@ -2472,12 +2493,22 @@ def _health_scan(root: Path) -> tuple[int, list[dict]] | None:
 
 
 class CaptureHealth(NamedTuple):
-    """The per-box answer: the state, the count, the refusal, and the LINE."""
+    """The per-box answer: the state, the count, the refusal, and the LINE.
+
+    ``unrecorded`` is the #12379 half, carried as DATA rather than re-derived by
+    the caller: every meta in the spool has already been parsed to answer
+    ``queued``/``saturated`` (:func:`_health_scan` exists because two walks over
+    this directory cost 2221 ms per line at the 20 000-entry ceiling), so a
+    second scan for the marker would re-introduce exactly the cost that one-scan
+    consolidation removed. It never appears on ``line`` — that spelling is
+    byte-identical to the Pi leg's and pinned by a cross-leg parity test.
+    """
 
     state: str
     queued: int
     status: int | None
     line: str
+    unrecorded: tuple[str, ...] = ()
 
 
 def _refusal_label(reason: object) -> str:
@@ -2616,6 +2647,10 @@ def _spool_health_line(
             "unreadable", 0, None,
             f"capture: UNREADABLE (cannot list {_entries_dir(root)})")
     queued, scan_metas = scan
+    # #12379: the unrecorded-outcome ids are taken from THIS scan's metas (see
+    # `CaptureHealth.unrecorded`) — the caller prints them, the pinned line never
+    # carries them, and no second walk over `entries/` is needed.
+    unrecorded = tuple(_unrecorded_from_metas(scan_metas))
     recorded = read_capture_status(root)
     if queued == 0 and recorded is not None and recorded.get("state") != "ok":
         # Self-healing: the block is over (or the other leg filed everything).
@@ -2646,7 +2681,8 @@ def _spool_health_line(
         return CaptureHealth(
             "blocked", queued, blocked_status,
             f"capture: BLOCKED ({queued} queued, {blocked_status} "
-            f"{_refusal_label(recorded.get('reason'))})")
+            f"{_refusal_label(recorded.get('reason'))})",
+            unrecorded)
     if saturated:
         # `queued` is the PENDING count, so a ceiling filled by terminal entries
         # reads `SATURATED (0 queued, …)` — true on both counts: nothing will be
@@ -2658,21 +2694,24 @@ def _spool_health_line(
             return CaptureHealth(
                 "saturated", queued, None,
                 "capture: SATURATED (no TORTOISE_API_KEY, "
-                f"{queued} queued, refusing new captures)")
+                f"{queued} queued, refusing new captures)",
+                unrecorded)
         return CaptureHealth(
             "saturated", queued, None,
-            f"capture: SATURATED ({queued} queued, refusing new captures)")
+            f"capture: SATURATED ({queued} queued, refusing new captures)",
+            unrecorded)
     if api_key == "":
         # The count is NOT dropped here: a keyless box is exactly the box whose
         # spool grows forever (nothing can file it), so the backlog stays on the
         # line that explains why.
         return CaptureHealth(
             "inactive", queued, None,
-            f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)")
+            f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)",
+            unrecorded)
     if queued > 0:
         return CaptureHealth("draining", queued, None,
-                             f"capture: DRAINING ({queued} queued)")
-    return CaptureHealth("ok", 0, None, "capture: OK (0 queued)")
+                             f"capture: DRAINING ({queued} queued)", unrecorded)
+    return CaptureHealth("ok", 0, None, "capture: OK (0 queued)", unrecorded)
 
 
 def _with_store_sync_terms(base: CaptureHealth, root: Path) -> CaptureHealth:
@@ -3123,19 +3162,28 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
             fresh["next_attempt_at_ms"] = 0
             # #12379: the DURABLE half of the trace, written in the same CAS as
             # `filed_key` so it describes the content that was actually filed.
-            # Set-only-when-present and CLEARED on a later filing that is not
-            # unrecorded (a re-filed entry whose outcome the server has since
-            # recorded must not keep claiming otherwise), the same
+            # STICKY, deliberately, and set-only-when-present (the same
             # omit-rather-than-write-null rule `filed_lane`/`filed_stamp` follow
-            # for the TS leg's strict comparison.
+            # for the TS leg's strict comparison).
+            #
+            # ⛔ It is NOT cleared by a later filing. A re-capture of this session
+            # cannot resolve the state: the server's re-capture gate requires a
+            # RECORDED failure (`prior_capture_ok is False`), so a session whose
+            # outcome is NULL replays and answers `replayed` — a body that says
+            # "already captured", not "recorded how extraction ended". Treating
+            # that as evidence of a recorded outcome deleted the only trace, on
+            # the routine resume/clear/compact path, while the condition provably
+            # persisted (measured in review: marker set → replay filing → marker
+            # gone, `filed_key` set). Only `session view` can answer currency, so
+            # a stale marker is corrected by reading the server, not by a client
+            # guess. `write_spool_entry` carries the key across snapshots and the
+            # Pi leg mirrors that carry (see its comment there).
             #
             # A CAS miss leaves the entry unfiled and unstamped: its content was
             # not what this POST carried, so the next pass re-posts it and that
             # attempt's own outcome stamps it.
             if unrecorded:
                 fresh[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
-            else:
-                fresh.pop(UNRECORDED_OUTCOME_KEY, None)
             _write_meta(root, fresh)
         # else: the posted content WAS filed; the entry keeps the newer turns
         # and stays unfiled, so they are re-posted next time.
