@@ -1224,6 +1224,78 @@ def test_a_plain_status_key_still_gets_the_documented_answer(env):
         sdk.update_entity(pid, status="live")
 
 
+def test_a_rendered_status_key_is_dropped_before_the_sibling_arm(env):
+    """Review round 13b (P2): the DROP is load-bearing, not just the refusal.
+
+    `keys_rendering_as` removes the key whose RENDERER names `status`, so the
+    label loop below cannot re-file it under its own label. Measured with the
+    drop reverted: a `:Point:Object` written through the content-rendering key
+    journals TWO records — the Point's `restatus` and then a
+    `revise`-under-`Object` for a property the caller never named — a record no
+    fold can apply, which is the #3311/#9649 class this whole guard exists to
+    close. Nothing pinned it before: reverting the hunk left 390 tests green.
+    """
+    sdk, events = env
+    pid = _live(sdk, "a hybrid written through a rendering key")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
+
+    sdk.update_entity(pid, **{_KStr("q"): "superseded"})
+
+    recs = _mutations(events, pid)
+    assert len(recs) == 1, (
+        f"one intent must journal ONE record, and the key must not ride into "
+        f"the sibling arm: {recs}")
+    assert recs[0].get("label") == "Point", (
+        f"the record must name the label the node replays as: {recs}")
+    assert recs[0].get("op") == "restatus", f"unexpected record: {recs}"
+
+
+def test_a_rendered_status_key_is_validated_against_the_SUBJECT_vocabulary(env):
+    """Review round 13b (P2): the Subject arm had the same presence hole.
+
+    The commit under review fixed this too but said so nowhere and pinned
+    nothing: with the fix reverted, `update_entity(<:Subject>,
+    **{KHash("status"): "dead"})` is ACCEPTED and stores a word that is not in
+    `SUBJECT_STATUS_VALUES` — the #1423 shape, reached through the key class this
+    round closed for the Point arm. Measured: head raises `Invalid status 'dead'
+    for a :Subject`, revert stores it.
+    """
+    sdk, _ = env
+    sid = sdk.create_entity("subject", "Rendered Key Co")["node"]["id"]
+
+    with pytest.raises(ValueError, match="Invalid status"):
+        sdk.update_entity(sid, **{_KHash("status"): "dead"})
+
+    row = sdk._get_proj().g.query(
+        "MATCH (n:Subject {id:$id}) RETURN n.status",
+        params={"id": sid}).result_set[0][0]
+    assert row != "dead", f"an undeclared Subject status must never land: {row!r}"
+
+
+def test_a_rendered_ECHO_of_the_stored_status_is_still_entailed(env):
+    """Review round 13b (P2): the exemption must see the rendering key too.
+
+    `_status_entailed` decides from the same rendering-aware mapping, so a
+    read-modify-write that echoed the terminal word back through the exotic key
+    is still recognised as an echo and ACCEPTED, rather than refused as a
+    transition. Measured with the exemption reverted onto `props`: the identical
+    call is refused (fail-closed, so this is the mildest of the three — but it
+    turns a declared-preserved capability, #3305, into a hard error).
+    """
+    sdk, events = env
+    old, _new = _superseded(sdk)
+    before = _row(sdk, old)
+    records_before = len(_mutations(events, old))
+
+    sdk.update_entity(old, **{_KHash("status"): "superseded"})
+
+    assert _row(sdk, old) == before, (
+        "an entailed echo must leave the row exactly as it was")
+    assert len(_mutations(events, old)) >= records_before, (
+        "the echo is a no-op on the row, not a refusal")
+
+
 # ══════════════════════════════════════════════════════════════════════
 def test_the_id_less_refusal_prescribes_no_unperformable_route(env):
     """Review round 12 (P3, AX rule 2): no repair the caller cannot execute.

@@ -47379,6 +47379,13 @@ class TortoiseSDK:
         # (measured at review cycle 4, after the value axis was already closed).
         # Imported here rather than at module scope because a new import line
         # shifts every ``sdk.py`` line the capstone documentation cites.
+        # (`lifecycle_props_by_rendering`/`keys_rendering_as` are the ONE
+        # exception, and deliberately: the #9649 guard calls the same pair in
+        # three places across `_update_entity` — presence, the entailed-echo
+        # exemption, the status drop — so per-call imports would put three
+        # copies of the rule in one function, which is the drift this module
+        # keeps paying for. The line-shift cost was paid once, when the pair
+        # landed, and re-derived in the same commit.)
         from .live import declares_event_state_key
 
         # ⛔ The reachability probe matches the label by BOTH identity keys, not
@@ -47601,10 +47608,13 @@ class TortoiseSDK:
             # status is the ONLY lifecycle field supplied, EVERY bound row holds
             # exactly that status, and none holds NULL (a NULL-status row is not
             # "equal", it is the legacy shape the backfill route exists for).
-            # (The `"status" in props` conjunct is REDUNDANT in situ — with no
-            # `status` the block is only reached via a temporal member, which the
-            # next clause refuses — and it is kept as defence-in-depth: it is what
-            # makes `props["status"]` below safe to read without a guard. A
+            # (The `"status" in _lifecycle_rendered` conjunct is REDUNDANT in
+            # situ — with no `status` the block is only reached via a temporal
+            # member, which the next clause refuses — and it is kept as
+            # defence-in-depth: it is what makes `_lifecycle_rendered["status"]`
+            # below safe to read without a guard, and, because the mapping is
+            # RENDERING-aware, it is also what tells an echo through an exotic
+            # key apart from a write that never named the field at all. A
             # mutation that deletes it is an EQUIVALENT mutant, not a hole.)
             _status_entailed = (
                 "status" in _lifecycle_rendered
