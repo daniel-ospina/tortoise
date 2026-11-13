@@ -656,6 +656,52 @@ def _event_state_key_names(key) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names))
 
 
+def lifecycle_props_by_rendering(props, guarded) -> dict:
+    """`{guarded name: value}` for every key whose RENDERER UNION names one.
+
+    ⛔ A door's PRESENCE TEST must be as shape-independent as the refusal it
+    guards, or the guard is decoration. `"status" in props` hashes the literal
+    name, so a `str` SUBCLASS key that overrides `__hash__` is missed by the
+    test (and by `set(props)`) while the WRITE still files it under `status` —
+    the live transport inlines `str(key)` and the journal writes the content.
+    That is not hypothetical: it was measured against this module's sibling door
+    (review cycles 4-8 of #11825) and then re-measured against the `#9649`
+    lifecycle guard added 70 lines below it in `update_entity` —
+    `update_entity(<superseded>, **{KHash("status"): "live"})` was ACCEPTED
+    (resurrected, window left closed, zero journal delta) while the #11825 guard
+    on the same node refused the identical call. Same door, two presence tests,
+    one hole.
+
+    FIRST-WINS, in iteration order, so a plain `str` key makes this equal to
+    `props[name]` and no ordinary call changes behaviour. Read this mapping to
+    ANSWER a question ("was a guarded field asked for?", "what value?") and use
+    `keys_rendering_as` to DROP the keys afterwards — reading `props[name]`
+    after this is exactly the hole it exists to close.
+    """
+    guarded = frozenset(guarded)
+    out: dict = {}
+    for key, value in props.items():
+        for name in _event_state_key_names(key):
+            if name in guarded:
+                out.setdefault(name, value)
+    return out
+
+
+def keys_rendering_as(props, names) -> list:
+    """The KEY OBJECTS in `props` that any renderer files under one of `names`.
+
+    The companion to `lifecycle_props_by_rendering`: after the guarded write has
+    been applied one way, a door must drop EVERY key that would re-write it
+    through the generic `SET n += $props` bag — and `k != "status"` drops only
+    the literal name, leaving the subclass key to write the field a second time
+    (measured: the status arm wrote `superseded`, the drop missed the key, and
+    the label loop's own write was the resurrecting one).
+    """
+    wanted = frozenset(names)
+    return [key for key in props
+            if wanted.intersection(_event_state_key_names(key))]
+
+
 def event_label_names(value) -> tuple[str, ...]:
     """EVERY name this LABEL can be filed under — the union of the two renderers.
 
