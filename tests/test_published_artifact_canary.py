@@ -15,6 +15,7 @@ green.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -1406,26 +1407,59 @@ def test_a_timeout_with_NO_recoverable_output_SAYS_so_instead_of_implying_silenc
     assert "the output above is what it produced first" not in transcript, transcript
 
 
-def test_the_DEFAULT_runner_recovers_output_from_a_command_it_kills(tmp_path):
-    """Drives the REAL runner against a REAL hung child, and pins that it is the DEFAULT.
+def test_a_timeout_with_BYTES_output_is_DECODED_not_crashed(tmp_path):
+    """`runner=subprocess.run` is the documented seam, and it attaches the killed command's
+    output as BYTES — even with `text=True` (`_check_timeout` joins the raw sequences).
 
-    ⛔ Both halves are load-bearing (#12363 round 17). Driving `_communicate_runner`
-    directly proves the drain works but NOT that `install_and_run` uses it: reverting the
-    default to `subprocess.run` left this case GREEN, because the output-losing runner it
-    exists to replace was never reached. A pin that cannot fire on the regression it
-    describes is the defect this suite is about.
+    ⛔ Measured on 3.12.3 (#12363 round 18): the first cut of the timeout handler appended
+    `exc.stdout` straight into `"\n".join(transcript)`, so exactly this shape raised
+    `TypeError: sequence item 1: expected str instance, bytes found` — the arm and the
+    recovered evidence were both lost and `main()`'s backstop turned a timeout into exit 2.
+    The str case above cannot see that; this one does.
     """
-    # The wiring half: the default must BE the draining runner, or the canary loses the
-    # diagnosis in exactly the hung-command state the alarm exists for.
+
+    def boom(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd, kwargs.get("timeout", 1), output=b"Collecting numpy\nERROR: disk full\n"
+        )
+
+    arm, transcript = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=5,
+        runner=boom,
+    )
+    assert arm.status == canary.UNKNOWN
+    assert "Collecting numpy" in transcript, transcript
+    assert "ERROR: disk full" in transcript, transcript
+    assert "the output above is what it produced first" in transcript, transcript
+
+
+def test_the_DEFAULT_runner_is_plain_subprocess_run_and_keeps_the_output(tmp_path):
+    """Two halves, both load-bearing (#12363 rounds 17 and 18).
+
+    1. The DEFAULT must stay `subprocess.run`. A custom `Popen`-based drain was tried and
+       reverted: it can only recover the tail by calling `communicate()` a second time,
+       and that reads to EOF — which never arrives while a surviving grandchild (the
+       FleetDB/pip build-backend daemon that INHERITS the pipe) still holds it. Measured:
+       a 2 s budget returned after **25 s**, and with a `start_new_session` daemon the
+       call never returned at all — so `--timeout` becomes unbounded and the handler (and
+       its marker, and its flush) never runs. The premise it was built on was also false:
+       `run()` does attach the output, as bytes.
+    2. A REAL killed child's output IS recovered, through that default.
+    """
     import inspect
 
     default = inspect.signature(canary.install_and_run).parameters["runner"].default
-    assert default is canary._communicate_runner, (
-        f"install_and_run defaults to {default!r}: a POSIX timeout then re-raises "
-        "without the child's output and the transcript shows silence"
+    assert default is subprocess.run, (
+        f"install_and_run defaults to {default!r}: a re-implemented runner re-opens the "
+        "unbounded-drain hazard and its output recovery is already provided by run()"
     )
+    # And the recovery is real: run() attaches the killed child's bytes, which the handler
+    # decodes, so the diagnosis survives the state where it is worth most.
     with pytest.raises(subprocess.TimeoutExpired) as raised:
-        canary._communicate_runner(
+        subprocess.run(
             [
                 sys.executable,
                 "-c",
@@ -1436,7 +1470,113 @@ def test_the_DEFAULT_runner_recovers_output_from_a_command_it_kills(tmp_path):
             text=True,
             timeout=1,
         )
-    assert "Collecting numpy" in (raised.value.stdout or ""), raised.value.stdout
+    assert b"Collecting numpy" in (raised.value.stdout or b""), raised.value.stdout
+
+
+def test_the_tool_imports_only_the_STANDARD_LIBRARY():
+    """The canary job has NO install step on purpose (a `pip install -e .` would let the
+    tool grade the tree), so one third-party import makes it die at IMPORT time — and an
+    interpreter-level failure exits 1, which both consumers read as "the published
+    artifact is broken — cut a release" (#12363 round 18).
+
+    ⛔ AST + `sys.stdlib_module_names`, not a substring scan: `from yaml import safe_load`,
+    `import os, yaml` and `importlib.import_module("yaml")` all defeat the literal form
+    this class of pin usually takes.
+    """
+    import ast
+
+    tree = ast.parse(
+        (REPO_ROOT / "tools" / "published_artifact_canary.py").read_text(encoding="utf-8")
+    )
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+    third_party = sorted(name for name in imported if name not in sys.stdlib_module_names)
+    assert third_party == [], (
+        f"tools/published_artifact_canary.py must be stdlib-only: the canary job installs "
+        f"nothing, so {third_party} would kill the tool at import time and its exit 1 would "
+        "be published as a release finding"
+    )
+    # The dynamic spellings the static import walk cannot see, walked explicitly: a
+    # literal target is classified, a NON-literal one is reported rather than cleared.
+    dynamic: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name not in {"__import__", "import_module"}:
+            continue
+        target = node.args[0] if node.args else None
+        if isinstance(target, ast.Constant) and isinstance(target.value, str):
+            dynamic.append(target.value.split(".")[0])
+        else:
+            dynamic.append(f"<unverifiable: {ast.dump(node)[:60]}>")
+    third_party_dynamic = sorted(name for name in dynamic if name not in sys.stdlib_module_names)
+    assert third_party_dynamic == [], (
+        f"a dynamic import defeats the stdlib-only pin above: {third_party_dynamic}"
+    )
+
+
+def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_path):
+    """Runs the canary step's OWN shell, twice, with a stub interpreter.
+
+    exit 1 is the irreversible instruction ("the published artifact is broken — cut a
+    release"), and BOTH consumers act on it. An interpreter-level failure exits 1 too — a
+    SyntaxError at import, an uncaught exception outside `main()`'s backstop, a
+    third-party import this job has no install step for — so the step must publish 1 only
+    when the tool's own report says FAIL (#12363 round 18). Without that, adding one
+    non-stdlib import orders an upload.
+
+    ⛔ Executed, not grepped: a presence pin on the `if` would stay green while the guard
+    compared the wrong variable or read the wrong path.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "release-artifact-canary.yml").read_text()
+    )
+    run = next(
+        step["run"]
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if "published_artifact_canary" in str(step.get("run", ""))
+    )
+
+    def execute(stub_body: str) -> tuple[int, str]:
+        bindir = tmp_path / "bin"
+        bindir.mkdir(exist_ok=True)
+        python_stub = bindir / "python"
+        python_stub.write_text(f"#!/bin/sh\n{stub_body}\n")
+        python_stub.chmod(0o755)
+        runner_temp = tmp_path / "runner"
+        runner_temp.mkdir(exist_ok=True)
+        out = tmp_path / "github_output"
+        out.write_text("")
+        summary = tmp_path / "summary.md"
+        env = {
+            **os.environ,
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_OUTPUT": str(out),
+            "GITHUB_STEP_SUMMARY": str(summary),
+        }
+        completed = subprocess.run(
+            ["bash", "-c", run], cwd=str(REPO_ROOT), env=env, capture_output=True, text=True
+        )
+        return completed.returncode, out.read_text()
+
+    # (a) the interpreter dies before the tool can report: nothing is published.
+    rc, output = execute("exit 1")
+    assert rc == 2, "an interpreter-level crash was published as a RELEASE finding"
+    assert "exit_code=2" in output, output
+
+    # (b) the tool's own report says FAIL: 1 is published, which is the whole point.
+    rc, output = execute('printf \'{"verdict": "FAIL", "exit_code": 1}\n\'; exit 1')
+    assert rc == 1, "a genuine FAIL was downgraded to a detector fault"
+    assert "exit_code=1" in output, output
 
 
 def test_the_pip_failure_detail_is_the_LAST_stderr_LINE_not_a_list_repr(tmp_path):

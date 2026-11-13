@@ -101,6 +101,7 @@ jobs:
         run: |
           set -o pipefail
           rc=0
+          mkdir -p "$RUNNER_TEMP/canary"
           # BUDGET ARITHMETIC — and what it does NOT cover, stated because this comment
           # has already been wrong once (#12363 review B3, cycle 2, round 3):
           #   commands: 3 x `--timeout` (venv, pip, `tortoise init`) = 3 x 300 = 900 s,
@@ -119,8 +120,22 @@ jobs:
           python tools/published_artifact_canary.py \
             --timeout 300 \
             --fetch-timeout 30 \
+            --json > "$RUNNER_TEMP/canary/verdict.json" \
             --summary-file "$GITHUB_STEP_SUMMARY" \
             --transcript-dir "$RUNNER_TEMP/canary" || rc=$?
+          # ⛔ exit 1 means "the published artifact is broken — cut a release", and BOTH
+          # consumers act on it: the run summary tells a human to cut an irreversible
+          # upload and the alert files that instruction on an issue. An INTERPRETER-level
+          # failure exits 1 too — a SyntaxError at import, an uncaught exception outside
+          # `main()`'s backstop, a third-party import this job has no install step for —
+          # so 1 is published ONLY when the tool's own report says FAIL. Anything else
+          # that reaches here as 1 is a DETECTOR fault and must read as exit 2, which is
+          # the code both consumers treat as "the canary could not answer" (#12363 round
+          # 18). Without this, adding one non-stdlib import to the tool orders an upload.
+          if [ "$rc" = "1" ] && ! grep -q '"verdict": "FAIL"' "$RUNNER_TEMP/canary/verdict.json" 2>/dev/null; then
+            echo "::warning::published-artifact-canary exited 1 WITHOUT publishing a FAIL verdict — classifying as a DETECTOR fault (exit 2), not a release call"
+            rc=2
+          fi
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit "$rc"
       # `always()` — not `failure()` — so this step is still considered when the JOB is
