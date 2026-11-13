@@ -1177,15 +1177,16 @@ def test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket(sdk, monkeypat
     assert per_finding["alreadyRetired"] is True
     assert "no such judgement" in per_finding["detail"]
 
-    # ⛔ THE RULE THAT HOLDS: every finding lands in AT LEAST one bucket. It is
-    # NOT `stale == retired + alreadyRetired + failed + gone` — a landed
-    # retirement whose cache reconcile failed is counted in both `retired` and
-    # `failed` (one finding, two honest answers: see
-    # test_a_failed_cache_write_counts_as_a_FAILED_sweep, which asserts
-    # retired=1 and failed=1 for a single stale finding).
-    accounted = (counts["retired"] + counts["alreadyRetired"]
-                 + counts["failed"] + counts["gone"])
-    assert accounted >= counts["stale"], (accounted, counts)
+    # ⛔ THE OVERLAP RULE — that `retired` and `failed` (or `gone`) can BOTH count
+    # one finding, so the buckets are per-finding predicates and never a partition
+    # — is deliberately NOT asserted here, and this is the measurement that decided
+    # it: with a single finding whose `stale` and `alreadyRetired` are already
+    # asserted above (`stale` 1, `retired` 0, `alreadyRetired` 1), any
+    # `accounted >= stale` line is ARITHMETICALLY FORCED true, so no mutant can
+    # red it — a dead assertion that would read as coverage. The rule is pinned
+    # where it can actually fail: `test_a_failed_cache_write_counts_as_a_FAILED_sweep`
+    # (one finding counted in `retired` AND `failed`) and the goal-gone test
+    # (`retired` 1 AND `gone` 1); it is documented on `invalidate_stale`.
     # nothing was written for a claim that no longer exists (a missing point reads
     # back as a falsy dict, which is why `_read_claim` folds it to MISSING)
     assert not sdk.get_entity(made["point_id"])
