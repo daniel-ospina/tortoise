@@ -906,9 +906,9 @@ file_alert() { # kind title body dedup_id
     # ⛔ rc MUST be 0 even though nothing was filed: every call site is a BARE command
     # under `set -euo pipefail`, so returning non-zero here would abort the driver at
     # the first alert and lose the hour's sweep — the one thing this branch exists to
-    # preserve (measured: `return 1` here reds 8 case-118 assertions, including
-    # "the SWEEP still ran"). This is NOT the alert_streak_set contract, whose callers
-    # test its rc; do not "normalize" the two.
+    # preserve (measured at this head: `return 1` here reds 19 case-118 assertions,
+    # including "the SWEEP still ran", and nothing outside case 118). This is NOT the
+    # alert_streak_set contract, whose callers test its rc; do not "normalize" the two.
     return 0
   fi
   tmp="$(mktemp)"
@@ -1707,27 +1707,73 @@ SWEEP_ELAPSED=$(( $(date +%s) - SWEEP_START ))
 # observed. rc=0 with an empty body is a completed exchange that carried no
 # report. Only the two budget/empty shapes are judged against completion age;
 # a transport fault stays loud.
+# #12264: keep the body EXACTLY as the call returned it. The rewrite below
+# substitutes the driver's OWN bodies for three shapes, and "did the app send me a
+# status?" must be answered about what came back over the wire — not about the
+# driver's own stand-in. `RUN_SUBSTITUTED` (read ONLY by the first log line below)
+# records that substitution so that line can keep naming the SHAPE: a budget timeout
+# arrived with no body at all, and "the body carried no readable status" would
+# describe a body that never came (#12264 round 6). `RUN_REPORTED` is the other flag:
+# it drives `SWEEP_REPORT_READ`, the catch-all incident and the terminal `*)` arm,
+# none of which those three substituted statuses can reach (they have their own arms).
+RAW_RUN="$RUN"
+RUN_SUBSTITUTED=0
 if [ "$CURL_RC" -eq 28 ]; then
-  RUN='{"status":"driver_timeout"}'
+  RUN='{"status":"driver_timeout"}'; RUN_SUBSTITUTED=1
 elif [ "$CURL_RC" -ne 0 ]; then
-  RUN='{"status":"transport_error"}'
-elif [ -z "$RUN" ]; then
-  RUN='{"status":"empty_response"}'
+  RUN='{"status":"transport_error"}'; RUN_SUBSTITUTED=1
+elif [ -z "${RUN//[[:space:]]/}" ]; then
+  # #12264 finding 3: `-z` alone only catches a zero-length body. `$( )` strips
+  # trailing NEWLINES but not a `\r` or spaces, so a 200 carrying "\r\n" arrived
+  # non-empty, jq then read pure whitespace as NO input (exit 0, prints nothing),
+  # the `|| echo` fallback never fired, and the run published a BLANK status while
+  # filing a categorical outage. Treat whitespace-only as the empty exchange it is.
+  RUN='{"status":"empty_response"}'; RUN_SUBSTITUTED=1
 fi
-RUN_STATUS="$(printf '%s' "$RUN" | jq -r 'if type=="object" then (.status // "error") else "error" end' 2>/dev/null || echo error)"
+# Trim surrounding whitespace: a reported `" backed_up"` is still a SUCCESS report,
+# and an untrimmed one reached the catch-all and filed "backups are NOT running".
+RUN_STATUS="$(printf '%s' "$RUN" | jq -r 'if type=="object" then ((.status // "error") | tostring | gsub("^\\s+|\\s+$"; "")) else "error" end' 2>/dev/null || echo error)"
+# #12264: `error` above is DERIVED, never reported — that expression synthesizes it
+# for a body that carries no usable status. Three shapes land on it and they must
+# not share a claim: a body that is NOT a JSON object (a proxy's HTML 502, a
+# truncated payload), a JSON object whose `.status` is absent/null/false (jq's `//`
+# replaces exactly the falsy values, so `{}`, `{"status":null}` and `{"status":false}`
+# all derive `error`), and the app's own `{"status":"error"}`. Two MORE shapes do
+# not derive `error` but are equally unreadable, and this flag catches them: a blank
+# string (`{"status":""}`, `{"status":"   "}` survives `//`) and a non-string
+# truthy value (`{"status":123}`, `{"status":0}` survives `//` and `tostring` makes
+# it `123`/`0`). Of all of them, only `{"status":"error"}` is a report the app made. This flag answers exactly that
+# question, so neither a summary nor a filed incident has to credit the app with a
+# status it never sent. `test("\\S")` makes it agree with the body guard above: an
+# all-whitespace status is not a status. The `|| echo no` and the case below degrade
+# fail-closed on every degradation path: an unparseable body makes jq exit 5, so
+# `|| echo no` answers `no`; an empty/whitespace body makes jq exit 0 and print
+# nothing, so the flag is empty and the `case` below normalises it to `no`. Neither
+# path can leave the flag reading `yes`.
+RUN_REPORTED="$(printf '%s' "$RAW_RUN" | jq -r 'if (type=="object") and (.status|type=="string") and (.status|test("\\S")) then "yes" else "no" end' 2>/dev/null || echo no)"
+case "$RUN_REPORTED" in yes) ;; *) RUN_REPORTED=no ;; esac
 # #12135 review round 4 (F1a): the driver's OWN classification of "no sweep report
-# was read" — the same four statuses the ride-along skip list carries (`:2045`) and
-# the no-report terminal arm on the driver side already names. The CLI terminal
-# summary must key on THIS, not on a per-status guess inside one branch:
-# `transport_error` sets NO_COVERAGE=1 unconditionally (`:2008`), so any "no report"
-# arm placed in the NO_COVERAGE=0 branch is unreachable for it — an arm that reads
-# like coverage and can never run. One flag, both branches, all four statuses.
+# was read" — the same four statuses the ride-along skip list carries (the
+# purge/reconcile guard's own `RUN_STATUS` test, "the skip set is FOUR
+# statuses") and the no-report terminal arm on the driver side already names. The
+# CLI terminal summary must key on THIS, not on a per-status guess inside one branch:
+# `transport_error` sets `NO_COVERAGE=1` unconditionally in its own case arm, so any
+# "no report" arm placed in the NO_COVERAGE=0 branch is unreachable for it — an arm
+# that reads like coverage and can never run. One flag, both branches, all four
+# statuses — plus any body that carries no readable status, which is the fifth way
+# to read no report (#12264).
 SWEEP_REPORT_READ=1
 case "$RUN_STATUS" in
   already_running|driver_timeout|transport_error|empty_response) SWEEP_REPORT_READ=0 ;;
 esac
-# Security review: RUN_STATUS is app-controlled — never publish it verbatim.
+# #12264: the flag must key on "the app sent a status I could read", not on the
+# derived string and not on the body's TYPE alone (an object can carry no status).
+[ "$RUN_REPORTED" = "yes" ] || SWEEP_REPORT_READ=0
+# Security review: RUN_STATUS is app-controlled — never publish it verbatim. A body
+# that carried a blank status must not publish `status=` (an empty field reads as a
+# driver bug, and `status=<unreadable>` is what this run actually measured).
 RUN_STATUS_SAFE="$(redact "$RUN_STATUS")"
+[ -n "$RUN_STATUS_SAFE" ] || RUN_STATUS_SAFE="<unreadable>"
 # Review P2 (bug-deep): `teams_backed_up` counts only DEFAULT-graph backups, so
 # a team whose default is legitimately empty while a CUSTOM graph archived
 # reads as 0. `graph_totals.backed_up` is the real coverage signal.
@@ -1774,7 +1820,18 @@ SWEEP_REASONS="$(
     | sort | uniq -c | awk '{c=$1; $1=""; sub(/^ /, ""); printf "%s%s=%s", (NR>1?" ":""), $0, c}' \
     || true
 )"
-log "sweep status: $RUN_STATUS_SAFE (took ${SWEEP_ELAPSED}s, curl rc=${CURL_RC})"
+if [ "$RUN_REPORTED" = "yes" ] || [ "$RUN_SUBSTITUTED" = "1" ]; then
+  log "sweep status: $RUN_STATUS_SAFE (took ${SWEEP_ELAPSED}s, curl rc=${CURL_RC})"
+else
+  # #12264: printing the derived token bare would credit the app with a status it
+  # never sent — and this is the first line an operator greps after a red run. No
+  # parenthetical quoting it either: for `{"status":123}` the token came OFF THE
+  # WIRE (stringified by `tostring`), not from the driver, so "driver-derived '<x>'"
+  # was untrue for exactly the shapes this branch exists for. Nothing is republished
+  # here: the incident carries the RAW body (truncated + redacted), which is where an
+  # operator reads what actually arrived.
+  log "sweep status: <unreadable> — the body carried no readable status (took ${SWEEP_ELAPSED}s, curl rc=${CURL_RC})"
+fi
 if [ -n "$SWEEP_REASONS" ]; then
   log "sweep per-graph outcomes: ${SWEEP_REASONS} (graph_totals: attempted ${GRAPHS_ATTEMPTED}, backed up ${GRAPHS_BACKED_UP})"
 fi
@@ -1955,10 +2012,12 @@ case "$RUN_STATUS" in
         # before the outcome is computed (backup_sweep.py:1842 precedes the status
         # assignment) — so it does not prove the POOL is servable. Of the three
         # direct-R2 stale causes, exactly ONE has no healthy reading: an archive
-        # timestamp that cannot be parsed (:1148), i.e. the pool's AGE is
+        # timestamp that cannot be parsed (the `newest_ts = 0` branch, which sets
+        # `POOL_UNPARSEABLE`), i.e. the pool's AGE is
         # unmeasurable. That one reds. The other two are deliberately NOT gated
-        # here: "team prefix present but no default archive" (:1183) is precisely
-        # what a team whose DEFAULT graph is legitimately empty looks like while a
+        # here: "team prefix present but no default archive" (that branch's own log
+        # line) is precisely what a team whose DEFAULT graph is legitimately empty
+        # looks like while a
         # CUSTOM graph archives — this leg is DEFAULT-only by design (#2375), and
         # the `no_teams|no_work` arm above RESOLVES SWEEP_NO_COVERAGE on that
         # shape. Reding it (which round 3 did) would red every timeout run forever
@@ -2027,10 +2086,23 @@ case "$RUN_STATUS" in
   *)
     # Any other body status (error / enum_failed / unrecognized) means the
     # sweep tried and failed — loud REGARDLESS of pool state (the 0-team
-    # envelope applies only to the enumerated-empty statuses above).
-    log "sweep did not back up (status=$RUN_STATUS_SAFE) — filing SWEEP_NO_COVERAGE (job red)"
-    file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but the sweep backed up nothing" \
-      "sweep status=${RUN_STATUS_SAFE} (raw: $(redact_truncate "$RUN" 300)). The sweep is enabled but backed up no team — backups are NOT running." ""
+    # envelope applies only to the enumerated-empty statuses above). That claim is
+    # TRUE ONLY when the body actually reported a status: the derived-`error`
+    # shapes fall to the else branch below, which says the outcome is UNMEASURED.
+    if [ "$RUN_REPORTED" = "yes" ]; then
+      log "sweep did not back up (status=$RUN_STATUS_SAFE) — filing SWEEP_NO_COVERAGE (job red)"
+      file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but the sweep backed up nothing" \
+        "sweep status=${RUN_STATUS_SAFE} (raw: $(redact_truncate "$RUN" 300)). The sweep is enabled but backed up no team — backups are NOT running." ""
+    else
+      # #12264: the body carried no status this run could read (an HTML 502, a
+      # truncated payload, or `{}` — `error` above is derived, not reported), so
+      # "backed up no team / backups are NOT running" is a claim this run never
+      # measured. The filing is still right and still fail-closed — NO report IS
+      # no coverage evidence — but say what was measured, not what it implies.
+      log "sweep returned no readable report — filing SWEEP_NO_COVERAGE (job red)"
+      file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — the sweep call returned no readable report" \
+        "the driver's POST /v1/internal/backups/sweep answered, but the body carried no status this run could read (raw: $(redact_truncate "$RUN" 300)). No STATUS was read, so the sweep's own outcome is UNMEASURED: this incident is filed because no status was read, not because a zero was measured. Backups may or may not be running — check the app's /status last_sweep and the app logs." ""
+    fi
     NO_COVERAGE=1
     ;;
 esac
@@ -2186,6 +2258,11 @@ fi
 # probe, and this one is carried for audit: `tortoise/hosted_api.py` stores the
 # body verbatim and surfaces only the driver's `ran_at`).
 if [ "$AWS_CLI_MISSING" = "1" ]; then r2_ok=null; else r2_ok=$([ "$R2_OK" = "1" ] && echo true || echo false); fi
+# #12264: the heartbeat's `status` is the value the DRIVER publishes for its run —
+# which may be the app's own `.status` (stringified when it is not a string) or a
+# driver-derived token for a body that carried none. It is the driver's record, not a
+# claim about what the app said, so the derived value belongs here even when the body
+# was unreadable; the operator-facing log line is where that distinction must show.
 curl -sS -m 20 -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d "$(jq -nc --arg rid "$(date +%s)" --arg s "$RUN_STATUS_SAFE" --argjson ok "$r2_ok" '{run_id:$rid,status:$s,r2_ok:$ok}')" \
   "${API}/v1/internal/driver/heartbeat" >/dev/null 2>&1 || true
@@ -2264,7 +2341,8 @@ if [ "$AWS_CLI_MISSING" = "1" ]; then
   #
   # Review C6: the first fix still GUESSED from `RUN_STATUS`, and guessed wrong for
   # every shape whose status implies no coverage fault — `degraded` is `backed_up`
-  # with per-graph errors (`:1764` takes `backed_up|degraded ;;` and leaves
+  # with per-graph errors (the `backed_up|degraded)` case arm takes
+  # `backed_up|degraded ;;` and leaves
   # NO_COVERAGE=0, suite cases 31a/46 pin that), and `already_running` with a fresh
   # stamp and `driver_timeout` with a fresh completed sweep are equally silent. So
   # a healthy-backups run ended by inventing a coverage fault — the mirror of the
@@ -2278,19 +2356,24 @@ if [ "$AWS_CLI_MISSING" = "1" ]; then
     # classification instead of asserting the leg ran.
     if [ "$SWEEP_REPORT_READ" = "0" ]; then
       # #12135 review round 7 (cycle-5 note 1): the F1d comment belongs to the
-      # NO_COVERAGE=0 arm (:2312), NOT here — this branch is gated on
+      # NO_COVERAGE=0 arm (the `elif [ "$SWEEP_REPORT_READ" = "0" ]` below), NOT
+      # here — this branch is gated on
       # NO_COVERAGE=1, so a comment saying "no coverage fault was recorded
       # (NO_COVERAGE=0)" would be exactly backwards, and a later lane trusting it
       # could "restore" the line below to deny a coverage fault this run DID record:
       # the C5 defect direction, reintroduced by a comment. State this arm's own
       # truth: a coverage fault WAS recorded, off a run that read no report — so the
-      # fault rests on the driver's own classification (:2008/:2019), not on a sweep
+      # fault rests on the driver's own classification (the `RUN_STATUS` case arms
+      # that reach this branch — `already_running`'s future/stale/unverifiable
+      # sub-tests, `driver_timeout|empty_response`, `transport_error`, and the `*)`
+      # catch-all — all of which set `NO_COVERAGE=1`), not on a sweep
       # result, and its incident could not be filed without the CLI.
       cli_scope="the sweep call returned NO report (status=$RUN_STATUS_SAFE), and a coverage fault was recorded — its SWEEP_NO_COVERAGE incident could not be filed while the CLI is missing"
     else
       # #12135 review round 6 (F2b): "a SECOND fault" is false for the three
       # zero-coverage statuses. Their coverage fault exists ONLY because R2_LIST_OK
-      # was pinned to 0 by the missing client (:1857) — it is the missing CLI's own
+      # was pinned to 0 by the missing client (`AWS_CLI_MISSING`) — it is the
+      # missing CLI's own
       # consequence, not an independent second fault, and the incident body it would
       # have carried even blames ListObjects permissions. Attribution, in the
       # opposite direction from F2a.
@@ -2303,8 +2386,11 @@ if [ "$AWS_CLI_MISSING" = "1" ]; then
     fi
   elif [ "$SWEEP_REPORT_READ" = "0" ]; then
     # #12135 review round 4 (F1b): the NO_COVERAGE=0 arm for a run that read no
-    # report at all — `already_running` on a fresh stamp reaches here via
-    # `:1802/:1814/:1826`, `driver_timeout` via `:1918/:1934`. The generic arm below
+    # report at all — `already_running` with a usable stamp inside the driver-down
+    # window (including the skew-clamped variant) reaches here, and
+    # `driver_timeout`/`empty_response` with a fresh completed sweep. Their
+    # future-stamp and stale-lock sub-tests set `NO_COVERAGE=1` and land in the
+    # branch above instead. The generic arm below
     # claimed "the sweep leg ran too", which their own "sweep skipped" line and the
     # driver-side no-report arm both contradict. `driver_timeout` is included: its
     # fresh-stamp reading is about COVERAGE (the default arm's second clause, which
@@ -2312,9 +2398,11 @@ if [ "$AWS_CLI_MISSING" = "1" ]; then
     # satisfiable at once, which is why this is its own branch and not a fifth case.
     # #12135 review round 5 (F1c): "no sweep leg completed" was itself false in
     # 100% of the shapes that reach this arm — `already_running` on a fresh stamp
-    # logs `sweep lock held; last real sweep 5m ago — healthy` (:1827), and
+    # logs `sweep lock held; last real sweep 5m ago — healthy` (the `LOCK_SKEW_NOTE`
+    # log line in the held-lock arm), and
     # `driver_timeout`/`empty_response` on a fresh stamp log `the last COMPLETED
-    # sweep was 5m ago` (:1985). A completed sweep IS on record; what this run did
+    # sweep was 5m ago` (the `SWEEP_CAUSE` log line in the timeout arm). A completed
+    # sweep IS on record; what this run did
     # not get is a REPORT. (The third shape — no usable stamp + measured-empty pool
     # — cannot reach here while the CLI is missing, because R2_LIST_OK is pinned to
     # 0 and that forces a SWEEP_NO_COVERAGE filing.) Say what the run actually
@@ -2377,7 +2465,18 @@ if [ "$NO_COVERAGE" = "1" ]; then
     driver_timeout|empty_response|transport_error|already_running)
       fail "no sweep report was read (status=$RUN_STATUS_SAFE) — see the SWEEP_NO_COVERAGE / POOL_STALE incidents" ;;
     *)
-      fail "sweep backed up nothing (status=$RUN_STATUS_SAFE) — see the SWEEP_NO_COVERAGE incident" ;;
+      # #12264: `error` is derived — a body that is not a JSON object carries no
+      # report either, and this arm is the NORMAL path (the flag above is only read
+      # while the CLI is missing). Same two sentences, split on what was read.
+      if [ "$RUN_REPORTED" = "yes" ]; then
+        fail "sweep backed up nothing (status=$RUN_STATUS_SAFE) — see the SWEEP_NO_COVERAGE incident"
+      else
+        # No "driver's own classification" here: for a non-string truthy
+        # `.status` the published token came OFF THE WIRE (stringified by `tostring`),
+        # so attributing it to the driver was the same overclaim the first log line
+        # no longer makes (#12264 round 7).
+        fail "no readable sweep report — the call's body carried no readable status (status=$RUN_STATUS_SAFE), so what it backed up is UNMEASURED — see the SWEEP_NO_COVERAGE incident"
+      fi ;;
   esac
   exit 1
 fi
