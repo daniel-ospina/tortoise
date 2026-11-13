@@ -213,34 +213,56 @@ PASSAGE_TEXT = (
 
 
 class _FakeGraph:
-    def __init__(self, rows):
-        self._rows = rows
+    """A real in-memory store: CREATE lands, and the reads see what landed.
+
+    ⛔ The first version answered the landing check from a CONSTANT, so deleting
+    the `CREATE` in `run` stayed green (measured) and the "did not land" refusal
+    was exercised by nothing — while a benign id-scheme rename reddened all four
+    drive tests, because the pin was bound to the fake's literal rather than to
+    the write. A dict makes the check derive from the writes.
+    """
+
+    def __init__(self):
+        self.stored: dict[str, str] = {}
+        self.rows = [["rp-12297000000", "first"], ["rp-12297000001", "second"]]
 
     def query(self, cypher, params=None):
-        # the two reads `run` makes before the loop: the stored-id check and the
-        # cache-warming read. Both want a one-column result.
-        rows = ([[r[0]] for r in self._rows]
-                if "STARTS WITH" in cypher or "RETURN n.id" in cypher
-                else self._rows)
+        cypher = cypher or ""
+        params = params or {}
+        if cypher.lstrip().upper().startswith("CREATE"):
+            if params.get("id") is not None:
+                self.stored[params["id"]] = params.get("c") or ""
+            return self._result([])
+        if "STARTS WITH" in cypher:
+            return self._result([[k] for k in self.stored])
+        if "n.id IN $ids" in cypher:
+            ids = list(params.get("ids") or [])
+            return self._result([[i] for i in ids if i in self.stored])
+        if "RETURN n.id" in cypher:
+            return self._result([["warm"]])
+        return self._result(self.rows)
 
+    @staticmethod
+    def _result(rows):
         class _R:
             result_set = rows
         return _R()
 
 
 class _FakeProj:
-    def __init__(self, rows):
-        self.g = _FakeGraph(rows)
+    def __init__(self):
+        self.g = _FakeGraph()
 
 
 class _FakeSDK:
-    """Reads return the harvested ids in fused order; writes are recorded."""
+    """Reads return the harvested ids in fused order; writes land in _FakeGraph."""
 
     def __init__(self, *a, **kw):
-        self.rows = [["rp-12297000000", "first"], ["rp-12297000001", "second"]]
+        self.proj = _FakeProj()
+        self.rows = self.proj.g.rows
 
     def _get_proj(self):
-        return _FakeProj(self.rows)
+        return self.proj
 
     def tortoise_fts_query(self, query, **kw):
         return [{"id": r[0]} for r in self.rows]
@@ -261,8 +283,9 @@ def drive(monkeypatch, tmp_path, capsys):
     from tortoise import sdk as sdk_mod
 
     def _go(*, stats_for=None, model=lambda: "cross-encoder/from-the-knob",
-            **over):
+            arg_model=None, drop_write=False, **over):
         calls: list[dict] = []
+        loaded: list[str] = []
 
         def _pool(query, rows, **kw):
             calls.append(kw)
@@ -270,8 +293,14 @@ def drive(monkeypatch, tmp_path, capsys):
                 "applied": True, "scored": len(rows)}
             return rows, dict(stats)
 
+        def _scorer(m):
+            # ⛔ RECORD the id the load check validates: without it, a run that
+            # loads one model and times another passes every artefact assertion.
+            loaded.append(m)
+            return object(), "ok"
+
         monkeypatch.setattr(rr, "rerank_pool", _pool)
-        monkeypatch.setattr(rr, "get_scorer", lambda m: (object(), "ok"))
+        monkeypatch.setattr(rr, "get_scorer", _scorer)
         monkeypatch.setattr(rr, "fused_rerank_model", model)
         monkeypatch.setattr(rr, "rerank_pool_enabled", lambda: False)
         monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
@@ -279,75 +308,129 @@ def drive(monkeypatch, tmp_path, capsys):
                             lambda *a, **k: [{"id": "x", "content": PASSAGE_TEXT}])
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/x")
         out = tmp_path / "artifact.json"
-        code = cal.run(_run_ns(threads=0, out=str(out), **over))
+        if drop_write:
+            # A store that silently accepts the CREATE and keeps nothing — the
+            # partial-write shape the landing check exists to catch.
+            monkeypatch.setattr(
+                _FakeGraph, "query",
+                lambda self, cypher, params=None: _FakeGraph._result(
+                    [] if (cypher or "").lstrip().upper().startswith("CREATE")
+                    else ([[k] for k in self.stored]
+                          if "STARTS WITH" in (cypher or "") else [])))
+        code = cal.run(_run_ns(threads=0, out=str(out), model=arg_model, **over))
         art = json.loads(out.read_text()) if out.exists() else None
-        return code, art, capsys.readouterr().err, calls
+        return type("Run", (), {"code": code, "art": art,
+                                "err": capsys.readouterr().err,
+                                "calls": calls, "loaded": loaded})()
 
     return _go
 
 
 def test_a_healthy_run_records_the_resolved_model_and_no_skips(drive):
-    """Exit 0, the artifact names the model the resolver returned, and the
-    applied/skipped fields are the arms' own tally."""
-    code, art, err, calls = drive()
-    assert code == 0, err
-    assert art is not None, "a clean run must emit its artifact"
-    assert art["config"]["model"] == "cross-encoder/from-the-knob", art["config"]
-    assert art["config"]["rerank_applied_on_every_query"] is True
-    assert art["config"]["rerank_skipped_read"] == 0
-    assert art["latency"]["pairs_scored"] > 0
+    """Exit 0, and the artifact names the model BOTH calls were handed."""
+    run = drive()
+    assert run.code == 0, run.err
+    assert run.art is not None, "a clean run must emit its artifact"
+    assert run.art["config"]["model"] == "cross-encoder/from-the-knob", run.art["config"]
+    assert run.art["config"]["rerank_applied_on_every_query"] is True
+    assert run.art["config"]["rerank_skipped_read"] == 0
+    assert run.art["latency"]["pairs_scored"] > 0
     # the timed call was handed that SAME id — the binding, not a neighbour of it
-    assert calls and all(c["model"] == "cross-encoder/from-the-knob"
-                         for c in calls), calls
+    assert run.calls and all(c["model"] == "cross-encoder/from-the-knob"
+                             for c in run.calls), run.calls
 
 
-def test_a_degraded_query_END_THE_RUN_and_leaves_no_artifact(drive):
+def test_an_EXPLICIT_model_pins_both_calls(drive):
+    """``--model`` must reach the load check AND the timed call.
+
+    ⛔ The drive otherwise only exercises ``args.model is None``, where the flag
+    and the resolver agree by construction — so `model = fused_rerank_model()`
+    and `get_scorer(fused_rerank_model())` both stayed green (measured), i.e. the
+    flag could be silently ignored and the artifact would record the knob's id
+    beside ``model_was_explicit: True``.
+    """
+    run = drive(model=lambda: "cross-encoder/from-the-knob",
+                arg_model="cross-encoder/from-the-args")
+    assert run.code == 0, run.err
+    assert run.art["config"]["model"] == "cross-encoder/from-the-args", (
+        run.art["config"])
+    assert run.loaded == ["cross-encoder/from-the-args"], (
+        f"the load check validated {run.loaded!r}, not the flag's model")
+    assert all(c["model"] == "cross-encoder/from-the-args" for c in run.calls), (
+        run.calls)
+
+
+def test_a_DEGRADED_query_ends_the_run_and_leaves_no_artifact(drive):
     """The refusal must FIRE: exit 3 and nothing written.
 
-    ⛔ Measured against the previous pins — deleting the `return 3` from the
-    refusal arm, or its whole `if`, left every test green while the artifact went
-    on to report a gained/lost 0 that is indistinguishable from a real zero.
+    ⛔ Only the FIRST query degrades, so a refusal that fails to return lets the
+    later queries score and the run COMPLETE — exit 0 with an artifact — which is
+    what this asserts against. (Not "so `pairs_scored > 0`": the refusal returns
+    BEFORE the increment, so `pairs_scored` is 0 at that moment either way. The
+    discriminating signals are the exit code and the absent artifact.) Measured
+    against the previous source-text pins, which stayed green when the `return 3`
+    (or the whole `if`) was deleted while the artifact went on to report a
+    gained/lost 0 indistinguishable from a real zero.
     """
-    # ⛔ ONLY THE FIRST query degrades: with every query degraded, the
-    # ``pairs_scored == 0`` refusal produces exit 3 as well and this test would
-    # pass with the degrade refusal reduced to a print (measured — it did). The
-    # second query scoring means the ONLY thing that can stop the run is the
-    # refusal under test.
-    code, art, err, _ = drive(
+    run = drive(
         stats_for=lambda n: ({"applied": False, "degrade_reason": "non-finite "
                               "scores", "scored": 0} if n == 1 else
                              {"applied": True, "scored": 2}))
-    assert code == 3, (code, err)
-    assert art is None, "a refused run must not leave an artifact behind"
-    assert "REFUSED" in err and "non-finite scores" in err, err
+    assert run.code == 3, (run.code, run.err)
+    assert run.art is None, "a refused run must not leave an artifact behind"
+    assert "REFUSED" in run.err and "non-finite scores" in run.err, run.err
 
 
 def test_a_READ_side_skip_is_counted_and_disclosed_in_the_artifact(drive):
-    """A tolerated skip must still show up, and every other query must score.
-
-    Two queries (prefix + midspan); the first is skipped for a read-side reason.
-    The run completes, the artifact says the rerank did NOT apply everywhere, and
-    the skip is counted — the pair the old literal got wrong.
-    """
-    code, art, err, _ = drive(
+    """A tolerated skip must still show up, and every other query must score."""
+    run = drive(
         stats_for=lambda n: ({"applied": False, "degrade_reason": "empty_pool",
                               "scored": 0} if n == 1 else
                              {"applied": True, "scored": 2}))
-    assert code == 0, err
-    assert art["config"]["rerank_skipped_read"] == 1, art["config"]
-    assert art["config"]["rerank_applied_on_every_query"] is False
-    assert sum(b["rerank_skipped_read"] for b in art["arms"].values()) == 1
+    assert run.code == 0, run.err
+    assert run.art["config"]["rerank_skipped_read"] == 1, run.art["config"]
+    assert run.art["config"]["rerank_applied_on_every_query"] is False
+    assert sum(b["rerank_skipped_read"] for b in run.art["arms"].values()) == 1
 
 
 def test_a_run_that_scores_NOTHING_refuses(drive):
     """No scored pair means no latency: refuse rather than publish a null."""
-    code, art, err, _ = drive(
+    run = drive(
         stats_for=lambda n: {"applied": False, "degrade_reason": "empty_pool",
                              "scored": 0})
-    assert code == 3, (code, err)
-    assert art is None
-    assert "no pair was ever scored" in err, err
+    assert run.code == 3, (run.code, run.err)
+    assert run.art is None
+    assert "no pair was ever scored" in run.err, run.err
 
+
+def test_the_wired_width_in_the_artifact_is_the_RESOLVED_one(drive, monkeypatch):
+    """``pool_scored_is_wired_default`` must compare against the RESOLVED width.
+
+    ⛔ The wired read resolves through ``rerank.fused_rerank_pool_width()``, env
+    knob first. Comparing ``args.limit`` to the CONSTANT reports "this is the
+    wired configuration" for a run the product would score at a different width —
+    the same class as naming a model the product would not load.
+    """
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK_POOL", "15")
+    run = drive()
+    assert run.code == 0, run.err
+    assert run.art["config"]["wired_pool_width"] == 15, run.art["config"]
+    assert run.art["config"]["pool_scored_is_wired_default"] is False, (
+        run.art["config"])
+    assert run.art["config"]["pool_scored"] == cal.POOL
+
+
+def test_a_passage_that_did_not_land_refuses(drive):
+    """The landing check must be able to fail, and to fail on ITS OWN evidence.
+
+    ⛔ The first fake answered this check from a CONSTANT, so deleting the
+    ``CREATE`` in ``run`` — or the whole landing check — stayed green (measured).
+    The store now records writes, so the check reads what actually landed.
+    """
+    run = drive(drop_write=True)
+    assert run.code == 3, (run.code, run.err)
+    assert run.art is None
+    assert "did not land" in run.err, run.err
 
 
 # ── 6. the run refuses a baseline that is not the fused order ──────────────

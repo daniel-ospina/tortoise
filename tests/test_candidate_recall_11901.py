@@ -1635,14 +1635,19 @@ def test_the_rerank_ARM_is_handed_the_resolved_model(tool_mod, monkeypatch):
     # branches that are dead at runtime, so `if args.rerank and False:` kept this
     # green while a --rerank run would emit an artifact with no `arms.rerank` at
     # all (measured) — the cross-encoder column §8's control comparison rests on.
+    # ⛔ The INNERMOST guard whose body holds the assignment, not `guards[0]`:
+    # taking the outermost one reds a behaviour-preserving `elif args.rerank:`
+    # (its test is the preceding branch's) and `if args.rerank is True:`.
     guards = [n for n in ast.walk(tree)
               if isinstance(n, ast.If)
               and any(isinstance(x, ast.Call) and isinstance(x.func, ast.Name)
                       and x.func.id == "build_rerank_arm"
                       for x in ast.walk(n))]
     assert guards, "the seam is not behind any guard"
-    assert ast.unparse(guards[0].test) == "args.rerank", (
-        f"the --rerank branch is guarded by {ast.unparse(guards[0].test)!r}")
+    innermost = min(guards, key=lambda n: len(list(ast.walk(n))))
+    test = ast.unparse(innermost.test)
+    assert test in ("args.rerank", "args.rerank is True", "bool(args.rerank)"), (
+        f"the --rerank branch is guarded by {test!r}")
     # ⛔ The LEXICAL arms legitimately call `_rerank_arm` directly, and they DO
     # pass a `model` kwarg — but it is a label (`lexical:difflib`), not a
     # cross-encoder id. What distinguishes them structurally is that they supply

@@ -317,8 +317,12 @@ def run(args: argparse.Namespace) -> int:
     # whose whole job is to decide whether the lever earns its gate. Refuse, in
     # the tool's own declared style (never a silent skip), and record the gate in
     # the artifact so an intended armed run stays auditable.
-    from tortoise.rerank import rerank_pool_enabled
+    from tortoise.rerank import fused_rerank_pool_width, rerank_pool_enabled
 
+    #: The width the WIRED path would score right now (env knob first) — recorded
+    #: beside ``pool_scored`` so "is this the shipped configuration" is decidable
+    #: from the artifact rather than from the constant.
+    _wired_pool_width = fused_rerank_pool_width()
     _ambient_gate = rerank_pool_enabled()
     if _ambient_gate and not args.allow_reranked_baseline:
         print("REFUSED: TORTOISE_FUSED_RERANK is armed, so the read's own order "
@@ -337,10 +341,7 @@ def run(args: argparse.Namespace) -> int:
               "eval \"$uri\"", file=sys.stderr)
         return 3
 
-    from tortoise.rerank import (
-        DEFAULT_FUSED_RERANK_POOL,
-        get_scorer,
-    )
+    from tortoise.rerank import get_scorer
     from tortoise.sdk import TortoiseSDK
 
     # ⛔ #12297, MEASURED ON THIS BOX: torch defaults to one thread per core (16
@@ -374,9 +375,14 @@ def run(args: argparse.Namespace) -> int:
                 "CREATE (n:Point {id:$id, content:$c, pointKind:'core:claim', "
                 "createdAt:'2026-11-01T00:00:00Z'})",
                 params={"id": row["id"], "c": row["content"]})
+        # ⛔ Scoped to THIS run's ids, not the graph: ``--graph`` exists so a
+        # graph can be reused, and then every id is pre-existing — a dropped or
+        # partial write would pass a ``STARTS WITH`` check and the run would
+        # measure the previous content while ``corpus.passages`` reported the new
+        # count.
         stored = {r[0] for r in proj.g.query(
-            "MATCH (n:Point) WHERE n.id STARTS WITH 'rp-12297' RETURN n.id",
-            params={}).result_set}
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+            params={"ids": [p["id"] for p in passages]}).result_set}
         missing = [p["id"] for p in passages if p["id"] not in stored]
         if missing:
             print(f"REFUSED: {len(missing)} of {len(passages)} passages did not "
@@ -512,8 +518,13 @@ def run(args: argparse.Namespace) -> int:
             "config": {
                 "cut": CUT,
                 "pool_scored": args.limit,
-                "pool_scored_is_wired_default": (
-                    args.limit == DEFAULT_FUSED_RERANK_POOL),
+                # ⛔ Against the RESOLVED width, not the constant: the wired path
+                # resolves through ``fused_rerank_pool_width()`` (env knob first),
+                # so with ``TORTOISE_FUSED_RERANK_POOL=15`` exported a ``== 40``
+                # check reports "the wired configuration" for a width the product
+                # would not score.
+                "pool_scored_is_wired_default": args.limit == _wired_pool_width,
+                "wired_pool_width": _wired_pool_width,
                 "retrieval_limit": args.limit,
                 "pool_size": args.pool_size,
                 # ⛔ The RESOLVED id, not the flag: ``args.model`` is None on

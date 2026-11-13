@@ -697,6 +697,7 @@ def test_a_degraded_scorer_reports_every_candidate_unscored(sdk, monkeypatch):
                            leg_trace=trace)
     entry = _rerank_entries(trace)[0]
     assert entry["ran"] is False
+    assert entry["degraded"] is False, entry   # the DISCLOSED arm, not a leg failure
     assert entry[rerank.RERANK_SCORED_KEY] == 0
     candidates = _candidate_count(sdk, monkeypatch, "zebra migration", 4)
     assert candidates > 0, "premise: the read must return candidates"
@@ -755,6 +756,12 @@ def test_a_non_relevance_order_by_is_never_re_picked_by_the_rerank(sdk, monkeypa
     entry = _rerank_entries(trace)[0]
     assert entry["ran"] is False, f"the skip must be disclosed ({entry})"
     assert entry["reason"] == "order_by_not_relevance", entry
+    # ⛔ `degraded` stays False on a SKIP too: in a leg trace that flag means "a
+    # retrieval leg did not run", and ``read_status`` folds ANY entry's value into
+    # the read's status — a True here reports a healthy confidence-ordered read as
+    # DEGRADED to every hosted consumer. Pinned on every entry shape, not just the
+    # `ok` one.
+    assert entry["degraded"] is False, entry
 
 
 def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
@@ -1050,6 +1057,7 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
     assert entries and entries[0]["ran"] is False, (
         f"the skip must be disclosed in the leg trace, not silent ({entries})")
     assert entries[0]["reason"] == "recency_order_applied", entries[0]
+    assert entries[0]["degraded"] is False, entries[0]   # a skip is not a degrade
 
     # ⛔ AND THE OTHER HALF — the one that makes the guard a GUARD. Step 4b fails
     # OPEN (its ``except`` arm leaves plain RRF order), so a recency request whose
