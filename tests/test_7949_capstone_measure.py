@@ -5262,15 +5262,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # insertion that moved every number below it. That is the class here — a
         # line-number pin over a number another tool owns, not a citation anyone
         # mis-copied. The entry read 9943 at `9828250732` and reads 9973 at
-        # `c17e3c5f78` — +30 across THREE landing PRs that each registered test
-        # files above it (`ba84fbfabf` 9949, `e200623286` 9965, `cd22562c24`
-        # 9973). ⛔ The `9951` this comment used to defend was never a value on
-        # `main`: it was 9943 + the 8 lines #12060 was predicted to add, and two
-        # other registrations landed first, so the prediction described no
-        # checkable commit — which is why this one number has now been
-        # "re-derived" three times. That is the row's real defect and not a
+        # `c17e3c5f78` (`ba84fbfabf` 9949, `e200623286` 9965, `cd22562c24`
+        # 9973). ⛔ The `9951` this comment used to defend was never a value of the
+        # ENTRY on `main`: it was 9943 + the 8 lines #12060 was predicted to add, and
+        # two other registrations landed first, so the prediction described no
+        # checkable commit (the ROW printed it; no commit's `carve_out:` entry sat
+        # there). That is the row's real defect and not a
         # transcription slip: the number is owned by another tool, so every
         # landing PR above it is a re-derivation this pin cannot do for itself.
+        # ⛔ No repair COUNT is stated in prose here — the row's own comment below
+        # ENUMERATES the values and the repairs instead, because every prose count
+        # this file has carried had already gone stale when it was read.
         # `carve_out:` opens 9847 and `uri_requiring:` 10178 at `c17e3c5f78`, so
         # 9973 is inside the section, and the identical text also sits at 6090 and
         # 8489 (+8 / +30 over `9828250732`'s 6082 / 8459 for the same cause), which
@@ -5280,6 +5282,35 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
+        #
+        # ⛔ The durable SHAPE is not unavailable, it is UNOWNED, and the
+        # distinction matters because a reader will otherwise mistake this repair for
+        # a class fix. The right shape for the CLAIM is (b): the document cites the
+        # ANCHOR TEXT (`- test_pack_logic_writeprobe_11083.py`) plus the section
+        # (`carve_out:`), and the pin asserts that anchor sits inside that section —
+        # no integer at all. That removes an INTEGER, not the claim: the pin still
+        # reds the moment the entry leaves `carve_out:`, so it does NOT go green over
+        # a stale document. It is deferred because it changes BOTH the document's
+        # wording AND `_pin_row_failures`' row shape (a shared helper) — a class
+        # change with no owner today. (c) — the pin DERIVES the anchor's line and
+        # compares it to the document's number — is dominated rather than rejected
+        # for effort: the document still owns an integer, so both the maintainer
+        # edit and the fleet-wide red survive it, while it buys only the pin's half
+        # of the bookkeeping.
+        # …and the deferral must not read as coverage of the class. #11573 (the
+        # citation-guard issue) was asked and did NOT take it: its guard is
+        # `tests/test_docs_citation_refs.py`, whose `_PATH_REF` is
+        # `(?<![\w/])(docs/[A-Za-z0-9_./-]+\.md):(\d+)(?:-(\d+))?` — a
+        # `config/ci-surfaces.yml:NNN` citation inside an epic doc is never even
+        # PARSED, and widening its `_TARGET_SCOPE` only widens which `.md` targets
+        # are admitted. Its own docstring states the limit that is exactly this
+        # failure: line PRESENCE, not semantic correctness — and the red that opened
+        # this work landed on a NON-BLANK comment line. Measured and recorded on
+        # #11573; the recurrence is ACCEPTED until a lane takes the (b) shape for
+        # manifest cites.
+        # ⛔ Do NOT weaken this row to anchor-only as a "durability" fix: the number
+        # in the DOCUMENT is what a reader acts on, and a pin that stopped reading it
+        # would go green over a document whose number is wrong.
         # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
         # by the sentence rather than by the number: `:631` is where `main` had it,
         # then #12112 moved it three times (`687`, `695`, `700`) and each move left a
@@ -5314,15 +5345,38 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("705", "`plan_hierarchy_edges` returns one"),
         ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            # 9714 -> 9951 -> 9973: re-derived from THIS tree (`awk
+            # 9714 -> 9951 -> 9973 -> 9987: re-derived from THIS tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
             # a merge. Measured values, not a delta: 9943 at `9828250732`, 9949
             # at `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24` and at
-            # `c17e3c5f78`. ⛔ `9951` is in that list only because this row
-            # printed it — it was a predicted merge-tree value (9943 + 8), never a
-            # line any commit on `main` carried.
-            ("9973", "- test_pack_logic_writeprobe_11083.py"),
+            # `c17e3c5f78`, 9987 at `f1f74135a15b` and at `abf186f110`. ⛔ `9951`
+            # is in that list only because this row printed it — it was a predicted
+            # merge-tree value (9943 + 8), never a line any commit on `main`
+            # carried. It is the ELEVENTH value this row has carried on `main` —
+            # `9633, 9635, 9714, 9823, 9906, 9917, 9933, 9934, 9951, 9973, 9987` —
+            # and the COUNT is deliberately not the claim: reproduce it, one value
+            # per commit, with
+            #   for c in $(git log --reverse --format=%h -- tests/test_7949_capstone_measure.py); do
+            #     git show $c:tests/test_7949_capstone_measure.py \
+            #       | rg -o '"[0-9]{4}", "- test_pack_logic_writeprobe_11083.py"'; done | sort -u
+            # The four repairs of the pin itself that this one follows:
+            # `eb27f96d3ecd` -> 9906, `63f725cca168` -> 9933, `23f80aef6a55` -> 9934,
+            # `e59e60769287` -> 9973 (`git show <c>:tests/… | rg -o '"[0-9]{4}", "- test_pack_logic_writeprobe_11083.py"'`
+            # reproduces each — a pattern that omits the `"[0-9]{4}", ` part
+            # prints only the filename and no number). The enumeration is also
+            # posted on #9158, the tracker entry for the class. The
+            # mover here is `f1f74135a15b` (#12302): +14 lines into
+            # `config/ci-surfaces.yml` above the entry, of which TWELVE are prose
+            # and TWO are `test_name_entropy_12294.py` registrations (one indented
+            # under `core:`, one a column-zero row under `tier1:`, neither a
+            # `carve_out:` entry) — so this mover WAS a registration, which is the
+            # load-bearing fact: the next registration above the entry moves it
+            # again.
+            # Re-derive from the tree, never from the last green run:
+            #   git log --oneline --reverse <derived-at>..origin/main \
+            #       -- config/ci-surfaces.yml
+            ("9987", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
