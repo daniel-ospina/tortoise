@@ -473,7 +473,7 @@ def underscore_run_terms(text: str) -> list[str]:
       name. The bound exists because an unbounded run makes the query string
       proportional to the input, and an over-limit query is recorded as an FTS
       FAILURE — it degrades LATER searches. No run in the measured population
-      reaches it (longest 31).
+      reaches it (longest 34, ``test_capstone_preregistration_9075``).
 
     …plus the two bounds every other tail in :func:`build_or_query` already
     carries, and which are NOT lossless: the dedupe, and
@@ -720,7 +720,9 @@ def build_or_query(
     Appending the composite as a further OR alternative recovers it with zero
     regressions (candidate recall@3 0.7133 -> 0.9633 on a pinned 300-name
     population, 75 gains / 0 losses, p < 0.001). Byte-identical for every query
-    without an inner ``_``.
+    carrying NO ``_`` at all — the narrower true claim: a run with a LEADING or
+    TRAILING ``_`` also fires (``'foo_ bar'`` -> ``'foo|bar|foo_'``), so such a
+    query is not a control case.
     """
     # #8933: the identifier terms are computed SEPARATELY from the capped
     # original set, so they can never consume one of its slots — the A4
@@ -759,9 +761,32 @@ def build_or_query(
     # is the composite. `x__y` emission is the same BYTES either way, `10:00_u`
     # is not (`00_u` vs `10\:00_u`), so the predicate counts them.
     composites = underscore_run_terms(query) if underscore_terms_enabled() else []
-    if max_terms < 1 or (len(tokens) <= 1 and not aliases and not phrases
-                        and not composites):
+    # #12360 review round 3 (P1): the predicate above counts the composites, but
+    # the OR path must NOT then drop the escaped-raw literal that branch used to
+    # send. The composite is the INDEX's term only while the run is pure ASCII
+    # (`[A-Za-z0-9_]`); the index treats every Unicode LETTER as a word character
+    # too, so for `año_actual` the index holds `año_actual` as ONE term and the
+    # composite this module can build from it (`o_actual`) is a term NOTHING
+    # holds. MEASURED on the lane, `_upsert_object` + `run_fts_query`, switch
+    # OFF vs ON: `año_actual` (o0), `dé_installer` (o4), `x_café` (o2),
+    # `the_café` (o3) and `_café` (o1) were each returned by their own name with
+    # the switch OFF and returned ZERO rows with it ON — a recall regression
+    # inside the very class this issue repairs, on the default-ON path.
+    #
+    # So when the pre-#12360 predicate would have been degenerate, the literal
+    # STAYS and the composites ride beside it: additive by construction, which
+    # is what the zero-loss column claims. `x__y` and `a_` are byte-identical
+    # through the dedupe below (`x__y|x__y` -> `x__y`), and `10:00_u` keeps its
+    # gain (`10\:00_u` + `00_u`).
+    degenerate = len(tokens) <= 1 and not aliases and not phrases
+    if max_terms < 1:
         return escape_redisearch_literal(query)
+    if degenerate and not composites:
+        return escape_redisearch_literal(query)
+    if degenerate:
+        literal = escape_redisearch_literal(query)
+        tail = [c for c in composites if c != literal]
+        return "|".join([literal, *tail])
     tokens.sort(key=len, reverse=True)  # stable — ties keep source order
     original = tokens[:max_terms]
     terms = list(original)

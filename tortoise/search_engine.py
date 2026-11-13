@@ -2950,10 +2950,12 @@ def run_fts_query(
     # pinned by ``tests/test_identifier_tokens_8933.py``.
     #
     # #12360: and there is a SECOND no-argument, ON-by-default input, so the
-    # surviving byte-identity claim is narrower than "every other query": any
-    # query with NO inner ``_`` is byte-identical, while a `_`-carrying query
-    # also gains its composite run (``web_search`` -> ``search|web|web_search``,
-    # recall@3 0.7133 -> 0.9633 measured on both product doors). Its switch is
+    # surviving byte-identity claim is narrower than "every other query": a
+    # query carrying NO ``_`` AT ALL is byte-identical, while any query with a
+    # `_` run — including one at the run's EDGE (``'foo_ bar'`` ->
+    # ``'foo|bar|foo_'``) — also gains its composite
+    # (``web_search`` -> ``search|web|web_search``, recall@3 0.7133 -> 0.9633
+    # measured on both product doors). Its switch is
     # ``TORTOISE_UNDERSCORE_TERMS``, pinned by
     # ``tests/test_12360_underscore_or_terms.py`` and evidenced in
     # ``docs/research/2026-11-13-12360-underscore-or-terms/``.

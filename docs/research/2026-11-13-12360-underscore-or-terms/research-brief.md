@@ -94,8 +94,11 @@ Three properties the port keeps:
   `#12298`.
 * **No write-path change** — RediSearch already stores the composite (that is the defect), so
   records written before this change are reachable.
-* **Byte-identical for every query without an inner `_`** — pinned, including `#8933`'s own
-  `ERR-4032` → `err|err4032|"err 4032"`.
+* **Byte-identical for every query carrying NO `_` at all** — pinned, including `#8933`'s own
+  `ERR-4032` → `err|err4032|"err 4032"`. ⚠️ The claim is that narrow, and it was corrected in
+  round 3: a run with a **leading or trailing** `_` also fires (`'foo_ bar'` →
+  `'foo|bar|foo_'`), so such a query is not a control case — the pin only ever covered queries
+  with no `_` in them.
 
 Four deviations from the measurement arm, and only ONE of them is lossless:
 
@@ -118,7 +121,7 @@ wrong, measured on a live lane: the index holds composites far past 48, and
 style) is returned by its own name but was **dropped** by the 48 bound, i.e. the exact defect this
 issue repairs. The alias bound is about a NORMALISED concatenation; the composite is the index's
 own term, so it takes the index's own length evidence. Above 128 the run is dropped and that loss
-is declared (a name that long is not in any measured population; the longest here is 31).
+is declared (a name that long is not in any measured population; the longest run here is **34**, `test_capstone_preregistration_9075`).
 
 ## 2. Per class — where the effect lives (recall@3, before → after)
 
@@ -187,12 +190,12 @@ the index itself:
 | `__a` (leading underscores) | yes | yes — the index holds `__a` |
 | `_menu` (run after a unicode break) | yes | no (harmless: an OR alternative that cannot match) |
 | `a__b` (double underscore: the tail emits the composite as the ONLY term, so the bytes are the raw text) | yes | no |
-| 48×`a` (a bounded single-char run is dropped; the length bound holds) | yes | no |
+| 48×`a` (no `_`, so the run never qualifies; the emitted query is the escaped literal) | yes | no |
 | `search\|web\|web_search` (the full union) | yes | yes |
 
 Nothing in the emitted alphabet can be a metacharacter: `underscore_run_terms` only ever emits
 `[a-z0-9_]` (lowercased), and a test asserts that against the module's own
-`_REDI_SEARCH_SPECIAL` set. The tail is also bounded (8 runs × 48 chars), so the OR budget
+`_REDI_SEARCH_SPECIAL` set. The tail is also bounded (8 runs × **128** chars — §1's bound, and this row said 48 until round 3), so the OR budget
 stays a bound.
 
 ## 5. Declared gaps
@@ -200,6 +203,17 @@ stays a bound.
 * **`:Object` only.** The mechanism is label-independent (the index tokenises stored text on
   every label) and should be *worse* on `:Point`, where a composite inside `content` is the
   only term the index holds — a prediction, not a measurement.
+* **Non-ASCII: `café_menu` is still unretrievable — and five neighbouring shapes very nearly
+  stopped being retrievable, which is the round-3 P1 and the more useful record.** Round 2 made
+  the composites count in the degenerate-branch predicate without keeping the escaped literal that
+  branch used to emit, and the composite is the index's own term only for an ASCII run. MEASURED
+  (`_upsert_object` + `run_fts_query`, switch the only difference): `año_actual` (o0),
+  `dé_installer` (o4), `x_café` (o2), `the_café` (o3) and `_café` (o1) were each returned by their
+  OWN NAME with the switch OFF and returned **zero rows** with it ON — a recall regression inside
+  the class this issue repairs, on the default-ON path, and it falsified the additive claim above.
+  Repaired: where the pre-change predicate was degenerate the escaped literal STAYS and the
+  composites ride beside it (`año_actual` → `año_actual|o_actual`), which restores the additivity
+  by construction. Pinned by `test_the_non_ascii_class_keeps_its_literal`.
 * **The run alphabet is ASCII, so a NON-ASCII `snake_case` name is still unretrievable.**
   Measured on a live lane: the index holds `café_menu` as ONE term
   (`queryNodes('Object', 'café_menu')` → the record; `'café'`, `'menu'`, `'caf_'`, `'_menu'` →

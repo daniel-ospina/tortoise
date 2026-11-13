@@ -202,6 +202,17 @@ _QUERIES = [
     "what's my fastest 5k",
     "PR #12298",
     "the capstone_verdict check",
+    # round 3: the NON-ASCII shapes. These were each returned by their own name
+    # with the switch OFF and returned ZERO rows with it ON, because the
+    # degenerate branch counted the composites and then dropped the escaped
+    # literal — and the composite is the index's term only for an ASCII run
+    # (`año_actual` is ONE index term; `o_actual` is held by nothing).
+    "año_actual",
+    "dé_installer",
+    "the_café",
+    "café_menu",
+    # an EDGE underscore fires too, so this is NOT a byte-identity case
+    "foo_ bar",
     "   ",
     "",
 ]
@@ -219,13 +230,47 @@ class TestAdditive:
                 f"additive contract broken for {q!r}: {missing} vanished "
                 f"({before} -> {after})")
 
-    def test_byte_identical_without_an_inner_underscore(self, monkeypatch):
+    def test_byte_identical_without_any_underscore(self, monkeypatch):
+        """The claim is "no `_` AT ALL", not "no INNER `_`" (round 3).
+
+        A run with a leading or trailing ``_`` also fires, so a query carrying
+        one is not a control case — asserted below, because the wider wording
+        would have a downstream lane measuring this change against exactly such
+        a query and treating the movement as impossible.
+        """
         for q in ["gym schedule", "error ERR-4032 on deploy", "PR #12298",
                   "what's my fastest 5k", ""]:
             monkeypatch.setenv(UNDERSCORE_ENV, "0")
             before = build_or_query(q)
             monkeypatch.setenv(UNDERSCORE_ENV, "1")
             assert build_or_query(q) == before, q
+
+    def test_an_edge_underscore_is_not_a_control_case(self, monkeypatch):
+        for q, off, on in [("foo_ bar", "foo|bar", "foo|bar|foo_"),
+                           ("the report_ is ready", "report|ready",
+                            "report|ready|report_"),
+                           ("_foo bar", "foo|bar", "foo|bar|_foo")]:
+            monkeypatch.setenv(UNDERSCORE_ENV, "0")
+            assert build_or_query(q) == off, q
+            monkeypatch.setenv(UNDERSCORE_ENV, "1")
+            assert build_or_query(q) == on, q
+
+    def test_the_degenerate_branch_keeps_the_escaped_literal(self, monkeypatch):
+        """A composite that the index does NOT hold must not replace the literal.
+
+        ``año_actual`` is ONE index term; the ASCII run splitter can only build
+        ``o_actual``, which nothing holds. Counting composites in the degenerate
+        predicate without keeping the literal therefore made a previously
+        findable record unfindable — the round-3 P1.
+        """
+        monkeypatch.setenv(UNDERSCORE_ENV, "1")
+        for q in ["año_actual", "dé_installer", "x_café", "the_café", "_café"]:
+            terms = _or_terms(build_or_query(q))
+            assert q in terms, (q, terms)
+        # the same-bytes cases are unchanged, and 10:00_u keeps its gain
+        assert build_or_query("x__y") == "x__y"
+        assert build_or_query("a_") == "a_"
+        assert build_or_query("10:00_u") == "10\\:00_u|00_u"
 
     def test_the_shipped_8933_bytes_are_untouched(self):
         # The #8933 pin's own byte assertion, re-stated here so a future edit
@@ -435,6 +480,31 @@ class TestLiveReachability:
         assert "o-12360-long" not in before, (
             "the OFF arm found a 61-char snake_case name — the fixture is not "
             f"measuring the defect ({before!r})")
+
+
+    def test_the_non_ascii_class_keeps_its_literal(self, proj, monkeypatch):
+        """A non-ASCII `snake_case` name stays findable — it was, and then wasn't.
+
+        The index holds ``año_actual`` as ONE term, so the escaped literal is
+        what finds it, while the ASCII run splitter can only offer ``o_actual``.
+        Both arms must return the record: the change has to be additive here as
+        much as anywhere, and the regression this pins was measured on a lane
+        rather than reasoned about.
+        """
+        from tortoise.search_engine import run_fts_query
+
+        name = "año_actual"
+        proj._upsert_object({"id": "o-12360-nonascii", "name": name,
+                             "object_kind": "core:other"})
+        self._wait_indexed(proj, 1)
+
+        for setting, arm in (("0", "OFF"), ("1", "ON")):
+            monkeypatch.setenv(UNDERSCORE_ENV, setting)
+            ids = [i for i, _s in run_fts_query(proj.g, name,
+                                                entity_type="object", limit=3)]
+            assert "o-12360-nonascii" in ids, (
+                f"{arm} arm lost a non-ASCII name it could find: "
+                f"{build_or_query(name)!r} -> {ids!r}")
 
 
 # ── the committed evidence ────────────────────────────────────────────────

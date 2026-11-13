@@ -1321,7 +1321,11 @@ _SOURCE_INDEX_ENTRIES = (
 
 
 def _indexed_term_runs(text: str) -> list[str]:
-    """The RAW alphanumeric runs of *text*, in the INDEX's own sense.
+    """The RAW alphanumeric runs of *text*, as the READ splits them.
+
+    For every character except one this IS the index's own sense; ``_`` is that
+    exception, and it is why this line no longer claims the index outright — see
+    the ``_`` paragraph at the end of this docstring.
 
     ⛔ NOT :func:`~tortoise.sparse.tokenize_sparse_query` (#11536 review round 8,
     P1/P2). That function is the QUERY parser: it DROPS stopwords,
