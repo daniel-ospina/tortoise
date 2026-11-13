@@ -47157,43 +47157,52 @@ class TortoiseSDK:
             # because an unrelated `:Point:Source` carried that value as its url
             # (measured: the row the caller named was never written and the
             # refusal blamed a Point it never addressed — AX rule 2).
-            # ⛔ Review F7-1: INDEX-BACKED, one arm at a time. A single
+            # ⛔ Review F7-1/F8-1: INDEX-BACKED and ONE ROUND TRIP. A single
             # `WHERE n.id = $id OR (n:Event AND n.eventId = $id) …` defeats the
             # `Point(id)` range index (measured: 23.7 ms vs 0.6 ms at 60k Points),
-            # and it ran for EVERY label's lifecycle write — including the
-            # `:Object`/`:Subject` writes whose id can never match a Point. Each
-            # arm below is the probe the write itself uses, so the ordinary
-            # id-addressed call costs exactly the one indexed read it did before
-            # this change.
-            _ADDRESS_TAIL = ("RETURN count(n) AS hits, "
-                             "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) "
-                             "AS idless, collect(DISTINCT n.id) AS ids")
-            _addressed = proj.g.query(
-                f"MATCH (n:Point {{id:$id}}) {_ADDRESS_TAIL}",
-                params={"id": id_val}).result_set
-            _hits, _idless, _addressed_ids = (
-                _addressed[0] if _addressed else (0, 0, []))
-            if not _hits:
-                # The `:Event` arm resolves by `eventId` (its own primary key).
-                _by_event = proj.g.query(
-                    f"MATCH (n:Event {{eventId:$id}}) WHERE n:Point "
-                    f"{_ADDRESS_TAIL}",
-                    params={"id": id_val}).result_set
-                _hits, _idless, _addressed_ids = (
-                    _by_event[0] if _by_event else (0, 0, []))
-            if not _hits:
-                # The `:Source` arm consults `url` only when nothing matched by
-                # `id`, so the url arm of this read asks the same question.
-                _source_by_id = proj.g.query(
-                    "MATCH (n:Source {id:$id}) RETURN count(n)",
-                    params={"id": id_val}).result_set[0][0]
-                if not _source_by_id:
-                    _by_url = proj.g.query(
-                        f"MATCH (n:Point:Source) WHERE n.url = $id "
-                        f"{_ADDRESS_TAIL}",
-                        params={"id": id_val}).result_set
-                    _hits, _idless, _addressed_ids = (
-                        _by_url[0] if _by_url else (0, 0, []))
+            # and paying that for every label's lifecycle write was the half a
+            # per-arm chain fixed while making `:Object`/`:Subject`/`:Event` writes
+            # pay 3-4 round trips instead of one. `UNION` keeps every arm on its
+            # own index and collapses them to one statement:
+            #   rank 1 = Point by `id`            (index `Point(id)`)
+            #   rank 2 = Event by `eventId`       (index `Event(eventId)`), Point only
+            #   rank 3 = Source by `id`           (index `Source(id)`) — existence only
+            #   rank 4 = Point:Source by `url`    (index `Source(url)`), read only when
+            #                                      rank 3 missed, because that is the
+            #                                      order the `:Source` write arm uses
+            # The ids from every arm that matched are UNIONED (a write can bind more
+            # than one label arm), and the rank-3 row contributes no id — it is a
+            # precedence probe, not a target.
+            _addr = {r[0]: r for r in proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN 1 AS rank, count(n) AS hits, "
+                "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
+                "collect(DISTINCT n.id) AS ids "
+                "UNION "
+                "MATCH (n:Event {eventId:$id}) WHERE n:Point RETURN 2 AS rank, "
+                "count(n) AS hits, "
+                "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
+                "collect(DISTINCT n.id) AS ids "
+                "UNION "
+                "MATCH (n:Source {id:$id}) RETURN 3 AS rank, count(n) AS hits, "
+                "0 AS idless, [] AS ids "
+                "UNION "
+                "MATCH (n:Point:Source) WHERE n.url = $id RETURN 4 AS rank, "
+                "count(n) AS hits, "
+                "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
+                "collect(DISTINCT n.id) AS ids",
+                params={"id": id_val}).result_set}
+            _hits = 0
+            _idless = 0
+            _addressed_ids: list = []
+            for _rank in (1, 2, 4):
+                if _rank == 4 and (_addr.get(3) and _addr[3][1]):
+                    continue          # `:Source` resolves `id` before `url`
+                _row = _addr.get(_rank)
+                if not _row or not _row[1]:
+                    continue
+                _hits += _row[1]
+                _idless += _row[2]
+                _addressed_ids.extend(_row[3] or ())
             # `is not None`, not truthiness: `collect` already drops NULLs, so the
             # only thing `if i` could filter is a FALSY non-null id (`id: 0`) — and
             # `_lifecycle_ids` is the single gate for the guard, the vocabulary

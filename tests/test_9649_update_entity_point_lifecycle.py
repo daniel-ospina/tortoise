@@ -558,6 +558,11 @@ def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
         f"a restatus record must name the label the node replays as: {recs}")
     assert _mutations(events, "evt-hybrid-9649") == [], (
         "nothing may be journalled against the ADDRESS the caller typed")
+    # …and the record must actually FOLD: a wrong label is only visible on replay
+    # (a live write that makes `rebuild_all` raise `NonFoldedEventsError`).
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _row(sdk, pid)["status"] == "retracted", (
+        "the journalled restatus must replay onto the Point")
 
 
 def test_a_source_keyed_by_id_is_not_blocked_by_a_hybrid_point_url(env):
@@ -757,3 +762,56 @@ def test_operator_points_keep_their_documented_lifecycle(env):
     with pytest.raises(ValueError, match="terminal"):
         sdk.update_entity(dead_op, validTo="2031-01-01T00:00:00Z")
     assert _row(sdk, dead_op)["status"] == "superseded"
+
+
+def test_the_guard_is_asked_with_the_doors_own_permissions(env, monkeypatch):
+    """Review round 8, P2: `missing_ok`/`allow_operator` were un-pinned.
+
+    The absent contract (#10119) is protected by the ADDRESS loop being empty, not
+    by the parameter — so this pins both halves: a resolved Point reaches the ONE
+    instrument exactly once with `missing_ok=True` and `allow_operator=True`, and
+    an absent id never reaches it at all.
+    """
+    sdk, _ = env
+    pid = _live(sdk)
+    seen: list = []
+    real = sdk._assert_lifecycle_guard
+
+    def spy(point_id, **kw):
+        seen.append((point_id, kw))
+        return real(point_id, **kw)
+
+    monkeypatch.setattr(sdk, "_assert_lifecycle_guard", spy)
+
+    sdk.update_entity(pid, validTo="2030-01-01T00:00:00Z")
+    assert [s[0] for s in seen] == [pid], seen
+    assert seen[0][1].get("missing_ok") is True, seen[0][1]
+    assert seen[0][1].get("allow_operator") is True, seen[0][1]
+
+    seen.clear()
+    assert sdk.update_entity("no-such-point-9649", status="live") == {}
+    assert seen == [], (
+        "an absent id must not reach the guard — the loop's emptiness is the "
+        "absent contract, not the parameter")
+
+
+def test_a_map_less_stored_status_still_defers(env):
+    """Review round 8, P2: the DEFER half had no pin for a non-NULL legacy word.
+
+    `_ALLOWED_TRANSITIONS` carries no entry for a legacy spelling, and the door
+    must DEFER rather than guess — refusing there would strand every graph
+    written with a word the table does not know. Every map-less status in the
+    fixtures so far is also TERMINAL, so the guard refused it before the
+    transition loop and the deferral was never exercised.
+    """
+    sdk, _ = env
+    pid = _live(sdk)
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status='current'", params={"id": pid})
+    assert "current" not in _ALLOWED_TRANSITIONS, (
+        "this arm is only non-vacuous while the map has no 'current' key")
+
+    sdk.update_entity(pid, status="live")
+    assert _row(sdk, pid)["status"] == "live"
+    sdk.update_entity(pid, status="retracted")
+    assert _row(sdk, pid)["status"] == "retracted"
