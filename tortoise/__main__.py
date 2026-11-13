@@ -13124,7 +13124,13 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     _health_notes: list[str] = []
     if isinstance(health_status, str) and health_status.strip().lower() not in (
             "ok", "healthy", "pass"):
-        _health_notes.append(f"the service reports `{_printable(health_status)}` on /health")
+        # `_scrub` as well as `_printable`: the status STRING is server-controlled
+        # and can echo the request URL (a proxy writing `blocked: <url>`), which
+        # for a userinfo `api_url` is a password — in the very row that masks that
+        # URL two fields earlier (#5109; fresh review round 8).
+        _health_notes.append(
+            f"the service reports "
+            f"`{_printable(_scrub(str(health_status), api_url, api_key))}` on /health")
     if not (isinstance(health_code, int) and 200 <= health_code < 400):
         _health_notes.append(f"/health returned {health_code}")
     _health_note = (" — " + "; ".join(_health_notes)) if _health_notes else ""

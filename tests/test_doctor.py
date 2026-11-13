@@ -326,6 +326,14 @@ class TestDoctorHostedCredential:
         import re as _re
         assert _re.search(r"/health 200 in \d+\.\d+s", hosted), hosted
         assert "org-9" in hosted and "tier anon" in hosted, hosted
+        # #11912 names api_url and the org among the Credentials block's
+        # indicators; both come from the STORE, so they are only reported if that
+        # row carries them (fresh review round 8 — deleting them left the suite
+        # green, and no other assertion looks at the store's own org).
+        cred = _row(out, "Credentials")
+        assert cred is not None, out[-1200:]
+        assert "api_url https://api.premiselabs.co" in cred, cred
+        assert "org agent-1" in cred, cred
         assert "❌ Hosted" not in out, out[-1200:]
         assert _FAKE_HOSTED_KEY not in out
 
@@ -667,13 +675,18 @@ class TestDoctorHostedCredential:
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _seed_db(db_path, "doctor suspended seed")
 
-        _run_doctor([])
+        rc = _run_doctor([])
         out = capsys.readouterr().out
 
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1500:]
         assert "suspended" in hosted.lower(), hosted
         assert appeal in hosted, hosted
+        # A suspension is a FAIL: ℹ️ would count in neither column, so the report
+        # would read `0 fail` / exit 0 for the one refusal whose remedy is a human
+        # appeal (fresh review round 8 — both were pinned by nothing).
+        assert "❌" in hosted, hosted
+        assert rc == 1
 
     def test_a_refused_credential_store_is_a_fail_not_a_quiet_warning(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -943,7 +956,12 @@ class TestDoctorHostedCredential:
         def handler(url, req):
             if url.endswith("/health"):
                 return _BoundedResponse(200, b'{"status":"ok"}')
-            return _BoundedResponse(200, b'{"org_id":"org-7"}')
+            # The ERROR-body read is capped too (fresh review round 8): a proxy
+            # that answers 4xx with a large page is the exact case the cap exists
+            # for, and it was unpinned.
+            from urllib.error import HTTPError
+            raise HTTPError(url, 400, "Bad Request", {},
+                            _BoundedResponse(400, b"x" * 100))
 
         _stub_hosted(monkeypatch, handler)
         db_path = str(tmp_path / "bounded.db")
@@ -957,7 +975,9 @@ class TestDoctorHostedCredential:
             "an unbounded or differently-capped read() reached the wire on some "
             f"leg — the body cap is not applied uniformly: {caps_seen}")
         hosted = _row(out, "Hosted")
-        assert hosted is not None and "✅" in hosted, out[-1200:]
+        # → API error 400 (the error-body read is the third capped read)
+        assert hosted is not None and "❌" in hosted, out[-1200:]
+        assert "API error 400" in hosted, hosted
 
     def test_an_unreadable_store_directory_is_a_refusal_not_an_environment_note(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
