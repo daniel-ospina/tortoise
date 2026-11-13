@@ -1102,14 +1102,28 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
     never fail on it (#1934). Every skip is logged with the pack and the index.
     """
     out: list[Confusion] = []
-    if not isinstance(guards, list):
+    if not isinstance(guards, (list, tuple)):
+        # ⛔ THIS SAID NOTHING (round-21 review P3, measured), contradicting the
+        # docstring three lines above: a pack's ENTIRE guard block was dropped
+        # for a non-sequence — including a well-formed entry passed as a dict —
+        # with no log anywhere, so a whole guard surface could go missing
+        # silently. A tuple is a legal sequence and is accepted.
+        _logger.warning(
+            "kind_guards: %s guards is not a list — the whole block is skipped "
+            "(got %s)", namespace, type(guards).__name__)
         return ()
     for i, entry in enumerate(guards):
         if not isinstance(entry, dict):
             _logger.warning("kind_guards: %s guards[%d] is not a map — skipped",
                             namespace, i)
             continue
-        confusions = entry.get("onConfusion") or []
+        # `is None`, not `or` (round-21 review P3, measured): `onConfusion: {}` /
+        # `""` / `0` / `false` compiled ZERO confusions with no log, while a
+        # truthy non-list fell into the warning below — the falsy-read-as-absent
+        # conflation this function already fixed for `rule` and `when`.
+        confusions = entry.get("onConfusion")
+        if confusions is None:
+            confusions = []
         if not isinstance(confusions, list):
             _logger.warning(
                 "kind_guards: %s guards[%d].onConfusion is not a list — skipped",
@@ -1256,8 +1270,12 @@ def _kept_layers(layers) -> tuple[str, ...]:
     layer) but SILENT, so `fromLayers: [subject, 1]` narrowed the scope and left
     no trace — the same "declaration that lies" shape as an unqualified kind.
     """
+    # ⛔ BLANKS TOO (round-21 review P3, measured): `fromLayers: [""]` compiled
+    # `('',)` silently — a scope no real layer can match, since `resolve` only
+    # ever asks for "subject"/"object". `_kept_kinds` already dropped blanks, so
+    # the two scopes did not share one filter despite the round's framing.
     kept = tuple(str(layer).lower() for layer in layers
-                 if isinstance(layer, str))
+                 if isinstance(layer, str) and str(layer).strip())
     if len(kept) != len(tuple(layers)):
         # ⛔ LOG THE WIDENED SCOPE (round-20 review P3, measured): logging
         # `kept` before the widening below told an all-non-string scope it was

@@ -369,7 +369,28 @@ class TestNeverRefuses:
           * `0`/`false`/`{}` were read as ABSENT by `or`, i.e. NIL mode silently —
             the falsy-vs-absent conflation the same round fixed for `rule` above.
         """
+        import logging
+
         import tortoise.kind_guards as kg
+
+        def capture(call):
+            """Run `call`, returning (result, the kind_guards log messages)."""
+            records = []
+
+            class _Grab(logging.Handler):
+                def emit(self, record):
+                    records.append(record.getMessage())
+
+            log = logging.getLogger("tortoise.kind_guards")
+            handler = _Grab()
+            log.addHandler(handler)
+            prev = log.level
+            log.setLevel(logging.WARNING)
+            try:
+                return call(), records
+            finally:
+                log.removeHandler(handler)
+                log.setLevel(prev)
 
         def entry(**extra):
             return {"kind": "widget", "layer": "object", "onConfusion": [
@@ -388,8 +409,21 @@ class TestNeverRefuses:
             assert kg.pack_guards("acme", [entry(fromLayers=bad_scope)]) == ()
         # `fromKinds: []` stays a legal scope — there `()` IS the documented NIL
         # mode, so widening it here would silently change what the guard covers.
-        assert len(kg.pack_guards("acme", [entry(fromKinds=[])])) == 1
-        assert kg.pack_guards("acme", [entry(fromKinds=[])])[0].from_kinds == ()
+        # ⛔ AND IT MUST BE SILENT (round-21 review P3, measured): pinning
+        # legality alone left a `_kept_kinds` that warns on ANY empty scope
+        # undetected — which would make "legal" and "complained about" the same
+        # thing, and the round's own claim ("only the DROP is reported") false.
+        got, quiet = capture(lambda: kg.pack_guards("acme", [entry(fromKinds=[])]))
+        assert len(got) == 1 and got[0].from_kinds == ()
+        assert quiet == [], quiet
+        got, quiet = capture(
+            lambda: kg.pack_guards("acme", [entry(fromKinds=["widget"])]))
+        assert quiet == [], quiet
+        # a BLANK layer member is a scope no layer can match — dropped, loudly
+        got, loud = capture(
+            lambda: kg.pack_guards("acme", [entry(fromLayers=[""])]))
+        assert got[0].from_layers == ("subject", "object"), got[0]
+        assert loud, "a blank layer member must be reported"
         # ⛔ `fromLayers: []` is NOT the same thing (round-19 review P2,
         # measured): it matched no layer, so it compiled a guard that could never
         # fire while BOTH gates called it clean. Empty means both layers.
@@ -398,47 +432,26 @@ class TestNeverRefuses:
         # …and a non-string member is dropped LOUDLY, not silently, naming the
         # scope the guard is actually held to (round-20 review: this warning was
         # unpinned, so reverting it to silence left the suite green)
-        import logging
-
-        records = []
-
-        class _Grab(logging.Handler):
-            def emit(self, record):
-                records.append(record.getMessage())
-
-        _log = logging.getLogger("tortoise.kind_guards")
-        _handler = _Grab()
-        _log.addHandler(_handler)
-        _prev = _log.level
-        _log.setLevel(logging.WARNING)
-        try:
-            kept = kg.pack_guards(
-                "acme", [entry(fromLayers=["subject", 1])])[0].from_layers
-            all_bad = kg.pack_guards(
-                "acme", [entry(fromLayers=[1, 2])])[0].from_layers
-        finally:
-            _log.removeHandler(_handler)
-            _log.setLevel(_prev)
+        layers, records = capture(
+            lambda: kg.pack_guards("acme", [entry(fromLayers=["subject", 1])]))
+        kept = layers[0].from_layers
+        bad_layers, bad_records = capture(
+            lambda: kg.pack_guards("acme", [entry(fromLayers=[1, 2])]))
+        all_bad = bad_layers[0].from_layers
         assert kept == ("subject",)
         # the KIND scope drops just as loudly — it has no widening default, so a
         # fully-dropped list lands on `()` = NIL mode, a scope nobody asked for
-        kinds_records = []
-        _handler2 = _Grab()
-        _handler2.emit = lambda r: kinds_records.append(r.getMessage())
-        _log.addHandler(_handler2)
-        _log.setLevel(logging.WARNING)
-        try:
-            k_kept = kg.pack_guards(
-                "acme", [entry(fromKinds=["widget", 1])])[0].from_kinds
-            k_nil = kg.pack_guards("acme", [entry(fromKinds=[1])])[0].from_kinds
-        finally:
-            _log.removeHandler(_handler2)
-            _log.setLevel(_prev)
+        kk, kinds_records = capture(
+            lambda: kg.pack_guards("acme", [entry(fromKinds=["widget", 1])]))
+        k_kept = kk[0].from_kinds
+        nil_out, nil_records = capture(
+            lambda: kg.pack_guards("acme", [entry(fromKinds=[1])]))
+        k_nil = nil_out[0].from_kinds
         assert k_kept == ("acme:widget",)
         assert k_nil == ()
         assert any("dropped a non-string or blank from fromKinds" in m
                    for m in kinds_records), kinds_records
-        assert any("NIL mode" in m for m in kinds_records), kinds_records
+        assert any("NIL mode" in m for m in nil_records), nil_records
         # …and it names the scope the guard IS held to, QUALIFIED as the compile
         # step stores it — not the manifest's spelling, and not `()`
         assert any("held to ('acme:widget',)" in m for m in kinds_records), \
@@ -447,7 +460,28 @@ class TestNeverRefuses:
         # the message must state the scope the guard IS held to, not the
         # pre-widened one (an all-non-string list widens to both layers)
         assert all_bad == ("subject", "object")
-        assert any("held to ('subject', 'object')" in m for m in records), records
+        assert any("held to ('subject', 'object')" in m
+                   for m in bad_records), bad_records
+
+        # ⛔ FALSY IS NOT ABSENT on the two CONTAINERS as well (round-21 review
+        # P3): `or []` / `or []` compiled ZERO confusions with no log for
+        # `{}`/`""`/`0`/`false`, where a truthy non-list took the warning arm.
+        for falsy_container in ({}, "", 0, False):
+            out, logs = capture(lambda v=falsy_container: kg.pack_guards(
+                "acme", [{"kind": "widget", "onConfusion": v}]))
+            assert out == (), falsy_container
+            assert any("onConfusion is not a list — skipped" in m
+                       for m in logs), (falsy_container, logs)
+        # …and a guard BLOCK that is not a sequence is reported, not dropped in
+        # silence (it used to vanish with no log at all, contradicting this
+        # module's own "every skip is logged")
+        out, logs = capture(
+            lambda: kg.pack_guards("acme", {"kind": "widget", "onConfusion": []}))
+        assert out == ()
+        assert any("acme" in m and "dict" in m for m in logs), logs
+        # a tuple IS a legal sequence of entries, and stays accepted
+        assert len(kg.pack_guards(
+            "acme", (entry(),))) == 1
 
         # a falsy predicate is no longer rewritten into the default
         assert kg.pack_guards("acme", [entry(when="")]) == ()
