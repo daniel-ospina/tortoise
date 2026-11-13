@@ -159,27 +159,33 @@ def _scope_slice(brief: str, heading: str) -> str:
     Raw is what a table parse needs (`_table` reads lines), so the two forms are
     one derivation, not two: `_scoped` is this, flattened.
     """
-    level = "##" if re.match(r"\d+$", heading) else "###"
+    if re.fullmatch(r"\d+(?:\.\d+)?", heading):
+        level = "##" if "." not in heading else "###"
+        # `## 2. Method` carries a period, `### 3.3 Per class` does not — measured.
+        own = rf"^{re.escape(level)} {re.escape(heading)}\.? "
+    else:
+        # A `## ` heading identified by a LABEL — the changelog's entries are
+        # `## \`#12298\` — …`, which has no numeric prefix to anchor on.
+        level = "##"
+        own = rf"^## (?=[^\n]*{re.escape(heading)})"
     # A TOP-LEVEL section OWNS its subsections: end at the next `##` only, not at
     # the first `###` (measured: ending at any heading made `_scoped(brief, "4")`
     # the heading line alone, and §4's Result line lives in 4.1).
     end = r"^## " if level == "##" else r"^#{2,3} "
-    # `## 2. Method` carries a period, `### 3.3 Per class` does not — measured.
-    hit = re.search(
-        rf"(?ms)^{re.escape(level)} {re.escape(heading)}\.? .*?(?={end}|\Z)",
-        brief)
+    hit = re.search(rf"(?ms){own}.*?(?={end}|\Z)", brief)
     assert hit is not None, f"the brief no longer carries a `{level} {heading}` section"
-    starts = re.findall(rf"(?m)^{re.escape(level)} {re.escape(heading)}\.? ", brief)
+    starts = re.findall(rf"(?m){own}", brief)
     assert len(starts) == 1, (
-        f"the brief carries {len(starts)} `{level} {heading}.` headings — the pin "
+        f"the brief carries {len(starts)} `{level} {heading}` headings — the pin "
         "cannot tell which section it is reading")
-    # The slice must END at a heading (the lookahead above) or at EOF — never by
-    # running off the end of a document whose next heading is written in a form
-    # this helper cannot see. That second case is a real leak (#12349 round 17,
-    # P2: a setext `3. Results` / `----------` made `_scoped(brief, "2")` 14 740
-    # chars, i.e. §2 PLUS §3's body) and it is what
-    # `test_the_brief_uses_only_heading_forms_the_scope_helper_can_see` exists to
-    # refuse from the other side.
+    # The slice must END at a heading or at EOF. This helper anchors on `## `/`### `
+    # ONLY, so a document whose next heading is rendered some other way cannot be
+    # seen from here — the OTHER side of that guarantee is the document-shape
+    # guard, `test_the_brief_uses_only_heading_forms_the_scope_helper_can_see`,
+    # which refuses ANY heading form this helper cannot see (measured leak, round
+    # 17: a setext `3. Results` / `----------` made `_scoped(brief, "2")` 14 740
+    # chars = §2 PLUS §3's body; round 19: the same leak via `####`, `#####`,
+    # `######` and `> ##`, which enumerated checks had missed).
     assert hit.end() == len(brief) or re.match(end, brief[hit.end():]), (
         f"the `{heading}` scope ended in the middle of the document without a "
         "heading — refusing a scope that may have run past its section")
@@ -474,8 +480,9 @@ def test_artifact_carries_the_rule_as_the_harness_constant(
     assert artifact["verdict"]["rule"] == artifact["decision_rule"]
     for clause in ("strictly greater", "exact two-sided McNemar", "p < 0.05"):
         assert clause in artifact["decision_rule"], clause
-        assert clause in brief_text, (
-            f"the brief no longer quotes the rule's own clause {clause!r}")
+        # §4.1 is where the brief states the rule's clauses (#12349 round 19).
+        assert clause in _scoped(brief_text, "4.1"), (
+            f"§4.1 no longer quotes the rule's own clause {clause!r}")
 
 
 def test_artifact_population_is_the_committed_pin(artifact, population) -> None:
@@ -649,7 +656,8 @@ def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact, brief_text
         "the tokens control is only real on the non-degenerate queries; the "
         "artifact must record the subset it holds on")
     assert subset["mcnemar_p_two_sided"] > 0.05
-    assert "Reading 1" in brief_text and "Reading 2" in brief_text, (
+    assert "Reading 1" in _scoped(brief_text, "0") and \
+        "Reading 2" in _scoped(brief_text, "0"), (
         "the brief must state the literal-falsifier reading as well as the "
         "decomposition — M3 is not simply 'FAIL'")
     dep = artifact["verdict"]["deployable_arm"]
@@ -760,10 +768,13 @@ def test_the_scorers_do_not_rank_identically(artifact, brief_text) -> None:
     assert artifact["arms"]["falkordb_tfidf"]["recall_by_k"]["15"][
         "mean_rank_when_found"] > artifact["arms"]["postgres_bm25/tokens"][
         "recall_by_k"]["15"]["mean_rank_when_found"]
-    # and the brief must state it — the false reading must not come back.
+    # and the brief must state it — the false reading must not come back. The two
+    # POSITIVE claims are §0-scoped (#12349 round 19); the NEGATIVE one stays
+    # document-wide on purpose — a false reading must not appear ANYWHERE.
     assert "rank these documents identically" not in brief_text
-    assert "45 rank differently" in brief_text
-    assert "1.452 vs 1.285" in brief_text
+    _s0 = _scoped(brief_text, "0")
+    assert "45 rank differently" in _s0
+    assert "1.452 vs 1.285" in _s0
 
 
 def test_the_threshold_arm_is_recorded_as_not_exercised(artifact) -> None:
@@ -1060,29 +1071,39 @@ def test_the_brief_uses_only_heading_forms_the_scope_helper_can_see(
     the same. The failure is silent in the other direction: the returned slice
     still looks like a scope.
 
-    The brief uses none of these forms today; this test is what keeps it so. The
-    INVERSE hazard — a `## `-prefixed line inside a fenced block truncates a
+    ⛔ DERIVED, NOT ENUMERATED (#12349 round 19). The first cuts of this test
+    listed the bad forms they happened to think of, so `####`, `#####`, `######`
+    and a blockquoted `> ## 3. Results` all re-opened the SAME leak on the SAME
+    section (measured: §2's slice 6 765 -> 14 73x chars, every gate green) while
+    the test's own docstring claimed "any OTHER heading form". A deny-list cannot
+    keep that promise. So the test now asks the other question: scan for anything
+    CommonMark RENDERS as a heading, and require it to be one of the two forms the
+    helper reads. A new form fails by default instead of passing by omission.
+
+    The INVERSE hazard — a `## `-prefixed line inside a fenced block truncates a
     section — is fail-closed (every §-scoped pin here is a presence assertion, so
     it reds loudly) and is deliberately not refused.
     """
     lines = brief.splitlines()
+    # The forms `_scope_slice` can read: the document title, `## N. …`, `### N.N …`.
+    readable = re.compile(r"^(?:# [^#\s].*|## \d+\. .*|### \d+\.\d+ .*)$")
+    # Anything CommonMark renders as a heading: ATX at column 0 (1-6), ATX inside
+    # up to 3 spaces of indent, and ATX behind blockquote markers.
+    renders_as_heading = re.compile(
+        r"^(?: {0,3}>[ \t]?)* {0,3}#{1,6}(?:[ \t]|$)")
     end_fm = 0                       # YAML frontmatter is delimited by `---`
     if lines and lines[0].strip() == "---":
         end_fm = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
     for i, line in enumerate(lines):
         if i <= end_fm:
             continue
-        assert not re.match(r"^#{2,6}(?!#| )", line), (
-            f"line {i + 1}: {line[:50]!r} is a hash heading with no space after "
-            "the marker, so `_scoped` cannot see it and a scope may run past its "
-            "own section")
-        assert not re.match(r"^ {1,3}#{1,6}(?:\s|$)", line), (
-            f"line {i + 1}: {line[:50]!r} is an INDENTED heading — valid "
-            "CommonMark, and invisible to `_scoped`, which anchors on a heading "
-            "at column 0. Measured (#12349 round 18, P2): indenting §3's heading "
-            "by one space grew `_scoped(brief, \"2\")` from 6 765 to 14 731 "
-            "chars, absorbing §3's body, and a §2 claim falsified in place was "
-            "then satisfied from there with every gate green")
+        if renders_as_heading.match(line):
+            assert readable.match(line), (
+                f"line {i + 1}: {line[:60]!r} is a heading CommonMark renders but "
+                "`_scoped` cannot read — it anchors on `## N. `/`### N.N ` at "
+                "column 0, so the PRECEDING section's scope runs past its own "
+                "boundary through this line. Measured leaks: setext, `##3.`,"
+                "1-3-space indent, `####`/`#####`/`######`, and `> ## `")
     for i in range(end_fm + 1, len(lines)):
         if re.fullmatch(r"(?:-{3,}|={3,})\s*", lines[i]) and lines[i - 1].strip():
             raise AssertionError(
@@ -1300,7 +1321,7 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, changelog: str)
     assert (arm, base) == (round(pair["recall_at_3"], 4),
                            round(pair["recall_at_3_base"], 4))
 
-    text = " ".join(changelog.replace("**", "").split())
+    text = _scoped(changelog, "#12298").replace("**", "")
     k5 = artifact["comparisons"]["falkordb_tfidf__vs__postgres_bm25/tokens"]["k5"]
     assert k5["only_b"] == 0 and k5["only_a"] > 0, (
         "the k=5 comparison no longer favours the shipped leg \u2014 the changelog's "
@@ -1532,7 +1553,11 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     total = definite + hashed + token_share
     assert round(total, 1) == 73.5
     assert round(100 - total, 1) == 26.5
-    assert "73.5 %" in brief_text and "26.5 %" in brief_text
+    _s43 = _scoped(brief_text, "4.3")
+    assert "73.5 %" in _s43 and "26.5 %" in _s43, (
+        "§4.3's own share row must sum to its published total — a document-wide "
+        "substring is satisfied by any other section restating the figures "
+        "(#12349 round 19: falsifying only this sentence stayed green)")
 
     # ⛔ The Δ COLUMN, in its own cells — a whole-document `"91.8" in brief` is a
     # substring that §3.3's sentence and `share × 91.8` both satisfy, so the two
@@ -1633,8 +1658,9 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
     asserting the superseded swing (review cycle 5, finding 3).
     """
     # A blockquote in the decision doc puts a `>` between the words a sentence
-    # spans on two lines; drop the marker before comparing prose.
-    text = " ".join(re.sub(r"(?m)^\s*>\s?", "", search_arch).split())
+    # spans on two lines; drop the marker before comparing prose. §6.2-SCOPED
+    # (#12349 round 19): the doc is 560 lines and the note is one section of it.
+    text = _scoped(re.sub(r"(?m)^\s*>\s?", "", search_arch), "6.2")
     cmp = artifact["comparisons"]
     k3 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
     k15 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k15"]
@@ -2126,14 +2152,21 @@ def test_the_falsifier_predicate_is_stated_the_same_way_in_every_document(
         "'closure not triggered' reading reverses; re-measure and re-decide")
 
     inverted = re.compile(r"falsifier[^.]*?is\s+satisfied\s+by", re.I)
-    for name, doc in (("research-brief.md", brief),
-                      ("SEARCH-ARCHITECTURE-CHANGELOG.md", changelog),
-                      ("SEARCH-ARCHITECTURE.md", search_arch)):
+    # The POSITIVE half is read from the section that CARRIES the ruling (#12349
+    # round 19): a bare "not triggered" anywhere in a 560-line decision document
+    # kept the pin green while the ruling sentence itself was inverted. The
+    # NEGATIVE half stays whole-document on purpose — the inverted phrasing must
+    # not appear ANYWHERE.
+    where = (("research-brief.md", brief, "0"),
+             ("SEARCH-ARCHITECTURE-CHANGELOG.md", changelog, "#12298"),
+             ("SEARCH-ARCHITECTURE.md", search_arch, "6.2"))
+    for name, doc, section in where:
         plain = " ".join(doc.replace("**", "").replace("*", "").split())
-        assert re.search(r"not\s+met|not\s+triggered", plain, re.I), (
-            f"{name} no longer states that the closure condition is not met/"
-            f"triggered — the predicate must be spelled out where a reader takes "
-            f"the C3 ruling from")
+        ruled = _scoped(doc, section).replace("**", "").replace("*", "")
+        assert re.search(r"not\s+met|not\s+triggered", ruled, re.I), (
+            f"{name}: §{section} no longer states that the closure condition is "
+            f"not met/triggered — that is the section a reader takes the C3 "
+            f"ruling from")
         assert not inverted.search(plain), (
             f"{name} calls the falsifier 'satisfied by' the arm — that is the "
             f"closure condition, which the deployable arm leaves UNSATISFIED; only "
