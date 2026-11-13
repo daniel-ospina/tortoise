@@ -1111,6 +1111,7 @@ def test_the_retirement_is_reported_in_full_and_is_IDEMPOTENT(sdk):
                    if v.invalidation])
     retired = invalidate(sdk, first, at="2026-11-12T12:00:00+00:00")
     assert retired["invalidated"] is True
+    assert retired["found"] is True, retired   # the SUCCESS arm reports it too
     assert retired["validTo"] == "2026-11-12T12:00:00+00:00"
     assert retired["reason"] == "target-revised"
     assert retired["detail"] == first.detail
@@ -1120,6 +1121,7 @@ def test_the_retirement_is_reported_in_full_and_is_IDEMPOTENT(sdk):
     again = invalidate(sdk, first)
     assert again["invalidated"] is False
     assert again["alreadyRetired"] is True
+    assert again["found"] is True, again       # it WAS read, and was terminal
     assert sdk.get_entity(made["point_id"])["status"] == "retracted"
 
 
@@ -1264,6 +1266,69 @@ def test_an_absent_claim_whose_GOAL_is_gone_lands_in_GONE_too(sdk, monkeypatch):
     assert counts["gone"] == 1, counts        # the cache could not be reconciled
     assert counts["retired"] == 0, counts     # nothing was retired here
     assert counts["failed"] == 0, counts
+
+
+def test_the_POST_EXCEPTION_terminal_arm_reconciles_too(sdk, monkeypatch):
+    """The third already-retired arm (#12336), which the claim-side predicate
+    normally MASKs.
+
+    ``invalidate`` re-reads the claim after ``retract_point`` raises, so this arm is
+    only reachable when the claim becomes terminal BETWEEN those two reads — which
+    is exactly the concurrent sweep it was written for. Reaching it needs the raise
+    and the status flip together (measured: without this test, deleting the arm's
+    ``cache`` key left the whole suite green — a dead arm that read as coverage).
+    """
+    i, t, g = _world(sdk, tag="post-exception")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"]).get("goalState") == "met"
+
+    def retired_by_a_PEER(point_id, **_kwargs):
+        sdk.update_entity(point_id, status="retracted")
+        raise ValueError("already terminal")
+
+    monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
+    report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
+                                          goal_id=g["id"],
+                                          reason="target-revised", detail="…"))
+    assert report["alreadyRetired"] is True, report
+    assert report["found"] is True, report
+    assert "already terminal" in report["detail"], report
+    assert report["cache"]["checked"] is True, report["cache"]
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
+
+
+def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
+    """``_reconcile_or_report``'s contract: the idempotent retirement outcome is
+    never discarded because the cache follow-up broke.
+
+    ``latest_judgement`` is the one call inside the reconcile that is NOT wrapped,
+    so it is the reachable way to make the reconcile raise. Measured: without the
+    guard the exception propagates out of the sweep loop and the finding lands in
+    NO bucket at all — the #12315 shape coming back through an error path
+    (``counts.alreadyRetired`` 1 -> 0).
+    """
+    i, t, g = _world(sdk, tag="reconcile-raises")
+    _judge(sdk, i, t, g)
+    sdk.update_entity(t["id"], threshold=12.0)  # a real stale finding
+
+    from tortoise import derived_invalidation as di
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("graph read exploded")
+
+    def retired_by_a_PEER(point_id, **_kwargs):
+        sdk.update_entity(point_id, status="retracted")
+        raise ValueError("already terminal")
+
+    monkeypatch.setattr(di, "latest_judgement", boom)
+    monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
+    counts = invalidate_stale(sdk, goal_id=g["id"])["counts"]
+    assert counts["stale"] == 1, counts
+    assert counts["alreadyRetired"] == 1, counts
+    assert counts["failed"] == 1, counts      # reported, never raised
+    assert counts["undecidable"] == 0, counts
 
 
 def test_the_derived_state_stops_feeding_the_goal(sdk):

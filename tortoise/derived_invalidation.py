@@ -737,8 +737,9 @@ def _reconcile_or_report(sdk: Any, goal_id: str | None) -> dict:
     ``counts.gone``), not a reason to discard the sweep's other results. A falsy
     ``goal_id`` is not a failure — ``reconcile_goal_state_cache`` says so itself.
 
-    ⚠️ It is deliberately the SAME function the retirement path calls, so there is
-    one reconcile and one set of predicates behind ``counts.failed``/``gone``.
+    ⚠️ It is deliberately the SAME reconcile the retirement path uses (step 4),
+    wrapped once, so there is one set of predicates behind
+    ``counts.failed``/``gone`` however the finding reached the door.
     """
     try:
         return reconcile_goal_state_cache(sdk, goal_id)
@@ -768,7 +769,8 @@ def invalidate(
        ⛔ EVERY ``alreadyRetired`` answer still owes the goal's cache its
        reconcile (step 4), including this one: the word a goal displays can name
        a claim that vanished or was retired elsewhere, and nothing else repairs
-       it (#12336).
+       it (#12336). ``found`` says which shape it was — ``False`` when the claim
+       was ABSENT, ``True`` when it was read and already terminal.
     3. ``retract_point`` — journal-first ORDER, so a rebuild replays the retirement
        instead of resurrecting a claim the live graph retired. ⚠️ ORDER is what
        the door guarantees and CONFIRMATION is not: its own docstring records
@@ -865,15 +867,11 @@ def invalidate(
                     "detail": f"already terminal ({after_status or 'outdated'})"}
         raise exc
 
-    try:
-        cache_report = reconcile_goal_state_cache(sdk, invalidation.goal_id)
-    except Exception as exc:
-        # The claim IS retired at this point, so this failure must not be
-        # swallowed INTO silence nor allowed to mask the retirement: report it.
-        # `reconcile_goal_state_cache` is public and idempotent, so the caller's
-        # repair route is to call it again with the goal's id.
-        cache_report = {"checked": False,
-                        "error": f"{type(exc).__name__}: {exc}"}
+    # The claim IS retired at this point, so a cache failure must not be swallowed
+    # INTO silence nor allowed to mask the retirement: `_reconcile_or_report`
+    # reports it, and the caller's repair route is to call the public, idempotent
+    # `reconcile_goal_state_cache` again with the goal's id.
+    cache_report = _reconcile_or_report(sdk, invalidation.goal_id)
 
     result: dict[str, Any] = {
         "invalidated": True,
@@ -995,7 +993,9 @@ def invalidate_stale(
     Returns, always: ``scanned`` (live judgements read), ``stale`` (the findings,
     each :meth:`Invalidation.as_dict`), ``invalidated`` (what
     :func:`invalidate` returned, per finding — including a per-finding ``error``
-    when one retirement refused, so the rest of the sweep's results survive),
+    when one retirement refused, so the rest of the sweep's results survive; such
+    a record carries ``error`` and neither ``cache`` nor ``found``, so a consumer
+    asking "was the claim there?" tests ``found is False`` and not falsiness),
     ``undecidable`` (verdicts the module could not decide — surfaced, never
     dropped), ``counts`` (including ``failed`` and ``gone``) and ``truncated``
     (true when the scan hit ``limit``, i.e. the sweep did not see the whole graph).
@@ -1021,10 +1021,12 @@ def invalidate_stale(
     none. ⛔ ``counts.alreadyRetired`` names TWO distinguishable facts: a claim
     that was FOUND and already terminal, and a claim that was NOT FOUND at all
     (#12315's arm). ``found`` is the mechanical discriminator (``False`` on the
-    absent arm, ``True`` on the two already-terminal arms) — ``status`` is NOT,
-    because a claim whose terminal predicate was the legacy ``outdated`` flag also
-    reports ``status: None``. So a consumer that needs the distinction reads the
-    finding and not the total.
+    absent arm, ``True`` on the two already-terminal arms) — ``status`` is NOT:
+    a claim whose terminal predicate was the legacy ``outdated`` flag reports
+    whatever its status property holds (``None``, or a stale word such as
+    ``live``), so that field cannot separate it from the absent arm. A retirement
+    that REFUSED carries ``error`` and neither ``cache`` nor ``found``, so test
+    ``found is False`` rather than falsiness.
 
     ⚠️ That rule does NOT hold for ``dry_run=True``, and the asymmetry is
     by design rather than an unhandled arm: a dry run retires nothing, so
