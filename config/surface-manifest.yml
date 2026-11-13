@@ -1243,9 +1243,10 @@ rows:
 # `recommendation` / `basis` / `reason` / `exemption` forward from the committed
 # manifest, and a cut reproduces this tool row byte-for-byte). The costs it does
 # have: (1) `cut --commit` must be handed a DEFAULT-BRANCH sha (#11057 review F1)
-# — cut at a lane head, `provenance_report` reds — and (2) a cut re-derives the
-# 39 `sdk:` rows' `used_by` cells by design (`CARRIED_SDK_ROW_KEYS` is just
-# `exemption`), churning a diff this change has nothing to do with.
+# — cut at a lane head, `provenance_report` reds — and (2) a cut re-derives EVERY
+# `sdk:` row's `used_by` cell (124 rows, all 124 carrying one; `CARRIED_SDK_ROW_KEYS`
+# is just `exemption`), churning a diff this change has nothing to do with.
+# ⛔ That 124 is re-derivable from this file: `rows` whose `name` starts `sdk:`.
 # So exactly one derived cell moves, to the value `check` itself derives from the
 # declaration (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it
 # stands on this branch, after the owner's 2239f94ff6 and c82c0337a4 rewrote the
