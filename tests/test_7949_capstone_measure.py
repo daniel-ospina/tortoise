@@ -4950,8 +4950,8 @@ def _bare_number_hits(text: str) -> list[str]:
 #: block, and it is the population the neighbour arm scans.
 _BLOCK_WORDS = re.compile(r"carve[_-]?out|carve out|\b(?:entry|block|manifest)\b")
 #: ⛔ …AND THE MANIFEST'S OWN FILENAME BELONGS IN THE POPULATION, because this arm's
-#: failure message promises a line number "must not reappear ANYWHERE in the
-#: document" and `_MANIFEST` already treats `ci-surfaces.yml` as the manifest — while
+#: RULE is that no manifest line cite may appear anywhere in the document, and
+#: `_MANIFEST` already treats `ci-surfaces.yml` as the manifest — while
 #: this gate did not, so the loop below `continue`d before `_neighbour_number_strays`
 #: ever ran on the most natural such line (#12369 review, P2, measured GREEN):
 #:
@@ -5278,12 +5278,18 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
     not "unify" these three readers.
 
     The hand scan it replaces also could not see an INDENTED entry: this very
-    test file is registered that way under the `core:` mirror of `surfaces:`
-    (measured with `parse_manifest_text`: `core` holds it, `sdk` does not — that
-    mirror holds 128 entries and none of them is this file) — the
-    same filename indented, which a scan that only looks at
-    column 0 cannot see — and a scan that misses those cannot honestly claim a
-    section "holds none". (Those mirrors are inside a block `register_tests` DOES
+    test file is registered that way under `surfaces:`, which is a mapping of
+    eight indented surface blocks, and it is in the `core` block (`898` entries)
+    AND in the `sdk` block (`128` entries) — measured at this head with
+    `parse_manifest_text` (`m["surfaces"]["sdk"]`, index 30; the raw line is
+    `config/ci-surfaces.yml:8536`, inside the `sdk:` block opened at `:8412`).
+    ⚠️ An earlier revision of this paragraph said "`core` holds it, `sdk` does
+    not — that mirror holds 128 entries and none of them is this file", which
+    the tree refutes: `sdk` IS the 128-entry mirror and it DOES hold the file.
+    The fact the paragraph needs is the one that survived the correction — the
+    registration is INDENTED, so a scan that only reads column 0 cannot see it —
+    and a scan that misses those cannot honestly claim a section "holds none".
+    (Those mirrors are inside a block `register_tests` DOES
     write, so their line numbers move on the next registration; naming them by
     block is the same rule this paragraph applies to the `carve_out:` claim.)
 
@@ -6151,22 +6157,38 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # shipped one round and four same-meaning tails walked straight past it —
             # "as well as", "along with", "in addition to", "for the E6 lane today,
             # and two more entries besides" — each making the claim FALSE with the
-            # pin GREEN (measured). A break is what the row actually writes after the
-            # name, and anything else is a qualifier this arm has not been taught to
-            # understand, so it refuses.
-            r"(?=\s*(?:—|–|\||\.|;|,|$))"
-            # …and `, one of two` / `, among several` turn "holds ONE" into a count
-            # of a larger set while keeping the clause-break shape.
-            r"(?!\s*,?\s*(?:one\s+of|two|three|among|several|many)\b)")
+            # pin GREEN (measured).
+            # ⛔ AND THE POSITIVE LOOKAHEAD THAT REPLACED IT ALLOWED A CLAUSE BREAK,
+            # which is the punctuation a continuation clause is written AFTER — so
+            # it was WEAKER than the deny-list on the very shape the deny-list
+            # missed. Measured at `8f09027daa`, each tail inserted immediately after
+            # the entry's closing backtick, real pin re-run: `, and one more`,
+            # `, plus another`, `, besides a second one`, ` — plus two more` were all
+            # GREEN (only `, among several` was refused, by the second lookahead
+            # below). A reader of the row then believes the block holds more than
+            # one, which the manifest arm cannot contradict. The arm therefore
+            # requires the row's ACTUAL continuation — the em-dash and the clause
+            # the document writes there — and refuses every other tail, because a
+            # qualifier after the name is the case it exists to catch. ⚠️ THE COST
+            # IS PAID IN THE OTHER DIRECTION AND IS NAMED HERE: a TRUE rewrite that
+            # puts any other clause break after the name is refused too (` — and
+            # nothing else`, `, with no other entry`, measured RED), because nothing
+            # mechanical separates "and nothing else" from "and one more" there —
+            # both are one connective away from the entry. Over-catching is the
+            # tolerated direction on this arm (a false red a maintainer rewrites,
+            # against a miss that ships the rot), and the row's shipped continuation
+            # is the one it accepts.
+            r"(?=\s*—\s*cited by\b)")
         if not re.search(_ONE_ENTRY, doc_hits[0]):
             block_failures.append(
                 f"03-test-design.md's `carve_out:` sentence does not say, in the row's "
                 f"own grammar, that the block holds **one**: {ENTRY!r} — the sentence "
                 f"is the only place the document says WHICH entry it means, and a "
-                f"quantifier between the phrase and the name (`besides`, `and one "
-                f"more`, `among several`, `of the two`) asserts MORE than one while "
-                f"keeping the filename on the line. Restore 'holds **one**: "
-                f"`{ENTRY}`' with no qualifier between.")
+                f"quantifier — before OR after the name (`besides`, `and one "
+                f"more`, `plus another`, `among several`, `of the two`) — asserts "
+                f"MORE than one while keeping the filename on the line. Restore "
+                f"'holds **one**: `{ENTRY}` — cited by …', with no qualifier on "
+                f"either side of it.")
         # ⛔ THE DOCUMENT'S "hold none" HALF IS PART OF THE CLAIM, and it was
         # unchecked: the tree was verified to hold none in `uri_requiring:` and
         # `slow_files:`, but the SENTENCE could be rewritten to claim the opposite
@@ -6454,7 +6476,7 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     # ⛔ THE SEPARATOR CARRIES A FILLER WORD IN ORDINARY ENGLISH, and that was the
     # last reproduced bypass: `… sits at line number 9987 this week` inserted into
     # `03-test-design.md` left the pin GREEN end-to-end while the arm that claims no
-    # such cite can reappear ANYWHERE in the document stayed silent. `→`, `#` and the
+    # such cite can appear anywhere in the document stayed silent. `→`, `#` and the
     # `line number` / `no.` forms are covered by `_SEP`'s optional tail and `_WRAP`.
     "`config/ci-surfaces.yml` line number 9987",
     "`config/ci-surfaces.yml` line no. 9987",
@@ -6669,8 +6691,8 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
 
     The identical sentence with the WORD "manifest" instead of the filename WAS
     scanned and red. One vocabulary admitted, the other not, for the same file — and
-    the arm's own failure message promises a line number "must not reappear ANYWHERE
-    in the document". An ORDINAL (`9987th line`) is unambiguously a POSITION, not the
+    the arm's own RULE is that no manifest line cite may appear anywhere in the
+    document. An ORDINAL (`9987th line`) is unambiguously a POSITION, not the
     count-ambiguous `number + lines` residual the regex states, so no spelling
     exemption applies here.
 
@@ -6780,6 +6802,17 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
         "`carve_out:` holds **one**: ",
         "`carve_out:` holds **one** file besides ", 1), man),
      "`_ONE_ENTRY` (a quantifier replaces the colon)"),
+    # ⛔ A QUALIFIER AFTER THE NAME — and it is the ONLY case here that reaches the
+    # tail lookahead. The case above is already refused by the `(?::|—|–)`
+    # alternation before the tail is consulted, so deleting the lookahead left
+    # every case in this table GREEN (measured: 385 passed with the lookahead
+    # line removed) — the arm was unpinned, which is the defect this table exists
+    # to prevent. This case REDs while the lookahead is present and goes GREEN
+    # when it is deleted, so it is the load-bearing one.
+    (lambda doc, man: (doc.replace(
+        "`test_pack_logic_writeprobe_11083.py` — cited by",
+        "`test_pack_logic_writeprobe_11083.py`, and one more — cited by", 1), man),
+     "`_ONE_ENTRY` (a qualifier AFTER the name)"),
     (lambda doc, man: (doc + "\nThe `carve_out:` block and the row "
                              "`test_pack_logic_writeprobe_11083.py` sits at `:9987` "
                              "on this head.\n", man),
@@ -6822,7 +6855,7 @@ def test_each_block_arm_reds_on_the_mutation_it_guards(mutation, arm, monkeypatc
       * for the arms below that are a shape's ONLY guard (the hold-none clause, the
         one-entry grammar, the neighbour loop, the doc-wide cite, the leak arm), the
         case fails if the arm is deleted — verified by deleting each one;
-      * `ceil(len(carve) > 1)` is a MESSAGE refinement: `elif carve != [ENTRY]`
+      * `elif len(carve) > 1:` is a MESSAGE refinement: `elif carve != [ENTRY]`
         refuses the same state, so its case stays RED with the arm deleted. It is
         listed for the message it produces, not for coverage.
     """
