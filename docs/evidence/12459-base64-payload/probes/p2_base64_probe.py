@@ -322,7 +322,17 @@ def main() -> int:
         p0_rec_bytes = len(p0_line.encode("utf-8")) + 1
         span = on_disk_embedding_span(p0_line)
         assert span is not None, rtype
+        # BYTE equality, not equal LENGTH: the printed claim is "reproduce each line
+        # exactly", and a same-length re-ordering of the same keys satisfies a length
+        # assert while producing different bytes (measured: a `dict(reversed(...))`
+        # shadow copy passed every length check and exited 0).
+        reserialised = json.dumps(rec, ensure_ascii=False, separators=(",", ":"))
         assert p0_rec_bytes == _line_len(rec, spaced=False), (rtype, p0_rec_bytes)
+        assert p0_line.encode("utf-8") == reserialised.encode("utf-8"), (
+            f"{rtype}: the written LINE is not the compact re-serialisation of the "
+            f"record (the read-back line carries no terminator; "
+            f"{len(p0_line.encode('utf-8'))} vs "
+            f"{len(reserialised.encode('utf-8'))} B)")
         assert span == _embedding_span(rec, seps=(",", ":")), (rtype, span)
         disk_checked += 1
         vector = _embedding_vector(rec)

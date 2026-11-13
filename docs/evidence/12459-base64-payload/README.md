@@ -40,8 +40,9 @@ writer to compact separators, the tool's vector figure and the journal's on-disk
 rulers — `5,072 B` spaced vs `4,689 B` compact for the same payload. That is #11886. Every P0 vector figure
 here is the **on-disk compact span**, and it is taken from the bytes the probe's own `tempfile.mkdtemp()`
 journal actually holds: the value is `raw_decode`d out of the written line, and the probe ASSERTS that the
-compact re-serialisation reproduces that line exactly before printing anything (the `⇒ the P0 figures above
-are the WRITTEN bytes` line in `measurement.txt`). The P2 columns are the framed *candidate* — nothing writes
+compact re-serialisation reproduces that line **byte for byte** (that is the `⇒ the P0 figures above are the
+WRITTEN bytes` line in `measurement.txt`). ⚠️ Not "before printing anything" — the corpus and
+`journal_growth` lines print first, so the verdict is the exit code, not the ordering. The P2 columns are the framed *candidate* — nothing writes
 them yet — re-serialised with the same compact separators. Each figure in the note names its ruler.
 
 ## The figures
