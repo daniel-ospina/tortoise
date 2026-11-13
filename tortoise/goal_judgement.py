@@ -1183,7 +1183,7 @@ def latest_readings(
         # ⛔ REFUSED BY NAME, because the count guard below would otherwise report
         # it as something else: `LIMIT 0` returns an empty page on every page, so
         # a MEASURED indicator would reach the truncation check and raise
-        # `RuntimeError` — "a page came back short" — blaming a server cap for a
+        # `RuntimeError` — "N row(s) never arrived" — blaming a server cap for a
         # local misconfiguration, while an indicator with NO readings would return
         # `[]`, which is the correct answer. The independent `count(e)` is what
         # makes "nothing was ever measured" unreachable for a measured indicator;
