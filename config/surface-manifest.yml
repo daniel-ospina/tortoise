@@ -907,18 +907,17 @@ approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 # ⚠️ `counts` is DERIVED by `cut` (and re-derived by `check`) from the TREE the cut ran in;
-# `cut_at_commit` only records the commit passed to `cut --commit`, which must be a
-# DEFAULT-BRANCH sha so the citation survives a squash-merge (#11057 review F1). So the two
-# can legitimately DISAGREE, and they are graded by different properties — `counts` is
-# compared by the DERIVATION property, while `cut_at_commit` is excluded from that drift
-# check and graded only by the provenance property (that it RESOLVES and SURVIVES). Do not
-# read the pair as one snapshot. They disagreed for a while (#4282 deleted 26 dead public SDK
-# methods at `45eefb26c`, so `sdk_public_methods` stayed 124 while `tools` still read
-# 72: the counts came from a lane tree, the sha from the branch). #11609 batch 1 cut a
-# lane tree with four no-destination MCP tools removed and recorded `origin/main`, so
-# the counts below read 68 while `6408da01ce` itself still holds 72 — same legitimate
-# divergence, opposite direction. ⛔ A hand-edited `counts` reds `check` — re-cut
-# instead (`cut --commit $(git rev-parse origin/main)`), and never paste a number in.
+# `cut_at_commit` records the commit passed to `cut --commit` (defaulting to the worktree HEAD,
+# which the provenance property then reds — RESOLVE **and** SURVIVE — once a lane head is
+# rebased away), which must be a DEFAULT-BRANCH sha so the citation survives a squash-merge
+# (#11057 review F1). So the two can legitimately DISAGREE, and they are graded by different
+# properties — `counts` is compared by the DERIVATION property, while `cut_at_commit` is
+# excluded from that drift check and graded only by the provenance property. Do not read
+# the pair as one snapshot: this very baseline is such a case — #11609 batch 1 cut a lane
+# tree with four no-destination MCP tools removed and recorded `origin/main`, so the counts
+# below read 68 while `6408da01ce` itself still holds 72. ⛔ A hand-edited `counts` reds
+# `check` — re-cut instead (`cut --commit $(git rev-parse origin/main)`), and never paste a
+# number in.
 counts:
   tools: 68
   sdk_public_methods: 124
