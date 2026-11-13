@@ -26,6 +26,7 @@ import hashlib
 import pytest
 
 from tortoise.derived_invalidation import (
+    GONE_UNPROVEN,
     RETIRED_GOAL_STATES,
     STALE_REASONS,
     Invalidation,
@@ -1824,6 +1825,76 @@ def test_a_goal_with_no_ID_cannot_be_repaired_and_is_COUNTED_not_dropped(sdk):
     assert standing and standing[0][0] == "met", standing
 
 
+def test_a_goal_on_a_label_the_surface_CANNOT_RESOLVE_is_COUNTED_not_reported_GONE(sdk):
+    """The unaddressable population's later shapes (#12412 cycle 5; #12457 cycle 2).
+
+    The scan is an EXCLUSION by the one label that matters (``WHERE NOT n:Point``),
+    so it matches a derived word on ANY label, and it names every candidate by
+    ``n.id`` alone. ``sdk.get_entity`` resolves only the canonical labels and
+    resolves each by its OWN primary identity prop, so a node with an id it cannot
+    address that way cannot be named to the repair door.
+
+    ⛔ WHAT THE DEFECT WAS, measured: such a candidate was handed to the door
+    anyway, and the door's only answer for an id it cannot resolve is
+    ``gone: True``, documented as *"the goal node is gone"*. The sweep recorded
+    ``{'action': 'gone', 'reason': "the goal 'w-1' no longer exists"}`` for nodes
+    that were still there with ``goalState='met'`` — a DELETION asserted in the
+    payload that never happened, which is a worse falsehood than the silent drop
+    the sibling no-``id`` counter exists to prevent.
+
+    ⛔ THE THIRD SHAPE IS THE SUBTLE ONE and it is why the fix is an OBSERVATION of
+    the graph, not a classifier over labels: ``Event`` is canonical but is keyed by
+    ``eventId``, so a ``:Event {id:'…'}`` reaches the door and still comes back
+    ``gone``. Filtering on ``_CANONICAL_ENTITY_LABELS`` misses it; intersecting with
+    ``prop == 'id'`` catches it but ALSO sweeps every genuinely repairable
+    ``:Event`` into ``unaddressable``. Both directions were measured (#12457 review
+    cycle 2). So the sweep probes the node's existence instead
+    (``derived_invalidation._GONE_PROBE`` / ``GONE_UNPROVEN``) and re-buckets a
+    present node as ``unaddressable``; the paired control below proves the
+    repairable ``:Event`` is still repaired.
+
+    The three subject nodes carry a DERIVED word, so this is a counting failure,
+    not a matching one. ``gone`` therefore means what the GRAPH says — the node is
+    really absent — never merely "the door could not resolve it"
+    (``test_a_goal_DELETED_mid_sweep_...``).
+    """
+    labels_and_ids = ((":Widget", "w-unresolvable-1"), ("", "nolabel-unresolvable-1"),
+                      (":Event", "e-id-only-unresolvable-1"))
+    for label, node_id in labels_and_ids:
+        sdk._get_proj().g.query(
+            f"CREATE (n{label} {{id:'{node_id}', goalState:'met'}})")
+    # The control: a real Event identity resolves through the door, so it must be
+    # REPAIRED — a classifier that swept every `:Event` into `unaddressable` would
+    # trade this bug for a silent coverage hole.
+    sdk._get_proj().g.query(
+        "CREATE (n:Event {id:'e-real-1', eventId:'e-real-1', goalState:'met'})")
+    report = reconcile_goal_states(sdk)
+    assert report["counts"]["unaddressable"] == 3, (
+        f"the sweep neither repaired nor counted an unaddressable shape: {report}")
+    assert report["counts"]["gone"] == 0, (
+        f"the sweep recorded a DELETION for nodes that still exist: {report}")
+    assert report["counts"]["repaired"] == 1, (
+        f"the fix over-excluded a RESOLVABLE `:Event` (silent coverage hole): {report}")
+    # ⛔ NO WORD-STANDING LOOP HERE, deliberately (#12457 review, cycle 6, measured).
+    # The obvious assertion — "each word still reads `met`" — CANNOT FAIL under any
+    # mutation of this diff: the whole premise is that the entity surface cannot
+    # WRITE these nodes, so neither a reverted probe nor a hand-added
+    # `update_entity(…, goalState=None)` changes a byte of the graph (both measured:
+    # the mutant stays GREEN). An assertion that cannot vary is dead weight that
+    # makes the next reader believe the no-repair half is covered. It IS covered,
+    # by `repaired == 1` above: only the resolvable control may be repaired, so any
+    # real repair of an unaddressable node reds that counter.
+    # The RECORD contract the payload docstring declares: `unaddressable` is a real
+    # `action` value with the SWEEP's own reason and NO `to` (nothing was written).
+    # Pinned here because the docstring's enum is CLOSED — a consumer branching on
+    # `action` must handle it, so a silent rename or an extra field is a contract
+    # break that no counter assertion above would catch.
+    rec = _only([r for r in report["goals"] if r["goalId"] == "w-unresolvable-1"])
+    assert rec["action"] == "unaddressable", rec
+    assert rec["reason"] == GONE_UNPROVEN, rec
+    assert "to" not in rec, rec
+
+
 def test_a_CAPPED_window_with_a_dropped_row_still_reports_TRUNCATED(sdk):
     """The two disclosures must compose (#12412 review, cycle 4, measured).
 
@@ -1955,7 +2026,16 @@ def test_a_word_a_HUMAN_sets_mid_sweep_is_PRESERVED_and_reported(sdk):
 def test_a_goal_DELETED_mid_sweep_is_reported_GONE_not_repaired(sdk):
     """The same two-read window, the other outcome: there is no node to point at
     anything, so the sweep must report `gone` rather than a `cleared` that landed
-    nowhere (a write to a missing id is a silent no-op)."""
+    nowhere (a write to a missing id is a silent no-op).
+
+    ⛔ THE NODE MUST ACTUALLY LEAVE THE GRAPH (#12457 review, cycle 2). This test
+    used to stub `get_entity` to return `{}` while the node stayed put, which the
+    door cannot tell apart from a node it simply cannot ADDRESS — and the sweep now
+    probes the graph on the `gone` arm, deliberately (see `GONE_UNPROVEN`), so a
+    node that is still there is reported `unaddressable`. Simulating the deletion
+    therefore means deleting: the stub removes the node as the door's read happens,
+    which is exactly the race the sweep must survive.
+    """
     i, t, g = _world(sdk, tag="sweep-gone-race")
     made = _judge(sdk, i, t, g)
     sdk.delete_entity(made["point_id"])
@@ -1963,6 +2043,9 @@ def test_a_goal_DELETED_mid_sweep_is_reported_GONE_not_repaired(sdk):
 
     def vanishing(node_id):
         if node_id == g["id"]:
+            # the node leaves the graph between the scan and the door's read
+            sdk._get_proj().g.query(
+                "MATCH (n {id:$id}) DELETE n", params={"id": node_id})
             return {}
         return real_get(node_id)
 
@@ -1972,6 +2055,8 @@ def test_a_goal_DELETED_mid_sweep_is_reported_GONE_not_repaired(sdk):
     finally:
         sdk.get_entity = real_get
     assert report["counts"]["gone"] == 1, report
+    assert report["counts"]["unaddressable"] == 0, (
+        f"a genuinely deleted goal was re-bucketed as unaddressable: {report}")
     assert report["counts"]["repaired"] == 0, report
     record = _only([r for r in report["goals"] if r["goalId"] == g["id"]])
     assert record["action"] == "gone", record
