@@ -1174,7 +1174,8 @@ class TestRestoreDependenciesResolve:
         records = sorted(arch.ROOT / e["file"]
                          for e in arch.load_manifest()["entries"]
                          if e["kind"] == arch.MCP_TOOL)
-        assert records, "the b1 archive is empty — this test would be vacuous"
+        assert records, ("no mcp-tool rows in archive/MANIFEST.json — this test would "
+                         "be vacuous (the population is the manifest, not a batch path)")
         missing: list[str] = []
         checked = 0
         for record in records:
