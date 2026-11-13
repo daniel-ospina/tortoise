@@ -13617,7 +13617,20 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                 else:
                     team_body = ""
             except (OSError, http.client.HTTPException):
+                # ⛔ A RAISED read is an UNREAD body, so it is a CUT (fresh review
+                # round 19). `_doctor_read_capped` propagates read errors on
+                # purpose, and on a CHUNKED reply a mid-stream drop raises
+                # `http.client.IncompleteRead` (a fixed-length one returns `b""`
+                # and takes the reader's own cut exit instead). Leaving
+                # `team_cut` False here dropped the cut signal, so the guard below
+                # never fired and a documented `403 GRAPH_SCOPED_TEAM_SURFACE`
+                # whose body a proxy cut mid-chunk fell through to the generic
+                # `❌ … API error 403: (empty body)` + exit 1 — the false red this
+                # flag exists to remove, reached through the raise path. It is
+                # MORE reachable since the reader arms a socket watchdog at the
+                # deadline: the interrupt surfaces as exactly this raise.
                 team_body = ""
+                team_cut = True
 
     _team_budget = _leg_budget(_DOCTOR_TEAM_TIMEOUT_S)
     if _team_budget is None:

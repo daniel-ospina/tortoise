@@ -2723,6 +2723,55 @@ class TestDoctorHostedCredential:
         assert "CUT" in hosted, hosted
         assert "❌" not in hosted, hosted
 
+    def test_a_raised_read_on_a_refusal_body_is_unproven_not_red(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A read that RAISES is an UNREAD body — the raise path is a cut too.
+
+        `_doctor_read_capped` propagates read errors on purpose, and on a CHUNKED
+        reply a mid-stream drop raises `http.client.IncompleteRead` (a
+        fixed-length body returns `b""` and takes the reader's own cut exit,
+        which is pinned by `test_an_early_close_with_bytes_outstanding_is_a_cut_body`).
+        The `HTTPError` arm swallowed that raise into `team_body = ""` and left
+        `team_cut` False, so a documented `403 GRAPH_SCOPED_TEAM_SURFACE` whose
+        body a proxy cut mid-chunk read `❌ … API error 403: (empty body)` +
+        exit 1 — the exact false red the cut flag exists to remove, surviving on
+        the one path that never set the flag (fresh review round 19).
+
+        Reachable in practice, not theoretical: the reader arms a socket watchdog
+        at the deadline, and its interrupt surfaces as exactly this raise.
+        """
+        import http.client as _http_client
+        from urllib.error import HTTPError
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        class _IncompleteBody(io.BytesIO):
+            """A chunked refusal body whose stream drops mid-chunk."""
+
+            def read1(self, n=-1):
+                raise _http_client.IncompleteRead(b'{"detail":', 50)
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise HTTPError(
+                url, 403, "Forbidden", {},
+                _IncompleteBody(b'{"detail":{"error_code":"GRAPH_SCOPED_TEAM_SURFACE"}}'))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "incomplete-403.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor incomplete 403 seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "❌" not in hosted, hosted
+        assert "CUT" in hosted and "UNPROVEN" in hosted, hosted
+        assert rc == 0, "an unread refusal body is not a failing credential"
+
     def test_a_cut_body_is_reported_even_when_the_prefix_parses(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
         """A cut must be reported even when the bytes read so far are VALID JSON.
