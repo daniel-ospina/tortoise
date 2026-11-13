@@ -288,8 +288,11 @@ point, and EVERY caller of this read is on it:
 Every other caller of this read **opts out** via `_rerank_candidates=False`, in two
 classes. **Order re-owners**: `_review_pool`, `suggest_entry_points`,
 `issue_insight`, `recall_state`, `recall_gaps`, `_resolve_subgraph_seed` sort the
-whole pool downstream, so a pre-cut reorder could only move which ids survive
-`limit` — an unmeasured composition change — and the eval / A-B harnesses
+whole pool downstream, and `search_sessions` re-sorts its pool by the PRE-rerank
+`rrf` score before slicing — so a pre-cut reorder could only move which ids survive
+`limit` (and, for `search_sessions`, is a permutation that sort discards: it cannot
+change the page and it pays a model load for nothing) — an unmeasured composition
+change in every case. The eval / A-B harnesses
 (`tools/longmem_eval/retrieve.py`, `tools/fusion_formula_ab.py`,
 `tools/ask_pool_admission_probe.py`) pin it for arm comparability, exactly as they
 pin `_valid_time_rerank`. **Membership probes**: `battery/runner/setup.py`'s

@@ -649,16 +649,15 @@ def test_the_wiring_is_a_permutation_and_discloses_the_cap(
     assert seen_ids, "the batch text read never ran"
     assert all(len(ids) == min(4, candidates) for ids in seen_ids), seen_ids
     assert entry[rerank.RERANK_SCORED_KEY] == min(4, candidates)
+    # ⛔ EQUALITY, NOT ``>=``: the wiring hands over ONE ROW PER CANDIDATE, so
+    # ``scored + unscored`` is the whole candidate set at every width — and it
+    # was structurally short when only the scored head was handed over (the
+    # silent-cap defect reproduced inside the disclosure). A ``>=`` here would
+    # pass over exactly that. (An inner ``if candidates < 5`` used to carry the
+    # equality on the no-cut case only; measured, it never executed at all —
+    # this fixture always has five — so the branch defended nothing.)
     assert (entry[rerank.RERANK_SCORED_KEY]
-            + entry[rerank.RERANK_UNSCORED_KEY]) >= candidates
-    # ⛔ NO ``else`` HERE: with ``scored == min(4, candidates)`` already asserted
-    # above, ``scored + unscored >= candidates`` IS ``unscored >= candidates - 4``,
-    # so an else-branch restating it can only fail where the line above already
-    # did — a second guard that guards nothing. The exact form covers the no-cut
-    # case; the ``>=`` form above covers the cut case.
-    if candidates < 5:      # no cut, so the candidate set is exactly what shipped
-        assert (entry[rerank.RERANK_SCORED_KEY]
-                + entry[rerank.RERANK_UNSCORED_KEY]) == candidates
+            + entry[rerank.RERANK_UNSCORED_KEY]) == candidates
     # Degradation is NOT reported through ``degraded``: in a leg trace that flag
     # means "a retrieval leg did not run" and would turn the read STATUS degraded.
     assert entry["degraded"] is False
@@ -776,6 +775,46 @@ def test_the_rerank_runs_before_the_valid_time_demotion():
     assert src.index("rerank_pool(") < src.index("prefer_latest_ids(")
 
 
+def test_search_sessions_re_owns_the_order_and_does_NOT_pay_for_a_rerank(sdk, monkeypatch):
+    """The seventh re-owned order, and the one the opt-out list missed.
+
+    ``search_sessions`` reads a GENEROUS candidate pool, then re-sorts it by
+    ``scores["rrf"]`` — the PRE-rerank fused score — and slices the page. A
+    rerank inside that read is a full permutation of the same list which the
+    sort then discards: it cannot change the page (so nothing looks broken) and
+    it pays a model load plus ~207 ms/mention to compute nothing, invisibly.
+
+    ⛔ Pinned by the LOAD, not by the order. A scorer that never runs produces
+    the same page as one that runs and is discarded, so an order assertion
+    cannot tell the two apart — measured: the trace entry is not even written
+    here (``search_sessions`` passes no ``leg_trace``), so the only observable
+    is whether the cross-encoder was loaded at all.
+    """
+    nonce = uuid.uuid4().hex[:8]
+    q = f"zebra {nonce} session"
+    for i in range(3):
+        # ``subject`` is the Event's TEXT column (``_RERANK_TEXT_FIELD_BY_LABEL``):
+        # without it the pool is textless, the load is skipped for that reason
+        # instead, and this test would pass over the missing opt-out (measured).
+        sdk.create_event(f"{q} probe {i}", "AgentSession",
+                         subject=f"{q} body {i}",
+                         keywords=[f"kw{i}"], eventStatus="completed")
+
+    loads: list[str] = []
+
+    def _loader(name, **kw):
+        loads.append(name)
+        return rerank.FakeScorer(), ""
+
+    monkeypatch.setattr(rerank, "load_scorer", _loader)
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    found = sdk.search_sessions(f"zebra {nonce}", limit=3)
+    assert found, "premise: the search must return sessions, or nothing ran"
+    assert loads == [], (
+        "search_sessions loaded the cross-encoder for a page it re-sorts by the "
+        f"PRE-rerank score and slices (loads={loads})")
+
+
 def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     """The half of the guard that ``order_by``/recency cannot reach.
 
@@ -787,6 +826,11 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     already passes ``_valid_time_rerank=False`` for the identical reason and now
     passes ``_rerank_candidates=False`` too. Pinned behaviourally: an injected
     positional scorer must not move the page, and the refusal must be disclosed.
+
+    ``search_sessions`` is the seventh and is pinned separately
+    (``test_search_sessions_re_owns_the_order_and_does_NOT_pay_for_a_rerank``):
+    it passes no ``leg_trace``, so the disclosure cannot be observed there and
+    the LOAD is the only signal.
     """
     nonce = uuid.uuid4().hex[:8]
     q = f"zebra {nonce}"
@@ -943,12 +987,18 @@ def test_a_pool_with_no_usable_text_makes_no_scorer_call(sdk, monkeypatch):
     it), so the guard this pins is about work, not wording:
     without it the read still calls ``rerank_pool(pool=0)``, ``_clamp_int`` turns
     the zero into the default width of 40, and the model is loaded, locked and run
-    over twenty empty passages for a result that cannot differ. Reverting the guard
-    to ``if True:`` leaves every other test in this file green, so the observation
-    is made here: the scorer must never be called.
+    over twenty empty passages for a result that cannot differ.
+
+    ⛔ OBSERVE THE **LOAD**, NOT THE SCORE. Reverting the guard to ``if True:``
+    leaves every other test in this file green, and the first version of THIS test
+    stayed green too (measured): ``rerank_pool`` returns ``no_scorable_text`` at its
+    own ``if not scorable`` early return BEFORE ``score()`` is ever reached, so a
+    scorer-call counter cannot see the revert. The model LOAD is the guard's only
+    observable effect — and it is the cost the guard exists to avoid.
     """
     _seed(sdk, 4)
     real_fetch = sdk_mod._fetch_rerank_pool_texts
+    loads: list[str] = []
     calls: list[list[str]] = []
 
     class _Recording:
@@ -956,17 +1006,22 @@ def test_a_pool_with_no_usable_text_makes_no_scorer_call(sdk, monkeypatch):
             calls.append(list(texts))
             return [0.0 for _ in texts]
 
+    def _loader(name, **kw):
+        loads.append(name)
+        return _Recording(), ""
+
     def _all_textless(graph, entity_type, graph_label, id_field, ids):
         return {pid: "" for pid in real_fetch(graph, entity_type, graph_label,
                                               id_field, ids)}
 
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     monkeypatch.setattr(sdk_mod, "_fetch_rerank_pool_texts", _all_textless)
-    _inject(_Recording(), monkeypatch)
+    monkeypatch.setattr(rerank, "load_scorer", _loader)
     trace: list[dict] = []
     sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=5,
                            leg_trace=trace)
 
+    assert loads == [], f"the cross-encoder was LOADED for a textless pool: {loads}"
     assert calls == [], f"the scorer ran on a textless pool: {calls}"
     entry = _rerank_entries(trace)[0]
     assert entry["ran"] is False
@@ -1010,11 +1065,13 @@ def test_a_row_returned_with_NO_TEXT_is_not_scored(sdk, monkeypatch):
     real_read = sdk_mod._fetch_rerank_pool_texts
 
     injected: list[bool] = []
+    pool_sizes: list[int] = []
 
     def _with_a_blank(
         graph, entity_type, graph_label, id_field, ids,
     ):
         out = real_read(graph, entity_type, graph_label, id_field, ids)
+        pool_sizes.append(len(ids))
         if blank_id in ids:
             out[blank_id] = ""          # what the read itself produces
             injected.append(True)
@@ -1029,8 +1086,16 @@ def test_a_row_returned_with_NO_TEXT_is_not_scored(sdk, monkeypatch):
     # THE PREMISE, ASSERTED: the blank row reached the read. Without this the
     # assertions below pass vacuously on a pool that never contained it.
     assert injected, "the stubbed row never entered the pool, so nothing was tested"
-    assert entry[rerank.RERANK_UNSCORED_KEY] >= 1, entry
-    assert entry[rerank.RERANK_SCORED_KEY] <= 4, entry
+    # EXACT, not ``>= 1`` / ``<= 4``: one row came back with no text, every other
+    # row of the pool had some, and the pool is far inside the shipped width — so
+    # the split is fully determined, and what this pins is that the DISCLOSURE is
+    # exact. (It does not pin the sdk's truthiness filter: ``rerank_pool`` strips
+    # an empty text itself, so swapping that filter for a membership test leaves
+    # THIS test green — measured. The load that filter avoids is pinned by
+    # ``test_a_pool_with_no_usable_text_makes_no_scorer_call``.)
+    assert entry[rerank.RERANK_UNSCORED_KEY] == 1, entry
+    assert entry[rerank.RERANK_SCORED_KEY] == pool_sizes[0] - 1, (
+        f"scored={entry[rerank.RERANK_SCORED_KEY]} pool={pool_sizes[0]}")
 
 
 class _Positional:

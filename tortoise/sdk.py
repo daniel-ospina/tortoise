@@ -40341,10 +40341,12 @@ class TortoiseSDK:
         # classes, and the second is why this is a SUPERSET of the
         # ``_valid_time_rerank=False`` sites rather than the same set:
         #   * the lanes that RE-OWN the order downstream (the six in
-        #     ``_valid_time_rerank``'s docstring) plus the eval / A-B harnesses
-        #     that pin that flag for arm comparability — a pre-cut reorder can
-        #     only move which ids survive ``limit``, an unmeasured composition
-        #     change;
+        #     ``_valid_time_rerank``'s docstring, plus ``search_sessions``, which
+        #     re-sorts its pool by the PRE-rerank ``rrf`` score before slicing —
+        #     so a rerank there is a permutation the sort discards) plus the eval
+        #     / A-B harnesses that pin that flag for arm comparability — a
+        #     pre-cut reorder can only move which ids survive ``limit``, an
+        #     unmeasured composition change;
         #   * MEMBERSHIP PROBES that read a page smaller than the pool width and
         #     ask "is this row in it" — ``battery/runner/setup.py``'s
         #     seed-manifest guard (a false ``ConfigError`` reading "stale
@@ -42001,7 +42003,8 @@ class TortoiseSDK:
         # re-owns the order DOWNSTREAM and passes neither — and six product
         # lanes do exactly that (``_review_pool``, ``suggest_entry_points``,
         # ``issue_insight``, ``recall_state``, ``recall_gaps``,
-        # ``_resolve_subgraph_seed``). Each already passes
+        # ``_resolve_subgraph_seed``), plus ``search_sessions``, which re-sorts
+        # its pool by the PRE-rerank ``rrf`` score before slicing. Each already passes
         # ``_valid_time_rerank=False`` for the identical reason; without this
         # arm the rerank re-picked their page INVISIBLY — the trace said
         # ``ok``, because nothing in the block knew the caller had opted out.
@@ -42067,7 +42070,6 @@ class TortoiseSDK:
                                if (_pool_texts.get(pid) or "").strip()]
                 _scored_rows = [{"id": pid, "content": _pool_texts[pid]}
                                 for pid in _scored_ids]
-                _scored_n = len(_scored_rows)
                 # ⛔ ONE ROW PER CANDIDATE, IN FUSED ORDER. A row with no usable
                 # text cannot be scored, so it must keep the SLOT the fused order
                 # gave it: ``rerank_pool`` writes the scored rows back into their
@@ -42095,10 +42097,11 @@ class TortoiseSDK:
                     # ⛔ ONE PASS, O(candidates). The shape this replaces rebuilt a
                     # membership set INSIDE a comprehension (O(width^2) on a path
                     # already priced at ~207 ms/mention, and
-                    # ``TORTOISE_FUSED_RERANK_POOL`` clamps only the FLOOR), so it
-                    # was hoisted to ``_scored_set`` — a fix for the cost of an
-                    # assembly that no longer happens: ``_pool_rows`` is built once
-                    # above, and ``rerank_pool`` scores only the scorable slots.
+                    # ``TORTOISE_FUSED_RERANK_POOL`` clamps only the FLOOR). No
+                    # set is needed at all now: ``_pool_rows`` is built once above
+                    # over ``result_ids``, and ``rerank_pool`` scores only the
+                    # scorable slots — so the cost cannot come back through this
+                    # block even at an unbounded width.
                     # ⛔ EVERY CANDIDATE IS HANDED OVER, and by construction the
                     # count is true: ``unscored`` is every candidate the scorer did
                     # not see (textless inside the width, and every row past it).
@@ -49033,6 +49036,14 @@ class TortoiseSDK:
             query, kind="AgentSession", entity_type="event",
             limit=candidate_limit,
             _record_reads=False,  # #7983: a candidate pool, sliced before return
+            # #12297: this pool is RE-SORTED by ``scores["rrf"]`` below (the
+            # PRE-rerank fused score) and then sliced — the same re-owned order
+            # the ``_valid_time_rerank=False`` lanes opt out of. A rerank
+            # here is a full permutation of the same list that the sort then
+            # throws away: it cannot change the page, and it pays a model load
+            # plus ~207 ms/mention to compute nothing. The trace said ``ok``
+            # because nothing in the block knew the caller had opted out.
+            _rerank_candidates=False,
         )
         has_semantic = any(
             r.get("scores")

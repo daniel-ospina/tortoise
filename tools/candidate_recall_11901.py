@@ -553,7 +553,7 @@ def _rerank_arm(
        near-duplicate passages should not fill the slots. A link-before-create
        prior wants the single best match, so MMR would be a different (and
        worse-conditioned) question — it is exercised by the ask lane and by
-       ``tests/test_rerank.py``, not here.
+       ``tests/test_longmem_rerank.py``, not here.
     3. **It does not use the score as a MATCHER.** Turning the cross-encoder
        score into an attach decision needs a threshold, and #11901 records a
        SECOND similarity constant as a REFUSED row beside
