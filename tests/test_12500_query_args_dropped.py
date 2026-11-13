@@ -284,6 +284,12 @@ def test_defaults_are_not_refusals(stub) -> None:
     {"tag": "pricing", "min_confidence": 0.0},
     {"tag": "pricing", "min_confidence": 0},
     {"tag": "pricing", "order_by": ""},
+    # The round-3 text=-arm clause is keyed on `min_confidence` truthiness too,
+    # and nothing else pins it: `is not None` there refuses a floor of 0.0 on a
+    # document read whose answer would have been CORRECT (round-4 finding 7, the
+    # round-1 P1 reintroducible with the suite green).
+    {"text": "x", "entity_type": "document", "min_confidence": 0.0},
+    {"text": "x", "entity_type": "source", "min_confidence": 0},
 ])
 def test_falsy_values_are_no_ops_and_never_refused(stub, kwargs) -> None:
     """A client that serialises its own DEFAULTS must not be refused (#12500 r1).
@@ -329,7 +335,10 @@ def test_the_tag_arm_message_names_the_precedence_that_blocks_pass_text(stub) ->
     assert "drop tag=" in result["error"], result["error"]
 
 
-@pytest.mark.parametrize("entity_type", ["document", "event", "session"])
+#: Valid NON-Point types only. "session" is not in VALID_ENTITY_TYPES, so it
+#: was refused by `validate_entity_type` ABOVE this guard and passed the
+#: assertion only because that message lists `point` (round-4 finding 5).
+@pytest.mark.parametrize("entity_type", ["document", "event", "object"])
 def test_the_text_arm_REFUSES_a_floor_it_cannot_apply(stub, entity_type) -> None:
     """`text=` applies the floor to POINT rows only (#12500 round-3 P1).
 
@@ -417,3 +426,127 @@ def test_the_message_agrees_in_number_with_the_arguments_it_names(stub) -> None:
     assert " and " in two["error"], two["error"]
     assert " are not applied" in two["error"], two["error"]
     assert " is not applied" in one["error"], one["error"]
+
+
+def test_a_floor_and_a_property_filter_have_no_common_arm(stub) -> None:
+    """Following the structural route with `filters=` set must not ping-pong r4 P1.
+
+    The structural refusal says "pass text="; the `#12455` refusal on the text=
+    arm says "drop text=". A caller holding `filters=` + `min_confidence` would
+    oscillate forever between two messages that each undo the other, because no
+    arm applies a property filter together with a floor or an ordering. The
+    message has to say so where the caller can see it.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(kind="statement", filters={"a": 1},
+                            min_confidence=_CONFIDENCE_FLOOR)
+
+    assert _is_refusal(result), "no refusal to read a message off"
+    assert "filters=" in result["error"], result["error"]
+    assert "drop filters=" in result["error"], result["error"]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"tag": "pricing", "text": "x", "min_confidence": _CONFIDENCE_FLOOR},
+    {"tag": "pricing", "text": "x", "order_by": "confidence"},
+])
+def test_the_tag_arm_still_refuses_when_text_is_also_passed(stub, kwargs) -> None:
+    """`tag=` wins, and the guard's `tag is not None` disjunct must survive (r4 P2 6).
+
+    Without that disjunct the condition is `not text`, so `tag="t", text="x"`
+    skipped the guard entirely and the TAG arm answered (`query_points_by_tag`)
+    with the floor dropped — the exact defect this PR closes, reopened by a
+    one-word refactor, with the whole suite green before this test existed.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(**kwargs)
+
+    assert _is_refusal(result), f"served {sorted(kwargs)} on the tag= arm"
+    assert "tag=" in result["error"], result["error"]
+    assert not [c for c in stub.calls if c[0] == "query_points_by_tag"], (
+        "the tag arm READ before refusing — rows can be served on an error path"
+    )
+
+
+@pytest.mark.parametrize("entity_type", ["document", "source"])
+def test_the_confidence_ordering_is_refused_where_no_row_carries_a_belief(
+        stub, entity_type) -> None:
+    """`order_by="confidence"` sorts on an EP belief neither type has (r4 P2 2).
+
+    `GraphRanker._fetch_signals` reads EPISTEMIC_LABELS = ("Point", "Subject",
+    "Object", "Event") and BOTH `document` and `source` map to the `Source`
+    label, so the sweep answers `{}`, every key falls to `(1, 0.0)`, and the
+    stable sort leaves the RRF order — unmarked, so the caller cannot tell the
+    order was never applied. Fails if the branch is missing (`_is_refusal` false)
+    or widened to the types that DO honour it (next test).
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(text="x", entity_type=entity_type,
+                            order_by="confidence")
+
+    assert _is_refusal(result), (
+        f"served order_by='confidence' for entity_type={entity_type!r}, which has "
+        f"no belief to sort on"
+    )
+    assert "order_by" in result["error"], result["error"]
+
+
+@pytest.mark.parametrize("entity_type", ["point", "event", "subject", "object",
+                                         "operator"])
+def test_the_confidence_ordering_still_works_for_the_epistemic_labels(
+        stub, entity_type) -> None:
+    """The control: these types DO carry a belief, so refusing them is a false block.
+
+    `operator` is the interesting one — operator rows are POINTS
+    (`security.py:166-174`), so a blanket "non-Point" refusal would break a
+    working call. Fails if the condition is written as `entity_type != "point"`
+    or against the whole non-Point set instead of the two Source-backed types.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(text="x", entity_type=entity_type,
+                            order_by="confidence")
+
+    assert not _is_refusal(result), (
+        f"refused order_by='confidence' for entity_type={entity_type!r}, whose "
+        f"ranker read DOES return beliefs: {result}"
+    )
+
+
+def test_the_kind_only_refusal_names_the_wider_population(stub) -> None:
+    """A `kind`-only tag refusal must not explain a floor the caller never passed.
+
+    Shipped before round 4: "kind is not applied on the tag= arm: tag mode reads a
+    tag and nothing else, so it cannot apply a confidence floor or an ordering.
+    … rows they excluded, or an order they did not ask for." — every clause names
+    an argument that was not in the call. `kind`'s harm is a WIDER population.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(tag="pricing", kind="statement")
+
+    assert _is_refusal(result), "no refusal to read a message off"
+    message = result["error"]
+    assert "wider population" in message, message
+    assert "floor" not in message and "ordering" not in message, message
+
+
+def test_the_refusal_never_repeats_its_route_or_says_a_entity_type(stub) -> None:
+    """Two shipped prose defects from round 4, pinned by their exact shapes.
+
+    * the text= arm emitted the drop-clause twice ("… otherwise drop
+      min_confidence for this read, or drop min_confidence for this read");
+    * the reason read "so a entity_type='document' read" — ungrammatical, and the
+      shipped message IS this PR's deliverable.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(text="x", entity_type="document",
+                             min_confidence=_CONFIDENCE_FLOOR)["error"]
+
+    assert message.count("drop min_confidence for this read") == 1, message
+    assert "a entity_type" not in message, message
+    assert "an entity_type" in message or "entity_type='document'" in message, message

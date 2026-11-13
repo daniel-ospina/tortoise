@@ -4112,67 +4112,136 @@ def tortoise_query(kind: str | None = None,
     # (measured: the `is not None` mutant serves `kind=""` alone and refuses
     # `tag="t", kind=""`). A floor of 0.0 excludes nothing; an empty order names
     # none.
-    _unapplied: list[str] = []
-    if tag is not None or not text:
+    #: (argument, why THIS arm cannot apply it) — one entry per refusal, and the
+    #: reason is built for the arm that ANSWERED. A single shared explanation said
+    #: "the structural arms read through sdk.paginated_query" on the tag= arm, and
+    #: named the floor/ordering harm for a `kind`-only refusal (round-4 P2s 4 and
+    #: 8, both measured on the shipped sentence).
+    _arm = "tag=" if tag is not None else ("text=" if text else "structural")
+    _unapplied: list[tuple[str, str]] = []
+
+    if _arm == "structural":
         # Both structural arms share `paginated_query`.
         if min_confidence:
-            _unapplied.append("min_confidence")
+            _unapplied.append((
+                "min_confidence",
+                "sdk.paginated_query, the accessor both structural arms read "
+                "through, takes no confidence floor"))
         if order_by:
-            _unapplied.append("order_by")
-    if tag is not None and kind:
-        # Tag mode reads EVERY kind of tagged Point, so a named kind narrows
-        # nothing while looking like it did.
-        _unapplied.append("kind")
-    if text and min_confidence and entity_type != "point":
-        # The `text=` arm forwards the floor to the SDK's fts leg, which compares
-        # it against EP belief under `entity_type == "point"` (sdk.py:43206 —
-        # `ep` is None for every other type, and the branch is gated on it), so a
-        # non-Point read passed the floor straight through and every row came
-        # back. Round-3 P1, measured at the tool boundary:
-        # `text="…", entity_type="document", min_confidence=0.9` returned the
-        # 0.1-belief rows, and the same read at 0.0 returned the identical page.
-        # That is the #6146 class this guard exists for, on the very arm the
-        # refusal above tells callers to use.
-        _unapplied.append("min_confidence")
+            _unapplied.append((
+                "order_by",
+                "the same accessor takes no ordering"
+                if min_confidence else
+                "sdk.paginated_query, the accessor both structural arms read "
+                "through, takes no ordering"))
+
+    elif _arm == "tag=":
+        # Tag mode reads a tag and nothing else.
+        if min_confidence:
+            _unapplied.append((
+                "min_confidence",
+                "tag mode reads a tag and nothing else, so it cannot apply a "
+                "confidence floor"))
+        if order_by:
+            _unapplied.append((
+                "order_by",
+                "tag mode cannot apply an ordering either"
+                if min_confidence else
+                "tag mode reads a tag and nothing else, so it cannot apply an "
+                "ordering"))
+        if kind:
+            # Tag mode reads EVERY kind of tagged Point, so a named kind narrows
+            # nothing while looking like it did.
+            _unapplied.append((
+                "kind",
+                "tag mode reads every kind of tagged Point, so a named `kind` "
+                "narrows nothing"))
+
+    else:
+        # ── the `text=` arm: it DOES apply both, for the rows that carry a
+        # belief, so these two are narrower than the arm itself.
+        if min_confidence and entity_type != "point":
+            # The fts leg compares the floor against EP belief under a literal
+            # `entity_type == "point"` gate (sdk.py:43206 — `ep` is None for
+            # every other type and the branch is gated on it), so any other
+            # entity_type passed the floor straight through. Round-3 P1,
+            # measured at the tool boundary: `text="…", entity_type="document",
+            # min_confidence=0.9` returned the 0.1-belief rows, and the same read
+            # at 0.0 returned the identical page. NOTE the wording: `operator`
+            # rows ARE Points (security.py:166-174), so the reason is the literal
+            # gate, never "this type has no Point rows" (round-4 P2 3).
+            _unapplied.append((
+                "min_confidence",
+                f"the fts leg applies its floor under a literal `entity_type == "
+                f"'point'` gate, and this read's entity_type={entity_type!r} does "
+                f"not satisfy it"))
+
+        if order_by == "confidence" and entity_type in ("document", "source"):
+            # Round-4 P2, measured live: `order_by="confidence"` sorts on the
+            # persisted EP belief that `GraphRanker._fetch_signals` reads for
+            # EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")
+            # (live.py:512) — and BOTH `document` and `source` map to the
+            # `Source` label, which is not among them. The sweep answers `{}`,
+            # every row's key falls to `(1, 0.0)`, the stable sort leaves the RRF
+            # order untouched, and nothing on the wire marks it unapplied
+            # (`annotate_belief_order` labels only rows carrying an `ep` dict).
+            # `event`/`subject`/`object`/`operator` DO honour it — measured — so
+            # this is not a blanket non-Point refusal.
+            _unapplied.append((
+                "order_by",
+                f"`order_by='confidence'` sorts on an EP belief and the ranker "
+                f"reads that belief for the four epistemic labels only, so no "
+                f"entity_type={entity_type!r} row carries one"))
+
     if _unapplied:
-        _named = " and ".join(_unapplied)
+        _names = [name for name, _ in _unapplied]
+        _named = " and ".join(_names)
         # Agreement in number: two named arguments shipped as "min_confidence and
         # order_by IS not applied" (round-3 P2, measured on a real call).
-        _verb = "are" if len(_unapplied) > 1 else "is"
-        # The explanation and the route BOTH have to describe the arm that
-        # answered. "Pass text=" was the round-1 dead end on the tag arm (`tag=`
-        # takes precedence, so the caller re-reads the same sentence), and it
-        # would be a second dead end here — the text= arm is refused precisely
-        # when text= is already set.
-        if tag is not None:
-            _arm = "tag="
-            _why = ("tag mode reads a tag and nothing else, so it cannot apply a "
-                    "confidence floor or an ordering")
-            _route = (f"To use {'them' if _verb == 'are' else 'it'}, drop tag= and "
-                      f"pass text= — tag= takes precedence, so keeping it re-reads "
-                      f"this same arm")
-        elif text:
-            _arm = "text="
-            _why = (f"the text= arm compares the floor against EP belief and only "
-                    f"Point rows carry one, while entity_type={entity_type!r} "
-                    f"selects non-Point rows — so no row could ever be excluded")
-            _route = ("To have the floor applied, pass entity_type='point'; "
-                      "otherwise drop min_confidence for this read")
+        _verb = "are" if len(_names) > 1 else "is"
+        _them = "them" if _verb == "are" else "it"
+        _why = "; ".join(reason for _, reason in _unapplied)
+        # What the caller actually LOST — per argument, not generic: a `kind`
+        # refusal served a WIDER population, it did not serve excluded rows.
+        _losses = []
+        if "min_confidence" in _names:
+            _losses.append("rows they excluded")
+        if "order_by" in _names:
+            _losses.append("an order they did not ask for")
+        if "kind" in _names:
+            _losses.append("a wider population than they asked for")
+        _loss = ", ".join(_losses[:-1]) + (" and " if len(_losses) > 1 else "") + _losses[-1]
+        # The route must terminate HERE. "Pass text=" was the round-1 dead end on
+        # the tag arm (`tag=` takes precedence, so the caller re-reads the same
+        # sentence); it is a second dead end on the text= arm, which is refused
+        # precisely because text= is already set; and it is contradicted by the
+        # `filters=` refusal below, so a caller holding both would ping-pong
+        # between two messages that each undo the other (round-4 P1).
+        if _arm == "tag=":
+            if _names == ["kind"]:
+                _route = ("To narrow by kind, drop tag= and pass kind= to the "
+                          "structural arm, which applies it")
+            else:
+                _route = (f"To use {_them}, drop tag= and pass text= — tag= takes "
+                          f"precedence, so keeping it re-reads this same arm")
+        elif _arm == "text=":
+            if "order_by" in _names:
+                _route = (f"To use {_them}, pass entity_type='point' (whose rows "
+                          f"carry a belief) or order_by='relevance'")
+            else:
+                _route = "To have the floor applied, pass entity_type='point'"
         else:
-            _arm = "structural"
-            _why = ("the structural arms read through sdk.paginated_query, which "
-                    "takes no confidence floor and no ordering")
-            _route = (f"To use {'them' if _verb == 'are' else 'it'}, pass text= — "
-                      f"the floor and the ordering are applied on that arm")
-        _extra = (
-            " Tag mode also reads every kind of tagged Point, so a named `kind` "
-            "narrows nothing." if "kind" in _unapplied and tag is not None else ""
+            _route = (f"To use {_them}, pass text= — the floor and the ordering "
+                      f"are applied on that arm")
+        _filters_note = (
+            " No arm applies a property `filters=` together with a confidence "
+            "floor or an ordering, so drop filters= if you need this argument."
+            if filters else ""
         )
         return _SafeError({"error": (
-            f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. The "
-            f"argument used to be dropped silently, so the caller got rows they "
-            f"excluded, or an order they did not ask for.{_extra} {_route}, or drop "
-            f"{_named} for this read."
+            f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. It "
+            f"used to be dropped silently, so the caller got {_loss}.{_filters_note}"
+            f" {_route}, or drop {_named} for this read."
         )})
     # ── #12455: `filters=` was ACCEPTED on the `text=` and `tag=` arms and DROPPED
     # `filters` is a STRUCTURAL-path argument. `text=` forwards
