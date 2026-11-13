@@ -1459,3 +1459,80 @@ def test_a_degenerate_run_publishes_None_not_a_zero_figure(tool_mod, monkeypatch
     assert fts["pooled_candidates_per_mention"] is None, (
         f"pooled_candidates_per_mention is {fts['pooled_candidates_per_mention']!r} "
         "with zero capture groups")
+
+
+# ── ARM-4's two computations, extracted so they can be pinned ────────────────
+# ⛔ Why these tests exist: the round-2 B3 fix (the numerator must be computed
+# over the POPULATION the denominator names, not over the variant sample) and the
+# ARM-4 pair-completeness numerator (`in_mk_block`) had NO test that reds if
+# either regresses. The only pre-existing `reduction_ratio` assertion is
+# `test_a_degenerate_run_publishes_None_not_a_zero_figure`, whose one-name
+# population returns `None` before any pair set is formed, and everything else
+# reads the committed artifact's numbers back instead of the computation.
+
+
+def test_the_blocked_pair_set_is_computed_over_the_whole_population(tool_mod):
+    """`_blocked_pair_set` covers EVERY row it is given, not a sample of them.
+
+    ⛔ MEASURED before the extraction: narrowing the loop to the 300-row variant
+    sample (`for _row in sample:`) instead of the population published a
+    reduction ratio ~3x cheaper than the quantity its own definition names
+    (`#12295` round-2 B3), and NOTHING red. A 4-member fixture pins the property
+    without a graph: the expectation is recomputed here from `index.candidates`,
+    so a `_blocked_pair_set` that looks at a SAMPLE of its rows cannot match it.
+    """
+    from tortoise.entity_blocking import BlockIndex
+
+    #: `o0` is unrelated to everything, so it contributes no pair. That is
+    #: load-bearing: it makes "the pairs proposed by the whole population" differ
+    #: from "the pairs proposed by rows[:1]" (which is empty), so a function that
+    #: silently narrowed to a sample reds on the equality below.
+    names = ["zebra quux", "the project alpha", "project alpha zeta",
+             "configuration guide"]
+    rows = [{"id": f"o{i}", "name": name} for i, name in enumerate(names)]
+    index = BlockIndex.from_rows([dict(row, label="Object") for row in rows])
+
+    expected: set[frozenset[str]] = set()
+    for row in rows:
+        for cid in index.candidates(row["name"], label="Object"):
+            if cid != row["id"]:                   # a self-hit is not a pair
+                expected.add(frozenset((row["id"], cid)))
+
+    got = tool_mod._blocked_pair_set(index, rows)
+    assert expected, (
+        "the fixture proposes NO pair, so this test could not discriminate a "
+        "sample-restricted numerator — re-pick the names")
+    assert got == expected, (
+        f"the blocked pair set is {sorted(map(sorted, got))!r}, expected "
+        f"{sorted(map(sorted, expected))!r} from index.candidates over ALL "
+        f"{len(rows)} rows — computing it over a sample reds here")
+    #: …and the sample-only computation is genuinely different, so the equality
+    #: above is not satisfiable by a `rows[:1]`-style denominator.
+    assert got != tool_mod._blocked_pair_set(index, rows[:1]), (
+        "a one-member subset proposes the same pair set as the whole population — "
+        "the fixture cannot detect a sample-restricted numerator")
+
+
+def test_in_block_is_true_only_for_a_canonical_the_blocker_reaches(tool_mod):
+    """`_in_block` is the ARM-4 numerator: TRUE for the indexed canonical, FALSE
+    for a name sharing no key.
+
+    ⛔ A hardcoded `True` (or a `return member_id in blocked_ids` where
+    `blocked_ids` is the mention's own id list built wrongly) would credit every
+    pair as reachable and publish a pair completeness of 1.0 that no blocker
+    produced. Pinned from BOTH directions, so neither arm can be faked.
+    """
+    from tortoise.entity_blocking import BlockIndex
+
+    index = BlockIndex.from_rows([
+        {"id": "o1", "name": "the project alpha", "label": "Object"},
+        {"id": "o2", "name": "configuration guide", "label": "Object"},
+    ])
+    assert tool_mod._in_block(index, "o1", "project alpha") is True, (
+        "the blocker did not propose the indexed canonical for a word-order "
+        "variant of its name — a `False` here would under-report pair "
+        "completeness, and a test that only checked the other direction would "
+        "pass on a hardcoded `True`")
+    assert tool_mod._in_block(index, "o1", "zzzz qqqq wwww") is False, (
+        "a mention sharing NO key with the member was reported reachable — a "
+        "`True` here is the hardcoded-`True` regression this test exists for")

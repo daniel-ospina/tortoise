@@ -75,7 +75,10 @@ at `k=3`; `#11901`'s hybrid artifact holds **260/419 = 62.1 %**. The `exact` arm
 by frequency is a different population), and **the mechanism of the difference is not diagnosed
 here** — it is declared, not explained. It is also why the before/after below is measured **in one
 run, on one corpus**, with the pre-`#12295` matcher frozen inside the harness rather than read back
-from the old artifact: a before/after against a moving before is not a measurement.
+from the old artifact: a before/after against a moving before is not a measurement. ⚠️ **The same
+limit applies one field down, inside ARM 2:** this run's `attached_folded` = **386** is not
+comparable with `#11901`'s `attached_folded` = **114** either, because the arm now runs the SHIPPED
+matcher on a separator-normalised input (§3.3) — that movement is a **CODE** move, not a corpus move.
 
 ---
 
@@ -154,11 +157,19 @@ At `k=3`, on the same 422 pairs, one run:
 | basename-only | 30 | 23 | **30** | **0** |
 
 ⚠️ **The same run holds a higher number and it must be read beside 207, not instead of it:** the
-harness's `attached_folded` arm — a fold that scrubs `[-_./]` only and does **NOT** drop a leading
-article — binds **386 of 422 (91.5 %)**. The 179-pair gap between 386 and 207 is exactly the
-`space-to-hyphen` class, i.e. the article anchor (§4). 207 is what the *stored* key achieves without
-reversing a decision; 386 is the ceiling if that decision is reopened. Neither is "the fold works" on
-its own, which is why both are in the artifact.
+harness's `attached_folded` arm binds **386 of 422 (91.5 %)** — and ⛔ **read what that arm IS before
+quoting it as a ceiling on the shipped fold.** It is **not** a second, article-preserving fold. It is
+the **shipped matcher itself** (`_find_existing_entity`, which since this PR includes
+`_find_by_folded_key`) run on a **separator-normalised input**: `_fold_punct` is applied to the
+MENTION and to the rows first, and the live matcher then compares those. The article-dropping rung
+therefore still fires inside it — the arm moves the mention across the **separator**, not the fold
+across the **article**. Its 386 decomposes per class as 175 (`article-drop`, bound by the shipped
+folded rung) + 179 (`space-to-hyphen`, bound because the mention was separator-normalised to
+`the plan doc` and the stored `the plan doc` folds onto it) + 21 (`hyphen-to-space`) + 11
+(`hash-dropped`). So 207 is what the *stored* key binds, and 386 is what it binds **once the MENTION
+is separator-normalised before the comparison** — a lever on the matcher's input, which §4 shows
+does **not** require the `#12047` round-4 finding-5 article anchor to be reopened. Neither number is
+"the fold works" on its own, which is why both are in the artifact.
 
 ## 4. The residual is exactly two declared classes, and one of them is a decision
 
@@ -175,11 +186,15 @@ The artifact's own per-`k` rows say something sharper than "a ceiling". At the *
 window** 179 of 180 are IN the window, so exactly one is out of reach at that setting; at
 **k=5, k=10 and k=15 all 180 are in the window** (`arms.variant_by_class["space-to-hyphen"][k]["in_window"]`
 = 180 at each of those `k`) and **still 0 attach**. Width therefore cannot recover them — which makes the diagnosis
-*stronger*, not weaker: the article anchor alone is the cause, and no `k` budget fixes it. Recovering
-them would take the
-lane from **207/422 = 49.1 %** to **386/422 = 91.5 %**, which is exactly the artifact's
-`attached_folded` = 386 (91.5 %). That is a **reopen of a recorded finding**, not a candidate for
-quiet adoption, so it is filed as evidence (see §7).
+*stronger*, not weaker: the article anchor alone is the cause of the SHIPPED matcher's
+non-attachment, and no `k` budget fixes it. Recovering
+them inside the window would take the lane from **207/422 = 49.1 %** to **386/422 = 91.5 %**, and the
+artifact's `attached_folded` = 386 (91.5 %) is the number that says so — ⛔ **but the lever that
+number names is not the article anchor.** The arm separator-normalises the MENTION and then runs the
+shipped matcher, so those 179 pairs bind through an **input-side** normalisation the stored fold
+already accepts; that is a different change from reversing `#12047` round-4 finding 5, and it is the
+one the artifact has measured. Reversing the anchor is still not a candidate for quiet adoption — it
+is filed as evidence (see §7), argued from the per-class reach numbers rather than from the 386.
 
 **`basename-only` — 30 pairs, 30/30 blocked, 0 attach.** Deliberate: a basename is non-injective
 (`lib/config.py` and `server/config.py` share one), so `entity_blocking.attach_matches` attaches on it
@@ -233,10 +248,18 @@ retrieval-miss class `#11901` owns; the folded rung cannot reach what the window
 
 ## 7. What moves next, with the number attached
 
-1. **The article-anchor reopen (evidence filed, not adopted).** `+179` pairs (42.4 % of the 422 pairs) are in the window and reachable; only the anchor prevents the bind. The artifact's
-   `attached_folded = 386` is the number that reopen is argued with, not an estimate of it. Route: argue it where
-   `#12047` round-4 finding 5 lives, with this brief's §4 as the evidence — **not** a quiet change to
-   `normalize_entity_name`, and not a second comparison key smuggled in beside it.
+1. **Two distinct levers, and only one of them needs a reopen.** The argument rests on the per-class
+   reach numbers, not on one total: `space-to-hyphen` is **180/180 reachable by the blocker, 179 in
+   the `k=3` window, 0 attach** (and `0 attach` at every `k`, including the widths where all 180 are
+   in the window) — so the pairs are present and unattached, and no `k` budget reaches them.
+   **(a) Separator-normalise the MENTION before the comparison** — that recovers **179** of them, it
+   is exactly what the artifact's `attached_folded = 386` measures (386 = 175 + 179 + 21 + 11), it is
+   an input-side lever, and it does **NOT** require reopening `#12047` round-4 finding 5.
+   **(b) Reverse the article anchor** — that would fold `the-plan-doc` onto `plan doc` in the stored
+   key itself. That IS a reopen of a recorded finding, and it belongs where that finding lives, with
+   this brief's §4 as the evidence — **not** a quiet change to `normalize_entity_name`, and not a
+   second comparison key smuggled in beside it. `+179` pairs (42.4 % of the 422 pairs) are in the
+   window and reachable in either case.
 2. **The basename class (30 pairs)** needs the adjudicator (B1) or a complete-population read on the
    capture path; both are larger than this lever.
 3. **Phase 2 measurement** stays first in `#11901`'s own ordering and is unaffected by this lane.

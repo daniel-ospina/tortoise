@@ -50,13 +50,19 @@ fixes:
                        in the window at each k? (widening can help)
   ARM 2  MATCHING      a mention that is a real surface VARIANT of the stored
                        name — how often does phase 1 bind it? This arm ALSO
-                       measures `attached_folded`, what a `[-_./]`-only fold
-                       would recover. ⚠️ That is a DIFFERENT fold from the one
-                       shipped in `#12295`: it does not drop a leading article,
-                       so it binds the article+separator class the shipped
-                       `normalize_entity_name` cannot (#12047 round-4 F5). Both
-                       are recorded because the gap between them IS the measured
-                       cost of that decision.
+                       measures `attached_folded`, which is the SHIPPED matcher
+                       run on a SEPARATOR-NORMALISED input: the surface and the
+                       rows are passed through `_fold_punct` (case + whitespace +
+                       `[-_./]` → space) BEFORE `_find_existing_entity` sees them.
+                       ⚠️ It is therefore NOT a second, article-preserving fold:
+                       the matcher inside is the live one, so the article-dropping
+                       rung still fires — the class moves because the MENTION was
+                       separator-normalised first (`the-plan-doc` → `the plan doc`,
+                       which the stored `the plan doc` folds onto). Its 386 = the
+                       article-drop class (175) + the separator class (179) + two
+                       classes the shipped matcher already binds, so it is NOT
+                       comparable with `#11901`'s `attached_folded` field: the
+                       114 → 386 movement is a CODE move, not a corpus move.
   ARM 3  THE UNION     how large is the candidate set a capture actually hands
                        `resolve_entities`? (not `limit` — see below)
 
@@ -383,6 +389,12 @@ def _mode_note(has_embedder: bool, legs_seen: dict[str, bool]) -> str:
 def _fold_punct(text: str) -> str:
     """The candidate fix, measured but NOT shipped: fold the separator class.
 
+    ⛔ Read what the ``attached_folded`` arm does with it: this is applied to the
+    surface AND the rows and then the SHIPPED matcher runs — so it is a lever on
+    the matcher's INPUT, not a replacement for the shipped fold, and the
+    article-dropping rung still fires inside it (see the ARM-2 bullet in the
+    module docstring).
+
     Deliberately only the separator class (``-``/``_``/``.``/``/``) plus case and
     whitespace. It is not a general normaliser and it does not touch word order
     or morphology, so it cannot merge two genuinely different names by itself —
@@ -645,6 +657,38 @@ def _allocate_shares(sample: int, pop: list[dict]) -> dict[str, int]:
     for c in order[:max(0, rem)]:
         base[c] += 1
     return base
+
+
+def _blocked_pair_set(index, rows) -> set[frozenset[str]]:
+    """Every pair the multi-key blocker proposes over ``rows`` — the COST numerator.
+
+    ``rows`` must be the population the published denominator names, not the
+    variant SAMPLE: the ratio is reported over ``C(population, 2)``, so a
+    numerator taken over a 300-row sample of a 1000-row population publishes a
+    figure ~3x cheaper than the quantity its own definition names (`#12295`
+    round-2 B3). Extracted from ``run()`` so a test can pin which population the
+    numerator is computed over without running the graph-backed measurement.
+
+    A mention's own self-hit is excluded: the index always proposes the member
+    to itself (it blocks on its own keys), and a self-pair is not a candidate.
+    """
+    pairs: set[frozenset[str]] = set()
+    for row in rows:
+        for cid in index.candidates(row["name"], label="Object"):
+            if cid != row["id"]:
+                pairs.add(frozenset((row["id"], cid)))
+    return pairs
+
+
+def _in_block(index, member_id, surface, label: str = "Object") -> bool:
+    """Does the blocker propose ``member_id`` as a candidate for ``surface``?
+
+    The ARM-2/ARM-4 pair-completeness numerator, by definition: the true node is
+    REACHABLE when the multi-key union names it. ``label`` is explicit because the
+    population is Object rows, and a ``label=None`` query answers over every label
+    the index holds — a different (wider) question than the one this arm asks.
+    """
+    return member_id in set(index.candidates(surface, label=label))
 
 
 def _interleave(by_cls: dict[str, list[dict]], shares: dict[str, int]) -> list[dict]:
@@ -1031,9 +1075,14 @@ def run(args: argparse.Namespace) -> int:
         #                         equality + kind, nothing else). Recomputed here,
         #                         never read back from the old artifact, so the
         #                         before/after is one run on one corpus.
-        #   ``attached_folded``   the candidate fold #11901 measured (`_fold_punct`,
-        #                         separators only) — kept so the two folds can be
-        #                         told apart rather than conflated.
+        #   ``attached_folded``   the SHIPPED matcher on a SEPARATOR-NORMALISED input
+        #                         (`_fold_punct` applied to the surface AND the rows
+        #                         first). ⛔ NOT an article-preserving fold and NOT
+        #                         comparable with #11901's field of the same name: the
+        #                         live matcher still drops the article, so this arm
+        #                         moves the mention across the separator, not the
+        #                         article anchor. 386 = 175 (article-drop) + 179
+        #                         (space-to-hyphen, separator-normalised) + 21 + 11.
         #   ``in_multikey_block`` the pair completeness of the multi-key blocker:
         #                         is the canonical id in the union of the keys the
         #                         mention blocks on? (the metric `#12295` names)
@@ -1101,7 +1150,7 @@ def run(args: argparse.Namespace) -> int:
                 # per (row, surface) and reported at every k — the window does not
                 # change what the blocker proposes.
                 blocked_ids = set(index.candidates(surface, label="Object"))
-                in_mk_block = row["id"] in blocked_ids
+                in_mk_block = _in_block(index, row["id"], surface)
                 #: ⛔ THE DENOMINATOR IS NOT THE ONE `reduction_ratio` USES, and that
                 #: is a DECLARED difference rather than an accident: the index always
                 #: self-hits (a member blocks on its own keys), so this count
@@ -1207,11 +1256,7 @@ def run(args: argparse.Namespace) -> int:
         #: ratio ~3x cheaper than the quantity its own definition names, #12295
         #: round-2 B3). The per-mention mean stays over the variant sample, where
         #: the cost of a DUPLICATE-LOOKING mention is what matters.
-        _mk_pairs = set()
-        for _row in pop:
-            for _cid in index.candidates(_row["name"], label="Object"):
-                if _cid != _row["id"]:
-                    _mk_pairs.add(frozenset((_row["id"], _cid)))
+        _mk_pairs = _blocked_pair_set(index, pop)
         arms["blocking"] = {
             "pairs": _pairs,
             "population": len(pop),

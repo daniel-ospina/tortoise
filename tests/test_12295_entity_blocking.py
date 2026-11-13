@@ -30,6 +30,9 @@ from tortoise.entity_blocking import (
     BASENAME,
     EXACT,
     MAX_BLOCK_SIZE,
+    PREFIX,
+    SHINGLE,
+    TOKEN,
     BlockIndex,
     attach_keys,
     attach_matches,
@@ -163,6 +166,35 @@ def test_injective_key_wins_over_a_non_injective_one():
         f"{[(m['id'], m['basename_only']) for m in got]!r}")
 
 
+def test_attach_matches_prefers_the_stored_fold_over_a_re_fold_of_the_name():
+    """Pins `stored = cand.get("folded") or cand.get("canonical_name")`.
+
+    `#12047` stores the folded key on the row (`canonical_name`; `folded` from the
+    dedupe scan), and `attach_keys` takes it as an override so ONE value blocks and
+    attaches — re-folding `name` instead would key the same row two ways. MEASURED
+    before this test: forcing `stored = None` in `attach_matches` left every test in
+    this file green, because production `search_graph` rows carry only
+    `{id, name, kind}` and no test supplied a stored fold.
+
+    The fixture is chosen so the two folds DISAGREE: `name` is `a b`, whose own fold
+    drops the leading article (`key_of("a b") == "b"`), while the stored
+    `canonical_name` is `ab`. The mention is `ab`, so the pair binds on the stored
+    fold and on nothing else.
+    """
+    stored = {"id": "o1", "name": "a b", "canonical_name": "ab"}
+    got = attach_matches("ab", [stored])
+    assert [m["id"] for m in got] == ["o1"], (
+        f"the STORED fold was not preferred over a re-fold of `name`: {got!r} — "
+        "deleting `stored = cand.get('folded') or cand.get('canonical_name')` must "
+        "red this test")
+    # …and the same row WITHOUT the stored fold must NOT bind: that is the
+    # direction that fails if the preference is dropped rather than honoured.
+    re_folded = {"id": "o1", "name": "a b"}
+    assert attach_matches("ab", [re_folded]) == [], (
+        "a row with no stored fold bound anyway, so this fixture does not "
+        "discriminate the stored-fold preference (key_of('a b') is 'b', not 'ab')")
+
+
 # ── the entropy gate: Zep's shape, blocking-side ──────────────────────────
 
 
@@ -205,6 +237,64 @@ def test_shingles_and_bands_are_deterministic_across_processes():
     assert len(sig) == 32
     assert len(lsh_bands(sig)) == 8                  # 32 permutations / band 4
     assert shingles("ab") == frozenset({"ab"})       # shorter than SHINGLE_SIZE
+
+
+def test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_shares_only_it():
+    """One witness per generator — `P`, `T`, `S` — each sharing THAT key alone.
+
+    ⛔ MEASURED before this test: deleting the `P:` append from `block_keys` left
+    all 59 tests green, and deleting the whole shingle block left all 59 green too.
+    The union is the candidate generator, so a deleted generator is a silent recall
+    loss that nothing else in this file observes: `attach_matches` decides on `E`,
+    and the tests that block on multiple keys never assert WHICH key met.
+
+    ⛔ `entity_resolver.py`'s module docstring says
+    `test_the_scan_finds_a_transposition_the_single_prefix_key_could_not` "pins"
+    the `T` key. It does not: those two names share `T` *and* `S`, so either one
+    survives the other's deletion. The `T` witness below is the pair whose ONLY
+    shared key is a token prefix.
+    """
+    # (a) all three namespaces are present in ONE ordinary high-entropy name.
+    for ns in (PREFIX, TOKEN, SHINGLE):
+        assert any(k.startswith(f"{ns}:") for k in block_keys("the project alpha")), (
+            f"no `{ns}:` key for `the project alpha` — the `{ns}` generator was "
+            "deleted from `block_keys`, and nothing else in this file reds")
+
+    # (b) `P` ALONE, by set equality: both names fold to a 2-token key under 6
+    # chars, so neither has a `T:` key, and their 3-gram shingle sets do not
+    # intersect (VERIFIED on this head: the intersection below is exactly the one
+    # prefix key). `MIN_BLOCK_CHARS == 3`, so the prefix is `"ab "` — with the
+    # space, because the prefix is taken over the FOLDED key, not over a word.
+    left, right = "ab cd", "ab gh"
+    shared = set(block_keys(left)) & set(block_keys(right))
+    assert shared == {"P:ab "}, (
+        f"the `P` witness pair ({left!r}, {right!r}) no longer shares exactly one "
+        f"`P:` key: {sorted(shared)!r}. This test pins `P` ALONE, so either the `P` "
+        "generator was deleted (the assertion above already reds) or a second "
+        "namespace now intersects here and the witness must be re-picked")
+
+    # (c) `T` ALONE for the word-order class: the two orderings share their token
+    # prefixes and NOT their prefix key, so deleting `T` cannot be masked by `P`.
+    transposed = set(block_keys("project alpha")) & set(block_keys("alpha project"))
+    assert any(k.startswith("T:") for k in transposed), (
+        "a word-order change shares no `T:` key — the `T` generator was deleted "
+        "from `block_keys`, and nothing else in this file reds")
+    assert not any(k.startswith("P:") for k in transposed), (
+        f"the transposition witness now shares a `P:` key too ({sorted(transposed)!r}), "
+        "so it can no longer pin `T` on its own — `P` would survive a `T` deletion")
+
+    # (d) `S` on a HIGH-ENTROPY name, and two shingle-near names must meet on at
+    # least one band. The intersection is COMPUTED: a hardcoded digest would pin
+    # one permutation seed as if it were the property.
+    cfg_bands = {k for k in block_keys("configuration") if k.startswith("S:")}
+    assert cfg_bands, (
+        "`configuration` is high-entropy and got no `S:` band — the shingle "
+        "generator was deleted from `block_keys`, and nothing else in this reds")
+    near_a = {k for k in block_keys("configuration guide") if k.startswith("S:")}
+    near_b = {k for k in block_keys("configuration guidse") if k.startswith("S:")}
+    assert near_a & near_b, (
+        "two shingle-near names share no `S:` band, so the LSH generator no longer "
+        f"produces candidates ({len(near_a)} and {len(near_b)} bands, no overlap)")
 
 
 def test_multikey_blocking_finds_what_the_single_prefix_key_cannot():
@@ -538,8 +628,13 @@ def test_a_whitespace_only_fold_is_never_indexed():
     assert index.stats()["members"] == 0, (
         "a whitespace-only fold was indexed — two unrelated names now share one "
         f"`E:` block: {index.blocks()!r}")
-    assert not [b for b in index.blocks() if b[1].startswith("E:")], (
-        f"an `E:` block was created for an empty fold: {index.blocks()!r}")
+    #: ⛔ Asserted on the INDEX's own structure, not on a fake member tuple: the
+    #: previous line here was `b[1].startswith("E:")` over `index.blocks()`, whose
+    #: elements are LISTS OF MEMBER IDS — `b[1]` is an id, never a key, so the
+    #: assertion was vacuous while the guard held and would have raised
+    #: `IndexError` on any non-empty one-member block.
+    assert index.blocks() == [], (
+        f"a block was created for an empty fold: {index.blocks()!r}")
     #: A punctuation-only name is NOT this class: it folds to itself and is indexed.
     index.add("c", "!!!", label="Object")
     assert index.stats()["members"] == 1, (
