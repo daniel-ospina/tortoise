@@ -162,12 +162,17 @@ is what the numbers here rest on.
 
 ⚠️ **The refusal has no override, on purpose, and its cost should be stated:** one terminal
 (`outdated`) operator, or one legacy `op_type`-only operator, blocks the WHOLE census — including
-the 127-row carry set that has nothing to do with the reasoning layer. The legacy cause at least
-names its remedy (`graph-scripts/backfill_is_operator.py`); the terminal cause names none, because
-the honest remedy is a decision about whether a superseded operator belongs in the curated graph —
-not a flag. That is acceptable only because this pass writes nothing yet: an operator who hits it
-can read the message, fix the layer, or take the decision, and no data is written while the census
-is refused.
+the 127-row carry set that has nothing to do with the reasoning layer. For the legacy cause there IS a
+mechanical script (`graph-scripts/backfill_is_operator.py` stamps `is_operator = true` on
+`op_type IS NOT NULL` rows, so it cannot demote anything) — but running it is a **write to the
+KEPT graph**, which ruling 1 above forbids this pass from making: it is the owner's decision, not
+a remedy this document can offer. The read-side alternative needs no write at all (widen
+`read_operators`' predicate to match `structure.operators`' disjunction, which costs the status
+filter's semantics), and it is a change to this reader that a later lane can argue on its own
+merits. The terminal cause names no remedy at all, because the honest one is a decision about
+whether a superseded operator belongs in the curated graph — not a flag. Accepting this is
+tractable only because the pass writes nothing yet: an operator who hits the refusal can read the
+message and take the decision it points at, and nothing is written meanwhile.
 
 | property | mechanism | test |
 |---|---|---|
