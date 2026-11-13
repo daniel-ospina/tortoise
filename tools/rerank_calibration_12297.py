@@ -209,8 +209,11 @@ def _arm_block() -> dict:
             "_found_before": 0, "_found_after": 0}
 
 
-#: Reasons ``rerank_pool`` reports BEFORE the scorer is consulted: the read
-#: handed it nothing to score. They are READ outcomes, not rerank failures, and
+#: Reasons ``rerank_pool`` reports when the READ handed it nothing to score
+#: (before the scorer is consulted at all, or because every candidate's text was
+#: empty). ⛔ A HAND-COPIED vocabulary, pinned against ``tortoise/rerank.py`` by
+#: ``test_the_read_side_vocabulary_is_the_one_rerank_pool_emits`` — otherwise a
+#: rename there makes this instrument refuse every query as "DEGRADED". They are READ outcomes, not rerank failures, and
 #: the instrument already models them — the gold stays in the denominator,
 #: ``_ndcg(None)`` is 0, and the block counts ``pool_absent``. Refusing on them
 #: would abort a ~46-minute run over a single query whose derived text matched
@@ -224,7 +227,7 @@ def _arm_block() -> dict:
 #: ``"disabled"``, be tolerated as a read outcome, and emit an artifact of unmixed
 #: before-only figures with no refusal at all. A dead member that would invert the
 #: guard if it ever lived is worse than no member.
-READ_SIDE_DEGRADES = frozenset({"empty_pool", "empty_query"})
+READ_SIDE_DEGRADES = frozenset({"empty_pool", "empty_query", "no_scorable_text"})
 
 
 def score_pool(query: str, rows: list[dict], *, model: str,

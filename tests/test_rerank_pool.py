@@ -246,7 +246,12 @@ def test_none_content_truncates_to_empty_and_does_not_degrade(
     rows = [{"id": "a", "content": None}, {"id": "b", "content": "gym gym"}]
     out, stats = rerank.rerank_pool(QUERY, rows)
     assert stats["applied"] is True
-    assert [r["id"] for r in out] == ["b", "a"]
+    # ⛔ ``a`` was NOT scored, so it keeps the SLOT the caller's order gave it.
+    # The earlier expectation was ``["b", "a"]`` — the unscored row demoted below
+    # a scored one — which at a fixed ``limit`` pushes it off the page while the
+    # trace reports ``moved: 0``. Not scoring a row must not move it.
+    assert [r["id"] for r in out] == ["a", "b"], out
+    assert stats["scored"] == 1 and stats["unscored"] == 1, stats
 
 
 # ── 5. the pool TEXT read: right property per label, same predicates ───────
@@ -524,6 +529,58 @@ def test_a_row_the_read_did_NOT_RETURN_is_never_scored(sdk, monkeypatch):
     assert "" not in texts_seen[0], texts_seen[0]
     assert entry[rerank.RERANK_SCORED_KEY] == len(texts_seen[0])
     assert entry[rerank.RERANK_UNSCORED_KEY] >= 1
+
+
+def test_an_UNSCORED_row_keeps_its_SLOT_and_is_not_pushed_off_the_page(
+        sdk, monkeypatch):
+    """A page whose top row has no text must come back with that row still on it.
+
+    ⛔ Measured before this fix: with a zeroed scorer (i.e. the reranker's own
+    decision is "no change") and ONE row's pool text blanked, the blanked row —
+    FIRST in the fused order — came back LAST, and at the caller's fixed ``limit``
+    it dropped off the page while the trace reported ``count: 0``. Silent recall
+    loss, and the mirror of the inversion this block already refuses (an excluded
+    row PROMOTED over included ones). The unscored row keeps its slot.
+    """
+    for i in range(5):
+        sdk.create_point(kind="statement",
+                         content=f"zebra migration claim number {i:02d}")
+    real_fetch = sdk_mod._fetch_rerank_pool_texts
+    blanked: list[str] = []
+
+    def _blank_the_first(graph, entity_type, graph_label, id_field, ids):
+        out = real_fetch(graph, entity_type, graph_label, id_field, ids)
+        first = next(iter(ids), None)
+        if first in out:
+            out[first] = ""
+            blanked.append(first)
+        return out
+
+    monkeypatch.setattr(sdk_mod, "_fetch_rerank_pool_texts", _blank_the_first)
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+
+    class _Flat:
+        """Every score equal: the reranker asks for NO change."""
+
+        def score(self, query, texts):
+            return [0.0 for _ in texts]
+
+    _inject(_Flat(), monkeypatch)
+    trace: list[dict] = []
+    on = [r["id"] for r in sdk.tortoise_fts_query(
+        "zebra migration", entity_type="point", limit=5, leg_trace=trace)]
+    assert blanked, "premise: one row's text must have been blanked"
+
+    entry = _rerank_entries(trace)[0]
+    assert entry["ran"] is True and entry["degraded"] is False, entry
+    # the unscored row did not move, so the page is the fused page
+    assert on[0] == blanked[0], (
+        f"the unscored row was demoted off the top of the page (on={on}, "
+        f"blanked={blanked[0]})")
+    assert entry[rerank.RERANK_SCORED_KEY] == 4, entry
+    assert entry[rerank.RERANK_UNSCORED_KEY] >= 1, entry
+    # …and with equal scores nothing moved, which the trace must say
+    assert entry["count"] == 0, entry
 
 
 def test_the_wiring_is_a_permutation_and_discloses_the_cap(

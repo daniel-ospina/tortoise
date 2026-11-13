@@ -200,12 +200,16 @@ def rerank_pool(
     reranker ranking well. The caller's own ``[:limit]`` is the only cut.
 
     ``pool`` bounds how many leading candidates are SCORED; the rest keep their
-    retrieval order and stay in the list. The scored head is reordered by
-    descending score with the original index as a stable tie-break, then the
-    unscored tail follows unchanged.
+    retrieval order and stay in the list. Within that bound, only the slots whose
+    text is non-empty are scored, and they are reordered by descending score with
+    the original index as a stable tie-break — writing back into THEIR OWN slots,
+    so a row the scorer never saw keeps the position the caller's order gave it
+    (nothing is demoted below a row it outranked, and nothing past the bound
+    moves). ``scored``/``unscored`` count exactly that split.
 
     Degrade (``applied: False`` + ``degrade_reason``) on: the gate off, an empty
-    query or pool, a scorer that will not load, a score exception, a
+    query or pool, a pool whose scored window carries NO usable text
+    (``no_scorable_text``), a scorer that will not load, a score exception, a
     length-mismatched score vector, a non-numeric score entry, a non-finite
     (``nan``/``inf``) score. Every one of them returns the input order
     untouched — this function never raises and never changes a caller's
@@ -228,16 +232,24 @@ def rerank_pool(
         return untouched, {"applied": False, "degrade_reason": reason}
 
     texts = [str(h.get(text_key) or "")[:RERANK_TRUNCATE_CHARS] for h in head]
+    # ⛔ ONLY THE SCORABLE SLOTS REACH THE SCORER. A row with no text cannot be
+    # scored on its text, and an EMPTY passage outranks an unrelated real one —
+    # passing ``""`` in would both waste a pair and let an unscored row be
+    # PROMOTED over scored ones.
+    scorable = [i for i in range(n_scored) if texts[i].strip()]
+    if not scorable:
+        return untouched, {"applied": False,
+                           "degrade_reason": "no_scorable_text"}
     try:
-        scores = scorer.score(query, texts)
+        scores = scorer.score(query, [texts[i] for i in scorable])
     except Exception as e:  # noqa: BLE001, RUF100 — degrade, never raise
         return untouched, {"applied": False, "degrade_reason": f"{e!r}"}
-    if not isinstance(scores, (list, tuple)) or len(scores) != len(texts):
+    if not isinstance(scores, (list, tuple)) or len(scores) != len(scorable):
         return untouched, {
             "applied": False,
             "degrade_reason": "scorer returned length-mismatched scores "
                               f"({len(scores) if isinstance(scores, (list, tuple)) else '?'} "
-                              f"vs {len(texts)})",
+                              f"vs {len(scorable)})",
         }
 
     # ⛔ THE COERCION IS INSIDE THE GUARD, not just the call: a scorer that
@@ -255,18 +267,47 @@ def rerank_pool(
         return untouched, {"applied": False,
                            "degrade_reason": "non-finite scores"}
 
-    order = sorted(range(n_scored), key=lambda i: (-values[i], i))
-    reordered = [head[i] for i in order] + untouched[n_scored:]
-    moved = sum(1 for rank, i in enumerate(order) if rank != i)
+    reordered, moved, top_score = _reorder_scorable_slots(
+        head, untouched, n_scored, scorable, values)
     return reordered, {
         "applied": True,
         "pool": pool_n,
-        "scored": n_scored,
-        "unscored": len(untouched) - n_scored,
+        "scored": len(scorable),
+        "unscored": len(untouched) - len(scorable),
         "moved": moved,
-        "top_score": round(values[order[0]], 4),
+        "top_score": top_score,
         "min_scored": round(min(values), 4),
     }
+
+
+def _reorder_scorable_slots(head: list[dict], untouched: list[dict],
+                            n_scored: int, scorable: list[int],
+                            values: list[float]
+                            ) -> tuple[list[dict], int, float | None]:
+    """Reorder the SLOTS whose text the scorer saw; leave every other slot alone.
+
+    ⛔ A slot with NO text was not scored, so it must keep the position the fused
+    order gave it. Sorting a COMPACTED list of only the scored rows and appending
+    everything else demotes an unscored row below rows it outranked — measured: a
+    row whose pool text was blank, sitting FIRST in the fused order, was pushed to
+    last with a zeroed scorer, and at the caller's fixed limit it dropped off the
+    page while the trace reported ``count: 0`` ("nothing moved"). That is silent
+    recall loss on a surface whose every measurement is taken at a fixed limit,
+    and it is the mirror of the inversion this function already refuses (an
+    excluded row being PROMOTED over included ones).
+
+    ``moved`` counts only score-driven moves, so the disclosure stays true.
+    """
+    out = list(head)
+    # ``values[j]`` is the score of ``head[scorable[j]]`` — the scorer saw the
+    # scorable slots ONLY, so both sides are indexed by position in ``scorable``.
+    order = sorted(range(len(scorable)), key=lambda j: (-values[j], scorable[j]))
+    for slot, j in zip(scorable, order, strict=True):
+        out[slot] = head[scorable[j]]
+    moved = sum(1 for slot, j in zip(scorable, order, strict=True)
+                if slot != scorable[j])
+    top = round(values[order[0]], 4) if order else None
+    return out + untouched[n_scored:], moved, top
 
 
 def rerank_enabled(flag: bool | None = None) -> bool:

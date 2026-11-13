@@ -261,12 +261,17 @@ paragraph called the table "an AD-HOC observation … at loadavg 2.7" — true o
 7.5 / 62.9 ms micro-benchmark the table REPLACED, false of the table itself, and it
 contradicted the provenance paragraph seven lines above.)
 
-**And one recorded gap in the artifact:** `measurement-user-search.json` was
-produced before `fused_rerank_gate_armed` was added to the report's `config`, so
-it has no such key. The absence is expected rather than a lost record — and the
-numbers are themselves evidence the baseline was not already reranked
-(`gained 165 / lost 0` is not producible by a rerank-vs-rerank comparison).
-A re-run records the field. The same is true of `config.model`: it read `null` (the harness recorded the FLAG, not the resolved id) and now carries the id the run resolved — `cross-encoder/ms-marco-MiniLM-L6-v2` — with `model_provenance` stating that it was filled in after the run and that no measured value changed; the harness writes the resolved id natively from now on.
+**And three recorded gaps in the artifact:** `measurement-user-search.json` was
+produced before the report's `config` carried `fused_rerank_gate_armed`,
+`wired_pool_width` and the resolved `model`, so it has none of the three keys (its
+`config.model` was filled in afterwards, as `model_provenance` states). Each
+absence is expected rather than a lost record — and the numbers are themselves
+evidence the baseline was not already reranked (`gained 165 / lost 0` is not
+producible by a rerank-vs-rerank comparison). A re-run records all three fields.
+`config.model` there reads `cross-encoder/ms-marco-MiniLM-L6-v2`, the id the run
+resolved, and `model_provenance` states that it was filled in after the run and
+that no measured value changed; the harness writes the resolved id natively from
+now on.
 
 So the user-search rerank **improves ranking and is not affordable**: 3.4 s per
 query on CPU, per query, in the interactive search path. **The lever earns its gate

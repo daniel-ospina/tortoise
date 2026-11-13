@@ -222,25 +222,31 @@ class _FakeGraph:
     the write. A dict makes the check derive from the writes.
     """
 
-    def __init__(self):
-        self.stored: dict[str, str] = {}
+    def __init__(self, drop_write: bool = False):
+        self.landed: set[str] = set()
+        self.drop_write = drop_write
         self.rows = [["rp-12297000000", "first"], ["rp-12297000001", "second"]]
 
     def query(self, cypher, params=None):
-        cypher = cypher or ""
+        """Answer by PARAMS, never by Cypher spelling.
+
+        ⛔ The first version matched substrings of the query text, so the pin was
+        bound to the fake's copy of the Cypher rather than to what the run MEANT:
+        a benign rename ("STARTS WITH" → a scoped IN) would red every drive test
+        while the write it guards still worked — and answering an unexpected
+        query from a constant is the shape that let a deleted ``CREATE`` stay
+        green. Params carry the intent; an unrecognised call is an ERROR here.
+        """
         params = params or {}
-        if cypher.lstrip().upper().startswith("CREATE"):
-            if params.get("id") is not None:
-                self.stored[params["id"]] = params.get("c") or ""
+        if "ids" in params:
+            return self._result([[i] for i in list(params["ids"])
+                                 if i in self.landed])
+        if "id" in params:
+            if not self.drop_write:
+                self.landed.add(params["id"])
             return self._result([])
-        if "STARTS WITH" in cypher:
-            return self._result([[k] for k in self.stored])
-        if "n.id IN $ids" in cypher:
-            ids = list(params.get("ids") or [])
-            return self._result([[i] for i in ids if i in self.stored])
-        if "RETURN n.id" in cypher:
-            return self._result([["warm"]])
-        return self._result(self.rows)
+        raise AssertionError(
+            f"the fake store got a query it does not model: {cypher!r} {params!r}")
 
     @staticmethod
     def _result(rows):
@@ -250,15 +256,17 @@ class _FakeGraph:
 
 
 class _FakeProj:
-    def __init__(self):
-        self.g = _FakeGraph()
+    def __init__(self, drop_write: bool = False):
+        self.g = _FakeGraph(drop_write)
 
 
 class _FakeSDK:
     """Reads return the harvested ids in fused order; writes land in _FakeGraph."""
 
+    drop_write = False
+
     def __init__(self, *a, **kw):
-        self.proj = _FakeProj()
+        self.proj = _FakeProj(type(self).drop_write)
         self.rows = self.proj.g.rows
 
     def _get_proj(self):
@@ -308,15 +316,9 @@ def drive(monkeypatch, tmp_path, capsys):
                             lambda *a, **k: [{"id": "x", "content": PASSAGE_TEXT}])
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/x")
         out = tmp_path / "artifact.json"
-        if drop_write:
-            # A store that silently accepts the CREATE and keeps nothing — the
-            # partial-write shape the landing check exists to catch.
-            monkeypatch.setattr(
-                _FakeGraph, "query",
-                lambda self, cypher, params=None: _FakeGraph._result(
-                    [] if (cypher or "").lstrip().upper().startswith("CREATE")
-                    else ([[k] for k in self.stored]
-                          if "STARTS WITH" in (cypher or "") else [])))
+        # A store that silently accepts the CREATE and keeps nothing — the
+        # partial-write shape the landing check exists to catch.
+        monkeypatch.setattr(_FakeSDK, "drop_write", drop_write)
         code = cal.run(_run_ns(threads=0, out=str(out), model=arg_model, **over))
         art = json.loads(out.read_text()) if out.exists() else None
         return type("Run", (), {"code": code, "art": art,
@@ -485,6 +487,25 @@ def test_the_run_measures_the_model_the_PRODUCT_would_load(monkeypatch):
     # It is pinned where neither can fake it — the end-to-end drive in §7 asserts
     # that BOTH the artifact's `config.model` and the id handed to the timed call
     # are the resolver's value.
+
+
+def test_the_read_side_vocabulary_is_the_one_rerank_pool_emits():
+    """`READ_SIDE_DEGRADES` is a hand-copied vocabulary — pin it to its source.
+
+    ⛔ It is a copy of string literals produced inside ``tortoise/rerank.py``, and
+    the tests iterate the set itself, so both sides were the tool. A rename in
+    ``rerank.py`` would make this instrument refuse EVERY query as "the rerank
+    DEGRADED" (fail-closed, but a whole run lost) — and a REMOVED read-side reason
+    would be worse: the run would refuse instead of counting the skip.
+    """
+    import inspect
+
+    from tortoise import rerank as rr
+
+    src = inspect.getsource(rr.rerank_pool)
+    for reason in sorted(cal.READ_SIDE_DEGRADES):
+        assert f'"{reason}"' in src, (
+            f"{reason!r} is not a degrade_reason rerank_pool emits any more")
 
 
 def test_a_degraded_arm_is_refused_and_says_so():

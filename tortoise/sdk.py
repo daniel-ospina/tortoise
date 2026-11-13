@@ -42038,9 +42038,9 @@ class TortoiseSDK:
                 # the ``is_operator`` leg with no row) used to be handed to the
                 # scorer as ``""`` — and an empty passage outranks an unrelated
                 # real one, so an EXCLUDED row was PROMOTED over included ones.
-                # Only ids that came back are scored; the rest ride with the
-                # unscored tail, keeping their relative retrieval order, and
-                # the disclosed ``unscored`` count counts them.
+                # Only ids that came back WITH text are scored; every other row
+                # keeps the slot the fused order gave it, and the disclosed
+                # ``unscored`` count counts them.
                 # ⛔ MEMBERSHIP IS NOT ENOUGH — the text must be NON-EMPTY. The
                 # read maps a null/absent property to ``""`` (``str(row[1] or
                 # "")``), so a row that IS returned can still arrive with no text
@@ -42053,6 +42053,18 @@ class TortoiseSDK:
                 _scored_rows = [{"id": pid, "content": _pool_texts[pid]}
                                 for pid in _scored_ids]
                 _scored_n = len(_scored_rows)
+                # ⛔ ONE ROW PER CANDIDATE, IN FUSED ORDER. A row with no usable
+                # text cannot be scored, so it must keep the SLOT the fused order
+                # gave it: ``rerank_pool`` writes the scored rows back into their
+                # own slots and leaves the rest alone. Handing it a COMPACTED
+                # list instead (scored head + everyone else appended) demoted an
+                # unscored row below rows it outranked — measured, a textless row
+                # FIRST in the fused order landed last with a zeroed scorer, and at
+                # a fixed ``limit`` it dropped off the page while the trace said
+                # ``count: 0``. Silent recall loss, and the mirror of the
+                # promotion this block already refuses.
+                _pool_rows = [{"id": pid, "content": _pool_texts.get(pid) or ""}
+                              for pid in result_ids]
                 # ⛔ DO NOT SPEND A MODEL CALL ON A POOL WITH NOTHING TO SCORE.
                 # The REPORTING half of this case is the ``if not _scored_rows``
                 # arm below (it overwrites ``_rr_stats``, so the trace is honest
@@ -42065,29 +42077,27 @@ class TortoiseSDK:
                 # twenty empty passages — for a result that cannot differ.
                 # ``test_a_pool_with_no_usable_text_makes_no_scorer_call`` pins it.
                 if _scored_rows:
-                    # Hoisted: rebuilding the set per ITEM made this
-                    # O(width^2), and ``TORTOISE_FUSED_RERANK_POOL`` has no
-                    # upper bound (``_clamp_int`` clamps only the FLOOR), so a
-                    # caller raising ``pool_size`` could put ~10^6 inserts on a
-                    # path already priced at ~207 ms/mention.
-                    _scored_set = set(_scored_ids)
-                    _rows = _scored_rows + [
-                        {"id": pid, "content": ""}
-                        for pid in _pool_ids if pid not in _scored_set
-                    ]
-                    # ⛔ THE UNSCORED TAIL RIDES ALONG. Handing ``rerank_pool`` only
-                    # the scored head made its ``unscored`` count structurally ZERO
-                    # — the stats said "nothing went unscored" while every candidate
-                    # past the width had gone unscored — which is the silent-cap
-                    # defect reproduced INSIDE the disclosure. The tail's content is
-                    # never read (it is not scored); it is here so the count is true.
-                    _rows += [{"id": pid, "content": ""}
-                              for pid in result_ids[_pool_n:]]
-                    _reranked, _rr_stats = rerank_pool(query, _rows, pool=_scored_n)
+                    # ⛔ ONE PASS, O(candidates). The shape this replaces rebuilt a
+                    # membership set INSIDE a comprehension (O(width^2) on a path
+                    # already priced at ~207 ms/mention, and
+                    # ``TORTOISE_FUSED_RERANK_POOL`` clamps only the FLOOR), so it
+                    # was hoisted to ``_scored_set`` — a fix for the cost of an
+                    # assembly that no longer happens: ``_pool_rows`` is built once
+                    # above, and ``rerank_pool`` scores only the scorable slots.
+                    # ⛔ EVERY CANDIDATE IS HANDED OVER, and by construction the
+                    # count is true: ``unscored`` is every candidate the scorer did
+                    # not see (textless inside the width, and every row past it).
+                    # Handing ``rerank_pool`` only the scored head made its
+                    # ``unscored`` structurally ZERO — the silent-cap defect
+                    # reproduced INSIDE the disclosure.
+                    _reranked, _rr_stats = rerank_pool(query, _pool_rows,
+                                                       pool=_pool_n)
                     if _rr_stats.get("applied"):
                         # ``rerank_pool`` is a permutation of what it was handed —
-                        # the scored head reordered, the unscored tail in its
-                        # retrieval order — so the read's id set is unchanged.
+                        # the scored slots reordered in place, every other slot
+                        # (no usable text, or past the width) untouched — so the
+                        # read's id set is unchanged AND an unscored row cannot be
+                        # pushed off a fixed-limit page.
                         result_ids = [r["id"] for r in _reranked]
             if not _scored_rows:
                 # ⛔ AN OPTED-IN LEVER THAT DID NOTHING MUST SAY SO. The pool

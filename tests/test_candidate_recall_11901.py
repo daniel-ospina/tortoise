@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -1660,6 +1662,45 @@ def test_the_rerank_ARM_is_handed_the_resolved_model(tool_mod, monkeypatch):
     assert direct and not unscored, (
         "an inline _rerank_arm call with no scorer of its own bypasses the "
         "resolver the seam exists to apply")
+
+
+class _ToyScorer:
+    """The minimum a scorer needs to be for ``_rerank_arm``: opaque scores."""
+
+    def score(self, query, texts):
+        return [0.0 for _ in texts]
+
+
+def test_the_latency_note_matches_what_happened_to_torch(tool_mod, monkeypatch):
+    """A ``--rerank-threads 0`` run must not claim a pin it never made.
+
+    ⛔ The note is the ONE field a reader uses to decide whether a latency figure
+    describes the model or the scheduler. ``0`` leaves torch's default pool in
+    place, and the artifact still said "PINNED to 0" — a pin the run never made,
+    on the field that answers exactly that question.
+    """
+    rows = [{"id": "g-0", "name": "gym"}, {"id": "g-1", "name": "gyms"}]
+    sample = [{"id": "g-0", "name": "gym", "cls": "exact"}]
+
+    def window(_name, _pool):
+        return list(rows)
+
+    def arm(threads):
+        return tool_mod._rerank_arm(
+            sample, window, lambda n, c: [], model="cross-encoder/toy",
+            pools=(5,), threads=threads, scorer=_ToyScorer())
+
+    # the thread pin itself: recorded where torch would have received it
+    applied: list[int] = []
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
+        set_num_threads=applied.append))
+
+    assert "PINNED to 1" in arm(1)["latency"]["note"]
+    assert applied == [1], applied
+    unpinned = arm(0)["latency"]["note"]
+    assert applied == [1], "threads=0 must leave torch's default pool alone"
+    assert "PINNED" not in unpinned, unpinned
+    assert "NOT pinned" in unpinned, unpinned
 
 
 def test_the_control_arms_are_not_labelled_with_the_models_cost_story(lexical):

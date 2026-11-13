@@ -706,12 +706,21 @@ def _rerank_arm(
                "Includes the scorer's lock and the torch sigmoid.")),
     }
     if not model.startswith("lexical:"):
-        out["latency"]["note"] += (
-            " torch threads are PINNED to "
-            f"{threads} and recorded here, because the unpinned default "
-            "(one thread per core) measured ~20x slower on this box "
-            "under fleet load — an unpinned figure describes the "
-            "scheduler, not the model")
+        # ⛔ THE NOTE MUST MATCH WHAT HAPPENED TO TORCH. `--rerank-threads 0`
+        # leaves the default pool in place, and the artifact said "PINNED to 0" —
+        # a pin the run never made, on the one field a reader uses to decide
+        # whether the figure describes the scheduler or the model.
+        if threads > 0:
+            out["latency"]["note"] += (
+                f" torch threads are PINNED to {threads} and recorded here, "
+                "because the unpinned default (one thread per core) measured "
+                "~20x slower on this box under fleet load — an unpinned figure "
+                "describes the scheduler, not the model")
+        else:
+            out["latency"]["note"] += (
+                " torch threads are NOT pinned (torch's default pool, one thread "
+                "per core): this figure describes the scheduler as much as the "
+                "model")
     return out
 
 # ── the NAME-ENTROPY GATE (#12294) — MEASURED HERE, DECLINED ────────────────
