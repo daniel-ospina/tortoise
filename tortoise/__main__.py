@@ -11301,7 +11301,13 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         "cli_target": None,
         "daemon_target": None,
         "differs": False,
-        # Whether the file was applied BEFORE the graded target was resolved.
+        # Whether a RE-RUN would grade the daemon's store. Only meaningful in the
+        # pre-application state, and MEASURED, never assumed: the CLI ladder and
+        # the daemon's rank a scheme-less `TORTOISE_DB_URI` differently (the CLI
+        # puts `TORTOISE_DB_PATH` above it, the daemon does not), so "the two
+        # ladders agree" is false on that box and the promise would let a user
+        # accept a green verdict about the wrong store (#12428 review).
+        "rerun_agrees": None,
         # Distinct from `read_by_this_command`: that one only says the file is in
         # this process NOW, which a mid-run import makes true of a target
         # resolved BEFORE it (#12428 review).
@@ -11459,6 +11465,17 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         payload["daemon_target"] = _mask_display_target(daemon_target)
     payload["differs"] = bool(cli_target and daemon_target
                               and cli_target != daemon_target)
+    if (payload["read_by_this_command"] and not payload["applied_when_graded"]
+            and not graded_explicit):
+        # The frame is POST-fill now (that is what `read_by_this_command` being
+        # true means), so resolving from the environment answers "what would a
+        # re-run grade?" without a second process.
+        try:
+            _rerun = _resolve_db_target(None)
+        except Exception:  # a broken environment is already reported elsewhere
+            _rerun = None
+        payload["rerun_agrees"] = bool(_rerun and daemon_target
+                                       and str(_rerun) == str(daemon_target))
     if payload["differs"] and payload["cli_target"] == payload["daemon_target"]:
         # Reachable: the mask collapses userinfo, so two stores differing ONLY in
         # credentials display identically. ⛔ The claim is
@@ -11576,10 +11593,19 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                     f"{_printable(str(env_file['daemon_target']))}")
         else:
             what = "the daemon's target does not resolve either"
+        # ⛔ Not an unconditional "sets the daemon's store": a provider-only file
+        # was credited with one while the same row said the daemon REFUSES to
+        # start — and a file key the ENVIRONMENT outranks cannot select either
+        # (#12428 review). Same three-way split as the arms below.
+        if env_file.get("file_graph_keys"):
+            _sets = (f"sets {_printable(', '.join(env_file['file_graph_keys']))} — "
+                     f"{_read_clause}")
+        else:
+            _sets = f"sets no graph key — {_read_clause}"
         rows.append(("Config: .env", "⚠️",
-                     f"{path} sets the daemon's store, and {_read_clause} — "
-                     f"this run's own target did not resolve, so the rows "
-                     f"below grade NO store — {what}. The two cannot be compared"))
+                     f"{path} {_sets}; this run's own target did not resolve, so "
+                     f"the rows below grade NO store — {what}. The two cannot be "
+                     "compared" + _applied_note))
         return rows
     if env_file.get("daemon_rung") == "refuses":
         # The daemon would not start at all: `mcp_server.main()` exits 1 rather
@@ -11641,14 +11667,21 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                 detail += (" (this run graded its OWN explicit target, so the "
                            "difference is that target, not this file)")
             elif not env_file.get("applied_when_graded", True):
-                # ⛔ The DOCUMENTED setup: no `TORTOISE_DB_URI` in the shell, so
-                # Step 1 resolved the canonical embedded default, and §5.5's later
-                # import then applied the file. Both ladders now resolve the
-                # file's URI — they agree — so the ladders explanation is false
-                # and the actionable sentence is "re-run" (#12428 review).
+                # ⛔ The DOCUMENTED setup: no store key in the shell, so Step 1
+                # resolved the canonical embedded default, and §5.5's later import
+                # then applied the file. The ladders explanation is false here
+                # (#12428 review) — but "a re-run grades the daemon's" is only
+                # true when the two ladders agree POST-fill, which `rerun_agrees`
+                # measures.
                 detail += (" (this run resolved the store above BEFORE that import "
-                           "applied the file, so a re-run grades the daemon's — "
-                           "the two ladders agree on this box)")
+                           "applied the file")
+                if env_file.get("rerun_agrees"):
+                    detail += (", so a re-run grades the daemon's — the two ladders "
+                               "agree on this box)")
+                else:
+                    detail += ("; a re-run resolves from the filled environment too, "
+                               "and the two ladders still rank its keys differently — "
+                               "the daemon's store is above)")
             else:
                 detail += (" (both read the SAME environment now, so the difference "
                            "comes from the two LADDERS ranking its keys differently)")

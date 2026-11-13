@@ -1198,6 +1198,7 @@ def test_doctor_blames_the_pre_application_target_not_the_ladders():
         "differs": True,
         "read_by_this_command": True,
         "applied_when_graded": False,
+        "rerun_agrees": True,
         "graded_explicit": False,
         "graded_unresolved": False,
         "cli_error": None,
@@ -1273,3 +1274,69 @@ def test_the_only_reader_claim_is_scoped_to_the_graph_target():
     doc = " ".join((dotenv_file.__doc__ or "").split())
     assert "For the GRAPH TARGET, exactly one entry point read that file" in doc, doc
     assert "s2_decision_seam" in doc, doc
+
+
+def _rows_text(payload):
+    from tortoise.__main__ import _dotenv_rows
+
+    base = {
+        "path": "/repo/.env",
+        "missing": False,
+        "differs": True,
+        "read_by_this_command": True,
+        "applied_when_graded": False,
+        "graded_explicit": False,
+        "graded_unresolved": False,
+        "cli_error": None,
+        "daemon_rung": "uri",
+        "daemon_target": "/tmp/from-file.db",
+        "cli_target": "/tmp/embedded-default.db",
+        "difference_is_masked": None,
+        "keys": ["TORTOISE_DB_URI"],
+        "file_graph_keys": ["TORTOISE_DB_URI"],
+        "graph_keys": [],
+        "shadowed_graph_keys": [],
+        "keys_already_set_in_the_environment": [],
+        "unread_env_files": [],
+        "rerun_agrees": True,
+    }
+    base.update(payload)
+    rows = _dotenv_rows(base)
+    return " ".join(str(detail) for _check, _status, detail in rows)
+
+
+def test_a_rerun_promise_needs_the_ladders_to_actually_agree():
+    """`rerun_agrees` decides whether "a re-run grades the daemon's" is said.
+
+    Measured before the fix: with `TORTOISE_DB_PATH` exported and a scheme-less
+    `TORTOISE_DB_URI` in the file, the row promised "a re-run grades the
+    daemon's — the two ladders agree on this box". The CLI ladder ranks
+    `TORTOISE_DB_PATH` ABOVE a scheme-less `TORTOISE_DB_URI` and the daemon's
+    does not, so a re-run still grades a different store — a false promise about
+    the very store the verdict is about (#12428 review).
+    """
+    agreed = _rows_text({"rerun_agrees": True})
+    assert "a re-run grades the daemon's — the two ladders agree on this box" in agreed, agreed
+
+    disagreed = _rows_text({"rerun_agrees": False})
+    assert "the two ladders agree on this box" not in disagreed, disagreed
+    assert "still rank its keys differently" in disagreed, disagreed
+    assert "the daemon's store is above" in disagreed, disagreed
+
+
+def test_the_unresolved_arm_does_not_credit_a_provider_only_file(capsys, _isolated):
+    """A file with no graph key cannot "set the daemon's store".
+
+    Measured before the fix: a provider-only `.env` plus `doctor --db relative/x`
+    printed "…sets the daemon's store … the daemon selects no store either —
+    `tortoise serve` REFUSES to start", a row contradicting itself (#12428
+    review).
+    """
+    _write_env(_isolated, "DEEPSEEK_API_KEY=sk-not-a-real-key\n")
+
+    _run(("doctor", "--db", "relative/probe.db"))
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+
+    assert "sets the daemon's store" not in row, row
+    assert "sets no graph key" in row, row

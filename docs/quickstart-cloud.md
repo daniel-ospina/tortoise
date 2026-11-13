@@ -164,8 +164,11 @@ masked form and a short fingerprint of the key in use (never the whole key), the
 target, and the cache-graph
 naming the `record-*` verbs expect. The graph target line also says whether the repo-root
 `.env` the **daemon** reads (`tortoise serve`, the MCP server) selects a *different* store —
-this command does not read that file, and the report names both targets when they differ, so
-"doctor says healthy" can never silently be about a database the daemon is not serving. It also
+this command does not read that file, and the report names both targets when they differ, so a
+green `doctor` verdict names the store it graded instead of leaving you to assume it is the
+daemon's. (That disclosure is about a `.env`; an environment that sets both `TORTOISE_DB_URI`
+and `TORTOISE_DB_PATH` can still resolve differently for the two ladders, and the report says
+so where it applies.) It also
 prints the **separate** store the Pi harness
 reads (`~/.pi/agent/tortoise-config.json`). That is often the *same* key (the report says
 which): when the key *and* the `api_url` match, a refusal applies to both; a different key
