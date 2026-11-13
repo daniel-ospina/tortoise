@@ -132,7 +132,18 @@ jobs:
           # that reaches here as 1 is a DETECTOR fault and must read as exit 2, which is
           # the code both consumers treat as "the canary could not answer" (#12363 round
           # 18). Without this, adding one non-stdlib import to the tool orders an upload.
-          if [ "$rc" = "1" ] && ! grep -q '"verdict": "FAIL"' "$RUNNER_TEMP/canary/verdict.json" 2>/dev/null; then
+          #
+          # ⛔ PARSED, NOT GREPPED (#12422 review cycle 5, P1, MEASURED). The first cut read
+          # `grep -q '"verdict": "FAIL"'`, which is keyed to `json.dumps(indent=2)`'s `": "`
+          # separator — a cosmetic "make the payload compact" tidy
+          # (`separators=(",", ":")`) leaves every pin green and turns a genuine FAIL into
+          # exit 2, i.e. it tells a human "the canary could not answer, do NOT cut a release"
+          # about a broken, uninstallable published artifact. Measured on this step's own
+          # block: `{ "verdict": "FAIL" }` -> exit_code=1, `{"verdict":"FAIL"}` -> exit_code=2.
+          # The verdict is a VALUE, so read the value.
+          published_fail=0
+          python -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("verdict")=="FAIL" else 1)' "$RUNNER_TEMP/canary/verdict.json" 2>/dev/null && published_fail=1
+          if [ "$rc" = "1" ] && [ "$published_fail" = "0" ]; then
             echo "::warning::published-artifact-canary exited 1 WITHOUT publishing a FAIL verdict — classifying as a DETECTOR fault (exit 2), not a release call"
             rc=2
           fi
