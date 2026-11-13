@@ -1604,7 +1604,7 @@ def test_a_goal_whose_word_THIS_ENGINE_never_wrote_is_not_even_a_CANDIDATE(
     assert sdk.get_entity(g["id"])["goalState"] == word
 
 
-def test_a_LEGACY_goal_POINT_is_NOT_swept_and_the_reason_is_pinned(sdk):
+def test_a_LEGACY_goal_POINT_is_NOT_swept_COUNTED_and_the_reason_is_pinned(sdk):
     """THE BOUNDARY THAT MAKES THE REPAIR DURABLE, not a missing feature.
 
     `goalState` IS carried by legacy `:Point` goals (`projection/entities.py`
@@ -1620,10 +1620,14 @@ def test_a_LEGACY_goal_POINT_is_NOT_swept_and_the_reason_is_pinned(sdk):
     repair-then-rebuild loop, and that reds the journal/projection parity blaming
     a rogue writer it is itself.
 
-    So the Point is deliberately NOT a candidate until the point prop write is
-    journalled (#4094's class), and this test is the pin: it fails the day someone
-    ">fixes" the omission by adding the label back without making the write
-    durable.
+    ⛔ SO IT IS DECLINED **AND COUNTED**: `counts.notDurable` is what keeps a sweep
+    over unrepairable words distinguishable from a sweep over an empty graph — the
+    same rule `counts.failed` keeps for a reconcile that did not run. THIS PIN
+    FAILS WHENEVER `:Point` is re-added to the scan, with or without a durable
+    point write: it distinguishes the label, not the durability. When the point
+    `goalState` write becomes journalled (#4094's class), replace this pin with the
+    Point arm of the durability test — that is the property the sweep actually
+    needs, and it is asserted there for the labels that have it.
     """
     point = sdk.create_point("goal", "legacy goal [sweep-point]",
                              goalState="met")
@@ -1632,6 +1636,11 @@ def test_a_LEGACY_goal_POINT_is_NOT_swept_and_the_reason_is_pinned(sdk):
     report = reconcile_goal_states(sdk)
     assert report["counts"]["scanned"] == 0, report
     assert report["counts"]["repaired"] == 0, report
+    assert report["counts"]["notDurable"] == 1, (
+        "the declined population must be COUNTED, or `scanned: 0` reads as a "
+        f"clean graph while the word stands: {report}")
+    assert report["notDurableReason"], (
+        "a counter with no stated meaning is a counter a consumer ignores")
     assert sdk.get_entity(point["id"])["goalState"] == "met", (
         "the sweep wrote an UNJOURNALLED prop on a Point: the next rebuild "
         "reverts it and check_consistency blames a rogue writer — see the "
@@ -1650,7 +1659,6 @@ def test_the_OBJECT_repair_is_JOURNALLED_so_a_rebuild_cannot_revert_it(tmp_path)
     import os
 
     from tortoise.config import is_db_uri
-    from tortoise.consistency import check_consistency
     from tortoise.sdk import TortoiseSDK
 
     events = tmp_path / "events"
@@ -1665,19 +1673,59 @@ def test_the_OBJECT_repair_is_JOURNALLED_so_a_rebuild_cannot_revert_it(tmp_path)
         made = _judge(durable, i, t, g)
         durable.delete_entity(made["point_id"])
         assert durable.get_entity(g["id"])["goalState"] == "met"
+        before = _records(events)
         report = reconcile_goal_states(durable)
         assert report["counts"]["cleared"] == 1, report
-        proj = durable._get_proj()
-        check_consistency(log, proj)          # adopts the baseline on a healthy run
-        result = check_consistency(log, proj)
-        assert result["ok"], (
-            "the cache repair moved the projection without a replayable record — "
-            f"divergence={result.get('divergence')!r}")
-        proj.rebuild_all(str(events), confirm_destructive=True)
+        # ⛔ THE JOURNAL RECORD IS THE EVIDENCE, not `check_consistency`: measured
+        # on this lane, an UNJOURNALLED clear of this exact prop still reads
+        # `ok=True / divergence=None` (the first call re-baselines the mutated
+        # graph, and `goalState` is not in the baseline digest's entity field set),
+        # so a `check_consistency` leg here can never fail and would be a
+        # decoration. The record is what survives a rebuild, and the rebuild below
+        # is what proves it.
+        new = _records(events)[len(before):]
+        mutated = [r for r in new
+                   if r.get("type") == "EntityMutated"
+                   and (r.get("state") or {}).get("goalState", "absent") is None]
+        assert mutated, (
+            "the cache repair left NO replayable record carrying goalState — a "
+            f"rebuild would resurrect the word. new records: {new}")
+        assert mutated[-1].get("id") == g["id"], mutated[-1]
+        durable._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert durable.get_entity(g["id"]).get("goalState") is None, (
             "a rebuild resurrected the word the sweep cleared")
     finally:
         durable.close()
+
+
+def _records(events):
+    """Every journalled record in order — the durability surface a rebuild replays."""
+    import json
+    return [json.loads(line) for line in
+            (events / "events.jsonl").read_text().splitlines() if line.strip()]
+
+
+def test_a_goal_on_a_NON_OBJECT_label_is_swept_too(sdk):
+    """The exclusion is ONE label, not a whitelist of labels (#12336 review
+    cycle 2, P1).
+
+    A `:Subject` goal takes an engine-written `goalState` through the JOURNALLED
+    entity surface, and MEASURED it survives a rebuild — so it is a repairable
+    candidate like any other, and an `:Object`-only scan reported `scanned: 0`
+    over it: a clean summary over a stale word, the exact false PASS this module
+    refuses. The entity door routes a `subject` kind to `:Subject` by itself, so
+    this shape is reachable without anyone typing a label.
+    """
+    subject = sdk.create_subject("team probe [sweep-subject]")
+    sdk.update_entity(subject["id"], goalState="met")
+    assert sdk.get_entity(subject["id"])["goalState"] == "met"
+    report = reconcile_goal_states(sdk)
+    assert report["counts"]["scanned"] == 1, (
+        "the sweep reported a clean scan over a non-:Object goal holding a "
+        f"derived word: {report}")
+    assert report["counts"]["cleared"] == 1, report
+    assert sdk.get_entity(subject["id"]).get("goalState") is None
+    assert report["counts"]["notDurable"] == 0, report
 
 
 def test_the_repair_sweep_dry_run_writes_nothing_and_names_what_it_would_clear(sdk):

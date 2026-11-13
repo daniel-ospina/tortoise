@@ -93,7 +93,7 @@ implied. These are recorded residuals, not oversights:
   human-readable reason is returned to the caller and is recomputable from the
   graph by :func:`invalidation_for` at any time. MEASURED: stamping it with
   ``update_point`` writes a live-only prop that neither replay fold carries, so
-  ``check-consistency`` reds a FAITHFUL graph permanently. The block above
+  ``check-consistency`` reds a FAITHFUL graph permanently. The block below
   :data:`STALE_REASONS` carries the full measurement; teaching the folds is the
   sanctioned fix and belongs to #11928's explain path, not to this lane.
 
@@ -132,6 +132,7 @@ from .live import TERMINAL_EXCLUDED_STATUSES
 __all__ = [
     "DEFINITION_BOUNDARY_PROP",
     "DERIVED_GOAL_STATES",
+    "NOT_DURABLE_REASON",
     "RETIRED_GOAL_STATES",
     "STALE_REASONS",
     "Invalidation",
@@ -757,7 +758,7 @@ def invalidate(
 
     ⛔ There is no fourth WRITE. The reason this state was retired is returned to
     the caller and is recomputable from the graph by :func:`invalidation_for`;
-    stamping it onto the claim is deliberately NOT done here, and the block above
+    stamping it onto the claim is deliberately NOT done here, and the block below
     :data:`STALE_REASONS` records the measurement that decided it (a live-only
     prop makes ``check-consistency`` red a FAITHFUL graph forever).
 
@@ -917,15 +918,15 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
 #: goal whose kind is absent or mislabelled keep a stale word forever, which is
 #: the read-side twin of the bug being repaired.
 #:
-#: ⛔ ``:Object`` ONLY, AND THE EXCLUSION OF A LEGACY GOAL ``:Point`` IS A
-#: MEASURED DECISION RATHER THAN AN OVERSIGHT. The prop IS declared for the point
-#: write path (#7856, ``projection/entities.py``), so a legacy goal Point can hold
-#: a derived word and is a real candidate — but the repair cannot be durable on
-#: it: ``sdk.update_entity``'s generic POINT branch journals only the annotator
-#: dims and ``mentions`` (its own SCOPE note, ``tortoise/sdk.py`` — *"Every other
-#: prop this generic surface writes live is still unfolded on replay"*), so a
-#: ``goalState`` clear there is live-only. MEASURED on this lane, one goal of each
-#: label (private test lane, ``check_consistency`` + ``rebuild_all``):
+#: ⛔ ``NOT n:Point`` — AN EXCLUSION BY THE ONE PROPERTY THAT MATTERS, NOT A
+#: WHITELIST OF LABELS. A legacy goal ``:Point`` can hold a derived word (the prop
+#: is declared for the point write path, #7856, ``projection/entities.py``) and its
+#: repair cannot be durable: ``sdk.update_entity``'s generic POINT branch journals
+#: only the annotator dims and ``mentions`` (its own SCOPE note, ``tortoise/sdk.py``
+#: — *"Every other prop this generic surface writes live is still unfolded on
+#: replay"*), so a ``goalState`` clear there is live-only. MEASURED on this lane,
+#: one goal of each label (private test lane, ``check_consistency`` +
+#: ``rebuild_all``):
 #:
 #:     [OBJECT] before_ok=True  report cleared=True  live=None
 #:              after_ok=True   divergence=None      rebuilt=None
@@ -936,20 +937,51 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
 #: diagnostic that blames a rogue writer it is itself, and (b) be undone wholesale
 #: by the next rebuild — reporting `cleared` on every pass of a repair-then-rebuild
 #: loop. That is the same live-only-prop hazard this module already refuses
-#: elsewhere (the block above :data:`STALE_REASONS`), so the legacy Point is NOT
-#: enumerated until the point prop write is journalled (the #4094 class, its own
-#: lane) and `counts` cannot claim a repair that a rebuild reverts.
+#: elsewhere (the block below :data:`STALE_REASONS`), so a node carrying that write
+#: branch is not repaired here until the point prop write is journalled (the #4094
+#: class, its own lane).
+#:
+#: ⛔ AND THE EXCLUSION IS BY THAT LABEL ALONE — everything else that can hold the
+#: word is INCLUDED, because a whitelist of labels is the shape this module calls
+#: out as an invisible missing case: a ``:Subject`` goal (the entity door routes a
+#: ``subject`` kind there) legitimately takes an engine-written ``goalState`` —
+#: MEASURED: ``create_subject`` + ``update_entity(goalState='met')`` survives a
+#: ``rebuild_all``, so it is a repairable, durable candidate — and a
+#: ``MATCH (n:Object)`` sweep reported ``scanned: 0`` over it, a clean summary over
+#: a stale word. The excluded population is COUNTED instead
+#: (:data:`_GOAL_STATE_UNDURABLE`), so a sweep over a graph that holds only
+#: unrepairable words is distinguishable from a sweep over an empty graph.
 #:
 #: ``LIMIT`` is asked for ``limit + 1`` rows so the caller can tell a scan that
 #: exactly filled its bound from one that OVERFLOWED it — the same disclosure
-#: :func:`invalidate_stale` owes with ``truncated``. ONE query over ONE label also
-#: means a node can only be enumerated once: the repo's `DEDUPE CONTRACT`
-#: (``live.py``) exists because an id-keyed read can be issued PER LABEL, and a
-#: ``:Point:Object`` node returned by two scans is counted, reported and
-#: repaired twice.
+#: :func:`invalidate_stale` owes with ``truncated``. ONE query also means a node
+#: can only be enumerated once: the repo's `DEDUPE CONTRACT` (``live.py``) exists
+#: because an id-keyed read can be issued PER LABEL, and a ``:Point:Object`` node
+#: returned by two scans is counted, reported and repaired twice.
 _GOAL_STATE_CANDIDATES = (
-    "MATCH (n:Object) WHERE toStringOrNull(n.goalState) IN $words "
+    "MATCH (n) WHERE NOT n:Point AND toStringOrNull(n.goalState) IN $words "
     "RETURN n.id AS id, n.goalState AS word ORDER BY n.id LIMIT $lim"
+)
+
+#: The population the sweep DECLINES, counted (never repaired) so its summary
+#: cannot read clean over words it could not durably repair: a node carrying the
+#: unwrapped POINT write branch whose cached word is derived. Count-only: one
+#: integer, no per-node record, because there is nothing a caller could do with
+#: one beyond knowing the sweep did not cover it — the prerequisite is the
+#: journalled point write, not a caller-side action.
+_GOAL_STATE_UNDURABLE = (
+    "MATCH (n:Point) WHERE toStringOrNull(n.goalState) IN $words "
+    "RETURN count(n)"
+)
+
+#: What ``counts.notDurable`` means, carried in the payload rather than only in
+#: prose: a number a consumer cannot interpret is a number it will ignore, and
+#: ignoring this one is exactly the false PASS the counter exists to prevent.
+NOT_DURABLE_REASON = (
+    "a goal on a legacy :Point holds a derived goalState and is NOT repaired: "
+    "the generic point write branch is unjournalled for goalState, so the "
+    "repair would be reverted by the next rebuild (needs a replayable record, "
+    "the #4094 class)"
 )
 
 
@@ -1002,22 +1034,18 @@ def reconcile_goal_states(
     ⛔ WHAT IT DOES NOT REPAIR, stated here rather than discovered by a reader who
     trusted a wider promise (each is a named residual, not a silent gap):
 
-    * **a legacy goal ``:Point``** — a derived word there IS a candidate and is
+    * **a legacy goal ``:Point``** — a derived word there can be a candidate and is
       NOT enumerated, because its repair cannot be durable: the generic POINT
       write branch journals only the annotator dims and ``mentions``, so a
       ``goalState`` clear there is live-only, reds the journal/projection parity
       and is reverted by the next rebuild. The measurement and the reason are on
       :data:`_GOAL_STATE_CANDIDATES`; the prerequisite is a replayable
-      ``goalState`` record for the point path (#4094's class).
-    * **a node re-labelled off ``:Object``** (the entity door maps a ``subject``
-      kind to ``:Subject``). ``record_judgement`` cannot complete a judgement onto
-      one — its arrow guard refuses — so no ENGINE-written word lives there
-      today; a human could still write one, and it would not be swept.
-      ⚠️ The enumeration is therefore a hardcoded label, which is the shape this
-      module elsewhere calls out as an invisible missing case
-      (the block above :data:`STALE_REASONS`). It is kept because the alternative
-      — a label-free ``MATCH (n)`` — would sweep the legacy Points the arm above
-      must NOT touch. That trade is deliberate and starts its own lane's review.
+      ``goalState`` record for the point path (#4094's class). ⛔ **It is COUNTED,
+      not silently skipped** — :data:`_GOAL_STATE_UNDURABLE` returns how many such
+      nodes hold a derived word, reported as ``counts.notDurable`` with
+      :data:`NOT_DURABLE_REASON` beside it, so a sweep over a graph whose only
+      stale words are unrepairable is distinguishable from a sweep over an empty
+      graph. That distinction is the whole rule `counts.failed` exists to keep.
     * **a goal holding NO word while a live judgement stands** (the cache write of
       a FIRST judgement was refused, or the goal was created without a
       ``goalState``). The candidate set is "holds a derived word", so that shape
@@ -1028,6 +1056,12 @@ def reconcile_goal_states(
       by kind, which is a separate decision rather than a filter tweak.
     * **a word written inside the DOOR's read→write window** — see the note on
       ``preserved`` below.
+
+    ⚠️ Everything else that can hold the word IS repaired, and that is a
+    deliberate breadth rather than a whitelist: a ``:Subject`` goal takes an
+    engine-written ``goalState`` through the journalled entity surface (measured:
+    it survives a rebuild), so it is a candidate like any other. The exclusion is
+    the ONE label whose write branch is unwrapped (:data:`_GOAL_STATE_CANDIDATES`).
 
     ⛔ THE GATE IS ON THE WORD, AT BOTH ENDS. Only a goal holding a word in
     :data:`DERIVED_GOAL_STATES` is even a candidate (so a human's ``active``,
@@ -1081,6 +1115,11 @@ def reconcile_goal_states(
       (reported the same way :func:`invalidate_stale` reports ``counts.gone``);
     * ``failed`` — the reconcile could not run or its write was refused. A sweep
       may not read clean while a goal still displays a word it could not repair;
+    * ``notDurable`` — goals the sweep DECLINED because their repair cannot be
+      durable (a node carrying the unwrapped POINT write branch), each holding a
+      derived word. It is not a failure and not a repair: it is the population
+      this call does not cover, counted so `scanned: 0` cannot be read as "this
+      graph is clean" (:data:`NOT_DURABLE_REASON` says the same in the payload);
     * ``wouldRepair`` — what a ``dry_run`` WOULD change; always ``0`` when
       ``dry_run`` is false, because nothing was previewed.
     """
@@ -1091,17 +1130,26 @@ def reconcile_goal_states(
     ).result_set or []
     rows: list[tuple[str, str]] = [(row[0], row[1]) for row in result
                                   if row and row[0]]
+    # ⛔ THE DECLINED POPULATION IS MEASURED, NOT ASSUMED EMPTY. Without this a
+    # sweep over a graph whose only stale words sit on nodes the sweep cannot
+    # durably repair returns the SAME payload as a sweep over an empty graph
+    # (`scanned: 0`, every counter 0) while those words still display — the false
+    # PASS every other counter in this module exists to prevent. It raises with
+    # the scan: an unreadable count is not a zero.
+    undurable = sdk._get_proj().g.query(
+        _GOAL_STATE_UNDURABLE, params={"words": words},
+    ).result_set or []
+    not_durable = int((undurable[0][0] if undurable and undurable[0] else 0) or 0)
     # `truncated` is answered from the UNTRIMMED length, and the bound is one goal
     # over the caller's limit so a scan that exactly filled it is not read as
-    # exhaustive. ONE label means one row per node, so no id-dedupe is owed here
-    # (the `DEDUPE CONTRACT` in `live.py` is about per-label reads).
+    # exhaustive.
     truncated = len(rows) > limit
     rows = rows[:limit]
 
     goals: list[dict[str, Any]] = []
     counts = {"scanned": 0, "repaired": 0, "cleared": 0, "rewritten": 0,
               "consistent": 0, "preserved": 0, "gone": 0, "failed": 0,
-              "wouldRepair": 0}
+              "wouldRepair": 0, "notDurable": not_durable}
     for goal_id, word in rows:
         counts["scanned"] += 1
         record: dict[str, Any] = {"goalId": goal_id, "from": word}
@@ -1172,7 +1220,8 @@ def reconcile_goal_states(
             counts["repaired"] += 1
         goals.append(record)
     return {"dryRun": dry_run, "truncated": truncated, "limit": limit,
-            "goals": goals, "counts": counts}
+            "goals": goals, "counts": counts,
+            "notDurableReason": NOT_DURABLE_REASON if not_durable else None}
 
 
 def invalidate_stale(
