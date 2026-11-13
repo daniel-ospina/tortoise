@@ -5263,15 +5263,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # line-number pin over a number another tool owns, not a citation anyone
         # mis-copied. At THIS merge (`main` `9828250732` plus #12060's own 8-line
         # registration block, which lands above the entry): entry 9951,
-        # `carve_out:` opens 9825, `uri_requiring:` 10156 — so 9951 is inside the
-        # section, and the identical text also sits at 6090 and 8467 (+8 on `main`'s
-        # 6082 / 8459 for the same cause), which is what the 5th element exists to
-        # refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8233 — the latter also +8, same cause) of `surfaces:`,
-        # so the resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8467 refuses
-        # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
-        # re-derivation onto it does not get told `sdk:` and conclude the guard is
-        # broken.
+        # `carve_out:` opens 9825, `uri_requiring:` 10156 — so 9951 was inside the
+        # section. ⚠️ Those three are that tree's numbers and NONE of them is this
+        # tree's: re-derived at `main` `cd22562c2` the entry is 9973, `carve_out:`
+        # opens 9847 and `uri_requiring:` 10178 — so 9973 is inside the section, and
+        # the +22 is entries inserted above the line, which is the class this row
+        # exists for. The identical text also sits INDENTED at 6090 and 8489 in this
+        # tree (`main` `9828250732`: 6082 and 8459 — so the first gains 8 and the
+        # second 30, i.e. they move at DIFFERENT rates and neither tracks the
+        # column-0 entry), which is what the 5th element exists to refuse. Both are
+        # INDENTED sub-keys (`core:` 2235, `sdk:` 8255 in this tree) of `surfaces:`,
+        # so the resolver's nearest-column-zero-key rule reports the PARENT: a cite
+        # onto 6090 or 8489 refuses with `sits in section 'surfaces:', not
+        # 'carve_out:'` — measured, so a re-derivation onto either does not get told
+        # `sdk:` and conclude the guard is broken.
         # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
         # by the sentence rather than by the number: `:631` is where `main` had it,
         # then #12112 moved it three times (`687`, `695`, `700`) and each move left a
@@ -5306,13 +5311,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("705", "`plan_hierarchy_edges` returns one"),
         ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            # 9714 -> 9951: re-derived from THIS merged tree (`awk
+            # 9714 -> 9951 -> 9973: re-derived from THIS tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
             # the merge — `main` read 9943 and the branch read 9941, and neither
             # number describes a tree that adds BOTH. The 8-line delta over `main`
             # is #12060's own registration block above the entry.
-            ("9951", "- test_pack_logic_writeprobe_11083.py"),
+            ("9973", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
