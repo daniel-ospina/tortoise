@@ -1879,3 +1879,46 @@ def test_a_query_selector_credential_is_cut_from_the_health_row():
     plain = "relative.db"
     message = f"Relative DB path '{plain}' rejected"
     assert _redact_credential_fragments(message, plain) == message
+
+
+def test_the_legacy_trio_is_named_as_the_cause_and_the_remedy_matches():
+    """With `FALKORDB_*` set the cause is the LADDER, and exporting does nothing.
+
+    Measured: the trio exported and a `.env` setting `TORTOISE_DB_PATH` made
+    `doctor` say "this run resolved the store above BEFORE that import applied the
+    file" (false — the trio decided it) and offer "export the file's keys" as the
+    remedy (inert — the trio outranks the file's key, so the same store comes
+    back). `.env.example` still ships the trio, so this is a live state
+    (#12428 review).
+    """
+    row = _rows_text({"read_by_this_command": True,
+                      "applied_when_graded": False,
+                      "cli_only_rung_active": True,
+                      "file_graph_keys": ["TORTOISE_DB_PATH"],
+                      "graph_keys": [],
+                      "shadowed_graph_keys": [],
+                      "keys_in_effect": [],
+                      "differs": True,
+                      "cli_target": "docker://:***@127.0.0.1:6399/tortoise",
+                      "daemon_target": "/tmp/from-file.db"})
+
+    assert "the legacy FALKORDB_* trio outranks" in row, row
+    assert "resolved the store above BEFORE" not in row, row
+    assert "set -a; . ./.env; set +a" not in row, row
+    assert "unset FALKORDB_*" in row, row
+
+    # ⛔ And in the NOT-applied state, which is what `doctor` usually produces
+    # (`read_by_this_command` False): nesting the clause under `if _applied:`
+    # meant the row named neither the cause nor a remedy here — measured on the
+    # real CLI (#12428 review).
+    unapplied = _rows_text({"read_by_this_command": False,
+                            "applied_when_graded": False,
+                            "cli_only_rung_active": True,
+                            "file_graph_keys": ["TORTOISE_DB_PATH"],
+                            "graph_keys": [],
+                            "shadowed_graph_keys": [],
+                            "keys_in_effect": [],
+                            "differs": True,
+                            "cli_target": "docker://:***@127.0.0.1:16379/tortoise",
+                            "daemon_target": "/tmp/from-file.db"})
+    assert "the legacy FALKORDB_* trio outranks" in unapplied, unapplied

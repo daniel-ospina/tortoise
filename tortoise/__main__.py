@@ -3159,6 +3159,13 @@ def _redact_db_value(text: str, *values: object) -> str:
     return out
 
 
+def _legacy_rung_environ():
+    """`os.environ`, for the CLI-only rung check (no module-level `os` import here)."""
+    import os as _os
+
+    return _os.environ
+
+
 def _env_db_target_value() -> str | None:
     """The environment's own graph-target value, for a redactor that needs it."""
     import os as _os
@@ -11502,6 +11509,15 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         # this process NOW, which a mid-run import makes true of a target
         # resolved BEFORE it (#12428 review).
         "applied_when_graded": bool(applied_when_graded),
+        # ⛔ A rung the CLI reads and the daemon never does. When one is set, the
+        # difference between the two targets is a LADDER difference: the graded
+        # store was not "resolved before the file was applied", it was resolved
+        # from the trio — and exporting the file's keys would not change it
+        # (#12428 review). `.env.example` still ships the trio, so it is a live
+        # state, not a hypothetical.
+        "cli_only_rung_active": any(
+            (_legacy_rung_environ().get(key) or "").strip()
+            for key in ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD")),
         # TRUE when the caller graded an EXPLICIT target (`doctor --db`/`--path`)
         # rather than one resolved from the environment. The printing arms need it
         # to explain a divergence correctly: with an explicit target the
@@ -11952,7 +11968,18 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                   f"serves {_printable(str(env_file['daemon_target'] or ''))}; "
                   f"the rows below grade {_printable(str(graded))} — a "
                   "DIFFERENT store" + _applied_note)
-        if _applied:
+        # ⛔ The trio branch is deliberately OUTSIDE the `if _applied:` block: in
+        # the real state `read_by_this_command` is often False (the daemon module
+        # is not imported on every run), and nesting it there meant the row named
+        # neither the cause nor a remedy for the state it was written for —
+        # measured (#12428 review).
+        if env_file.get("cli_only_rung_active"):
+            detail += (" (the legacy FALKORDB_* trio outranks the file's key on "
+                       "this CLI's ladder, and the daemon never reads the trio — "
+                       "so the two differ by LADDER, not by timing: unset "
+                       "FALKORDB_* or export TORTOISE_DB_URI to compare the "
+                       "same store)")
+        elif _applied:
             # ⛔ The ladders clause is only true when BOTH targets come from the
             # SAME (post-fill) environment. With `--db`/`--path` the caller graded
             # an EXPLICIT target, so the difference is that target, not ladder
