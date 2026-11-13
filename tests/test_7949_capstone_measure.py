@@ -4723,9 +4723,19 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
 #:     OUTSIDE the boundary group now.
 #:   * the list had no time units, so `— 166 hours` was a cite.
 #: Both measured with `_MANIFEST_CITE` against `config/ci-surfaces.yml — <n> <unit>`.
-_UNIT = (r"(?!\s*(?:(?:s|sec|secs|seconds|ms|min|mins|h|hr|hrs|hour|hours|days?|weeks?|"
-         r"months?|years?|tests?|files|lines|rows|cases|bytes|shards|entries|points|"
-         r"modules?|(?i:kb|mb))\b|%))")
+#:
+#: ⛔ THE LIST IS CLOSED, AND THAT IS THE FALSE-RED SIDE OF THIS GUARD — a MISSED unit
+#: does not weaken the pin, it REFUSES CORRECT PROSE. Measured on the shipped list:
+#: `— 166 pp above the floor`, `— 961 pins`, `— 131 GB`, `the entry moved 103 times`
+#: and `the block is 145 characters wide` were all RED. Every one of those spellings
+#: is written in THIS repo (`pp` in the `durations:` prose, `pins` for tests,
+#: `times`/`characters` in this very module's comments), so the list is not a nice-to-
+#: have: add the unit when you add a count, and put the count in
+#: `…_does_not_fire_on_correct_prose` where the next widening has to keep it green.
+_UNIT = (r"(?!\s*(?:(?:s|sec|secs|seconds|ms|us|µs|min|mins|h|hr|hrs|hour|hours|days?|"
+         r"weeks?|months?|years?|times?|tests?|pins?|defs?|files|lines|rows|cases|"
+         r"characters?|chars?|bytes|shards|entries|points|modules?|arms?|keys?|nodes?|"
+         r"commits?|sessions?|issues?|prs?|pp|percentage points|(?i:kb|mb|gb|tb))\b|%))")
 #: ⛔ `(?!,\d)` IS LOAD-BEARING: without it the thousands-separated alternative
 #: BACKTRACKS to a prefix, so `1,320,023 bytes` matched as the integer `1,320` and was
 #: reported as a line cite. The existing pass-fixture never showed it because its
@@ -4825,6 +4835,44 @@ def _bare_number_hits(text: str) -> list[str]:
     return [m.group(0) for m in _BARE_NUM.finditer(text)
             if not _BARE_YEAR.match(m.group(0))]
 
+#: The block's own names. A line carrying one of these is a line that TALKS ABOUT the
+#: block, and it is the population the neighbour arm scans.
+_BLOCK_WORDS = re.compile(r"carve[_-]?out|carve out|\b(?:entry|block|manifest)\b")
+#: …and a line that names ANOTHER source file is that file's, not this claim's: see
+#: `_neighbour_number_strays` for the measurement that made this necessary.
+_OTHER_FILE = re.compile(r"[\w/]+\.(?:py|ya?ml|json|md)\b")
+
+
+def _neighbour_number_strays(line: str) -> list[str]:
+    """Numbers a NEIGHBOUR line attaches in cite position — [] for another file's cite.
+
+    `_LINE_CITE` carries no file binding on purpose: on the CLAIM sentence any number
+    in cite position is a finding. On a neighbouring line that same looseness refuses
+    the document's ordinary prose, because this document is cite-heavy and a
+    maintainer explaining this block's mechanism naturally writes
+
+        ``… spliced by `tools/ci_selection.py::register_tests` (its `entry_lines`
+        loop, `:4906`)``
+
+    — measured RED before this guard, and again for ``The `corpus` block in
+    `capstone_run.py` … its literal sits at `:1194` ``. Both are cites of ANOTHER
+    module, which this module's own contract says must stay green ("elsewhere in the
+    document that is a legitimate cite of some OTHER module").
+
+    ⚠️ RESIDUAL, stated: a bare `:NNNN` on a line that also names another file is
+    therefore not seen. It is ambiguous by construction — nothing mechanical can tell
+    a continuation of that file's cite from a re-typed manifest line — and the
+    doc-wide STRICT arm (`_MANIFEST_CITE`) still catches a manifest-bound cite on any
+    line whatsoever.
+
+    The caller passes the line with the claim ENTRY's own filename already removed.
+    """
+    if _OTHER_FILE.search(line):
+        return []
+    stray = [m.group(0) for m in _LINE_CITE.finditer(line)]
+    stray += [n for n in _bare_number_hits(line) if n not in stray]
+    return stray
+
 
 class _ManifestShapeError(RuntimeError):
     """`config/ci-surfaces.yml` is not readable in the shape this pin needs.
@@ -4848,15 +4896,26 @@ def _parse_manifest(lines: list[str], failures: list[str]) -> dict | None:
     docstring records 24 duplicate keys measured on one merge).
 
     ⛔ Parsed ONCE and passed on: one strict parse is ~0.8 s on a shared cell, so
-    asking `_section_entries` per section re-parsed it three times — ~1.6 s of a
-    ~18 s junit sum for the file. The refusal is
-    unchanged; only the repetition goes. (Readings, not constants: three
-    consecutive runs at the reviewed head measured 0.755 / 0.776 / 0.832 s per
+    asking `_section_entries` per section parsed it once per section (three parses)
+    — keeping ONE removes the other two, ~1.6 s of a ~18 s junit sum for the file.
+    The refusal is unchanged; only the repetition goes. (Readings, not constants:
+    three consecutive runs at the reviewed head measured 0.755 / 0.776 / 0.832 s per
     parse. No byte figure is quoted here — a size is a tree state, and this PR is
     about not typing one into a document.)
+
+    ⛔ A NON-MAPPING PARSE IS A FAILURE, NOT A `None` (measured fail-open).
+    `parse_manifest_text` legitimately returns `None` for an EMPTY document —
+    verified: `''`, `'# only comments\n'`, `'   \n'` and `'---\n'` all parse to
+    `None` — and the caller's `manifest is None` is documented as "the refusal is
+    already in `block_failures`". With an empty manifest there IS no refusal, so
+    every `_entries_or_failure` short-circuited and every "holds one" / "hold none"
+    guard was suppressed: the whole block arm reported GREEN over a file it never
+    read. A top-level list or scalar took the same path and was reported as
+    "the key is ABSENT entirely", which is true but names the wrong cause. So the
+    parsed TYPE is checked here, at the ONE place that can see it.
     """
     try:
-        return parse_manifest_text("\n".join(lines))
+        parsed = parse_manifest_text("\n".join(lines))
     except DuplicateManifestKeyError as exc:
         failures.append(
             f"config/ci-surfaces.yml has a DUPLICATE mapping key ({exc}) — the file "
@@ -4876,6 +4935,20 @@ def _parse_manifest(lines: list[str], failures: list[str]) -> dict | None:
             f"{exc}) — this pin cannot read a block it cannot parse, and an "
             f"unparseable manifest is a real defect in a file a tool rewrites")
         return None
+    if not isinstance(parsed, dict):
+        # ⛔ AN EMPTY (or non-mapping) MANIFEST IS A FAILURE, NOT A `None` — see the
+        # docstring: `parse_manifest_text` returns `None` for `''`, for a
+        # comments-only file, for `'---\n'`, and for a bare whitespace document, and
+        # the caller reads `None` as "the refusal is already collected". With an
+        # empty manifest nothing was collected, so every "holds one" / "hold none"
+        # guard was skipped and this pin reported GREEN over a file it never read.
+        failures.append(
+            f"config/ci-surfaces.yml parses to {type(parsed).__name__}, not a "
+            f"mapping — an empty or non-mapping manifest cannot hold the "
+            f"`carve_out:` block 03-test-design.md makes a positive claim about, and "
+            f"reading it as 'no findings' is the fail-open this pin exists to be")
+        return None
+    return parsed
 
 
 def _section_entries(manifest: dict, section: str) -> list[str] | None:
@@ -5649,10 +5722,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         return name == ENTRY or any(g in name for g in capstone_globs)
 
     # ⛔ PARSED ONCE. One strict parse is ~0.8 s on a shared cell; asking
-    # `_section_entries` per section re-parsed it three times, for ~1.6 s of this test.
-    # The refusal is unchanged — only the repetition goes. (No size is quoted: a byte
-    # count is a tree state, and this PR is about not typing one into prose — including
-    # its own.)
+    # `_section_entries` per section parsed it once per section (three parses), and
+    # keeping one removes the other two — ~1.6 s of this test. The refusal is
+    # unchanged — only the repetition goes. (No size is quoted: a byte count is a
+    # tree state, and this PR is about not typing one into prose — including its own.)
     manifest = _parse_manifest(ci_lines, block_failures)
 
     def _has_top_level(section: str) -> bool:
@@ -5828,14 +5901,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # Measured at this head: all four of those occur on exactly ONE line — the
         # claim's — so the population is EMPTY on the current document and the
         # widening cannot change its verdict. It only closes the hole above.
-        _BLOCK_WORDS = re.compile(r"carve[_-]?out|carve out|\b(?:entry|block|manifest)\b")
+        # The scanning itself is `_neighbour_number_strays` (module level, and pure),
+        # which is where the "another file's cite is not this claim's" rule and its
+        # two measured false reds live — and where the rule is PINNED, because a rule
+        # that exists only inside a test body cannot be tested.
         neighbour_findings: list[str] = []
         for other_line in doc_lines:
             if other_line == doc_hits[0] or not _BLOCK_WORDS.search(other_line):
                 continue
-            stripped = other_line.replace(ENTRY, "")
-            stray = [m.group(0) for m in _LINE_CITE.finditer(stripped)]
-            stray += [n for n in _bare_number_hits(stripped) if n not in stray]
+            stray = _neighbour_number_strays(other_line.replace(ENTRY, ""))
             if stray:
                 neighbour_findings.append(
                     f"{stray[0]!r} in {other_line.strip()[:90]!r}")
@@ -5849,10 +5923,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"NEIGHBOURING line re-creates the rot just as surely (the entry's "
                 f"position in `config/ci-surfaces.yml` is moved by every "
                 f"registration `tools/ci_selection.py::register_tests` splices above "
-                f"it). Keep the claim in one place and print no number. ⚠️ RESIDUAL, "
-                f"stated: a number on a line that names neither the block, an entry "
-                f"nor the manifest is not scanned — no mechanical rule can attribute "
-                f"it to this claim.")
+                f"it). Keep the claim in one place and print no number. ⚠️ TWO RESIDUALS, "
+                f"both stated rather than left to be discovered: a number on a line "
+                f"that names neither the block, an entry nor the manifest is not "
+                f"scanned, and a bare `:NNNN` on a line that names ANOTHER source file "
+                f"is not scanned either (it is that file's cite, and nothing mechanical "
+                f"can tell the two apart — the doc-wide strict arm still catches a "
+                f"manifest-bound cite anywhere).")
         if _LINE_CITE.search(doc_hits[0].replace(ENTRY, "")):
             block_failures.append(
                 "03-test-design.md attaches a LINE NUMBER to "
@@ -5943,6 +6020,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     "`the manifest`'s `durations:` row: 166 s",
     "`config/ci-surfaces.yml` — 961 tests",
     "`config/ci-surfaces.yml` — 166 min",
+    # ⛔ units the closed `_UNIT` list did not name, each measured RED: `pp`, `pins`
+    # and `GB` are all written in this repo's own prose (`pp` in the `durations:`
+    # block, `pins` for tests), so a missed unit here refuses CORRECT PROSE.
+    "`config/ci-surfaces.yml` — 166 pp above the floor",
+    "`config/ci-surfaces.yml` — 961 pins",
+    "`config/ci-surfaces.yml` — 131 GB",
     "`config/ci-surfaces.yml`'s `slow_files:` row, re-taken on 2026-11-09",
     # ⛔ three more measured false-REDs, each a different defect in the COUNT rule: a
     # `%` inside a `\b` group can never match at end-of-input, a thousands-separated
@@ -6038,6 +6121,13 @@ def test_the_manifest_line_cite_matcher_catches_every_spelling(prose):
     # of exactly 2026 with no separator is indistinguishable and is not caught).
     ("the block was reviewed in 2026", False),
     ("the entry moved in 9987", True),
+    # ⛔ AND THE COUNT UNITS THE CLOSED LIST DOES NOT NAME — measured RED before the
+    # list was extended, every one of them a spelling this repo actually writes: `pp`
+    # in the `durations:` prose, `pins` for tests, `times` / `characters` in this very
+    # module's comments. A missed unit refuses CORRECT PROSE, which is the false-red
+    # half of this guard, so these are pinned here beside the ones that caught it.
+    ("the entry moved 103 times", False),
+    ("the block is 145 characters wide", False),
 ])
 def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(prose, should_match):
     """`_BARE_NUM` catches a bare line number OR head, and no count or decimal.
@@ -6052,6 +6142,37 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
         f"_BARE_NUM {'missed' if should_match else 'refused'} {prose!r} — the arm "
         f"shares `_NUM`'s vocabulary, so a head, a decimal and a count all behave the "
         f"way the docstring says they do")
+
+
+@pytest.mark.parametrize(("line", "strays"), [
+    # ⛔ THE NEIGHBOUR ARM MUST NOT REFUSE ANOTHER FILE'S CITE, and both of these were
+    # measured RED before `_neighbour_number_strays` existed. They are the natural
+    # prose of a maintainer explaining the block's mechanism — and `03-test-design.md`
+    # is the bundle's cite-heavy document (`sdk.py:9612`/`:9665`, `capstone_run.py`),
+    # so its neighbours WILL name other modules with line numbers.
+    ("`surfaces:` blocks are spliced by `tools/ci_selection.py::register_tests` (its "
+     "`entry_lines` loop, `:4906`) and the entry line moves under them.", []),
+    ("The `corpus` block in `capstone_run.py` is frozen; its literal sits at `:1194`.",
+     []),
+    ("`sdk.py`'s `extraction_mode` pair (`sdk.py:24003` → `:24634`) is the same row.",
+     []),
+    # …and the forms it MUST still catch, so the "another file" exemption cannot become
+    # a bypass: a bare cite with NO other file named, and the history-trimmed number.
+    ("The entry itself sat at `:9987` at head `1a0ace24`.", [":9987`", "9987"]),
+    ("the manifest entry read 9943 before the last re-derivation", ["9943"]),
+    # ⚠️ THE RESIDUAL, pinned so it cannot widen silently: a bare `:NNNN` on a line
+    # that also names another file is NOT seen. That is the deliberate cost of the
+    # exemption above — nothing mechanical can tell a continuation of that file's cite
+    # from a re-typed manifest line — and the doc-wide STRICT arm still catches a
+    # manifest-bound cite on any line at all.
+    ("`capstone_run.py`'s corpus literal; the entry also sat at `:9987`.", []),
+])
+def test_the_neighbour_arm_admits_another_files_cite_and_still_catches_this_claims(
+        line, strays):
+    """A neighbour line's number belongs to the file it is bound to, or to this claim."""
+    assert _neighbour_number_strays(line) == strays, (
+        f"`_neighbour_number_strays({line!r})` — the exemption for another file's cite "
+        f"must not become a bypass, and it must not refuse correct prose")
 
 
 def test_the_two_cite_arms_are_complementary_not_duplicate():
