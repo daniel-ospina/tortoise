@@ -23,12 +23,13 @@ reserves to the owner ("MCP/SDK Surface Approval"), and it would have to land at
 the pre-truncation seam or it would silently return a filtered-looking page
 smaller than ``limit``. Refusing removes the fail-open now.
 
-BOUNDARY, deliberate and stated here so it cannot drift silently:
-``include_retracted`` is honoured on the structural, paginated and tag arms only.
-A caller who puts it in ``filters`` still gets it promoted to the parameter (the
-handler pops it before this guard), and the ``text=`` arm still does not apply
-it. That is documented in the tool's docstring; it is NOT what this guard
-covers, and the test at the bottom pins the boundary rather than hiding it.
+``include_retracted`` is the one argument that is NOT a property filter: the
+handler pops it out of ``filters`` into its own parameter *before* this guard, so
+it must not be refused. It is honoured on every arm — on ``text=`` it is
+forwarded as the fts leg's ``include_terminal`` (an existing SDK parameter), which
+is what round 1 of review fixed: the arm used to accept it and never apply it.
+The tests below pin both polarities, so neither the refusal nor the behaviour can
+drift silently.
 
 Test doctrine (Class B): every test states (1) the value whose presence makes it
 fail and (2) that the fixture reaches that value.
@@ -316,6 +317,14 @@ def test_include_retracted_stays_false_by_default(stub) -> None:
 @pytest.mark.parametrize("kwargs", [
     {"tag": "pricing", "filters": {"domain": "legal"}},
     {"tag": "pricing", "text": "q", "filters": {"domain": "legal"}},
+    # The guard's `tag is not None` and the tag BRANCH's `tag is not None` are
+    # the same spelling, and `""` is not `None` — pin it, because a branch moved
+    # to `if tag:` would leave `tag="", filters=…` reaching the tag reader with
+    # the dict dropped, silently (#12455 round-2 finding 7).
+    {"tag": "", "filters": {"domain": "legal"}},
+    # Same class for the text side: whitespace is TRUTHY, so it routes to the
+    # fts leg — a guard that used `.strip()` would let the dict through.
+    {"text": "  ", "filters": {"domain": "legal"}},
 ])
 def test_the_tag_arm_refuses_a_filters_dict_it_cannot_apply(stub, kwargs) -> None:
     """RED before round-1's fix: the unfiltered TAG population came back.
@@ -350,8 +359,32 @@ def test_the_tag_arm_names_itself_in_the_refusal(stub) -> None:
     result = tortoise_query(tag="pricing", text="q", filters={"domain": "legal"})
 
     assert _is_refusal(result), "no refusal to read a message off"
-    assert "tag=" in result["error"], result["error"]
-    assert "tag mode takes precedence" in result["error"] or "tag=" in result["error"]
+    assert "on the tag= arm" in result["error"], result["error"]
+    # …and the remedy must name BOTH arguments this caller set: dropping only
+    # `tag=` leaves `text=` truthy and the guard fires again with the structural
+    # path still unreachable (#12455 round-2 finding 4).
+    assert "Drop tag= and text=" in result["error"], result["error"]
+
+
+@pytest.mark.parametrize("filters", [
+    {},                               # clients that serialise an empty object
+    {"include_retracted": True},      # popped into the parameter, not a filter
+])
+def test_a_tag_read_with_a_non_filter_still_serves(stub, filters) -> None:
+    """The tag arm's over-block edges: an EMPTY dict, and the promoted flag.
+
+    Fails if the guard is written ``if tag is not None and filters is not None``
+    — which refuses the many clients that serialise ``{}`` — or if the
+    `include_retracted` pop is ever moved below the guard, which would refuse a
+    name that is not a property filter. Neither shape was pinned before
+    (#12455 round-2 finding 7).
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(tag="pricing", filters=filters)
+
+    assert not _is_refusal(result), f"refused a legitimate tag read: {result}"
+    assert [c[0] for c in stub.calls] == ["query_points_by_tag"], stub.calls
 
 
 def test_a_tag_read_without_filters_still_serves(stub) -> None:
@@ -366,6 +399,34 @@ def test_a_tag_read_without_filters_still_serves(stub) -> None:
 
     assert not _is_refusal(result), f"refused a legitimate tag read: {result}"
     assert [c[0] for c in stub.calls] == ["query_points_by_tag"], stub.calls
+
+
+def test_no_docstring_bullet_still_says_the_tag_arm_IGNORES_filters() -> None:
+    """The tag twin of the test below — its absence was round-2 finding 1.
+
+    The old tag bullet said tag mode "ignores kind/filters/min_confidence/
+    order_by" while a NEW bullet 17 lines later said `filters=` is REFUSED
+    there: two mutually exclusive statements about one argument in the same
+    served docstring, and the stale one is exactly the belief the guard exists to
+    correct. Fails if any `tag=` bullet advertises filters as merely ignored.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    doc = inspect.getdoc(tortoise_query) or ""
+    tag_bullets = [
+        line for line in doc.splitlines()
+        if line.strip().startswith("- tag=<name>")
+    ]
+    assert len(tag_bullets) >= 2, (
+        "expected the tag= bullet AND the tag-mode bullet; found "
+        f"{len(tag_bullets)}: {tag_bullets}"
+    )
+    stale = [line for line in tag_bullets
+             if "filters" in line and "REFUS" not in line.upper()]
+    assert stale == [], (
+        "a `tag=` bullet still presents `filters=` as merely ignored on that "
+        f"arm, contradicting the refusal: {stale}"
+    )
 
 
 def test_the_docstring_does_not_advertise_filters_for_the_text_arm() -> None:

@@ -3879,9 +3879,10 @@ def tortoise_query(kind: str | None = None,
       (default 100 — see the #10602 note below).
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
-      ignores kind/filters/min_confidence/order_by; a non-Point `entity_type`
-      is REFUSED there (and on the structural arms) rather than dropped —
-      those arms read the Point label only, and the refusal names the
+      ignores kind/min_confidence/order_by, and REFUSES `filters=` (see the
+      tag= bullet below — it used to ignore it silently, #12455); a non-Point
+      `entity_type` is REFUSED there (and on the structural arms) rather than
+      dropped — those arms read the Point label only, and the refusal names the
       per-type enumerator to use instead (#12372).
     - Pagination: pass offset=/limit= (or 1-based page=). When offset=/page= is
       set, returns {results, total, hasMore} (previously
@@ -3899,10 +3900,14 @@ def tortoise_query(kind: str | None = None,
       IS applied here, forwarded as the fts leg's include_terminal.
     - tag=<name> mode: a Point reader keyed on the tag only. It has no
       property-filter parameter either, so `filters=` is REFUSED here too rather
-      than dropped (#12455). `kind`/`min_confidence`/`order_by` are not applied
-      by this arm.
+      than dropped (#12455). `kind`/`min_confidence`/`order_by` are NOT applied
+      by this arm — a known accepted-and-dropped gap tracked in #12500, not a
+      documented feature.
     - include_retracted=True surfaces tombstones on every path (structural,
-      paginated, and tag modes); default False excludes them.
+      paginated, and tag modes); default False excludes them. Known gap, tracked
+      in #12502: the TAG arm's own exclusion is `status != "retracted"` only, so
+      it still serves superseded/archived/outdated/deprecated rows by default,
+      where the structural and fts arms exclude the whole terminal vocabulary.
 
     Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
     a structured error dict.
@@ -4022,17 +4027,24 @@ def tortoise_query(kind: str | None = None,
     #
     # `include_retracted` is NOT refused and NOT dropped: it is popped out of
     # `filters` into its own parameter above, and the `text=` arm now forwards it
-    # as the fts leg's `include_terminal` (the `tag=` arm already mirrors its
-    # tombstone contract). Refusing a name that is not a property filter would be
-    # a false block; leaving it unapplied was the same defect one level down.
+    # as the fts leg's `include_terminal`. Refusing a name that is not a property
+    # filter would be a false block; leaving it unapplied was the same defect one
+    # level down. NOTE the `tag=` arm APPLIES the flag but with a narrower
+    # vocabulary than the other arms (`status != "retracted"` only) — a real gap
+    # filed as #12502, and the reason this comment does not say the arms agree.
     if filters and (text or tag is not None):
         _arm = "tag=" if tag is not None else "text="
+        # A caller who set BOTH must drop both to reach the structural path —
+        # naming only `tag=` (which wins) sends them back into the guard with
+        # `_arm="text="` and the structural path still unreachable (#12455
+        # round-2 finding 4, measured by re-running with `tag` removed).
+        _also = " and text=" if (tag is not None and text) else ""
         return _SafeError({"error": (
             f"filters= is not applied on the {_arm} arm, and it used to be "
             f"dropped silently (#12455): that arm reads through a leg with no "
             f"property-filter parameter, so your filters would be ignored and "
             f"the UNFILTERED population returned as if they had applied. Drop "
-            f"{_arm} to use the structural path "
+            f"{_arm}{_also} to use the structural path "
             f"(tortoise_query(kind=..., filters={{...}})), or drop filters= for "
             f"this read. (`include_retracted` is NOT affected: it is promoted to "
             f"its own parameter, and the text= arm forwards it as the fts leg's "
