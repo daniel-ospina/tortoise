@@ -5389,8 +5389,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # it was is the error this note exists to stop: 10019 IS a line a
             # commit on `main` carries — the anchor at `ea2c41a696`
             # (`9987 + 32`, #12108) — reached with nothing of this lane in the
-            # tree. The 32 in that sum is `d036b9859960`'s block (#11825), not
-            # this lane's 15: the merge of this lane onto 9987 reads 10002, not
+            # tree. The 32 in that sum is #11825's block — LANDED by
+            # `ea2c41a696` (#12108), which is the commit whose own new-side
+            # offset is `+32 @7535`; `d036b9859960` is that issue's branch
+            # commit and touches `ci-surfaces.yml` by 0 lines, so it owns no
+            # block here — and it is not this lane's 15: the merge of this lane
+            # onto 9987 reads 10002, not
             # 10019. `main` then overtook 10019 by **+2** (`a53ba8cf53` 10020,
             # `73c479ce40` 10021), which is why a rebase had to RE-DERIVE the
             # number rather than re-check it.
