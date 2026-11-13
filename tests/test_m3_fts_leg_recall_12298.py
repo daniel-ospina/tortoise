@@ -13,7 +13,7 @@ the shipped code**. Both rot the same two ways this repo already knows:
    false.
 2. **The tables drift away from the artifact.** The brief's published tables are
    recomputed from the committed `artifact.json` and compared CELL BY CELL —
-   §0, §3.1, §3.2, §3.3 and §3.5 below, plus §2's census and §3.4's identifier
+   §0, §3.1, §3.2, §3.3 and §3.5 below, plus §2's census and §3.3's identifier
    decomposition — and the changelog's recall@3 table and fixture-count sentence
    are compared too (⛔ NOT the whole changelog: its paired-p and Δ columns are
    not pinned — saying "the changelog is compared" was wider than the tests, so
@@ -151,6 +151,44 @@ def _num(cell: str) -> float:
     m = re.search(r"-?\d+(?:\.\d+)?", _plain(cell))
     assert m, f"no number in the cell {cell!r}"
     return float(m.group())
+
+
+def _scoped(brief: str, heading: str) -> str:
+    """The whitespace-flattened text of ONE markdown section — and only that one.
+
+    ⛔ THE ROOT FIX for a class that survived three review rounds (#12349 rounds
+    14-16). A pin that asserts `"<a published number>" in <the whole document>`
+    is satisfied by a copy of that number ANYWHERE — so the section the pin is
+    named after can be falsified in place while every gate stays green, provided
+    the true text also appears in another section. That is not hypothetical: a
+    planted restatement turned §2's census (M-A2), §3.3's decomposition (M-B1..3),
+    §3.5's fixture summary (M-C1) and §0's Reading-2 bullet (M-D1) green while
+    each was contradicted in its own section.
+
+    Two properties make this the scope and not a substring of a scope:
+
+    * HEADING-ANCHORED on the RAW document — `^## <heading>.` at a line start —
+      before any flattening, so a MENTION of `## 2. ` inside prose cannot open a
+      scope (M-A4: flattening first made a §1 mention indistinguishable from the
+      heading, and §2's whole block was then satisfied from §1's tail).
+    * EXACTLY ONE such heading is required. A second `## 2.` is a document
+      defect the pin should report, not something to resolve by taking `[1]`.
+    """
+    level = "##" if re.match(r"\d+$", heading) else "###"
+    # A TOP-LEVEL section OWNS its subsections: end at the next `##` only, not at
+    # the first `###` (measured: ending at any heading made `_scoped(brief, "4")`
+    # the heading line alone, and §4's Result line lives in 4.1).
+    end = r"^## " if level == "##" else r"^#{2,3} "
+    # `## 2. Method` carries a period, `### 3.3 Per class` does not — measured.
+    hit = re.search(
+        rf"(?ms)^{re.escape(level)} {re.escape(heading)}\.? .*?(?={end}|\Z)",
+        brief)
+    assert hit is not None, f"the brief no longer carries a `{level} {heading}` section"
+    starts = re.findall(rf"(?m)^{re.escape(level)} {re.escape(heading)}\.? ", brief)
+    assert len(starts) == 1, (
+        f"the brief carries {len(starts)} `{level} {heading}.` headings — the pin "
+        "cannot tell which section it is reading")
+    return " ".join(hit.group(0).split())
 
 
 # ── 1. the defect claim, asserted against the shipped tokenizer ─────────────
@@ -981,7 +1019,10 @@ def test_brief_fixture_table_is_the_artifact(artifact, brief: str) -> None:
     sentence = (f"Shipped: {sh['reachable']} of {n} reachable. In-place fix: "
                 f"{fx['reachable']} of {n}. `pg/tokens`: {tk['reachable']} of {n}. "
                 f"`pg/native`: {nv['reachable']} of {n}.")
-    assert sentence in " ".join(brief.split()), (
+    # ⛔ §3.5-SCOPED (#12349 round 16, finding 4): a whole-document `in " ".join(...)`
+    # was satisfied by a copy of this sentence planted in §4 while §3.5's own
+    # summary was falsified — measured M-C1, green.
+    assert sentence in _scoped(brief, "3.5"), (
         f"§3.5's summary sentence must read {sentence!r} — the artifact says the "
         f"shipped leg reaches {sh['reachable']} of {n} and the in-place fix "
         f"{fx['reachable']} of {n}")
@@ -989,44 +1030,44 @@ def test_brief_fixture_table_is_the_artifact(artifact, brief: str) -> None:
 
 def test_brief_census_and_identifier_decomposition_are_the_artifact(
         artifact, population, brief: str) -> None:
-    """§2's control break and §3.4's identifier decomposition — recomputed.
+    """§2's control break and §3.3's identifier decomposition — recomputed.
+
+    ⛔ §3.3, not §3.4 (§3.4 is "The mechanism — a tokenizer contract mismatch"):
+    three review rounds labelled this block §3.4, which sends a red pin's reader
+    to the wrong section of the brief.
 
     The decomposition is what makes §4.3's conclusion ("the scorer is not the
     constraint") checkable, and it is arithmetic over the committed ranks, so a
     re-run must move it here rather than only in the artifact.
     """
-    text = " ".join(brief.split())
     census = artifact["terms_census"]
-    # ⛔ §2-SCOPED, DIGIT-ANCHORED, and it costs nothing to be exact (#12349
-    # rounds 14-15). Three successive cuts of this block were each caught by a
-    # fresh reviewer asserting more than the code enforced:
-    #   * round 13: whole-document `in text` for the class split -> a §4
-    #     restatement plus edited §2 cells stayed green (M5b);
-    #   * round 15 finding 1: the CENSUS COUNT was still whole-document -> §2's
-    #     own `126 of the 300` rewritten to `226` stayed green when a
-    #     restatement carried the true count (M7);
-    #   * round 15 finding 2: `next(...)` picked the FIRST sentence in the whole
-    #     document containing the phrase, not §2's -> an EARLIER (e.g. §0)
-    #     sentence carrying the true split plus edited §2 cells stayed green
-    #     (M10d).
-    # So everything below reads from §2's own text, and the counts are
-    # digit-anchored so a `126` cannot be satisfied by a `226`.
-    section2 = text.split("## 2. ")[1].split("## 3. ")[0]
-    census_sentence = next(
-        s for s in re.split(r"(?<=\.)\s+", section2)
-        if "queries are degenerate" in s)
-    assert re.search(
-        rf"(?<!\d){census['degenerate']} of the {census['queries']} queries "
-        r"are degenerate", census_sentence), (
-        "§2's degenerate-query census no longer matches `terms_census` — the "
-        "control break is recorded as "
-        f"{census['degenerate']} of {census['queries']} and §2's own census "
-        f"sentence says: {census_sentence}")
+    # ⛔ EVERY PIN BELOW READS ITS OWN §-SCOPED SLICE, never the whole document
+    # (#12349 rounds 13-16 — the same class four times, so the scope is derived
+    # once by `_scoped` and used everywhere rather than patched per round):
+    #   * r13 whole-document `in text` -> a §4 restatement + edited §2 cells = green;
+    #   * r15 the census COUNT was still whole-document -> §2 `126`->`226` with
+    #     the true 126 restated in §4 = green;
+    #   * r15 `next(...)` took the FIRST match anywhere -> an earlier §0 sentence
+    #     carrying the true split = green;
+    #   * r16 a restatement INSIDE §2, and a `## 2. ` MENTION in §1 (indistinguishable
+    #     from the heading once the document is flattened), both = green.
+    # `_scoped` is heading-anchored on the RAW document and requires exactly one
+    # heading; the census sentence is then located BY THE COUNT, not by a phrase
+    # that a restatement can also carry.
+    section2 = _scoped(brief, "2")
+    sentences2 = re.split(r"(?<=\.)\s+", section2)
+    census_re = (rf"(?<!\d){census['degenerate']} of the {census['queries']} "
+                 r"queries are degenerate")
+    assert len(re.findall(census_re, section2)) == 1, (
+        "§2 must state its degenerate-query census EXACTLY ONCE — "
+        f"`terms_census` records {census['degenerate']} of {census['queries']}, "
+        f"and §2 carries {len(re.findall(census_re, section2))} such statements")
+    census_sentence = next(s for s in sentences2 if re.search(census_re, s))
     # ⛔ §2's DEGENERATE CLASS SPLIT is published ("108 `definite` … and 18
     # ident — none of them a path") and was unpinned while §2's census is
     # described as compared CELL BY CELL (#12349 review, P2-2): rewriting those
     # cells to 118/28 kept all 72 tests green. It is arithmetic over
-    # `degenerate_ids` + `names[i].cls`, exactly like §3.4's decomposition, so
+    # `degenerate_ids` + `names[i].cls`, exactly like §3.3's decomposition, so
     # it gets the same cell treatment.
     by_id = {n["id"]: n for n in population["names"]}
     deg = Counter(by_id[i]["cls"] for i in
@@ -1048,13 +1089,42 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
         "§2's `none of them a path` clause must agree with the classes: "
         f"{deg['path']} degenerate queries are `path`")
     subset = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
-    # §2-SCOPED for the same reason as the census above: a whole-document `in
-    # text` is satisfied by a restatement in ANY section, so §2's own number
-    # could be falsified while every gate stayed green.
     assert re.search(rf"(?<!\d){subset['n']} tokens-controlled queries",
                      section2), (
         f"§2 must name the {subset['n']}-query tokens-controlled population "
         f"in §2 itself")
+    # §2's OWN published triple, and the control-break disclosure that gives it
+    # meaning (#12349 round 16, finding 6): both were unpinned, so §2 could state
+    # `0.6172 → 0.6287, +2.15 pts, p = 0.827` — contradicting the artifact — with
+    # every gate green, and the disclosure sentence could be DELETED silently.
+    triple = (f"{subset['recall_at_3_base']:.4f} → {subset['recall_at_3']:.4f}, "
+              f"+{subset['delta_pts']:.2f} pts, "
+              f"p = {subset['mcnemar_p_two_sided']:.3f}")
+    assert f"**{triple}**" in section2, (
+        f"§2 must publish the tokens-controlled triple as {triple!r} — "
+        f"recomputed from `primary_arm_tokens_controlled_subset`")
+    def _hit3(ranks: dict, i: str) -> bool:
+        return ranks.get(i) is not None and ranks[i] <= 3
+
+    _shipped = artifact["arms"]["falkordb_tfidf"]["ranks"]
+    _pg_tokens = artifact["arms"]["postgres_bm25/tokens"]["ranks"]
+    _gains = [i for i in _shipped
+              if _hit3(_pg_tokens, i) and not _hit3(_shipped, i)]
+    _losses = [i for i in _shipped
+               if _hit3(_shipped, i) and not _hit3(_pg_tokens, i)]
+    net_rows = len(_gains) - len(_losses)
+    _deg_ids = set(artifact["arms"]["postgres_bm25/tokens"]["degenerate_ids"])
+    on_collapsed = sum(1 for i in _gains if i in _deg_ids)
+    assert re.search(rf"net \+{net_rows} rows at k=3", section2), (
+        f"§2 must state the full arm's net +{net_rows} rows at k=3 — "
+        "recomputed from the two arms' ranks")
+    assert re.search(rf"\*\*{on_collapsed}\*\* sit on collapsed rows", section2), (
+        f"§2 must state that {on_collapsed} of those gains sit on collapsed "
+        "(degenerate) rows — recomputed from the ranks and `degenerate_ids`")
+    assert "the two Postgres arms' ranks are identical" in section2, (
+        "§2 must DISCLOSE the control break — the degenerate rows are where "
+        "the two Postgres arms cannot differ, and deleting that sentence leaves "
+        "the split stated without the reason it matters")
     # §0's subset row states BOTH recalls, and §0 is where a reader quotes from.
     subset_row = next(
         (r for r in _table(brief, "recall@3", "Δ vs shipped")
@@ -1086,16 +1156,23 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     sh = found("falkordb_tfidf", hashed)
     sn_sh = found("falkordb_tfidf", snake)
     sn_fx = found("falkordb_tfidf__tokens_fixed", snake)
-    assert (f"the {len(hashed)} `#n` shapes") in text
-    assert f"**{sh} of {len(hashed)}**" in text, (
-        f"§3.4 must state {sh} of {len(hashed)} for the `#n` shapes")
-    plain = text.replace("**", "")
+    # ⛔ §3.3-SCOPED (#12349 round 16, finding 3): these three were whole-document
+    # substrings, so the paragraph could be falsified in place while a copy of the
+    # true sentence sat in another section — measured M-B1/M-B2/M-B3, all green.
+    # The section was ALSO mislabelled §3.4 in this block, in its messages and in
+    # the CI row: §3.4 is "The mechanism — a tokenizer contract mismatch", and
+    # this paragraph is §3.3 "Per class (recall@3 / recall@15)".
+    section33 = _scoped(brief, "3.3")
+    plain33 = section33.replace("**", "")
+    assert f"the {len(hashed)} `#n` shapes" in section33
+    assert f"**{sh} of {len(hashed)}**" in section33, (
+        f"§3.3 must state {sh} of {len(hashed)} for the `#n` shapes")
     want = (f"the {len(snake)} `snake_case` names: {sn_sh} of {len(snake)} "
             f"({sn_sh / len(snake):.3f}) shipped → {sn_fx} of {len(snake)} "
             f"({sn_fx / len(snake):.3f}) with the in-place fix, "
             f"+{(sn_fx - sn_sh) / len(snake) * 100:.1f} pts")
-    assert want in plain, (
-        "§3.4's identifier decomposition must re-derive from the committed ranks; "
+    assert want in plain33, (
+        "§3.3's identifier decomposition must re-derive from the committed ranks; "
         f"expected {want!r}")
 
 
@@ -1360,7 +1437,7 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     assert "73.5 %" in brief_text and "26.5 %" in brief_text
 
     # ⛔ The Δ COLUMN, in its own cells — a whole-document `"91.8" in brief` is a
-    # substring that §3.4's sentence and `share × 91.8` both satisfy, so the two
+    # substring that §3.3's sentence and `share × 91.8` both satisfy, so the two
     # figures §4.3 is actually quoted from could be falsified with the pin green
     # (measured by mutation on the previous cut: 26.7→26.6 and 91.8→81.8 both
     # passed).
@@ -1382,7 +1459,12 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
     leave these bullets quoting the superseded figures with every gate green —
     the condition the file claims is impossible (review cycle 5, finding 2).
     """
-    plain = " ".join(brief.replace("**", "").split())
+    # ⛔ §0-SCOPED (#12349 round 16, finding 5): a whole-document `plain` was
+    # satisfied by a copy of a bullet planted in §5 while §0's own bullet was
+    # falsified — measured M-D1, green. §4's Result line gets its OWN scope, since
+    # it is §4 that carries it (see the last assertion).
+    plain = _scoped(brief, "0").replace("**", "")
+    plain4 = _scoped(brief, "4").replace("**", "")
     cmp = artifact["comparisons"]
     k3 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
     k15 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k15"]
@@ -1441,7 +1523,7 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         f"(+{k3['delta_pts']:.2f} pts, p = {k3['mcnemar_p_two_sided']:.3f}) and on "
         f"the tokens-controlled subset (+{subset['delta_pts']:.2f} pts, "
         f"p = {subset['mcnemar_p_two_sided']:.3f})"
-    ) in plain, "§4's Result line no longer matches the artifact"
+    ) in plain4, "§4's Result line no longer matches the artifact"
 
 
 def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arch: str) -> None:
