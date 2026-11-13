@@ -3333,11 +3333,15 @@ def _glob_matches(pattern: str, names: tuple[str, ...]) -> bool:
 
     Asked with `fnmatch` on the pattern's LAST PATH SEGMENT, so `**/`, directory prefixes,
     string-concatenated arguments and character classes are graded by what they MATCH rather than
-    by how they are spelled — the distinction three review rounds were spent on. A literal segment
-    (`action.yml`, a composite action rather than a workflow) matches no real workflow name and is
-    ignored for free.
+    by how they are spelled — the distinction three review rounds were spent on. A pattern with NO
+    wildcard (`python-ci.yml`, a deliberate single-workflow reference, or a tuple of REQUIRED
+    filenames) enumerates nothing, so it matches nothing here by construction: `"*.yml"` still
+    reds, while `glob("python-ci.yml")` and a filename tuple stay clean instead of reding as
+    "one-sided enumerations" (measured, review round 7).
     """
     segment = pattern.rsplit("/", 1)[-1]
+    if not any(ch in segment for ch in "*?["):
+        return False
     return any(fnmatch.fnmatchcase(name, segment) for name in names)
 
 
@@ -3452,6 +3456,19 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
     `.yaml` reds even when no site spells a glob.
     """
     source = Path(__file__).read_text()
+    #: NON-VACUITY ON THE ANALYZER, not just on the population. A pin whose READER has gone blind
+    #: is indistinguishable from a clean tree — with `_glob_calls` short-circuited to `[]` and a
+    #: real one-sided glob added, this test still passed (measured, review round 6). The two
+    #: assertions below pin the reader's own shape, so a mutilated analyzer reds HERE instead of
+    #: certifying the module, which is the same failure `#12238` names one layer up.
+    assert _glob_calls('WORKFLOWS.glob("*.yml")') == [(1, "WORKFLOWS", "glob", ["*.yml"])], (
+        "`_glob_calls` no longer reports (line, receiver, method, literals) for a plain one-sided "
+        "glob — the structural scan below would grade nothing and pass"
+    )
+    assert any(literals for *_head, literals in _glob_calls(source)), (
+        "`_glob_calls` found no string literal anywhere in this module — the scan is blind, so "
+        "the green below would mean nothing"
+    )
     yml_names, yaml_names = _workflow_probe_names()
     assert yml_names, "the probe population is empty — this pin would grade nothing"
     calls = _glob_calls(source)
