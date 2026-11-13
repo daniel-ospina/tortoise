@@ -1476,10 +1476,20 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # `run_fts_query`/`queryNodes` while a 128-char name returns one — the same
     # false PASS this branch exists to prevent.
     if deferred and len(token) > MAX_COMPOSITE_RUN_LEN:
+        # ⛔ THE CONSEQUENCE CLAUSE IS NOT ONE THING (#12360 review round 11, P3).
+        # It used to assert "so the query is ONE literal term the index cannot
+        # hold and the probe would match NOTHING", which is FALSE for any
+        # over-bound token that still has segments the tokeniser keeps: MEASURED
+        # ``('ab_'*43)[:129]`` builds ``ab|ab|...`` (twelve alternatives of one
+        # SHORT term) — the OPPOSITE failure from a literal that matches nothing.
+        # The refusal and the advice are right either way; only the reason had to
+        # describe what the read actually does.
         return (f"its `_` run is longer than {MAX_COMPOSITE_RUN_LEN} characters, "
                 f"the bound at which the read stops emitting the composite "
-                f"(#12360) — so the query is ONE literal term the index cannot "
-                f"hold and the probe would match NOTHING — pass a SHORTER token")
+                f"(#12360) — so the composite the index actually holds is NOT "
+                f"sent and the probe cannot address ONE indexed term: the read "
+                f"falls back to one escaped literal or to a split of its "
+                f"segments instead — pass a SHORTER token")
     if (single_run and token.lower() == runs[0]
             and token.lower() in SPARSE_STOPWORDS):
         return ("it is a search stopword; a probe must be a RARE token that "

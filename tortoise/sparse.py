@@ -15,10 +15,15 @@ the BM25-style rank behavior the epic's scope prescribes (issue #1541 D1/D2).
 Single-token queries and stopword-only queries fall back to the raw string —
 byte-identical to the pre-R2 code path for inputs WITHOUT RediSearch-special
 characters (escaped via :func:`escape_redisearch_literal`, see below) — with one
-#12360 exception stated so this header is not the next stale claim: a DEGENERATE
-input carrying a ``_`` run also emits that run's composite beside the literal
+#12360 exception, stated precisely so this header is not the next stale claim (it
+said the wrong thing once, review round 11): a DEGENERATE input whose `_` run is
+NOT the whole input also emits that run's composite beside the literal
 (``a_b c_d`` -> ``a_b c_d|a_b|c_d``), which changes the fallback's bytes for a
-string that carries no RediSearch-special character at all.
+string carrying no RediSearch-special character at all. ⛔ Where the run IS the
+literal (``a_b``, ``a_``, ``__a``), or the run is alnum-free (``___``) or over
+:data:`MAX_COMPOSITE_RUN_LEN`, the composite is deduped away or never built and
+the bytes are UNCHANGED — see :func:`build_or_query`, which states the same thing
+in the same terms.
 
 Escaping is structural: tokens are alnum-only, so RediSearch reserved
 characters (``|`` included) cannot be injected into the OR-union path. The
