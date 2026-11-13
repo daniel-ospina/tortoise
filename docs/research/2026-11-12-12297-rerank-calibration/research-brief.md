@@ -491,12 +491,15 @@ for the recall and nDCG cells, `arms.*.latency` for the per-pair cost.
 
 ⛔ **5.463 is the same arm re-run**, not a different measurement: §6's
 `measurement-noun-path.json` prices the cross-encoder at **5.179 ms/pair** and this
-lexical-control run prices it at **5.463** over the identical 39,930 pairs on one
-thread — a 5.5 % run-to-run spread on the same box. The finding here is the **ratio to
-the lexical baselines measured in this same process** (≈ 176× `difflib`, ~1,090×
-`overlap` — the same ratio as below), which survives the spread; quote §6's 5.179 when
-costing an added millisecond budget, and this ratio when arguing the cross-encoder is
-worth it.
+lexical-control run prices it at **5.463** over the same 39,930-pair **count** on
+one thread — a 5.5 % spread on the same box that spans the CORPUS difference as
+well as run-to-run noise: this run's population is a regenerated one
+(`c9f290a2866ec996`; §6's is `0aa80dff278c4e58`), as Residual 4 below records, so
+the two are **not pooled** and the pairs are not literally the same 39,930. The
+finding here is the **ratio to the lexical baselines measured in this same
+process** (≈ 176× `difflib`, ~1,090× `overlap` — the same ratio as below), which
+survives the spread; quote §6's 5.179 when costing an added millisecond budget, and
+this ratio when arguing the cross-encoder is worth it.
 
 | pool 40, exact arm | recall@3 | nDCG@10 | gained / lost | **ms/pair** |
 |---|---|---|---|---|
@@ -515,6 +518,7 @@ worth it.
 | cross-encoder | 95.1 % → 99.8 % (+21 / **−1**) | 95.1 % → 99.5 % (+20 / **−1**) |
 | lexical `difflib` | 95.1 % → 99.5 % (+21 / −2) | 95.1 % → 99.5 % (+21 / −2) |
 | lexical `overlap` | 95.1 % → **100.0 %** (+21 / **−0**) | 95.1 % → **100.0 %** (+21 / **−0**) |
+| (§3's same arm on the earlier population starts at 95.3 % and gains +19 / −1 at pool 40 — the one-row baseline difference Residual 4 explains) | | |
 
 ### What this establishes, exactly
 
