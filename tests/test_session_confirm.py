@@ -117,7 +117,7 @@ def test_unknown_extraction_outcome_is_PENDING_not_unextracted():
     ``extraction.outcome_known: False`` — the server's own word for "not
     recorded YET". Returning UNEXTRACTED there made `tortoise session capture`
     print "no memory points were extracted" and file a PAID saved-backlog entry
-    for captures that were read back holding 5-7 points seconds later.
+    for captures that were read back holding 2-7 points seconds later.
 
     The turns ARE durable, so the spool may still terminalise — under PENDING.
     """

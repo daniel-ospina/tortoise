@@ -10,7 +10,7 @@ yet". Reading the count alone made `session capture` print:
 
     Extraction: no-provider — the turns were STORED but no memory points were extracted
 
-for sessions that were read back moments later holding 5-7 memory points, and it
+for sessions that were read back moments later holding 2-7 memory points, and it
 persisted a *priced* saved-backlog deferral offering to re-extract work that was
 already done.
 

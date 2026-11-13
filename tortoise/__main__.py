@@ -8504,7 +8504,7 @@ def _session_post(api_key: str, api_url: str):
                 # (#12362): the server has not recorded an outcome, so there is
                 # no cause to name. Labelling it keyless made the CLI print
                 # "no memory points were extracted" — measured FALSE on
-                # captures that extracted 5-7 points seconds later — and
+                # captures that extracted 2-7 points seconds later — and
                 # recorded a priced saved-backlog entry for work already done.
                 body: dict = {"confirmed": verdict}
                 if verdict == UNEXTRACTED:

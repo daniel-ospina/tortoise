@@ -12252,7 +12252,14 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert all("[^[:alnum:]_]" in _c and "[^[:alnum:]_.]" not in _c for _c in _all_a1), (
         "EVERY statement of the A1 proof command must use the non-dot-excluding class — a "
         f"`[^[:alnum:]_.]` copy is blind to a receiver-qualified call (found {_all_a1})")
-    assert "hasPart" in ext[1771 - 1] and '"predicate":' in ext[1771 - 1], (
+    # ⛔ THE INDEX AND THE MESSAGE MOVE TOGETHER. The previous round re-derived the
+    # number in the f-string only, leaving `ext[1771 - 1]` — so the pin indexed the
+    # MITIGATES op schema and could never pass, while its diagnostic printed the
+    # allowlist line and then said that line does NOT carry it (self-contradicting,
+    # and a reviewer caught it: #12374 cycle 3). `1773` is measured
+    # (`grep -n 'hasPart' tortoise/extractor_v2.py` → 487, 1773), so the index is
+    # what the number means, not a second place to carry it.
+    assert "hasPart" in ext[1773 - 1] and '"predicate":' in ext[1773 - 1], (
         f"extractor_v2.py:1773 reads {ext[1773 - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")
     assert "`extractor_v2.py:11524`" in text, (
