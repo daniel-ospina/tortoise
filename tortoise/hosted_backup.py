@@ -1413,15 +1413,19 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         # the same defect this clause was being fixed for, one sentinel over.
         unlabelled_targets = [t for t in node_targets if t == _UNLABELLED_DUMP_ENTRY]
         # ⛔ EACH CLASS MAY BE PRESENT INDEPENDENTLY, so the sentence is COMPOSED from what
-        # was actually dropped (`#12015` reviews rounds 5 and 7). Two defects lived in the
-        # collapsed form: an arm named "the edges kept beside them" over an edge-free drop
-        # (a claim outrunning the labels), and the concluding clause offered an explicit
-        # property clear as the ONLY route for a label-less NODE — while the label ADD
-        # (`SET n:Source`, exactly what the relabel walk performs) makes such a vector
-        # reachable WITHOUT deleting it. And the walk is `MATCH (n:Document)`-scoped, so
-        # only a `Document` entry can honestly be promised a relabel at all; any other
-        # unserved label needs the same label ADD. Its label is imported rather than
-        # restated: one owner for the walk's scope (`tortoise/migrate_kinds.py`).
+        # was actually dropped (`#12015` reviews rounds 5, 7 and 8). Three defects lived
+        # in the earlier forms: an arm named "the edges kept beside them" over an
+        # edge-free drop (a claim outrunning the labels); the concluding clause offered an
+        # explicit property clear as the ONLY route for a label-less NODE; and BOTH node
+        # arms promised that a label ADD makes "the vector" reachable — which is FALSE at
+        # the moment the line is emitted, because the restore DELETES the vector
+        # (`props.pop(EMBEDDING_PROPERTY, None)` on every flagged node) and writes nothing
+        # back. The label ADD makes the NODE served, so a RE-EMBED lands where the read
+        # path serves it; the dropped vector itself is gone, and saying otherwise sends the
+        # operator looking for a vector that no step can bring back. The walk is
+        # `MATCH (n:Document)`-scoped, so only a `Document` entry can be promised it at
+        # all; the walk's label is imported rather than restated, so its scope has one
+        # owner (`tortoise/migrate_kinds.py`).
         from tortoise.migrate_kinds import _LEGACY_DOCUMENT_LABEL
 
         relabel_repairable = [t for t in node_targets if t == _LEGACY_DOCUMENT_LABEL]
@@ -1429,20 +1433,22 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
                           if t not in (_LEGACY_DOCUMENT_LABEL, _UNLABELLED_DUMP_ENTRY)]
         parts: list[str] = []
         if relabel_repairable:
-            parts.append("nodes kept so a relabel migration can repair them")
+            parts.append("nodes kept so a relabel migration makes them SERVED — the "
+                         "dropped vector is GONE, so re-embed after the relabel")
         if other_labelled:
             parts.append(
-                "nodes kept whose label no relabel walk matches — give the node a "
-                "SERVED label (a label ADD, `SET n:Source`) and the vector becomes "
-                "reachable")
+                "nodes kept whose label no relabel walk matches — the dropped vector "
+                "is GONE; add a SERVED label (`SET n:Source`) and re-embed")
         if unlabelled_targets:
             parts.append(
                 "the nodes the dump gave no label, so NO relabel migration can repair "
-                "them — the same label ADD (`SET n:Source`) does")
+                "them — the dropped vector is GONE; add a SERVED label "
+                "(`SET n:Source`) and re-embed")
         if edge_targets:
             parts.append(
-                "edges kept, where only an explicit property clear removes the vector "
-                "(a relationship carries NO label at all, so NO relabel can reach it)")
+                "edges kept — a relationship carries NO label at all, so NO relabel "
+                "can reach the dropped vector; only an explicit property clear or a "
+                "new index can serve one there")
         remedy = "; ".join(parts)
         logger.warning(
             "restore_graph: dropped %d vector(s) on unserved target(s) %s — "

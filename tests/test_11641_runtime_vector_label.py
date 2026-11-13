@@ -1902,7 +1902,7 @@ def test_the_drop_warning_names_a_remedy_that_EXISTS_for_the_target(tmp_path, ca
 
     The `allow_unserved_vectors=True` warning is the ONLY operator-visible line on the
     recovery route, and it ended by promising that "a relabel migration can repair them".
-    That is true of a record label (the `:Document` → `:Point` walk `relabel_legacy_documents()`
+    That is true of a `:Document` label (the `:Document` → `:Source` walk `relabel_legacy_documents()`
     does) and FALSE of a `<relationship:TYPE>` entry: a relationship has no label at all, so
     nothing relabel-shaped can reach it and only an explicit property clear removes the vector.
     A line that names a repair which cannot exist sends the operator to a no-op, which is the
@@ -1921,7 +1921,7 @@ def test_the_drop_warning_names_a_remedy_that_EXISTS_for_the_target(tmp_path, ca
                          if "dropped" in r.getMessage())
     assert edge_msg, "an authorised EDGE drop logged nothing"
     assert "NO relabel" in edge_msg, edge_msg
-    assert "nodes kept so a relabel migration can repair them" not in edge_msg, (
+    assert "nodes kept so a relabel migration makes them SERVED" not in edge_msg, (
         "the EDGE is what survives here and no relabel repairs a relationship: "
         + edge_msg)
 
@@ -1942,7 +1942,7 @@ def test_the_drop_warning_names_a_remedy_that_EXISTS_for_the_target(tmp_path, ca
     node_msg = "\n".join(r.getMessage() for r in caplog.records
                          if "dropped" in r.getMessage())
     assert node_msg, "an authorised NODE drop logged nothing"
-    assert "nodes kept so a relabel migration can repair them" in node_msg, node_msg
+    assert "nodes kept so a relabel migration makes them SERVED" in node_msg, node_msg
 
     # ⛔ THE MIXED ARM (review round 5): when ONE run drops a node's vector AND an edge's,
     # the line must carry BOTH remedies — reverting this arm to the node-only sentence red
@@ -1971,7 +1971,7 @@ def test_the_drop_warning_names_a_remedy_that_EXISTS_for_the_target(tmp_path, ca
     mixed_msg = "\n".join(r.getMessage() for r in caplog.records
                           if "dropped" in r.getMessage())
     assert mixed_msg, "an authorised MIXED drop logged nothing"
-    assert "nodes kept so a relabel migration can repair them" in mixed_msg, (
+    assert "nodes kept so a relabel migration makes them SERVED" in mixed_msg, (
         "the node half of a mixed drop keeps its relabel remedy: " + mixed_msg)
     assert "edges kept" in mixed_msg, (
         "the mixed wording must say the EDGE half has no relabel: " + mixed_msg)
@@ -2081,11 +2081,13 @@ def test_the_remedy_does_not_promise_a_relabel_to_a_node_with_NO_label(tmp_path,
     assert "NO relabel" in msg, (
         "a node the dump gave NO label is not repairable by a relabel migration, so the "
         "warning must not promise one: " + msg)
-    assert "nodes kept so a relabel migration can repair them" not in msg, (
+    assert "nodes kept so a relabel migration makes them SERVED" not in msg, (
         "the relabel promise is still made over a node that has no label at all: " + msg)
     # ⛔ AND THE NON-DESTRUCTIVE ROUTE IS NAMED (`#12015` review round 7). "Only an
     # explicit property clear removes it" sends an operator to the destructive move while
-    # the label ADD (`SET n:Source`, the `#11641`/D10 walk) makes the vector reachable.
+    # the label ADD (`SET n:Source`) makes the NODE served, so a re-embed lands where the
+    # read path serves it — the walk itself only matches `:Document`, and the dropped
+    # vector is not recoverable by any step.
     assert "SET n:Source" in msg, (
         "a label-less node's vector IS repairable without deleting it — the warning must "
         "name the label ADD, not only a property clear: " + msg)
@@ -2114,6 +2116,8 @@ def test_a_NON_Document_unserved_label_gets_no_relabel_promise(tmp_path, caplog)
     assert "no relabel walk matches" in msg, (
         "`:Session` is outside `relabel_legacy_documents()`'s `MATCH (n:Document)` scope, "
         "so the warning must not promise that relabel: " + msg)
+    assert "nodes kept so a relabel migration makes them SERVED" not in msg, (
+        "the relabel promise is still made over a label the walk cannot match: " + msg)
     assert "SET n:Source" in msg, (
         "the non-destructive label ADD is the route that DOES reach it: " + msg)
 
@@ -2145,7 +2149,7 @@ def test_the_mixed_remedy_does_not_name_edges_that_are_not_there(tmp_path, caplo
     assert out["dropped_vectors"] == 2, out
     msg = "\n".join(r.getMessage() for r in caplog.records
                     if "dropped" in r.getMessage())
-    assert "nodes kept so a relabel migration can repair them" in msg, msg
+    assert "nodes kept so a relabel migration makes them SERVED" in msg, msg
     assert "the nodes the dump gave no label" in msg, msg
-    assert "edges kept beside them" not in msg, (
+    assert "edges kept" not in msg, (
         "the dump carried NO edges, yet the warning named kept edges as survivors: " + msg)
