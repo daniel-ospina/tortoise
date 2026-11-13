@@ -613,9 +613,12 @@ def test_the_row_two_MEASURES_the_EDGE_vector_door(monkeypatch):
     assert "stored-without-a-query-path: none" in row.observed, row.observed
     # ⛔ The POPULATION is PRINTED and an EMPTY one holds the row at PARTIAL — and both
     # halves are pinned here (`#12015` round 4: measured UNPINNED by removing the
-    # `not projection["relationships_probed"]` arm and watching this file stay 172/172
-    # green). Without it, "41 edge types measured, none stores a vector" and "the edge
-    # arm never ran" are the SAME printed evidence — `stored-without-a-query-path: none`
+    # `not projection["relationships_probed"]` arm and watching every test in this file
+    # stay green — a green run OF THE FILE AS IT STOOD THEN, which is why no count is
+    # quoted: this file collects 183 today, so any unscoped figure here would be the
+    # stale-measurement defect the §6 note below forbids). Without it, "41 edge types
+    # measured, none stores a vector" and "the edge arm never ran" are the SAME printed
+    # evidence — `stored-without-a-query-path: none`
     # / `MET` — which is the rule the neighbouring notes already state: a `MET` must not
     # rest on an unprinted (or unmeasured) set.
     assert "PLANTED ON and saw REFUSE" in row.observed, row.observed
@@ -665,7 +668,10 @@ def test_an_edge_arm_that_stops_PLANTING_cannot_report_full_coverage(monkeypatch
     where a door RECORDED A DROP"*, so that an arm which stops planting cannot still report
     full coverage. That promise was pinned by NOTHING: deriving the population from the input
     list (`edge_probed.add(rel_type)` at the top of the per-type loop — the exact variant the
-    probe's own comment calls MEASURED wrong) left this file **171 passed, 2 skipped**. Only
+    probe's own comment calls MEASURED wrong) left the file as it stood then green at
+    `171 passed, 2 skipped` (=173, SCOPED to that head — this file collects 183 today, so the
+    figure is not re-cut: the mutation it describes reds the pin above on the current tree and
+    therefore cannot be re-measured here). Only
     the empty-the-integer direction was pinned by the test above.
 
     So this disables the PLANT: with no stored-vector property to plant, no door can record a
