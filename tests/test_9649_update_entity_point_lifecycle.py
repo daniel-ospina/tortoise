@@ -636,3 +636,68 @@ def test_a_read_modify_write_of_the_unchanged_status_still_lands(env):
 
     with pytest.raises(ValueError, match="terminal"):
         sdk.update_entity(pid, status="live", content="a resurrection attempt")
+
+
+def test_the_entailed_status_exemption_is_narrow(env):
+    """Review round 5, P2: the exemption is pinned at all three of its edges.
+
+    A generic PUT may re-send the status a terminal claim already has — that is
+    `test_a_read_modify_write_of_the_unchanged_status_still_lands`. Each of the
+    three narrowings below, dropped, either re-opens probe 2 or resurrects a
+    sibling, while the rest of the suite stays green.
+    """
+    sdk, _ = env
+
+    # (a) an entailed status PLUS a temporal field is still a window write.
+    t = _live(sdk, "entailed+temporal")
+    sdk.retract_point(t)
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_entity(t, status="retracted", validTo="2030-01-01T00:00:00Z")
+    assert _row(sdk, t)["validTo"] != "2030-01-01T00:00:00Z", (
+        "the temporal half must be refused even when the status is entailed")
+
+    # (b) a NULL-status sibling is NOT "equal" — it is the legacy shape.
+    n = _live(sdk, "null sibling")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status=NULL, n.outdated=true",
+        params={"id": n})
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_entity(n, status="live")
+    assert _row(sdk, n)["status"] is None
+
+    # (c) EVERY bound row must hold it — "any" resurrects a terminal sibling.
+    f = _live(sdk, "fan terminal")
+    sdk.retract_point(f)
+    sdk.create_point("statement", "fan live twin", dedup=False,
+                     status="live", id=f)
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_entity(f, status="retracted")
+    assert sorted(r[0] for r in _fan(sdk, f)) == ["live", "retracted"], (
+        "the refused call must leave both rows as they were")
+
+
+def test_the_entailed_status_exemption_reads_the_write_row_set(env):
+    """Review round 5, P1: the exemption must read the rows the WRITE binds.
+
+    The secondary arms match NARROWER than the write (`:Event` by eventId,
+    `:Source` by url) while the write binds every node carrying the resolved id.
+    Measuring the exemption on the ADDRESSED rows let an addressed `{live}` beside
+    an unaddressed terminal sibling satisfy "every row holds it", and the write
+    then resurrected the sibling — measured on the `deprecated` twin of a
+    `:Point:Event` addressed by its eventId.
+    """
+    sdk, _ = env
+    pid = _live(sdk, "hybrid with twin")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid",
+        params={"id": pid, "eid": "evt-twin-9649"})
+    sdk._get_proj().g.query(
+        "CREATE (n:Point {id:$id, content:'twin', status:'deprecated'})",
+        params={"id": pid})
+    before = sorted(r[0] for r in _fan(sdk, pid))
+    assert before == ["deprecated", "live"], before
+
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_entity("evt-twin-9649", status="live")
+    assert sorted(r[0] for r in _fan(sdk, pid)) == before, (
+        "the unaddressed terminal twin must not be resurrected")

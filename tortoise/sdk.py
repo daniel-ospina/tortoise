@@ -47195,6 +47195,27 @@ class TortoiseSDK:
                     f"key every other door uses) or write the window through "
                     f"`update_point(id, ...)`."
                 )
+            # ⛔ Review F5-1: BOTH the exemption and the status arm read the row set
+            # the WRITE binds (`n.id IN $ids`), never the row set the ADDRESS
+            # matched. The secondary arms are the narrower pair: `:Event` matches
+            # `n:Event AND n.eventId = $id` and `:Source` matches `:Point:Source`,
+            # while the write binds every node carrying the resolved id — so an
+            # addressed `{live}` beside an unaddressed terminal sibling (the
+            # public duplicate-id fan-out) satisfied "every ADDRESSED row holds it"
+            # and the write resurrected the sibling. Measured on the deprecated
+            # twin of a `:Point:Event` addressed by its eventId.
+            _pt_statuses: tuple = ()
+            _bound_null_statuses = 0
+            if _lifecycle_ids:
+                _bound = proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "RETURN collect(DISTINCT n.status) AS statuses, "
+                    "sum(CASE WHEN n.status IS NULL THEN 1 ELSE 0 END) "
+                    "AS null_statuses",
+                    params={"ids": _lifecycle_ids},
+                ).result_set[0]
+                _pt_statuses = tuple(_bound[0] or ())
+                _bound_null_statuses = _bound[1]
             # ⛔ Review F4-2: an ENTAILED status is not a lifecycle write. A
             # generic tenant PUT is a read-modify-write — it fetches the row and
             # sends it back with the fields it changed — so refusing
@@ -47209,8 +47230,8 @@ class TortoiseSDK:
             _status_entailed = (
                 "status" in props
                 and not (_TEMPORAL_RESTAMP_PROPS & set(props))
-                and not _null_statuses
-                and tuple(_addressed_statuses or ()) == (props["status"],))
+                and not _bound_null_statuses
+                and _pt_statuses == (props["status"],))
             for _lifecycle_id in (() if _status_entailed else _lifecycle_ids):
                 try:
                     self._assert_lifecycle_guard(
@@ -47236,13 +47257,6 @@ class TortoiseSDK:
             # fail-open class, and a live write that makes `rebuild_all` refuse).
             # Measured: `status='archived'` landed on a `:Point:Event` addressed
             # by its eventId, journalled as `label='Event'`.
-            _pt_statuses: tuple = ()
-            if _lifecycle_ids:
-                _pt_statuses = tuple(proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids "
-                    "RETURN collect(DISTINCT n.status)",
-                    params={"ids": _lifecycle_ids},
-                ).result_set[0][0])
             # ⛔ Review F4-1: gate on the ADDRESS, never on the collected statuses.
             # `collect` drops NULLs, so a Point whose stored status is NULL yields
             # `()` — indistinguishable from "no Point addressed" — and gating on it
@@ -47253,8 +47267,8 @@ class TortoiseSDK:
             # into the sibling arm and journalled `restatus` against the wrong
             # label (which makes `rebuild_all` raise). Measured. `_lifecycle_ids`
             # is non-empty exactly when a Point is bound.
+            _status = props["status"]
             if _lifecycle_ids:
-                _status = props["status"]
                 if (not isinstance(_status, str)
                         or _status not in POINT_STATUS_VALUES):
                     # Same refusal `update_point` issues (#3311 defect 1). The
