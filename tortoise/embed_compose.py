@@ -97,6 +97,11 @@ later lane:**
      census population, not merely undeclared within it. An armed graph
      therefore needs it to embed ``embeddingText or content`` before a backfill
      may run — the fourth stated boundary, and gap (d) in ``.env.example``.
+     ✅ **CLOSED for the backfill by #12489:** ``LABEL_CONFIG["Point"]`` now
+     embeds ``embeddingText or content`` — spelled as a ``CASE``, because
+     ``coalesce`` treats ``''`` as present while Python's ``or`` (the
+     read/replay rule it must match) does not. Gap (d)'s ``add_point`` half is
+     still OPEN.
 6. **The truncation budget.** ``EMBED_WORD_BUDGET`` (512, the same cap
    ``embeddings._truncate_for_embedding`` applies at encode time) is spent
    HEAD-FIRST on the quote, and the names line is RESERVED out of it: the quote

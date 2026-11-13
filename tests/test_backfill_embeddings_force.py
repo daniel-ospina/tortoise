@@ -351,10 +351,15 @@ def test_composition_parity_point_prefers_embedding_text(proj, monkeypatch):
     ⚠️ Both halves are pinned against mutants measured in review (round 1):
     ``coalesce(n.embeddingText, n.content)`` reds the ``p-empty-et`` case,
     because ``''`` is non-NULL in Cypher so an empty-string ``embeddingText``
-    SHADOWED ``content`` — Python's ``or`` falls back, and the expression must
-    translate THAT. The dry-run/live agreement assertion is the other half of
-    the same defect: under ``coalesce`` the dry run counted ``p-empty-et`` as
-    repairable while the live pass dropped it as text-less (#5126's shape).
+    SHADOWED ``content`` — that row is then never filled (a silent miss), while
+    both passes still agree with each other about skipping it. Python's ``or``
+    falls back, and the expression must translate THAT.
+
+    The ``dry_total == updated`` assertion pins a DIFFERENT shape: a ``text_expr``
+    that disagrees with the ``text_pred`` derived from the same constant (one
+    literal edited, the other not) made the dry run promise 3 rows and the live
+    pass write 2 — measured (mutant: ``text_expr`` coalesce, ``text_pred``
+    CASE-derived). That is why one constant feeds both keys.
     """
     g = _g(proj)
     composed = "`ISSUES 2` — the verbatim quote another Point also carries"

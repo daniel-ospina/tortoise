@@ -112,16 +112,22 @@ DEFAULT_BATCH = 500
 #: EMPTY** ``embeddingText`` falls back to ``content``.
 #:
 #: ⚠️ ``coalesce(n.embeddingText, n.content)`` is NOT that rule and was measured
-#: to diverge: ``''`` is non-NULL in Cypher, so an empty-string ``embeddingText``
-#: SHADOWED ``content``, the composed text became ``''``, the live pass dropped
-#: the row as text-less while ``--dry-run`` counted it as repairable — the exact
-#: dry-run/live disagreement ``text_pred`` exists to prevent (#5126). The
-#: ``CASE`` is the faithful translation of Python ``or``. (``nullif`` is not
-#: available in this Cypher dialect — measured: “Unknown function 'nullif'”.)
+#: to be wrong: ``''`` is non-NULL in Cypher, so an empty-string ``embeddingText``
+#: SHADOWED ``content`` and that row's text became ``''`` — the live pass then
+#: dropped it as text-less, so the row is **never filled** while the surface
+#: still reports the sweep as complete. (It is a SILENT MISS, not a dry-run/live
+#: disagreement: this constant feeds both ``text_expr`` and ``text_pred``, so a
+#: ``coalesce`` mutant moves both and the two passes still agree with each
+#: other — they agree on skipping the row.) The ``CASE`` is the faithful
+#: translation of Python ``or``. (``nullif`` is not available in this Cypher
+#: dialect — measured: “Unknown function 'nullif'”.)
 #:
 #: One constant for BOTH ``text_expr`` and ``text_pred`` on purpose: the file's
 #: own rule is that the two passes share ONE predicate, and two literals would
-#: let them drift apart one edit at a time.
+#: let them drift apart one edit at a time. (That drift is a REAL measured
+#: shape, separately from the ``coalesce`` defect above: a ``text_expr`` that
+#: disagrees with a CASE-derived ``text_pred`` made the dry run promise 3 rows
+#: and the live pass write 2 — the #5126 failure.)
 _POINT_EMBEDDING_TEXT_EXPR = (
     "CASE WHEN n.embeddingText IS NULL OR n.embeddingText = '' "
     "THEN n.content ELSE n.embeddingText END"
@@ -525,9 +531,17 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     the live pass agree BY CONSTRUCTION wherever a surface declares a
     ``text_pred`` (Document and Point do: ``''`` is non-NULL in Cypher, so a
     bare ``IS NOT NULL`` counted rows the live pass skipped — #5126, #12489).
-    Residual, recorded rather than silently over-reported: a surface with only
-    a bare property still uses ``IS NOT NULL``, so a *non-empty-check* miss is
-    limited to a whitespace-only value on those surfaces.
+    Residual, recorded rather than silently over-reported, in TWO parts:
+    (a) a surface with only a bare property still uses ``IS NOT NULL``, so a
+    *non-empty-check* miss is limited to a whitespace-only value on those
+    surfaces; (b) even a ``text_pred`` surface is not perfectly aligned with
+    the live guard, because Cypher ``trim()`` strips SPACES only while the live
+    pass's Python ``str.strip()`` also strips tab, NBSP and em-space — measured
+    on this surface: four Points whose ``content`` was ``"\\t"``, ``"\\u00a0"``,
+    ``"\\u2003"``, ``"\\t \\t"`` gave ``dry_total=4`` against ``updated=0,
+    skipped=4``. Pre-existing and unchanged by #12489 (the pre-fix bare
+    ``IS NOT NULL`` counted the same four); the claim of exactness is corrected
+    here rather than left to be discovered.
     """
     g = db.select_graph(graph_name)
     total = 0
