@@ -2334,26 +2334,24 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
         )
     try:
         from tortoise.sdk_retired import REMOVED_SDK_METHODS, RETIRED_SDK_METHODS
-        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, RETIRED_USE_INSTEAD
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
     except Exception as exc:
         raise SurfaceEvidenceUnreadable(
             f"could not import the retirement records (RETIRED_USE_INSTEAD / "
             f"RETIRED_SDK_METHODS / REMOVED_SDK_METHODS): {type(exc).__name__}: {exc}"
         ) from exc
-    # ⛔ The forward record is the SERVED set, not the map's keys. `_RETIRED_SHIMS` is built
-    # from `RETIRED_TOOL_REGISTRY` (`RETIRED_TOOL_REGISTRY = [t for t in _ENTRY_DECLARATIONS
-    # if t.name in RETIRED_USE_INSTEAD]`), so a KEY whose `ToolDefinition` was deleted serves
-    # nothing at all — neither advertised nor answered. Counting that key as a record would let
-    # one "cleanup" (retire the name AND delete the tool) report the removal as *"keeps
-    # SERVING the name"*, the opposite of the truth (review of PR #12313). This gate must not
-    # rest on an invariant it does not check, even though `tests/test_retired_tools.py` reds
-    # the dangling-key state on a committed tree.
-    served_forward = set(RETIRED_USE_INSTEAD) & {t.name for t in RETIRED_TOOL_REGISTRY}
     return {
         "archived": archived,
-        "forward": served_forward,
-        # The RAW map as well as the SERVED subset, because `archive_surface.check` reads the
-        # raw one: a KEY whose `ToolDefinition` was deleted is invisible to `check`'s
+        # ⛔ THE RAW MAP, AND THAT IS THE ONLY FORWARD SET. There used to be a second field,
+        # `forward`, holding the SERVED subset (`_RETIRED_SHIMS`, built from
+        # `RETIRED_TOOL_REGISTRY`) — but `removal_report` reads `forward_raw`, so the served
+        # set was inert, kept alive only by a `dict.get` fallback that could never run
+        # (`removal_records` always sets `forward_raw`) and by a test asserting the dead field.
+        # A defence nothing consults is worse than no defence: it reads as protection while a
+        # later change could consume `forward` and reopen the dangling-key hole below with the
+        # suite green (review of PR #12313, round 11).
+        #
+        # `archive_surface.check` reads the raw map: a KEY whose `ToolDefinition` was deleted is invisible to `check`'s
         # `forward`-is-still-served arm and reds its ARCHIVE arm instead ("is a
         # RETIRED_USE_INSTEAD forward entry — a forward entry is STILL SERVED … must not be
         # archived"). With only the served subset here, `cut` told the operator to archive a
@@ -2466,6 +2464,9 @@ def removal_report(
         return any(c == cls and s == symbol for c, s in entries)
     problems: list[RemovalProblem] = []
     accounting: dict[tuple[str, str], str] = {}
+    # Bare waivers that met a RECORDED removal, held until every removal is graded: a bare
+    # entry is a false record only if it waives nothing anywhere.
+    recorded_bare: dict[str, list[tuple[str, str]]] = {}
     # `{(symbol, class): …}` — ONE entry per REMOVAL, not per symbol. Keyed by symbol (as it
     # was) two removals of the same name collapsed into one entry and the `accounted N
     # removal(s)` line understated what the cut did; the printed record is the audit the
@@ -2504,7 +2505,7 @@ def removal_report(
             continue
         elif archived:
             found.append(f"archive entry ({kind})")
-        if cls == "tool" and symbol in records.get("forward_raw", records.get("forward", ())):
+        if cls == "tool" and symbol in records.get("forward_raw", ()):
             # REACHABLE, and refused in `check`'s own words. "Archived AND forward" is TWO
             # records only when an archive entry is also present; on its own the forward key
             # is the whole problem: the tool declaration is gone (so the name serves nothing
@@ -2533,7 +2534,15 @@ def removal_report(
                 ))
             continue
         if found:
-            if _waived(symbol, cls):
+            # ONLY a waiver that NAMES this surface can replace its record. `_waived` was used
+            # here, so a BARE `--allow-removal x` was refused as a redundant override when the
+            # removal it matched was the recorded one on the OTHER surface — while the same
+            # bare entry was exactly what the unrecorded class needed, and waives. The
+            # "sole authority" rule the ambiguity counter already applies applies here too
+            # (review of PR #12313, round 11). A bare entry's verdict is DEFERRED, because
+            # whether it waives anything depends on removals still to come: if it covers no
+            # unrecorded removal it is the false record round 8 refused.
+            if _waived_by_qualified(symbol, cls):
                 # A record ALREADY accounts for this removal, so the waiver waives nothing —
                 # and honouring it would REPLACE that record in the printed log, telling the
                 # next reader to look for a rename that did not happen. Same false-record
@@ -2547,6 +2556,8 @@ def removal_report(
                     "record with a rename claim is a false record"
                 ))
                 continue
+            if _waived_by_bare(symbol):
+                recorded_bare.setdefault(symbol, []).append((cls, found[0]))
             accounting[(symbol, cls)] = found[0]
             continue
         if _waived(symbol, cls):
@@ -2568,6 +2579,22 @@ def removal_report(
             f"{symbol} ({cls}) was DROPPED with no record — it is gone from the "
             "declaration and from the archive both, so there is nothing left to read"
         ))
+    for symbol, pairs in sorted(recorded_bare.items()):
+        if symbol in waived:
+            # The bare entry really does waive an unrecorded removal, so it is not a false
+            # record — the recorded classes keep their records and it accounts the rest.
+            continue
+        for cls, label in pairs:
+            problems.append(RemovalProblem(
+                "redundant-override",
+                f"{symbol} ({cls}) is already accounted for by {label}, so "
+                f"`--allow-removal {symbol}` waives nothing — an override that replaces a "
+                "real record with a rename claim is a false record",
+            ))
+            # The refusal is the verdict, so the record it names is not part of an `accounted`
+            # block that will never print — and a caller reading `accounting` must not see a
+            # record the cut refused.
+            accounting.pop((symbol, cls), None)
     for symbol, classes in sorted(waived.items()):
         if len(classes) > 1:
             problems.append(RemovalProblem(
@@ -2671,7 +2698,18 @@ def cmd_cut(args: argparse.Namespace) -> int:
             # "this cut does not remove <symbol>" for a symbol the cut DID remove, and hid
             # the specific refusal `removal_report` had produced (review of PR #12313).
             removals = prior_symbols - derived_symbols
-            records = removal_records()
+            # ⛔ NO REMOVALS, NO RECORD TO GRADE. `removal_records()` grades the WHOLE archive
+            # (`manifest_violations` + `file_violations`), so calling it unconditionally made
+            # an archive defect the cut neither reads nor aggravates refuse a cut that drops
+            # nothing — with a message about forgetting a symbol — e.g. the unindexed `.py`
+            # left behind by an interrupted `archive_symbol` (the file is written before the
+            # row is appended). Round 10 fixed the same false refusal for a MISSING manifest
+            # only; gating on the removals fixes the class (review of PR #12313, round 11).
+            records = (
+                removal_records()
+                if removals
+                else {"archived": set(), "forward_raw": set(), "sdk_retired": set()}
+            )
             problems, accounting = removal_report(
                 prior_symbols, derived_symbols, records, allowed=set(allowed)
             )
