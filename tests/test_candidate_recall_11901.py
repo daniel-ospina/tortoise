@@ -1221,11 +1221,22 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
         # 157/1676 (9.4 %) instead of 157/419 (37.5 %) on the corpus.
         assert vg["pairs"] == arms["variant"]["3"]["pairs"] == 36, (p, vg)
         assert vg["gated_pairs"] == _EXACT_GATED[p], (p, vg)
-        # EXACTLY ONE gated pair binds today (the `#2258` -> `2258` mention).
-        # Inverting the per-PAIR accumulator reports every NON-binding pair
-        # instead (35); accumulating it per (pair x k) over-reports it 4x.
-        assert vg["would_attach_before"] == 1, (p, vg)
-        assert vg["would_attach_before_any_k"] == 1, (p, vg)
+        # ⛔ EIGHT, NOT ONE, AND THE DIFFERENCE IS #12295'S FOLD. On main's
+        # matcher exactly ONE gated pair bound in this fixture (the `#2258` ->
+        # `2258` hash-dropped mention) — the number #12294's decline quoted as
+        # "the gate trades measured recall for zero duplicate reduction". #12295
+        # ships the comparison-side fold in `_find_existing_entity`, so a gated
+        # VARIANT surface now binds to its own canonical, and every one of this
+        # fixture's 8 in-window gated pairs attaches. The cost side of the gate is
+        # therefore REAL and 8x larger here, which is exactly why the frozen
+        # control sits beside it: `arms["variant"]["3"]["attached_norm_only"]` is
+        # 1, i.e. pre-#12295 behaviour, recomputed in the same run.
+        # Still discriminating: inverting the per-PAIR accumulator reports every
+        # NON-binding pair (27-8=19 shipped, 18-8=10 zep); accumulating it per
+        # (pair x k) over-reports it 4x (32).
+        assert vg["would_attach_before"] == 8, (p, vg)
+        assert vg["would_attach_before_any_k"] == 8, (p, vg)
+        assert arms["variant"]["3"]["attached_norm_only"] == 1, arms["variant"]
         assert 0 <= vg["would_attach_before"] <= vg["in_window_before"] \
             <= vg["gated_pairs"] <= vg["pairs"], (p, vg)
 
