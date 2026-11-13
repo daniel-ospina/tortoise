@@ -4,9 +4,10 @@
 as a claim (``tortoise/goal_judgement.py``). This module is the arrow's OTHER
 half: what happens to that claim when one of its three inputs is replaced. Before
 this module the answer was **nothing** — measured on #11926 — and the graph kept
-a conclusion whose justification was gone, which the design of record calls *"the
-worst failure mode the EP layer has"* — quoted from issue #11926, whose body states
-it; the plan of record applies it to the three inputs in
+a conclusion whose justification was gone. ⛔ The phrase is the ISSUE's, not the
+plan's: *"the worst failure mode the EP layer has"* is quoted from issue #11926's
+body — it appears in no document in this tree — and the plan of record applies it
+to the three inputs in
 ``docs/plans/2026-11-11-goal-measurement-and-reasoning.md`` §3 rows 8, 9 and 12:
 
     ===========================  ==========================================
@@ -1624,14 +1625,19 @@ def invalidate_stale(
                 # is about, one level out.
                 # ⚠️ `None` says the SWEEP could not tell, not that the answer is
                 # unknowable for every raise: `invalidate` raises from two places
-                # — `claim is None` (the read failed: genuinely unknown) and the
-                # trailing `raise exc` when `retract_point` refused a claim this
-                # call had ALREADY read as live (answer `True`) UNLESS the re-read
-                # that follows found it gone or unreadable (answer unknown, and
-                # that is the vanish-mid-sweep race this PR is about). The
-                # exception does not carry which, so the conservative `None` is
-                # reported and `error` carries the raise. `cache` stays absent: no
-                # reconcile ran.
+                # — `claim is None` (the FIRST read failed: genuinely unknown) and
+                # the trailing `raise exc`, reached when `retract_point` refused a
+                # claim this call had ALREADY read as live. ⛔ The re-read that
+                # follows a refusal does not change that by returning here: if it
+                # finds the claim GONE this function has already RETURNED with
+                # `found: False` (the second vanish window above), and if the
+                # re-read itself is UNREADABLE (`after` is `None`) it falls
+                # through BOTH terminal tests to this same `raise exc`. So
+                # "gone" is an ANSWER this door reports, not an unknown, and the
+                # trailing raise is the unreadable-after-refusal path. The
+                # exception does not say which read failed, so the conservative
+                # `None` is reported and `error` carries the raise. `cache` stays
+                # absent: no reconcile ran.
                 # ⛔ PRECEDENT STATED AS A DIFFERENCE, NOT AN IDENTITY: #7818 fixed
                 # the same CLASS one surface over — an omitted `found` key read
                 # through `.get()` as honest absence when a candidate WAS found.
