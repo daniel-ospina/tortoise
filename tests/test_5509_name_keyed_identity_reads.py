@@ -90,6 +90,56 @@ def _about_decision(sdk, content: str, object_id: str) -> str:
     return pid
 
 
+class TestThe12120UnaddressableTimelineFallback:
+    """Round 17: the UNADDRESSABLE fallback asks the writer's key space.
+
+    `belief_timeline` resolves the topic to one id; the ONE branch that cannot
+    use that id is an id-less stub (the resolver refuses an id-keyed write but
+    proves the holder unique, `UnaddressableEntityName`). That branch re-spelled
+    the predicate as raw `name`/`canonical_name` — NARROWER than the resolver
+    above it — so a stub matched only by the folded spelling resolved and then
+    matched nothing, and the read reported "no decisions" about a topic it had
+    just resolved. These pins reach `unaddressable=True`; a revert to the raw arms
+    returns `[]` here.
+    """
+
+    def test_a_fold_only_idless_stub_is_reachable_by_the_fallback(self, sdk_factory):
+        sdk = sdk_factory()
+        g = sdk._get_proj().g
+        # An id-less stub whose name IS the folded spelling ("widget"), asked for
+        # as "The Widget": the resolver admits it (fold-equal), the raw arms miss.
+        g.query("CREATE (o:Object {name:'widget', objectKind:'company'})")
+        pid = sdk.create_point("decision", "the widget should ship in Q1")["id"]
+        g.query(
+            "MATCH (p:Point {id:$pid}), (o:Object {name:'widget'}) "
+            "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid})
+
+        ts = sdk.belief_timeline("The Widget")
+        assert [e.get("content") for e in ts] == [
+            "the widget should ship in Q1"], (
+            f"the id-less fallback asked a narrower key space than the resolver "
+            f"that admitted the stub: {ts!r}")
+
+    def test_an_alias_only_idless_stub_is_reachable_by_the_fallback(self, sdk_factory):
+        sdk = sdk_factory()
+        g = sdk._get_proj().g
+        # The writer stores ALIASES FOLDED (`apply_entity_merge` adds
+        # `normalize_entity_name(name)`), so the union's alias arm asks for the
+        # folded spelling.
+        g.query(
+            "CREATE (o:Object {name:'zeta', objectKind:'company', "
+            "aliases:['omega corp']})")
+        pid = sdk.create_point("decision", "omega should ship in Q2")["id"]
+        g.query(
+            "MATCH (p:Point {id:$pid}), (o:Object {name:'zeta'}) "
+            "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid})
+
+        ts = sdk.belief_timeline("The Omega Corp")
+        assert [e.get("content") for e in ts] == [
+            "omega should ship in Q2"], (
+            f"an alias-only holder was unreachable from the fallback: {ts!r}")
+
+
 class TestBeliefTimelineIdentityRead:
     def test_rename_appends_the_other_carrier_on_main(self, sdk_factory):
         """THE REPRODUCTION. Pre-fix, the second `belief_timeline("Acme")`

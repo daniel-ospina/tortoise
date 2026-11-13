@@ -8729,18 +8729,62 @@ def _cmd_session_health() -> int:
 
     It ALSO prints one `capture:` line per DIVERGENT capture seam on stderr (#6388)
     via `_print_seam_divergences` — a different substrate from the spool, so the
-    pinned one-line answer on stdout stays byte-identical to the Pi leg's.
+    pinned one-line answer on stdout stays byte-identical to the Pi leg's. For
+    the same reason #12379's unrecorded-outcome count is a SECOND stderr line
+    (`_print_unrecorded_captures`) and never a term on the pinned line, whose
+    spelling a cross-leg parity test pins by executing the real TypeScript.
     """
     import sys as _sys
 
     try:
         from tortoise.capture_spool import capture_health_line, spool_dir
-        print(capture_health_line(spool_dir(),
-                                 api_key=_capture_key_presence()).line)
+        health = capture_health_line(spool_dir(),
+                                    api_key=_capture_key_presence())
+        print(health.line)
     except Exception as exc:
+        health = None
         print(f"capture: UNREADABLE (health read failed: {exc})", file=_sys.stderr)
+    _print_unrecorded_captures(health)
     _print_seam_divergences()
     return 0
+
+
+def _print_unrecorded_captures(health=None) -> None:
+    """Name the captures whose extraction outcome the server never recorded (#12379).
+
+    The surface that survives the hooks: `session drain` prints the same count,
+    but the Claude SessionEnd/SessionStart hooks discard its stderr
+    (``2>/dev/null``), and stdout here carries the ONE pinned health line both
+    legs must agree on byte-for-byte (a cross-leg parity test executes the real
+    TypeScript against it) — so a machine-local, Python-only fact belongs on
+    stderr, exactly like the seam divergences beside it.
+
+    ``health`` is the :class:`~tortoise.capture_spool.CaptureHealth` the caller
+    already read, and the ids are taken FROM it: every meta in the spool has
+    already been parsed to answer ``queued``/``saturated``, and a second walk to
+    find the same marker is exactly the cost ``_health_scan`` exists to remove
+    (2221 ms per line at the 20 000-entry ceiling). ``None`` (the health read
+    itself failed) is silent: its ``UNREADABLE`` verdict already said so, and a
+    second, softer statement about the same directory is noise.
+    """
+    import sys as _sys
+
+    found = tuple(getattr(health, "unrecorded", ()) or ())
+    if not found:
+        return
+    # Ids are named (bounded) because a count a user cannot resolve to a session
+    # is a fact they cannot act on; the full list stays on disk in each entry's
+    # own meta, so this line is the pointer to it.
+    named = ", ".join(found[:3]) + (f" +{len(found) - 3} more"
+                                   if len(found) > 3 else "")
+    print(
+        f"capture: {len(found)} session(s) were filed with NO recorded "
+        f"extraction outcome at the time ({named}) — the turns are stored, it "
+        f"is not known whether extraction ran, and no re-extraction is offered "
+        f"for them (`tortoise session view <id>` reports the server's state; a "
+        f"later capture verdict that records how it ended clears this)",
+        file=_sys.stderr,
+    )
 
 
 def _record_drain_deferrals(root, summary) -> None:
@@ -8881,6 +8925,30 @@ def _cmd_session_drain(api_key: str, api_url: str,
             f"terminal {summary.terminal} (kept, not retried; re-file with "
             f"'tortoise session drain --retry-terminal'), "
             f"discarded {len(summary.discarded)}",
+            file=_sys.stderr,
+        )
+    # #12379: a 2xx filed with NO RECORDED extraction outcome is counted on its
+    # own line. It needs no term in the gate above — `summary.attempted` is
+    # incremented BEFORE the POST in `_flush_one`, so a pass that observed an
+    # unrecorded filing always passes that gate already. #12362 removed the
+    # false "no memory points were extracted" claim and the priced deferral that
+    # went with it — the correct trade — and left nothing naming the session.
+    # The SessionStart hook discards this stderr, so the DURABLE half is the
+    # marker stamped on the spool entry (`capture_spool._flush_one`), which
+    # `session health` prints; this line is the hand-run drain's answer, and it
+    # names the ids because a count alone cannot be acted on.
+    if summary.unrecorded:
+        # BOUNDED, exactly like the health line's list: `flush_spool` has no
+        # per-pass attempt cap (the `Bounds` hold count/byte ceilings only) and
+        # `SPOOL_MAX_ENTRIES` is 20 000, so an unbounded join could render twenty
+        # thousand ids into one stderr line. The ids that are cut are still on
+        # disk, one meta each.
+        shown = summary.unrecorded_sessions[:3]
+        more = (f" +{len(summary.unrecorded_sessions) - 3} more"
+                if len(summary.unrecorded_sessions) > 3 else "")
+        print(
+            f"spool drain: outcome unrecorded {summary.unrecorded} "
+            f"({', '.join(shown)}{more})",
             file=_sys.stderr,
         )
     # #6388: the OTHER substrate `SessionStart` is the natural cadence for —

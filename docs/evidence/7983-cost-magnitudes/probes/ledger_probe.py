@@ -165,7 +165,13 @@ def main() -> int:
             if not words:
                 continue
             try:
-                sdk.tortoise_fts_query(" ".join(words), limit=a.limit)
+                sdk.tortoise_fts_query(
+                    " ".join(words), limit=a.limit,
+                    # #12297: recorded-baseline probe — its numbers are
+                    # pre-lever, so the armed rerank would silently add a model
+                    # load to every sampled read and move the magnitude it
+                    # reports.
+                    _rerank_candidates=False)
                 ran += 1
             except Exception as exc:
                 print(f"query skipped: {type(exc).__name__}: {exc}", file=sys.stderr)

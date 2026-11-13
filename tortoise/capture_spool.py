@@ -89,6 +89,7 @@ __all__ = [
     "is_probe_session_id",
     "is_spooled",
     "list_spool_metas",
+    "outcome_unrecorded",
     "quota_refusal",
     "read_capture_status",
     "read_discards",
@@ -97,6 +98,7 @@ __all__ = [
     "remove_spool_entry",
     "reset_terminal_entries",
     "spool_dir",
+    "unrecorded_captures",
     "write_capture_status",
     "write_spool_entry",
 ]
@@ -309,6 +311,62 @@ class PostOutcome:
     body: dict = field(default_factory=dict)
 
 
+#: The key a 2xx body (and the spool meta of the entry it filed) uses to say the
+#: server has NOT recorded whether extraction ran. Set by
+#: ``__main__._session_post._refused`` for the ``PENDING`` verdict (#12362) and
+#: copied onto the spool entry by ``_flush_one`` so the state outlives the run.
+UNRECORDED_OUTCOME_KEY = "extraction_outcome"
+UNRECORDED_OUTCOME_VALUE = "unknown"
+
+
+def outcome_unrecorded(body) -> bool:
+    """True when a 2xx body says the EXTRACTION OUTCOME was never recorded.
+
+    THE one definition of the state #12379 owns, so the three surfaces that see
+    one wire body (the spool drain, the day-file drain and the spool entry's own
+    durable marker) cannot drift apart about it.
+
+    ⛔ It is NOT "extracted nothing". A keyless capture (#4188) or a team with
+    extraction switched off (#4258) genuinely produced no memory points and the
+    server SAYS so (``outcome_known: true``); those keep their priced deferral,
+    because re-extracting them is the remedy that works. This marker means the
+    opposite — the server has not said either way — so pricing it would offer a
+    re-attempt for a session that may already have extracted (the #12362 bug).
+
+    Deliberately narrow and fail-safe: only the explicit marker counts. A body
+    from a tree that does not carry #12362, a malformed body, or ``None`` all
+    read as "nothing known to be unrecorded" — an absent marker never
+    fabricates a trace, and it never suppresses a real one.
+    """
+    return (isinstance(body, dict)
+            and body.get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE)
+
+
+#: The ``confirmed`` verdicts that mean the server KNOWS how the capture ended, so
+#: a marker standing over one of them is stale. ``filed`` is ``extracted >= 1``
+#: (#12374's ``FILED`` verdict); ``unextracted`` is the store-only outcome the
+#: server recorded (``outcome_known: true``, #4188 / #4258). Everything else —
+#: ``pending`` (still unknown), ``replayed`` (already captured, says nothing about
+#: extraction), an absent verdict, a malformed body — leaves the marker alone.
+RECORDED_OUTCOME_VERDICTS = ("filed", "unextracted")
+
+
+def outcome_recorded(body) -> bool:
+    """True when a 2xx body PROVES the server recorded how the capture ended.
+
+    The inverse question to :func:`outcome_unrecorded`, and the ONLY evidence
+    allowed to clear the spool marker. It is deliberately narrow: an
+    uninformative body (``replayed``, a bare 2xx, a malformed one) must not be
+    read as a resolved outcome — that reading is what deleted the only trace on
+    the routine resume/clear/compact replay path (see ``_flush_one``'s comment).
+    """
+    if not isinstance(body, dict):
+        return False
+    verdict = body.get("confirmed")
+    return (isinstance(verdict, str)
+            and verdict.strip().lower() in RECORDED_OUTCOME_VERDICTS)
+
+
 @dataclass
 class FlushSummary:
     attempted: int = 0
@@ -350,6 +408,14 @@ class FlushSummary:
     #: need (the org's spend cap must not read as a plan quota). Mirrors the Pi
     #: leg's ``summary.quota``.
     quota: dict | None = None
+    #: #12379: how many of the 2xx answers in THIS pass said the server had not
+    #: recorded the extraction outcome (see :func:`outcome_unrecorded`). The
+    #: session ids are kept beside the count because a number with no id is not
+    #: actionable — the surviving trace a human can act on is the marker on the
+    #: entry itself (``unrecorded_captures``), and this pair is what the
+    #: drain's own line names.
+    unrecorded: int = 0
+    unrecorded_sessions: list[str] = field(default_factory=list)
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
 
@@ -1658,6 +1724,37 @@ def write_spool_entry(
         "attempts": _attempts(prior or {}),
         "next_attempt_at_ms": _carried_window(prior or {}),
     }
+    # #12379: the "extraction outcome was never recorded" marker is STICKY.
+    # Carried forward across snapshots like the backoff above, because a growing
+    # session rewrites this meta on EVERY turn and the state it describes is not
+    # resolved by a new turn: the server's re-capture gate requires a RECORDED
+    # failure (`prior_capture_ok is False`), so a NULL-outcome session replays
+    # instead of re-extracting, however many times it is sent. Without this carry
+    # the only durable trace of a session that can never gain memory points would
+    # vanish on its next turn (measured in review).
+    #
+    # WHO STAMPS AND WHO CLEARS: the drain's own filing CAS (`_flush_one`) does
+    # BOTH, and this carry is neither. It stamps when the body says the outcome
+    # was never recorded (:func:`outcome_unrecorded`) and CLEARS on the same
+    # content's filing when the body instead REPORTS how it ended
+    # (:func:`outcome_recorded` — `filed` / `unextracted`) — a client-verified
+    # clear, because keeping the marker over a resolved session is the permanent
+    # false alarm a review measured. Nothing on the turn path can decide either
+    # way, so a new turn only ever PRESERVES what the last filing concluded.
+    # ⛔ MIRRORED on the Pi leg — `writeSpoolEntry` in
+    # `tortoise/pi-hooks/tortoise-capture.ts` carries the same key forward as a
+    # PRESERVATION obligation, because a fresh meta literal there would otherwise
+    # erase a Python-stamped entry's marker (the cross-leg gap a reviewer proved).
+    # ⚠️ RESIDUAL, stated rather than implied: that leg ALSO files (its own
+    # `flushSpool`), but its filing path reads no response body (`PostResult`
+    # carries none), so it can neither stamp this key nor CLEAR it — a session
+    # whose growth is filed by the Pi leg keeps a marker that a Python-side
+    # filing of the same verdict would have cleared. Not a false PASS (the trace
+    # only ever over-reports an unknown state, never hides one) and it is what
+    # the health line's HISTORICAL wording exists to survive; porting the clear
+    # to the Pi CAS needs the body on that path.
+    if (prior or {}).get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE:
+        meta[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
     # Set-only-when-present, FIRST-WRITER-WINS, and — unlike `model` below,
     # which is never carried forward — carried forward across snapshots. The
     # `prior` lane wins when both are set, so a later snapshot can only FILL IN
@@ -2351,6 +2448,58 @@ def count_pending_captures(root: Path) -> int | None:
     return pending
 
 
+def unrecorded_captures(root: Path) -> list[str] | None:
+    """Session ids of captures whose extraction outcome the server never recorded.
+
+    The DURABLE half of #12379's trace. A drain's counter lives in one run's
+    console line, and the hook that produces most captures throws that stderr
+    away (``claude-hooks/session-end.sh`` → ``2>/dev/null``), so the state is
+    also stamped onto the spool entry when it is filed (:func:`_flush_one`) and
+    listed here by the surface that survives the redirect, ``session health``.
+
+    Ids, not a bare count: a number a user cannot resolve to a session is a
+    fact they cannot act on, and the entry is the only thing left that names it.
+
+    Read through the SAME read-only scanner the health line uses
+    (``list_spool_metas(repair=False)``), so this cannot disagree with the
+    ``queued``/``saturated`` reading about an unparseable meta, and a probe id is
+    skipped exactly as the ledger writer skips it (``session view`` cannot resolve
+    a synthetic probe). ``None`` means the spool could not be LISTED — an
+    unreadable directory is not an empty one.
+
+    Includes an entry that was stamped by an earlier pass and left unfiled since
+    (a replayed snapshot, or a later filing that did not carry it): that
+    session's outcome is just as unrecorded, and the next pass re-posts it. A
+    pass whose own compare-and-swap MISSES stamps nothing — see
+    :func:`_flush_one`, which states that rule where it is decided.
+    """
+    try:
+        metas, discards = list_spool_metas(root, repair=False)
+    except OSError:
+        return None
+    if any(d.get("reason") == DISCARD_SPOOL_UNREADABLE for d in discards):
+        return None
+    return _unrecorded_from_metas(metas)
+
+
+def _unrecorded_from_metas(metas: list[dict]) -> list[str]:
+    """The #12379 ids among already-parsed metas — one reading, no second walk."""
+    found: list[str] = []
+    for meta in metas:
+        if not isinstance(meta, dict):
+            continue
+        if meta.get(UNRECORDED_OUTCOME_KEY) != UNRECORDED_OUTCOME_VALUE:
+            continue
+        sid = str(meta.get("session_id") or "")
+        if not sid or is_probe_session_id(sid):
+            # A synthetic `session verify` probe is never filed by a drain and
+            # `session view` cannot resolve it, so naming it would be a dead end
+            # (`_record_backlog_deferral` skips it for the same reason).
+            continue
+        found.append(sid)
+    return found
+
+
 def _health_scan(root: Path) -> tuple[int, list[dict]] | None:
     """ONE read-only pass over `entries/`: the pending count AND the metas.
 
@@ -2388,12 +2537,22 @@ def _health_scan(root: Path) -> tuple[int, list[dict]] | None:
 
 
 class CaptureHealth(NamedTuple):
-    """The per-box answer: the state, the count, the refusal, and the LINE."""
+    """The per-box answer: the state, the count, the refusal, and the LINE.
+
+    ``unrecorded`` is the #12379 half, carried as DATA rather than re-derived by
+    the caller: every meta in the spool has already been parsed to answer
+    ``queued``/``saturated`` (:func:`_health_scan` exists because two walks over
+    this directory cost 2221 ms per line at the 20 000-entry ceiling), so a
+    second scan for the marker would re-introduce exactly the cost that one-scan
+    consolidation removed. It never appears on ``line`` — that spelling is
+    byte-identical to the Pi leg's and pinned by a cross-leg parity test.
+    """
 
     state: str
     queued: int
     status: int | None
     line: str
+    unrecorded: tuple[str, ...] = ()
 
 
 def _refusal_label(reason: object) -> str:
@@ -2532,6 +2691,10 @@ def _spool_health_line(
             "unreadable", 0, None,
             f"capture: UNREADABLE (cannot list {_entries_dir(root)})")
     queued, scan_metas = scan
+    # #12379: the unrecorded-outcome ids are taken from THIS scan's metas (see
+    # `CaptureHealth.unrecorded`) — the caller prints them, the pinned line never
+    # carries them, and no second walk over `entries/` is needed.
+    unrecorded = tuple(_unrecorded_from_metas(scan_metas))
     recorded = read_capture_status(root)
     if queued == 0 and recorded is not None and recorded.get("state") != "ok":
         # Self-healing: the block is over (or the other leg filed everything).
@@ -2562,7 +2725,8 @@ def _spool_health_line(
         return CaptureHealth(
             "blocked", queued, blocked_status,
             f"capture: BLOCKED ({queued} queued, {blocked_status} "
-            f"{_refusal_label(recorded.get('reason'))})")
+            f"{_refusal_label(recorded.get('reason'))})",
+            unrecorded)
     if saturated:
         # `queued` is the PENDING count, so a ceiling filled by terminal entries
         # reads `SATURATED (0 queued, …)` — true on both counts: nothing will be
@@ -2574,21 +2738,24 @@ def _spool_health_line(
             return CaptureHealth(
                 "saturated", queued, None,
                 "capture: SATURATED (no TORTOISE_API_KEY, "
-                f"{queued} queued, refusing new captures)")
+                f"{queued} queued, refusing new captures)",
+                unrecorded)
         return CaptureHealth(
             "saturated", queued, None,
-            f"capture: SATURATED ({queued} queued, refusing new captures)")
+            f"capture: SATURATED ({queued} queued, refusing new captures)",
+            unrecorded)
     if api_key == "":
         # The count is NOT dropped here: a keyless box is exactly the box whose
         # spool grows forever (nothing can file it), so the backlog stays on the
         # line that explains why.
         return CaptureHealth(
             "inactive", queued, None,
-            f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)")
+            f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)",
+            unrecorded)
     if queued > 0:
         return CaptureHealth("draining", queued, None,
-                             f"capture: DRAINING ({queued} queued)")
-    return CaptureHealth("ok", 0, None, "capture: OK (0 queued)")
+                             f"capture: DRAINING ({queued} queued)", unrecorded)
+    return CaptureHealth("ok", 0, None, "capture: OK (0 queued)", unrecorded)
 
 
 def _with_store_sync_terms(base: CaptureHealth, root: Path) -> CaptureHealth:
@@ -2956,6 +3123,16 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # left the breadcrumb standing (and `session verify` reading a failure
         # that had already been resolved) (#4714 review).
         _clear_breadcrumb_for(meta.get("harness"), sid)
+        # #12379: the 2xx may be honest about the turns and silent about the
+        # extraction — the server stored them and never recorded whether
+        # extraction ran. FILING is right (the spool's contract is turn
+        # durability) but the state must leave a trace: #12362 removed the false
+        # "no memory points were extracted" claim AND the priced deferral, which
+        # is the correct trade, and left nothing anywhere naming the session.
+        unrecorded = outcome_unrecorded(outcome.body)
+        if unrecorded:
+            summary.unrecorded += 1
+            summary.unrecorded_sessions.append(sid)
         # COMPARE-AND-SWAP, on the POSTED CONTENT **AND LANE**. A concurrent
         # capture (a resumed session, or the SessionStart drain racing a live
         # turn) can grow this entry while the POST is in flight. Stamp
@@ -3027,6 +3204,42 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                 now_ms / 1000.0, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             fresh["attempts"] = 0
             fresh["next_attempt_at_ms"] = 0
+            # #12379: the DURABLE half of the trace, written in the same CAS as
+            # `filed_key` so it describes the content that was actually filed.
+            # Set-only-when-present (the same omit-rather-than-write-null rule
+            # `filed_lane`/`filed_stamp` follow for the TS leg's strict
+            # comparison).
+            #
+            # ⛔ An UNINFORMATIVE body never clears it. A re-capture of this
+            # session cannot resolve the state: the server's re-capture gate
+            # requires a RECORDED failure (`prior_capture_ok is False`), so a
+            # session whose outcome is NULL replays and answers `replayed` — a
+            # body that says "already captured", not "recorded how extraction
+            # ended". Treating that as evidence of a recorded outcome deleted the
+            # only trace, on the routine resume/clear/compact path, while the
+            # condition provably persisted (measured in review: marker set →
+            # replay filing → marker gone, `filed_key` set).
+            #
+            # ⛔ But a body that DOES report the outcome is evidence, and keeping
+            # the marker over it is the alert-fatigue failure the health line
+            # exists to avoid: `confirmed: filed` means the server imported the
+            # turns (so extraction ran) and `confirmed: unextracted` means it
+            # knows it did not — either way the session is no longer "unknown",
+            # and a marker left standing would make `session health` report a
+            # permanent false alarm until the entry is evicted. So the marker is
+            # CLEARED by a recorded verdict and only by one
+            # (:func:`outcome_recorded`). What remains after that is the case
+            # nothing on the client can resolve — no later filing at all — which
+            # is why the health line states it HISTORICALLY ("filed with no
+            # recorded outcome at the time") rather than as a live claim.
+            #
+            # A CAS miss leaves the entry unfiled and unstamped: its content was
+            # not what this POST carried, so the next pass re-posts it and that
+            # attempt's own outcome stamps it.
+            if unrecorded:
+                fresh[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
+            elif outcome_recorded(outcome.body):
+                fresh.pop(UNRECORDED_OUTCOME_KEY, None)
             _write_meta(root, fresh)
         # else: the posted content WAS filed; the entry keeps the newer turns
         # and stays unfiled, so they are re-posted next time.

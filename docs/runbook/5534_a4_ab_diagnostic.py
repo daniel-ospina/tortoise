@@ -160,13 +160,18 @@ def measure_one(q: dict, *, limit: int, embed: bool,
         out["expansion_terms"] = len(expansion)
 
         t2 = time.monotonic()
+        # #12297: this A/B compares two ID SETS and their orders; an armed
+        # rerank would re-pick both arms and the delta would stop being the
+        # search_keys_prf effect it claims to measure.
         hits_off = sdk.tortoise_fts_query(
             q["question"], limit=limit, pool_size=limit,
-            include_terminal=True, keep_numeric=True, search_keys_prf=False)
+            include_terminal=True, keep_numeric=True, search_keys_prf=False,
+            _rerank_candidates=False)
         t3 = time.monotonic()
         hits_on = sdk.tortoise_fts_query(
             q["question"], limit=limit, pool_size=limit,
-            include_terminal=True, keep_numeric=True, search_keys_prf=True)
+            include_terminal=True, keep_numeric=True, search_keys_prf=True,
+            _rerank_candidates=False)
         t4 = time.monotonic()
         off_ids = _ids_of(hits_off)
         on_ids = _ids_of(hits_on)

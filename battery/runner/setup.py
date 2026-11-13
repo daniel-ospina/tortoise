@@ -598,7 +598,13 @@ def _sdk_marker_present(sdk, scenario: Scenario) -> bool:
     (ingest mints server ids — the derive id is a raw-lane artifact). Read
     via the product fts surface, never raw queries."""
     want = seed_manifest_content(scenario.id)
-    rows = sdk.tortoise_fts_query("battery:seed_manifest", limit=20) or []
+    # #12297: a MEMBERSHIP probe over a page SMALLER than the rerank's pool
+    # width (``limit=20`` < 40) — with the gate armed the rerank re-picks which
+    # rows survive that cut, and this guard would then report "stale PRE-FIX
+    # graph" for a graph that is not stale. Opt out: nothing here asserts
+    # anything about rerank quality.
+    rows = sdk.tortoise_fts_query("battery:seed_manifest", limit=20,
+                                  _rerank_candidates=False) or []
     return any(str(r.get("content") or "") == want for r in rows)
 
 

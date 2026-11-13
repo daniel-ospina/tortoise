@@ -98,6 +98,7 @@ from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
 )
 from tortoise.entity_identity import (  # #3590: identity is a minted id, a name is a label
     AmbiguousEntityName,  # #9876: the create's route-then-refuse, mapped to 422 here
+    name_key_space_same_entity,  # #12120: the writer's key space, for node-returning reads
     refuse_ambiguous_create,  # the READ-ONLY pre-flight twin of that refusal
     resolve_fold_name,  # #3590 fold-side name resolution
 )
@@ -21061,14 +21062,28 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # names are excluded from the legacy `about_entities` channel below: the
     # binder is the only confidence-gated aboutSubject producer, and the raw
     # `MERGE (:Object {name})` would otherwise re-mint the #4934 label leak.
+    # F6 (corrected, #12120 review round 3): the skip is EXACT (F6's rule — a
+    # legitimately-cased Object keeps its edge) and the fold is used only to
+    # NARROW the probe below: a spelling that merely FOLD-equals a declared
+    # subject-kind name may only be attributed to an Object whose own name is
+    # that exact spelling. The `aboutObject` anchor resolves over the writer's
+    # folded union, so without the narrowing a fold-equivalent spelling reached a
+    # fold-equal Object and wrote the un-gated edge #1370/#4934 forbids.
+    from tortoise.entity_resolver import normalize_entity_name as _fold
     from tortoise.subject_binding import bind_point_subjects, is_subject_kind
-    # F6: EXACT names (no `.lower()` fold) so the skip and the case-SENSITIVE
-    # `MATCH (o:Object {name:$n})` resolution agree, derived from the entities
-    # whose KIND is a subject kind.
+
+    # ⛔ The DECLARATION side is stripped, exactly as both sibling sites strip it
+    # (`sdk.py`'s subject-name set, `near_dup_merge.py`'s) and as every reference
+    # below now is. Comparing a stripped reference against a raw-padded set made a
+    # declared subject `" The Team "` unreachable: the reference missed the
+    # `#1370`/`#4934` drop and wrote the un-gated edge that `main` and the local
+    # path refuse (review round 18). `kind` is compared RAW — that is
+    # `is_subject_kind`'s contract.
     subject_entity_names = {
-        er.entity.name for er in reconcile.entities
+        str(er.entity.name).strip() for er in reconcile.entities
         if is_subject_kind(er.entity.kind)
     }
+    subject_entity_names_folded = {_fold(n) for n in subject_entity_names}
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
     doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
     document_basename = _document_source_basename(payload)
@@ -21311,7 +21326,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # with pointKind event). Content-addressed ev_<sha> ids; MERGE-safe. ──
     #: (eventId, Object name) pairs the events mention — wired in step 6a, after
     #: step 6 has REGISTERED the entities (see the note at the append site).
-    _deferred_about_objects: list[tuple[str, str]] = []
+    # (event id, reference, exact_only) — `exact_only` marks a reference that
+    # only FOLD-equals a declared subject-kind name, so §6a resolves it by an
+    # exact-name match only (review round 6; the Point anchor's narrowing).
+    _deferred_about_objects: list[tuple[str, str, bool]] = []
     for ev in (payload.events or []):
         proj.g.query(
             "MERGE (e:Event {eventId:$eid}) "
@@ -21331,8 +21349,38 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             params={"eid": ev.id, "did": doc_id},
         )
         for name in ev.about_entities:
-            if str(name) in subject_entity_names:
-                # #1370 (F5): DELIBERATE drop, not a hand-off. This loop writes
+            _exact_only = False
+            # #12120 review: ONE spelling for the whole decision, stripped — the
+            # membership tests below are what keeps a subject-kind name off this
+            # channel (`#1370`/`#4934`), and the deferred resolver strips too, so
+            # deciding on the raw padding made `" The Team "` a NON-subject here
+            # and an EXACT match there: the un-gated `aboutObject` edge the drop
+            # exists to prevent, written on the hosted path only (the local twin
+            # and `near_dup_merge` both strip before deciding).
+            name = str(name).strip()
+            if name in subject_entity_names:
+                _subject_channel = True
+            elif _fold(name) in subject_entity_names_folded:
+                # Fold-equal only: an EXACT-name Object is still F6's carrier and
+                # keeps its edge; a fold-only one must not get it.
+                _subject_channel = False
+                _exact_only = True
+            else:
+                _subject_channel = False
+            if _subject_channel:
+                # #1370 (F5): the FOLD arm is required here (#12120 review round
+                # 4): this channel's resolver below (`resolve_fold_name`, §6a)
+                # is fold-WIDE, so an exact-only guard left a fold-equivalent
+                # spelling of a subject-kind name free to write the un-gated
+                # `aboutObject` edge the `#4934` rule forbids.
+                # ⛔ Round 6 corrects the round-4 reasoning: dropping here is NOT
+                # free. F6's case — a legitimately-cased Object whose name IS the
+                # reference — must keep its edge on every channel, and the three
+                # sibling sites narrow (`AND o.name = $exact`) instead of
+                # dropping. So the fold arm only marks the reference EXACT-ONLY
+                # (see the deferral below): the exact spelling still resolves, a
+                # fold-only carrier does not.
+                # DELIBERATE drop, not a hand-off. This loop writes
                 # `aboutObject` ONLY — the binder reads a Point's `slots`, not
                 # an Event's `about_entities`, so nothing replaces this edge.
                 # The attribution is intentionally not emitted because the only
@@ -21351,7 +21399,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # registered the entity with its real minted id. Resolving HERE
             # found no holder for a name this payload introduces and dropped the
             # edge for exactly the case P2-4 was filed about.
-            _deferred_about_objects.append((ev.id, name))
+            _deferred_about_objects.append((ev.id, name, _exact_only))
 
     # ── 4. Source bridge: the session Source (#4005 — the canonical
     # ``session:<session_id>`` identity ONTOLOGY §4.6 registers, the SAME url
@@ -21795,8 +21843,13 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # registers their targets, so resolving there found no holder for a name
     # this very payload introduces and dropped the edge, which is exactly the
     # #1272 P2-4 case the retired `MERGE (o:Object {name:$name})` existed to
-    # cover. A name that still resolves to nothing is left UNWIRED (and recorded
-    # by `resolve_fold_name`) rather than fabricated.
+    # cover. A name that still resolves to nothing is left UNWIRED rather than
+    # fabricated — the folded arm below records it through `resolve_fold_name`
+    # (`mention=True`). ⛔ The exact-only arm below neither resolves nor records,
+    # and that is deliberate (review round 16): it is reached only for a reference
+    # DECLARED in the payload's `entities`, which STEP 6 creates, so an empty
+    # `_targets` there is a NARROWED miss rather than a resolution failure — see
+    # the note at the arm for the shapes that produce it.
     # ⛔ `mention=True` is the ATTRIBUTION classification (#9876 review). This is
     # an about-edge NAME — one of the uses D1's `unfolded-mention` row enumerates
     # verbatim (`identity-decision.md`: "an `EventRecorded`'s `subject` / `object`
@@ -21806,18 +21859,96 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # Without the flag this site records `unregistered-reference` /
     # `ambiguous-entity-name` — NON-exempt — for a write where nothing was
     # folded, while the replay pass resolves the SAME reference exemptly
-    # (`projection/entities.py:4896` status-fold target, `:5275`
-    # `EventRecorded.object`), i.e. one reference with two dispositions, the
-    # live/replay parity break R8 forbids.
-    for _eid, _name in _deferred_about_objects:
-        _resolved = resolve_fold_name(proj.g, "Object", _name,
-                                      context="session-commit aboutObject",
-                                      mention=True)
-        if _resolved:
+    # (`projection/entities.py` `_fold_object_status`, and its about-name
+    # resolution at `context="status fold about"`) — i.e. one reference with two
+    # dispositions, the live/replay parity break R8 forbids. The EXPLICIT-object
+    # site it must not be confused with is the one carrying
+    # `context="EventRecorded.object"`, NOT this about-edge name (review round 17).
+    # ⛔ Those three sites are cited by SYMBOL and by STRING, never by line, after a
+    # measured post-mortem (review round 27): the line numbers this note first
+    # carried were EXACT when written (`_fold_object_status` `:5783`,
+    # `context="status fold about"` `:5892`, `context="EventRecorded.object"` `:6295`
+    # at `57982a098c`) and went ~17 lines stale on a LATER forward merge from `main`
+    # — uniformly `+17` (measured at `53e0be5f1b`: `:5800` / `:5909` / `:6312`).
+    # That is precisely why they were dropped rather than corrected: the numbers
+    # are a dated reading of a moving file, not a coordinate to navigate by.
+    for _eid, _name, _exact_only in _deferred_about_objects:
+        # #12120 review: strip ONCE, here. Both sibling sites strip before they
+        # compare (`sdk.py` `_n = name.strip()`, `near_dup_merge.py` the same),
+        # and the arm this one replaces (`resolve_fold_name`) folded — which
+        # strips. Comparing the raw payload spelling made `" The Team "` exact on
+        # the Point channel and on the local path but a MISS on this one, so an
+        # about-object edge that `main` wrote was silently dropped here.
+        _name = str(_name).strip()
+        if _exact_only:
+            # Fold-equal to a declared subject-kind name: attribute EXACT-name
+            # Objects only (the `#4934` rule), never a fold-only carrier. The
+            # resolver cannot express "exact spelling", so ask directly — but ask
+            # the SAME other two questions the resolver it narrows
+            # (`resolve_fold_name`) answers, or the narrow arm silently changes
+            # more than the spelling:
+            #   • LIVE-ONLY — `resolve_fold_name` reads live holders, so an
+            #     unfiltered probe would write a NEW `aboutObject` edge onto a
+            #     superseded/archived/retracted Object that every recall surface
+            #     excludes (and for `retracted`, the #689 direction).
+            #   • ATTACH TO EVERY carrier, like the Point anchor below (which
+            #     narrows with `AND o.name = $exact` and MERGEs per matching row) —
+            #     otherwise one payload with two exact carriers yields N Point
+            #     edges and ZERO Event edges, a family split no rule asks for.
+            #   • THE MERGE COLLAPSE, which is the resolver's THIRD answer and the
+            #     one this arm was missing (review round 13): `resolve_fold_name`
+            #     runs `_collapse_resolved_holders`, so a merged-away carrier
+            #     resolves to its SURVIVOR and an entity whose survivor is terminal
+            #     resolves to NOTHING. Asking only the live question attached the
+            #     edge to the CARRIER (a node the writer's own merge retired) and,
+            #     once that survivor was superseded, wrote a NEW edge where the
+            #     folded arm refuses. Measured on a lane graph: folded -> survivor,
+            #     exact -> carrier; survivor superseded -> folded None, exact
+            #     carrier. Attach-to-every-carrier still holds for DISTINCT
+            #     carriers — the collapse dedupes per ENTITY, never per spelling.
+            #     ⚠️ DECLARED DIVERGENCE, not parity: that Point anchor is
+            #     STATUS-BLIND (main's behaviour — it carries no liveness
+            #     predicate), while this arm is live-only because the resolver it
+            #     narrows is. So for one reference whose only exact carrier is
+            #     already terminal, the Point channel attaches and this one does
+            #     not. Left as stated rather than silently aligned: making the
+            #     Point arm live-only would change main's behaviour for every
+            #     about-edge payload, which is not this fix's surface.
+            # No ambiguity record is owed here: nothing is chosen between
+            # carriers (the pre-#12120-round-6 arm called `resolve_fold_name`,
+            # which on two carriers recorded an EXEMPT `unfolded-mention` and
+            # dropped the link — precisely the link this arm now writes, to both).
+            _exact_rows = proj.g.query(
+                "MATCH (o:Object) WHERE o.name = $n AND "
+                f"{_terminal_excluded('o.status')} RETURN o.id",
+                params={"n": _name}).result_set
+            from tortoise.entity_identity import _collapse_resolved_holders
+            _targets = [str(_tid) for _tid in _collapse_resolved_holders(
+                proj.g, "Object", [r[0] for r in _exact_rows if r and r[0]])
+                if _tid]
+            # ⛔ No `record_non_folded` here, and that is a property of the SHAPE,
+            # not an omission (review round 16, corrected in the same round). A
+            # reference reaches this arm only because it is declared in the
+            # payload's `entities`, and a declared entity is CREATED by step 6
+            # (measured: it exists even with `passes_frequency_gate: False`; a kind
+            # that is exclusively a subject layer goes to `:Subject` instead). So an
+            # empty `_targets` here means every holder was NARROWED OUT — by this
+            # arm's exact spelling, by its live-only probe, or by the merge
+            # collapse — or lives in the Subject family. It never means "this name
+            # resolves to nothing", which is what an exempt `SHAPE_UNFOLDED_MENTION`
+            # record would assert; that disposition is `resolve_fold_name`'s, and
+            # replay's un-narrowed fold finds the same holder this arm narrowed
+            # away.
+        else:
+            _one = resolve_fold_name(proj.g, "Object", _name,
+                                     context="session-commit aboutObject",
+                                     mention=True)
+            _targets = [_one] if _one else []
+        for _oid in _targets:
             proj.g.query(
                 "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
                 "MERGE (e)-[:aboutObject]->(o)",
-                params={"eid": _eid, "oid": _resolved},
+                params={"eid": _eid, "oid": _oid},
             )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
@@ -21912,12 +22043,46 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # keeps the pre-fix id when §5's write gate found no confirmed id.
         pid = point_resolved_ids.get(pr.point.id, pid)
         for name in pr.point.about_entities:
-            if str(name) in subject_entity_names:
-                continue  # #1370: the gated binder owns aboutSubject
+            # One spelling for the whole decision — the same treatment the Event
+            # loop gives its reference (`review round 18`): deciding on the raw
+            # padding made `" The Team "` miss the `#1370` drop here and take the
+            # fold-equal narrowing below, writing the un-gated `aboutObject` edge
+            # to the exact-name carrier, while both the local path and the Event
+            # channel dropped it.
+            name = str(name).strip()
+            if name in subject_entity_names:
+                continue  # #1370: the gated binder owns aboutSubject (EXACT, per F6)
+            # #12120 about-anchor site: the anchor attached on the RAW `name` only, while
+            # every writer resolves the FOLDED union (`name` · `canonical_name` ·
+            # `aliases`, raw and folded). A point whose payload named a
+            # fold-equivalent spelling of an already-registered Object therefore
+            # matched NOTHING and the `aboutObject` edge was silently dropped —
+            # no warning, no skip record, the link simply absent. The key space is
+            # now the writer's, from `entity_identity.name_key_space_same_entity`
+            # (never a second copy of the arms).
+            #
+            # ⛔ The ATTACH-TO-EVERY-CARRIER shape is DELIBERATELY kept (this is
+            # the disposition recorded for this site): routing it through
+            # `resolve_entity_id_same_entity` would make an attribution edge
+            # REFUSE where capture writes — two live same-name carriers — silently
+            # losing an attachment on the hosted path only. Widening the spelling
+            # set picks no identity, so that objection does not apply.
+            _space, _space_params = name_key_space_same_entity("o", str(name))
+            if not _space:
+                continue
+            # #12120 review round 3: when this spelling only FOLD-equals a
+            # declared subject-kind name, only an EXACT-name Object may be
+            # attributed — a fold-only carrier is the #4934 leak on a spelling
+            # the pre-fix raw probe could not reach, and an exact carrier is
+            # F6's case (a legitimately-cased Object keeps its edge).
+            if _fold(str(name)) in subject_entity_names_folded:
+                _space = f"({_space}) AND o.name = $exact"
+                _space_params = {**_space_params, "exact": str(name).strip()}
             proj.g.query(
-                "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "
-                "MERGE (p)-[:aboutObject]->(o)",
-                params={"pid": pid, "name": name},
+                f"MATCH (p:Point {{id:$pid}}), (o:Object) "
+                f"WHERE {_space} "
+                f"MERGE (p)-[:aboutObject]->(o)",
+                params={"pid": pid, **_space_params},
             )
         # #1370: write-time, confidence-gated, fail-closed subject binding —
         # the SAME shared driver the local capture seam calls. Only for a
@@ -48340,7 +48505,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 180 tracked files (442 distinct
+# ABSOLUTE line number from 181 tracked files (445 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
