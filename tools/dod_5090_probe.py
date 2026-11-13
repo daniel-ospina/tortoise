@@ -2427,7 +2427,9 @@ def _shell_line_is_exported(line: str, flag: str,
     if exported is None:
         return True
     stripped = line.strip()
-    if stripped.startswith("export "):
+    # ⛔ SPACE OR TAB: `export\tFLAG=1` is legal shell and exports, and the space-only
+    # test dropped it while the bare-export matcher above already accepted `\s+`.
+    if re.match(r"^export[ \t]", stripped):
         return True
     match = _SHELL_ASSIGN.match(line)
     if not match or match.group("name") != flag:
@@ -2594,16 +2596,26 @@ def _assigned_value(line: str, flag: str) -> str | None:
     # published "silent" over an image whose container really has the flag (fresh
     # review of PR #12474, P3; measured, and pre-existing). `export` stays
     # case-SENSITIVE because that is shell, not Dockerfile.
-    # ⛔ A SPACE **or a TAB** separates a Dockerfile instruction from its arguments
-    # (`ENV\tFLAG=1` is legal), and accepting only the space read it OFF — the same
-    # false-HOLD the lowercase fix closed, on the white-space axis (fresh review of PR
-    # #12474, P3). `export` stays space-only because that is shell, not Dockerfile.
-    head = stripped.upper()
-    dockerfile_instruction = re.match(r"^(?:ENV|ARG)[ \t]+", head)
+    # ⛔ A SPACE **or a TAB** separates the keyword from its arguments — for a
+    # Dockerfile instruction (`ENV\tFLAG=1`) AND for the shell's `export` — and
+    # accepting only the space read both OFF, which is the same false HOLD the
+    # lowercase fix closed, on the white-space axis (fresh review of PR #12474, P3).
+    # ⛔ `export` stays case-SENSITIVE (shell is), unlike `ENV`/`ARG`; the two axes are
+    # separate and each was measured. A tab-separated `export` used to be dropped in
+    # silence — no hit, no `outside_runtime`, no `indeterminate` — while this module's
+    # own `_SHELL_BARE_EXPORT` already accepted `\s+` for the same keyword (review of PR
+    # #12474, round 4).
+    # ⛔ Matched on the ORIGINAL line: `ENV`/`ARG` case-insensitively (Dockerfile),
+    # `export` case-SENSITIVELY (shell) — matching the uppercased line would have made
+    # the lowercase literal `export` unmatchable, which is the same reading-in-the-wrong-
+    # case defect the Dockerfile arm was fixed for.
+    dockerfile_instruction = re.match(r"^(?:ENV|ARG)[ \t]+", stripped, re.IGNORECASE)
     if dockerfile_instruction:
         stripped = stripped[dockerfile_instruction.end():].lstrip()
-    elif stripped.startswith("export "):
-        stripped = stripped[len("export "):].lstrip()
+    else:
+        shell_export = re.match(r"^export[ \t]+", stripped)
+        if shell_export:
+            stripped = stripped[shell_export.end():].lstrip()
     # The flag must be the KEY: at the start of the line, followed by `=` or
     # `:` and nothing but the value. `Set FLAG=1 to enable` and
     # `name: verify FLAG=1 takes effect` fail here, which is the point.

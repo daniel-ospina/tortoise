@@ -3048,6 +3048,21 @@ def test_a_LOWERCASE_dockerfile_instruction_is_still_a_deployment_hit(
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
     assert any("build-time ARG" in hit for hit in shipped["outside_runtime"]), shipped
+    # ⛔ …and the SHELL keyword has the same white-space rule with the opposite CASE
+    # rule: `export\tFLAG=1` is legal and exports, and it used to be dropped in silence
+    # (no hit, no `outside_runtime`, no `indeterminate`) while `_SHELL_BARE_EXPORT`
+    # already accepted `\s+` for the bare form (fresh review of PR #12474, round 4).
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport\tTORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+    # …and `EXPORT FLAG=1` (uppercase SHELL keyword) is a different word, not a hit.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nEXPORT TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "OFF", shipped["per_surface"]
 
 
 def test_a_BLOCK_LIST_compose_entrypoint_is_discovered_too(tmp_path, monkeypatch):
@@ -9838,7 +9853,8 @@ def test_the_citation_check_REDS_on_a_deliberately_broken_citation():
     # ⛔ The name must exist in SOME OTHER file, or the arm cannot discriminate a
     # file-scoped lookup from a universe-scoped one (fresh review of PR #12474, P3:
     # the first version used a name that exists in NO file, so it passed either way).
-    misplaced_name = [n for n in by_file["tests/test_lane_stash.py"] if n.startswith("test_")][0]
+    misplaced_name = next(n for n in by_file["tests/test_lane_stash.py"]
+                          if n.startswith("test_"))
     assert misplaced_name in defined and misplaced_name not in by_file[
         "tests/test_dod_5090_probe.py"], misplaced_name
     misplaced = f"`tests/test_dod_5090_probe.py::{misplaced_name}`"
