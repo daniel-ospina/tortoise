@@ -604,8 +604,9 @@ def test_every_figure_the_brief_quotes_is_bound_to_the_artifact(report):
     #: satisfied by a truncated one, which the old bare-substring needles allowed.
     corpus = report["corpus"]
     for label, needle in (
-        ("corpus.graph", f"`{corpus['graph']}`"),
-        ("corpus.population_digest", f"`{corpus['population_digest']}`"),
+        ("corpus.graph", f"graph `{corpus['graph']}`"),
+        ("corpus.population_digest",
+         f"population digest `{corpus['population_digest']}`"),
         ("corpus.elapsed_s", f"{corpus['elapsed_s']} s"),
         ("corpus.files", f"{corpus['files']} harvested session files"),
         ("corpus.sample", f"sample {corpus['sample']}"),
@@ -625,13 +626,29 @@ def test_every_figure_the_brief_quotes_is_bound_to_the_artifact(report):
     assert "`legs_seen.structural` is `false` there, `true` here" in text, (
         "the brief no longer states the structural-leg contrast this run rests on")
 
-    #: The duplicate-rate table: the two control arms the ablation's verdict
-    #: depends on (only the shipped arm had assertions).
+    #: The duplicate-rate table: ALL THREE arms, including the `prior_off` BASELINE
+    #: cell nothing read, and the arithmetic that makes `attached` meaningful —
+    #: `attached + minted == pairs` holds for every arm and is what a bare `0`
+    #: cannot be substituted for. The shipped arm's rate is bound in its RENDERED
+    #: form, because an `abs=1e-3` comparison lets the brief's 4-dp figure drift.
+    for arm in ("prior_off", "prior_on_norm_only", "prior_on_shipped_folded"):
+        data = arms["duplicate_rate"][arm]
+        assert data["attached"] + data["minted"] == pairs, (
+            f"the {arm} arm attaches {data['attached']} and mints "
+            f"{data['minted']} of {pairs} pairs — those do not account for the "
+            "population, so the brief's table row is arithmetically false")
+    assert arms["duplicate_rate"]["prior_off"]["attached"] == 0, (
+        "the no-prior baseline attached something, so the brief's `0` is false")
     for arm in ("prior_off", "prior_on_norm_only"):
-        assert arms["duplicate_rate"][arm]["minted"] == pairs, (
-            f"the {arm} arm did not mint every pair — the brief's `422` is false")
         assert arms["duplicate_rate"][arm]["rate"] == 1.0, (
             f"the {arm} arm's rate is not 1.0 — the brief's `1.0000` is false")
+    shipped = arms["duplicate_rate"]["prior_on_shipped_folded"]
+    assert f"**{shipped['rate']}**" in text, (
+        f"the brief does not render the shipped arm's rate exactly as the artifact "
+        f"states it ({shipped['rate']})")
+    assert (f"reduction ratio {blocking['multikey']['reduction_ratio']}") in text, (
+        "the brief does not state the reduction ratio in its own sentence — a bare "
+        "needle for it is satisfied by any other numeral in the prose")
 
     #: §3.3's per-class table: pin each row's first three cells (the claim cells
     #: the prose reads), then the COLUMN totals, so no single cell can move without
