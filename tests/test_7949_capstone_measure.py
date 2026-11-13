@@ -5261,8 +5261,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
         # insertion that moved every number below it. That is the class here — a
         # line-number pin over a number another tool owns, not a citation anyone
-        # mis-copied. At THIS merge (`main` `cd22562c24e4` plus this branch's
-        # entries and #12060's own registrations, all landing above it): entry
+        # mis-copied. At THIS merge (`main` `cd22562c24e4` — which already
+        # contains #12060's own registrations — plus this branch's entry, both
+        # landing above it): entry
         # 10005, `carve_out:` opens 9879, `uri_requiring:` 10210 — so 10005 is
         # inside the section, and the identical text also sits at 6090 and 8521,
         # which is what the 5th element exists to refuse. ⚠️ Both of those are
