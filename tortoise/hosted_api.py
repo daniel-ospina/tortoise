@@ -21861,9 +21861,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # folded, while the replay pass resolves the SAME reference exemptly
     # (`projection/entities.py` `_fold_object_status`, and its about-name
     # resolution at `context="status fold about"` — cited at the SYMBOL and the
-    # string, not the line: the three line numbers this note first carried were
-    # already ~17 lines stale at the head that wrote them (review round 25), and a
-    # line in a 6k-line file is the one citation a later edit always rots. The
+    # string, not the line. ⛔ The three line numbers this note first carried were
+    # EXACT when written (`_fold_object_status` at `:5783`, `context="status fold
+    # about"` at `:5892`, `context="EventRecorded.object"` at `:6295` at
+    # `57982a098c`) and went ~17 lines stale on a LATER forward merge from `main`
+    # (review round 27) — which is precisely why a line number is the one citation
+    # a later edit always rots, and why they are gone rather than corrected. The
     # EXPLICIT-object site it must not be confused with is the one carrying
     # `context="EventRecorded.object"`, NOT this about-edge name: review round 17), i.e. one
     # reference with two dispositions, the live/replay parity break R8 forbids.

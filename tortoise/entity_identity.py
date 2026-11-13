@@ -142,9 +142,15 @@ class NonFoldedEntry(NamedTuple):
     #  (a) the GONE-SURVIVOR arms — every holder is a carrier of ONE merged entity
     #      whose survivor is deleted (`_ref_is_one_gone_entity` and the `if not
     #      by_name` twins, four of the five sites); `candidate_ids` there holds only
-    #      REAL ids (falsy ones are filtered out), so it may carry one id — or none,
-    #      when the lone carrier is itself id-less — but never the `<id-less>`
-    #      placeholder. ⛔ Those four answer by ENTITY COUNT
+    #      REAL ids and never the `<id-less>` placeholder — but the GUARANTEE IS
+    #      PER-ARM, from two different mechanisms, so do not restate it as "falsy ids
+    #      are filtered out" (review round 27; that is true of two of the four): the
+    #      two `_ref_is_one_gone_entity` sites pass an UNFILTERED comprehension and
+    #      are protected by that predicate's own per-row id test, which returns False
+    #      for any row whose id is falsy or not in `widened`; the two `if not by_name`
+    #      twins are protected by their `if r[1]` filter. An empty tuple is therefore
+    #      a legal answer on the twins and is NOT a claim about which cause fired.
+    #      ⛔ Those four answer by ENTITY COUNT
     #      (review round 25): two DISTINCT entities holding the ref keep
     #      `"ambiguous-name"`, because telling a consumer to fix ONE dangling
     #      pointer where the graph holds two is the same false repair this note
