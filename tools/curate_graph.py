@@ -667,9 +667,10 @@ NOT_ENUMERABLE = {
 #: `limit > 10000` outright (`tortoise_fts_query`, `sdk.py:40575`), so this constant is
 #: also the `limit` every operator read sends. There is no headroom to spend — raising
 #: it does not read a wider layer, it makes every operator read raise `ValueError` out
-#: of the SDK, which is NOT a `CurationRefused` and so escapes both `except` arms as an
-#: unhandled rc 1. A population above 10,000 has no single-call read on this surface at
-#: all, which is what the refusal says.
+#: of the SDK, which is NOT a `CurationRefused`: an ARMED run reaches rc 1 through the
+#: generic `except Exception` arm, and a DISARMED run reports it on the artifact and
+#: exits 0 — that arm exists for exactly this. A population above 10,000 has no
+#: single-call read on this surface at all, which is what the refusal says.
 OPERATOR_READ_CEILING = 10_000
 
 

@@ -177,8 +177,9 @@ local to this reader: the operator clause (`n.is_operator = true`) and the termi
 in the search path (`search_engine`), and `tortoise_search` exposes neither the `op_type`
 disjunction nor `include_terminal` — so it needs a `search_engine`/`sdk` change plus a new tool
 parameter, i.e. an MCP surface change that needs the owner's approval before a lane may argue its
-merits. The terminal cause names no remedy at all, because the honest one is a decision about
-whether a superseded operator belongs in the curated graph — not a flag. Accepting this is
+merits. The terminal cause has the same read-side remedy, but the flag alone does not settle
+whether a superseded operator belongs in the curated graph — that is a decision, and it
+is the owner's. Accepting this is
 tractable only because the pass writes nothing yet: an operator who hits the refusal can read the
 message and take the decision it points at, and nothing is written meanwhile.
 
