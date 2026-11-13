@@ -5,9 +5,9 @@ reconstruction across a boundary it cannot cross, and a segment may not vanish
 without a recorded disposition.**
 
 Every test here drives the mechanism that makes that property true. The ones
-marked ``# FALSIFIER`` are the ones that must go RED when the guard is removed —
-the file header of ``tools/journal_bound_falsifier.py`` (below) shows how to run
-that check, and the PR body records the red run.
+named ``test_FALSIFIER_*`` are the ones that must go RED when the guard is
+removed — ``tests/test_journal_segments_falsifier.py`` is what removes it (a
+mutation per guard, plus one combined mutant), and the PR body records the run.
 """
 from __future__ import annotations
 
@@ -69,6 +69,11 @@ def records(n: int, prefix: str = "r") -> list[dict]:
     return [{"type": "PointRevised", "id": f"{prefix}{i}"} for i in range(n)]
 
 
+def _real_lines(path: Path) -> int:
+    """The manifest's `lines` is a REAL count — the module compares it to disk."""
+    return len([line for line in path.read_bytes().split(b"\n") if line.strip()])
+
+
 def write_manifest(directory: Path, names: list[str],
                    dispositions: dict[str, str] | None = None) -> None:
     """A valid manifest for a HAND-BUILT directory (no seal involved).
@@ -83,7 +88,7 @@ def write_manifest(directory: Path, names: list[str],
         index = int(SEALED_RE.match(name).group(1)) if SEALED_RE.match(name) else None
         rows.append({"name": name, "index": index,
                      "bytes": (directory / name).stat().st_size,
-                     "lines": 1,
+                     "lines": _real_lines(directory / name),
                      "disposition": dispositions.get(name, "present"),
                      "recorded_at": "2026-11-13T00:00:00+00:00"})
     first_missing = next((r["name"] for r in sorted(rows, key=lambda r: r["index"])
@@ -770,3 +775,182 @@ def test_a_stale_append_handle_follows_the_rename_and_the_journal_stays_consiste
     # `pre` was appended BEFORE the seal, so it belongs to the sealed segment;
     # `post` went to the NEW active one — which is the property under test.
     assert [r["id"] for r in read_all_segments(graph_dir)] == ["a0", "pre", "post"]
+
+
+# ---------------------------------------------------------------------------
+# cycle-2 findings
+# ---------------------------------------------------------------------------
+
+
+def test_ANCHOR2b_a_record_dropped_and_the_bytes_PADDED_BACK_is_REFUSED(
+        graph_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    """Bytes alone is not enough: the same length can hold one record fewer.
+
+    Cycle-2 measured this: drop a record line from a sealed segment and pad the
+    file back to the recorded byte count with trailing blanks (which `read_all`
+    skips WITHOUT counting, so no damage counter fires) → `full_reconstruction:
+    True` over a stream short by one. The recorded LINE count is the datum that
+    catches it, and it was already in the manifest.
+    """
+    monkeypatch.setenv(ENV_FLAG, "1")
+    write_journal(graph_dir, records(3, "a"))
+    seal_active(graph_dir)
+    segment = graph_dir / "events.0000.jsonl"
+    recorded_bytes = segment.stat().st_size
+    lines = segment.read_bytes().split(b"\n")
+    lines = [line for line in lines if line.strip()][:-1]        # drop the last record
+    body = b"\n".join(lines) + b"\n"
+    segment.write_bytes(body + b"\n" * (recorded_bytes - len(body)))   # same size
+
+    assert segment.stat().st_size == recorded_bytes
+    with pytest.raises(SegmentModifiedError) as exc:
+        verify(discover(graph_dir))
+    assert "lines on disk" in str(exc.value)
+
+
+def test_the_claim_says_when_it_is_UNANCHORED(graph_dir: Path):
+    """An unsealed journal's claim rests on the files present, and says so.
+
+    Cycle-2's second P1: nothing can anchor a file that is still being appended
+    to, so truncating the ACTIVE segment is undetected. That is declared — and
+    the declaration is visible in the answer rather than only in a docstring,
+    because `anchored=False` is the state EVERY deployment is in today.
+    """
+    write_journal(graph_dir, records(2))
+    scope = reconstruction_scope(discover(graph_dir))
+    assert scope.full is True
+    assert scope.anchored is False
+    assert "UNANCHORED" in scope.reason
+    report = summarise(graph_dir)
+    assert report["full_reconstruction"] is True
+    assert report["anchored"] is False
+
+    # …and it becomes anchored once something is sealed
+    monkeypatch_env = pytest.MonkeyPatch()
+    monkeypatch_env.setenv(ENV_FLAG, "1")
+    try:
+        seal_active(graph_dir)
+    finally:
+        monkeypatch_env.undo()
+    assert reconstruction_scope(discover(graph_dir)).anchored is True
+
+
+def test_a_directory_named_jsonl_is_REFUSED(graph_dir: Path):
+    """`rebuild_all` filters on the NAME, so a dict named `sub.jsonl` is replayed.
+
+    Cycle-2: `is_file()` hid it from `discover` while the replay would raise
+    `IsADirectoryError` opening it — a claim over a journal nothing can fold.
+    """
+    write_journal(graph_dir, records(1))
+    (graph_dir / "sub.jsonl").mkdir()
+
+    with pytest.raises(SegmentSequenceError) as exc:
+        discover(graph_dir)
+    assert "sub.jsonl" in str(exc.value)
+
+
+def test_the_writer_refuses_an_index_its_own_verifier_would_reject(graph_dir: Path):
+    """Never EMIT a broken layout: 10000 sorts before 9999.
+
+    Cycle-2: `seal_active` renamed to `events.10000.jsonl` and wrote the row,
+    after which every read and every write refused — the writer created the state
+    anchor 4 exists to detect, and the repair was renaming ten thousand files.
+    """
+    (graph_dir / "events.9999.jsonl").write_bytes(b'{"type":"X"}\n')
+    (graph_dir / ACTIVE_NAME).write_bytes(b'{"type":"Y"}\n')
+    write_manifest(graph_dir, ["events.9999.jsonl"])
+
+    with pytest.raises(SegmentSequenceError) as exc:
+        seal_active(graph_dir) if False else _next_index_pinned(graph_dir)
+    assert "5-digit name sorts BEFORE a 4-digit one" in str(exc.value)
+
+
+def _next_index_pinned(graph_dir: Path):
+    """Call the writer's index guard without needing the env flag."""
+    from tortoise.journal_segments import _next_index
+    return _next_index(discover(graph_dir))
+
+
+def test_summarise_reports_a_MISTYPED_manifest_instead_of_raising(graph_dir: Path):
+    """Parseable-but-wrong JSON must not crash the one verb that reports.
+
+    Cycle-2: `int(raw.get('through_index'))` escaped as a bare `ValueError`, and a
+    null `bytes` on a departed row as `TypeError`.
+    """
+    write_journal(graph_dir, records(1))
+    (graph_dir / MANIFEST_NAME).write_text(json.dumps({
+        "version": 1, "segments": [], "boundary": {"through_index": "nope"},
+    }), encoding="utf-8")
+    report = summarise(graph_dir)
+    assert report["verified"] is False
+    assert "non-numeric through_index" in report["reason"]
+
+    (graph_dir / MANIFEST_NAME).write_text(json.dumps({
+        "version": 1,
+        "segments": [{"name": "events.0000.jsonl", "index": 0, "bytes": None,
+                      "lines": 1, "disposition": "archived"}],
+        "boundary": {"through_index": 0, "first_missing": "events.0000.jsonl"},
+    }), encoding="utf-8")
+    report = summarise(graph_dir)
+    assert report["verified"] is False
+    assert "non-numeric field" in report["reason"]
+
+
+def test_a_writer_on_a_missing_directory_raises_a_named_refusal(tmp_path: Path,
+                                                               monkeypatch):
+    monkeypatch.setenv(ENV_FLAG, "1")
+    with pytest.raises(JournalLayoutError) as exc:
+        seal_active(tmp_path / "nope")
+    assert "not a directory" in str(exc.value)
+
+
+def test_a_TORN_TAIL_is_tolerated_while_MID_FILE_damage_is_not(graph_dir: Path):
+    """`log.py` distinguishes them on purpose; this reader must not conflate them.
+
+    A trailing fragment was never a complete record (SIGKILL on the last append),
+    where a skipped mid-file line was a record the journal held and lost.
+    Cycle-2: both raised, which would make the reader unusable after any killed
+    process.
+    """
+    write_journal(graph_dir, records(2, "a"))
+    path = graph_dir / ACTIVE_NAME
+    path.write_bytes(path.read_bytes() + b'{"type": "PointRev')   # torn tail
+
+    assert [r["id"] for r in read_all_segments(graph_dir)] == ["a0", "a1"]
+
+
+def test_plan_rotation_refuses_a_nonsense_threshold(graph_dir: Path):
+    """`max_bytes=0` would mint an empty sealed segment per call."""
+    write_journal(graph_dir, records(1))
+    with pytest.raises(ValueError) as exc:
+        plan_rotation(graph_dir, max_bytes=0)
+    assert "must be positive" in str(exc.value)
+
+
+def test_the_manifest_lock_is_reentrant_within_one_thread(graph_dir: Path,
+                                                          monkeypatch):
+    """A nested writer must not deadlock (flock is per open-file-description)."""
+    from tortoise.journal_segments import _manifest_lock
+    monkeypatch.setenv(ENV_FLAG, "1")
+    write_journal(graph_dir, records(1))
+
+    # ⛔ TWO contexts on purpose: a naive lock blocks forever on the second
+    # (flock is per open-file-description), so combining them would defeat the
+    # test. `noqa` because the linter's simplify is exactly the change under test.
+    with _manifest_lock(graph_dir), _manifest_lock(graph_dir):
+        seal_active(graph_dir)
+    assert (graph_dir / "events.0000.jsonl").exists()
+
+
+def test_the_replay_enumeration_this_module_assumes_has_not_changed():
+    """CANARY: anchors 1 and 4 rest on `rebuild_all`'s own enumeration.
+
+    Cycle-2 (P2): the order test rebuilt `sorted(os.listdir(db_dir))` +
+    `endswith('.jsonl')` locally, so if the real enumerator changed (a glob, a
+    recursion, another suffix) the test would stay green over a false premise.
+    This pins the predicate in the source it comes from.
+    """
+    source = (Path(__file__).resolve().parent.parent
+              / "tortoise/projection/__init__.py").read_text(encoding="utf-8")
+    assert "sorted(os.listdir(log_dir))" in source
+    assert "fname.endswith('.jsonl')" in source

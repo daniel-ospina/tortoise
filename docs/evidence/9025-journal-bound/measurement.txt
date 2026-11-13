@@ -44,22 +44,22 @@ turn text: 1000 chars (MODELLED — see the probe docstring)
 == the bill for ONE user's journal — steady state at month 36
    (storage is charged on the CUMULATIVE bytes, every month)
   who · scenario                       GB   $0.125/GB  Glacier IR  Deep Arch
-  a light user · S                   0.14      0.0179      0.0006     0.0001
-  a light user · M                   0.65      0.0808      0.0026     0.0006
-  a light user · L                   0.74      0.0923      0.0030     0.0007
-  a power user · S                   1.86      0.2330      0.0075     0.0018
-  a power user · M                   8.41      1.0509      0.0336     0.0083
-  a power user · L                   9.60      1.2001      0.0384     0.0095
+  a light user · S                   0.15      0.0192      0.0006     0.0002
+  a light user · M                   0.69      0.0868      0.0028     0.0007
+  a light user · L                   0.79      0.0991      0.0032     0.0008
+  a power user · S                   2.00      0.2502      0.0080     0.0020
+  a power user · M                   9.03      1.1284      0.0361     0.0089
+  a power user · L                  10.31      1.2886      0.0412     0.0102
 
 == the same bill at 1,000 power users (a project)
-  S      1864.17 GB   $   233.02/mo disk   $    1.85/mo deep archive
-  M      8407.09 GB   $  1050.89/mo disk   $    8.32/mo deep archive
-  L      9601.13 GB   $  1200.14/mo disk   $    9.51/mo deep archive
+  S      2001.64 GB   $   250.21/mo disk   $    1.98/mo deep archive
+  M      9027.05 GB   $  1128.38/mo disk   $    8.94/mo deep archive
+  L     10309.14 GB   $  1288.64/mo disk   $   10.21/mo deep archive
 
 == the trigger — when the journal line ALONE reaches solo's whole budget
-  a power user (M) adds $0.0292/month of disk each month
-  cumulative reaching $5.70/month: month 195 (16.2 years of one power user)
-  with P2's payload instead: month 344
+  a power user (M) adds $0.0313/month of disk each month
+  cumulative reaching $5.70/month: month 182 (15.2 years of one power user)
+  with P2's payload instead: month 321
 
 VERDICT: a measurement, not a bound — the three options on #9025 are
 priced from these bytes; choosing between them is the owner's.

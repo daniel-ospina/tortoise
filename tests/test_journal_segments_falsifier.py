@@ -274,6 +274,11 @@ def test_mutant_claim_function_licenses_the_claim_it_exists_to_refuse(
     mutant.assert_full_reconstruction(layout)                  # ⛔ silent claim
 
 
+def _real_lines(path: Path) -> int:
+    """The manifest's `lines` is a REAL count — the module compares it to disk."""
+    return len([line for line in path.read_bytes().split(b"\n") if line.strip()])
+
+
 def _manifest_for(graph: Path, names: list[str]) -> None:
     """A valid manifest for a hand-built directory (the mutant's own format)."""
     import json
@@ -282,7 +287,7 @@ def _manifest_for(graph: Path, names: list[str]) -> None:
             for n in names]
     for row in rows:                                  # sizes must match, or ANCHOR 2 fires
         row["bytes"] = (graph / row["name"]).stat().st_size
-        row["lines"] = 1
+        row["lines"] = _real_lines(graph / row["name"])
     (graph / "journal-manifest.json").write_text(json.dumps({
         "version": 1, "graph_dir": str(graph), "segments": rows,
         "boundary": {"recorded_at": "2026-11-13T00:00:00+00:00",

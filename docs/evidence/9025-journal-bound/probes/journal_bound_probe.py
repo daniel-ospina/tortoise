@@ -362,7 +362,10 @@ def main() -> int:
     # §8 of SEARCH-ARCHITECTURE (and §5 of STORAGE-ARCHITECTURE): Postgres
     # disk $0.125/GB-month; Glacier IR $0.004/GB-month, Deep Archive
     # $0.00099/GB-month (AWS published, verified 2026-11-13).
-    GB = 1024 ** 3
+    # ⛔ DECIMAL, not GiB. The byte column above prints decimal GB (9.03 GB for
+    # 9,027,046,080 B), so the bill must divide by the SAME 10**9 or the two
+    # columns describe quantities 7.4 % apart while both are labelled "GB".
+    GB = 1000 ** 3
     rate_disk = 0.125
     rate_glacier_ir = 0.004
     rate_deep_archive = 0.00099

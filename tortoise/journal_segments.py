@@ -62,7 +62,18 @@ said it was complete"**. So the claim is a separate, checkable object
 :class:`ReconstructionClaimError` rather than returning a falsy value a caller
 might ignore.
 
-⛔ **DECLARED RESIDUAL — a manifest is evidence, not proof.** Everything here is
+⛔ **DECLARED RESIDUAL 2 — THE LIVE TAIL IS UNANCHORED.** No manifest can record
+the size of a file that is still being appended to, so truncating or blanking
+``events.jsonl`` — the ACTIVE segment — is detected by nothing here: the sealed
+prefix still matches its recorded sizes and :func:`reconstruction_scope` reports
+``full=True``. This is the shape **every deployment is in today** (the flag is
+off, nothing seals, so there is no sealed prefix at all), which is why
+:attr:`ReconstructionScope.anchored` exists: it is ``False`` until a manifest
+exists, and a caller that needs *evidence* rather than an *assumption* must check
+it. Closing this needs a per-append anchor (a length trail), which is a write-path
+change and therefore part of the policy decision, not of this plumbing.
+
+⛔ **DECLARED RESIDUAL 1 — a manifest is evidence, not proof.** Everything here is
 a record that a deployment *wrote*; a deployment that deletes the manifest AND
 every sealed segment leaves this module with nothing to compare, and it will
 report the remaining files as a complete journal. That is unavoidable for any
@@ -75,8 +86,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
+import threading
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
@@ -233,6 +246,13 @@ class ReconstructionScope:
     first_missing: str | None
     complete_from: str | None
     reason: str
+    #: ⛔ Whether the claim rests on RECORDED EVIDENCE at all. ``False`` means no
+    #: manifest exists — nothing has ever been sealed — so "every segment the
+    #: journal has is present" describes the files that are here, not proof that
+    #: nothing was lost. **This is the shape every deployment is in today** (the
+    #: flag is off and nothing seals), so a caller that needs evidence rather
+    #: than an assumption must check it.
+    anchored: bool = False
 
 
 @dataclass(frozen=True)
@@ -340,9 +360,14 @@ def discover(graph_dir: str | Path) -> Layout:
     journalled: dict[str, Path] = {}
     unplaceable: list[str] = []
     for path in sorted(directory.iterdir()):
-        if not path.is_file() or not path.name.endswith(".jsonl"):
+        if not path.name.endswith(".jsonl"):
             continue
-        if path.name == ACTIVE_NAME or SEALED_RE.match(path.name):
+        # ⛔ NOT `is_file()`. `rebuild_all` filters on the NAME alone
+        # (`endswith('.jsonl')`), so a DIRECTORY or FIFO called `sub.jsonl` is
+        # something the replay will try to open — and a claim over a journal
+        # whose replay raises `IsADirectoryError` is not a claim about anything.
+        if (path.name == ACTIVE_NAME or SEALED_RE.match(path.name)) \
+                and path.is_file():
             journalled[path.name] = path
             continue
         unplaceable.append(path.name)
@@ -397,24 +422,44 @@ def discover(graph_dir: str | Path) -> Layout:
         if disposition not in ("present", "archived", "compacted"):
             raise JournalLayoutError(
                 f"{name} has unknown disposition {disposition!r}")
+        try:
+            rec_bytes = int(row.get("bytes", 0))
+            rec_lines = int(row.get("lines", 0))
+            index = row.get("index")
+            index = int(index) if index is not None else None
+        except (TypeError, ValueError) as exc:
+            raise JournalLayoutError(
+                f"{manifest_path(directory)} has a non-numeric field on the "
+                f"{name} row — refusing rather than guessing what it meant"
+            ) from exc
         found.append(Segment(
             name=name,
-            index=row.get("index"),
-            bytes=int(row.get("bytes", 0)),
-            lines=int(row.get("lines", 0)),
+            index=index,
+            bytes=rec_bytes,
+            lines=rec_lines,
             disposition=disposition,  # type: ignore[arg-type]
             on_disk=False,
-            recorded_bytes=int(row.get("bytes", 0)),
-            recorded_lines=int(row.get("lines", 0)),
+            recorded_bytes=rec_bytes,
+            recorded_lines=rec_lines,
             recorded_at=row.get("recorded_at"),
         ))
 
     boundary = None
     if manifest is not None and manifest.get("boundary"):
         raw = manifest["boundary"]
+        # A hand edit or a writer from another build can leave a field the
+        # wrong TYPE. Coerce, and refuse with a named error rather than letting a
+        # bare ValueError/TypeError escape from `summarise` — the one verb that
+        # promises a report instead of a traceback.
+        try:
+            through = int(raw.get("through_index", -1))
+        except (TypeError, ValueError) as exc:
+            raise JournalLayoutError(
+                f"{manifest_path(directory)} has a non-numeric "
+                f"through_index ({raw.get('through_index')!r})") from exc
         boundary = Boundary(
             recorded_at=str(raw.get("recorded_at", "")),
-            through_index=int(raw.get("through_index", -1)),
+            through_index=through,
             first_missing=raw.get("first_missing"),
         )
 
@@ -471,9 +516,22 @@ def verify(layout: Layout) -> None:
             raise SegmentModifiedError(
                 f"{seg.name} is {seg.bytes} B on disk but the manifest recorded "
                 f"{seg.recorded_bytes} B at seal time — the segment was "
-                f"rewritten in place. If that was a compaction, record it with "
-                f"record_disposition(..., 'compacted') so the claim stops "
-                f"saying 'full'.")
+                f"rewritten in place. `record_disposition` cannot clear this (it "
+                f"changes a disposition, never a size): the repair is to restore "
+                f"the segment's bytes, or to record the compaction that rewrote "
+                f"it by re-sealing. A sealed segment that GREW means a writer "
+                f"held an fd across the seal.")
+        # ⛔ BYTES ALONE IS NOT ENOUGH. A record can be dropped and the file
+        # padded back to the same length (trailing blanks are skipped by
+        # `read_all` WITHOUT counting, so no damage counter fires): the claim
+        # then reads "full" over a record stream short by one. Measured.
+        if seg.on_disk and seg.recorded_lines is not None \
+                and seg.lines != seg.recorded_lines:
+            raise SegmentModifiedError(
+                f"{seg.name} holds {seg.lines} lines on disk but the manifest "
+                f"recorded {seg.recorded_lines} at seal time — records were "
+                f"dropped or added in place, even if the byte count was padded "
+                f"back to match.")
 
     if layout.manifest_present:
         rows = (read_manifest(layout.directory) or {}).get("segments", [])
@@ -528,9 +586,18 @@ def reconstruction_scope(layout: Layout) -> ReconstructionScope:
     gone = [s for s in layout.segments
             if s.disposition != "present" or not s.on_disk]
     if not gone:
+        if not layout.manifest_present:
+            return ReconstructionScope(
+                full=True, first_missing=None, complete_from=None,
+                anchored=False,
+                reason=("no journal-manifest.json: nothing has been sealed, so "
+                        "this is an UNANCHORED claim — it describes the files "
+                        "present, and cannot show that nothing was lost"))
         return ReconstructionScope(
             full=True, first_missing=None, complete_from=None,
-            reason="every segment the journal has is present")
+            anchored=True,
+            reason="every segment the manifest records is present at its "
+                   "recorded size")
 
     missing = sorted(gone, key=lambda s: (-1 if s.index is None else s.index))[0]
     # "complete from" is the first segment the replay can actually reproduce
@@ -546,6 +613,7 @@ def reconstruction_scope(layout: Layout) -> ReconstructionScope:
         full=False,
         first_missing=missing.name,
         complete_from=complete_from,
+        anchored=True,
         reason=(f"{len(gone)} segment(s) are recorded as "
                 f"{'/'.join(dispositions)}; the replay cannot reproduce what "
                 f"they held"))
@@ -589,25 +657,49 @@ def read_all_segments(graph_dir: str | Path, *, salvage: bool = False) -> list[d
 
     records: list[dict] = []
     damaged: list[str] = []
+    torn: list[str] = []
     for seg in layout.segments:
         if seg.disposition != "present" or not seg.on_disk:
             continue
         log = EventLog(layout.directory / seg.name)
         records.extend(read_for_replay(log))
-        skipped = log.skipped_line_count
-        if skipped:
-            damaged.append(f"{seg.name}: {skipped} line(s) skipped")
+        # ⛔ A TORN TAIL is not the same defect as MID-FILE damage, and `log.py`
+        # treats them differently on purpose: a trailing fragment was never a
+        # complete record (SIGKILL on the last append), where a skipped MID-FILE
+        # line was a record the journal held and lost. Refusing the first would
+        # make the reader unusable after any killed process — the contract
+        # `tortoise/log.py::read_for_replay` documents.
+        if getattr(log, "corrupt_line_count", 0):
+            damaged.append(f"{seg.name}: {log.corrupt_line_count} mid-file line(s)")
+        if getattr(log, "torn_trailing_count", 0):
+            torn.append(f"{seg.name}: {log.torn_trailing_count} torn tail fragment(s)")
     if damaged and not salvage:
         raise JournalLayoutError(
             f"{layout.directory} has damaged records ({'; '.join(damaged)}) — "
             f"refusing to hand back a record stream that is silently short of "
             f"what the journal holds. Pass salvage=True to read what parses.")
+    if torn and not salvage:
+        _LOGGER.warning(
+            "journal %s: reading across a torn tail (%s) — those fragments were "
+            "never complete records", layout.directory, "; ".join(torn))
     return records
 
 
 # --------------------------------------------------------------------------
 # the writers (gated; rename and record, never delete)
 # --------------------------------------------------------------------------
+
+
+#: Paths THIS THREAD already holds the manifest lock on. `flock` is per
+#: open-file-description, so a second `os.open` in the same process would not be
+#: granted and a nested writer would BLOCK FOREVER — so the lock is made
+#: re-entrant. ⛔ It is **per THREAD, not per process**: a process-global set made
+#: a SECOND THREAD look like a re-entrant caller and skip the lock entirely,
+#: which silently destroyed exclusion between threads (caught by
+#: `test_concurrent_manifest_writers_do_not_lose_a_row`, which then lost a row).
+_HELD_LOCKS = threading.local()
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
@@ -618,18 +710,51 @@ def _manifest_lock(directory: Path) -> Iterator[None]:
     TRANSACTION: two writers that both read, then both write, lose one of the two
     updates — measured as a sealed segment's row vanishing while the segment
     stayed on disk, which leaves the journal in a state no API could repair.
+
+    ⚠️ **DECLARED RESIDUAL:** deleting ``.journal-manifest.lock`` while a writer
+    holds it gives the next writer a different inode, so exclusion is lost. The
+    dev/ino is re-validated after acquiring (a mismatch retries), which closes
+    the common case but cannot close a deletion that happens after the check.
     """
+    import fcntl
+
+    if not directory.is_dir():
+        raise JournalLayoutError(f"not a directory: {directory}")
+    key = str(directory.resolve())
+    held_here = getattr(_HELD_LOCKS, "paths", None)
+    if held_here is None:
+        held_here = _HELD_LOCKS.paths = set()
+    if key in held_here:                        # re-entrant within this THREAD
+        yield
+        return
+
     lock_path = directory / LOCK_NAME
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        import fcntl
-        fcntl.flock(fd, fcntl.LOCK_EX)
+    for _ in range(5):
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
-            yield
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                on_path = os.stat(lock_path)
+            except FileNotFoundError:           # deleted while we waited
+                os.close(fd)
+                continue
+            held = os.fstat(fd)
+            if (on_path.st_dev, on_path.st_ino) != (held.st_dev, held.st_ino):
+                os.close(fd)                    # the lock file was replaced
+                continue
+            held_here.add(key)
+            try:
+                yield
+            finally:
+                held_here.discard(key)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            return
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+    raise JournalLayoutError(
+        f"could not acquire {lock_path} after 5 attempts — the lock file keeps "
+        f"being replaced while we wait")
 
 
 def _write_manifest(graph_dir: Path, payload: dict) -> Path:
@@ -642,9 +767,23 @@ def _write_manifest(graph_dir: Path, payload: dict) -> Path:
     return path
 
 
+#: The largest index a FOUR-digit name can carry. Beyond it the name grows a
+#: digit and `sorted()` stops agreeing with the numeric order (anchor 4), so the
+#: WRITER must refuse rather than emit a layout its own verifier rejects.
+MAX_SEALABLE_INDEX = 9999
+
+
 def _next_index(layout: Layout) -> int:
-    return max([s.index for s in layout.segments
-                if s.index is not None], default=-1) + 1
+    next_index = max([s.index for s in layout.segments
+                      if s.index is not None], default=-1) + 1
+    if next_index > MAX_SEALABLE_INDEX:
+        raise SegmentSequenceError(
+            f"cannot seal {layout.directory}: the next index is {next_index}, "
+            f"and a 5-digit name sorts BEFORE a 4-digit one, so the replay "
+            f"would fold out of sequence. A journal that has sealed "
+            f"{MAX_SEALABLE_INDEX + 1} segments has reached the end of this "
+            f"naming scheme — that is a decision, not a rename.")
+    return next_index
 
 
 def _rows(layout: Layout) -> list[dict]:
@@ -673,12 +812,18 @@ def plan_rotation(graph_dir: str | Path, max_bytes: int) -> RotationPlan | None:
     do), which is the normal answer today because nothing calls
     :func:`seal_active` unless a deployment switches it on.
     """
+    if max_bytes <= 0:
+        # `max_bytes=0` would seal an EMPTY active segment on every call: an
+        # index consumed per iteration and a sealed segment holding nothing.
+        raise ValueError(
+            f"max_bytes must be positive (got {max_bytes}) — a zero threshold "
+            f"mints an empty sealed segment per call")
     layout = discover(graph_dir)
     verify(layout)
     active = layout.active
     if active is None:
         return None
-    if active.bytes < max_bytes:
+    if active.bytes < max_bytes or active.bytes == 0:
         return None
     next_index = _next_index(layout)
     return RotationPlan(
@@ -787,10 +932,12 @@ def record_disposition(graph_dir: str | Path, name: str,
 
     directory = Path(graph_dir)
     with _manifest_lock(directory):
-        # Refuse a layout that cannot be described BEFORE writing to its manifest:
-        # `discover` is the check that catches an unplaceable `*.jsonl` or a
-        # sealed sequence whose manifest has gone. Its value is the raise.
-        discover(directory)
+        # ⛔ NOT `discover()` here. The intended order is MOVE THE BYTES, THEN
+        # RECORD — so at the moment this runs the manifest is stale by design (a
+        # `present` row whose file has gone), and a full verify would refuse the
+        # one state this call exists to make recordable. `read_manifest`
+        # validates the format, the version and the boundary object, which is
+        # what a writer needs.
         payload = read_manifest(directory)
         if payload is None:
             raise JournalLayoutError(
@@ -827,6 +974,7 @@ def summarise(graph_dir: str | Path) -> dict:
             "segments": [],
             "verified": False,
             "full_reconstruction": False,
+            "anchored": False,
             "from_segment": None,
             "reason": str(exc),
         }
@@ -847,12 +995,14 @@ def summarise(graph_dir: str | Path) -> dict:
         scope = reconstruction_scope(layout)
         report["verified"] = True
         report["full_reconstruction"] = scope.full
+        report["anchored"] = scope.anchored
         report["first_missing"] = scope.first_missing
         report["from_segment"] = scope.complete_from
         report["reason"] = scope.reason
     except JournalLayoutError as exc:
         report["verified"] = False
         report["full_reconstruction"] = False
+        report["anchored"] = False
         report["first_missing"] = None
         report["from_segment"] = None
         report["reason"] = str(exc)

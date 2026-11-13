@@ -52,17 +52,20 @@ $ env -u TORTOISE_DB_URI uv run python \
 
 | who · capture size | per month | 1 year | 3 years | $/month at month 36 ($0.125/GB) |
 |---|---|---|---|---|
-| light · typical | 19.3 MB | 231 MB | 694 MB | $0.08 |
-| power · typical | 250.8 MB | 3.01 GB | 9.03 GB | $1.05 |
-| power · heavy | 286.4 MB | 3.44 GB | 10.31 GB | $1.20 |
+| light · typical | 19.3 MB | 231 MB | 694 MB | $0.09 |
+| power · typical | 250.8 MB | 3.01 GB | 9.03 GB | $1.13 |
+| power · heavy | 286.4 MB | 3.44 GB | 10.31 GB | $1.29 |
 
-A thousand power users: **8.41 TB, $1,051/month** at month 36 — 18 % of those
-users' whole storage budget (`1,000 × 30 % × $19`).
+A thousand power users: **9.03 TB, $1,128/month** at month 36 — 19.8 % of those
+users' whole storage budget (`1,000 × 30 % × $19 = $5,700`). ⚠️ All figures are
+**decimal GB (10⁹)**, the same unit as the byte columns above.
 
 **The trigger.** Solo's entire storage budget is `30 % × $19 = $5.70/month`. The
-journal line *alone* reaches it for one power user at **month 195** (16.2 years),
-or **month 344** once `#11821` P2's base64 payload lands (1.76× on every capture,
-arithmetic on two measured endpoints — P2 itself is unlanded).
+journal line *alone* reaches it for one power user at **month 182** (15.2 years),
+or **month 321** once `#11821` P2's base64 payload lands. ⚠️ **That 1.7–1.8× is per
+capture size, not a single multiplier**: measured 1.73× (small), 1.76× (typical),
+1.78× (heavy), and the 321 figure is the typical one. P2 itself is unlanded, so
+this is arithmetic on two measured endpoints.
 
 ## The two limits, stated rather than footnoted
 
