@@ -1152,7 +1152,12 @@ def latest_readings(
     # ⛔ KEEP THE PROJECTION EDGE-FREE. If a later change returns `id(r)` or any
     # other relationship property, duplicate edges become duplicate ROWS — and
     # then a `dwell` of N can be satisfied by ONE measurement repeated. That is
-    # this projection's OWN hazard and nothing else in the repo records it: the
+    # the SECOND route to the #12511 defect above, and the one a projection
+    # change would OPEN (the first — a duplicated `o.id` — needs no projection
+    # change at all, which is why closing that issue cannot be assumed to make
+    # this note redundant, and why this note cannot claim to be its only record;
+    # an earlier revision of this sentence did, ten lines below the block that
+    # contradicts it). The disambiguation still stands on its own: the
     # note at ``hosted_backup.py:360-370`` is the #4515 "TOTAL OR FAIL" rule and
     # its load-bearing aggregate, and the operand table at ``:372-400`` is about
     # ``id(n) > -1`` disagreeing across the v4/v6 cores — an OPERAND edge case,
