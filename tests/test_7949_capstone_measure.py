@@ -5353,18 +5353,24 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # `c17e3c5f78`, 9987 at `f1f74135a15b` and at `abf186f110`. ⛔ `9951`
             # is in that list only because this row printed it — it was a predicted
             # merge-tree value (9943 + 8), never a line any commit on `main`
-            # carried. It is the ELEVENTH value this row has carried on `main` —
-            # `9633, 9635, 9714, 9823, 9906, 9917, 9933, 9934, 9951, 9973, 9987` —
-            # and the COUNT is deliberately not the claim: reproduce it, one value
+            # carried. What `main` has carried is `9633, 9635, 9714, 9823, 9906,
+            # 9917, 9933, 9934, 9951, 9973`; `9987` is on NO `main` commit — it
+            # exists only once this one lands, which is why the recipe below prints
+            # eleven values from a LOCAL branch and ten from `origin/main`. The
+            # COUNT is deliberately not the claim: reproduce it, one value
             # per commit, with
             #   for c in $(git log --reverse --format=%h -- tests/test_7949_capstone_measure.py); do
             #     git show $c:tests/test_7949_capstone_measure.py \
             #       | rg -o '"[0-9]{4}", "- test_pack_logic_writeprobe_11083.py"'; done | sort -u
-            # The four repairs of the pin itself that this one follows:
-            # `eb27f96d3ecd` -> 9906, `63f725cca168` -> 9933, `23f80aef6a55` -> 9934,
-            # `e59e60769287` -> 9973 (`git show <c>:tests/… | rg -o '"[0-9]{4}", "- test_pack_logic_writeprobe_11083.py"'`
+            # Every repair of the pin itself that has landed — a commit whose row
+            # value matched the entry where its PARENT's did not:
+            # `a7139b663d25` -> 9714, `eb27f96d3ecd` -> 9906, `63f725cca168` -> 9933,
+            # `23f80aef6a55` -> 9934, `e59e60769287` -> 9973
+            # (`git show <c>:tests/… | rg -o '"[0-9]{4}", "- test_pack_logic_writeprobe_11083.py"'`
             # reproduces each — a pattern that omits the `"[0-9]{4}", ` part
-            # prints only the filename and no number). The enumeration is also
+            # prints only the filename and no number; the repair PROOF is against
+            # the PARENT, `<c>^`, whose row disagreed with the entry). The
+            # enumeration is also
             # posted on #9158, the tracker entry for the class. The
             # mover here is `f1f74135a15b` (#12302): +14 lines into
             # `config/ci-surfaces.yml` above the entry, of which TWELVE are prose
