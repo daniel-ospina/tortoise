@@ -33257,7 +33257,8 @@ class TortoiseSDK:
                 # selection could still do here is move which ids survive the
                 # ``limit`` cut: an unmeasured composition change on a product
                 # surface. Opt out, like ``recall_state``.
-                _valid_time_rerank=False)
+                _valid_time_rerank=False,
+                _rerank_candidates=False)  # #12297: same re-owned order
         except Exception:  # noqa: BLE001, RUF100
             return {}
         scoped = {}
@@ -39582,7 +39583,8 @@ class TortoiseSDK:
                 # #8487: the fallback's rows are re-scored into a confidence
                 # band below, so this is another candidate pool whose order the
                 # caller re-owns.
-                _valid_time_rerank=False)
+                _valid_time_rerank=False,
+                _rerank_candidates=False)  # #12297: same re-owned order
             results = []
             max_rrf = max(
                 (r.get("scores", {}).get("rrf", 0.0) for r in fts_results),
@@ -39798,6 +39800,7 @@ class TortoiseSDK:
                 text, entity_type="point", limit=pool_limit,
                 _record_reads=False,  # #7983: a candidate pool
                 _valid_time_rerank=False,  # #8487: caller re-owns the order
+                _rerank_candidates=False,  # #12297: same re-owned order
                 _truncation_out=_trunc_out,  # #8447: the retrieval path's proof
             )
             # The retrieval path's verdict: it dropped rows at the pool bound,
@@ -40332,6 +40335,19 @@ class TortoiseSDK:
         # on #8487 itself, so the next lane reading the #1745 convention finds
         # why this lever is the exception.
         _valid_time_rerank: bool = True,
+        # #12297: PRIVATE — the FUSED-CANDIDATE rerank. Default True = the
+        # product behaviour (a relevance read reranks when the gate is armed).
+        # Passed False by a caller that RE-OWNS the order of these rows
+        # downstream — the SAME six lanes that pass ``_valid_time_rerank=False``,
+        # and for the same reason: their sort/aggregate is what the caller sees,
+        # so the only thing a pre-cut reorder can do is move which ids survive
+        # ``limit``, which is an unmeasured composition change on a product
+        # surface. ⛔ The two opt-outs are SEPARATE on purpose: the capture path
+        # (``extractor_v2._fts_rows``) deliberately KEEPS the rerank — it has a
+        # measured recall@3 delta and its own ``OVERRIDES:`` record — while
+        # opting out of the valid-time selection. One flag for both would force
+        # that departure to choose.
+        _rerank_candidates: bool = True,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
         # B6 (#3892): the read-path status sink — one of the four recorded terms
@@ -41965,7 +41981,25 @@ class TortoiseSDK:
         # this is that rule applied to the second pre-cut reorder. Not a silent
         # choice either: a read that opted in and was left alone DISCLOSES it.
         _rr_order_by_ok = order_by == "relevance"
+        # ⛔ THE SECOND HALF OF THE SAME GUARD. ``order_by``/recency catch a
+        # caller that ASKS for another order; they do not catch a caller that
+        # re-owns the order DOWNSTREAM and passes neither — and six product
+        # lanes do exactly that (``_review_pool``, ``suggest_entry_points``,
+        # ``issue_insight``, ``recall_state``, ``recall_gaps``,
+        # ``_resolve_subgraph_seed``). Each already passes
+        # ``_valid_time_rerank=False`` for the identical reason; without this
+        # arm the rerank re-picked their page INVISIBLY — the trace said
+        # ``ok``, because nothing in the block knew the caller had opted out.
         _rr_recency_conflict = bool(_recency_applied)
+        if (result_ids and rerank_pool_enabled() and (query or "").strip()
+                and _rr_order_by_ok and not _rerank_candidates
+                and status_trace is not None):
+            status_trace.append(dict(
+                _trace_entry("rerank", ran=False, degraded=False,
+                             reason="order_owned_downstream", count=0),
+                **{RERANK_POOL_KEY: fused_rerank_pool_width(),
+                   RERANK_SCORED_KEY: 0,
+                   RERANK_UNSCORED_KEY: len(result_ids)}))
         if (result_ids and rerank_pool_enabled() and (query or "").strip()
                 and not _rr_order_by_ok and status_trace is not None):
             status_trace.append(dict(
@@ -41984,7 +42018,7 @@ class TortoiseSDK:
                    RERANK_SCORED_KEY: 0,
                    RERANK_UNSCORED_KEY: len(result_ids)}))
         if (result_ids and rerank_pool_enabled() and (query or "").strip()
-                and _rr_order_by_ok
+                and _rr_order_by_ok and _rerank_candidates
                 and not _rr_recency_conflict):
             # ONE width for the batch read AND the scorer (#12297 review): the
             # knob used to be resolved only inside ``rerank_pool``, so a
@@ -42031,9 +42065,15 @@ class TortoiseSDK:
                 # twenty empty passages — for a result that cannot differ.
                 # ``test_a_pool_with_no_usable_text_makes_no_scorer_call`` pins it.
                 if _scored_rows:
+                    # Hoisted: rebuilding the set per ITEM made this
+                    # O(width^2), and ``TORTOISE_FUSED_RERANK_POOL`` has no
+                    # upper bound (``_clamp_int`` clamps only the FLOOR), so a
+                    # caller raising ``pool_size`` could put ~10^6 inserts on a
+                    # path already priced at ~207 ms/mention.
+                    _scored_set = set(_scored_ids)
                     _rows = _scored_rows + [
                         {"id": pid, "content": ""}
-                        for pid in _pool_ids if pid not in set(_scored_ids)
+                        for pid in _pool_ids if pid not in _scored_set
                     ]
                     # ⛔ THE UNSCORED TAIL RIDES ALONG. Handing ``rerank_pool`` only
                     # the scored head made its ``unscored`` count structurally ZERO
@@ -44062,6 +44102,7 @@ class TortoiseSDK:
             query, kind=kind, entity_type="point", limit=pool,
             _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
             _valid_time_rerank=False,  # #8487: caller re-owns the order
+            _rerank_candidates=False,  # #12297: same re-owned order
             exclude_status=exclude_status,
             include_terminal=include_superseded,
             # Sec-1 (code-review gate): the pool can reach ~30k ids — W4
@@ -44078,6 +44119,7 @@ class TortoiseSDK:
                 query, kind=kind, entity_type="object", limit=pool,
                 _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
                 _valid_time_rerank=False,  # #8487: caller re-owns the order
+                _rerank_candidates=False,  # #12297: same re-owned order
                 include_terminal=include_superseded,
                 leg_trace=leg_trace,
                 read_status_out=_object_status)
@@ -44511,7 +44553,8 @@ class TortoiseSDK:
                 # #8487: GapsRanker.rerank re-sorts the pool and ``[:limit]``
                 # is applied to THAT order, so this is the same
                 # re-owned-order shape as recall_state.
-                _valid_time_rerank=False)
+                _valid_time_rerank=False,
+                _rerank_candidates=False)  # #12297: same re-owned order
             pool_ids = [r["id"] for r in results if r.get("id")]
             op_ids = {
                 row[0] for row in proj.g.query(
@@ -44647,7 +44690,8 @@ class TortoiseSDK:
             # order, so the selection's ordering is discarded here and the only
             # effect left is which ≤5 seeds survive the cut — an unmeasured
             # change to the returned subgraph. Opt out, like ``recall_state``.
-            _valid_time_rerank=False)]
+            _valid_time_rerank=False,
+            _rerank_candidates=False)]  # #12297: same re-owned order
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 

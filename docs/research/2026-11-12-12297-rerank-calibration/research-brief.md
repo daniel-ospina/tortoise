@@ -280,6 +280,15 @@ point, and EVERY caller of this read is on it:
 | the capture-time noun prior (`extractor_v2._fts_rows`, `limit=3`) | yes — §3/§6 |
 | the **ask lane** (`tortoise/ask_lane.py` reaches the same read with the default `order_by="relevance"`, no recency, a non-empty question) | **no** — and its candidate text is captured TURNS, i.e. the passage-length class priced at 85.227 ms/pair, so arming the gate there costs the same ≈3.4 s/query it costs user search |
 
+Six further product lanes reach this read and **opt out** rather than being
+blasted: `_review_pool`, `suggest_entry_points`, `issue_insight`, `recall_state`,
+`recall_gaps` and `_resolve_subgraph_seed` re-own the order of the rows downstream,
+so a pre-cut reorder there could only move which ids survive `limit` — an
+unmeasured composition change. Each passes `_rerank_candidates=False` (and already
+passed `_valid_time_rerank=False` for the same reason), and the leg trace reports
+`order_owned_downstream`. The capture prior is the deliberate exception: it keeps
+the rerank, under its own `OVERRIDES:` record.
+
 Default-off does not bound the blast radius of turning it on; it only means nothing
 changes until someone turns it on for all three — one of which this calibration does
 not price at all.

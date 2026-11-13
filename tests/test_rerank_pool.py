@@ -719,6 +719,41 @@ def test_the_rerank_runs_before_the_valid_time_demotion():
     assert src.index("rerank_pool(") < src.index("prefer_latest_ids(")
 
 
+def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
+    """The half of the guard that ``order_by``/recency cannot reach.
+
+    Six product lanes re-own the order DOWNSTREAM (``_review_pool``,
+    ``suggest_entry_points``, ``issue_insight``, ``recall_state``,
+    ``recall_gaps``, ``_resolve_subgraph_seed``) and pass neither an
+    ``order_by`` nor a recency field — so before this arm the rerank re-picked
+    their page with the trace reading ``ok``, i.e. invisibly. Each of them
+    already passes ``_valid_time_rerank=False`` for the identical reason and now
+    passes ``_rerank_candidates=False`` too. Pinned behaviourally: an injected
+    positional scorer must not move the page, and the refusal must be disclosed.
+    """
+    nonce = uuid.uuid4().hex[:8]
+    q = f"zebra {nonce}"
+    for i in range(6):
+        sdk.create_point(kind="statement", content=f"{q} reown probe {i}")
+
+    off = [r["id"] for r in sdk.tortoise_fts_query(
+        q, entity_type="point", limit=3, _rerank_candidates=False)]
+    assert len(off) == 3, f"premise: a full page must come back (off={off})"
+
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    _inject(_Positional(), monkeypatch)
+    trace: list[dict] = []
+    on = [r["id"] for r in sdk.tortoise_fts_query(
+        q, entity_type="point", limit=3, _rerank_candidates=False,
+        leg_trace=trace)]
+    assert on == off, (
+        "a caller that re-owns the order still had its page re-picked by the "
+        f"rerank (off={off} on={on})")
+    entry = _rerank_entries(trace)[0]
+    assert entry["ran"] is False, f"the skip must be disclosed ({entry})"
+    assert entry["reason"] == "order_owned_downstream", entry
+
+
 def test_a_non_relevance_order_by_is_never_re_picked_by_the_rerank(sdk, monkeypatch):
     """The second pre-cut reorder must not touch a page another ordering owns.
 
