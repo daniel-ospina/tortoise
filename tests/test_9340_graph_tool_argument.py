@@ -1182,8 +1182,9 @@ def test_no_advertised_handler_names_the_workspace_default_itself():
         f"{sorted(routed)}")
     # ⛔ `tortoise_analyze` was the third member and is ARCHIVED in #11609 batch 1 —
     # it is no longer advertised, so it cannot be an arm here. Its routing is pinned
-    # against the frozen copy in `test_analyze_derives_its_anchors_from_the_selected_graph`
-    # below, so the restore path still cannot reintroduce the workspace-default bug.
+    # against the frozen copy in `test_analyze_anchors_route_through_the_dispatch_
+    # GRAPH_SELECTION_ARCHIVED` below, so the restore path still cannot reintroduce
+    # the workspace-default bug.
 
 
 # ── #9762: the resolution rides the DISPATCH TASK, not the wrapper ─────────

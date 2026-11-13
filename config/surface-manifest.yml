@@ -386,6 +386,30 @@ response_fields:
     pair can also disagree BY DESIGN: a legacy `outdated=true` point with no stored status reads `status="live"`
     beside `terminal=true`, because `status` is the stored word (the #9974 R1 rendering rule) and `terminal` is
     the predicate.'
+# ⛔ FOUR rows stood here until #4282 deleted their carriers (2026-10-27), and they are recorded
+# here rather than dropped silently, because each named a REAL emitted field:
+#   • `sdk:capture_session` / `graph_ops` (#3561) — the capture's measured graph-operation count.
+#   • `sdk:capture_session` / `stats.step_witness` (#9116, landed by #10214) — the eight per-stage
+#     witness blocks under `stats`, one per extractor stage, each carrying that stage's own counts
+#     and (for the two flag-gated passes) the `enabled` flag beside them; a block witnesses its
+#     step only when the stage reports it did work, and the seam copies COUNTS, never the VET
+#     gate's per-candidate `decisions` text.
+#   • `sdk:get_provenance_chain` / `raw` — the Source index entry (source_id, content_hash,
+#     raw_state, raw_state_at, available, permanent, retryable, label, message) emitted on every
+#     returned item: the chain IS the Source link, so it existed whether or not the raw did.
+#     #4282 deleted the method and the row went with it.
+#   • `sdk:traverse` / `idx` (#6101) — now recorded on `tortoise_traverse` below, its surviving carrier.
+# The SEAM SURVIVES: it is `_capture_stats_with_step_witness` at the `_extract_session_v2` meta fold
+# (`tortoise/sdk.py`), a privatised method, and the whole extractor-v2 pipeline still reaches it. What
+# went with the surface is the public CARRIER, so `stats.step_witness` is now observable in-process
+# (and by the capstone probes) rather than through a declared SDK response. `graph_ops` had exactly
+# one carrier — the `counts_capture_ops` decorator on the deleted method — and is gone with it.
+# Restoring either as a declared surface is a SURFACE CHANGE and needs owner approval (#4282).
+#
+# ⛔ AND THIS COMMENT SURVIVED A `cut` ONLY BY BEING RESTORED BY HAND (#11609 batch 1): `cut`
+# re-emits `rows:`/`response_fields:` from the declaration and drops every comment inside those
+# sections, so a re-cut silently deletes a memorial like this one. Whoever cuts next must diff
+# this file for lost comments and put them back — `check` cannot see a comment.
 - response: tortoise_traverse
   field: idx
   emitted_when: 'always, on every hop in nodes[] — the traversed edge''s idx (the same value the #4282-deleted `sdk:traverse`
@@ -877,6 +901,14 @@ approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
+# ⚠️ `counts` is DERIVED by `render`, and it describes the SAME snapshot as
+# `cut_at_commit` above — both come out of one `cut --commit <default-branch sha>`.
+# The two disagreed for a while (#4282 deleted 26 dead public SDK methods at
+# `45eefb26c`, so `sdk_public_methods` stayed 124 while `tools` still read 72);
+# #11609 batch 1 removed four no-destination MCP tools and re-cut, so they agree
+# again: 68 tools / 124 SDK methods / 23 retired, derived from the declaration.
+# ⛔ A hand-edited `counts` reds `check` — re-cut instead (`cut --commit $(git
+# rev-parse origin/main)`), and never paste a number in.
 counts:
   tools: 68
   sdk_public_methods: 124
@@ -1211,6 +1243,27 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
+# #12297: SPLICED, not re-cut — and the two reasons are the REAL costs of a cut,
+# not a claim that a cut would lose hand-curated cells (it would not:
+# `CARRIED_TOOL_ROW_KEYS` in tools/surface_manifest.py carries `used_by` /
+# `recommendation` / `basis` / `reason` / `exemption` forward from the committed
+# manifest, and a cut reproduces this tool row byte-for-byte). The costs it does
+# have: (1) `cut --commit` must be handed a DEFAULT-BRANCH sha (#11057 review F1)
+# — cut at a lane head, `provenance_report` reds — and (2) a cut re-derives the
+# 39 `sdk:` rows' `used_by` cells by design (`CARRIED_SDK_ROW_KEYS` is just
+# `exemption`), churning a diff this change has nothing to do with.
+# ⚠️ COST (2) IS NOW CLOSED (#11609 batch 1): `CARRIED_SDK_ROW_KEYS` carries
+# `used_by` as well, because on a box where `skills/` does not resolve the
+# `skill-docs` corpus comes back EMPTY and a re-cut erased the label from 38
+# untouched rows. An EMPTY corpus is UNREADABLE, not absent — it is carried, and
+# only a READABLE corpus that does not mention the name drops the label.
+# So exactly one derived cell moved here, to the value `check` itself derives from the
+# declaration (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it
+# stands on this branch, after the owner's 2239f94ff6 and c82c0337a4 rewrote the
+# same two comments). Nothing else in this row, and nothing in any other row,
+# moves. ⛔ Splicing a DERIVED cell is safe only because `check` re-derives it: if
+# this value ever disagrees with the declaration, both gates go red rather than
+# drifting. It is not a general licence to edit derived cells.
 - name: tortoise_suggest_entry_points
   served_from: tortoise/mcp_server.py:aae4bf5f5ceffe7c
   served_attributes: 542cf2dbb222d260
