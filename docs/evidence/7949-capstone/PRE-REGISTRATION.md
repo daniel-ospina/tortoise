@@ -2550,13 +2550,15 @@ to answer.
   are the ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for
   *any* edit to this file, and the probe's cite and this document's cite are re-pointed TOGETHER so
   they cannot disagree about this anchor.
-- ⛔ **Superseded for THIS tree by §10.29.** This entry's window was the live one when it was
+- ⛔ **Superseded for THIS tree by §10.29, and then by §10.30 — which owns the window below.** This entry's window was the live one when it was
   written, and `#12067` has no hunk in `tortoise/projection/__init__.py` — but a later merge on
   the branch inserted above the anchor, so the window this tree carries is
   `projection/__init__.py:14272-14274`, not `:14248-14250` — re-derived by opening the lines
   (`14272` is the `# Ensure pointKind is present` comment, `14274` is `clean["pointKind"] = ""`),
   and the probe's cite of the same anchor is re-pointed with it so the two cannot disagree. (§10.26 records the `:14245` window; `29ec0f3471` then inserted a net `+3` above the
-  anchor, making `:14248-14250` what this entry measured.)
+  anchor, making `:14248-14250` what this entry measured.) ⚠️ Per §10.30 this window's LIVE carrier is
+  §10.30 itself — the sentence is re-derived here because the probe cites the same anchor, not
+  because this entry was re-pointed in place.
 
 ### 10.28 — the §11/§9 cite block re-derived for `#12067`'s `+54`, and the `#10360` read-back re-pointed (2026-11-13, `#12067`)
 
@@ -2732,6 +2734,8 @@ to answer.
 - ⛔ **§10.1–§10.29 are HISTORY and were NOT re-pointed.** Their numbers name the head each entry
   measured, per §10.19/§10.22/§10.24; a re-point in place would be a false record of what was
   measured. The live carriers are §11, §9, §3.4/§3.7/§7 for the `edges.py` windows, §10.29 for
-  the one `record_projection.py` value that has no other carrier, and this entry.
+  the one `record_projection.py` value that has no other carrier, and this entry — including the
+  `#548` window, `projection/__init__.py:14272-14274` (`:14265-14267` at §10.29's head — `d63caecf56`,
+  `#12338`, inserted 29 lines above the anchor), whose sentence lives in §10.27.
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
   supersede marker.

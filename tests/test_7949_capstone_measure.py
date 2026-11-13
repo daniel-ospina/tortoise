@@ -4729,9 +4729,9 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("15277", "if vet_enabled and complete_list:"),
             ("15278", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
-        # the VET block's start; its lines of keys (13526-13528) close on
-        # line 13529 — DERIVED by content, not by arithmetic: `result["vet"] = {`
-        # opens at 13525 and the block's `}` is 13529. ⚠️ A conflict resolution
+        # the VET block's start; its lines of keys (15622-15624) close on
+        # line 15625 — DERIVED by content, not by arithmetic: `result["vet"] = {`
+        # opens at 15621 and the block's `}` is 15625. ⚠️ A conflict resolution
         # here once kept main's numerals (13256/13257-13259/13260 — correct on
         # main, but in THIS tree 13256 is the `"hold"` key and 13257-13260 is
         # the whole `chain_enforcer` block) next to the branch's post-refactor
@@ -4811,7 +4811,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # (#11517 review, finding 3). It said the flag-OFF surfaces live at
         # `:13515-13523`, which is the CLASSIFY block plus the two VET comment
         # lines — it does not contain `result["vet"]` at all, because the two
-        # blocks are 13515-13521 and 13525-13529. The row above pins the VET
+        # blocks are 15611-15617 and 15621-15625. The row above pins the VET
         # bounds for a DIFFERENT sentence, so this sentence's own copy of the
         # block bounds had no reader: a bare `:N`-range names no file, which is
         # the drift the whole `_PIN_ROWS` leg exists to stop. Non-vacuity: on
@@ -4820,8 +4820,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # the wrong range it was added for.
         #
         # ⛔ AND BOTH BLOCK BOUNDS, not a subset: the corrected sentence names
-        # `:13515-13521, :13525-13529`, so `13525`/`13529` are its OWN copy of
-        # the VET bounds and need the same reader. The `13525`/`13529` row on
+        # `:15611-15617, :15621-15625`, so `15621`/`15625` are its OWN copy of
+        # the VET bounds and need the same reader. The `15621`/`15625` row on
         # `probes/capstone_run.py` scopes to THAT document's line; it cannot see
         # this sentence, and a row that pinned 4 of a sentence's 6 numbers would
         # leave the fix's own new cite as the one this leg still cannot see.
@@ -5368,16 +5368,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # own review).
     # ⛔ AND IT IS CALLED **BEFORE** `assert not failures` ON PURPOSE — THE ORDER IS
     # LOAD-BEARING, so do not tidy it down beside that assert. This test is RED on
-    # `main` for unrelated rows, and THIS PR REPAIRS THEM — `04-plan.md` cited
-    # `tortoise/sdk.py:25284` for `declared = declared_relation_predicates()`, which the
-    # merged tree carries at `25393`, and the row above now reads `25393` — and the other
-    # rows red on the same tree are re-derived by the same commit, not left behind:
-    # `00-plan.md` and `03-test-design.md` both cite `sdk.py:9955`/`10008` (now `:10064`
-    # /`:10117`), `00-plan.md` also `18547` (`:18656`), `00-align.md`
-    # `16346`/`16347` (`:16455`/`:16456`), and `RECONCILE-A1-A2-A5.md`
-    # `18887`/`18899`/`18900` (`:18996`/`:19008`/`:19009`) — so the order still decides
-    # whether this pin runs. Nor was it better at this branch's old base: at `ca74f2375e`
-    # the row cited `25189` and
+    # `main` for unrelated rows, and THIS DIFF REPAIRS TEN OF THEM — every one of the ten
+    # failure messages this test collects names a present-tense cite of `tortoise/sdk.py`
+    # that no longer opens on the code it claims (`00-plan.md` and `03-test-design.md` both
+    # cite `sdk.py:9955`/`10008`, now `:10064`/`:10117`; `00-plan.md` also `18547` →
+    # `:18656`; `00-align.md` `16346`/`16347` → `:16455`/`:16456`; and
+    # `RECONCILE-A1-A2-A5.md` `18887`/`18899`/`18900` → `:18996`/`:19008`/`:19009`). The row
+    # this paragraph used to lead with — `04-plan.md`'s `sdk.py:25284` for
+    # `declared = declared_relation_predicates()`, live at `25393` — was red at this
+    # branch's base and is NOT carried by this diff: `main`'s own lane re-pointed it before
+    # the merge, so both sides now say `25393` and the file no longer differs. Either way
+    # the order decides whether this pin runs. Nor was it better at this branch's old base:
+    # at `ca74f2375e` the row cited `25189` and
     # `git show ca74f2375e:tortoise/sdk.py | sed -n '25189p'` is a bare `)`; the same
     # cite rot is tracked in #12456 / #12381. And
     # an `assert` that raises ends the test: placed after it, this pin was **never
