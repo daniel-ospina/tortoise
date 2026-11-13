@@ -12833,6 +12833,305 @@ def _session_index_rows_without_graph(
              "(see the `Graph: health` row)")]
 
 
+#: `doctor`'s hosted probe bounds (#11912).
+#: The reachability read is cheap, so it gets a short bound. The AUTHENTICATED
+#: read is where the hosted app's cold start lands — a first request after an
+#: idle period measured >10s while a warm app answers in 0.2–1.6s (`tortoise
+#: team info` retries for exactly this reason), so it gets ONE bounded retry
+#: rather than reporting a waking service as a broken credential. Worst case is
+#: therefore 5 + 10 + 30 s, and only when the network is timing out.
+_DOCTOR_HEALTH_TIMEOUT_S = 5
+_DOCTOR_TEAM_TIMEOUT_S = 10
+_DOCTOR_TEAM_RETRY_TIMEOUT_S = 30
+
+
+def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> None:
+    """#11912: report the hosted identity AND whether it works.
+
+    THE GAP THIS CLOSES. `doctor` answered "is the local graph healthy" and
+    nothing else, so a box whose `~/.tortoise/credentials.json` held a revoked
+    key printed `5 pass, 5 warn, 0 fail` and exited 0 — while every hosted
+    command failed with `401 Invalid API key` in the same minute. `config show`
+    (#10655) built the reporter; this is the first-run verb reaching it.
+
+    Two rows at most, and they are DIFFERENT questions:
+
+    * `Credentials` — what this shell would actually send, resolved through the
+      ONE authority (`_resolve_config_path`, the same ladder every command
+      uses: `TORTOISE_API_KEY` → `<cwd>/.tortoise` →
+      `~/.tortoise/credentials.json`). Never the secret: a mask plus a
+      fingerprint, and a fingerprint is WITHHELD for a short key because a
+      48-bit digest over a guessable secret is brute-forceable offline.
+    * `Hosted` — does that identity work: `GET /health` reachable (with the
+      measured latency) and `GET /v1/team` accepted, or the server's exact
+      refusal. This is the row that was missing.
+
+    ⛔ NO NETWORK WHEN THERE IS NO CREDENTIAL. A self-hosted box must make zero
+    requests (asserted by a test), and a store the resolver REFUSED is a local
+    fault naming a local remedy — dialling to "confirm" it would be a probe
+    against a host the store did not supply.
+
+    Side-effect-free by construction, which is the standing rule for this verb
+    (#2204): both reads are unauthenticated-nothing GETs. Neither creates a
+    graph, a point, or a team.
+
+    `--offline` skips the two requests and SAYS SO, so "not tested" can never be
+    read as "tested and fine" — a network-under-test box (a proxy, an air-gapped
+    runner) has a supported way to answer the local question alone.
+    """
+    import http.client
+    import json as _json
+    import os as _os
+    import time
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    raw_env_key = _os.environ.get("TORTOISE_API_KEY")
+    env_key = raw_env_key if (raw_env_key and raw_env_key.strip()) else None
+
+    winner_path: Path | None = None
+    api_key: str | None = None
+    api_url: str | None = None
+    try:
+        winner_path, winner_cfg, api_key, api_url = _resolve_config_path()
+    except _ConfigError as exc:
+        # The resolver REFUSED a store (corrupt, unreadable, non-string key).
+        # Every command fails on this, so it is a FAIL, not a warning — and the
+        # remedy is local, so no request is made.
+        offender = str(exc.args[0]) if exc.args else "(unknown store)"
+        reason = str(exc.__cause__) if exc.__cause__ else "api_key missing or invalid"
+        results.append(("Credentials", "❌",
+                        f"refused at {_printable(offender)} — {_printable(reason)}; "
+                        "no hosted request was made. `tortoise config show` "
+                        "names which store won"))
+        return
+    except (OSError, RuntimeError) as exc:
+        # The resolver could not RUN (deleted cwd, unresolvable HOME) — an
+        # environment fault, not a verdict about a store. Reporting "no
+        # credential" here would advise a re-mint for a live key.
+        results.append(("Credentials", "⚠️",
+                        f"the credential resolver could not run "
+                        f"({type(exc).__name__}: {_printable(exc)}); hosted "
+                        "identity unknown"))
+        return
+
+    source = ("env:TORTOISE_API_KEY" if env_key
+              else (str(winner_path) if winner_path is not None else "none"))
+    api_url = api_url if isinstance(api_url, str) else str(api_url or "")
+    # A store/proxy-supplied endpoint ending in `/` would ask for `//health` and
+    # `//v1/team` — the 404-that-reads-as-a-broken-key every other hosted caller
+    # in this file already normalizes away (`tortoise/__main__.py`'s
+    # "a trailing slash would produce ``//v1/team`` → 404"). Normalize HERE once,
+    # so the probe and the reported target agree.
+    api_url = api_url.rstrip("/")
+
+    if not api_key:
+        # The honest answer for a plain self-host install — and the reason this
+        # branch makes NO request (#11912 target: "0 network calls when no
+        # credential is configured").
+        results.append(("Credentials", "ℹ️",
+                        "none configured — self-hosted only; no hosted request "
+                        "was made (hosted: `tortoise signup`)"))
+        return
+
+    masked = _mask_secret_tail(api_key)
+    fingerprint = _publishable_fingerprint(api_key)
+    detail = f"{_printable(source)} — {masked}"
+    if fingerprint is not None:
+        detail += f" (fingerprint {fingerprint})"
+    # The coordinates this identity carries are OFFLINE information (#11912 lists
+    # them in the block): the endpoint, and the org the store names. The org is
+    # store-supplied, so it is printed through `_printable` — a newline in
+    # `org_name` would otherwise forge a whole results row.
+    if api_url:
+        detail += f", api_url {_printable(_mask_display_target(api_url))}"
+    _org = (winner_cfg or {}).get("org_name") if isinstance(winner_cfg, dict) else None
+    if isinstance(_org, str) and _org.strip():
+        detail += f", org {_printable(_org)}"
+    if not _is_sendable_key(api_key):
+        # `http.client` refuses a CR/LF or non-latin-1 header value by raising a
+        # ValueError that ECHOES THE KEY; refuse here where the message is ours.
+        results.append(("Credentials", "❌",
+                        f"{detail} — cannot be sent in a request header (not "
+                        "latin-1 encodable, or contains CR/LF). Re-mint it: "
+                        "`tortoise signup` or `tortoise recover`"))
+        return
+    results.append(("Credentials", "✅", detail))
+
+    if offline:
+        # Not probed is NOT "healthy": the row says exactly what went untested.
+        results.append(("Hosted", "ℹ️",
+                        f"{_printable(_mask_display_target(api_url or ''))} — "
+                        "not probed (`--offline`); hosted reachability and key "
+                        "validity were NOT tested"))
+        return
+
+    # ── the reachability read (no credential in the request) ──
+    base = _mask_display_target(api_url or "")
+    health_code: int | None = None
+    health_status: str | None = None
+    latency: float | None = None
+    started = time.monotonic()
+    try:
+        with urlopen(Request(f"{api_url}/health"),
+                     timeout=_DOCTOR_HEALTH_TIMEOUT_S) as resp:
+            health_code = getattr(resp, "status", None) or resp.getcode()
+            # The service's OWN verdict rides the body (`{"status": "degraded",
+            # …}`) — a 200 whose body says degraded is a reachable-but-unhealthy
+            # service, and that is the difference between "the key works" and
+            # "the product works". Bounded + fully guarded: this body is
+            # server/proxy-controlled.
+            try:
+                raw_health = resp.read()
+                if isinstance(raw_health, bytes) and len(raw_health) <= 65536:
+                    parsed_health = _json.loads(raw_health.decode("utf-8", "replace"))
+                    if isinstance(parsed_health, dict):
+                        candidate_status = parsed_health.get("status")
+                        if isinstance(candidate_status, str) and candidate_status.strip():
+                            health_status = candidate_status
+            except (OSError, ValueError, TypeError, RecursionError,
+                    http.client.HTTPException):
+                health_status = None
+        latency = time.monotonic() - started
+    except HTTPError as exc:
+        # A 4xx/5xx IS an answer — the host is reachable and something is
+        # serving. The code is reported; it does not need the transport branch.
+        health_code = exc.code
+        latency = time.monotonic() - started
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        # The reason is `_scrub`ed as well as the target: `http.client` embeds
+        # the URL in its own message, and a URL with userinfo embeds a PASSWORD
+        # (`InvalidURL: nonnumeric port: '<password>@host'`). `_scrub` expands
+        # each supplied value into its user/password fragments, which is the one
+        # rule #5109 established for this file.
+        results.append(("Hosted", "❌",
+                        f"cannot reach {base} — "
+                        f"{_printable(_scrub(str(getattr(exc, 'reason', None) or exc), api_url, api_key))}"
+                        f". Check https://api.premiselabs.co/health or your "
+                        "TORTOISE_API_URL, then `tortoise config show`"))
+        return
+
+    # ── the authenticated read: the ONLY thing that proves the key ──
+    team_code: int | None = None
+    team_body = ""
+    reach_error: str | None = None
+
+    def _team_request(timeout: int) -> None:
+        nonlocal team_code, team_body
+        req = Request(f"{api_url}/v1/team",
+                      headers={"Authorization": f"Bearer {api_key}"})
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                team_code = getattr(resp, "status", None) or resp.getcode()
+                team_body = resp.read().decode("utf-8", "replace")
+        except HTTPError as exc:
+            team_code = exc.code
+            try:
+                team_body = exc.read().decode("utf-8", "replace") if exc.fp else ""
+            except (OSError, http.client.HTTPException):
+                team_body = ""
+
+    try:
+        _team_request(_DOCTOR_TEAM_TIMEOUT_S)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        reason = getattr(exc, "reason", None) or exc
+        if not _is_timeout_reason(reason):
+            reach_error = _printable(_scrub(str(reason), api_url, api_key))
+        else:
+            # Cold start, not a broken credential: retry once, bounded.
+            try:
+                _team_request(_DOCTOR_TEAM_RETRY_TIMEOUT_S)
+            except (OSError, http.client.HTTPException, ValueError) as retry_exc:
+                retry_reason = getattr(retry_exc, "reason", None) or retry_exc
+                reach_error = (
+                    f"no answer in {_DOCTOR_TEAM_TIMEOUT_S}s, and none "
+                    f"in {_DOCTOR_TEAM_RETRY_TIMEOUT_S}s on retry "
+                    f"({_printable(_scrub(str(retry_reason), api_url, api_key))})")
+
+    if reach_error is not None:
+        # The credential is UNPROVEN — never green, whatever /health said.
+        results.append(("Hosted", "❌",
+                        f"{base} — {reach_error}. Check "
+                        "https://api.premiselabs.co/health or your "
+                        "TORTOISE_API_URL, then `tortoise config show`"))
+        return
+
+    health_part = (f"/health {health_code}"
+                   + (f" in {latency:.2f}s" if latency is not None else ""))
+    body = _scrub(team_body, api_url, api_key)
+    parsed: object = None
+    try:
+        parsed = _json.loads(body) if body else None
+    except (ValueError, TypeError, RecursionError):
+        parsed = None
+
+    if team_code == 401:
+        results.append(("Hosted", "❌",
+                        f"{health_part}; /v1/team 401 Invalid API key — "
+                        f"{base} refused the stored key. Re-mint it: `tortoise "
+                        "signup` (new team) or `tortoise recover` (same team, "
+                        "needs your st_ recovery token); `tortoise config show` "
+                        "names which store won"))
+        return
+
+    error_code = None
+    if isinstance(parsed, dict):
+        detail_obj = parsed.get("detail")
+        if isinstance(detail_obj, dict):
+            candidate = detail_obj.get("error_code")
+            if isinstance(candidate, str):
+                error_code = candidate
+
+    if team_code == 403 and error_code in _ORG_INFO_REMEDIES:
+        # A DELIBERATE refusal, not a fault: the server authenticated the key and
+        # then declined team-level scope. `❌` here would tell a correctly-scoped
+        # user to re-mint a working key.
+        results.append(("Hosted", "ℹ️",
+                        f"{health_part}; /v1/team 403 {error_code} — "
+                        f"{_ORG_INFO_REMEDIES[error_code]}"))
+        return
+
+    if isinstance(team_code, int) and 200 <= team_code < 300:
+        org = None
+        if isinstance(parsed, dict):
+            for field in ("org_name", "org_id"):
+                value = parsed.get(field)
+                if isinstance(value, str) and value.strip():
+                    org = value
+                    break
+        tier = parsed.get("tier") if isinstance(parsed, dict) else None
+        extra = ""
+        if isinstance(tier, str) and tier.strip():
+            extra += f", tier {_printable(tier)}"
+        if isinstance(org, str) and org.strip():
+            extra += f", org {_printable(org)}"
+        # A 200 whose body says the service is degraded — or any non-2xx/3xx
+        # /health — is a reachable but UNHEALTHY service. It is a WARNING, never a
+        # pass and never a fail: the user cannot fix it, and hiding it would make
+        # "the key works" read as "the product works". A 5xx on /health with a
+        # 200 on /v1/team used to render ✅ (fresh review of this change).
+        icon = "✅"
+        health_notes: list[str] = []
+        if isinstance(health_status, str) and health_status.strip().lower() not in ("ok", "healthy", "pass"):
+            health_notes.append(f"the service reports `{_printable(health_status)}` on /health")
+        if not (isinstance(health_code, int) and 200 <= health_code < 400):
+            health_notes.append(f"/health returned {health_code}")
+        health_note = ""
+        if health_notes:
+            icon = "⚠️"
+            health_note = " — " + "; ".join(health_notes)
+        results.append(("Hosted", icon,
+                        f"{base} — {health_part}; /v1/team accepted{extra}"
+                        f"{health_note}"))
+        return
+
+    code_display = team_code if team_code is not None else "no status"
+    results.append(("Hosted", "❌",
+                    f"{health_part}; /v1/team → API error {code_display}: "
+                    f"{_printable(body[:200]) if body else '(empty body)'}. "
+                    f"`tortoise config show` reports what this machine knows"))
+
+
 def _cmd_doctor(args):
     """Health check — verify Tortoise setup is healthy."""
     import importlib
@@ -13477,6 +13776,19 @@ def _cmd_doctor(args):
         raise
     except Exception as e:
         results.append(("Capture spool", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
+
+    # 8. Hosted identity (#11912). The one surface this verb could not see: a
+    # box whose stored key was revoked read `0 fail` while every hosted command
+    # 401'd. `--offline` is read via getattr because `_cmd_onboard` calls this
+    # function with a bare `Namespace(cmd="doctor")` (#703) — the same reason
+    # every other attribute above is read that way.
+    try:
+        _doctor_hosted_rows(results, offline=bool(getattr(args, "offline", False)))
+    except MemoryError:
+        raise
+    except Exception as e:
+        results.append(("Hosted", "⚠️",
                         f"check unavailable: {str(e)[:60]}"))
 
     # Print results
@@ -14981,6 +15293,14 @@ def main(argv: list[str] | None = None) -> int:
     setup.add_argument("--output", default=None, help="Save config to file instead of stdout")
     doctor = sp.add_parser("doctor", help="Health check — verify Tortoise setup")
     doctor.add_argument("--path", default=None, help="Path for embedded mode")
+    # #11912: the hosted block dials only when a credential EXISTS, and this flag
+    # is the supported way to answer the local question alone (a proxy or an
+    # air-gapped runner). `not probed` is reported, never rendered as healthy.
+    doctor.add_argument(
+        "--offline", action="store_true", default=False,
+        help="Do not probe the hosted endpoint: report the resolved credential "
+             "and the local checks only (no network requests)",
+    )
     doctor.add_argument(
         "--db", default=None,
         help="Docker URI (docker://, redis://, rediss://) or embedded DB file "

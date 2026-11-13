@@ -98,6 +98,392 @@ def _health_line(out: str) -> str:
     return next(line for line in out.splitlines() if "Graph: health" in line)
 
 
+def _row(out: str, label: str) -> str | None:
+    """The results line for `label` (None when the row was not printed)."""
+    return next((ln for ln in out.splitlines() if f" {label}:" in ln), None)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_hosted_identity(monkeypatch, tmp_path):
+    """#11912: `doctor` probes the hosted identity when one is configured, so
+    this module must never inherit the OPERATOR's identity.
+
+    `$HOME` is redirected because `~/.tortoise/credentials.json` is one of the
+    three credential candidates — without this, a developer who ran
+    `tortoise signup` on their box would see `doctor` dial the live API from
+    inside the test suite, and a stale key there would turn a local-only
+    assertion into an unexplainable red. Tests that need a home set their own
+    `HOME` afterwards (that wins — it is the same `monkeypatch`), and the
+    hosted tests below write their store into the isolated one.
+    """
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    return home
+
+
+class _FakeResponse:
+    """The minimal `urlopen(...)` context-manager response shape doctor uses."""
+
+    def __init__(self, status: int, body: bytes = b""):
+        self.status = status
+        self._body = body
+
+    def read(self, *_a, **_k):
+        return self._body
+
+    def getcode(self):
+        return self.status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+def _stub_hosted(monkeypatch, handler):
+    """Replace `urllib.request.urlopen` for the duration of a test.
+
+    `_doctor_hosted_rows` imports it at CALL time, so patching the attribute on
+    `urllib.request` is what the production path resolves. Returns the list of
+    `(url, timeout)` pairs actually requested, so a test can assert on the
+    requests that were NOT made — the property this feature is most likely to
+    regress (a diagnostic that dials a keyless box).
+    """
+    import urllib.request
+
+    calls: list[tuple[str, int | None]] = []
+
+    def fake_urlopen(req, timeout=None):
+        url = getattr(req, "full_url", str(req))
+        calls.append((url, timeout))
+        return handler(url, req)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return calls
+
+
+def _write_credential(home, api_key: str, api_url: str | None = None) -> None:
+    """Seed the global credential store the resolver reads (mode-0600)."""
+    import json
+
+    store = home / ".tortoise"
+    store.mkdir(parents=True, exist_ok=True)
+    payload = {"api_key": api_key, "org_id": "org-1", "org_name": "agent-1"}
+    if api_url:
+        payload["api_url"] = api_url
+    path = store / "credentials.json"
+    path.write_text(json.dumps(payload))
+    path.chmod(0o600)
+
+
+#: A hosted-shaped key that is NOT a credential — built by concatenation so the
+#: literal can never be mistaken for (or scanned as) a live token. Used to prove
+#: `doctor` prints a mask and never the value.
+_FAKE_HOSTED_KEY = "t" + "t_" + "FAKEKEY0000000000000000000000"
+_FAKE_ENV_KEY = "t" + "t_" + "ENVKEY00000000000000000000000"
+
+
+class TestDoctorHostedCredential:
+    """#11912: `doctor` must be able to see the hosted half of the product.
+
+    The defect this pins: with a REVOKED key in `~/.tortoise/credentials.json`,
+    `doctor` printed `5 pass, 5 warn, 0 fail` and exited 0 while every hosted
+    command answered `401 Invalid API key` in the same minute. The tool that is
+    supposed to tell a user what is wrong certified a setup that could not make
+    a single hosted call.
+    """
+
+    def test_no_credential_makes_no_request_and_says_so(
+            self, clear_db_env, tmp_path, capsys, monkeypatch):
+        """A keyless box: no `Hosted` row at all, zero network calls.
+
+        This is the self-host install, and it is also #11912's target "0 network
+        calls when no credential is configured" — a diagnostic that dials a host
+        nobody configured is a probe against a system the user never named.
+        """
+        calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
+            f"no request may be made on a keyless box — dialled {url}"))
+        db_path = str(tmp_path / "keyless.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor keyless seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert calls == []
+        assert _row(out, "Hosted") is None, out[-1500:]
+        cred = _row(out, "Credentials")
+        assert cred is not None and "none configured" in cred, out[-1500:]
+        assert "ℹ️" in cred
+        assert rc in (0, 1)  # decided by the LOCAL rows, not by any request
+
+    def test_invalid_key_is_a_fail_not_a_pass(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """THE regression: a revoked key must not read `0 fail`.
+
+        Before this block existed the same invocation printed
+        `5 pass, 5 warn, 0 fail` and exited 0.
+        """
+        from urllib.error import HTTPError
+
+        _write_credential(_hermetic_hosted_identity, "tt_REVOKEDKEY000000000000000000")
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise HTTPError(url, 401, "Unauthorized",
+                            {"Content-Type": "application/json"},
+                            __import__("io").BytesIO(
+                                b'{"detail":"Invalid API key"}'))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "revoked.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor revoked seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "❌" in hosted, hosted
+        assert "401" in hosted, hosted
+        # The remedy the served refusal itself names — a verdict without a next
+        # step is the raw-error-envelope pattern `team info` already fixed.
+        assert "tortoise signup" in hosted and "tortoise recover" in hosted, hosted
+        assert "config show" in hosted, hosted
+        assert rc == 1, "a broken hosted credential must exit non-zero"
+        # The secret itself must never reach the transcript.
+        assert "tt_REVOKEDKEY000000000000000000" not in out
+
+    def test_valid_key_is_green_with_latency_and_identity(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A working identity is reported as working: latency, tier, org."""
+        _write_credential(_hermetic_hosted_identity, "tt_WORKINGKEY000000000000000000")
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}')
+            if url.endswith("/health") else
+            _FakeResponse(200, b'{"org_id":"org-9","tier":"anon"}')))
+        db_path = str(tmp_path / "valid.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor valid seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "✅" in hosted, hosted
+        assert "/v1/team accepted" in hosted, hosted
+        assert "in " in hosted and "s" in hosted  # measured latency, not a bare OK
+        assert "org-9" in hosted and "tier anon" in hosted, hosted
+        assert rc in (0, 1)
+        assert "tt_WORKINGKEY000000000000000000" not in out
+
+    def test_offline_makes_no_request_and_says_not_probed(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """`--offline` is the supported answer for a proxy / air-gapped runner.
+
+        The row says "not probed" so "untested" can never be read as "fine".
+        """
+        _write_credential(_hermetic_hosted_identity, "tt_REVOKEDKEY000000000000000000")
+        calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
+            f"--offline must make no request — dialled {url}"))
+        db_path = str(tmp_path / "offline.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor offline seed")
+
+        _run_doctor(["--offline"])
+        out = capsys.readouterr().out
+
+        assert calls == []
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "not probed" in hosted, out[-1500:]
+        assert "--offline" in hosted
+        # The credential row is still resolved and printed — the offline answer
+        # is "what would I send", which needs no network.
+        assert _row(out, "Credentials") is not None
+
+    def test_graph_scoped_403_is_information_not_a_failure(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A graph-scoped key is refused BY DESIGN — it must not be called broken.
+
+        `team info` already draws this line (`_ORG_INFO_REMEDIES`); a `❌` here
+        would tell a correctly-scoped user to re-mint a working key.
+        """
+        from urllib.error import HTTPError
+
+        _write_credential(_hermetic_hosted_identity, "tt_GRAPHSCOPEDKEY0000000000000")
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise HTTPError(url, 403, "Forbidden",
+                            {"Content-Type": "application/json"},
+                            __import__("io").BytesIO(
+                                b'{"detail":{"error_code":"GRAPH_SCOPED_TEAM_SURFACE"}}'))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "scoped.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor scoped seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "❌" not in hosted, hosted
+        assert "GRAPH_SCOPED_TEAM_SURFACE" in hosted, hosted
+        assert "by design" in hosted or "deliberate" in hosted, hosted
+        assert rc in (0, 1)
+
+    def test_degraded_health_is_a_warning_not_a_pass(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A 200 whose body says `degraded` is not "the product works".
+
+        The live hosted `/health` has returned `{"status":"degraded"}` while
+        `/v1/team` answered 200 — the key works and the service does not. Neither
+        a ✅ (which would hide it) nor a ❌ (which the user cannot fix) is honest.
+        """
+        _write_credential(_hermetic_hosted_identity, "tt_WORKINGKEY000000000000000000")
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"degraded"}')
+            if url.endswith("/health") else
+            _FakeResponse(200, b'{"org_id":"org-9"}')))
+        db_path = str(tmp_path / "degraded.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor degraded seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "⚠️" in hosted, hosted
+        assert "degraded" in hosted, hosted
+        assert "/v1/team accepted" in hosted, hosted
+
+    def test_env_key_names_its_source(self, clear_db_env, tmp_path, capsys,
+                                     monkeypatch):
+        """The env key is the highest-precedence candidate and is NAMED as such.
+
+        "which store won" is the question `config show` exists to answer; a
+        row that just says "a key is configured" leaves a store-shadowed user
+        chasing the wrong file.
+        """
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_ENVKEY0000000000000000000000")
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}')
+            if url.endswith("/health") else
+            _FakeResponse(200, b'{"org_id":"org-2"}')))
+        db_path = str(tmp_path / "env-key.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor env key seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        cred = _row(out, "Credentials")
+        assert cred is not None and "env:TORTOISE_API_KEY" in cred, out[-1500:]
+        assert "tt_ENVKEY0000000000000000000000" not in out
+
+    def test_trailing_slash_in_api_url_does_not_fake_a_broken_key(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A store/proxy endpoint ending in `/` must not read as a bad credential.
+
+        `f"{api_url}/v1/team"` on `https://host/` asks for `//v1/team`, which the
+        server answers 404 — the offline reporter's own failure mode, and the
+        reason every other hosted caller in this file rstrips the slash. Fresh
+        review of this change reproduced it before the fix.
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url="https://api.example.test/")
+        seen: list[str] = []
+
+        def handler(url, req):
+            seen.append(url)
+            return (_FakeResponse(200, b'{"status":"ok"}')
+                    if url.endswith("/health") else
+                    _FakeResponse(200, b'{"org_id":"org-3"}'))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "slash.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor slash seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "//health" not in " ".join(seen) and "//v1/team" not in " ".join(seen), seen
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "✅" in hosted, out[-1500:]
+        assert "accepted" in hosted, hosted
+
+    def test_transport_failure_scrubs_a_url_password(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """An unreachable endpoint must not echo the api_url's PASSWORD.
+
+        `http.client` interpolates the URL into its own exception text, so a
+        userinfo-bearing endpoint — realistic behind a proxy, which is exactly
+        the setup `--offline` advertises — would print the secret. Fixed in the
+        same review round; `_scrub` is the file's one rule for this (#5109).
+        """
+        password = "hunter2pass"
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url=f"https://svc:{password}@api.example.test/")
+
+        def handler(url, req):
+            raise ValueError(f"nonnumeric port: '{password}@api.example.test'")
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "scrub.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor scrub seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "❌" in hosted, out[-1500:]
+        assert password not in out, "the api_url password reached the transcript"
+        assert rc == 1
+
+    def test_health_5xx_with_a_working_key_is_a_warning(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A reachable-but-broken `/health` must not render `✅ … All checks passing!`.
+
+        The pass arm keyed on `/v1/team` alone, so a `/health` 500 with a 200 on
+        `/v1/team` printed a full green report (fresh review of this change).
+        """
+        from urllib.error import HTTPError
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                raise HTTPError(url, 500, "Server Error", {}, None)
+            return _FakeResponse(200, b'{"org_id":"org-4"}')
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "health5xx.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor health5xx seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "⚠️" in hosted, hosted
+        assert "/health returned 500" in hosted, hosted
+        assert "/v1/team accepted" in hosted, hosted
+
+
 class TestDoctorPath:
     def test_doctor_path_resolves_and_runs(self, clear_db_env, tmp_path, capsys):
         """--path <file> resolves to that embedded DB and runs."""

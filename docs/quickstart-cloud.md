@@ -168,6 +168,17 @@ which): when the key *and* the `api_url` match, a refusal applies to both; a dif
 — or the same key pointed at a different host — means a refusal on one says nothing about
 the other. `--json` gives the same report to a script.
 
+**`tortoise doctor` is the same question with a verdict.** Alongside its local rows it
+reports a `Credentials` row (the winning store, a masked key and a fingerprint) and a
+`Hosted` row: `GET /health` reachable with the measured latency, and `GET /v1/team`
+**accepted** or the server's exact refusal — so a revoked key reads `❌ Hosted: … 401
+Invalid API key` with the re-mint remedy, instead of a green report on a box whose
+every hosted command fails. With **no** credential configured it prints one
+`ℹ️` line (`self-hosted only`) and makes no request at all; `--offline` skips the two
+requests and says `not probed`, which is the answer for a proxy or an air-gapped
+runner. A `403`/`GRAPH_SCOPED_TEAM_SURFACE` refusal is reported as information, not a
+failure — the key is valid, its scope is narrower by design.
+
 Everyday commands:
 
 ```bash

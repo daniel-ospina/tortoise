@@ -2143,6 +2143,26 @@ def _cursor_home_isolation(monkeypatch):
     yield
 
 
+# ── #11912: ambient HOSTED-IDENTITY isolation ────────────────────────────
+# `doctor` now probes the hosted identity when one is configured, so an
+# operator's exported `TORTOISE_API_KEY` would send every `doctor`-calling test
+# in the suite to the REAL `api.premiselabs.co` — a live outbound request from a
+# test run, and (with a stale key) an unexpected `❌` row on a run that expected
+# a local-only verdict. The same ambient key already broke the self-host surface
+# gates (401s) for the same reason: one exported variable silently re-aims every
+# consumer. Cleared per test, exactly like `CODEX_HOME`/`CURSOR_HOME` above.
+#
+# The FILE source (`~/.tortoise/credentials.json`) is the other half and cannot
+# be scrubbed from here without redirecting `$HOME` for all 41k tests, so the
+# doctor module isolates HOME itself (`_hermetic_hosted_identity` in
+# test_doctor.py) and the hosted tests set their own store explicitly.
+@pytest.fixture(autouse=True)
+def _hosted_identity_env_isolation(monkeypatch):
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _disable_embedder_autowarmup(monkeypatch):
     """#2952: keep the engine-init embedder warm-up out of the test suite.
