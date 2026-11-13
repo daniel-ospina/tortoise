@@ -76,7 +76,7 @@ Round 2 said *"retires the node in **every** reader"*. That is true of the ident
 **false of every retrieval reader**, and the difference matters because it is the difference between "a redirect
 is a worse merge" and "a redirect is a merge **plus** a visible duplicate".
 
-**The identity readers — six reads, five of which retire the carrier:**
+**The identity readers — nine reads, eight of which retire the carrier:**
 
 | reader | line at `f33f5e2c3215` | what it does |
 |---|---|---|
@@ -84,8 +84,11 @@ is a worse merge" and "a redirect is a merge **plus** a visible duplicate".
 | the by-name resolver | `entity_resolver.py:611` (the `$k IN n.aliases` arm), hop at `:624` | matches the carrier by its own `canonical_name`, then `follow_resolved_from` **returns the survivor** |
 | the write-side union | `entity_identity.py:466` `_live_holders_same_entity` → `_collapse_resolved_holders` (`:350`, hop `:384`) | collapses each carrier onto its survivor and counts DISTINCT ids |
 | the create verb | `entity_identity.py:593-594` (`resolve_or_mint`) | a write of the variant lands on the **survivor** |
+| the fold-name resolver | `entity_identity.py:621` `resolve_fold_name`, collapse at `:729` | collapses carriers before resolving a folded name |
+| the id resolver | `entity_identity.py:1102` `resolve_entity_id`, collapse at `:1173` | collapses carriers itself — its own comment at `:1164-1172` is about this exact disagreement |
+| the role-holder resolver | `entity_resolver.py:878` `resolve_role_holder`, hop at `:933` | *"A merged-away carrier is not the holder any more (same rule as the write path): hop to the entity the merge recorded"* |
 | the ANY-status / un-collapsed read | `entity_identity.py:410` `_name_holder_ids_same_entity` | deliberately does **not** collapse (a held name must not read as unheld) |
-| the onboarding seed's anchor collapse | `onboarding/seed.py:271` `_collapse_merged_anchor_rows`, hop at `:307` (`target = cur.get("resolved_from")`) | collapses merged-away carriers onto their survivor, docstring *"**any status**"* — a sixth identity-side read, added in cycle 5's sweep |
+| the onboarding seed's anchor collapse | `onboarding/seed.py:271` `_collapse_merged_anchor_rows`, hop at `:307` (`target = cur.get("resolved_from")`) | collapses merged-away carriers onto their survivor, docstring *"**any status**"* — one of the eight that retire |
 
 **The retrieval readers — none of them knows the property exists.** Measured counts at this head:
 
@@ -133,9 +136,9 @@ back as one (there is no inverse: given an alias you cannot recover which varian
 what score). **So the answer to the brief's question is: yes, a non-retiring pointer exists — and restoring
 round 1's N-4 with it is not possible, because what N-4 needs is the verdict, not the pointer.**
 
-### 8.1.2 `dedup_reviewed='link'` is read by nothing
+### 8.1.2 `dedup_reviewed='link'` is read by nothing *value-aware*
 
-**Verdict: CONFIRMED — but ⛔ CORRECTED on two of round 2's supporting claims, in the direction that costs
+**Verdict: CONFIRMED for *value-aware* reads — but ⛔ CORRECTED on two of round 2's supporting claims, in the direction that costs
 work.** Round 2 said *"read by nothing"* and this lane's first draft added *"written by nothing"*. **The read
 half is right for every value-aware reader, and wrong for the one reader that is value-agnostic — and the write
 half is wrong outright.**
@@ -286,9 +289,11 @@ fixture"*. Given (d), **a distributions-only M3 under-reads and a rank-only M3 o
 6. **A stated tie rule.** Both scorers must be read through the same `recency_tie_clause`
    (`search_engine.py:2993`), or the comparison is measuring tie order.
 
-**Contradiction test:** no recorded decision is reversed. V1 gates the **index location**; M3 *is* V1's own named
-measurement (`SEARCH-ARCHITECTURE.md:268`, `:517`) and is pre-authorised inside `#12186`. Requirements 3–4 narrow
-M3; they do not move its scope, and they add no new gate.
+**Contradiction test:** no recorded decision is reversed. The **text-index** ruling gates the **index location** —
+*"the text index **stays** until **M3** measures a BM25-capable Postgres option"* (`SEARCH-ARCHITECTURE.md:268`) — and
+M3 *is* that ruling's own named measurement (`:517`), pre-authorised inside `#12186`. ⚠️ **Not V1**: V1 is the
+***vector*-index** question (`STORAGE-ARCHITECTURE.md:1581`), resolved by the pgvector move (`SEARCH-ARCHITECTURE.md:25`).
+Requirements 3–4 narrow M3; they do not move its scope, and they add no new gate.
 
 ### 8.1.4 Zep's Jaccard is over 3-gram NAME shingles with an LSH candidate universe, and reads no edge
 
@@ -443,7 +448,9 @@ there, not filed as a peer** (§8.6).
 `tortoise_fts_query(<X's folded name>, entity_type="object", limit=3, include_terminal=True)` and check whether
 `X.id` is in the rows. If it is not, D-1 is wrong and this section is dropped.
 
-**Contradiction test:** **no recorded decision reaches this work.** V1 gates the index location; §12.2/§12.2c gate
+**Contradiction test:** **no recorded decision reaches this work.** The **text-index** ruling
+(`SEARCH-ARCHITECTURE.md:268`) gates the index location and **V1** gates the ***vector*** index
+(`STORAGE-ARCHITECTURE.md:1581`); §12.2/§12.2c gate
 what earns a vector; §14.3 V3 + the KEEP ruling gate the embeddings' existence; §2.0 gates the record/cache split;
 the D-block decisions and §7/§17.4.6 gate the read ledger. D-1 is a completeness defect in the merge's read side.
 
@@ -619,7 +626,7 @@ should take, and it is the shape §8.1.5 already settled.
 | §8.1.1 `resolved_from` is a merge in identity and a duplicate in retrieval | **no recorded decision reaches this work** | statement about code |
 | §8.1.1b `aliases[]` is the only non-retiring pointer, and pointer ≠ link | **no recorded decision reaches this work** — it informs the `#2730` owner question, it does not answer it | evidence for that home |
 | §8.1.2 `'link'` is read by nothing *value-aware* — and it IS writable, which is worse than unread (this is §8.1.2's own verdict, **not** the retracted "neither written nor read") | **no recorded decision reaches this work** | statement about code |
-| §8.1.3 M3's six requirements | **none reversed** — V1 (`SEARCH-ARCHITECTURE.md:268`) gates the index *location*; M3 **is** V1's own named measurement (`:517`), pre-authorised inside `#12186`; this only narrows M3's metric set | **obeyed** |
+| §8.1.3 M3's six requirements | **none reversed** — the **text-index** ruling (`SEARCH-ARCHITECTURE.md:268`) gates the index *location*; M3 **is** that ruling's own named measurement (`:517`), pre-authorised inside `#12186`. ⚠️ **Not V1**, which is the *vector*-index question (`STORAGE-ARCHITECTURE.md:1581`); this only narrows M3's metric set | **obeyed** |
 | §8.1.4 Zep: name shingles, no edge, deterministic-first | **no recorded decision reaches this work** | statement about a third party |
 | §8.1.5 shared-neighbour scoring is Hindsight's shape, gated on `aboutObject` fill | **no recorded decision reaches this work.** It moves nothing about the vector (§12.2c), the index (V1), the embeddings (V3/KEEP) or the record/cache split (§2.0) | candidate, gated on `#4211`'s substrate |
 | §8.2 D-1 the merge does not de-duplicate retrieval | **no recorded decision reaches this work** | **defect** |
@@ -629,7 +636,8 @@ should take, and it is the shape §8.1.5 already settled.
 | §8.3.4 Mastra: no **similarity-based** retrieval step (the narrower claim — see §8.3.4's two withdrawals) | **it touches none of the records listed at the end of this section**; the D block's suspension (§7/§17.4.6) is untouched | scope note only |
 | §8.3.5 topology never decides identity in the field | **no recorded decision reaches this work** | supports B1 staying a *verdict*, not a similarity threshold |
 
-**Not reversed, and checked explicitly:** the **KEEP ruling** (`#11395`), **V1**, **§12.2/§12.2c**, **§14.3 V3**,
+**Not reversed, and checked explicitly:** the **KEEP ruling** (`#11395`), **V1**, the **text-index-stays-until-M3**
+ruling (`SEARCH-ARCHITECTURE.md:268`), **§12.2/§12.2c**, **§14.3 V3**,
 **§2.0**, the **no-eviction / projection-window** rule, and **§7 + §17.4.6's ban on the read ledger as an
 admission-control signal**. This round proposes nothing that touches any of them, and §8.2's D-1 is a completeness
 fix on the merge, not a change to what is stored.
@@ -640,7 +648,7 @@ fix on the merge, not a change to what is stored.
 
 1. **Round 2's `resolved_from` conclusion survives; its wording does not.** "Retires the node in every reader" →
    **"retires it in every identity read that decides *which entity a name lands on*, and in none of the retrieval
-   readers."** ⛔ That is **five of the six** (see §8.1.1's table): the sixth, `_name_holder_ids_same_entity`
+   readers."** ⛔ That is **eight of the nine** (see §8.1.1's table): the ninth, `_name_holder_ids_same_entity`
    (`entity_identity.py:410`), deliberately does **not** collapse, because a held name must not read as unheld —
    so "every identity reader" would overstate by one. N-4's dispatch readiness is
    unchanged (still blocked on `SAME_AS`), and the redirect is now a *worse* substitute than round 2 said, because
