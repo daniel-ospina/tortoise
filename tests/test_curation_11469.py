@@ -4611,12 +4611,25 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     assert m, "the doc no longer states the enumerable population as a sum of its classes"
     pts, srcs, ops, evts, total = (int(g.replace(",", "")) for g in m.groups())
     assert pts + srcs + ops + evts == total, (pts, srcs, ops, evts, total)
-    # The Event class-table ROW must agree with the population's events addend — the exact
-    # check that catches the round-3 defect (a row updated without the population line).
+    # The BY-NODE-TYPE Event row must agree with the population's events addend — the
+    # exact check that catches the round-3 defect (a row updated without the population
+    # line). ⚠️ This is doc:49, NOT the class table: its `**Event**` bold-count shape is
+    # unique to the node-type table.
     row = _re.search(r"^\| \*\*Event\*\* \| \*\*([\d,]+)\*\*", doc, _re.M)
-    assert row, "the class table has no Event row"
+    assert row, "the by-node-type table has no Event row"
     assert int(row.group(1).replace(",", "")) == evts, (
         f"the Event row states {row.group(1)} but the population line counts {evts:,}")
+    # ⛔ ...and the CLASS table's own Event row, which the assertion above does NOT reach
+    # (review cycle 6 measured it: the regex above matches the by-node-type row, so
+    # setting this one to 4,671 left the file at 236 passed). Its shape is different —
+    # a backticked kind and an unbolded count — so it needs its own parse. Without this,
+    # the class table can contradict its own population and dispositions lines silently,
+    # which is precisely the self-contradiction the check exists to catch.
+    cls = _re.search(r"^\| `event` \(session container\) \| ([\d,]+) \(", doc, _re.M)
+    assert cls, "the class table has no `event` (session container) row"
+    assert int(cls.group(1).replace(",", "")) == evts, (
+        f"the class-table Event row states {cls.group(1)} but the population line counts "
+        f"{evts:,}")
     # ...and the dispositions line must add up to the same population.
     assert f"127 carry · 5 not-carried · {total - 132:,} undecidable" in flat, (
         "the dispositions line does not add up to the population")
