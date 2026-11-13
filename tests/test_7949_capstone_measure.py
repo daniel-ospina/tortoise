@@ -5302,11 +5302,20 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
 
     The hand scan it replaces also could not see an INDENTED entry. Measured at this
     head with `parse_manifest_text`: THIS module (`test_7949_capstone_measure.py`) is
-    registered indented in `core` (898 entries) and is NOT in `sdk` (128 entries);
-    the ENTRY (`test_pack_logic_writeprobe_11083.py`) is registered indented in BOTH
-    (`core` index 653, `sdk` index 30 — INDICES, and the indices are what a test can
-    assert; the LINE numbers of both rows move on the next registration, so none is
-    printed here). ⚠️ THAT DISTINCTION IS THE WHOLE POINT AND AN EARLIER
+    registered INDENTED in `core` and is NOT in `sdk`; the ENTRY
+    (`test_pack_logic_writeprobe_11083.py`) is registered INDENTED in BOTH, i.e. in
+    the `<surface>:` blocks `tools/ci_selection.py::register_tests` splices into —
+    which is why a scan that reads COLUMN-0 rows alone cannot see it, and why the row
+    that carries it in a column-0 block is the one this pin reads instead.
+    ⛔ NEITHER A COUNT NOR AN INDEX IS PRINTED HERE, and an INDEX is NOT the stable
+    alternative the first cut of this paragraph claimed it was: this PR's own merge
+    of `origin/main` moved the entry's `core` index 653 -> 655 (898 -> 902 entries)
+    while the claim it sits in was untouched, because an index moves on any
+    registration ABOVE the entry exactly as a line number does. A number nobody
+    re-derives is the class this pin exists to delete, so the stable statement is the
+    MEMBERSHIP fact — indented in `core`, indented in `sdk`, absent from `sdk` for
+    this module — which is what the hand scan could not see. ⚠️ THAT DISTINCTION IS
+    THE WHOLE POINT AND AN EARLIER
     REVISION LOST IT: the paragraph conflated the two files and then added a
     `⚠️ CORRECTED` marker asserting the tree refuted "sdk does not hold it" — which
     is TRUE of this module and FALSE of the entry. A marker that declares a correct
