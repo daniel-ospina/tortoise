@@ -510,8 +510,10 @@ def _unserved_vector_reason(label: str) -> str:
 #:
 #: ⚠️ `hosted_backup` REPORTS THE SAME SPELLING, not the same sentence: it builds an
 #: edge entry as `<relationship:TYPE>` too, so one defect has ONE vocabulary for its
-#: KEYS. Its own operator warning still says "unserved label(s)" over a list that can
-#: contain one; that wording is untouched here and named rather than claimed away.
+#: KEYS. Its `restore_graph` drop warning now says "unserved target(s)" and its REMEDY
+#: clause is target-aware — a relabel repairs a node's vector, and no relabel can repair
+#: an edge's, so an edge-only drop says exactly that (`#12015` review round 3). The
+#: `restore_backup`/`_require_served_restore_labels` messages keep their own wording.
 #: The key format itself has ONE owner since this review —
 #: :func:`relationship_target` / :data:`RELATIONSHIP_TARGET_PREFIX`.
 

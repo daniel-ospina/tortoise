@@ -1278,7 +1278,7 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     # same way) — a DR verb should not pull another subsystem's import graph in at module
     # scope. There is no cycle here (`cache_projection` never imports `hosted_backup`), so
     # module scope would also work; this is the lighter of two valid choices, not a constraint.
-    from tortoise.cache_projection import relationship_target
+    from tortoise.cache_projection import is_relationship_target, relationship_target
 
     dropped_vector_labels = sorted({
         label
@@ -1379,14 +1379,33 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         result["dropped_edge_endpoints"] = missing_endpoints
     if dropped_vectors:
         # Only reachable with allow_unserved_vectors=True — same rule: the strict
-        # path raised before any node was created. Reported, never silent, and the
-        # NODES are still restored so a relabel migration can repair them.
+        # path raised before any node was created. Reported, never silent, and what
+        # SURVIVES differs by target — so the REMEDY half must differ too. A node keeps
+        # its label, so a relabel migration repairs its vector; a RELATIONSHIP has no
+        # label at all, so no relabel can ever repair that one and only an explicit
+        # property clear removes it (`#12015` review round 3: this clause said "nodes
+        # kept so a relabel migration can repair them" over an edge-only drop, naming a
+        # repair that cannot exist for the object that actually survived).
         # ⚠️ Logged as well as returned, exactly as `dropped_edges` is: a caller that reads only
         # `counts["nodes"]/["edges"]` would otherwise lose real vectors with nothing in the log.
+        node_targets = [t for t in dropped_vector_labels
+                        if not is_relationship_target(t)]
+        edge_targets = [t for t in dropped_vector_labels
+                        if is_relationship_target(t)]
+        if edge_targets and not node_targets:
+            remedy = ("edges kept — a relationship has no label, so NO relabel "
+                      "migration can repair that vector; only an explicit property "
+                      "clear removes it")
+        elif edge_targets:
+            remedy = ("nodes kept so a relabel migration can repair them, and the "
+                      "edges kept beside them, whose vectors no relabel can repair "
+                      "(a relationship has no label)")
+        else:
+            remedy = "nodes kept so a relabel migration can repair them"
         logger.warning(
-            "restore_graph: dropped %d vector(s) on unserved label(s) %s — "
-            "allow_unserved_vectors=True (nodes kept so a relabel migration can repair them)",
-            dropped_vectors, dropped_vector_labels,
+            "restore_graph: dropped %d vector(s) on unserved target(s) %s — "
+            "allow_unserved_vectors=True (%s)",
+            dropped_vectors, dropped_vector_labels, remedy,
         )
     if allow_unserved_vectors:
         # Unconditional under the flag, unlike `dropped_edges` above: the docstring promises the

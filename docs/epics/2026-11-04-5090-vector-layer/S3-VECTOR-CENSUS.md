@@ -336,7 +336,7 @@ the falsifier for the PLANTED property set, without which reverting that derivat
 `embedding` red no row at all), seven by `#11455` (all seven are row-1 shipped-default tests), and one by this PR's round-9 fresh review,
 which SCORES the `#11455` clause itself (`test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool`
 — reverting `on_by_default = deployment["on"]` to the any-surface bool left every other row-1 test
-green, so the artefact `#11086` item 4 is ticked on was pinned nowhere), and one by this change
+green, so the artefact `#11086` item 4 is ticked on was pinned nowhere), and one by `#12284`
 (`test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently` — `#9314`'s missing
 pytest-lane catcher: a duplicated literal key in `WRITER_CENSUS`/`CENSUS_EVIDENCE` collapses
 before any code can see it, so only `ruff`'s `F601` caught `#11996`'s pair, post-merge), and three by
