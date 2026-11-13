@@ -38,6 +38,8 @@ carrying it or declared as a known gap.
 
 from __future__ import annotations
 
+import ast
+import fnmatch
 import hashlib
 import io
 import os
@@ -45,6 +47,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -1318,6 +1321,52 @@ def _textual_jobs(text: str) -> list[tuple[str, list[str], list[str]]]:
     return out
 
 
+#: The suffixes GitHub Actions will RUN as a workflow. BOTH, not a convention: GitHub
+#: documents `.github/workflows/<name>.yml` **or** `.yaml` — verbatim, *"Workflow files use
+#: YAML syntax, and must have either a .yml or .yaml file extension"*
+#: (workflow-syntax reference) — and a workflow in either extension triggers on every event
+#: like any other. Until #12238 this module globbed
+#: `*.yml` alone at every ENUMERATION site, so no enumeration scan opened a `.yaml`
+#: workflow — `_jobs` was never called on it, its jobs could not appear in
+#: `test_every_pool_eligible_gh_job_is_declared`'s output, and nothing in the suite said
+#: a file had been skipped. That is the same silent skip in the same fail-open direction
+#: the rest of this file exists to close. ⛔ The hole was the ENUMERATION, not opening as
+#: such: a `.yaml` workflow NAMED BY HAND in `GH_JOBS` or `ADVISORY_MOUNTS` was still read
+#: (`_job_block` and the advisory pin call `path.read_text()` on a literal filename and
+#: check no extension), which is why this is a silent skip in the COVERAGE scan and not in
+#: the declared-job pins. Latent rather than live (measured: no `.yaml`
+#: workflow is in the tree), and a tuple rather than two globs so a reader adds in ONE
+#: place.
+_WORKFLOW_SUFFIXES = (".yml", ".yaml")
+
+
+def _workflow_paths(root: Path | None = None) -> list[Path]:
+    """Every workflow file GitHub will run — the ONE enumeration site (#12238).
+
+    Why centralised: the narrow glob looked CORRECT at each site, which is why it was
+    written three times in this file. Repairing each site leaves the fourth to be written
+    next week, so every scan derives from `_WORKFLOW_SUFFIXES` through this function, and
+    `test_no_site_spells_the_workflow_glob_one_sidedly` reds if a one-extension glob reappears.
+    That pin grades TWO ways (see `_opens`) — what the PATTERN matches, and, for a wildcarded
+    pattern, what it literally SPELLS — because the match arm alone is population-dependent;
+    the pin's SCOPE states what neither arm reaches.
+
+    `root` exists so a pin can drive the REAL scan on a synthetic tree; it defaults to the
+    repo's own directory at CALL time, so it follows `WORKFLOWS`.
+
+    WHAT THIS CANNOT SEE, stated rather than left to be assumed: GitHub's documented
+    storage location is the `.github/workflows` DIRECTORY (*"You must store workflow files in
+    the .github/workflows directory of your repository"*), so the population this enumerator
+    must cover is that directory's own files — it reads direct children and does not descend
+    into a subdirectory, which the docs do not name as a workflow location. And only these
+    two suffixes exist, so a workflow this enumerator misses does not exist. Whether an
+    ENUMERATED workflow actually runs is a different question, answered by
+    `KNOWN_DISABLED_WORKFLOWS` and its own pin.
+    """
+    base = WORKFLOWS if root is None else root
+    return sorted({path for suffix in _WORKFLOW_SUFFIXES for path in base.glob(f"*{suffix}")})
+
+
 def _jobs(path: Path) -> list[tuple[str, list[str]]]:
     """(job name, its lines) for every job in a workflow file.
 
@@ -1898,7 +1947,7 @@ def _undeclared_gh_jobs(
     catch.
     """
     undeclared: list[str] = []
-    for path in sorted(workflows.glob("*.yml")):
+    for path in _workflow_paths(workflows):
         for job, body in _jobs(path):
             text = "\n".join(body)
             if not _poolable_label(text):
@@ -2071,7 +2120,7 @@ def test_the_job_splitter_returns_exactly_the_jobs_yaml_declares(tmp_path):
     cannot pass by agreeing with `_jobs`' own mistakes.
     """
     wrong = []
-    for path in sorted(WORKFLOWS.glob("*.yml")):
+    for path in _workflow_paths():
         declared = set((yaml.safe_load(path.read_text()) or {}).get("jobs") or {})
         split = [name for name, _ in _jobs(path)]
         if set(split) != declared or len(split) != len(declared):
@@ -2741,7 +2790,7 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
     # spelling beat it: `>2`/`>-2` (indicator), `"run":`/`run :` (key), `&a`/`!!str` (one
     # decoration), `&a !!str` (two), `!<tag:…>` (verbatim form), `>` on the next line (the
     # plainest spelling of all), `>` after a COMMENT line, a bare `!` tag, and the explicit-key
-    # `? run` / `: >` form. So `_yaml_run_scalars` asks PyYAML: the composer folds, and this row
+    # `? run` / `: >` form. So `_yaml_jobs` asks PyYAML: the composer folds, and this row
     # asserts the ANSWER rather than the pattern. Every spelling below is one the runner
     # really folds into a single executing command — verified against `yaml.safe_load`.
     for header in (
@@ -3126,7 +3175,7 @@ def test_an_expression_valued_runs_on_keeps_its_job_in_the_scan():
     """
     seen = {
         (path.name, job)
-        for path in sorted(WORKFLOWS.glob("*.yml"))
+        for path in _workflow_paths()
         for job, body in _jobs(path)
         if _poolable_label("\n".join(body))
     }
@@ -3136,4 +3185,426 @@ def test_an_expression_valued_runs_on_keeps_its_job_in_the_scan():
         "text cannot resolve to a label — the scan must fail CLOSED on it (assume the "
         "job can reach the pool), because a silent skip removes the job from "
         "`test_every_pool_eligible_gh_job_is_declared`'s surface entirely (#9018)"
+    )
+
+
+def test_a_dot_yaml_workflow_is_scanned_like_a_dot_yml_one(tmp_path):
+    """#12238: GitHub RUNS `*.yaml`, so a scan that globs `*.yml` is silently blind to it.
+
+    ⛔ THE DEFECT IS THE SILENCE, NOT THE COUNT. Every enumeration site in this module
+    globbed `*.yml`, so no enumeration scan opened a `.yaml` workflow: `_jobs` never saw
+    it (a `.yaml` named BY HAND in `GH_JOBS`/`ADVISORY_MOUNTS` was still read by
+    `_job_block`/`read_text` — the hole is the enumeration, not opening), the
+    coverage scan could not name its jobs, and nothing in the output said a file had been
+    skipped — this suite stayed GREEN while a `gh`-using pool job in that file would die
+    `line 2: gh: command not found` / exit 127, the exact red-that-reads-as-a-harness-defect
+    this module exists to prevent (#9018). Latent rather than live: no `.yaml` workflow is
+    in the tree today (measured: 41 workflow files, all `.yml`).
+
+    So the pin is the DISCLOSURE — one synthetic workflow, the scan's own entry point, and
+    the assertion that the hazard is REPORTED — driven twice with the EXTENSION as the only
+    variable. A pin on the enumerator's length would stay green under a scan that never
+    consumed it, which is the half-fix this issue is written against.
+    """
+    body = (
+        "name: synth\n"
+        "on: push\n"
+        "jobs:\n"
+        "  yaml-only:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: gh pr view 1 --json number\n"
+    )
+    scripts = _gh_executing_scripts()
+
+    (tmp_path / "synthetic.yml").write_text(body)
+    assert _undeclared_gh_jobs(tmp_path, scripts, set(), set()) == ["synthetic.yml::yaml-only"]
+
+    # The extension is the ONLY difference between this call and the one above.
+    (tmp_path / "synthetic.yml").unlink()
+    (tmp_path / "synthetic.yaml").write_text(body)
+    assert _undeclared_gh_jobs(tmp_path, scripts, set(), set()) == ["synthetic.yaml::yaml-only"], (
+        "a `*.yaml` workflow is invisible to the scan. GitHub runs both extensions, so a "
+        "`gh`-using pool job in a `.yaml` workflow joins the #9018 gap with this suite "
+        "GREEN and nothing naming the file (#12238)"
+    )
+
+
+def test_the_enumerator_returns_every_workflow_file_github_would_run():
+    """An INDEPENDENT read of the directory, not a second call to the same glob.
+
+    Compared against `iterdir()` filtered by a LITERAL suffix pair — not by
+    `_WORKFLOW_SUFFIXES` — so the enumerator cannot pass by agreeing with itself, the same reason
+    `test_the_job_splitter_returns_exactly_the_jobs_yaml_declares` compares `_jobs` against
+    `yaml.safe_load` rather than against a hand-written expectation.
+
+    WHAT THIS PIN CANNOT SEE, measured rather than assumed: the tree holds 0 `.yaml` workflows, so
+    dropping `".yaml"` from `_WORKFLOW_SUFFIXES` leaves this comparison GREEN (41 == 41) — the
+    narrowed enumerator misses nothing that exists. The dropped entry is caught by the tuple
+    assertion in `test_no_site_spells_the_workflow_glob_one_sidedly` and by the synthetic `.yaml`
+    in `test_a_dot_yaml_workflow_is_scanned_like_a_dot_yml_one`, not here. What THIS pin answers is
+    that the enumerator and the directory agree, and that the population is non-empty.
+
+    The population assertion is not decoration: with an EMPTIED `.github/workflows`, a
+    two-sided comparison is `set() == set()` and passes while proving nothing — a gate that
+    reports OK when it examined nothing, which is the shape `#12238` is about one layer up.
+    (An UNREADABLE directory is a different case and needs no help: `iterdir()` raises and the
+    test reds, which is the safe direction — this assertion is about the empty population.)
+    """
+    on_disk = {p.name for p in WORKFLOWS.iterdir() if p.is_file() and p.suffix in (".yml", ".yaml")}
+    assert on_disk, (
+        f"no workflow files found in {WORKFLOWS} — this comparison is two empty sets and "
+        "proves nothing (a gate that examined nothing must not read as a pass)"
+    )
+    assert {p.name for p in _workflow_paths()} == on_disk, (
+        "`_workflow_paths()` does not return every workflow file in `.github/workflows` — "
+        "a workflow it omits is never covered by the enumeration scans in this module "
+        "(hand-declaring it in `GH_JOBS` still reads it, but the coverage scan cannot see "
+        "it) (#12238)"
+    )
+
+
+def _glob_calls(source: str) -> list[tuple[int, str, str, list[str]]]:
+    """`(line, receiver, method, string literals)` for every `glob(`/`rglob(` call in `source`.
+
+    ⛔ TOKENIZED, NOT TEXT-SCANNED — the third answer to this question rather than the first,
+    and the same lesson `_yaml_jobs` records above. Cut 1 matched
+    `glob("<star>.yml")` literally. Cut 2 read the argument up to the first `)` and was beaten
+    by the repo's own idiom `glob.glob(str(WORKFLOWS) + "/*.yml")`, whose argument CONTAINS a
+    `)` — and it also reddened on its own docstring, because a hand-rolled quote tracker cannot
+    tell a delimiter from a quote inside prose. Both are the same defect: guessing Python's
+    structure from characters. `tokenize` knows it, so this asks `tokenize`.
+
+    A call is a NAME token `glob`/`rglob` (the `glob.glob` form included, where the NAME is the
+    attribute) immediately followed by `(`; the argument span is found by counting PAREN
+    TOKENS, so a paren or quote inside a string cannot unbalance it; the patterns are the
+    STRING tokens in the span, `ast.literal_eval`-ed. An f-string is tokenized as
+    FSTRING_START/MIDDLE/END, so its literal FRAGMENTS are what the source holds — they are
+    collected as FRAGMENTS (never joined into a pattern, which only executing the code could
+    produce), and the test's SCOPE states exactly what that does and does not reach.
+
+    `receiver` is the NAME before the dot (`WORKFLOWS` in `WORKFLOWS.glob(…)`), carried for the
+    failure MESSAGE only — no grading decision reads it. An earlier cut excused a one-sided call
+    when a complementary call existed on the same receiver; that exemption was removed (cut 5 of
+    `test_no_site_spells_the_workflow_glob_one_sidedly`) because it licensed reverting one of this
+    PR's own sites to a narrow glob with all 53 tests green. Do not reintroduce one, and do not
+    read this field as evidence that a receiver-based pairing is sound.
+    """
+    out: list[tuple[int, str, str, list[str]]] = []
+    tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    for i, token in enumerate(tokens):
+        if token.type != tokenize.NAME or token.string not in {"glob", "rglob"}:
+            continue
+        if i + 1 >= len(tokens) or tokens[i + 1].string != "(":
+            continue
+        receiver = ""
+        if i >= 2 and tokens[i - 1].string == "." and tokens[i - 2].type == tokenize.NAME:
+            receiver = tokens[i - 2].string
+        literals: list[str] = []
+        depth = 0
+        for inner in tokens[i + 1 :]:
+            if inner.type == tokenize.OP and inner.string == "(":
+                depth += 1
+            elif inner.type == tokenize.OP and inner.string == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif inner.type == tokenize.STRING:
+                try:
+                    value = ast.literal_eval(inner.string)
+                except (ValueError, SyntaxError):
+                    continue
+                if isinstance(value, str):
+                    literals.append(value)
+            #: FRAGMENTS, NOT PATTERNS: an f-string's literal middle is the only part of it the
+            #: source holds, so it is collected as a fragment and graded as one — `f"*.yml"`
+            #: yields `"*.yml"` (one-sided, reds) while the module's own `f"*{suffix}"` yields
+            #: `"*"` (matches both, clean). Measured; the SCOPE states what fragments miss.
+            elif inner.type == tokenize.FSTRING_MIDDLE:
+                literals.append(inner.string)
+        out.append((token.start[0], receiver, token.string, literals))
+    return out
+
+
+#: The witness names a pattern is graded against: EVERY real workflow stem, asked twice — as
+#: `<stem>.yml` and as `<stem>.yaml`. One fixed witness is not enough, and review round 4 measured
+#: why: `glob("ci*.yml")` matches four real workflows and `glob("[!x]*.yml")` matches all 41, yet
+#: neither matches a single hard-coded name like `x.yml`, so a one-sided probe graded BOTH clean.
+#: The twins are synthesised, so the `.yaml` side is asked even though no `.yaml` workflow exists
+#: today (#12238 is precisely about the file that does not exist yet).
+_PROBE_STEM = "probe-workflow"
+
+
+def _workflow_probe_names() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """`(names ending .yml, the same stems ending .yaml)` — the real population plus twins."""
+    stems = sorted({path.stem for path in _workflow_paths()} | {_PROBE_STEM})
+    return tuple(f"{stem}.yml" for stem in stems), tuple(f"{stem}.yaml" for stem in stems)
+
+
+def _glob_matches(pattern: str, names: tuple[str, ...]) -> bool:
+    """Would this glob PATTERN match a workflow filename in `names`?
+
+    Asked with `fnmatch` on the pattern's LAST PATH SEGMENT, so `**/`, directory prefixes,
+    character classes, and a concatenation whose literal part alone carries the whole pattern
+    (this repo's own `glob.glob(str(WORKFLOWS) + "/*.yml")`) are graded by what they MATCH rather
+    than by how they are spelled — the distinction three review rounds were spent on. ⛔ NOT every
+    concatenation: `glob("*" + ".yml")` arrives as two fragments that are graded SEPARATELY and
+    never joined, so it stays clean (declared in the pin's SCOPE). A pattern with NO
+    wildcard (`python-ci.yml`, a deliberate single-workflow reference, or a tuple of REQUIRED
+    filenames) can open at most one file per pattern, so it is not an EXTENSION-CLASS enumeration
+    and it matches nothing here by construction: `"*.yml"` still reds, while `glob("python-ci.yml")`
+    and a filename tuple stay clean instead of reding as "one-sided enumerations" (measured,
+    review round 7).
+    """
+    segment = pattern.rsplit("/", 1)[-1]
+    if not any(ch in segment for ch in "*?["):
+        return False
+    return any(fnmatch.fnmatchcase(name, segment) for name in names)
+
+
+def _spells_one_extension(pattern: str, ext: str) -> bool:
+    """A wildcarded pattern that literally spells `ext` and not the other extension.
+
+    POPULATION-INDEPENDENT ON PURPOSE, and the second half of the grade. Matching alone is not
+    enough: `WORKFLOWS.glob("release*.yml")` matches no workflow in this tree (41 files, none
+    starting `release`), so a match-only grade reads it as "not a workflow glob" and passes —
+    while it IS a fourth one-sided enumeration, and a workflow rename or removal can silently
+    disarm a site that reds today (measured, review round 8).
+
+    A wildcard is required. A pattern with none (`python-ci.yml`, a deliberate single-workflow
+    reference or a tuple of required filenames) enumerates nothing and is not graded — that is
+    the over-block review round 7 removed.
+    """
+    segment = pattern.rsplit("/", 1)[-1]
+    if not any(ch in segment for ch in "*?["):
+        return False
+    other = ".yaml" if ext == ".yml" else ".yml"
+    return ext in segment and other not in segment
+
+
+def _opens(pattern: str, names: tuple[str, ...], ext: str) -> bool:
+    """Can this pattern open `ext` workflows — by what it MATCHES, or by what it SPELLS?
+
+    Both arms are needed and neither subsumes the other. Matching is population-dependent (a
+    pattern whose stems the tree does not hold matches nothing), spelling only sees a LITERAL
+    extension (a computed one from an f-string fragment matches but spells nothing). Every
+    grading site asks this ONE question, so the two halves cannot disagree about what a call
+    opens.
+    """
+    return _glob_matches(pattern, names) or _spells_one_extension(pattern, ext)
+
+
+def _one_sided_workflow_pattern_constants(
+    yml_names: tuple[str, ...], yaml_names: tuple[str, ...]
+) -> list[str]:
+    """Module-level string constants that spell a one-sided workflow glob — the file's OWN idiom.
+
+    Why this exists: `_SCRIPT_GLOBS` is a tuple of patterns consumed as
+    `for pattern in _SCRIPT_GLOBS: REPO.glob(pattern)`, so a reader adding a fourth enumeration
+    site has that precedent to copy — and a call whose argument is a bare NAME has no literal in
+    its span for `_glob_calls` to grade (measured, review round 4). Module globals resolve the
+    pattern after all.
+
+    A tuple is graded as a GROUP, because that is how it is consumed: `("<star>.yml", "<star>.yaml")`
+    is a complete enumeration used together, and grading its members one at a time would red it
+    (measured — the first cut of this arm did exactly that).
+    """
+    one_sided: list[str] = []
+    for name, value in globals().items():
+        if name.startswith("__"):
+            continue
+        members = value if isinstance(value, (tuple, list, set, frozenset)) else (value,)
+        #: NO PATH PREFIX REQUIRED. The module's own workflow code spells RELATIVE patterns
+        #: (`WORKFLOWS.glob(...)`), so `_WORKFLOW_GLOBS = ("<star>.yml",)` is the natural fourth
+        #: site — and requiring `workflows/` in the member graded only the `REPO.glob(
+        #: ".github/workflows/<star>.yml")` spelling (measured, review round 5). Dropping the
+        #: requirement costs nothing, for two separate reasons — do not read either as the other:
+        #: `.sh`/`.py` pattern tuples never reach the symmetry test at all, they are dropped by the
+        #: extension-substring filter on `patterns` just below; and a constant is skipped by the
+        #: symmetry test only when the two arms AGREE — both open nothing (a pattern that neither
+        #: matches nor spells an extension) OR both open (a complete pair, e.g. one tuple holding
+        #: both extensions, which stays CLEAN by design below) — so `("release*.yml",)`, which
+        #: matches neither witness stem, still REDS via the spelling arm (measured, review round 12).
+        patterns = [
+            member
+            for member in members
+            if isinstance(member, str) and (".yml" in member or ".yaml" in member)
+        ]
+        if not patterns:
+            continue
+        opens_yml = any(_opens(pattern, yml_names, ".yml") for pattern in patterns)
+        opens_yaml = any(_opens(pattern, yaml_names, ".yaml") for pattern in patterns)
+        if opens_yml != opens_yaml:
+            one_sided.append(f"{name} = {patterns!r}")
+    return one_sided
+
+
+def test_no_site_spells_the_workflow_glob_one_sidedly():
+    """#12238: repairing the three live sites would leave the fourth to be written next week.
+
+    STRUCTURAL on purpose. The one-sided glob looked right at every site it was written on, so a
+    reader adding a fourth scan has no signal that the other extension is missing. This pin gives
+    them one: every glob in this module that targets the workflows directory must be able to open
+    BOTH extensions — the enumeration derives from `_WORKFLOW_SUFFIXES` through
+    `_workflow_paths()`.
+
+    ⛔ IT GRADES TWO WAYS, BECAUSE ONE OF THEM IS POPULATION-DEPENDENT. It grades what the
+    pattern MATCHES (so a glob this file does not spell literally still reds) AND — for a pattern
+    with a wildcard — whether it literally SPELLS one extension and not the other, through the
+    single question `_opens` (so `release*.yml` reds even though no workflow in today's tree
+    starts with `release`). Six cuts are the
+    specification here, because each cut was falsified by a shape it did not anticipate:
+
+      * cut 1 matched the literal `glob("<star>.yml")` — escaped by `**` prefixes, keyword
+        arguments, wrapped calls and the repo's stdlib `glob.glob(str(WORKFLOWS) + "/*.yml")`;
+      * cut 2 read the argument text to the first `)` — escaped by that same `)`-carrying
+        argument, and it reddened on its own docstring;
+      * cut 3 used `tokenize` but asked ONE witness name, `x.yml` — so `glob("ci*.yml")` (four
+        real workflows) and `glob("[!x]*.yml")` (all 41) graded clean, and the MIRROR direction,
+        `glob("<star>.yaml")` skipping all 41 `.yml` workflows, was never asked at all;
+      * cut 4 asked the same stem twice — `.yml` and `.yaml` — so EXACTLY ONE reads as the
+        defect, and graded module-level pattern CONSTANTS (this file's own idiom);
+      * cut 5 REMOVES cut 4's receiver-pairing exemption, which excused any one-sided
+        call sharing a receiver with a complementary call anywhere in the file. It had zero
+        beneficiaries on this module (both exemption sets were empty) and its only observable
+        effect was to licence the next narrow site: with a legitimate
+        `[*WORKFLOWS.glob("<star>.yml"), *WORKFLOWS.glob("<star>.yaml")]` pair present, one of
+        this PR's OWN three sites could be reverted to `WORKFLOWS.glob("<star>.yml")` and all 53
+        tests passed — a partial reversion of this fix, certified green (measured, review round
+        7). A both-extension pair is now RED like any other hand-written enumeration, because the
+        module's one enumeration is `_workflow_paths()`: the red names it.
+      * cut 6 adds the SECOND ARM (`_spells_one_extension`, asked through `_opens`), because the
+        match arm alone is population-DEPENDENT: `WORKFLOWS.glob("release*.yml")` matches no
+        workflow in today's 41-file tree, so it graded CLEAN as a live fourth one-sided site —
+        and a workflow rename or removal silently disarms a site that reds today (measured,
+        review round 8). A wildcarded pattern that literally names one extension and not the
+        other is one-sided whatever the tree holds.
+
+    SCOPE, so a green run is not read as more than it is — what stays out of reach, declared
+    rather than implied:
+
+      * an f-string's pattern as a WHOLE. The source holds only its literal FRAGMENTS
+        (FSTRING_START/MIDDLE/END), so those are what `_glob_calls` collects — graded as
+        fragments, never joined. Measured on this file's own forms: `glob(f"*.yml")` yields
+        `['*.yml']` and reds (a literally-spelled extension is one-sided however it is
+        tokenized), while `glob(f"*{suffix}")` — this module's correct form — yields `['*']`,
+        which matches both extensions and stays clean. What that CANNOT catch, declared: an
+        extension assembled from placeholders (`f"*{dot}yml"`, `glob("*" + ext)`), or a LITERAL
+        concatenation that splits the pattern itself (`glob("*" + ".yml")`, `glob("*." + "yaml")`)
+        — its fragments come back as `['*', '.yml']`, graded SEPARATELY: `"*"` → True/True (it opens
+        both), `".yml"` → False/False (no wildcard, so neither arm fires). The `"*"` operand is
+        therefore what masks the one-sided whole. ⛔ The reason is
+        NOT that the fragments match nothing — `fnmatch("ci.yml", "*")` is true, so a lone
+        `"*"` fragment matches BOTH witness names. It is that fragments are graded
+        INDEPENDENTLY and never joined, so a fragment that opens BOTH extensions (`"*"`) masks a
+        one-sided whole. Joining them would mean reconstructing the pattern the interpreter
+        builds, i.e. executing the code under test — so the join is never attempted: the
+        fragments are graded exactly as they stand, and only the pattern they WOULD form stays
+        ungraded.
+      * a reader that never calls `glob`/`rglob` — `WORKFLOWS.iterdir()` filtered by suffix, or
+        `os.listdir`. Measured clean, and not pinnable from source text without a dataflow
+        analysis. (`rglob` IS graded: it is in the same NAME set as `glob`, and a recursive
+        enumeration of the workflows directory reds like any other one-sided glob.)
+      * a both-extension pair written by hand as TWO CALLS — `[*WORKFLOWS.glob("<star>.yml"),
+        *WORKFLOWS.glob("<star>.yaml")]` — or as two separate module constants. This is an
+        OVER-BLOCK by choice: the pair is CORRECT, but it is also the shape whose `.yaml` half
+        can be dropped silently later, and `_workflow_paths()` already expresses it once. The red
+        says so rather than licensing a receiver, which is what measured worse (cut 5 above).
+        ⛔ NOT the over-block: ONE constant holding the pair as a single tuple/list
+        (`_PAIR_GLOBS = ("<star>.yml", "<star>.yaml")`) stays CLEAN — the constants arm grades a
+        tuple as a GROUP, because that is how it is consumed, and dropping either member still
+        reds (measured). So "the same pair as module constants" reds only in the two-constants
+        spelling; a reply that read the pair-in-one-constant form as reachable would be wrong.
+      * a one-sided pattern held in a LOCAL binding or a `__`-prefixed global rather than a
+        module-level constant (`globs = ("<star>.yml",)` inside a function, consumed by
+        `WORKFLOWS.glob(pattern)`). The constant arm reads module globals only, so a bare NAME
+        there has no literal in its span and no constant to resolve. Declared rather than
+        closed: the copyable idiom in this file IS module-level (`_SCRIPT_GLOBS`,
+        `_WORKFLOW_SUFFIXES`), which the arm does grade. The same reach applies to a pattern
+        handed to a HELPER that forwards it to `glob` (`_enumerate(WORKFLOWS, "<star>.yml")`):
+        the call site's argument is a literal, but the `glob` call's is a bare NAME, so neither
+        arm pairs them. Declared, not closed — pairing them is a dataflow analysis, not a
+        source scan.
+      * an extension spelled with a CHARACTER CLASS (`"release*.[y]ml"`). The spelling arm
+        compares the segment against the two literal extensions, so this falls back to the
+        match arm and grades CLEAN against a tree with no `release*` workflow — the same hole
+        one level down (measured, review round 9). Declared rather than closed: normalising
+        every equivalent spelling (`[y]ml`, `?ml`, `*ml`) would need the pattern GRAMMAR, and a
+        half-normaliser invents false reds.
+      * a `.yml`-only glob in this module that does NOT target workflows (a future config or
+        fixture loader). It reds, and that is an OVER-BLOCK by choice: a receiver-based filter
+        would have to guess which directories hold workflows, and every guess it got wrong in
+        review (`glob.glob(str(WORKFLOWS) + "/*.yml")`, whose receiver is the stdlib module and
+        whose argument merely MENTIONS the directory) was a fail-open. The module has no such
+        glob today. ⛔ If one is ever needed, a note HERE does NOT clear the red — nothing reads
+        this docstring. The red is cleared only in code: teach the grading loop below the
+        exemption for that shape (record why at the site), or restructure the loader so it does
+        not spell an extension-class glob. Measured (review round 15): adding the declaration to
+        this list and re-running left the identical red.
+        ⛔ EXCEPT a pattern with NO wildcard: `cfg.glob("main.yml")` is a SINGLE-FILE reference,
+        not an extension-class enumeration, so it stays CLEAN (`_glob_matches` and
+        `_spells_one_extension` both require a wildcard, measured), while `cfg.glob(
+        "config/*.yml")` reds. Carried from review round 7, which recorded it on #12238 as a
+        deferred follow-up; stated here because this list is where reach is declared.
+
+    Stated because a structural pin invites over-reading: over-claiming, not escaping, is what
+    review rounds 2 and 3 both caught here. The tuple is asserted here too (bottom), so a dropped
+    `.yaml` reds even when no site spells a glob.
+    """
+    source = Path(__file__).read_text()
+    #: NON-VACUITY ON THE ANALYZER, not just on the population. A pin whose READER has gone blind
+    #: is indistinguishable from a clean tree — with `_glob_calls` short-circuited to `[]` and a
+    #: real one-sided glob added, this test still passed (measured, review round 6). The
+    #: assertion below pins the reader's own shape, so a mutilated analyzer reds HERE instead of
+    #: certifying the module, which is the same failure `#12238` names one layer up.
+    #:
+    #: ⛔ THERE IS DELIBERATELY NO SECOND CANARY HERE (`any(literals … over the module's own
+    #: calls`). Holding every pattern in a module constant and calling `base.glob(pattern)` is a
+    #: behaviour-preserving refactor that leaves this module with no literal-carrying call at all,
+    #: and it still has something to grade — the constants arm reads the module globals. Reding it
+    #: would block the very idiom that arm grades (measured, review round 9: the enumerator
+    #: rewritten as `base.glob(_WF_PREFIX + suffix)` with `_WF_PREFIX = "*"` left this module with
+    #: `literals=[]` on BOTH calls and red-ed an otherwise identical tree). Blindness is what the
+    #: shape assertion below pins.
+    assert _glob_calls('WORKFLOWS.glob("*.yml")') == [(1, "WORKFLOWS", "glob", ["*.yml"])], (
+        "`_glob_calls` no longer reports (line, receiver, method, literals) for a plain one-sided "
+        "glob — the structural scan below would grade nothing and pass"
+    )
+    yml_names, yaml_names = _workflow_probe_names()
+    assert yml_names, "the probe population is empty — this pin would grade nothing"
+    calls = _glob_calls(source)
+    #: ⛔ NO PAIRING EXEMPTION (cut 5 above). An earlier cut excused a one-sided call when a
+    #: complementary call existed on the same RECEIVER, which is a scalar fact about the whole
+    #: file rather than about the site: once any legitimate pair existed, EVERY later one-sided
+    #: site on that receiver went green — including a reverted one of this PR's own sites, with
+    #: all 53 tests passing (measured, review round 7). The exemption had no beneficiary on this
+    #: module; its only effect was to license the next hole.
+    one_sided: list[str] = []
+    for line, receiver, method, literals in calls:
+        if not literals:
+            continue
+        opens_yml = any(_opens(lit, yml_names, ".yml") for lit in literals)
+        opens_yaml = any(_opens(lit, yaml_names, ".yaml") for lit in literals)
+        if opens_yml == opens_yaml:
+            continue
+        one_sided.append(f"line {line}: {(receiver or '<expression>')}.{method}({literals!r})")
+    one_sided += [
+        f"constant {label}"
+        for label in _one_sided_workflow_pattern_constants(yml_names, yaml_names)
+    ]
+    assert not one_sided, (
+        f"this module spells an EXTENSION-CLASS glob one-sidedly at {len(one_sided)} site(s): "
+        f"{one_sided}. For a WORKFLOW enumeration that is the #12238 defect: one extension "
+        "opens, the other is silently skipped although GitHub RUNS both — use "
+        "`_workflow_paths()`. For any OTHER loader (a config or fixture path) this is a "
+        "declared over-block by choice, and a note in this test's SCOPE docstring will NOT "
+        "clear it: nothing reads that prose. Clear it in code — teach the loop above the "
+        "exemption for that shape with its reason at the site, or stop spelling an "
+        "extension-class glob there."
+    )
+    # ORDER-INSENSITIVE: `_workflow_paths()` sorts, so the tuple's order carries no meaning and
+    # asserting the order would red a semantically identical swap with a message blaming the
+    # extensions. Set equality keeps the dropped-entry teeth without the false red.
+    assert set(_WORKFLOW_SUFFIXES) == {".yml", ".yaml"}, (
+        "`_WORKFLOW_SUFFIXES` no longer matches the set of extensions GitHub Actions runs"
     )

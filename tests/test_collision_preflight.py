@@ -8783,13 +8783,24 @@ class CollisionPreflightTest(unittest.TestCase):
         wt = self.checked_out_worktree(branch, f"busy-{ISSUE}")
         fake_bin = self.tmp / "fakebin"
         fake_bin.mkdir(exist_ok=True)
-        # ⛔ A COPY OF A REAL BINARY, NOT A SHELL SCRIPT. `fleet_state.pi_processes`
-        # matches `basename(argv[0]) == "pi"`, and the kernel rewrites argv[0] to the
+        # ⛔ argv[0] MUST READ `pi`. `fleet_state.pi_processes` matches
+        # `basename(argv[0]) == "pi"`, and the kernel rewrites argv[0] to the
         # INTERPRETER for a `#!` script — `ps` then reads `bash /…/pi 120` and the census
-        # legitimately does not see a lane named `pi`. An ELF copy keeps argv[0].
+        # legitimately does not see a lane named `pi`.
+        # ⛔ THE INTERPRETER RUNS, THE COPY DOES NOT: `executable=PYTHON` execs python
+        # while argv[0] stays `pi` (a native `execve` keeps the argv[0] it is handed).
+        # Do NOT "tidy" this back to `[str(pi), "120"]`: on Ubuntu 26.04 (what
+        # `ubuntu-latest` resolves to) `/bin/sleep` is a symlink into the uutils
+        # MULTI-CALL binary, which dispatches on `basename(argv[0])` and dies with
+        # `coreutils: unknown program 'pi'` — before this census takes its first
+        # sample. The copy below is inert setup: nothing reads that path any more
+        # (the interpreter is what `execve`s, and the census stub rows are literal
+        # text while `/proc` supplies only the cwd). It is retained so this change
+        # stays on the failure mode it fixes; deleting the now-dead copies — and the
+        # `/bin/sleep` host dependency they carry — is separate work (#12039).
         pi = fake_bin / "pi"
         shutil.copy("/bin/sleep", pi)
-        proc = subprocess.Popen([str(pi), "120"], cwd=str(wt),
+        proc = subprocess.Popen([str(pi), "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(wt),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # The census the TOOL reads is the STUBBED table (`_write_ps_stub`), so the
         # lane this test really spawned must be SERVED to it — otherwise the tool
@@ -9056,9 +9067,9 @@ class CollisionPreflightTest(unittest.TestCase):
         branch = f"fix/{ISSUE}-empty-busy"
         ref = self.empty_branch(branch)
         wt = self.checked_out_worktree(branch, f"empty-busy-{ISSUE}")
-        # `_start_fake_pi` owns the binary's SHAPE (a copy of a real binary, invoked
-        # by NAME, so `basename(argv[0]) == "pi"` at a width-safe length) and serves
-        # its row to the stubbed process table the TOOL reads — see `_write_ps_stub`.
+        # `_start_fake_pi` owns the process's SHAPE (argv[0] is `pi`, so
+        # `basename(argv[0]) == "pi"` at a width-safe length) and serves its row to
+        # the stubbed process table the TOOL reads — see `_write_ps_stub`.
         proc = self._start_fake_pi(wt)
         try:
             self._wait_for_pi_cwd(wt)
@@ -9615,9 +9626,11 @@ class CollisionPreflightTest(unittest.TestCase):
     def _start_fake_pi(self, cwd: Path) -> subprocess.Popen:
         """A process the census will see as `pi`, standing in `cwd` (see test (c2) above).
 
-        A COPY OF A REAL BINARY invoked by NAME through `PATH`: a `#!` script would carry
-        the interpreter as argv[0], and an absolute path would put the matcher at the mercy
-        of the `ps` column width.
+        argv[0] is the bare name `pi` — short, so no `ps` column width can truncate it, and
+        `basename(argv[0])` is exactly what the matcher reads. A `#!` script would instead
+        carry the interpreter as argv[0]. ⛔ The interpreter itself runs (`executable=PYTHON`);
+        the copied binary is inert — see the warning at
+        `test_a_live_process_in_the_worktree_still_blocks`.
         """
         fake_bin = self.tmp / "fakebin-empty"
         fake_bin.mkdir(exist_ok=True)
@@ -9625,7 +9638,7 @@ class CollisionPreflightTest(unittest.TestCase):
         if not pi.exists():
             shutil.copy("/bin/sleep", pi)
         env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
-        proc = subprocess.Popen(["pi", "120"], cwd=str(cwd), env=env,
+        proc = subprocess.Popen(["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(cwd), env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # ⛔ The census the TOOL reads is the STUBBED table, so the fixture's own
         # lane must be SERVED to it as well (`_write_ps_stub`). Without this the
@@ -10348,7 +10361,7 @@ exec {real} "$@"
         if not binary.exists():
             shutil.copy("/bin/sleep", binary)
         proc = subprocess.Popen(
-            ["pi", "120"], cwd=str(peer_wt),
+            ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(peer_wt),
             env={**os.environ, "PATH": f"{pi}:{os.environ.get('PATH', '')}"},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -10802,7 +10815,7 @@ exec {real} "$@"
         if not binary.exists():
             shutil.copy("/bin/sleep", binary)
         proc = subprocess.Popen(
-            ["pi", "120"], cwd=str(lane_wt),
+            ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
             env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -10846,7 +10859,7 @@ exec {real} "$@"
         if not binary.exists():
             shutil.copy("/bin/sleep", binary)
         proc = subprocess.Popen(
-            ["pi", "120"], cwd=str(lane_wt),
+            ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
             env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -10888,7 +10901,7 @@ exec {real} "$@"
         if not binary.exists():
             shutil.copy("/bin/sleep", binary)
         proc = subprocess.Popen(
-            ["pi", "120"], cwd=str(lane_wt),
+            ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
             env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:

@@ -792,6 +792,23 @@ Full data flow, and the two LaunchAgents that switch it on:
 - **Port 6379 already in use** — another container/process (local redis, another compose stack) is on it. Remap the sidecar: `-p 127.0.0.1:16380:6379` (Option B) or edit the compose `ports:` entry, then use `docker://:falkordb@localhost:16380/tortoise`.
 - **Upgrading** — clone: `git pull && pip install -e .`; direct install: `pip install -U git+https://github.com/daniel-ospina/tortoise.git`.
 - **`tortoise doctor` shows a Docker ❌** — expected in embedded-only mode (no container running). The graph-health check runs against the resolved DB target; `doctor --db <uri|path>` and `doctor --path` explicitly target a specific DB, and the bare `doctor` invocation works without extra flags.
+- **`tortoise doctor` reports a `Credentials` or `Hosted` row you did not expect** — when a hosted
+  credential is configured, `doctor` also answers the *hosted* question: `GET /health` reachable,
+  and `GET /v1/team` accepted or refused, so a revoked key reads
+  `❌ Hosted: … 401 Invalid API key` instead of a green report. **What counts as a hosted
+  credential, precisely:** a **store file** (`./.tortoise` or `~/.tortoise/credentials.json`) always
+  probes; an exported `TORTOISE_API_KEY` probes only when `TORTOISE_API_URL` is **also** set or the key
+  is `tt_`/`tk_`-shaped; otherwise the row says `not probed` and **no request is made** — because that
+  same variable is also the shared static secret this page tells you to set (line 65), and `doctor`
+  must not ship a local secret to a hosted endpoint nobody configured. It resolves the credential through
+  the ladder `tortoise config show` prints — `TORTOISE_API_KEY` → `./.tortoise` →
+  `~/.tortoise/credentials.json` — so the two cannot disagree about which store won (unlike the
+  transmitting verbs, which skip the checkout-local candidate by design, `doctor` does not). With
+  **no** credential configured it
+  prints one `ℹ️` line and makes **no** request at all. On a box where the endpoint is not reachable
+  from here — a corporate proxy, an air-gapped runner — run `tortoise doctor --offline` (or
+  `tortoise onboard --offline`): the local checks still run, and the row says `not probed` rather
+  than implying the credential was verified.
 
 ## 8. Beta feedback & bug reports
 
