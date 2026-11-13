@@ -501,13 +501,23 @@ def _has_high_entropy(normalized_name: str) -> bool:
 
 
 def _signal_tokens(name: str) -> list[str]:
-    """The tokens the capture prior WILL match on for this name.
+    """The STOPWORD-REMOVED tokens of this name — not the leg's surviving set.
 
     `sparse.build_or_query` drops `SPARSE_STOPWORDS` before it builds the
-    OR-union (`sparse.py:34-52`), so the surviving tokens are the entire
-    discriminating surface of the query. Same split rule as the leg
-    (lowercase, non-alphanumeric runs), so this cannot drift from what is
-    searched for.
+    OR-union (`sparse.py:34-52`), so these are the tokens that would carry the
+    query IF the leg used them.
+
+    ⛔ It is the SPLIT rule that is shared with the leg (lowercase,
+    non-alphanumeric runs), NOT the surviving-token set: `tokenize_sparse_query`
+    additionally drops every token shorter than 2 characters and — at
+    `build_or_query`'s default `keep_numeric=False`, which is what the capture
+    path passes — every all-digit token, then appends identifier aliases
+    (`sparse.py:410-430`). So `_signal_tokens("#2258") == ["2258"]` while the leg
+    tokenises `2258` to `[]` and takes the escaped raw literal: the "token" this
+    function returns does not exist as one. Nothing measured changes (the 15
+    ident names are gated by BOTH predicates — `gate_gated_names` records them
+    as the `both` set — so no share moves), but this is not a fidelity
+    guarantee and must not be quoted as one.
     """
     from tortoise.sparse import SPARSE_STOPWORDS
 
@@ -554,6 +564,16 @@ def _pooled_coverage(sample_size: int, captures: int, budget: int) -> dict:
     ``truncated`` is the field to read: True means the pooled numbers are about
     ``names_measured`` names, not ``names_in_sample``. At the committed
     artifact's shape (300 names, 20 captures, budget 15) it is False.
+
+    ⛔ The COMMITTED artifact ``measurement-entropy-gate-12294.json`` predates
+    this field and does not carry it — its denominator is reconstructible from
+    what it does state (``corpus.sample`` 300 = ``pooled.captures`` 20 x the
+    15-name budget recorded in ``pooled_budget_note``), and back-filling a
+    generated record is worse than the gap: a hand-added field turns the run's
+    own evidence into a hybrid a re-run diff reads as drift. The established
+    precedent in this repo is `test_the_harness_reports_how_much_of_its_own_input_it_discarded`
+    (committed artifacts predate ``corpus.input``; the INSTRUMENT is what is
+    asserted). A fresh run emits the field.
     """
     reached = min(sample_size, captures * budget)
     singleton = 1 if reached % budget == 1 else 0

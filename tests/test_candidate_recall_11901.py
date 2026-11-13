@@ -870,8 +870,14 @@ class _FakeProj:
 
 
 def _drive(tool_mod, monkeypatch, tmp_path, *, stored_names, trace_maker, argv=None,
-           pop=None):
-    """Run `main()` against a fake SDK; return (exit code, out path)."""
+           pop=None, rows_maker=None):
+    """Run `main()` against a fake SDK; return (exit code, out path).
+
+    ``rows_maker`` is optional and defaults to the refusing tests' behaviour (no
+    rows at all). Pass it to drive the SUCCESS path: the arms' accounting only
+    exercises its found-the-canonical branches when the leg returns a row, and
+    `tests/test_name_entropy_12294.py` pins the predicate, not the accounting.
+    """
     monkeypatch.setenv("TORTOISE_DB_URI",
                        "docker://:falkordb@localhost:6379/recall_unit")
     if pop is None:
@@ -899,11 +905,11 @@ def _drive(tool_mod, monkeypatch, tmp_path, *, stored_names, trace_maker, argv=N
         def _get_proj(self):
             return self._proj
 
-        def tortoise_fts_query(self, _q, **kw):
+        def tortoise_fts_query(self, q, **kw):
             trace = kw.get("leg_trace")
             if trace is not None:
                 trace.append(trace_maker())
-            return []
+            return rows_maker(q) if rows_maker is not None else []
 
         def close(self):
             return None
@@ -984,6 +990,79 @@ def test_a_sample_larger_than_the_population_is_refused(tool_mod, monkeypatch, t
                            "--captures", "2", "--out", str(tmp_path / "artifact.json")])
     assert rc == 2, f"a sample larger than the population was not refused (rc={rc})"
     assert not out.exists(), "an artifact was written from a sample larger than the population"
+
+
+# ── the #12294 gate arms' ACCOUNTING ──────────
+
+
+def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatch,
+                                                           tmp_path):
+    """The four `#12294` arms have no other test: pin their accounting to a RUN.
+
+    `tests/test_name_entropy_12294.py` pins the ported predicate and
+    `_pooled_coverage` IN ISOLATION; nothing observed what `run()` accumulates.
+    Measured on this suite: narrowing the pooled loop's bound, or deleting
+    `arms["pooled_coverage"] = _pooled`, left every test green while
+    `pooled_gate`'s quoted share ("1 of 86 rescued at k=3, 6 of 86 at k=15" — the
+    gate's production-truth cost) described a population the artifact would
+    still certify as untruncated: #11823's silent-cap class, inside the
+    instrument whose numbers decline a lever.
+
+    Mutations that must red this: the loop bound no longer following
+    `names_reached`; a `gated` count accumulated once per (name x predicate)
+    instead of once per name; a per-k table that stops summing to its `_k_sum`;
+    a `pooled_gate` cell whose `rescued_by_union + lost` stops equalling its
+    `gated`.
+    """
+    # every query finds "the canonical": the arms' found-branches all execute,
+    # so `suppressed_correct` / `rescued_by_union` are exercised, not just their
+    # zero defaults. ⛔ The population must be LARGER THAN ONE POOLED GROUP (15
+    # names), or the loop's bound is untestable: with three names `range(...)`
+    # has a single step whatever the bound is, and halving `names_reached` left
+    # this test green (measured).
+    pop = ([{"cls": "definite", "name": f"the item{i}"} for i in range(9)]
+           + [{"cls": "ident", "name": f"#{2258 + i}"} for i in range(9)]
+           + [{"cls": "path", "name": f"src/mod{i}.py"} for i in range(9)])
+    names = [r["name"] for r in pop]
+    rc, out = _drive(
+        tool_mod, monkeypatch, tmp_path,
+        # `the item0` is gated by `shipped` only (`item0` — 5 chars, 1 token);
+        # `#2258` by BOTH (`2258` — 4 chars, 1 token), so neither predicate's
+        # found-branches are left at their zero defaults.
+        stored_names=names, pop=pop,
+        trace_maker=lambda: {"leg": "vector", "ran": True, "degraded": False},
+        rows_maker=lambda _q: [
+            {"id": f"obj-11901{i:06d}", "content": n,
+             "point_kind": "core:other"} for i, n in enumerate(names)],
+        argv=["--population", "27", "--sample", "27", "--captures", "2",
+              "--out", str(tmp_path / "artifact.json")])
+    assert rc == 0, f"a healthy driven run did not succeed (rc={rc})"
+    arms = json.loads(out.read_text())["arms"]
+
+    # 1. the recorded coverage describes the population the loop ACTUALLY reached
+    BUDGET = 15   # mirrors `run()`'s production ``max_queries`` literal
+    cov = arms["pooled_coverage"]
+    assert cov["names_in_sample"] == arms["gate"]["shipped"]["names"] == 27, cov
+    assert cov["names_measured"] == cov["names_reached"] - cov["skipped_singleton"]
+    groups = [min(BUDGET, cov["names_reached"] - s)
+              for s in range(0, cov["names_reached"], BUDGET)]
+    assert len(groups) == 2, groups          # 15 + 12, so the bound is observable
+    assert arms["pooled"]["3"]["captures"] == sum(1 for n in groups if n >= 2)
+    assert cov["names_measured"] == sum(n for n in groups if n >= 2)
+    assert cov["truncated"] is False
+
+    # 2. per-predicate reconciliation — the three structures must agree
+    for p in ("shipped", "zep_full_name"):
+        g = arms["gate"][p]
+        assert sum(g["suppressed_correct_by_k"].values()) == \
+            g["suppressed_correct_k_sum"], p
+        assert g["gated"] == sum(1 for e in arms["gate_gated_names"]
+                                 if p in e["predicates"]), p
+        # this row set holds the canonical for EVERY name, so a gated name is
+        # never "unreachable at any k" — the falsifier's headline cannot invert
+        assert g["gated_and_missed"] == 0, p
+        for k, cell in arms["pooled_gate"][p].items():
+            assert cell["rescued_by_union"] + cell["lost"] == cell["gated"] > 0, (p, k)
 
 
 def test_the_harness_reports_how_much_of_its_own_input_it_discarded(tmp_path):
