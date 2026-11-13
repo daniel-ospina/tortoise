@@ -106,6 +106,38 @@ Four properties are load-bearing and each is pinned by a test:
   the withheld-hold tests (consumer: `…is_held_rather_than_read_as_absent`,
   `…is_held_even_when_the_resolver_raises`). The only client skipped is one with
   no projection at all (a test double: no `resolved_from` state to withhold).
+  other arm of the same `except` is narrower, and is stated rather than implied:
+  a read that fails BEFORE any hop resolves** (a query error, not a per-row
+  unresolvable) **has no `folded` rows to carry, so `entities` comes back EMPTY**
+  — `search_graph` withholds every entity prior, `extract_session_v2` therefore
+  skips D3 for that run entirely (the pre-`#12296` behaviour: no resolution, plus
+  this reason and the impaired-leg counters), and no pre-hop row is emitted by
+  either arm. The only
+  client skipped is one with no projection at all (a test double: no
+  `resolved_from` state exists to withhold).
+* **A withheld spelling is HELD, never absent — on both arms.** The fold's
+  refusal is per-ROW, and a row it withheld is unreadable, not missing: reading it
+  as measured absence is the one state §4.4 I1 makes license a CREATE, so the
+  machinery names it end to end. `_PriorFoldUnresolvable` carries
+  `unresolved_names`; `search_graph` publishes them as **`entities_unresolved`** on
+  its PARTIAL exit (the key is absent when nothing was withheld); the orchestrator
+  keeps the D3 pass alive when the fold withheld EVERY row and appends each named
+  spelling to `resolution_held`. It does so on the resolver's FAILURE arm as well
+  as its success arm — a raising `resolve_entities` is exactly when the create
+  would otherwise happen — and the population is de-duped on `_norm` (F3's hold
+  identity) against what resolved, so one fold yields one hold and a mention that
+  RESOLVED is never also reported held. `execute_embed` refuses the create at the
+  `_norm(name) in _entity_holds` gate, and the `entity_identity_held` census class
+  is bumped ONCE per run at a site shared by both arms. Pinned by
+  `test_a_withheld_spelling_is_held_rather_than_read_as_absent`,
+  `test_the_orchestrator_holds_a_withheld_spelling_the_resolver_called_new`,
+  `test_a_withheld_spelling_is_held_even_when_the_resolver_raises` and
+  `test_a_resolved_mention_is_not_also_reported_held_under_another_spelling`.
+  ⚠️ **Residual, stated:** the hold key is `_norm` (case/whitespace), not
+  `normalize_entity_name`, so an ARTICLE variant of a withheld spelling (`The Team`
+  withheld, `Team` mentioned) is a different key and can still be created — #12424
+  tracks it, and the create gate keys on the same `_norm`, so widening one side
+  alone would not close it.
 * **A chain the bound cannot resolve is cannot-answer, not a carrier.**
   `_PRIOR_HOP_BOUND` (8) exists because the walk is batched;
   `apply_entity_merge` cannot create a chain ≥ 2, so a longer one is a
