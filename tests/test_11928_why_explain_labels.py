@@ -364,6 +364,34 @@ def test_a_tradeoff_alternative_written_as_an_object_is_surfaced(sdk):
 
 # ── 4. the :Point lane is unchanged ───────────────────────────────────────
 
+def test_a_decision_written_as_an_object_emits_its_tradeoffs(sdk):
+    """The DECISION-POINT GATE, not only the ``alt`` widening (review round 1).
+
+    ``test_a_tradeoff_alternative_written_as_an_object_is_surfaced`` above passes
+    with a POINT anchor, so it exercises the widening and never the gate: the
+    gate reads the anchor's kind from ``n.pointKind`` and the alternative's from
+    ``alt.pointKind``, while an ``:Object`` stores its kind in ``objectKind``
+    (``create_object`` writes that property and leaves ``pointKind`` NULL).
+
+    So the widening admitted the rows and the Python fold then dropped them: a
+    real decision written as an Object with Object options emitted a block with
+    NO ``tradeoffs`` key — the "the widening did not work" shape, and the same
+    silence the #11823/#11928 work exists to end. Measured as a mutant: revert
+    both kind cells to ``pointKind`` and this pin reports ``[]``.
+    """
+    decision = sdk.create_object("how to land the rollout", objectKind="decision")
+    alt_a = sdk.create_object("land it behind a flag", objectKind="option")
+    alt_b = sdk.create_object("land it to everyone", objectKind="option")
+    sdk.create_operator("IMPL", decision["id"], [alt_a["id"]])
+    sdk.create_operator("IMPL", decision["id"], [alt_b["id"]])
+
+    block = assemble_why_blocks(sdk._get_proj(), [decision["id"]])[decision["id"]]
+    labels = sorted(t["label"] for t in block.get("tradeoffs") or [])
+    assert labels == ["land it behind a flag", "land it to everyone"], (
+        "an Object decision point emitted no tradeoffs: "
+        + repr(block.get("tradeoffs")))
+
+
 def test_two_distinct_event_counter_claims_are_both_surfaced(sdk):
     """The fusion must dedupe on the INTERNAL node id, not on the emitted
     ``point_id`` (review F1, measured).

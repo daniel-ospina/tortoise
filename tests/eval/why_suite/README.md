@@ -15,6 +15,16 @@ dig_deeper}` — `assessment` is #11928's additive dimension, absent when nothin
 judged the node) produced by `tortoise.why.assemble_why_blocks` is all the
 grader ever sees.
 
+> ⛔ `grading.py`'s own module docstring still lists the SEVEN keys, without
+> `assessment?`, and that is deliberate rather than missed (#11928 review round 1).
+> `grading.py` is part of the pinned protocol: `judge._protocol_bytes()` folds its
+> sha256 into `protocol_sha256()` / `judge_pin()`, so editing even a docstring byte
+> there is a PROTOCOL change — a new `judge_why_suite_vN` plus `--bless-protocol`,
+> not a comment fix. The docstring stays stale until that bless happens; this note
+> is where the choice is recorded, so a reader meets a stated gap and not a silent
+> one. `assessment` is produced by the assembly and graded elsewhere, so this has
+> no effect on what this corpus measures.
+
 | | |
 |---|---|
 | Issue | #2100 (W3-b) — epic #2080 (gbrain measurable-memory adoption) |

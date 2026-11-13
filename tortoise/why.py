@@ -77,6 +77,7 @@ from .live import (
     epistemic_disjunction,  # #11928: the traversal-position widening
     epistemic_identity,  # #11928: coalesce(id, eventId) — NOT a bare id
     is_terminal_status,  # #2490: terminal rows override has_ep
+    kind_expression,  # #11928: the KIND, whatever property its label stores it under
 )
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
@@ -930,8 +931,16 @@ _TRADEOFFS_CYPHER = (
     # alternative); no SDK door mints that shape.
     "OPTIONAL MATCH (op)-[:mitigated_by]->(m:Point) "
     f"WHERE {_live_only('m.status')} "
-    f"RETURN n.id, n.pointKind, {epistemic_identity('alt')}, {_text_expr('alt')}, "
-    "  alt.pointKind, op.id, m.content, "
+    f"RETURN n.id, {kind_expression('n')}, {epistemic_identity('alt')}, {_text_expr('alt')}, "
+    # #11928 review round 1: BOTH kind columns go through `kind_expression`, not
+    # `pointKind`. The gate in `_assemble_tradeoffs` decides "is this a decision
+    # point?" from these two cells, and an `:Object` stores its kind in
+    # `objectKind` — so reading `pointKind` alone made the gate DEAD for an
+    # Object decision with Object options: the traversal admitted the rows and
+    # the Python fold then dropped them, emitting a block with no `tradeoffs`
+    # and no reason. `:Point` rows are byte-identical (`pointKind` still wins
+    # first, and NULL still coalesces to '').
+    f"  {kind_expression('alt')}, op.id, m.content, "
     # #11702: raw columns (see `_CONFLICTS_CYPHER`) -- `coalesce(…, 1.0)` gave
     # an absent alternative `ep_weight` 0.5, which then SORTED it above a
     # measured 0.4 one (the same inversion the support chain just had fixed).
