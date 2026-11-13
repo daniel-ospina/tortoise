@@ -12974,13 +12974,15 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
     (x24) and the deadline check ran zero times. A proxy or CDN normalises a reply
     to chunked, so that is the LIVE shape, not a corner. The deadline therefore
     arms a watchdog that `shutdown()`s the underlying socket. What that produces
-    depends on the body shape, and BOTH outcomes are honest because the interrupt
-    is recorded: a chunked body raises `IncompleteRead` (a read error, which the
-    callers report as an unread body), while a close-delimited body simply returns
-    `b""` — indistinguishable from a normal end UNLESS the flag is checked, which
-    is why `interrupted` overrides the length heuristic in the EOF and probe paths
-    (fresh review at `fb2926ef9e`). `close()` alone does not reliably wake a
-    blocked recv; `shutdown()` does. The socket is found by WALKING the `fp` chain
+    depends on the body shape, and both are honest: a chunked body raises
+    `IncompleteRead` (a read error, which the callers report as an unread body),
+    while a close-delimited body simply returns `b""` — indistinguishable from a
+    normal end except by the CLOCK, which is why an EOF with nothing declared is
+    a CUT at or past the deadline and only the peer's end before it (fresh review
+    at `fb2926ef9e`/`a424e32d6f`). A DECLARED length still outranks the clock in
+    both directions: bytes owed is a cut, a satisfied length is complete even past
+    the deadline (round 17). `close()` alone does not reliably wake a blocked recv;
+    `shutdown()` does. The socket is found by WALKING the `fp` chain
     (`_doctor_response_socket`), because an `HTTPError` puts the `HTTPResponse` one
     hop deeper than a 2xx reply does.
 
@@ -12995,17 +12997,15 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
 
     sock = _doctor_response_socket(resp)
     watchdog: threading.Timer | None = None
-    # ⛔ The interrupt must be OBSERVABLE (fresh review at `fb2926ef9e`). Shutting
-    # the socket down does not always RAISE: on a close-delimited body (no
-    # `Content-Length`, no `Transfer-Encoding`) `read1` simply returns `b""`, and
-    # `length` is None for that shape exactly as it is for chunked — so the EOF
-    # branch graded OUR OWN interrupt as "the stream declared its end",
-    # `cut=False`, and a healthy close-delimited `/v1/team` reply was reported
-    # `❌ … no team identity … Check your TORTOISE_API_URL` with exit 1 (measured:
-    # a close-delimited drip returned 360 bytes `cut=False` in 0.50 s as shipped,
-    # and `cut=True` with the watchdog disarmed — the interrupt caused the false
-    # red). The flag is the difference between "the peer ended the body" and "we
-    # ended it", and the reader must never claim the first about the second.
+    # ⛔ The interrupt must be OBSERVABLE. Shutting the socket down does not
+    # always RAISE: on a close-delimited body (no `Content-Length`, no
+    # `Transfer-Encoding`) `read1` simply returns `b""`, and `length` is None for
+    # that shape exactly as it is for chunked — so OUR OWN interrupt used to be
+    # graded "the stream declared its end". It is now detected WITHOUT a flag: the
+    # watchdog is armed AT the deadline, so an EOF with nothing declared at/after
+    # the deadline is ours (see the EOF branch below), and the flag the first
+    # attempt added was both redundant with that clock and ordered before the
+    # declared-length settlement (fresh review round 29).
     if sock is not None:
         def _interrupt() -> None:
             with contextlib.suppress(OSError):
@@ -13061,10 +13061,9 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
                 # on a premature close instead of raising `IncompleteRead` (declared
                 # 200, closed after 10, `length == 190`, no exception), so a
                 # truncated reply would report "not cut" and reach the captive-portal
-                # arm — the false red the flag removes, on a different trigger.
+                # arm — the false red the CUT signal removes, on a different trigger.
                 # `length` is the bytes still OWED; `None` (chunked OR
-                # close-delimited) carries NO information — and OUR OWN interrupt
-                # produces exactly that shape, so the flag is checked FIRST.
+                # close-delimited) carries NO information.
                 outstanding = getattr(resp, "length", None)
                 if outstanding is None:
                     inner = getattr(resp, "fp", None)
@@ -13116,13 +13115,11 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
         # review round 23).
         probe = reader(1)
         # An interrupted probe returns `b""` for the same reason a completed body
-        # does, so BOTH signals are consulted: the FLAG (the reader knows it shut
-        # the socket down — round 19/24) and the CLOCK (a probe that came back
-        # after the deadline with nothing declared cannot prove completeness, and
-        # a double with no socket never sets the flag). A "cut" claim is the safe
-        # one; "complete" is the one that puts a fragment in front of the verdict.
-        return (b"".join(chunks),
-                bool(probe) or time.monotonic() >= deadline)
+        # does, and nothing is declared on this path, so the CLOCK decides: a
+        # probe that came back at/after the deadline cannot prove completeness.
+        # A "cut" claim is the safe one; "complete" is the one that puts a
+        # fragment in front of the verdict.
+        return b"".join(chunks), bool(probe) or time.monotonic() >= deadline
     finally:
         if watchdog is not None:
             watchdog.cancel()
