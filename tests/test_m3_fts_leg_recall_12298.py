@@ -1059,58 +1059,159 @@ def test_brief_fixture_table_is_the_artifact(artifact, brief: str) -> None:
         f"{fx['reachable']} of {n}")
 
 
-def test_the_brief_uses_only_heading_forms_the_scope_helper_can_see(
-        brief: str) -> None:
-    """`_scoped` anchors on `^## `/`^### `. Any OTHER heading form is INVISIBLE.
+# The forms `_scope_slice` reads. Anything else that opens a section is a leak.
+_READABLE_HEADING = re.compile(r"^(?:# [^#\s].*|## \d+\. .*|### \d+\.\d+ .*)$")
+# CommonMark 4.2/4.3 allow up to three spaces of indentation, and blockquote
+# markers, before a heading's own marker.
+_HEADING_PREFIX = r"(?: {0,3}>[ \t]?)* {0,3}"
+# A line that STARTS with a `#` run. This is deliberately wider than 4.2's ATX
+# form: `##3. Results` is NOT a CommonMark heading (it renders as prose), but it
+# LOOKS like a section to a reader and `_scope_slice` cannot see it either, so the
+# preceding scope runs through it exactly as it does through a real heading.
+_HASH_RUN = re.compile(rf"^{_HEADING_PREFIX}#{{1,}}")
+# The other rendered heading form (CommonMark 4.3): a bare run of `=` or `-` under
+# a paragraph line. ⛔ ONE character is enough — the spec puts NO minimum length on
+# this run (only `---`/`===` are *thematic breaks*, and a thematic break needs a
+# blank line before it; under prose it is a setext underline).
+_SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+# A raw HTML heading renders as a heading and is invisible to `_scope_slice`.
+_HTML_HEADING = re.compile(r"^ {0,3}<h[1-6][\s>/]", re.IGNORECASE)
 
-    ⛔ A guard on the pins' own INSTRUMENT (#12349 round 17, P2), and the leak it
-    prevents was measured, not imagined: with §3's heading written as a setext
-    (`3. Results` followed by `----------`), `_scoped(brief, "2")` returned
-    14 740 characters — §2 PLUS §3's body — so a restatement planted under that
-    heading satisfied every §2 pin. `##3. Results` (no space after the marker) did
-    the same. The failure is silent in the other direction: the returned slice
-    still looks like a scope.
 
-    ⛔ DERIVED, NOT ENUMERATED (#12349 round 19). The first cuts of this test
-    listed the bad forms they happened to think of, so `####`, `#####`, `######`
-    and a blockquoted `> ## 3. Results` all re-opened the SAME leak on the SAME
-    section (measured: §2's slice 6 765 -> 14 73x chars, every gate green) while
-    the test's own docstring claimed "any OTHER heading form". A deny-list cannot
-    keep that promise. So the test now asks the other question: scan for anything
-    CommonMark RENDERS as a heading, and require it to be one of the two forms the
-    helper reads. A new form fails by default instead of passing by omission.
+def _unscoped_heading_forms(brief: str) -> list[str]:
+    """Every line that opens a section `_scope_slice` cannot see — as messages.
+
+    ⛔ This is the guard on the pins' own INSTRUMENT, factored out of the test that
+    asserts it (#12349 round 19) so that the guard's own coverage can be pinned by
+    a test instead of by its docstring: `test_the_heading_guard_refuses_the_forms
+    _that_actually_leak` drives each form through it and asserts the returned list
+    is non-empty. A guard whose promises live only in prose is the defect this PR
+    spent four rounds closing in the document; it must not reappear here.
+
+    ⛔ THE ENUMERATION IS OF THE SPEC, NOT OF EXAMPLES SOMEONE THOUGHT OF
+    (CommonMark 4.2 ATX · 4.3 setext · raw HTML). That distinction is the round-19
+    finding: the previous cut listed bad FORMS (`####`, `> ## `, …), so the one it
+    had not thought of — a one- or two-character setext underline, or the same
+    underline indented by 1-3 spaces, both of which CommonMark renders as an h2 —
+    left §2's scope running through §3's body with every gate green (measured at
+    this head: 73 passed while `_scoped(brief, "2")` had absorbed §3). A spec has
+    a closed list of heading forms; an imagination does not.
 
     The INVERSE hazard — a `## `-prefixed line inside a fenced block truncates a
     section — is fail-closed (every §-scoped pin here is a presence assertion, so
     it reds loudly) and is deliberately not refused.
     """
     lines = brief.splitlines()
-    # The forms `_scope_slice` can read: the document title, `## N. …`, `### N.N …`.
-    readable = re.compile(r"^(?:# [^#\s].*|## \d+\. .*|### \d+\.\d+ .*)$")
-    # Anything CommonMark renders as a heading: ATX at column 0 (1-6), ATX inside
-    # up to 3 spaces of indent, and ATX behind blockquote markers.
-    renders_as_heading = re.compile(
-        r"^(?: {0,3}>[ \t]?)* {0,3}#{1,6}(?:[ \t]|$)")
     end_fm = 0                       # YAML frontmatter is delimited by `---`
     if lines and lines[0].strip() == "---":
         end_fm = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
-    for i, line in enumerate(lines):
-        if i <= end_fm:
-            continue
-        if renders_as_heading.match(line):
-            assert readable.match(line), (
-                f"line {i + 1}: {line[:60]!r} is a heading CommonMark renders but "
-                "`_scoped` cannot read — it anchors on `## N. `/`### N.N ` at "
-                "column 0, so the PRECEDING section's scope runs past its own "
-                "boundary through this line. Measured leaks: setext, `##3.`,"
-                "1-3-space indent, `####`/`#####`/`######`, and `> ## `")
-    for i in range(end_fm + 1, len(lines)):
-        if re.fullmatch(r"(?:-{3,}|={3,})\s*", lines[i]) and lines[i - 1].strip():
-            raise AssertionError(
-                f"line {i + 1}: a bare `{lines[i].strip()}` under the prose line "
-                f"{lines[i - 1][:50]!r} is a SETEXT heading — it turns that prose "
-                "into a heading `_scoped` cannot see, and the preceding section's "
-                "scope then runs past its own boundary")
+    start = end_fm + 1 if end_fm else 0
+    bad: list[str] = []
+    for i in range(start, len(lines)):
+        line = lines[i]
+        if _HASH_RUN.match(line) and not _READABLE_HEADING.match(line):
+            bad.append(
+                f"line {i + 1}: {line[:60]!r} starts with a `#` run that `_scoped` "
+                "cannot read (it anchors on `## N. `/`### N.N ` at column 0), so "
+                "the PRECEDING section's scope runs past its own boundary through "
+                "it. Refused forms: ATX at 1-6 with any 0-3-space indent or "
+                "blockquote prefix, `####`+, and a marker with no space after it")
+        elif _HTML_HEADING.match(line):
+            bad.append(
+                f"line {i + 1}: {line[:60]!r} is a raw HTML heading — it renders "
+                "as a section boundary and `_scoped` cannot see it, so the "
+                "preceding section's scope runs through it")
+        elif _SETEXT_UNDERLINE.match(line) and i and lines[i - 1].strip():
+            bad.append(
+                f"line {i + 1}: a bare `{line.strip()}` under the prose line "
+                f"{lines[i - 1][:50]!r} is a SETEXT heading (CommonMark sets no "
+                "minimum run length, and allows 1-3 spaces of indent) — it turns "
+                "that prose into a heading `_scoped` cannot see, and the preceding "
+                "section's scope then runs past its own boundary")
+    return bad
+
+
+def test_the_brief_uses_only_heading_forms_the_scope_helper_can_see(
+        brief: str) -> None:
+    """`_scoped` anchors on `## N. `/`### N.N `. Any OTHER section opener LEAKS.
+
+    ⛔ A guard on the pins' own INSTRUMENT (#12349 round 17, P2), and the leak it
+    prevents was measured, not imagined: with §3's heading written as a setext
+    (`3. Results` followed by `----------`), `_scoped(brief, "2")` returned
+    14 740 characters — §2 PLUS §3's body — so a restatement planted under that
+    heading satisfied every §2 pin. The failure is silent in the other direction:
+    the returned slice still looks like a scope.
+
+    WHICH forms are refused, and why that list is closed, is
+    `_unscoped_heading_forms`' docstring; that the list is COMPLETE is pinned by
+    `test_the_heading_guard_refuses_the_forms_that_actually_leak`, which drives
+    every form through the guard and shows the same form leaks first.
+    """
+    bad = _unscoped_heading_forms(brief)
+    assert not bad, "\n".join(bad)
+
+
+# Every heading form that is a section boundary but is invisible to `_scope_slice`.
+# ⛔ Each one is driven through BOTH halves of the check by the test below: the
+# leak it causes in `_scope_slice`, and the refusal it must earn from the guard.
+# Naming them here is not a deny-list of guesses — it is the spec's closed set
+# (4.2 ATX · 4.3 setext) plus the two lookalikes that are invisible for the same
+# reason (a marker with no space after it, and raw HTML).
+LEAKY_SECTION_OPENERS = [
+    "#### 3. Results",                  # ATX level 4
+    "##### 3. Results",                 # ATX level 5
+    "###### 3. Results",                # ATX level 6
+    "   ## 3. Results",                 # ATX, 3-space indent (valid CommonMark)
+    " > ## 3. Results",                 # ATX behind a blockquote marker
+    "> > ## 3. Results",                # … and behind two
+    "##3. Results",                     # lookalike: no space after the marker
+    "<h2>3. Results</h2>",              # raw HTML heading
+    "3. Results\n-",                     # setext, ONE-character underline
+    "3. Results\n--",                    # setext, two characters
+    "3. Results\n---",                   # setext, three characters
+    "3. Results\n=",                     # setext h1, one character
+    "3. Results\n==",                    # setext h1, two characters
+    "3. Results\n===",                   # setext h1, three characters
+    "3. Results\n  ---",                 # setext, 2-space indent (valid CommonMark)
+    "3. Results\n   ---",                # setext, 3-space indent
+]
+
+
+@pytest.mark.parametrize("opener", LEAKY_SECTION_OPENERS)
+def test_the_heading_guard_refuses_the_forms_that_actually_leak(
+        opener: str) -> None:
+    """Each section-opener must BOTH leak through `_scope_slice` AND be refused.
+
+    ⛔ The two halves are the whole point. A form refused without leaking is
+    over-refusal (see the accepting test below); a form that leaks without being
+    refused is the defect this test exists for. Measured at the previous head: a
+    `--` underline and a 2-space-indented `---` both made §2's scope swallow §3's
+    body while all 73 tests stayed green, because the guard required a run of
+    THREE or more and accepted no indentation — and `##3. Results`, which the
+    ENUMERATED guard before it did refuse, was no longer refused at all while the
+    docstring still listed it as caught.
+    """
+    doc = f"## 2. Method\n\n§2 body.\n\n{opener}\n\n§3 BODY\n"
+    assert "§3 BODY" in _scope_slice(doc, "2"), (
+        f"{opener!r} does not leak — this case would prove nothing, so it must be "
+        "dropped or replaced rather than counted as coverage")
+    assert _unscoped_heading_forms(doc), (
+        f"{opener!r} leaks and the guard accepts it — this is the fail-open the "
+        "guard exists to close")
+
+
+def test_the_heading_guard_accepts_every_form_the_helper_can_read() -> None:
+    """The over-refusal half: the forms `_scope_slice` DOES read must be accepted.
+
+    A guard that refused the document's real headings would red this suite for a
+    reason that has nothing to do with the claim under test — and the obvious
+    "repair" from there is to weaken the guard. The control doubles as the proof
+    that the refusal above is about the FORM: the same body, with a readable §3
+    heading, is accepted and does not leak.
+    """
+    for heading in ("# M3 — the FTS leg", "## 3. Results", "### 3.1 Recall@k"):
+        doc = f"{heading}\n\nbody\n\n## 4. Verdict\n\nmore\n"
+        assert not _unscoped_heading_forms(doc), heading
 
 
 def test_brief_census_and_identifier_decomposition_are_the_artifact(
