@@ -5054,6 +5054,17 @@ def test_removal_records_read_the_REAL_archive_and_retirement_maps():
     assert "backfill_sources" in records["sdk_retired"], (
         "RETIRED_SDK_METHODS/REMOVED_SDK_METHODS was not read"
     )
+    # ⛔ AND THE RENAME MAP IS NOT THE UNION. `RETIRED_SDK_METHODS` names a REPLACEMENT (a
+    # rename, which needs no freeze); `REMOVED_SDK_METHODS` records a departure with none. Only
+    # the rename map may take the no-freeze route, and this pins the wiring against the REAL
+    # maps — every other `sdk_renamed` site in this file mocks `removal_records`, so deleting
+    # the real one would have left the suite green (review of PR #12313, round 18).
+    assert "events_poll" in records["sdk_renamed"], (
+        "RETIRED_SDK_METHODS (the rename map) was not read into `sdk_renamed`"
+    )
+    assert "backfill_sources" not in records["sdk_renamed"], (
+        "a REMOVED_SDK_METHODS name (a departure with no replacement) must not be a rename"
+    )
 
 
 def test_an_unreadable_archive_manifest_is_a_REFUSAL_not_an_empty_record(tmp_path):
@@ -5275,23 +5286,37 @@ def test_an_SDK_rename_with_NO_map_entry_is_refused_so_the_CALLER_fails_closed(
     assert "sdk_retired.py" in out, out
     assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
 
-    # Non-vacuity: WITH the map entry the same override is the record and the cut passes.
+    # ⛔ THE TWO MAPS MEAN OPPOSITE THINGS, and `backfill_sources` is in REMOVED_SDK_METHODS —
+    # a departure with NO replacement. Collapsing the maps into one set accepted that shape as
+    # "a deliberate rename" too, so a DELETED method was recorded as a rename and skipped the
+    # freeze: the caller got a bare `AttributeError`, `cut` persisted nothing, and
+    # `archive_surface.py check` (which iterates the archive manifest) could not see it
+    # (review of PR #12313, round 18). A REMOVED name still needs the freeze.
     monkeypatch.setattr(
         sm,
         "removal_records",
-        lambda *a, **k: {"archived": set(), "forward_raw": set(), "sdk_retired": {"backfill_sources"}},
+        lambda *a, **k: {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"backfill_sources"},
+            "sdk_renamed": set(),
+        },
     )
     rc = sm.cmd_cut(
         argparse.Namespace(
             commit=CUT_SHA,
             allow_approval_reset=True,
             allow_removal=["sdk:backfill_sources"],
-            allow_removal_reason="renamed to annotate_ask_matches",
+            allow_removal_reason="deleted: returned every tenant, zero callers",
         )
     )
     out = capsys.readouterr().out
-    assert rc == 0, out
-    assert "RETIRED_SDK_METHODS" in out and "--allow-removal" in out, out
+    assert rc == 1, f"a REMOVED_SDK_METHODS name was accepted as a rename with no freeze:\n{out}"
+    assert "NO replacement" in out and "FREEZE IT" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+    # Non-vacuity: a RETIRED_SDK_METHODS name (a RENAME, replacement named) is the one shape
+    # that needs no freeze — see `test_a_STATED_RENAME_clears_the_SDK_map_ONLY_half`.
 
 
 def test_the_MAP_HALF_has_a_printed_route_it_can_actually_use(
@@ -5331,6 +5356,10 @@ def test_the_MAP_HALF_has_a_printed_route_it_can_actually_use(
     # The missing half has its own printed route, and that route says not to re-freeze.
     map_route = sm.REMOVAL_WAYS[1]
     assert map_route in out, "the map half has no printed route:\n" + out
+    # The tool route must name BOTH files: `archive_symbol` freezes the declaration AND the
+    # handler, and a handler that is already gone is skipped SILENTLY — so restoring only
+    # `tool_registry.py` archives a tool whose behaviour is lost, with every gate green.
+    assert "tortoise/mcp_server.py" in sm.REMOVAL_WAYS[0], sm.REMOVAL_WAYS[0]
     assert "sdk_retired.py" in map_route and "already archived" in map_route, map_route
     # And the pair rule is qualified, so it does not contradict the rename remedy beside it.
     assert "STATED RENAME" in sm.SDK_PAIR_RULE, sm.SDK_PAIR_RULE
@@ -5339,7 +5368,9 @@ def test_the_MAP_HALF_has_a_printed_route_it_can_actually_use(
 def test_a_STATED_RENAME_clears_the_SDK_map_ONLY_half(monkeypatch, tmp_path, derived_baseline, capsys):
     """The rename remedy the refusal prints must WORK for the shape it is printed over.
 
-    This is the repo's recorded SDK rename procedure — old name into `RETIRED_SDK_METHODS`,
+    This is the repo's recorded SDK rename procedure — old name into `RETIRED_SDK_METHODS`
+    (the RENAME map, whose entry names the replacement; `REMOVED_SDK_METHODS` is the other
+    map and records a departure with no replacement, so it gets no such shortcut),
     method gone from `sdk.py` — which is map-only with no freeze, so the cut refused it and
     then printed "a genuine RENAME … passes `--allow-removal`" four lines under its own "FREEZE
     IT FIRST". Re-running with the flag produced a byte-identical refusal, because that arm
@@ -5349,7 +5380,7 @@ def test_a_STATED_RENAME_clears_the_SDK_map_ONLY_half(monkeypatch, tmp_path, der
     """
     sm = _load_manifest_tool()
     prior = _prior_with_extra_rows(
-        derived_baseline, [{"name": "sdk:backfill_sources", "method": "backfill_sources"}]
+        derived_baseline, [{"name": "sdk:events_poll", "method": "events_poll"}]
     )
     path = tmp_path / "surface-manifest.yml"
     path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
@@ -5359,7 +5390,12 @@ def test_a_STATED_RENAME_clears_the_SDK_map_ONLY_half(monkeypatch, tmp_path, der
     monkeypatch.setattr(
         sm,
         "removal_records",
-        lambda *a, **k: {"archived": set(), "forward_raw": set(), "sdk_retired": {"backfill_sources"}},
+        lambda *a, **k: {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"events_poll"},
+            "sdk_renamed": {"events_poll"},
+        },
     )
 
     # Unstated: refused, and the refusal names the freeze (the default for a removal).
@@ -5374,8 +5410,8 @@ def test_a_STATED_RENAME_clears_the_SDK_map_ONLY_half(monkeypatch, tmp_path, der
         argparse.Namespace(
             commit=CUT_SHA,
             allow_approval_reset=True,
-            allow_removal=["sdk:backfill_sources"],
-            allow_removal_reason="renamed to backfill_documents",
+            allow_removal=["sdk:events_poll"],
+            allow_removal_reason="renamed to events_watch",
         )
     )
     out = capsys.readouterr().out
@@ -5809,7 +5845,12 @@ def test_an_override_cannot_waive_TWO_surfaces_at_once():
     problems, accounting = sm.removal_report(
         prior,
         set(),
-        {"archived": set(), "forward_raw": set(), "sdk_retired": {"tortoise_x"}},
+        {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"tortoise_x"},
+            "sdk_renamed": {"tortoise_x"},
+        },
         allowed={"tool:tortoise_x", "sdk:tortoise_x"},
     )
     assert problems == [], problems
@@ -6483,7 +6524,12 @@ def test_a_bare_waiver_beside_a_QUALIFIED_one_is_not_the_two_surface_ambiguity()
     # The SDK rename carries its departure record, as every SDK rename must: `--allow-removal`
     # alone is refused for an SDK method (a caller of the old name needs the map's fail-closed
     # `AttributeError`), so the legitimate two-surface command names the map as well.
-    records = {"archived": set(), "forward_raw": set(), "sdk_retired": {"x"}}
+    records = {
+        "archived": set(),
+        "forward_raw": set(),
+        "sdk_retired": {"x"},
+        "sdk_renamed": {"x"},
+    }
     problems, accounting = sm.removal_report(
         {("x", "tool"), ("x", "sdk")}, set(), records, allowed={"x", "sdk:x"}
     )

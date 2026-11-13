@@ -2133,8 +2133,11 @@ ARCHIVE_KIND_BY_CLASS = {"tool": "mcp-tool", "sdk": "sdk-method"}
 
 REMOVAL_WAYS = (
     "an `archive/MANIFEST.json` entry of the matching kind — RESTORE THE DECLARATION FIRST "
-    "if it is already deleted (restore `tortoise/tool_registry.py` for a tool, "
-    "`tortoise/sdk.py` for an SDK method from the commit you are removing it at), because "
+    "if it is already deleted (restore `tortoise/tool_registry.py` AND "
+    "`tortoise/mcp_server.py` for a tool — the archive freezes the declaration AND every "
+    "handler, and a handler that is already gone is skipped SILENTLY, so restoring only the "
+    "registry archives a tool whose behaviour is lost; restore `tortoise/sdk.py` for an SDK "
+    "method, from the commit you are removing it at), because "
     "`archive_symbol` reads it from the working tree and refuses without it, then freeze: "
     "`uv run python tools/archive_surface.py archive <mcp-tool|sdk-method> <symbol> "
     "--batch <slug> --reason <text>` (and re-delete the declaration afterwards) — for an `sdk-method` this is ONE HALF: it must be "
@@ -2387,7 +2390,16 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
         # tree, and the only way out of the red was deleting the frozen entry. The raw set is
         # what lets `removal_report` refuse in `check`'s words (review of PR #12313).
         "forward_raw": set(RETIRED_USE_INSTEAD),
+        # The UNION answers "does this method have a map entry" (either map is enough for THAT
+        # question), but the two maps mean OPPOSITE things and the no-freeze rename arm must
+        # not treat them alike: `RETIRED_SDK_METHODS` is a RENAME whose replacement the map
+        # names (and whose owner gates pin that the replacement exists), while
+        # `REMOVED_SDK_METHODS` is a departure with NO replacement to point at. Collapsed into
+        # one set, a DELETED method was accepted as "a deliberate rename" with no freeze, so
+        # the caller got a bare `AttributeError`, `cut` persisted nothing, and no gate could
+        # see the loss (review of PR #12313, round 18).
         "sdk_retired": set(RETIRED_SDK_METHODS) | set(REMOVED_SDK_METHODS),
+        "sdk_renamed": set(RETIRED_SDK_METHODS),
     }
 
 
@@ -2514,7 +2526,11 @@ def removal_report(
             # code that nothing else can see — `archive_surface.check` iterates the archive
             # manifest, so a method that was never frozen is invisible to every other gate).
             # The map records the DEPARTURE; it does not keep the code.
-            if not archived and _waived(symbol, cls):
+            if (
+                not archived
+                and _waived(symbol, cls)
+                and symbol in records.get("sdk_renamed", ())
+            ):
                 # ⛔ A STATED RENAME IS A ROUTE HERE, and it has to be: the repo's recorded
                 # SDK rename procedure is EXACTLY this shape (`tortoise/sdk_retired.py`: the
                 # old name goes into `RETIRED_SDK_METHODS` and leaves `sdk.py`), so refusing
@@ -2528,21 +2544,33 @@ def removal_report(
                     waived.setdefault(symbol, []).append(cls)
                 accounting[(symbol, cls)] = (
                     "`--allow-removal` (deliberate rename, stated in the PR) + the "
-                    "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` departure record"
+                    "`RETIRED_SDK_METHODS` rename record"
                 )
                 continue
             if not archived:
+                renamed_entry = symbol in records.get("sdk_renamed", ())
                 problems.append(RemovalProblem(
                     "no-record",
-                    f"{symbol} (sdk) is in RETIRED_SDK_METHODS / REMOVED_SDK_METHODS but its "
-                    "code is NOT archived — the map records the DEPARTURE, it does not keep "
-                    "the code, and the #11609 ruling keeps removed code so a mistake can be "
-                    "inspected later. FREEZE IT: restore the method into `tortoise/sdk.py` "
-                    "from the commit you are removing it at FIRST (it is already gone from the "
-                    "working tree, and `archive` reads it from there), then `uv run python "
-                    f"tools/archive_surface.py archive sdk-method {symbol} --batch <slug> "
-                    "--reason <text>`, then re-delete it (the freeze and the map entry are ONE "
-                    "record, and this cut requires BOTH halves)"
+                    f"{symbol} (sdk) is in "
+                    + ("RETIRED_SDK_METHODS / REMOVED_SDK_METHODS" if renamed_entry
+                       else "REMOVED_SDK_METHODS — a departure with NO replacement")
+                    + " but its code is NOT archived — the map records the DEPARTURE, it "
+                    "does not keep the code, and the #11609 ruling keeps removed code so a "
+                    "mistake can be inspected later. "
+                    + ("FREEZE IT: restore the method into `tortoise/sdk.py` "
+                       "from the commit you are removing it at FIRST (it is already gone from the "
+                       "working tree, and `archive` reads it from there), then `uv run python "
+                       f"tools/archive_surface.py archive sdk-method {symbol} --batch <slug> "
+                       "--reason <text>`, then re-delete it (the freeze and the map entry are ONE "
+                       "record, and this cut requires BOTH halves). If this is really a RENAME, "
+                       "name the replacement in `RETIRED_SDK_METHODS` instead — a rename is the "
+                       "one shape that needs no freeze"
+                       if not renamed_entry else
+                       "FREEZE IT: restore the method into `tortoise/sdk.py` from the commit you "
+                       "are removing it at FIRST, then `uv run python "
+                       f"tools/archive_surface.py archive sdk-method {symbol} --batch <slug> "
+                       "--reason <text>`, then re-delete it (the freeze and the map entry are ONE "
+                       "record, and this cut requires BOTH halves)")
                 ))
                 continue
             found.append("RETIRED_SDK_METHODS/REMOVED_SDK_METHODS + archived code")
