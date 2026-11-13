@@ -312,9 +312,13 @@ do NOT, because the re-pick IS the lever: the two API-server search routes
   above any sane pool width, so its page cannot move.
 - **Recorded-baseline harnesses** — the eval / A-B tools
   (`tools/longmem_eval/retrieve.py`, `tools/fusion_formula_ab.py`,
-  `tools/ask_pool_admission_probe.py`) and the benchmarks
-  (`benchmarks/run_report.py`, `benchmarks/load_test.py`) pin it for comparability
-  against RECORDED numbers, exactly as the first three pin `_valid_time_rerank`.
+  `tools/ask_pool_admission_probe.py`), the benchmarks
+  (`benchmarks/run_report.py`, `benchmarks/load_test.py`), and the `docs/runbook`
+  rank diagnostics (`4107`, `5534`, `w6c`, `w7a`) and `docs/evidence`'s cost probe
+  pin it for comparability against RECORDED numbers, exactly as the first three
+  pin `_valid_time_rerank`. ⛔ The `docs/` half matters most: `w6c`/`w7a`'s entire
+  output is the gold row's POSITION and `5534`'s is an id-set delta, so an armed
+  rerank would not perturb those measurements, it would replace them.
 - **Membership probes** — `battery/runner/setup.py`'s seed-manifest guard
   (`limit=20`), `tools/why_layer_rate.py`'s support-entry lookup (`limit=25`) and
   `mcp_server`'s `tortoise_suggest_entry_points` (`limit=5`, where the returned page
@@ -327,9 +331,10 @@ deliberate exception on the write path: it keeps the rerank, under its own
 `OVERRIDES:` record.
 
 ⛔ And the composition change is **bounded by arithmetic, not by the sweep**: the
-rerank permutes only the scored head, so a caller reading `limit >= _scored_n` gets
-the same page whatever the rerank does — which is why the public reads at
-`limit >= 50` are safe today. That bound moves with `TORTOISE_FUSED_RERANK_POOL`,
+rerank permutes only the scored head, so a caller reading `limit >= _pool_n` gets
+the same **membership** — in a page whose ORDER the rerank did change (`count` on
+the trace entry is exactly how many positions moved). That is why the public reads
+at `limit >= 50` are safe today, and why the lever buys them nothing. That bound moves with `TORTOISE_FUSED_RERANK_POOL`,
 the knob this PR wires end to end; raise it above a caller's `limit` and that
 caller's page composition starts moving. The opt-out list above is what keeps that
 from being silent.

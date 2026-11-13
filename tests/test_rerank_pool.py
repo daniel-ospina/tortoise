@@ -919,19 +919,19 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
 
     #: Sites that INTENTIONALLY run the lever. Everything else must opt out.
     runs_the_lever = {
-        ("ask_lane.py", "run_ask_lane"):
+        ("tortoise/ask_lane.py", "run_ask_lane"):
             "the ask lane — reaches the same read with a relevance order, no "
             "recency and a non-empty question; priced as NOT calibrated in the "
             "brief's §5, i.e. disclosed by the document rather than skipped",
-        ("extractor_v2.py", "_fts_rows"):
+        ("tortoise/extractor_v2.py", "_fts_rows"):
             "the capture noun prior — KEEPS the rerank under its own "
             "OVERRIDES: record (#8487/#12297), measured recall@3 delta",
-        ("hosted_api.py", "search"): "user search — the surface §5 prices",
-        ("selfhost_api.py", "search"):
+        ("tortoise/hosted_api.py", "search"): "user search — the surface §5 prices",
+        ("tortoise/selfhost_api.py", "search"):
             "user search, self-hosted — the same read, so the same "
             "authorisation to run it",
-        ("mcp_server.py", "tortoise_query"): "user search (MCP text route)",
-        ("mcp_server.py", "tortoise_search"): "user search (MCP)",
+        ("tortoise/mcp_server.py", "tortoise_query"): "user search (MCP text route)",
+        ("tortoise/mcp_server.py", "tortoise_search"): "user search (MCP)",
     }
     # ⛔ NO ROW FOR ``volunteer_context``. It binds the read as ``_search_fn=`` and
     # the opt-out rides in its ``_search_kwargs`` — MEASURED to matter: before
@@ -996,13 +996,23 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         return out
 
     scanned: list[str] = []
-    for path in sorted((root / "tortoise").glob("*.py")):
+    # ⛔ ``rglob``, not ``glob``: ``tortoise/`` holds 17 subpackages
+    # (``projection/``, ``packs/``, ``session_import/``, …), and a caller placed
+    # in one of them inherited the armed lever with the census still green.
+    # Measured on a scratch tree holding one bare call in ``tortoise/top.py``
+    # and one in ``tortoise/subpkg/diag.py``: ``glob`` reported
+    # ``['tortoise/top.py:g']``, ``rglob`` reported both. The claim above is
+    # "EVERY SITE IN ``tortoise/``", so the walk must mean it.
+    for path in sorted((root / "tortoise").rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(root).as_posix()
         for owner, opted_out in _sites(path):
-            scanned.append(f"tortoise/{path.name}:{owner}")
+            scanned.append(f"{rel}:{owner}")
             if opted_out:
                 continue
-            assert (path.name, owner) in runs_the_lever, (
-                f"tortoise/{path.name}:{owner}'s read does not opt out of the "
+            assert (rel, owner) in runs_the_lever, (
+                f"{rel}:{owner}'s read does not opt out of the "
                 "rerank and is not on the intentional list — with the gate "
                 "armed it re-picks which rows survive limit, undisclosed")
     # non-vacuous: the enumeration must have found the surface it claims to
@@ -1043,7 +1053,13 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         "tools/rerank_calibration_12297.py",  # ditto
     }
     seen_external: set[str] = set()
-    for tree in ("tools", "battery", "benchmarks"):
+    # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,
+    # A/B id-set comparisons) and ``docs/evidence`` the cost-magnitude probes —
+    # the same class as the ``tools/`` harnesses, so they must opt out too: their
+    # output is the ORDER or the COST the lever moves, and their recorded
+    # numbers predate it.
+    for tree in ("tools", "battery", "benchmarks", "docs/runbook",
+                 "docs/evidence"):
         for path in sorted((root / tree).rglob("*.py")):
             rel = str(path.relative_to(root))
             found = _sites(path)
@@ -1057,7 +1073,7 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                     f"{rel}:{owner} reads the rerankable page and neither opts "
                     "out nor is on the intentional-keep list — with the gate "
                     "armed it re-picks which rows survive limit, undisclosed")
-    assert len(seen_external) >= 9, (
+    assert len(seen_external) >= 13, (
         f"the derived census saw only {sorted(seen_external)} — the trees moved")
 
     # ⛔ AND THE CENSUS MUST SEE THE SEAM. A read bound as ``_search_fn=`` (the

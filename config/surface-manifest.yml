@@ -1237,15 +1237,22 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-# #12297: SPLICED, not re-cut. The tool's CONTRACT is unchanged (same inputs,
-# same reply shape, same registry row) — its BODY gained one kwarg, which moves the
-# code-object digest the freeze records. `cut_at_commit` must name a DEFAULT-BRANCH
-# commit and a raw `cut` would also drop the hand-curated `used_by` /
-# `recommendation` / `basis` cells, so only the derived `served_from` cell moves
-# here — to exactly the value `check` derives from the declaration
-# (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it stands on
-# this branch, after the owner's 2239f94ff6 and c82c0337a4 rewrote the same two
-# comments). Nothing else in this row, and nothing in any other row, moves.
+# #12297: SPLICED, not re-cut — and the two reasons are the REAL costs of a cut,
+# not a claim that a cut would lose hand-curated cells (it would not:
+# `CARRIED_TOOL_ROW_KEYS` in tools/surface_manifest.py carries `used_by` /
+# `recommendation` / `basis` / `reason` / `exemption` forward from the committed
+# manifest, and a cut reproduces this tool row byte-for-byte). The costs it does
+# have: (1) `cut --commit` must be handed a DEFAULT-BRANCH sha (#11057 review F1)
+# — cut at a lane head, `provenance_report` reds — and (2) a cut re-derives the
+# 39 `sdk:` rows' `used_by` cells by design (`CARRIED_SDK_ROW_KEYS` is just
+# `exemption`), churning a diff this change has nothing to do with.
+# So exactly one derived cell moves, to the value `check` itself derives from the
+# declaration (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it
+# stands on this branch, after the owner's 2239f94ff6 and c82c0337a4 rewrote the
+# same two comments). Nothing else in this row, and nothing in any other row,
+# moves. ⛔ Splicing a DERIVED cell is safe only because `check` re-derives it: if
+# this value ever disagrees with the declaration, both gates go red rather than
+# drifting. It is not a general licence to edit derived cells.
 - name: tortoise_suggest_entry_points
   served_from: tortoise/mcp_server.py:aae4bf5f5ceffe7c
   served_attributes: 542cf2dbb222d260
