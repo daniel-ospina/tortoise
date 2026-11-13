@@ -1050,8 +1050,11 @@ def _is_refusal_envelope(text: str) -> bool:
     refusal, the sensitive-op rate-limit 429, and the GRAPH-TARGET family (a retarget
     refusal, "No graph … is reachable", requires-a-workspace, a graph that cannot be
     opened) — matched by prefix. That list is the ONE registry; do NOT restate a
-    count here, because this docstring said "FOUR shapes" while the delegate matched
-    six (review round 5), and then said six while it matched nine. Every one of the
+    count here, because this docstring has already gone stale doing exactly that
+    ("FOUR shapes" while the delegate matched six). Two graph-target arms are OUT on
+    purpose and named beside the tuple; a bare "Graph " lead was tried and REMOVED
+    because it classified "Graph disclosure: …" and "Graph was purged…" as refusals,
+    silencing crashes. Every one of the
     graph-target entries exists because the census sites that take a graph fallback
     (`_section`, `read_operators`, `read_events`, and now `read_points`) receive that
     family as `ToolError` and must classify it as a refusal, not a crash. A

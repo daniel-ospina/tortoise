@@ -865,17 +865,28 @@ _REFUSAL_RATE_LIMIT_LEAD = "Rate limit exceeded for "
 #: ⛔ LEADS, not whole messages: each embeds caller-specific detail (the requested
 #: graph, this transport's capabilities), and they live HERE beside their siblings so
 #: a reworded producer cannot silently re-open rc 1.
-#: ⛔ DELIBERATELY EXCLUDED: "`<tool>` does not take a `graph` argument"
-#: (`mcp_server._take_graph_argument`). It is a USAGE error — the caller fixes it by
-#: removing the argument — and its message begins with the tool NAME, so no stable
-#: prefix exists to key on. It stays a crash-class failure on purpose; the CLI still
-#: surfaces its text through `describe_failure`, and no census site would take a graph
-#: fallback for it.
+#: ⛔ DELIBERATELY EXCLUDED — TWO arms, named so the gap is not rediscovered as a bug:
+#: (a) "`<tool>` does not take a `graph` argument" (`mcp_server._take_graph_argument`):
+#: a USAGE error the caller fixes by removing the argument, and its message begins
+#: with the tool NAME, so no stable prefix exists to key on;
+#: (b) the cannot-be-opened arm (`plan_graph_target`'s
+#: `f"Graph {_describe_graph(row)} cannot be opened: …"`): the GRAPH NAME sits
+#: immediately after "Graph ", so no prefix short of the name itself exists.
+#: ⛔ The bare lead `"Graph "` was tried and REMOVED — it is 6 characters and matched
+#: unrelated prose that must stay CRASH-class: measured, it classified
+#: "Graph disclosure: 3 rows were read from …" (an informational note),
+#: "Graph limit reached for this workspace." and "Graph was purged by an operator."
+#: as DESIGNED REFUSALS, which silences a crash page — the exact INVERSE of the
+#: defect #11153 fixes. A generic lead is worse than a missing one.
+#: Both arms stay crash-class on purpose; the CLI still surfaces their text through
+#: `describe_failure`, and no census site would take a graph fallback for them.
 _REFUSAL_GRAPH_TARGET_LEADS = (
     "This credential is bound to one graph and cannot be re-targeted ",
     "No graph ",
     "The `graph` argument requires a hosted workspace connection ",
-    "Graph ",
+    "The `graph` argument must be a graph id or name ",
+    "The `graph` argument is empty. ",
+    "Graph name ",
 )
 
 #: The refusal as a caller of a MUTATING tool must read it (#10849).
@@ -929,13 +940,19 @@ _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE = (
 #: reported it as a crash. It is registered now, through
 #: `_REFUSAL_GRAPH_TARGET_LEADS` above (declared there, beside the producers' other
 #: constants), so the exhaustive claim holds for the arms that carry a STABLE lead.
-#: ⛔ ONE arm remains OUT by design and it is named so the gap is not rediscovered as
-#: a bug: `_take_graph_argument`'s "`<tool>` does not take a `graph` argument" is a
-#: USAGE error whose message begins with the tool NAME, so no stable prefix exists;
-#: it stays crash-class (the CLI still prints its text through `describe_failure`).
-#: The other graph-target arms are ALSO classified where it matters for routing —
-#: `curate_graph` reads them through `_looks_like_graph_refusal` to pick the
-#: credential-bound fallback, which is the one place a wrong answer would mix graphs.
+#: ⛔ TWO arms remain OUT by design, and they are named beside that tuple so neither
+#: gap is rediscovered as a bug: `_take_graph_argument`'s "`<tool>` does not take a
+#: `graph` argument" (tool NAME leads) and the cannot-be-opened arm (GRAPH NAME
+#: leads). Both stay crash-class (the CLI still prints their text through
+#: `describe_failure`). A bare `"Graph "` lead was tried and removed — it classified
+#: "Graph disclosure: …" and "Graph was purged…" as refusals, silencing crashes.
+#: ⛔ The other graph-target arms are classified where it matters for routing —
+#: `curate_graph` reads them through `_looks_like_graph_refusal` — for the arms whose
+#: wording that classifier matches (`cannot be re-targeted`, `No graph …
+#: reachable`, `graph-bound`). ⚠️ It does NOT match the hosted-workspace or
+#: multi-match arms, which still raise rather than taking the credential-bound
+#: fallback; that predates this PR (they raised as `ToolError` before) and is
+#: tracked separately rather than claimed here.
 #:
 #: ⛔ ALL THREE `-32009` wait-bound arms are named, including the WRITE one, rather
 #: than leaning on the base message's leading 60 characters: they agree today only

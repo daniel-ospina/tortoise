@@ -397,12 +397,13 @@ def test_every_designed_prose_refusal_is_classified_not_a_crash(monkeypatch):
     **THAT CARRIES A STABLE LEAD** (review round 9, measured).
 
     ⛔ Not literally every one: `mcp_auth.REFUSAL_PROSE_MESSAGES`'s ⛔ SCOPE note names
-    ONE arm that is OUT by design — `_take_graph_argument`'s "`<tool>` does not take a
-    `graph` argument", a USAGE error whose message begins with the tool NAME, so there
-    is no prefix to key on. It stays crash-class, and the CLI still surfaces its text
-    through `describe_failure`. Read the module note before concluding the registry is
-    complete, or a future arm will be left out on the assumption that this docstring
-    already covers it.
+    TWO arms that are OUT by design — `_take_graph_argument`'s "`<tool>` does not take
+    a `graph` argument" (the tool NAME leads, so no stable prefix exists) and the
+    cannot-be-opened arm (`Graph <name> cannot be opened: …`, where the graph NAME sits
+    immediately after "Graph "). Both stay crash-class, and the CLI still surfaces
+    their text through `describe_failure`. Read the module note before concluding the
+    registry is complete, or a future arm will be left out on the assumption that this
+    docstring already covers it.
 
     Two shipped refusals were prose with no entry — the graph-lookup MARGIN arm and
     the sensitive-op rate-limit (429) — so `refusal_message` bucketed them as CRASHES:
@@ -504,6 +505,7 @@ def test_the_graph_target_family_is_a_designed_refusal_not_a_crash(monkeypatch):
         mod._live_call_tool("tortoise_get_entity", {})
     assert str(caught.value) == wire, str(caught.value)
 
+
 def test_the_payload_is_redacted_in_the_cli_refusal_arm(monkeypatch, capsys):
     """#10605 applies to the refusal arm too (round 10).
 
@@ -544,7 +546,6 @@ def test_the_payload_is_redacted_in_the_cli_refusal_arm(monkeypatch, capsys):
         f"the credential reached stdout: {out}")
     assert "<redacted>" in out, out
     assert json.loads(out)["is_error"] is True, out
-
 
 
 def test_a_total_outage_of_the_orientation_summary_is_a_refusal(monkeypatch):
@@ -608,3 +609,60 @@ def test_a_partial_orientation_summary_keeps_reporting_what_answered(monkeypatch
     result = ms.tortoise_overview()
     assert isinstance(result, dict) and not isinstance(result, ms._SafeError)
     assert result["taxonomy"] == {"kinds": 3}
+
+
+def test_the_graph_target_leads_never_swallow_an_unrelated_message():
+    """A lead is a matcher, so an over-GENERIC one converts CRASHES into refusals.
+
+    Round 11, measured: the first cut of `_REFUSAL_GRAPH_TARGET_LEADS` carried a bare
+    ``"Graph "`` so the multi-match and cannot-be-opened arms would classify. Being six
+    characters, it also matched prose that must stay crash-class — ``"Graph
+    disclosure: 3 rows were read from …"`` (an informational note), ``"Graph limit
+    reached for this workspace."`` and ``"Graph was purged by an operator."`` — and
+    `refusal_message` answering yes there SILENCES a crash page (rc 3 with an
+    `isError: true` payload). That is the exact INVERSE of #11153, and worse than a
+    missing lead, so ``"Graph "`` was replaced by ``"Graph name "`` and the
+    cannot-be-opened arm was moved to the named-exclusion list.
+
+    Both directions are pinned here: the arms that must classify, and the neighbours
+    that must NOT.
+    """
+    from tortoise import mcp_auth
+    from tortoise.mcp_client import refusal_message
+
+    # MUST classify: every graph-target arm that carries a stable lead.
+    must_classify = (
+        "This credential is bound to one graph and cannot be re-targeted by a "
+        "`graph` argument (requested org_x_g_a).",
+        "No graph 'x' is reachable from this workspace. Reachable graphs: y.",
+        "The `graph` argument requires a hosted workspace connection (an OAuth or "
+        "tenant-key MCP session) — this transport has no graph set to resolve it "
+        "against.",
+        mcp_auth._GRAPH_TYPE_REFUSAL,
+        "The `graph` argument is empty. Omit it to use this workspace's default "
+        "graph, or pass one of: x.",
+        "Graph name 'x' matches 2 graphs in this workspace: a, b. Pass the graph id "
+        "instead.",
+    )
+    for message in must_classify:
+        assert refusal_message(message) is not None, message[:70]
+
+    # MUST NOT classify: the named exclusions, and the neighbours a bare "Graph "
+    # lead used to swallow. A match here reports a crash as a designed refusal.
+    must_not_classify = (
+        # the two documented exclusions
+        "`tortoise_create_point` does not take a `graph` argument — it targets the "
+        "workspace or names its graph explicitly. Remove the argument.",
+        "Graph a (g1) cannot be opened: it is missing its graph id or its storage "
+        "namespace. Omit `graph` to use the default graph.",
+        # what a bare "Graph " lead wrongly caught (measured)
+        "Graph disclosure: 3 rows were read from org_x_g_default because the "
+        "requested graph was not found.",
+        "Graph limit reached for this workspace.",
+        "Graph was purged by an operator.",
+        # and a genuine crash, which must keep paging on rc 1
+        "Error calling tool: TypeError: 'NoneType' is not subscriptable",
+    )
+    for message in must_not_classify:
+        assert refusal_message(message) is None, (
+            f"classified as a DESIGNED refusal, which silences a crash: {message[:70]}")
