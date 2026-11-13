@@ -132,6 +132,7 @@ import collections
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -348,6 +349,137 @@ def _fold_punct(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+# ── the NAME-ENTROPY GATE (#12294) — MEASURED HERE, DECLINED ────────────────
+#
+# Zep/Graphiti refuses its *fuzzy* (MinHash/LSH shingle) matcher for names too
+# short or too repetitive to shingle reliably, and DEFERS those names to the LLM
+# dedupe prompt — it never drops them. Read from
+# `graphiti_core/utils/maintenance/dedup_helpers.py`:
+#
+#   * `_NAME_ENTROPY_THRESHOLD = 1.5` / `_MIN_NAME_LENGTH = 6` /
+#     `_MIN_TOKEN_COUNT = 2` — the three constants at `:31-33`;
+#   * `_has_high_entropy` (`:80-86`) refuses when `len(name) < 6 AND
+#     tokens < 2` (an **AND**, so a long single-token or a short two-token name
+#     passes THAT test) and otherwise requires the Shannon entropy of the name's
+#     CHARACTERS (spaces stripped, bits/char) to reach `1.5`;
+#   * the call site (`_resolve_with_similarity`, `:337-355`) runs EXACT
+#     normalised-name matching for **every** name first and gates only the block
+#     below it; a gated name goes to `unresolved_indices`, which
+#     `_resolve_with_llm` (`node_operations.py:660-670`) feeds to the LLM.
+#
+# ⛔ THE GATE IS DECLINED, AND THIS MODULE HOLDS THE EVIDENCE. #12294 proposed
+# porting it to `extractor_v2._derive_queries` (no query for a gated name) and
+# `resolve_entities` (hold, never assert new). Built, measured here, and
+# falsified by the issue's own falsifier on the #11901 corpus:
+#
+#   * ⛔ THE PREMISE IS FALSE, and this is the finding that outlives the lane.
+#     The gate assumes a bare definite description's query degenerates to its
+#     bare content word and returns a near-synonymous cluster. It does not:
+#     `sparse.build_or_query` builds the OR-union only when TWO OR MORE tokens
+#     survive stopword removal, and a single surviving token takes the RAW-LITERAL
+#     fallback (`sparse.py:536-550`) — so `the fix` is queried as `the fix`, which
+#     RediSearch evaluates as an implicit AND over both terms (`sparse.py:13-17`).
+#     The article is not a wasted term, it is half of the conjunction.
+#   * the SHIPPED-shaped predicate gates 98 sample rows / 85 distinct names of
+#     300, and **98 of 98 rows are reachable by the leg at k=15** (85 at k=3) —
+#     so the gate removes a CORRECT candidate for almost every name it touches;
+#   * the class it was proposed for — names unreachable at ANY k (`82/300`,
+#     #11901's 27 %) — has **zero** overlap with the gated set: the predicate is
+#     anti-correlated with the population it was meant to protect;
+#   * with the real capture UNION (15 names, `max_queries`), the OTHER names'
+#     queries rescue just **1 of 85** gated names, so the recall cost is not an
+#     artefact of measuring each name in isolation;
+#   * the exact Zep port is narrower and no better: it gates only `#NNNN`
+#     identifiers (26 rows / 13 distinct) — **not** the
+#     bare-definite-description class (62.3 % of `:Object` names) the issue
+#     targeted, because `the suite` is 9 characters and 2 tokens as written;
+#   * and no duplicate is prevented: gated VARIANT pairs that phase 1 could bind
+#     today = **0** at every k (`#11901`: variant attach is 0.0 % before and
+#     after), so the gate trades measured recall for zero duplicate reduction.
+#
+# The predicate is kept HERE rather than in `tortoise/`, because it is live
+# measurement code and would be dead product code:
+# `tests/test_name_entropy_12294.py` pins both the port and the falsification, so
+# a future lane re-attempting lever M-1 reds instead of re-deriving it.
+
+#: Zep's three published constants, re-declared so a test can pin the port.
+_NAME_ENTROPY_THRESHOLD = 1.5
+_MIN_NAME_LENGTH = 6
+_MIN_TOKEN_COUNT = 2
+
+
+def _name_char_entropy(normalized_name: str) -> float:
+    """Shannon entropy over the name's CHARACTERS, spaces stripped, bits/char.
+
+    Zep's `_name_entropy` (`dedup_helpers.py:60-78`). Repetition, not length, is
+    what it measures: ``aaaaaaaa`` scores 0.0, ``deadline`` ~2.8.
+    """
+    cleaned = (normalized_name or "").replace(" ", "")
+    if not cleaned:
+        return 0.0
+    counts: dict[str, int] = {}
+    for char in cleaned:
+        counts[char] = counts.get(char, 0) + 1
+    total = len(cleaned)
+    return -sum((c / total) * math.log2(c / total) for c in counts.values())
+
+
+def _has_high_entropy(normalized_name: str) -> bool:
+    """Zep's predicate, verbatim in behaviour (`dedup_helpers.py:80-86`).
+
+    ⛔ The conjunction is deliberate and is the part a later "simplification"
+    would break: `len < 6 AND tokens < 2` refuses only names that are BOTH short
+    and single-token, so `fix` is refused, `hotfix` (6 chars, 1 token) is NOT,
+    and `the fix` (9 chars, 2 tokens) is not. As an `or` it would refuse every
+    single-token name — wider than the source ships, and in the direction that
+    removes correct candidates.
+    """
+    token_count = len((normalized_name or "").split())
+    if len(normalized_name or "") < _MIN_NAME_LENGTH and token_count < _MIN_TOKEN_COUNT:
+        return False
+    return _name_char_entropy(normalized_name) >= _NAME_ENTROPY_THRESHOLD
+
+
+def _signal_tokens(name: str) -> list[str]:
+    """The tokens the capture prior WILL match on for this name.
+
+    `sparse.build_or_query` drops `SPARSE_STOPWORDS` before it builds the
+    OR-union (`sparse.py:34-52`), so the surviving tokens are the entire
+    discriminating surface of the query. Same split rule as the leg
+    (lowercase, non-alphanumeric runs), so this cannot drift from what is
+    searched for.
+    """
+    from tortoise.sparse import SPARSE_STOPWORDS
+
+    return [t for t in re.split(r"[^a-z0-9]+", (name or "").lower())
+            if t and t not in SPARSE_STOPWORDS]
+
+
+def _name_carries_signal(name: str) -> bool:
+    """Would a gate on this name keep a query that can still discriminate?
+
+    Two ways a name carries no signal, and the second is the one Zep's
+    full-name predicate cannot see through our tokenizer:
+
+    1. **No content token at all** — every token is a `SPARSE_STOPWORDS` member
+       (`the same`, `the one`), so `build_or_query` falls back to the escaped
+       raw string.
+    2. **Zep's predicate on the CONTENT tokens** — refuse a name whose only
+       surviving token is one Zep's rule would refuse on its own. `the fix` →
+       `fix`, three characters and one token, so it is refused by the same rule
+       that refuses `fix` itself. ⚠️ Measured: this is the wrong inference for
+       our leg, because the leg does NOT search that token alone — it searches
+       `the fix` as a two-term implicit AND (see the header).
+
+    ⛔ MEASURED AND DECLINED: see this block's header. The predicate is correct
+    as a port and wrong as a policy here — it selects names the leg CAN find.
+    """
+    tokens = _signal_tokens(name)
+    if not tokens:
+        return False
+    return _has_high_entropy(" ".join(tokens))
+
+
 def _allocate_shares(sample: int, pop: list[dict]) -> dict[str, int]:
     """Largest-remainder allocation of ``sample`` across the harvested classes.
 
@@ -397,13 +529,7 @@ def run(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 3
 
-    from tortoise.extractor_v2 import (
-        _find_existing_entity,
-        _has_high_entropy,
-        _name_carries_signal,
-        _sanitise_query_text,
-        _signal_tokens,
-    )
+    from tortoise.extractor_v2 import _find_existing_entity, _sanitise_query_text
     from tortoise.sdk import TortoiseSDK
 
     sessions = Path(os.path.expanduser(args.sessions_dir))
@@ -572,7 +698,7 @@ def run(args: argparse.Namespace) -> int:
         # issue — how many of them had the CANONICAL in the window, i.e. correct
         # candidates the gate would suppress.
         gate: dict[str, dict[str, int]] = {
-            p: {"names": 0, "gated": 0, "gated_gap": 0,
+            p: {"names": 0, "gated": 0, "unique_gated": 0,
                 "in_window_before": 0, "suppressed_correct": 0,
                 "noise_rows_freed": 0, "gated_and_missed": 0}
             for p in ("zep_full_name", "shipped")}
@@ -618,12 +744,11 @@ def run(args: argparse.Namespace) -> int:
                             continue
                         _g_hit[p][k] = hit is not None
                         if hit is not None:
+                            gate[p]["in_window_before"] += 1
                             gate[p]["suppressed_correct"] += 1
                             gate_by_class[row["cls"]][p]["suppressed_correct"] += 1
                         else:
                             gate[p]["noise_rows_freed"] += len(rows)
-                        if k == KS[0]:
-                            gate[p]["gated_gap"] += len(rows)
                 if hit is not None:
                     exact[k]["in_window"] += 1
                     exact_by_class[row["cls"]][str(k)]["in_window"] += 1
@@ -691,6 +816,17 @@ def run(args: argparse.Namespace) -> int:
                         "window_rows": _g_hit[p] and len(wide),
                     })
         arms["gate"] = gate
+        #: the DISTINCT names each predicate gates — the sample can repeat a name
+        #: (it is drawn per class, and a name can be harvested under two rules),
+        #: so `gated` counts sample rows and this counts names. "98 of 300" is a
+        #: row count; the share of the population it describes is this one.
+        for p in gate:
+            gate[p]["unique_gated"] = len({g["name"] for g in gate_gated
+                                           if not (
+                                               _name_carries_signal(g["name"])
+                                               if p == "shipped" else
+                                               _has_high_entropy(
+                                                   g["name"].lower().strip()))})
         arms["gate_by_class"] = {c: dict(v) for c, v in sorted(gate_by_class.items())}
         arms["gate_gated_names"] = gate_gated
         arms["exact"] = exact
@@ -779,6 +915,16 @@ def run(args: argparse.Namespace) -> int:
         # capture, which is the production budget (``max_queries=15``).
         pooled = {k: {"captures": 0, "set_sum": 0, "set_min": 10**9, "set_max": 0}
                   for k in KS}
+        #: #12294: the PRODUCTION-TRUTH cost of the gate, which the isolated arms
+        #: cannot answer. `search_graph` unions every derived query into ONE
+        #: id-keyed candidate set, so a gated name's canonical can still arrive
+        #: through ANOTHER name's query in the same capture. This measures exactly
+        #: that: build the union from the NON-gated names only (what the gate
+        #: would leave in place), then ask whether each gated name's canonical is
+        #: still in it. ``lost`` is the gate's true recall cost.
+        pooled_gate: dict[str, dict[str, int]] = {
+            p: {"gated": 0, "rescued_by_union": 0, "lost": 0}
+            for p in ("shipped", "zep_full_name")}
         budget = 15   # production ``max_queries``
         for start in range(0, min(len(sample), args.captures * budget), budget):
             group = sample[start:start + budget]
@@ -786,15 +932,36 @@ def run(args: argparse.Namespace) -> int:
                 continue
             for k in KS:
                 merged: dict[str, dict] = {}
+                kept: dict[str, dict] = {}
                 for row in group:
-                    for r in window(row["name"], k):
+                    rows_here = window(row["name"], k)
+                    for r in rows_here:
                         if r["id"] and r["id"] not in merged:
                             merged[r["id"]] = r
+                    if (_name_carries_signal(row["name"])
+                            and _has_high_entropy(row["name"].lower().strip())):
+                        for r in rows_here:
+                            kept[r["id"]] = r
                 size = len(merged)
                 pooled[k]["captures"] += 1
                 pooled[k]["set_sum"] += size
                 pooled[k]["set_min"] = min(pooled[k]["set_min"], size)
                 pooled[k]["set_max"] = max(pooled[k]["set_max"], size)
+                if k != KS[0]:
+                    continue
+                for row in group:
+                    for p, is_gated in (
+                            ("shipped", not _name_carries_signal(row["name"])),
+                            ("zep_full_name", not _has_high_entropy(
+                                row["name"].lower().strip()))):
+                        if not is_gated:
+                            continue
+                        pooled_gate[p]["gated"] += 1
+                        if row["id"] in kept:
+                            pooled_gate[p]["rescued_by_union"] += 1
+                        else:
+                            pooled_gate[p]["lost"] += 1
+        arms["pooled_gate"] = pooled_gate
         arms["pooled"] = pooled
 
         # ⛔ A MIXED run is refused: `legs_seen` OR-s the looser #3005 predicate

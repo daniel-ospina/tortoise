@@ -2813,131 +2813,6 @@ def _query_key(entity_type: str, raw: str) -> str | None:
     return f"{entity_type}:{_norm_sent(q)}"
 
 
-# ── the NAME-ENTROPY GATE (#12294) ────────────────────────────────────────────
-#
-# WHERE THIS COMES FROM. Zep/Graphiti refuses its *fuzzy* (MinHash/LSH shingle)
-# matcher for names that are too short or too repetitive to shingle reliably, and
-# DEFERS those names to the LLM dedupe prompt instead — it never drops them.
-# Ported from `graphiti_core/utils/maintenance/dedup_helpers.py`:
-#
-#   * `_NAME_ENTROPY_THRESHOLD = 1.5` / `_MIN_NAME_LENGTH = 6` /
-#     `_MIN_TOKEN_COUNT = 2` are the three constants at `:31-33`;
-#   * `_has_high_entropy` (`:80-86`) refuses when `len(name) < 6 AND
-#     tokens < 2` — an **AND**, so a two-word name of any length passes that
-#     test — and otherwise requires the Shannon entropy of the name's
-#     CHARACTERS (spaces stripped, bits/char) to reach `1.5`;
-#   * the call site (`_resolve_with_similarity`, `:337-355`) runs EXACT
-#     normalised-name matching for **every** name first, and gates only the
-#     block below it; a gated name is appended to `unresolved_indices`, which
-#     `_resolve_with_llm` (`node_operations.py:660-670`) feeds to the LLM.
-#
-# ⛔ WHAT THAT MEANS FOR US, AND WHY THE PURE PORT IS NOT THE WHOLE GATE. Zep's
-# gate guards a *character-shingle* matcher ours does not have. Our equivalent
-# fuzzy path is the capture prior's FTS query (`_derive_queries` →
-# `_fts_rows`), and `sparse.build_or_query` turns a name into an OR-union of its
-# tokens AFTER `SPARSE_STOPWORDS` is removed (`sparse.py:34-52`). So a bare
-# definite description — `the suite`, `the fix`, 62.3 % of our `:Object` names —
-# reaches the leg as the single content token `suite`/`fix`: the articles are
-# gone before the query is built, and the remaining token is the whole
-# discriminating surface. Zep's predicate, applied to the full name, passes that
-# class (it is 9 characters and 2 tokens), so a faithful port would gate almost
-# nothing here — which is why `_name_carries_signal` gates the **content tokens
-# the leg will actually match on**, using Zep's rule as the inner test.
-#
-# ⛔ WHAT A GATE MAY NOT DO. It may not widen what is stored or indexed (V1,
-# §12.2/§12.2c, the `#11395` KEEP ruling), and it may not weaken a deterministic
-# rung: a gated name never reaches the FTS leg, so `resolve_entities` may no
-# longer read its `none` mode as a MEASURED ABSENCE — see `HOLD_LOOKUP_GATED`.
-
-#: Zep's three published constants, re-declared here so this module owns the
-#: threshold it ships (a test pins all three against the values above).
-_NAME_ENTROPY_THRESHOLD = 1.5
-_MIN_NAME_LENGTH = 6
-_MIN_TOKEN_COUNT = 2
-
-
-def _name_char_entropy(normalized_name: str) -> float:
-    """Shannon entropy over the name's CHARACTERS, spaces stripped, bits/char.
-
-    Zep's `_name_entropy` (`dedup_helpers.py:60-78`), re-implemented rather than
-    imported (it is a GPL-incompatible dependency's internal, and it is eight
-    lines). Repetition, not length, is what it measures: `aaaaaaaa` scores 0.0
-    while `deadline` scores ~2.8.
-    """
-    cleaned = (normalized_name or "").replace(" ", "")
-    if not cleaned:
-        return 0.0
-    counts: dict[str, int] = {}
-    for char in cleaned:
-        counts[char] = counts.get(char, 0) + 1
-    total = len(cleaned)
-    return -sum((c / total) * math.log2(c / total) for c in counts.values())
-
-
-def _has_high_entropy(normalized_name: str) -> bool:
-    """Zep's predicate, verbatim in behaviour (`dedup_helpers.py:80-86`).
-
-    ⛔ The conjunction is deliberate and is the part a later "simplification"
-    would break: `len < 6 AND tokens < 2` refuses only names that are BOTH short
-    and single-token, so `fix` is refused, `hotfix` (6 chars, 1 token) is NOT,
-    and `the fix` (9 chars, 2 tokens) is not. Writing it as `or` would refuse
-    every single-token name in the graph — a much wider gate than the source
-    ships, and the direction that removes correct candidates.
-    """
-    token_count = len((normalized_name or "").split())
-    if len(normalized_name or "") < _MIN_NAME_LENGTH and token_count < _MIN_TOKEN_COUNT:
-        return False
-    return _name_char_entropy(normalized_name) >= _NAME_ENTROPY_THRESHOLD
-
-
-def _signal_tokens(name: str) -> list[str]:
-    """The tokens the capture prior WILL match on for this name — one home.
-
-    `sparse.build_or_query` drops `SPARSE_STOPWORDS` before it builds the
-    OR-union (`sparse.py:34-52`), so the surviving tokens are the entire
-    discriminating surface of the query. Derived by the same split rule
-    (`sparse._SPLIT_RE`, lowercase, non-alphanumeric runs) so this cannot drift
-    from what the leg searches for.
-    """
-    from .sparse import SPARSE_STOPWORDS
-
-    return [t for t in re.split(r"[^a-z0-9]+", (name or "").lower())
-            if t and t not in SPARSE_STOPWORDS]
-
-
-def _name_carries_signal(name: str) -> bool:
-    """Does this name hold a key distinctive enough for the FUZZY leg?
-
-    Returns ``False`` when the capture prior should NOT spend a query (and up
-    to three candidate slots) on it, and the name must instead be resolved by
-    the deterministic rungs — or, when those cannot answer, HELD.
-
-    Two ways a name carries no signal, and the second is the one Zep's
-    full-name predicate cannot see through our tokenizer:
-
-    1. **No content token at all.** Every token is a `SPARSE_STOPWORDS` member
-       (`the same`, `the one`, `it`), so `build_or_query` has nothing left to
-       search with and the leg answers from its raw-fallback branch — a
-       literal-string match that cannot bind a re-spelling and, on a bare
-       article, matches nothing. There is no query to run.
-    2. **Zep's predicate on the CONTENT tokens** — the text the leg actually
-       searches. `the fix` → `fix`, which is 3 characters and one token, so it
-       is refused by the same rule that refuses `fix` itself. This is the whole
-       point of the gate on our population: the article-headed class is long
-       and two-token as written, and one short token as searched.
-
-    ⛔ Conservative by construction: any name with two surviving content tokens
-    (`the plan doc` → `plan doc`) passes — a conjunction of two tokens is
-    already a real blocking key, and `#11901` measured that widening the window
-    does not help names that cannot discriminate, so the gate claims nothing
-    about names that can.
-    """
-    tokens = _signal_tokens(name)
-    if not tokens:
-        return False
-    return _has_high_entropy(" ".join(tokens))
-
-
 def _derive_queries(embed_list: dict, story: str) -> dict:
     """Deterministic query derivation: entity names → object/subject,
     event contents → event, point contents → point, story topics → point.
@@ -2957,16 +2832,7 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
             # through the ONE home, like the text legs: the object width is None
             # today, so this is behaviour-identical — and the day one is set, the
             # derivation and the record cannot silently disagree (#5095 review).
-            text = _candidate_query_text("object", e.get("name"))
-            # #12294: a name with no discriminating token derives NO query — the
-            # leg would answer a near-synonymous cluster that phase 1 cannot
-            # bind (`#11901`: 0.0 % of variants attach at any k) while spending
-            # one of the capture's `max_queries` slots. The name is not dropped:
-            # `resolve_entities` holds it (never asserts it new) unless a
-            # deterministic rung or phase 2 answers for it.
-            if not _name_carries_signal(text):
-                continue
-            _add("object", text)
+            _add("object", _candidate_query_text("object", e.get("name")))
     for ev in embed_list.get("events", []) or []:
         if isinstance(ev, dict) and ev.get("content"):
             _add("event", _candidate_query_text("event", ev.get("content")))
@@ -2976,37 +2842,6 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
     for t in _story_topics(story):
         _add("point", t)
     return queries
-
-
-def _gated_entity_names(embed_list: dict) -> list[dict]:
-    """Entity names the capture prior will NOT search for, and why (#12294).
-
-    `_derive_queries` omits these from the `object` leg, so without this they
-    would leave no trace on the run. Every consumer of the gate asks
-    `_name_carries_signal` — this is the reporting half, never a second
-    predicate, and it exists so a caller can tell *"the leg had nothing to
-    match"* from *"the leg was never asked"* (the `#5095` distinction, extended
-    to the names `#12294` stops asking about).
-
-    Returns ``[{"name", "reason"}]`` — `reason` is ``no_content_token`` (every
-    token is a `SPARSE_STOPWORDS` member, so the leg has no term to search) or
-    ``low_entropy_token`` (Zep's predicate refuses the content token(s) the leg
-    would search on).
-    """
-    out: list[dict] = []
-    seen: set[str] = set()
-    for e in embed_list.get("entities", []) or []:
-        if not (isinstance(e, dict) and e.get("name")):
-            continue
-        text = _candidate_query_text("object", e.get("name"))
-        key = _query_key("object", text)
-        if key is None or key in seen or _name_carries_signal(text):
-            continue
-        seen.add(key)
-        out.append({"name": text,
-                    "reason": ("no_content_token" if not _signal_tokens(text)
-                               else "low_entropy_token")})
-    return out
 
 
 # #2552 / #4509: a capture's OWN turn echoes are TRANSCRIPT, not memory.
@@ -3180,13 +3015,7 @@ def search_graph(sdk, embed_list: dict, story: str, *,
          "entities": [{id, name, kind}], "points": [{id, content, kind}],
          "events": [{id, content, kind}], "queries_run": int,
          "query_coverage": {"derived"|"ran"|"failed": {leg: int}},
-         "query_results": {"ran": [key], "failed": [key]},
-         "gated_entities": [{"name", "reason"}]}
-
-    ⛔ ``gated_entities`` (#12294) names the entity candidates the entropy gate
-    kept OUT of the `object` leg: they were never searched for, so their absence
-    from ``entities`` is not evidence that they do not exist. `resolve_entities`
-    reads it and holds such a name instead of asserting it new.
+         "query_results": {"ran": [key], "failed": [key]}}
 
     ⛔ ``degraded`` is NOT the completeness signal (#5095). It means the search
     never got through its FIRST query, so a degraded result carries ZERO priors;
@@ -3204,10 +3033,7 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     empty = {"mode": mode, "degraded": True, "reason": None,
              "entities": [], "points": [], "events": [], "queries_run": 0,
              "query_coverage": {"derived": {}, "ran": {}, "failed": {}},
-             "query_results": {"ran": [], "failed": []},
-             # every return path carries the key (#5095's shape rule): an
-             # unresolved search gates no name, it just has no candidates.
-             "gated_entities": []}
+             "query_results": {"ran": [], "failed": []}}
     if not _is_searchable_backend(mode, sdk):
         store = ("FalkorDBLite (embedded)"
                  if _sdk_backend_is_embedded(sdk) else repr(mode))
@@ -3220,11 +3046,6 @@ def search_graph(sdk, embed_list: dict, story: str, *,
         return empty
 
     queries = _derive_queries(embed_list, story)
-    # #12294: the names the entropy gate kept OUT of the `object` leg. Reported
-    # on every return path (zeroed above by `empty`) so a reader can separate
-    # "no candidate matched" from "the query was never issued" — the same
-    # distinction `query_coverage` makes for queries that ran and failed.
-    gated = _gated_entity_names(embed_list)
     # Bound the query budget deterministically.
     budget = max_queries
     bucket = {"object": "entities", "subject": "entities",
@@ -3290,7 +3111,6 @@ def search_graph(sdk, embed_list: dict, story: str, *,
             # zero" from "not reported".
             "query_coverage": coverage,
             "query_results": {"ran": [], "failed": []},
-            "gated_entities": gated,
         }
     _enrich_point_priors(sdk, list(results["points"].values()))
     return {
@@ -3301,7 +3121,6 @@ def search_graph(sdk, embed_list: dict, story: str, *,
         "queries_run": q_run,
         "query_coverage": coverage,
         "query_results": {"ran": ran_keys, "failed": failed_keys},
-        "gated_entities": gated,
     }
 
 
@@ -5975,17 +5794,8 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
 HOLD_AMBIGUOUS = "ambiguous"
 HOLD_DISAMBIGUATION_FAILED = "disambiguation_failed"
 HOLD_DISAMBIGUATION_UNDECIDED = "disambiguation_undecided"
-#: #12294 — the capture prior deliberately did not SEARCH for this name (the
-#: name-entropy gate). `none` from phase 1 therefore means *"not measured"*, not
-#: *"measured absent"*, and §4.4 I1 forbids turning that into an ADD. It is a
-#: distinct reason from `ambiguous` (a real collision) and from the two
-#: disambiguation reasons (a call that ran badly) precisely because the fix is
-#: different: this one is resolved by the deterministic rungs or by a phase-2
-#: verdict, never by another lookup retry.
-HOLD_LOOKUP_GATED = "lookup_gated"
 HOLD_REASONS: tuple[str, ...] = (HOLD_AMBIGUOUS, HOLD_DISAMBIGUATION_FAILED,
-                                 HOLD_DISAMBIGUATION_UNDECIDED,
-                                 HOLD_LOOKUP_GATED)
+                                 HOLD_DISAMBIGUATION_UNDECIDED)
 #: …and the declared set is ENFORCED, not merely documented: `execute_embed`
 #: normalises an unknown reason arriving through its `held_entities` parameter to
 #: the undecided class with a warning, so the vocabulary cannot widen silently at
@@ -6200,14 +6010,6 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     """
     existing = [e for e in (search or {}).get("entities", []) or []
                 if isinstance(e, dict) and e.get("id")]
-    # #12294: the names the entropy gate kept out of the prior's `object` leg.
-    # Keyed by the SAME identity phase 1 uses for a name (``_norm``), because
-    # this set decides whether phase 1's ``none`` is evidence or silence, and two
-    # different normalisations here would let a name be gated and treated as
-    # measured at once.
-    gated = {_norm(g.get("name", ""))
-             for g in (search or {}).get("gated_entities", []) or []
-             if isinstance(g, dict) and g.get("name")}
     warnings: list[str] = []
     resolved: dict[str, dict] = {}
     records: list[dict] = []
@@ -6317,15 +6119,6 @@ def resolve_entities(entity_refs: list[dict], search: dict,
             # an undecided name and a confidently-absent one both leave the answer
             # empty and the caller created both. An omission is now the HOLD signal.
             reason = HOLD_DISAMBIGUATION_UNDECIDED
-        elif _norm(name) in gated and name not in declared_new:
-            # #12294: the gate did not search for this name, so phase 1's `none`
-            # is SILENCE, not a measured absence — and "no answer" is exactly the
-            # state §4.4 I1 forbids reading as `new`. Reached only when phase 2
-            # did not run (no candidate table to ask) or did not positively
-            # declare the name new; a declared-`new` name fell through to the
-            # branch below instead, which is the one disposition that licenses
-            # an ADD.
-            reason = HOLD_LOOKUP_GATED
         else:
             # Phase 1 found no candidate of this name and no resolver that
             # answered said otherwise: the one measured absence.
