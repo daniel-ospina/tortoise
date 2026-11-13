@@ -81,23 +81,30 @@ jobs:
         run: |
           set -o pipefail
           rc=0
-          # BUDGET ARITHMETIC, stated so it can be checked (a comment is what drifted
-          # here already): index mode spends `--fetch-timeout` TWICE (the engine and
-          # client index reads) and `--timeout` THREE times (venv, pip, `tortoise init`),
-          # so the reachable worst case is 2x60 + 3x300 = 1020 s against this job's
-          # 1200 s. Both budgets must be passed: a single `--timeout` bounded the fetches
-          # too, which made the worst case 5x300 = 1500 s — the job timeout, which kills
-          # the run BEFORE the report, the transcript and the "what a red means" step
-          # (#12363 review B3, corrected in cycle 2).
+          # BUDGET ARITHMETIC — and what it does NOT cover, stated because this comment
+          # has already been wrong once (#12363 review B3, cycle 2, round 3):
+          #   commands: 3 x `--timeout` (venv, pip, `tortoise init`) = 3 x 300 = 900 s,
+          #             genuinely bounded by subprocess.run's timeout;
+          #   fetches:  2 x `--fetch-timeout` = 2 x 30 = 60 s NOMINAL. `urlopen`'s
+          #             timeout is PER SOCKET OPERATION, not a wall-clock budget, so a
+          #             slow-drip response or redirect hops can exceed it. That residual
+          #             is bounded only by this job's `timeout-minutes`.
+          #   total:    960 s nominal against 1200 s.
+          # Because the fetch phase is not truly wall-bounded, the transcript is written
+          # INCREMENTALLY by the tool (not at the end) and uploaded with `if: always()`,
+          # so even a cancelled job leaves the evidence this step exists to keep.
           python tools/published_artifact_canary.py \
             --timeout 300 \
-            --fetch-timeout 60 \
+            --fetch-timeout 30 \
             --summary-file "$GITHUB_STEP_SUMMARY" \
             --transcript-dir "$RUNNER_TEMP/canary" || rc=$?
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit "$rc"
-      - name: Keep the install/run transcript on failure
-        if: failure()
+      - name: Keep the install/run transcript (every terminal state)
+        # `always()` — not `failure()`: a job CANCELLED at its timeout boundary does not
+        # run `failure()` steps, and that is exactly when the incremental log is the only
+        # diagnosis left (#12363 review round 3).
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: published-artifact-canary-log

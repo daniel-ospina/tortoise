@@ -114,13 +114,14 @@ jobs:
             --timeout 300 \
             --summary-file "$GITHUB_STEP_SUMMARY" \
             --transcript-dir "$RUNNER_TEMP/canary-publish"
-      - name: Keep the install/run transcript on failure
+      - name: Keep the install/run transcript (every terminal state)
         # The step above writes its evidence to $RUNNER_TEMP, which the runner deletes;
         # the tool's own FAIL detail says "see the transcript", so without this upload
         # that pointer is unsatisfiable and a blocked release cannot be diagnosed from
         # CI at all (#12363 review E2-1). Mirrors the scheduled canary's step — the two
-        # are pinned together by tests/test_published_artifact_canary.py.
-        if: failure()
+        # are pinned together by tests/test_published_artifact_canary.py. `always()`, for
+        # the same reason as the canary's: a cancelled job runs no `failure()` step.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: publish-canary-log

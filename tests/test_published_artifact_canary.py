@@ -345,7 +345,13 @@ def test_wheel_mode_fail_details_do_not_claim_the_index_or_a_user(tmp_path):
         version="0.2.0",
         workdir=tmp_path,
         timeout=10,
-        runner=_Runner({"pip": _completed(["pip", "install"], 1, "", "no")}),
+        runner=_Runner(
+            {
+                "pip": _completed(
+                    ["pip", "install"], 1, "", f"ERROR: {wheel.name} is not a valid wheel"
+                )
+            }
+        ),
         wheel=wheel,
     )
     assert install_fail.status == canary.FAIL
@@ -359,16 +365,28 @@ def test_wheel_mode_fail_details_do_not_claim_the_index_or_a_user(tmp_path):
 
 
 def test_the_install_cannot_resolve_from_a_configured_MIRROR(tmp_path, monkeypatch):
-    """The pip INDEX variables choose WHICH INDEX the install resolves from: on a
-    box with a mirror configured the canary would grade the mirror's copy instead
-    of what PyPI serves (cycle-2 review B-3)."""
-    for name in ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_NO_INDEX", "PIP_CONFIG_FILE"):
+    """`PIP_` is stripped by PREFIX, not by a member list, AND the install names
+    `--index-url https://pypi.org/simple` explicitly — env vars were only the
+    highest-precedence half of pip's config surface, and `/etc/pip.conf` is loaded
+    unconditionally (a CLI flag outranks it). Without both, a box with a mirror grades
+    the MIRROR's copy instead of what PyPI serves (#12363 cycle-2 B-3, round 3)."""
+    for name in (
+        "PIP_INDEX_URL",
+        "PIP_EXTRA_INDEX_URL",
+        "PIP_NO_INDEX",
+        "PIP_CONFIG_FILE",
+        "PIP_REQUIRE_VIRTUALENV",
+        "PIP_CONSTRAINT",
+        "https_proxy",
+    ):
         monkeypatch.setenv(name, "https://mirror.internal/simple")
     captured = {}
 
     class _Capture(_Runner):
         def __call__(self, cmd, **kwargs):
             captured["env"] = kwargs["env"]
+            if Path(cmd[0]).name == "pip":
+                captured["cmd"] = list(cmd)
             return super().__call__(cmd, **kwargs)
 
     canary.install_and_run(
@@ -381,53 +399,150 @@ def test_the_install_cannot_resolve_from_a_configured_MIRROR(tmp_path, monkeypat
     assert not [
         k for k in captured["env"] if k.startswith("PIP_") and k != "PIP_DISABLE_PIP_VERSION_CHECK"
     ]
+    assert "https_proxy" not in captured["env"]
+    assert "--index-url" in captured["cmd"], captured["cmd"]
+    assert canary.PYPI_SIMPLE in captured["cmd"], captured["cmd"]
+
+
+def test_an_install_failure_is_only_RED_when_pip_says_the_artifact_is_absent(tmp_path):
+    """A pip failure is not evidence that the ARTIFACT is broken: a DNS blip, an index
+    outage or a proxy 502 land in the same exit code, and reporting those as "users
+    cannot even install it — a release is owed" is the round-1 B1 mis-routing one layer
+    down (#12363 round 3). Only pip's own absence vocabulary is a FAIL."""
+    absent = _Runner(
+        {
+            "pip": _completed(
+                ["pip", "install"],
+                1,
+                "",
+                "ERROR: Could not find a version that satisfies the requirement "
+                "tortoise-graph==0.2.0 (from versions: none)",
+            )
+        }
+    )
+    arm, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=absent,
+    )
+    assert arm.status == canary.FAIL
+
+    flaky = _Runner(
+        {
+            "pip": _completed(
+                ["pip", "install"],
+                1,
+                "",
+                "ERROR: Could not install packages due to an OSError: "
+                "[Errno -3] Temporary failure in name resolution",
+            )
+        }
+    )
+    arm2, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=flaky,
+    )
+    assert arm2.status == canary.UNKNOWN, arm2.detail
 
 
 def test_both_workflows_keep_the_transcript_and_budget_the_fetches():
-    """The evidence pairing and the budget arithmetic are pinned HERE because a
-    comment is what drifted: the publish step wrote its transcript to a directory
-    nothing uploaded (cycle-2 E-1), and one `--timeout` bounded the fetches too,
-    making the worst case exceed the job (cycle-2 B-2/E-3)."""
+    """The evidence pairing and the budget arithmetic are pinned HERE because a comment
+    is what drifted — twice (#12363 cycle-2 E-1, round 3).
+
+    The arithmetic is PARSED out of each workflow and compared against that job's OWN
+    `timeout-minutes`. An earlier version of this test hard-coded `3 * 300` and never read
+    the canary job's budget at all, so four mutations that each restored the "the job
+    timeout kills the run before the report is written" loss passed green (#12363 round 3).
+    """
+    import re
+
     import yaml
 
     workflows = REPO_ROOT / ".github" / "workflows"
     canary_wf = yaml.safe_load((workflows / "release-artifact-canary.yml").read_text())
     publish_wf = yaml.safe_load((workflows / "publish-pypi.yml").read_text())
 
-    canary_steps = canary_wf["jobs"]["canary"]["steps"]
-    canary_run = " ".join(
-        str(s.get("run", ""))
-        for s in canary_steps
-        if "published_artifact_canary" in str(s.get("run", ""))
-    )
-    assert "--fetch-timeout" in canary_run, (
-        "the canary must set both budgets: `--timeout` alone also bounds the two index "
-        "fetches, so 5 x 300 s exceeds the 20 min job and the report is never written"
-    )
-    assert "--transcript-dir" in canary_run
-    assert any(
-        s.get("if") == "failure()" and str(s.get("uses", "")).startswith("actions/upload-artifact")
-        for s in canary_steps
-    ), "the canary drops the transcript on failure"
+    def run_text(steps) -> str:
+        return " ".join(
+            str(step.get("run", ""))
+            for step in steps
+            if "published_artifact_canary" in str(step.get("run", ""))
+        )
 
-    build_steps = publish_wf["jobs"]["build"]["steps"]
-    publish_run = " ".join(
-        str(s.get("run", ""))
-        for s in build_steps
-        if "published_artifact_canary" in str(s.get("run", ""))
+    def num(text: str, flag: str, default: float) -> float:
+        found = re.search(rf"{flag}\s+([\d.]+)", text)
+        return float(found.group(1)) if found else default
+
+    def upload_without_condition(steps, name: str) -> None:
+        # `if: always()` — a job CANCELLED at its timeout boundary runs no `failure()`
+        # step, and that is exactly when the incremental transcript is the only evidence.
+        uploads = [
+            step
+            for step in steps
+            if str(step.get("uses", "")).startswith("actions/upload-artifact")
+        ]
+        assert uploads, f"{name}: nothing uploads the transcript the tool tells you to read"
+        assert any(step.get("if") == "always()" for step in uploads), (
+            f"{name}: the transcript upload must be `if: always()`"
+        )
+
+    canary_job = canary_wf["jobs"]["canary"]
+    canary_run = run_text(canary_job["steps"])
+    assert "--transcript-dir" in canary_run
+    assert "--fetch-timeout" in canary_run, (
+        "`--timeout` alone also bounds the two index fetches: the tool then spends its "
+        "command budget five times and the report is never written"
     )
+    canary_budget = canary_job.get("timeout-minutes")
+    assert canary_budget, "the canary job declares no timeout-minutes"
+    nominal = 2 * num(canary_run, "--fetch-timeout", 60.0) + 3 * num(canary_run, "--timeout", 600.0)
+    assert nominal <= canary_budget * 60, (
+        f"nominal worst case {nominal}s exceeds the canary job's {canary_budget * 60}s — "
+        f"the job timeout would kill the run before the report and the transcript"
+    )
+    upload_without_condition(canary_job["steps"], "canary")
+
+    build_job = publish_wf["jobs"]["build"]
+    publish_run = run_text(build_job["steps"])
     assert "--transcript-dir" in publish_run
-    assert any(
-        s.get("if") == "failure()" and str(s.get("uses", "")).startswith("actions/upload-artifact")
-        for s in build_steps
-    ), (
-        "the pre-publish gate writes a transcript it says to read ('see the transcript') "
-        "and nothing uploads it — a blocked release becomes undiagnosable"
+    build_budget = build_job.get("timeout-minutes")
+    assert build_budget, "the build job declares no timeout-minutes for the smoke to fit inside"
+    assert 3 * num(publish_run, "--timeout", 600.0) <= build_budget * 60, (
+        "3 x the per-command budget exceeds the build job's own timeout"
     )
-    # The per-command budget must fit inside a job timeout the job actually declares.
-    job_timeout = publish_wf["jobs"]["build"].get("timeout-minutes")
-    assert job_timeout, "the build job declares no timeout-minutes for the smoke to fit inside"
-    assert job_timeout * 60 >= 3 * 300
+    upload_without_condition(build_job["steps"], "build")
+
+
+def test_the_transcript_is_written_incrementally_not_only_at_the_end(tmp_path):
+    """A job cancelled at its timeout boundary never reaches the final write, so the
+    transcript must land as each command finishes (#12363 round 3)."""
+
+    class _Dies(_Runner):
+        def __call__(self, cmd, **kwargs):
+            result = super().__call__(cmd, **kwargs)
+            if Path(cmd[0]).name == "tortoise":
+                raise KeyboardInterrupt("cancelled mid-run")
+            return result
+
+    log = tmp_path / "logs" / "canary.log"
+    with pytest.raises(KeyboardInterrupt):
+        canary.install_and_run(
+            package="tortoise-graph",
+            version="0.2.0",
+            workdir=tmp_path,
+            timeout=10,
+            runner=_Dies({}, creates_db_for=None),
+            transcript_path=log,
+        )
+    assert log.is_file(), "no transcript survived the cancellation"
+    text = log.read_text()
+    assert "pip install" in text, text
+    assert "[exit 0]" in text, text
 
 
 # --------------------------------------------------------------------------
@@ -556,7 +671,16 @@ def test_install_and_run_strips_ambient_tortoise_env(tmp_path, monkeypatch):
 
 
 def test_a_failed_install_is_red_and_never_reaches_the_command(tmp_path):
-    runner = _Runner({"pip": _completed(["pip", "install"], 1, "", "No matching distribution")})
+    runner = _Runner(
+        {
+            "pip": _completed(
+                ["pip", "install"],
+                1,
+                "",
+                "ERROR: No matching distribution found for tortoise-graph==0.2.0",
+            )
+        }
+    )
     arm, _ = canary.install_and_run(
         package="tortoise-graph",
         version="0.2.0",
