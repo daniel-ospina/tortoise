@@ -164,7 +164,16 @@ kill_timeout = 30
 #   (c) `requests-refused` — a SHARE of the traffic this bound applies to was
 #       refused inside the last 120 s (`TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S`):
 #       at least `TORTOISE_WAIT_BOUND_HEALTH_MIN_SHARE` (0.5) of at least
-#       `TORTOISE_WAIT_BOUND_HEALTH_MIN_ATTEMPTS` (5) requests. A SHARE, because
+#       `TORTOISE_WAIT_BOUND_HEALTH_MIN_ATTEMPTS` (5) requests — computed from
+#       DATA traffic only: the instrument's own polls and the whole-graph routes
+#       (import, export, backups, dream, promote) are excluded from both sides,
+#       and a refusal during a one-time embedder load (a machine that is merely
+#       WARMING) is counted but kept out of the verdict. A REFUSED control poll
+#       is a separate term of its own (`control-refused`, >= 2 in the window): a
+#       no-I/O poll that cannot run inside the bound is evidence a healthy box
+#       cannot produce (`/health/ready` and `/health/security` do I/O, so they
+#       stay DATA-plane evidence, and a 404 from a path no route matched never
+#       counts as demand). A SHARE, because
 #       the bound is breached BY DESIGN for ~2.1% of calls: a count is blind on a
 #       quiet box (the two measured traces ran at 3.5/min and 17/min) and a
 #       bucket-density reds a HEALTHY box as traffic rises (measured: 92% of

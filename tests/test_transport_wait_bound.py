@@ -2170,6 +2170,7 @@ async def test_a_documented_long_route_is_not_a_refusal_of_the_plane(
         await _breach(hanging, "/v1/organizations/org-1/import", method="POST")
     window = refusal_window.wait_bound_breach_window()
     assert window["attempts"] == 5 and window["total"] == 0
+    # a DECIDED green: five data attempts, none refused
     assert window["refusing"] is False
 
 
@@ -2215,7 +2216,7 @@ async def test_a_refused_control_poll_is_the_verdict_on_its_own_arm(
     """
     hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
     for _ in range(2):
-        await _breach(hanging, "/v1/agent/signup", method="POST")
+        await _breach(hanging, "/v1/search")
     for _ in range(8):
         await _breach(hanging, "/health")
 
@@ -2314,4 +2315,124 @@ async def test_a_refusal_during_a_one_time_embedder_load_is_not_the_verdict(
         await _breach(hanging, "/v1/search")
     window = refusal_window.wait_bound_breach_window()
     assert window["total"] >= 6
+    assert window["refusing"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_router_miss_is_not_demand_the_plane_saw(monkeypatch, refusal_window):
+    """A scanner's stray 404s must not hold the check green.
+
+    Measured before this gate: 40 stray `GET /wp-login-*.php` (404 from the
+    router, no route matched) beside 7 refused `/v1/search` gave
+    `attempts 47, total 7, share 0.149 -> 200` over a fully refusing plane — the
+    same fail-open the 401 filter closed, reached with no credential at all, and
+    at no cost to an attacker (the bound itself rate-limits the refused calls).
+
+    The bound is left GENEROUS here: this test is about the denominator, and a
+    refused router miss would be a separate (and correct) breach.
+    """
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    async def ok(request):
+        return JSONResponse({"ok": True})
+
+    async def missing(request):
+        return JSONResponse({"detail": "Point not found"}, status_code=404)
+
+    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 60.0)
+    app = Starlette(routes=[Route("/v1/search", ok),
+                            Route("/v1/points/{point_id}", missing)])
+    app.add_middleware(ha.WaitBoundMiddleware)
+    client = TestClient(app)
+    for i in range(40):
+        assert client.get(f"/wp-login-{i}.php").status_code == 404
+    assert refusal_window.wait_bound_breach_window()["attempts"] == 0, (
+        "router misses never reached the plane, so they are not demand")
+
+    # the control: a MATCHED route answering 404 IS the plane answering
+    assert client.get("/v1/points/p1").status_code == 404
+    assert refusal_window.wait_bound_breach_window()["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_long_route_whose_own_timeout_exceeds_the_bound_is_not_the_gate(
+        fast_bound, refusal_window):
+    """A slow THIRD PARTY must not fail an unrelated deploy.
+
+    `/v1/graphs/trash/{id}/restore` waits up to 300 s on the per-org sweep lock by
+    design and answers `503 Retry-After: 300`; signup/claim wait up to 15 s on
+    Supabase. Measured before this fix: 5 refused restores in a window gave
+    `share 1.0 -> 503`.
+    """
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for path, method in (
+        ("/v1/graphs/trash/g-1/restore", "POST"),
+        ("/v1/agent/signup", "POST"),
+        ("/v1/signup/email", "POST"),
+        ("/v1/claim/email", "POST"),
+        ("/v1/user/identity/resend-confirmation", "POST"),
+        ("/webhooks/github", "POST"),
+    ):
+        for _ in range(6):
+            await _breach(hanging, path, method=method)
+    window = refusal_window.wait_bound_breach_window()
+    assert window["total"] == 0, (
+        "a designed long wait or a slow upstream is not the data plane failing",
+        window)
+    # NOT DECIDED, not "green by absence": with no data traffic in the window
+    # there is nothing for the share to be a share OF (`None`, never False).
+    assert window["refusing"] is None
+
+
+def test_the_cold_start_predicate_reads_the_lock_that_actually_blocks(monkeypatch):
+    """The carve-out must read the state that makes requests WAIT.
+
+    Round 6 measured the pre-fix predicate against a real background load: it
+    returned False on a machine whose `EmbeddingModel._lock` WAS held and whose
+    requests WERE blocking, because the hosted pre-warm runs `get()` inside
+    `background_load()` — which SUPPRESSES the one-time Event — and never sets
+    `_warm_up_thread` (only `start_warm_up` does). It appeared to work only
+    because `TortoiseSDK._get_proj()` happens to call `start_warm_up()`. Remove
+    or gate that call and the deploy-gate carve-out silently stops existing,
+    with no test to notice.
+    """
+    from tortoise.embeddings import EmbeddingModel
+
+    monkeypatch.setattr(EmbeddingModel, "one_time_setup_in_progress",
+                        staticmethod(lambda: False))
+    monkeypatch.setattr(EmbeddingModel, "_warm_up_thread", None, raising=False)
+    lock = EmbeddingModel._lock
+    if lock.locked():  # a peer test holds it; the negative half is unmeasurable
+        pytest.skip("the embedder lock is held elsewhere")
+    assert ha._embedder_load_in_flight() is False
+    lock.acquire()
+    try:
+        assert ha._embedder_load_in_flight() is True, (
+            "the lock IS the thing that blocks, so it is the thing to read")
+    finally:
+        lock.release()
+    assert ha._embedder_load_in_flight() is False
+
+
+@pytest.mark.asyncio
+async def test_a_refused_health_ready_probe_is_NOT_a_control_refusal(
+        fast_bound, refusal_window):
+    """`/health/ready` does a DB round trip, so it is data-plane evidence.
+
+    The control arm's whole justification is "a healthy box cannot fail to run a
+    no-I/O poll in 10 s". `/health/ready` runs `_READY_PROBE` and
+    `_CONTROL_PLANE_PROBE` — the prefix list matched it anyway, so a merely SLOW
+    store red'd the check through an arm that promises it does no I/O, and
+    independently of the data plane's own staleness window (#12477 review round
+    6). It stays counted as DATA plane evidence, which is what it is.
+    """
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(8):
+        await _breach(hanging, "/health/ready")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["control_refusals"] == 0
+    assert window["total"] == 8 and window["attempts"] == 8
     assert window["refusing"] is True

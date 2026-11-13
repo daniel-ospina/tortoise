@@ -3067,6 +3067,26 @@ class TestDaemonWorker:
 class TestHealthzListener:
     """#2850 item 4: the dedicated, off-loop liveness port."""
 
+    @pytest.fixture(autouse=True)
+    def _isolated_verdict_inputs(self):
+        """The listener's verdict reads REGISTERED readers, so they must be clean.
+
+        #12477 review round 6 (measured): running this file after
+        `test_transport_wait_bound.py` left a served-progress reader registered,
+        which switches the wedge term from ``stale`` to ``stale AND demand AND
+        no_serve`` — and an idle box then answers 200, so three stale-loop tests
+        failed on COLLECTION ORDER alone. The same isolation the rest of this file
+        already has for the refusal window, for the three inputs the verdict now
+        also reads.
+        """
+        monitoring.set_served_progress_source(None)
+        monitoring.set_dataplane_verdict_source(None)
+        monitoring.reset_wait_bound_breach_window()
+        yield
+        monitoring.set_served_progress_source(None)
+        monitoring.set_dataplane_verdict_source(None)
+        monitoring.reset_wait_bound_breach_window()
+
     def test_default_target_is_the_fixed_contract(self, monkeypatch):
         """Port 9090 on 0.0.0.0 — another agent wires the Fly check to it."""
         monkeypatch.delenv("TORTOISE_HEALTHZ_PORT", raising=False)

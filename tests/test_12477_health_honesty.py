@@ -123,6 +123,12 @@ def test_the_fly_check_goes_red_through_the_real_wiring_when_the_db_fails():
         monitoring.heartbeat_record()
         hosted_api._LIVENESS_LAST_SERVED_AT = time.monotonic() - 1.0
 
+    # this test OWNS its three inputs: another file in the same session may
+    # have left a fresh not-ok probe result behind, which would red the FIRST
+    # assertion for a reason that has nothing to do with the injection
+    hosted_api._HEALTH_PROBE._result = {
+        "ok": True, "observed": True, "latency_ms": 5.0, "error": None}
+    hosted_api._HEALTH_PROBE._completed_at = time.monotonic()
     _tick()
     status, body = _get(port)
     assert status == 200, body
