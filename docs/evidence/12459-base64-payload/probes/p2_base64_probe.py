@@ -33,15 +33,18 @@ COMMITTED writer (`EventLog(...).append`), then re-reads that file, because a
 baseline measured off the real writer's bytes is the only baseline that answers
 "what would this cost". Everything it prints is measured on that tempdir copy. `tools/journal_growth.py` cannot answer the vector questions (it
 re-serialises with SPACED separators — its own docstring calls the output
-attribution; see #11886), so the vector spans here are measured by walking the
-journal this probe actually wrote, on ONE ruler.
+attribution; see #11886), so the P0 vector spans here are `raw_decode`d out of the
+journal this probe actually wrote, on ONE ruler, and the compact re-serialisation is
+kept only as an ASSERTION that the two rulers agree.
 
 Usage
 =====
     env -u TORTOISE_DB_URI uv run python \
         docs/evidence/12459-base64-payload/probes/p2_base64_probe.py
 
-Exit: 0 measured · 2 usage.
+Exit: 0 measured · 1 a claim was FALSIFIED (a control or an assertion failed — every
+guard prints what it falsified before returning) · 2 the interpreter is older than
+3.12, so the probe refused to run at all.
 """
 from __future__ import annotations
 
@@ -228,6 +231,26 @@ def _replace_embedding(record: dict, text: str) -> dict:
     return rec
 
 
+def on_disk_embedding_span(line: str) -> int | None:
+    """The `embedding` VALUE's raw byte span in *line*, taken from the written bytes.
+
+    `raw_decode` starts at the byte after the key and returns the end of the value, so
+    the span is exactly what the writer emitted — not a re-serialisation. This matters
+    for this note in particular: #11886's whole point is that the same payload has two
+    spans depending on the SEPARATORS, so a probe that prints "bytes on disk" while
+    computing `json.dumps(...)` is using the weaker ruler and claiming the stronger.
+    """
+    key = '"embedding":'
+    idx = line.find(key)
+    if idx < 0:
+        return None
+    start = idx + len(key)
+    while start < len(line) and line[start] == " ":
+        start += 1
+    _, end = json.JSONDecoder().raw_decode(line, start)
+    return len(line[start:end].encode("utf-8"))
+
+
 def as_f32_bits(values: list[float]) -> bytes:
     return struct.pack(f"<{len(values)}f", *values)
 
@@ -266,15 +289,32 @@ def main() -> int:
           "(#11886) — not used for any vector figure below.")
 
     # ── per vector-bearing record, on ONE ruler ─────────────────────────
-    print("\n== per class, vector-bearing records (bytes on disk, JSON line + terminator)")
+    # The P0 columns are the WRITTEN bytes: `p0_lines[i]` is the line `EventLog.append`
+    # produced for `recs[i]`, and the vector span is `raw_decode`d out of that line. The
+    # compact re-serialisation is still computed, but only as an ASSERTION that the two
+    # rulers agree — a probe that prints "bytes on disk" and computes `json.dumps` is
+    # the #11886 defect this note exists to name.
+    p0_lines = (p0_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(p0_lines) == len(recs), (len(p0_lines), len(recs))
+    pos = {id(rec): i for i, rec in enumerate(recs)}
+    disk_checked = 0
+    print("\n== per class, vector-bearing records "
+          "(P0 bytes ON DISK; P2 is the framed candidate, re-serialised)")
     print("   class                 P0 rec   P0 vector   P2 vector   P2 rec   rec ratio")
     rows = []
     for rtype in VECTOR_TYPES:
         rec = by_type.get(rtype)
         if rec is None:
             continue
-        p0_rec_bytes = _line_len(rec, spaced=False)
-        span = _embedding_span(rec, seps=(",", ":"))
+        p0_line = p0_lines[pos[id(rec)]]
+        # +1 for the `\n` the writer terminates each record with — `_line_len` counts it,
+        # and the on-disk line as READ back has it stripped.
+        p0_rec_bytes = len(p0_line.encode("utf-8")) + 1
+        span = on_disk_embedding_span(p0_line)
+        assert span is not None, rtype
+        assert p0_rec_bytes == _line_len(rec, spaced=False), (rtype, p0_rec_bytes)
+        assert span == _embedding_span(rec, seps=(",", ":")), (rtype, span)
+        disk_checked += 1
         vector = _embedding_vector(rec)
         width = rec.get("point", {}).get(JOURNAL_VECTOR_WIDTH_KEY)
         assert width == JOURNAL_VECTOR_WIDTH_F32, (rtype, width)
@@ -301,8 +341,12 @@ def main() -> int:
     print(f"  pre-#11821 baseline  9,176 B → {p2_rec_bytes:,} B  "
           f"({9176 / p2_rec_bytes:.2f}x)")
 
+    print(f"  ⇒ the P0 figures above are the WRITTEN bytes ({disk_checked} lines "
+          f"`raw_decode`d out of the tempdir journal, vector span included); the "
+          f"writer's compact separators reproduce each line exactly")
+
     # ── the whole corpus ────────────────────────────────────────────────
-    total_p0 = sum(_line_len(r, spaced=False) for r in recs)
+    total_p0 = sum(len(ln.encode("utf-8")) + 1 for ln in p0_lines)
     p2_all = 0
     for rec in recs:
         vector = _embedding_vector(rec)

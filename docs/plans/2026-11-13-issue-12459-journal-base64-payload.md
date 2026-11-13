@@ -639,7 +639,10 @@ Named here so the implementation cannot choose a weaker one:
      next append) with P2-framed records — the record after the seal is present, once.
   6. **every refusal of §2.2 and §2.4 each red**: truncated body (−16 chars, the measured silent case),
      short array with the count unchanged, **packed `f64` under a declared `f32`** (3,072 B decoded against
-     a declared 1,536 B — §6's rollback row depends on this one), unknown version, non-base64 character,
+     a declared 1,536 B — §6's rollback row depends on this one), unknown version, **both** character cases —
+     the REPLACING one (refused by the count) **and** the count-clean INSERTION, which only `validate=True`
+     refuses (§2.2 is explicit that these are two cases, not one, and the insertion is the fail-open one: a
+     reader with the default decoder accepts a corrupted body and decodes the right vector),
      **and the two §2.4 cross-checks**: a frame whose declared width *disagrees* with the payload's
      `embedding_width` must raise, and a frame on a record carrying **no** `embedding_width` must raise.
      §2.4 calls that cross-check the one thing stopping the width being wrong at rebuild "without anything

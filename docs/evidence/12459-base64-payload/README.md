@@ -37,9 +37,12 @@ That reproduces P0's published corpus total (`32,130 B`, `max 5,423 B`) exactly.
 The tool attributes bytes by **re-serialising** each value with `json.dumps`' default (spaced)
 separators (`_json_bytes`; its own docstring calls the output *attribution*). Since P0 also moved the
 writer to compact separators, the tool's vector figure and the journal's on-disk bytes are on different
-rulers — `5,072 B` spaced vs `4,689 B` compact for the same payload. That is #11886. Every vector figure
-here is the **on-disk compact span**, measured by walking the journal the probe actually wrote, and each
-figure in the note names its ruler.
+rulers — `5,072 B` spaced vs `4,689 B` compact for the same payload. That is #11886. Every P0 vector figure
+here is the **on-disk compact span**, and it is taken from the bytes the probe's own `tempfile.mkdtemp()`
+journal actually holds: the value is `raw_decode`d out of the written line, and the probe ASSERTS that the
+compact re-serialisation reproduces that line exactly before printing anything (the `⇒ the P0 figures above
+are the WRITTEN bytes` line in `measurement.txt`). The P2 columns are the framed *candidate* — nothing writes
+them yet — re-serialised with the same compact separators. Each figure in the note names its ruler.
 
 ## The figures
 
@@ -105,7 +108,9 @@ env -u TORTOISE_DB_URI uv run python \
     docs/evidence/12459-base64-payload/probes/p2_base64_probe.py
 ```
 
-`measurement.txt` is one run's verbatim output. Exit 0 = measured. The probe **asserts** the three decode links (two of them
+`measurement.txt` is one run's verbatim output. Exit 0 = measured; exit **1** = a claim was FALSIFIED (a
+control or an assertion failed, and the guard prints which) — so a wrapper must not read a non-zero exit as
+"the probe crashed"; exit 2 means the interpreter was older than 3.12 and the probe refused to run. The probe **asserts** the three decode links (two of them
 producer-facing, plus the frame round-trip), the `f64` round-trip and its off-grid fixture, the six refusals
 above, the sweep's cut set, the declared-count vacuity guard, and **all three** controls around the bits
 assertion — the float64-VALUE comparison passing against the producer, the same comparison REJECTING P0's

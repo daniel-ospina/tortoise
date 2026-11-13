@@ -6,7 +6,7 @@
   39 records  32,130 B  mean 823.8 B  p95 5,148 B  max 5,423 B
   ⚠️ the tool's `embedding` share is a SPACED re-serialisation (#11886) — not used for any vector figure below.
 
-== per class, vector-bearing records (bytes on disk, JSON line + terminator)
+== per class, vector-bearing records (P0 bytes ON DISK; P2 is the framed candidate, re-serialised)
    class                 P0 rec   P0 vector   P2 vector   P2 rec   rec ratio
    PointAdded             5,423      4,689      2,064    2,798   1.94x
    OperatorAdded          5,124      4,689      2,064    2,499   2.05x
@@ -19,6 +19,7 @@
   chars/float         12.2 → 5.4
   raw float32 packed  1,536 B  (base64 is +33.3 % framing over raw: 2,048 B string − 1,536 B raw = 512 B)
   pre-#11821 baseline  9,176 B → 2,798 B  (3.28x)
+  ⇒ the P0 figures above are the WRITTEN bytes (4 lines `raw_decode`d out of the tempdir journal, vector span included); the writer's compact separators reproduce each line exactly
 
 == whole corpus
   P0  39 records  32,130 B
