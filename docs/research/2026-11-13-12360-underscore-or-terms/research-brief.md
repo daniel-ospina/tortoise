@@ -29,21 +29,41 @@ difference — no harness-side term injection, no replica Cypher.
 
 | surface (its own production window) | recall@3 before | after | Δ | paired p | regressions | nDCG@10 |
 |---|---|---|---|---|---|---|
-| **MCP / SDK search** — `sdk.tortoise_fts_query` (the door `tortoise_search` is registered to; REST `GET /v1/search`) | 0.7133 | **0.9633** | **+25.00 pts** | < 1e-22 | **0** | 0.6917 → 0.9273 |
-| **capture prior** — `extractor_v2._fts_rows` (link-before-create, window 3) | 0.7133 | **0.9633** | **+25.00 pts** | < 1e-22 | **0** | 0.6917 → 0.9273 |
-| *reference:* the FTS leg in isolation (`run_fts_query`) — the number `#12298` published | 0.7133 | 0.9633 | +25.00 pts | < 1e-22 | 0 | 0.6917 → 0.9273 |
+| **capture prior** — `extractor_v2._fts_rows` (link-before-create, window 3), over the `#11901` corpus | 0.7133 | **0.9633** | **+25.00 pts** | < 1e-22 | **0** | 0.6917 → 0.9273 |
+| **MCP / SDK search** — `sdk.tortoise_fts_query` (the door `tortoise_search` is registered to; REST `GET /v1/search`), over the `#11901` corpus | 0.7133 | **0.9633** | **+25.00 pts** | < 1e-22 | **0** | 0.6917 → 0.9273 |
+| **MCP / SDK search**, over **the declared user-search query set** (`#1144` `AUTHORED_QUERIES`, n=50) | — | — | **+0.00** | — | **0** | unchanged |
+| *reference:* the FTS leg in isolation (`run_fts_query`), `#11901` corpus — the number `#12298` published | 0.7133 | 0.9633 | +25.00 pts | < 1e-22 | 0 | 0.6917 → 0.9273 |
 
 **The falsifier on `#12360` is met on both surfaces** (≥ +10 points, visible on each, zero
 regressions), and the isolation arm **reproduces `#12298`'s published 0.7133 → 0.9633 with
 75 gains / 0 losses exactly** — so the port is faithful and the earlier measurement was not a
 harness artifact.
 
-⚠️ **The three rows are identical, and that is a finding, not a copy-paste.** The dense leg is
-not installed on a plain lane (`sentence_transformers` absent), so the two fused surfaces are
-the fused read in its **keyword-only** shape: one live leg, so RRF preserves the leg's order.
-The artifact carries this as `dense_leg`. What the identity proves is the thing worth
-proving — **both doors pass the raw text down and none of them re-tokenises it away** — and
-what it does NOT prove is how the composite interacts with a live dense leg (declared in §5).
+### The declared user-search query set is UNCHANGED, and that is the correct answer
+
+`#12360` names two query populations: the `#11901` corpus for the capture prior, and *"the
+declared user-search query set"* for MCP/SDK search. The repo's declared set is
+`tests/eval/retrieval/queries.py::AUTHORED_QUERIES` (50 authored queries over this product's
+real domain). ⚠️ **None of them contains `_`**, so the mechanism has nothing to recover there —
+and must change nothing there, because that is exactly what the byte-identity property promises.
+Measured on both doors: **the two arms return the identical ordered id list on 50/50 queries**
+and the emitted query bytes are identical on 50/50. With identical result lists, recall@k and
+nDCG@10 are equal for **any** labelling, so this is a proof of inertness rather than a recall
+score — and it needs no labels to be complete.
+
+⛔ **The substitution is declared, not hidden:** the `+25.00 pts` rows are the `#11901` name
+population measured through BOTH doors, because that is the only population here that contains
+the shapes being repaired. Reading the contract's two-surface sentence as *"the gain must appear
+on the declared set"* would require the declared set to contain an identifier query, which it
+does not — so the artifact records both (`user_search_set`, and
+`verdict.query_population_substitution`).
+
+⚠️ **The two name-population rows are identical, and that is a finding, not a copy-paste.** The
+dense leg is not installed on a plain lane (`sentence_transformers` absent), so both fused
+surfaces are the fused read in its **keyword-only** shape: one live leg, so RRF preserves the
+leg's order. What the identity proves is the thing worth proving — **both doors pass the raw text
+down and none of them re-tokenises it away** — and what it does NOT prove is how the composite
+interacts with a live dense leg (declared in §5).
 
 ## 1. What was ported, exactly
 
@@ -75,9 +95,12 @@ Three properties the port keeps:
 * **Byte-identical for every query without an inner `_`** — pinned, including `#8933`'s own
   `ERR-4032` → `err|err4032|"err 4032"`.
 
-Two deliberate **hardenings over the measurement arm**, both declared in the function's
-docstring: an alnum-free run (`___`) is dropped, and the run is bounded at
-`MAX_IDENTIFIER_LEN` (48). The population's longest run is 31, so the bound moved nothing.
+Two deviations from the measurement arm that are **lossless** (no alnum-free run, and the
+48-char `MAX_IDENTIFIER_LEN` bound), **plus two that are not** — the dedupe and the
+`MAX_ALIASES_PER_POINT` (8) budget cap every other tail already carries, so a query with nine
+distinct `_` runs keeps the first eight. The cap is deliberate (an over-limit query is recorded
+as an FTS FAILURE and degrades LATER searches), and it is stated in the function's docstring
+rather than left for the next lane comparing the port to the arm it came from.
 
 ## 2. Per class — where the effect lives (recall@3, before → after)
 
@@ -145,9 +168,9 @@ the index itself:
 | `a_` (trailing underscore) | yes | yes — the index holds `a_` |
 | `__a` (leading underscores) | yes | yes — the index holds `__a` |
 | `_menu` (run after a unicode break) | yes | no (harmless: an OR alternative that cannot match) |
-| `a__b` (double underscore) | yes | no — `x__y` takes the degenerate branch and sends the RAW `x__y`, which does match |
+| `a__b` (double underscore: the tail emits the composite as the ONLY term, so the bytes are the raw text) | yes | no |
 | 48×`a` (a bounded single-char run is dropped; the length bound holds) | yes | no |
-| `search|web|web_search` (the full union) | yes | yes |
+| `search\|web\|web_search` (the full union) | yes | yes |
 
 Nothing in the emitted alphabet can be a metacharacter: `underscore_run_terms` only ever emits
 `[a-z0-9_]` (lowercased), and a test asserts that against the module's own

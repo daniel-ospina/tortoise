@@ -17,10 +17,15 @@ re-tokenised straight back — ``#12298``'s first harness arm passed
 thing under test. So:
 
 * the mechanism lives INSIDE ``build_or_query`` (one seam, every caller), and
-* every assertion below is on the string that reaches ``db.idx.fulltext.queryNodes``
-  (the ``$query`` parameter of the issued Cypher), NEVER on the input that was
-  handed to the builder. A test of the input would pass over a path that never
-  sends it.
+* the assertions that PROVE the mechanism are on the string that reaches
+  ``db.idx.fulltext.queryNodes`` (the ``$query`` parameter of the issued Cypher) —
+  ``TestTheEmittedQueryCarriesTheComposite``, ``TestBothSurfacesPassTheRawQuery`` and
+  ``TestLiveReachability``. NEVER on the input that was handed to the builder: a test of the
+  input would pass over a path that never sends it. The remaining classes (``TestRunTerms``,
+  ``TestAdditive``, ``TestPin``) assert the builder's RETURN VALUE, which is legitimate only
+  because ``run_fts_query`` passes that string through verbatim — the seam that makes it so is
+  itself pinned by ``test_it_rides_the_same_seam_the_fused_read_calls`` and
+  ``test_builder_keeps_the_door_agnostic``.
 
 The ``_or_terms`` helper is the same phrase-aware splitter
 ``tests/test_identifier_tokens_8933.py`` uses, repeated here deliberately: a
@@ -82,16 +87,18 @@ def _or_terms(query: str) -> list[str]:
 class _CapturingGraph:
     """A graph double that records the Cypher + params of every query."""
 
+    class _R:
+        """The FalkorDB result envelope: an empty ``result_set``."""
+
+        def __init__(self):
+            self.result_set: list = []
+
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
 
-    def query(self, cypher, params=None, timeout=None):  # noqa: ARG002
+    def query(self, cypher, params=None, timeout=None):
         self.calls.append((cypher, dict(params or {})))
-
-        class _R:
-            result_set: list = []
-
-        return _R()
+        return self._R()
 
     @property
     def sent(self) -> list[str]:

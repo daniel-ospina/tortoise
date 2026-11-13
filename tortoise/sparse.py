@@ -444,13 +444,21 @@ def underscore_run_terms(text: str) -> list[str]:
     the tokenizer emits, so re-sending it would only duplicate one (and
     duplicates are the caller's problem — :func:`build_or_query` dedupes).
 
-    Two deliberate HARDENINGS over the measurement arm, both of which can only
-    drop a term that could never match, and both declared rather than silent:
+    Two deliberate LOSSLESS hardenings over the measurement arm, both declared
+    rather than silent:
 
     * no alphanumeric character in the run -> dropped (``___``);
     * ``len(run) > MAX_IDENTIFIER_LEN`` -> dropped, the same 48-character bound
       the alias mechanism uses. The measured population's longest run is
       ``test_7949_capstone_verdict_check`` (31), so this bound moved nothing.
+
+    …plus the two bounds every other tail in :func:`build_or_query` already
+    carries, and which are NOT lossless: the dedupe, and
+    ``MAX_ALIASES_PER_POINT`` (8). A query with nine distinct ``_`` runs keeps
+    the first eight and silently loses the ninth — the OR budget has to stay a
+    bound (an over-limit query is recorded as an FTS FAILURE and degrades LATER
+    searches), so the trade is deliberate, and it is stated here rather than
+    left for the next lane comparing this function to the arm it came from.
     """
     if not text:
         return []
@@ -575,8 +583,15 @@ def expansion_tokens(
     alias can never duplicate or displace an original token), deduped,
     sorted by length DESC (specificity — same rule as the OR-union cap), and
     bounded at ``max_terms`` (``DEFAULT_MAX_EXPANSION_TERMS`` = 8): the
-    second FTS pass's total OR budget is ``DEFAULT_MAX_OR_TERMS + 8`` at
-    most, and the original query's tokens ALWAYS keep their slots first.
+    expansion tail CONTRIBUTES at most 8 terms to the second FTS pass, and the
+    original query's tokens ALWAYS keep their slots first.
+    ⛔ Not the pass's TOTAL budget — that is ``DEFAULT_MAX_OR_TERMS`` (12)
+    originals + 8 expansion + the three additive tails the same pass carries
+    (#8933 aliases 8 + phrases 8, #12360 composite runs 8) = **44 measured**, and
+    :func:`build_or_query`'s own docstring is where that bound is stated. This
+    sentence said ``DEFAULT_MAX_OR_TERMS + 8`` ("20") until #12360's review,
+    already stale by #8933's two tails; two places in one module disagreeing
+    about the same bound is how a peer "repairs" the wrong one.
     Accepts a flat string, ``None``, or an iterable of strings (the extractor
     writes ``search_keys`` as a flat space-joined STRING after
     ``_flatten_search_keys_prop``; raw graph values may still be arrays).
@@ -712,10 +727,14 @@ def build_or_query(
     # for the same reason the identifiers are (an already-split term list cannot
     # be un-split): the tokenizer above destroyed the very thing that must be
     # emitted. See :func:`underscore_run_terms` for the measured defect and why
-    # this is a query-side repair rather than a tokenizer change. They count in
-    # the degenerate predicate for the same reason the aliases do — an
-    # underscore-ONLY input (`__` between two stopwords) that reaches the raw
-    # branch would send the composite ESCAPED, and the index holds it unescaped.
+    # this is a query-side repair rather than a tokenizer change.
+    #
+    # They count in the degenerate predicate for the same reason the aliases do:
+    # a `_`-shaped input whose plain tokens all die (`a_`, `x__y`, `__a`) has,
+    # before this change, only the ESCAPED-RAW branch to fall into, and that
+    # branch sends the whole string as one literal — where the index's own term
+    # is the composite. `x__y` emission is the same BYTES either way, `10:00_u`
+    # is not (`00_u` vs `10\:00_u`), so the predicate counts them.
     composites = underscore_run_terms(query) if underscore_terms_enabled() else []
     if max_terms < 1 or (len(tokens) <= 1 and not aliases and not phrases
                         and not composites):

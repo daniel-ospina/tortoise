@@ -29,7 +29,7 @@
       "n": 30
      }
     },
-    "elapsed_s": 1.1,
+    "elapsed_s": 1.22,
     "mean_rank": {
      "1": 1.0,
      "10": 1.401,
@@ -387,7 +387,7 @@
       "n": 30
      }
     },
-    "elapsed_s": 1.11,
+    "elapsed_s": 1.28,
     "mean_rank": {
      "1": 1.0,
      "10": 1.27,
@@ -904,7 +904,7 @@
       "n": 30
      }
     },
-    "elapsed_s": 0.47,
+    "elapsed_s": 0.54,
     "mean_rank": {
      "1": 1.0,
      "10": 1.401,
@@ -1262,7 +1262,7 @@
       "n": 30
      }
     },
-    "elapsed_s": 0.48,
+    "elapsed_s": 0.54,
     "mean_rank": {
      "1": 1.0,
      "10": 1.27,
@@ -1779,7 +1779,7 @@
       "n": 30
      }
     },
-    "elapsed_s": 1.17,
+    "elapsed_s": 1.39,
     "mean_rank": {
      "1": 1.0,
      "10": 1.401,
@@ -2137,7 +2137,7 @@
       "n": 30
      }
     },
-    "elapsed_s": 1.22,
+    "elapsed_s": 1.27,
     "mean_rank": {
      "1": 1.0,
      "10": 1.27,
@@ -2649,18 +2649,14 @@
      "rank": null,
      "rank_wide": null,
      "stored": "abc_def",
-     "terms_sent": [
-      "abc_def"
-     ]
+     "terms_sent": []
     },
     {
      "query": "test_7949_capstone_verdict_check",
      "rank": null,
      "rank_wide": null,
      "stored": "test_7949_capstone_verdict_check",
-     "terms_sent": [
-      "test_7949_capstone_verdict_check"
-     ]
+     "terms_sent": []
     },
     {
      "query": "ERR-4032",
@@ -2744,18 +2740,14 @@
      "rank": null,
      "rank_wide": null,
      "stored": "abc_def",
-     "terms_sent": [
-      "abc_def"
-     ]
+     "terms_sent": []
     },
     {
      "query": "test_7949_capstone_verdict_check",
      "rank": null,
      "rank_wide": null,
      "stored": "test_7949_capstone_verdict_check",
-     "terms_sent": [
-      "test_7949_capstone_verdict_check"
-     ]
+     "terms_sent": []
     },
     {
      "query": "ERR-4032",
@@ -2839,18 +2831,14 @@
      "rank": null,
      "rank_wide": null,
      "stored": "abc_def",
-     "terms_sent": [
-      "abc_def"
-     ]
+     "terms_sent": []
     },
     {
      "query": "test_7949_capstone_verdict_check",
      "rank": null,
      "rank_wide": null,
      "stored": "test_7949_capstone_verdict_check",
-     "terms_sent": [
-      "test_7949_capstone_verdict_check"
-     ]
+     "terms_sent": []
     },
     {
      "query": "ERR-4032",
@@ -2914,7 +2902,7 @@
    ]
   }
  },
- "graph": "u12360-run2",
+ "graph": "u12360-final3",
  "index": {
   "label": "Object",
   "numDocuments": 300,
@@ -2929,7 +2917,7 @@
   10,
   15
  ],
- "measured_at": "2026-11-13T07:01:13Z",
+ "measured_at": "2026-11-13T07:18:50Z",
  "population": {
   "classes": {
    "definite": 180,
@@ -2937,9 +2925,30 @@
    "path": 30
   },
   "n": 300,
-  "path": "/home/cmux/tortoise/.worktrees/fix-12360/docs/research/2026-11-13-12360-underscore-or-terms/population.json",
+  "path": "docs/research/2026-11-13-12360-underscore-or-terms/population.json",
   "sha256": "095d3aa5623d8f4b6b92585425599813add914f086afc0db25f53a753a9da124",
   "source": "#12298's pinned 300-name sample (verbatim copy)"
+ },
+ "user_search_set": {
+  "arms": {
+   "capture_prior": {
+    "delta_pts": 0.0,
+    "identical_rank_vectors": 50,
+    "n": 50,
+    "note": "identical ordered ids on every query -> recall@k and nDCG@10 are equal for any labelling"
+   },
+   "mcp_search": {
+    "delta_pts": 0.0,
+    "identical_rank_vectors": 50,
+    "n": 50,
+    "note": "identical ordered ids on every query -> recall@k and nDCG@10 are equal for any labelling"
+   }
+  },
+  "available": true,
+  "emitted_bytes_identical": 50,
+  "n": 50,
+  "source": "tests/eval/retrieval/queries.py::AUTHORED_QUERIES (#1144)",
+  "with_underscore": []
  },
  "verdict": {
   "capture_prior": {
@@ -2970,6 +2979,7 @@
    "regressions": 0,
    "zero_regressions": true
   },
-  "passes": true
+  "passes": true,
+  "query_population_substitution": "The contract asks for the #11901 corpus on the capture prior and the DECLARED USER-SEARCH QUERY SET on the MCP/SDK door. That declared set contains NO `_` query, so the mechanism cannot move it \u2014 and must not (byte-identity). The gain is therefore measured with the #11901 name population on BOTH doors (the substitution), and the declared set is measured for INERTNESS on both doors (identical ordered ids, identical emitted bytes) rather than for a gain it structurally cannot have."
  }
 }

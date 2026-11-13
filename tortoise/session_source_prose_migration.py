@@ -1496,8 +1496,10 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     built = build_or_query(token)
     if len(built.split("|")) != 1:
         return (f"the read expands it into several terms ({built!r}) — either "
-                f"the identifier mechanism (a digit/dash run) or the ASCII "
-                f"tokeniser splitting an accented word; pass the plain token")
+                f"the identifier mechanism (a digit/dash run), the #12360 "
+                f"`_`-composite tail (`TORTOISE_UNDERSCORE_TERMS`), or the "
+                f"ASCII tokeniser splitting an accented word; pass the plain "
+                f"token")
     return None
 
 

@@ -135,6 +135,14 @@ FIXTURES = [
 
 # ── population ─────────────────────────────────────────────────────────────
 
+def _repo_relative(path: Path) -> str:
+    """A repo-relative path for the artifact, never this box's worktree path."""
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def load_population(path: Path) -> tuple[list[dict], str]:
     raw = path.read_bytes()
     doc = json.loads(raw)
@@ -362,7 +370,7 @@ def run(args: argparse.Namespace) -> int:
         "issue": "12360",
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "graph": args.graph,
-        "population": {"path": str(pop_path), "sha256": pop_sha,
+        "population": {"path": _repo_relative(pop_path), "sha256": pop_sha,
                        "n": len(rows),
                        "classes": dict(collections.Counter(r["cls"] for r in rows)),
                        "source": "#12298's pinned 300-name sample (verbatim copy)"},
@@ -401,7 +409,13 @@ def run(args: argparse.Namespace) -> int:
                 fx.append({"stored": stored_name, "query": q,
                            "rank": out.index(fid) + 1 if fid in out else None,
                            "rank_wide": wide.index(fid) + 1 if fid in wide else None,
-                           "terms_sent": underscore_run_terms(q)})
+                           # ⛔ The switch decides this, or the artifact lies:
+                           # recording the composite for the OFF arm would say
+                           # "it was sent and still missed", which inverts the
+                           # finding.
+                           "terms_sent": (underscore_run_terms(q)
+                                          if os.environ[UNDERSCORE_ENV] == "1"
+                                          else [])})
             per_arm[arm] = fx
         result["fixtures"][surface] = {
             "stored_names": [s for s, _q in FIXTURES],
@@ -439,7 +453,23 @@ def run(args: argparse.Namespace) -> int:
     verdict["passes"] = bool(
         verdict["mcp_search"]["passes_10pts"]
         and verdict["capture_prior"]["passes_10pts"])
+    verdict["query_population_substitution"] = (
+        "The contract asks for the #11901 corpus on the capture prior and the "
+        "DECLARED USER-SEARCH QUERY SET on the MCP/SDK door. That declared set "
+        "contains NO `_` query, so the mechanism cannot move it — and must not "
+        "(byte-identity). The gain is therefore measured with the #11901 name "
+        "population on BOTH doors (the substitution), and the declared set is "
+        "measured for INERTNESS on both doors (identical ordered ids, identical "
+        "emitted bytes) rather than for a gain it structurally cannot have.")
     result["verdict"] = verdict
+
+    # ── the declared user-search query set: inertness, not a gain (see the
+    #    function's docstring for why that is the CORRECT answer there) ──
+    try:
+        result["user_search_set"] = measure_declared_user_search(ctx)
+    except Exception as exc:
+        result["user_search_set"] = {"available": False,
+                                     "error": f"{type(exc).__name__}: {exc}"}
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -471,8 +501,99 @@ def run(args: argparse.Namespace) -> int:
               f"regressions={v['regressions']}, "
               f">=10pts={v['passes_10pts']}")
     print(f"  passes={verdict['passes']}")
+    uss = result.get("user_search_set") or {}
+    if uss.get("available"):
+        print(f"\n── declared user-search query set ({uss['n']} queries, "
+              f"{len(uss['with_underscore'])} with `_`):")
+        for door, row in uss["arms"].items():
+            print(f"   {door:>13}: identical ordered ids on "
+                  f"{row['identical_rank_vectors']}/{row['n']}  "
+                  f"Δ={row['delta_pts']}")
+        print(f"   emitted query bytes identical: "
+              f"{uss['emitted_bytes_identical']}/{uss['n']}")
+    else:
+        print(f"\n── declared user-search query set: UNAVAILABLE "
+              f"({(uss or {}).get('error')})")
     print(f"\nwrote {out}")
     return 0
+
+
+# ── the declared user-search query set (the contract's OTHER surface) ─────
+
+def measure_declared_user_search(ctx: dict) -> dict:
+    """The DECLARED user-search query set, both arms, both doors.
+
+    `#12360` asks for two surfaces: *"the `#11901` corpus for the capture prior,
+    and **the declared user-search query set** for MCP/SDK search"*. The set is
+    the repo's own (`tests/eval/retrieval/queries.py::AUTHORED_QUERIES`, the
+    `#1144` authored slice: 50 natural-language queries over this product's
+    real domain).
+
+    ⚠️ What this CAN and CANNOT report, stated rather than implied:
+
+    * It **cannot** report a recall@k GAIN, because none of these queries is
+      identifier-shaped (`_`-carrying), so the mechanism has nothing to recover
+      — and that is the CORRECT result: the change is byte-identical for every
+      query without an inner `_`. A recall number here would be a score over
+      labels this lane does not hold.
+    * It **can** report, and does, the thing that matters for that surface: the
+      two arms return the **identical ordered id list** for every query, on both
+      doors, and the emitted query BYTES are identical — so recall@k and
+      nDCG@10 are equal for ANY labelling whatsoever, without needing the labels.
+      That is a proof of inertness, not an absence of a measurement.
+    * The gain this issue is about is therefore measured on the population that
+      CONTAINS the shapes it repairs (`#11901`'s 300 names) — recorded as
+      ``query_population_substitution`` in the artifact, because the contract's
+      two-surface wording assumes the declared set would exercise the mechanism
+      and it does not.
+    """
+    from tortoise.sparse import UNDERSCORE_ENV, build_or_query
+
+    try:
+        from tests.eval.retrieval.queries import AUTHORED_QUERIES as decl
+    except Exception as exc:
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    queries = [q["query"] if isinstance(q, dict) else str(q) for q in decl]
+    out: dict = {
+        "available": True,
+        "source": "tests/eval/retrieval/queries.py::AUTHORED_QUERIES (#1144)",
+        "n": len(queries),
+        "with_underscore": [q for q in queries if "_" in q],
+        "arms": {},
+    }
+    per_arm: dict[str, list[list[str]]] = {}
+    bytes_identical = 0
+    for arm, flag in (("off", "0"), ("on", "1")):
+        os.environ[UNDERSCORE_ENV] = flag
+        per_arm[arm] = [_query_ids("mcp_search", ctx, q, 15) for q in queries]
+    for q in queries:
+        os.environ[UNDERSCORE_ENV] = "0"
+        before = build_or_query(q)
+        os.environ[UNDERSCORE_ENV] = "1"
+        if build_or_query(q) == before:
+            bytes_identical += 1
+    for door in ("mcp_search", "capture_prior"):
+        if door == "capture_prior":
+            for arm, flag in (("off", "0"), ("on", "1")):
+                os.environ[UNDERSCORE_ENV] = flag
+                per_arm[f"prior_{arm}"] = [
+                    [r.get("id", "") for r in (ctx["fts_rows"](
+                        ctx["sdk"], "object", q, limit=15) or [])]
+                    for q in queries]
+            off, on = per_arm["prior_off"], per_arm["prior_on"]
+        else:
+            off, on = per_arm["off"], per_arm["on"]
+        identical = sum(1 for a, b in zip(off, on, strict=True) if a == b)
+        out["arms"][door] = {
+            "n": len(queries),
+            "identical_rank_vectors": identical,
+            "delta_pts": 0.0 if identical == len(queries) else None,
+            "note": ("identical ordered ids on every query -> recall@k and "
+                     "nDCG@10 are equal for any labelling"),
+        }
+    out["emitted_bytes_identical"] = bytes_identical
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
