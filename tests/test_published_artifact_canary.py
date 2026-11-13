@@ -1104,6 +1104,9 @@ def test_the_publish_time_smoke_resolves_EXACTLY_ONE_wheel_before_it_runs():
     # into `--wheel` while `publish` uploads both). A count taken from a possibly-truncated
     # variable cannot police arity, so the glob line must be pipeline-free.
     glob_lines = [line for line in run.splitlines() if "dist/*.whl" in line]
+    # A READER GUARD, not coverage: it is implied by the `assert "dist/*.whl" in run` above,
+    # so it can never attribute a failure alone. The behavioural clause at the end of this
+    # file is what closes the class.
     assert glob_lines, "the step no longer mentions the wheel glob"
     for line in glob_lines:
         # ⛔ A PIPE, not shell's `||`: `whl=$(ls dist/*.whl 2>/dev/null) || whl=""` is the
@@ -1111,7 +1114,7 @@ def test_the_publish_time_smoke_resolves_EXACTLY_ONE_wheel_before_it_runs():
         # on the first cut of this clause, which red on the correct code).
         assert not re.search(r"(?<!\|)\|(?!\|)", line), (
             f"the wheel-glob line takes a pipeline ({line.strip()!r}) — a truncating pipe "
-            f"(\`| head -1\`) makes the `-ne 1` count guard vacuous while leaving it in the "
+            f"(| head -1) makes the `-ne 1` count guard vacuous while leaving it in the "
             f"text, so exactly one arbitrary wheel is smoked and every wheel is uploaded"
         )
 
@@ -1129,6 +1132,84 @@ def test_the_publish_time_smoke_resolves_EXACTLY_ONE_wheel_before_it_runs():
     assert not re.search(r'--wheel\s+"?\$\(', run), (
         "`--wheel` takes an inline `$(...)` substitution: an empty `dist/*.whl` glob collapses "
         "it to an empty argument and the smoke tests a DIFFERENT release than the one uploaded"
+    )
+
+
+def test_the_wheel_arity_guard_REFUSES_zero_and_two_wheels_by_RUNNING_it(tmp_path):
+    """Execute the step's own resolution block, rather than grepping it (#12422 review cycle 4, P2).
+
+    Every text assertion above is LINE-SCOPED to a line containing `dist/*.whl`, so the class
+    it names survives two spellings that keep `dist/*.whl`, `-ne 1` and `exit 1` in the text
+    while making `wc -l` always 1 — both MEASURED GREEN against the text-only cut:
+
+        whl=${whl%%$'\n'*}                                    # no pipe at all
+        whl=$(printf '%s\n' "$whl" | cut -d' ' -f1)             # a pipe, on an unscanned line
+
+    Shell text cannot be pinned against "any transformation of the glob output"; the surface
+    is what the block DOES. So the block is lifted out of the workflow and RUN under `bash -e`
+    in a temp dir seeded with 0, 1 and 2 fake wheels, and the arity verdict is observed.
+    """
+    import subprocess
+
+    import yaml
+
+    workflows = REPO_ROOT / ".github" / "workflows"
+    build_steps = yaml.safe_load((workflows / "publish-pypi.yml").read_text())["jobs"]["build"][
+        "steps"
+    ]
+    preupload = [
+        step for step in build_steps if "published_artifact_canary.py" in str(step.get("run") or "")
+    ]
+    assert len(preupload) == 1, "the pre-upload gate step is missing"
+    lines = str(preupload[0]["run"]).splitlines()
+
+    # The resolution block: from the `whl=` assignment through its OWN closing `fi`. Lifted
+    # verbatim, so whatever the step actually executes is what this test executes.
+    start = next(
+        i
+        for i, line in enumerate(lines)
+        if "dist/*.whl" in line and not line.lstrip().startswith("#")
+    )
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "fi")
+    block = "\n".join(lines[start : end + 1])
+
+    def run_block(wheel_count: int) -> subprocess.CompletedProcess:
+        case = tmp_path / f"wheels{wheel_count}"
+        (case / "dist").mkdir(parents=True)
+        for i in range(wheel_count):
+            # Empty files are enough: the block resolves NAMES. `publish` is not executed.
+            (case / "dist" / f"pkg-0.{i}-py3-none-any.whl").write_bytes(b"")
+        script = case / "resolve.sh"
+        script.write_text(
+            "set -o pipefail\n" + block + '\nprintf "WHL=%s\\n" "$whl"\n',
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            ["bash", "-e", str(script)], cwd=str(case), capture_output=True, text=True
+        )
+
+    zero = run_block(0)
+    assert zero.returncode != 0, (
+        "the guard PASSED with an empty dist/ — `--wheel` would receive an empty string and the "
+        f"publish step would smoke a different release. stdout={zero.stdout!r}"
+    )
+    assert "expected exactly one wheel" in (zero.stdout + zero.stderr), (
+        "the empty-dist refusal does not NAME the build defect it found: "
+        f"{zero.stdout + zero.stderr!r}"
+    )
+
+    two = run_block(2)
+    assert two.returncode != 0, (
+        "the guard PASSED with TWO wheels in dist/ — one arbitrary wheel is smoked while every "
+        f"wheel is uploaded. stdout={two.stdout!r}"
+    )
+
+    one = run_block(1)
+    assert one.returncode == 0, (
+        f"the guard REFUSED a single-wheel dist/ (a false block): {one.stdout + one.stderr!r}"
+    )
+    assert "WHL=dist/pkg-0.0-py3-none-any.whl" in one.stdout, (
+        f"the resolved wheel was not handed on intact: {one.stdout!r}"
     )
 
 
@@ -1200,6 +1281,45 @@ def test_the_transcript_is_written_incrementally_not_only_at_the_end(tmp_path):
     text = log.read_text()
     assert "pip install" in text, text
     assert "[exit 0]" in text, text
+
+
+def test_a_timeout_FLUSHES_the_recovered_output_to_the_transcript_FILE(tmp_path):
+    """The timeout arm's `flush()` is the only thing that lands the recovered output (#12422 review cycle 4, P2).
+
+    `_main` writes `log_path` ONLY when the returned transcript is empty, so on the timeout
+    path the FILE this test reads is written by the handler's own `flush()` and by nothing
+    else. Deleting that one call left the whole suite green (measured: `66 passed`) while the
+    uploaded `publish-canary-log` artifact — the artefact the pre-upload gate exists to make
+    diagnosable — stopped carrying the output the command had already produced.
+    """
+
+    class _Hangs(_Runner):
+        def __call__(self, cmd, **kwargs):
+            result = super().__call__(cmd, **kwargs)
+            if Path(cmd[0]).name == "tortoise":
+                raise subprocess.TimeoutExpired(cmd, 7, output="Collecting numpy==1.26.4\n")
+            return result
+
+    log = tmp_path / "logs" / "canary.log"
+    arm, _transcript = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Hangs({}, creates_db_for=None),
+        transcript_path=log,
+    )
+    assert arm.status == canary.UNKNOWN, arm
+    assert log.is_file(), (
+        "no transcript FILE survived a timeout — the handler's flush() is the only writer on "
+        "this path, so the uploaded artifact would be empty in exactly the state the "
+        "diagnosis is worth most"
+    )
+    text = log.read_text()
+    assert "Collecting numpy==1.26.4" in text, (
+        f"the recovered output is not in the transcript FILE: {text!r}"
+    )
+    assert "killed at the 7s budget" in text, f"the timeout marker is absent: {text!r}"
 
 
 # --------------------------------------------------------------------------
