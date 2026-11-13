@@ -1619,6 +1619,22 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(
             assert f"arms.{arm}.<P>.exact.recall_3_after" in got, (
                 f"{name}:{arm}: the note names another arm's achieved cell — it "
                 f"must point at `arms.{arm}.<P>.exact.recall_3_after`")
+            # ⛔ EVERY arm-bearing pointer, not just the achieved cell. The note
+            # now carries a SECOND `arms.{label}` pointer (the "this arm's own
+            # at-pool figures live in its ... cell" clause), and pinning only the
+            # first left it free: measured, hard-coding THAT one to `arms.rerank`
+            # (with the artifacts regenerated) kept this test green while the
+            # lexical carriers pointed at the rerank arm's numbers.
+            foreign = sorted({a for a in ("rerank", "lexical_difflib",
+                                         "lexical_overlap") if a != arm})
+            for other in foreign:
+                assert f"arms.{other}." not in got, (
+                    f"{name}:{arm}: the note carries a pointer into `arms.{other}` "
+                    f"— every arm-bearing pointer must name this carrier")
+            assert got.count(f"arms.{arm}.") == emitted.count(
+                "arms.{label}."), (
+                f"{name}:{arm}: the note does not carry every one of the "
+                f"template's arm pointers")
             assert got == want, (
                 f"{name}:{arm}: the artifact's ceiling_note is not what the tool "
                 f"emits for this arm — regenerate the artifact (it is generated, "
