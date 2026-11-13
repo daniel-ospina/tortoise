@@ -1105,6 +1105,13 @@ surfaces:
   - test_email_signup.py
   - test_enforcement.py
   - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the ledger pins hosted_api.py / mcp_auth.py / __main__.py reads)
+  # #12407/#12428: the `.env` the daemon reads and the CLI does not — the test's
+  # subject is `tortoise/__main__.py` + `tortoise/dotenv_file.py` + `mcp_server`'s
+  # loader, and a diff confined to `__main__.py` resolves to `api` ALONE (measured:
+  # `select(['tortoise/__main__.py'])` -> `['api']`), which REPLACES the `core`
+  # fallback — so the `core` registration alone leaves this suite asleep on the
+  # exact diff that breaks it.
+  - test_env_file_divergence.py
   - test_epic903_hosted.py
   - test_epic903_mcp.py
   - test_export_delete.py
@@ -2292,6 +2299,7 @@ surfaces:
   # `full: true, test_files: ALL`), not through this row.
   - test_12372_entity_type_dropped.py
   - test_candidate_recall_11901.py
+  - test_env_file_divergence.py
   # #12298 M3 (the measurement PR #12349): the brief's tables must equal the
   # committed `artifact.json`, and the brief's DEFECT claim must still match the
   # shipped tokenizer. The guarded production module is `tortoise/sparse.py`
