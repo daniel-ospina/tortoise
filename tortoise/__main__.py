@@ -12914,9 +12914,42 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                         "names which store won"))
         return
     except (OSError, RuntimeError) as exc:
-        # The resolver could not RUN (deleted cwd, unresolvable HOME) — an
-        # environment fault, not a verdict about a store. Reporting "no
-        # credential" here would advise a re-mint for a live key.
+        # A bare `OSError` is TWO different findings and they must not be folded
+        # together (#11912 review round 5). `Path.is_file()` sits OUTSIDE the
+        # resolver's own try, so a store behind an inaccessible PARENT DIRECTORY
+        # (`~/.tortoise` left root-owned 0700 by a `sudo tortoise init`, EACCES;
+        # or EIO) escapes as a bare OSError — and that state makes EVERY command
+        # fail, so it is a refusal, not an environment quirk. `_cmd_config`
+        # already attributes this from `exc.filename` (see its `offender` block);
+        # this arm used to call it "resolver could not run" + ⚠️, which let the
+        # report exit 0 on exactly the box #11912 is about.
+        offender = getattr(exc, "filename", None)
+        blamed: str | None = None
+        if offender:
+            try:
+                blamed_store = Path(offender)
+            except (TypeError, ValueError):
+                blamed_store = None
+            if blamed_store is not None:
+                try:
+                    _candidates = (Path.cwd() / ".tortoise",
+                                   Path.home() / ".tortoise" / "credentials.json")
+                except (OSError, RuntimeError):
+                    _candidates = ()
+                if any(_same_path(blamed_store, cand) for cand in _candidates):
+                    blamed = str(blamed_store)
+        if blamed is not None:
+            # A named STORE is the blocker: every command fails on it.
+            results.append(("Credentials", "❌",
+                            f"unreadable at {_printable(blamed)} "
+                            f"({type(exc).__name__}: {_printable(exc)}); no hosted "
+                            "request was made. `tortoise config show` names "
+                            "which store won — a parent directory this process "
+                            "cannot read is the usual cause (e.g. a store left "
+                            "root-owned by `sudo tortoise init`)"))
+            return
+        # No store to blame (a deleted cwd, an unresolvable HOME): the
+        # ENVIRONMENT, which is a warning about what could not be read.
         results.append(("Credentials", "⚠️",
                         f"the credential resolver could not run "
                         f"({type(exc).__name__}: {_printable(exc)}); hosted "
@@ -13143,13 +13176,38 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     except (ValueError, TypeError, RecursionError):
         parsed = None
 
+    # ── the `/health` verdict, computed ONCE (#11912 review round 5) ──
+    # It used to be consulted only inside the 2xx-accepted arm, so a graph-scoped
+    # key (a DOCUMENTED, supported key type) dropped `/health`'s own answer
+    # entirely: `200 {"status":"degraded"}` rendered `ℹ️ … /health 200` — counted
+    # in neither column — and `doctor` printed `✅ All checks passing!` during a
+    # real outage, which is the under-block the health note exists to remove.
+    _health_notes: list[str] = []
+    if isinstance(health_status, str) and health_status.strip().lower() not in (
+            "ok", "healthy", "pass"):
+        _health_notes.append(f"the service reports `{_printable(health_status)}` on /health")
+    if not (isinstance(health_code, int) and 200 <= health_code < 400):
+        _health_notes.append(f"/health returned {health_code}")
+    _health_note = (" — " + "; ".join(_health_notes)) if _health_notes else ""
+
+    def _combine(icon: str, detail: str) -> tuple[str, str, str]:
+        """The `Hosted` row, carrying the health verdict and the provenance note.
+
+        A reachable-but-unhealthy SERVICE is a ⚠️ whatever the credential's own
+        verdict is: the user cannot fix it, and it must never leave `doctor` able
+        to print `All checks passing!` over a `degraded` endpoint.
+        """
+        if _health_notes and icon in ("✅", "ℹ️"):
+            icon = "⚠️"
+        return ("Hosted", icon, f"{detail}{_health_note}{_provenance_note}")
+
     if team_code == 401:
-        results.append(("Hosted", "❌",
+        results.append(_combine("❌",
                         f"{health_part}; /v1/team 401 Invalid API key — "
                         f"{base} refused the stored key. Re-mint it: `tortoise "
                         "signup` (new team) or `tortoise recover` (same team, "
                         "needs your st_ recovery token); `tortoise config show` "
-                        f"names which store won{_provenance_note}"))
+                        "names which store won"))
         return
 
     error_code = None
@@ -13171,7 +13229,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             suffix = f" Appeal: {appeal_url}" if appeal_url else ""
             body_message = (message[:-len(suffix)]
                             if (suffix and message.endswith(suffix)) else message)
-            results.append(("Hosted", "❌",
+            results.append(_combine("❌",
                             f"{health_part}; /v1/team 403 — the organization is "
                             f"suspended: {_printable(body_message)}"
                             + (f". Appeal: {_printable(appeal_url)}" if appeal_url else "")))
@@ -13181,9 +13239,9 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         # A DELIBERATE refusal, not a fault: the server authenticated the key and
         # then declined team-level scope. `❌` here would tell a correctly-scoped
         # user to re-mint a working key.
-        results.append(("Hosted", "ℹ️",
+        results.append(_combine("ℹ️",
                         f"{health_part}; /v1/team 403 {error_code} — "
-                        f"{_ORG_INFO_REMEDIES[error_code]}{_provenance_note}"))
+                        f"{_ORG_INFO_REMEDIES[error_code]}"))
         return
 
     if isinstance(team_code, int) and 200 <= team_code < 300:
@@ -13200,7 +13258,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                 identity = field
                 break
         if identity is None:
-            results.append(("Hosted", "❌",
+            results.append(_combine("❌",
                             f"{health_part}; /v1/team answered "
                             f"{team_code} but with no team identity in the body "
                             f"({_printable(body[:160]) if body else '(empty body)'}) "
@@ -13222,24 +13280,8 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             extra += f", tier {_printable(tier)}"
         if isinstance(org, str) and org.strip():
             extra += f", org {_printable(org)}"
-        # A 200 whose body says the service is degraded — or any non-2xx/3xx
-        # /health — is a reachable but UNHEALTHY service. It is a WARNING, never a
-        # pass and never a fail: the user cannot fix it, and hiding it would make
-        # "the key works" read as "the product works". A 5xx on /health with a
-        # 200 on /v1/team used to render ✅ (fresh review of this change).
-        icon = "✅"
-        health_notes: list[str] = []
-        if isinstance(health_status, str) and health_status.strip().lower() not in ("ok", "healthy", "pass"):
-            health_notes.append(f"the service reports `{_printable(health_status)}` on /health")
-        if not (isinstance(health_code, int) and 200 <= health_code < 400):
-            health_notes.append(f"/health returned {health_code}")
-        health_note = ""
-        if health_notes:
-            icon = "⚠️"
-            health_note = " — " + "; ".join(health_notes)
-        results.append(("Hosted", icon,
-                        f"{base} — {health_part}; /v1/team accepted{extra}"
-                        f"{health_note}{_provenance_note}"))
+        results.append(_combine("✅",
+                        f"{base} — {health_part}; /v1/team accepted{extra}"))
         return
 
     # A service-side refusal is NOT a credential verdict. `/v1/team` runs a
@@ -13250,21 +13292,19 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     # code — during a deploy or capacity blip, for a healthy key (fresh review
     # round 4).
     if isinstance(team_code, int) and (team_code in (408, 429) or 500 <= team_code < 600):
-        results.append(("Hosted", "⚠️",
+        results.append(_combine("⚠️",
                         f"{health_part}; /v1/team answered {team_code} — the "
                         "SERVICE refused this request, so the key stays UNPROVEN "
                         "rather than wrong (capacity, rate limit or a restart). "
                         f"Re-run shortly; `tortoise team info` reports the same "
-                        f"state. {_printable(body[:400]) if body else ''}"
-                        f"{_provenance_note}"))
+                        f"state. {_printable(body[:400]) if body else ''}"))
         return
 
     code_display = team_code if team_code is not None else "no status"
-    results.append(("Hosted", "❌",
+    results.append(_combine("❌",
                     f"{health_part}; /v1/team → API error {code_display}: "
                     f"{_printable(body[:2000]) if body else '(empty body)'}. "
-                    f"`tortoise config show` reports what this machine knows"
-                    f"{_provenance_note}"))
+                    "`tortoise config show` reports what this machine knows"))
 
 
 def _cmd_doctor(args):

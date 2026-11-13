@@ -210,6 +210,26 @@ _FAKE_HOSTED_KEY = "t" + "t_" + "FAKEKEY0000000000000000000000"
 _FAKE_ENV_KEY = "t" + "t_" + "ENVKEY00000000000000000000000"
 
 
+def _expected_health_timeout() -> int:
+    from tortoise.__main__ import _DOCTOR_HEALTH_TIMEOUT_S
+    return _DOCTOR_HEALTH_TIMEOUT_S
+
+
+def _expected_health_retry_timeout() -> int:
+    from tortoise.__main__ import _DOCTOR_TEAM_RETRY_TIMEOUT_S
+    return _DOCTOR_TEAM_RETRY_TIMEOUT_S
+
+
+def _expected_team_timeout() -> int:
+    from tortoise.__main__ import _DOCTOR_TEAM_TIMEOUT_S
+    return _DOCTOR_TEAM_TIMEOUT_S
+
+
+def _expected_team_retry_timeout() -> int:
+    from tortoise.__main__ import _DOCTOR_TEAM_RETRY_TIMEOUT_S
+    return _DOCTOR_TEAM_RETRY_TIMEOUT_S
+
+
 class TestDoctorHostedCredential:
     """#11912: `doctor` must be able to see the hosted half of the product.
 
@@ -253,7 +273,7 @@ class TestDoctorHostedCredential:
         """
         from urllib.error import HTTPError
 
-        _write_credential(_hermetic_hosted_identity, "tt_REVOKEDKEY000000000000000000")
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
 
         def handler(url, req):
             if url.endswith("/health"):
@@ -281,12 +301,12 @@ class TestDoctorHostedCredential:
         assert "config show" in hosted, hosted
         assert rc == 1, "a broken hosted credential must exit non-zero"
         # The secret itself must never reach the transcript.
-        assert "tt_REVOKEDKEY000000000000000000" not in out
+        assert _FAKE_HOSTED_KEY not in out
 
     def test_valid_key_is_green_with_latency_and_identity(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
         """A working identity is reported as working: latency, tier, org."""
-        _write_credential(_hermetic_hosted_identity, "tt_WORKINGKEY000000000000000000")
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
         _stub_hosted(monkeypatch, lambda url, req: (
             _FakeResponse(200, b'{"status":"ok"}')
             if url.endswith("/health") else
@@ -305,7 +325,7 @@ class TestDoctorHostedCredential:
         assert "in " in hosted and "s" in hosted  # measured latency, not a bare OK
         assert "org-9" in hosted and "tier anon" in hosted, hosted
         assert rc in (0, 1)
-        assert "tt_WORKINGKEY000000000000000000" not in out
+        assert _FAKE_HOSTED_KEY not in out
 
     def test_offline_makes_no_request_and_says_not_probed(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -313,7 +333,7 @@ class TestDoctorHostedCredential:
 
         The row says "not probed" so "untested" can never be read as "fine".
         """
-        _write_credential(_hermetic_hosted_identity, "tt_REVOKEDKEY000000000000000000")
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
         calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
             f"--offline must make no request — dialled {url}"))
         db_path = str(tmp_path / "offline.db")
@@ -340,7 +360,7 @@ class TestDoctorHostedCredential:
         """
         from urllib.error import HTTPError
 
-        _write_credential(_hermetic_hosted_identity, "tt_GRAPHSCOPEDKEY0000000000000")
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
 
         def handler(url, req):
             if url.endswith("/health"):
@@ -373,7 +393,7 @@ class TestDoctorHostedCredential:
         `/v1/team` answered 200 — the key works and the service does not. Neither
         a ✅ (which would hide it) nor a ❌ (which the user cannot fix) is honest.
         """
-        _write_credential(_hermetic_hosted_identity, "tt_WORKINGKEY000000000000000000")
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
         _stub_hosted(monkeypatch, lambda url, req: (
             _FakeResponse(200, b'{"status":"degraded"}')
             if url.endswith("/health") else
@@ -399,7 +419,7 @@ class TestDoctorHostedCredential:
         row that just says "a key is configured" leaves a store-shadowed user
         chasing the wrong file.
         """
-        monkeypatch.setenv("TORTOISE_API_KEY", "tt_ENVKEY0000000000000000000000")
+        monkeypatch.setenv("TORTOISE_API_KEY", _FAKE_ENV_KEY)
         _stub_hosted(monkeypatch, lambda url, req: (
             _FakeResponse(200, b'{"status":"ok"}')
             if url.endswith("/health") else
@@ -413,7 +433,7 @@ class TestDoctorHostedCredential:
 
         cred = _row(out, "Credentials")
         assert cred is not None and "env:TORTOISE_API_KEY" in cred, out[-1500:]
-        assert "tt_ENVKEY0000000000000000000000" not in out
+        assert _FAKE_ENV_KEY not in out
 
     def test_trailing_slash_in_api_url_does_not_fake_a_broken_key(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -546,17 +566,17 @@ class TestDoctorHostedCredential:
         exactly that; the leg is now retried once at the wider bound.
         """
         _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
-        attempts: list[tuple[str, int | None]] = []
+        seen: list[str] = []
 
         def handler(url, req):
-            attempts.append((url, req.timeout if hasattr(req, "timeout") else None))
-            if url.endswith("/health") and len([a for a in attempts if a[0].endswith("/health")]) == 1:
+            seen.append(url)
+            if url.endswith("/health") and len([u for u in seen if u.endswith("/health")]) == 1:
                 raise TimeoutError("timed out")
             return (_FakeResponse(200, b'{"status":"ok"}')
                     if url.endswith("/health") else
                     _FakeResponse(200, b'{"org_id":"org-5"}'))
 
-        _stub_hosted(monkeypatch, handler)
+        calls = _stub_hosted(monkeypatch, handler)
         db_path = str(tmp_path / "cold.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _seed_db(db_path, "doctor cold start seed")
@@ -564,8 +584,13 @@ class TestDoctorHostedCredential:
         rc = _run_doctor([])
         out = capsys.readouterr().out
 
-        health_calls = [u for u, _t in attempts if u.endswith("/health")]
-        assert len(health_calls) == 2, attempts
+        # The BOUNDS, not just the count: a retry at the same 5 s would still
+        # "retry" while re-introducing the cold-start failure this exists for
+        # (fresh review round 5 — `Request` has no `.timeout`, so the old
+        # assertion recorded None and pinned nothing).
+        health_calls = [(u, t) for u, t in calls if u.endswith("/health")]
+        assert [t for _u, t in health_calls] == [
+            _expected_health_timeout(), _expected_health_retry_timeout()], health_calls
         hosted = _row(out, "Hosted")
         assert hosted is not None and "✅" in hosted, out[-1500:]
         assert "first attempt timed out" in hosted, hosted
@@ -708,15 +733,12 @@ class TestDoctorHostedCredential:
         refusal, and two must report the credential as UNPROVEN.
         """
         _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
-        team_calls = []
-
         def handler(url, req):
             if url.endswith("/health"):
                 return _FakeResponse(200, b'{"status":"ok"}')
-            team_calls.append(url)
             raise TimeoutError("timed out")
 
-        _stub_hosted(monkeypatch, handler)
+        all_calls = _stub_hosted(monkeypatch, handler)
         db_path = str(tmp_path / "team-timeout.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _seed_db(db_path, "doctor team timeout seed")
@@ -724,7 +746,10 @@ class TestDoctorHostedCredential:
         rc = _run_doctor([])
         out = capsys.readouterr().out
 
+        team_calls = [(u, t) for u, t in all_calls if u.endswith("/v1/team")]
         assert len(team_calls) == 2, team_calls  # one attempt + one bounded retry
+        assert [t for u, t in team_calls] == [
+            _expected_team_timeout(), _expected_team_retry_timeout()], team_calls
         hosted = _row(out, "Hosted")
         assert hosted is not None and "❌" in hosted, out[-1500:]
         assert "no answer in 10s" in hosted and "on retry" in hosted, hosted
@@ -918,6 +943,78 @@ class TestDoctorHostedCredential:
 
         assert len(caps_seen) >= 2, caps_seen
         assert _row(out, "Hosted") is not None
+
+    def test_an_unreadable_store_directory_is_a_refusal_not_an_environment_note(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A store behind an unreadable PARENT dir makes every command fail.
+
+        `Path.is_file()` sits outside the resolver's own try, so `~/.tortoise` at
+        mode 000 (what a `sudo tortoise init` leaves behind) escapes as a bare
+        OSError rather than `_ConfigError`. Rendering that as "the resolver could
+        not run" + ⚠️ let `doctor` exit 0 on exactly the box #11912 is about —
+        `_cmd_config` already attributes it from `exc.filename` (fresh review
+        round 5).
+        """
+        import os as _os
+        import stat as _stat
+
+        store = _hermetic_hosted_identity / ".tortoise"
+        store.mkdir(parents=True, exist_ok=True)
+        (store / "credentials.json").write_text('{"api_key": "x"}')
+        calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
+            f"an unreadable store must not be dialled — requested {url}"))
+        db_path = str(tmp_path / "unreadable-store.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor unreadable store seed")
+        store.chmod(0o000)
+        try:
+            if _os.access(store, _os.R_OK):  # root ignores mode bits
+                pytest.skip("running as root")
+            rc = _run_doctor([])
+        finally:
+            store.chmod(_stat.S_IRWXU)
+        out = capsys.readouterr().out
+
+        assert calls == []
+        cred = _row(out, "Credentials")
+        assert cred is not None and "❌" in cred, out[-1200:]
+        assert "unreadable at" in cred, cred
+        assert rc == 1
+
+    def test_a_graph_scoped_key_still_surfaces_a_degraded_health(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """`/health`'s own verdict must survive a graph-scoped 403.
+
+        That arm returned `ℹ️` before the health verdict was consulted, so a
+        `degraded` service rendered as information — counted in neither column —
+        and an otherwise-clean box printed `✅ All checks passing!` during a real
+        outage. A graph-scoped key is documented and supported (fresh review
+        round 5).
+        """
+        from urllib.error import HTTPError
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"degraded"}')
+            raise HTTPError(url, 403, "Forbidden", {},
+                            __import__("io").BytesIO(
+                                b'{"detail":{"error_code":"GRAPH_SCOPED_TEAM_SURFACE"}}'))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "scoped-degraded.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor scoped degraded seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "⚠️" in hosted, hosted
+        assert "degraded" in hosted, hosted
+        assert "All checks passing" not in out, out[-1200:]
 
 
 class TestDoctorPath:
