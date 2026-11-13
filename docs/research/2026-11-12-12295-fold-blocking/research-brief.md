@@ -4,28 +4,36 @@
 **Harness:** `tools/candidate_recall_11901.py` (**reused, not rebuilt** — the tool and its pinned
 test landed with `#12159`) · **Run:** `--population 1000 --sample 300 --captures 20`, elapsed
 390.6 s, graph `recall11901_1794532634_746264`, population digest `03785295abd20d9a`,
-measured at code head `ae63e846e4104311de508d83b19b32fb5e672d4f` — the commit whose code these
-numbers describe (full 40-hex on purpose: this is the anchor a reader reproduces from, so it is
-quoted in full and `test_the_artifact_declares_one_uniform_retrieval_mode` asserts the brief names
-the artifact's `code_head` verbatim). ⚠️ The run
-itself happened at `e9a572d4b4`, which the `#12304` rebases rewrote out of every ref (a dangling
-local object, absent from a fresh clone); `ae63e846e410` is that same commit as the LATEST rebase
-left it, and `git diff e9a572d4b4 ae63e846e410 -- tortoise/entity_resolver.py
-tortoise/entity_blocking.py tortoise/extractor_v2.py` is EMPTY. ⛔ This paragraph named the
-`437d…`-generation shas (a first rebase generation, now dangling) until #12304 review round 10 —
-every one of them fails `git merge-base --is-ancestor` against this branch, i.e. they were dangling
-in exactly the way the sentence beside them calls disqualifying. They are named here WITHOUT their
-full digests on purpose, so that this paragraph cannot itself re-introduce the advert it warns
-about. ⛔ And a reader should NOT expect the obvious guard: an "every quoted sha resolves" arm was
+measured at code head `ae63e846e4104311de508d83b19b32fb5e672d4f` — quoted in full because
+`test_the_artifact_declares_one_uniform_retrieval_mode` asserts the brief names the artifact's
+`code_head` verbatim.
+⛔ **AND THAT SHA IS *NOT* A REPRODUCTION ANCHOR — the correction (#12304 review round 21).** This
+paragraph used to call it "the anchor a reader reproduces from" and to imply it survived the rebases
+because the LATEST one left it. Measured: `git merge-base --is-ancestor ae63e846e410` answers **1**
+against BOTH this branch's HEAD and `origin/main`, and the only ref that contains it is a local,
+un-refetched `refs/remotes/` entry — so it is dangling in exactly the way the paragraph below
+calls disqualifying, and no reader can `git show` it from a fresh clone. The FIELD is kept because
+it is what the artifact's own contract requires and because a squash merge destroys every branch
+sha anyway (the pin's own comment records that, and is why it asserts the note's SHAPE and a
+content-equivalence rather than an ancestry). What replaces it as the anchor is CONTENT, which is
+checkable without any sha being reachable: on a docstring-stripped AST compare,
+`tortoise/entity_resolver.py` and `tortoise/extractor_v2.py` are **identical** between
+`ae63e846e410` and this head, and `tortoise/entity_blocking.py` differs **only** by the two label
+changes named below. ⛔ This paragraph also named the `437d…`-generation shas (a first rebase
+generation, now dangling) until #12304 review round 10, for the same reason they are not named here
+now: a sha no ref serves is not provenance, and quoting one in full makes it look like it is.
+⛔ And a reader should NOT expect the obvious guard: an "every quoted sha resolves" arm was
 WRITTEN and MEASURED and is deliberately NOT shipped, because a rebased-out commit leaves every
 ref while its object stays in the local object DB — `git cat-file -e` answers 0 for
 `437d5d17a5f5` today — so the arm stayed GREEN on exactly the mutation it exists to catch. What
 IS shipped is the arm that can fail: `test_the_artifact_declares_one_uniform_retrieval_mode`
 asserts `report["code_head"] in brief`, and it reds on a first-generation sha substituted for the
-live one (measured, both directions). The artifact is the
+artifact's declared one (measured, both directions) — which is a CONSISTENCY pin, not a
+reachability one. The artifact is the
 source of truth for this field and the brief must agree with it.
-Commits after it touch those files in two ways, and the provenance claim is stated as the diff
-rather than as a summary of it: (a) DOCSTRINGS/COMMENTS — the `emitted:` note moves, and a
+The DELTA between the code that produced these numbers and this head touches those files in two
+ways, and the provenance claim is stated as the diff rather than as a summary of it: (a)
+DOCSTRINGS/COMMENTS — the `emitted:` note moves, and a
 `complete=True` note is added; (b) LABELS — `1990cca573` (pre-rebase `d52a989eafd2`) renames the
 `lsh_bands` docstring label and the `stats()` counter key `keys` -> `key_memberships`, and
 `22e43732e9` (pre-rebase `22ec4d1a6048`) adds a `candidates(label=None)` LABEL FALLBACK in
@@ -33,8 +41,10 @@ rather than as a summary of it: (a) DOCSTRINGS/COMMENTS — the `emitted:` note 
 ⛔ The enumeration, not this summary, is what proves it — and ⛔ **THE RANGE NO LONGER ISOLATES
 POST-RUN CHANGES**: the `#12304` rebases rewrote every branch sha, so
 `git log --format=%h ae63e846e410..HEAD -- tortoise/entity_resolver.py tortoise/entity_blocking.py
-tortoise/extractor_v2.py` now prints **25** commits (`git rev-list --count ae63e846e410..HEAD` is
-**55** unrestricted) that SPAN the whole rewritten branch. It is not a list of docstring-only
+tortoise/extractor_v2.py` now prints the whole rewritten branch's commits, and SPANS it. No count
+is stated here — deliberately: the commit that writes this sentence adds itself to the number
+it would quote (measured both ways: the figures were one lower before this paragraph landed),
+so any integer here is a number a reader cannot re-derive. It is not a list of docstring-only
 commits and this paragraph does not claim it is — it holds the branch's own feature and fix
 commits too, which is what a base-moved range holds. What the enumeration DOES establish is the
 IDENTITY of the two statement changes, and it establishes it by CONTENT, not by position: the
