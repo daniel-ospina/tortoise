@@ -574,16 +574,20 @@ def encode_plan_block(limits: dict | None, resource: str = "points",
     key = _RESOURCE_LIMIT_KEYS.get(resource)
     if key is None:
         # ⛔ NOT the gate's refusal — `enforce_org_limit` DOES serve the DERIVED caps
-        # (`documents`, whose limit is `max_points × _DOCUMENTS_FROM_POINTS_FACTOR`,
-        # `DERIVED_CAP_RESOURCES`). This encoder covers the resources whose cap is a
-        # plain key in the limits dict, which is every resource the account read
-        # reports today (`points`); a derived cap needs its own branch here before it
-        # can be encoded, and guessing one would be how the two surfaces drift apart.
-        raise QuotaCheckError(
-            f"no encodable limit key for resource {resource!r} "
-            f"(the derived caps, {sorted(DERIVED_CAP_RESOURCES)}, need their own "
-            "branch — the write gate DOES enforce them)"
-        )
+        # (`documents`: `max_points × _DOCUMENTS_FROM_POINTS_FACTOR`,
+        # `DERIVED_CAP_RESOURCES`). This encoder covers the resources whose cap is a plain
+        # key in the limits dict, which is every resource the account read reports today
+        # (`points`); a derived cap needs its own branch here before it can be encoded, and
+        # guessing one would be how the two surfaces drift apart. So the two cases get two
+        # messages: naming a derived cap "unknown" would tell the next reader the gate
+        # does not enforce it.
+        if resource in DERIVED_CAP_RESOURCES:
+            raise QuotaCheckError(
+                f"{resource!r} has a DERIVED cap, which this encoder does not build yet "
+                "— the write gate DOES enforce it, so it must be "
+                "encoded from `max_points` rather than refused as unknown"
+            )
+        raise QuotaCheckError(f"unknown quota resource: {resource!r}")
     block: dict = {
         "resource": resource,
         "used": int(used) if used is not None else None,
