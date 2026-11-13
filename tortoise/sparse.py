@@ -490,10 +490,12 @@ def underscore_run_terms(text: str) -> list[str]:
     literally "every" (#12368 review): the SAME committed artifact reports the
     identifier class at recall@1 **0.2000** with the switch OFF — 18 of its 90
     queries — while only 17 of those 90 carry no ``_`` (the ``#n`` shapes), so at
-    least one ``_``-carrying name IS found at rank 1, by an incidental segment
-    match rather than by its own term. The universal is what this repair
-    reverses, not a distribution. Measured on a pinned
-    300-name population (#11901's instrument, ``:Object`` label, the FTS leg in
+    least one ``_``-carrying name IS found at rank 1. The universal is what this
+    repair reverses, not a distribution; and the counter-example is the ``a_bc``
+    shape this docstring already describes as retrievable (its segments leave ONE
+    surviving token, so the degenerate branch sends the whole token — found by
+    ITS OWN TERM, not by an incidental segment match, #12368 review round 13).
+    Measured on a pinned 300-name population (#11901's instrument, ``:Object`` label, the FTS leg in
     isolation): candidate recall@3 **0.7133 -> 0.9633** (+25.00 pts, exact
     two-sided McNemar p < 0.001) with **75 gains and ZERO losses**, and 21 empty
     result sets -> 0. The identifier class goes 0.2000 -> 0.9444 and paths
@@ -541,11 +543,12 @@ def underscore_run_terms(text: str) -> list[str]:
       on ``año_actual``/``the_café``/``_café``/``dé_installer``/``x_café``, in the
       precomposed spelling).
       ⚠️ NOT "both spellings" (#12368 review): the NFD spelling of a name whose
-      ASCII part PRECEDES the mark is still refused — one branch later, by
-      ``session_source_prose_migration._indexed_term_runs``'s separator test —
-      and that refusal is PRE-EXISTING: it reproduces identically at
-      ``TORTOISE_UNDERSCORE_TERMS=0``, so this change neither causes nor cures it.
-      NFD ``_café`` IS accepted because its mark follows the whole run.
+      ASCII part PRECEDES the mark is still refused — by the probe guard's own
+      run/term tests (its separator/run-count test for ``año_actual``/``the_café``/
+      ``x_café``, its term-count test for ``dé_installer``) — and that refusal is
+      PRE-EXISTING: it reproduces identically at ``TORTOISE_UNDERSCORE_TERMS=0``,
+      so this change neither causes nor cures it. NFD ``_café`` IS accepted
+      because its mark follows the whole run.
       ⚠️ Scoped (#12368 second and third reviews): only THIS bullet is non-lossy.
       The two bounds below are both DECLARED LOSSY (``___``, and a run past
       ``MAX_COMPOSITE_RUN_LEN``), so an earlier "additive in the only sense that
