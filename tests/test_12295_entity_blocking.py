@@ -114,23 +114,30 @@ def test_the_basename_gate_is_TWO_SIDED_and_each_side_alone_can_open_it():
     """Pins `mention_path or is_path_shaped(cand_name)` as a DISJUNCTION.
 
     ⛔ MEASURED, and this test is the reason it exists: no pre-existing fixture
-    discriminates the two operands, because every one of them has BOTH sides
-    path-shaped (`"api/config.py"` vs `"src/core/config.py"` above,
-    `"lib/config.py"` vs `"src/config.py"` below). Reverting the `or` to the `and`
-    that `attach_keys`' docstring used to describe left the whole entity suite green
-    (measured: 215 passed), and so did dropping EITHER operand alone — so the
-    docstring fix that corrected that wording was unpinned, in a PR whose subject is
-    pins.
+    discriminates the two operands. The fixtures that reach the basename GATE all
+    have BOTH sides path-shaped (`"api/config.py"` vs `"src/core/config.py"` above,
+    `"lib/config.py"` vs `"src/config.py"` below), so `and` and `or` agree on every
+    one of them; the fixtures that do not (`"12295"` vs `"#12295"`, `"ab"` vs a
+    stored fold) never reach that gate at all. Reverting the `or` to the `and` that
+    `attach_keys`' docstring used to describe therefore left the entity suite green
+    (measured: 215 passed with this test deselected), and so did dropping EITHER
+    operand alone — so the docstring fix that corrected that wording was unpinned, in
+    a PR whose subject is pins.
 
-    The two cases below are one-operand each, so each mutation reds one and only one
-    of them:
+    The two cases below are one-operand each, so a per-OPERAND mutation reds one
+    specific case:
 
     * mention is a BARE basename, candidate is a path   -> only the CANDIDATE side
-      can open the gate (measured: `or` -> `and` gives `1 failed` at THIS assertion,
-      `assert [] == ['o1']`);
+      can open the gate (measured: dropping the candidate operand gives `1 failed`
+      at THIS assertion, `assert [] == ['o1']`);
     * mention is a path, candidate is a BARE basename   -> only the MENTION side
       can open it, so dropping the mention operand mutant reds the SECOND assertion
       with `assert [] == ['o2']` while the first stays green (measured).
+
+    ⛔ `or` -> `and` closes the gate on BOTH cases, not one: both assertions would
+    red, and pytest reports the FIRST because execution stops there (measured). The
+    per-operand mutants above are what discriminate the two cases; the `and` mutant
+    is the disease the disjunction prevents, not a per-case witness.
     """
     #: bare mention, path-shaped candidate — the mention operand is FALSE here
     got = attach_matches("config.py",
