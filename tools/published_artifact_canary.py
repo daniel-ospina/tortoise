@@ -151,6 +151,19 @@ _STRIPPED_ENV_PREFIXES = (
     "FALKORDB_",
     "REDIS_",
     "PIP_",
+    # EVERY proxy spelling, not the two that happen to be commonest. pip has no
+    # `trust_env=False`, so a proxy is consumed by its vendored requests OUTSIDE pip's
+    # option system — `--isolated` does not touch it. MEASURED (#12363 round 5): with
+    # ONLY `all_proxy` set, `pip download --isolated --index-url
+    # https://pypi.org/simple six` still dialled the fake proxy
+    # (`HTTPSConnection(host='127.0.0.1', port=9): Connection refused`) and then printed
+    # pip's ABSENCE vocabulary (`No matching distribution found … from versions: none`)
+    # — the exact string this tool must never read as a verdict. Leaving one spelling
+    # out is therefore not cosmetic: it is one of the two ways a run grades bytes nobody
+    # asked for. urllib (this tool's OWN fetches) ignores `all_proxy` entirely, so the
+    # child and the parent also end up on different transports unless it is stripped.
+    "all_proxy",
+    "ALL_PROXY",
     "http_proxy",
     "https_proxy",
     "HTTP_PROXY",
@@ -629,12 +642,33 @@ def install_and_run(
                 "install",
                 "--quiet",
                 "--no-cache-dir",
-                # ⛔ --isolated IGNORES every config file and every PIP_* env var, and
-                # --index-url then names PyPI explicitly. Both are required: measured,
+                # ⛔ --index-url names PyPI EXPLICITLY, and --isolated suppresses the
+                # USER config file and every PIP_* env var. Both are required: measured,
                 # `--index-url` alone leaves a config-file `extra-index-url` MERGING
                 # ("Looking in indexes: https://pypi.org/simple, http://mirror/…"), so a
-                # runner with a global mirror could resolve tortoise-graph==0.2.0 from
-                # the MIRROR and report PASS over bytes PyPI never served (#12363 round 4).
+                # runner with a mirror configured could resolve tortoise-graph==0.2.0
+                # from the MIRROR and report PASS over bytes PyPI never served
+                # (#12363 round 4).
+                #
+                # ⛔ WHAT --isolated DOES *NOT* COVER, stated because the comment here
+                # used to claim it "IGNORES every config file" and that is false
+                # (#12363 round 5). Read pip's source, not its help text:
+                # `Configuration.iter_config_files` yields the GLOBAL config
+                # UNCONDITIONALLY and guards only USER with `not self.isolated`, and
+                # `load()` gates `_load_environment_vars` the same way. Measured:
+                # `pip config debug --isolated` in a fresh venv prints `global:
+                # /etc/xdg/pip/pip.conf, /etc/pip.conf` and NO `user:` entry. A
+                # SYSTEM-level `extra-index-url` therefore still MERGES with this CLI
+                # value: the mirror class is NARROWED, not closed — a residual bounded by
+                # the fresh venv + fresh HOME, and real on any runner carrying a system
+                # pip config (this repo's `ubuntu-latest` can route to a self-hosted
+                # runner, #7867).
+                #
+                # ⛔ Proxies are not pip OPTIONS at all (pip has no `trust_env=False`), so
+                # `http(s)_proxy`/`all_proxy` are consumed by its vendored requests and
+                # survive --isolated. That is why `_STRIPPED_ENV_PREFIXES` is
+                # LOAD-BEARING rather than belt-and-braces — do not delete it as
+                # redundant with this flag.
                 "--isolated",
                 "--index-url",
                 PYPI_SIMPLE,
@@ -831,12 +865,30 @@ def main(argv: list[str] | None = None) -> int:
                 absent_probe=lambda name: index_absence_probe(name, args.fetch_timeout),
             )
 
+    # ⛔ Every I/O fault left in this function exits 2, never a traceback: a traceback
+    # IS exit 1, and exit 1 is what BOTH consumers render as "the published artifact is
+    # broken — a release is owed" (the run summary and the alert issue's alarm text).
+    # An unreadable pyproject.toml or an unwritable `--summary-file` is a DETECTOR fault
+    # and must not borrow the release verdict — the same class as the round-3
+    # `IncompleteRead` escape, at the two call sites that were still unguarded (#12363
+    # round 5).
+    try:
+        tree_version = source_version((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    except OSError as exc:
+        print(
+            f"the canary cannot report: could not read {REPO_ROOT / 'pyproject.toml'} "
+            f"({type(exc).__name__}: {exc}) — a detector fault, not a finding about the "
+            f"published artifact",
+            file=sys.stderr,
+        )
+        return 2
+
     report = build_report(
         engine_doc=engine_doc,
         client_doc=client_doc,
         engine_error=engine_error,
         client_error=client_error,
-        tree_version=source_version((REPO_ROOT / "pyproject.toml").read_text()),
+        tree_version=tree_version,
         init_arm=init_arm,
         now=datetime.now(UTC),
         wheel_path=wheel,
@@ -847,16 +899,34 @@ def main(argv: list[str] | None = None) -> int:
     if log_path is not None and not transcript:
         # The install never ran (unreadable index): say so in the log rather than leaving
         # an empty file the reader has to interpret.
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(
-            f"(no install/run: engine index state={engine_state} "
-            f"{'— ' + engine_error if engine_error else ''})\n"
-        )
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                f"(no install/run: engine index state={engine_state} "
+                f"{'— ' + engine_error if engine_error else ''})\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            print(
+                f"the canary cannot report: could not write {log_path} "
+                f"({type(exc).__name__}: {exc})",
+                file=sys.stderr,
+            )
+            return 2
 
     summary = render_summary(report)
     if args.summary_file:
-        with open(args.summary_file, "a", encoding="utf-8") as handle:
-            handle.write(summary)
+        try:
+            with open(args.summary_file, "a", encoding="utf-8") as handle:
+                handle.write(summary)
+        except OSError as exc:
+            print(
+                f"the canary cannot report: could not append to --summary-file "
+                f"{args.summary_file} ({type(exc).__name__}: {exc}) — no report reached "
+                f"the caller, so the verdict is UNKNOWN, not the artifact's",
+                file=sys.stderr,
+            )
+            return 2
 
     if args.json:
         print(
