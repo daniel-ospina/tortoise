@@ -2129,16 +2129,13 @@ def test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_
         "retirement left")
 
 
-#: The only inserted words a denial can absorb and still say the same thing:
-#: adverbs and adjectives ("nothing EVER repairs", "no automatic SELF-repair path",
-#: "no automatic, SINGLE path", "never, EVER a finding again"). A literal substring
-#: is defeated by one of these (round 31); an unbounded gap is not the answer either
-#: — a wide `\w+` gap turns TRUE prose into a false positive, because flattening the
-#: punctuation makes "(or holding nothing) is reconciled" read as "nothing is
-#: reconciled" (round 32, measured). So: anchors, a FILLER-bounded gap, never `.*`.
-_FILLER = (r"(?:ever|else|other|single|self|automatic|really|anymore|subsequent|"
-           r"further|later|longer|merely|actually|truly|again)")
-_GAP = rf"(?:\s+{_FILLER}){{0,3}}\s+"
+#: Up to three words of inserted text between two anchors of one denial.
+#: A family stated as a LITERAL SUBSTRING is defeated by one word inserted INSIDE
+#: the phrase (round 31: "nothing EVER repairs"); a FILLER allowlist is defeated by
+#: any adverb off the list (round 32: "nothing STRICTLY repairs", "nothing QUIETLY
+#: repairs"). So the gap is ingredient-agnostic: any word, at most three, and the
+#: patterns run per SENTENCE so a match cannot cross a boundary.
+_GAP = r"(?:\s+\w+){0,3}\s+"
 
 
 def _family(*anchors: str) -> re.Pattern[str]:
@@ -2147,18 +2144,21 @@ def _family(*anchors: str) -> re.Pattern[str]:
 
 
 #: Every phrase family by which this PR's prose has denied a repair that exists.
-#: Rounds 29-31 each defeated a narrower encoding of this net (a literal ban, a
-#: two-prefix allowlist, a literal substring); the families are now anchor
-#: sequences, and each occurrence is judged in its OWN SENTENCE.
 _REPAIR_DENIALS = (
     _family(r"no", r"automatic", r"(?:path|repair|route|sweep|pass)"),
     _family(r"no", r"(?:later|subsequent|further)", r"(?:pass|sweep|scan|revisit\w*)"),
     _family(r"nothing", r"(?:else\s+)?(?:repairs?|fixes?|clears?|reconciles?|remediates?)"),
     _family(r"never", r"(?:a\s+)?finding", r"again"),
-    # One token or two, hyphen or space: `un-repairable` is the same denial.
-    re.compile(r"un[\s-]?repairable"),
+    re.compile(r"un[\s-]?repairable"),  # one token or two, hyphen or space
     _family(r"cannot", r"be", r"repaired"),
     _family(r"no", r"repair", r"(?:route|path|possible)"),
+)
+
+#: Sentences the net flags which state a TRUE fact, exempted by a stable marker AND
+#: a reason. Exemptions are themselves asserted, so one cannot outlive its sentence.
+_TRUE_NON_DENIALS = (
+    # `nothing` is the cache's OBJECT ("holding nothing"), not an actor that repairs.
+    "(or holding nothing) is reconciled",
 )
 
 #: The qualifiers that make a denial TRUE. The routing fact (#12315/#12336) is
@@ -2183,17 +2183,24 @@ def _assert_repair_denials_are_qualified(text: str, site: str) -> None:
     sentence). And anchors with a bounded gap, not substrings, so one inserted
     word cannot remove a denial from the net.
     """
-    low = " ".join(text.lower().split())
-    sentences = re.split(r"(?<=[.!?])\s+", low)
-    for sentence in sentences:
+    for sentence in re.split(r"(?<=[.!?])\s+", " ".join(text.lower().split())):
         # Match on a punctuation-FLATTENED copy: the gap is `\w`-only, so inserted
         # punctuation breaks an anchor without changing the claim — round 32 walked
         # through it with "never, EVER a finding again", "no automatic self-REPAIR
         # path" and "un-repairable", all green. The QUALIFIER test still reads the
         # raw sentence, so flattening cannot manufacture a qualifier.
-        flat = re.sub(r"[^\w\s]", " ", sentence)
+        if any(marker in sentence for marker in _TRUE_NON_DENIALS):
+            continue
+        # A hyphen inside a word is a JOIN in one reading and a SEPARATOR in the
+        # other, and both readings deny: "re-paired" is "repaired" (round 33) while
+        # "self-repaired" is "self repaired" (round 32). So the sentence is matched
+        # under BOTH -- joined and split -- and a hit in either one is a denial. The
+        # QUALIFIER test still reads the raw sentence, so neither reading can
+        # manufacture a qualifier.
+        joined = re.sub(r"(?<=\w)[-'\u2019](?=\w)", "", sentence)
+        split = re.sub(r"[^\w\s]", " ", sentence)
         for pattern in _REPAIR_DENIALS:
-            m = pattern.search(flat)
+            m = pattern.search(joined) or pattern.search(split)
             if m is None:
                 continue
             assert any(q in sentence for q in _REPAIR_QUALIFIERS), (
@@ -2221,21 +2228,23 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
     freezing every sentence verbatim — which would false-block benign rewording by
     the other writer on this branch. Stated rather than hidden.
 
-    WHAT IS NOT RESIDUAL: material inserted INSIDE the family phrase — the two
-    rounds that found it, and what closes each:
+    WHAT IS NOT RESIDUAL — material inserted INSIDE the family phrase, and what
+    closes each of the three rounds that found it:
 
-    * round 31, an inserted WORD ("nothing EVER repairs", "cannot EVER be
-      repaired", "never EVER a finding again") — the families were literal
-      substrings, so `_family` now builds them as anchor SEQUENCES with a gap;
+    * round 31, an inserted WORD ("nothing EVER repairs") — the families were
+      literal substrings, so `_family` builds them as anchor SEQUENCES with a gap;
     * round 32, inserted PUNCTUATION ("never, EVER a finding again", "no automatic
-      self-repair path", "un-repairable") — the gap is `\w`-only, so the sentence
-      is matched on a punctuation-flattened copy while the qualifier test still
-      reads the raw sentence.
+      self-repair path") — punctuation is a separator, so the sentence is also
+      matched on a split-normalised copy;
+    * round 33, an arbitrary adverb off a filler allowlist ("nothing STRICTLY
+      repairs") and a hyphen that JOINS a word ("cannot be re-paired") — the gap is
+      now ingredient-agnostic (any word, at most three), and the sentence is matched
+      under BOTH readings of an intra-word hyphen, joined ("re-paired" ->
+      "repaired") and split ("self-repaired" -> "self repaired").
 
-    The gap is bounded to FILLER words on purpose: an unbounded gap plus flattening
-    makes TRUE prose read as a denial — "a cache holding a word this engine wrote
-    (or holding nothing) is reconciled" becomes "nothing is reconciled" (measured,
-    round 32). So the net absorbs an adverb or adjective, never a new predicate.
+    Matching under both readings flags exactly one TRUE sentence, so that sentence is
+    exempted by stable marker with its reason in `_TRUE_NON_DENIALS` — and the
+    exemption is itself asserted, so it cannot outlive the prose it excuses.
     """
     import tortoise.derived_invalidation as di
 
@@ -2267,6 +2276,10 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
     assert ("no automatic path repairs it later once the goal holds no other live "
             "claim") in norm, (
         "the absent-arm COMMENT must keep the qualifier IN the sentence")
+    for marker in _TRUE_NON_DENIALS:
+        assert any(marker in t for t in (door, helper, cache_doc, norm)), (
+            f"stale exemption {marker!r} — it no longer appears at any site, so it "
+            "excuses nothing; delete it rather than leaving a blind spot")
     assert norm.count("no automatic path") == 1, (
         "EXACTLY ONE 'no automatic path' may stand in `invalidate`; the adjacency "
         "assertion above cannot see a second one planted in another comment")
