@@ -86,17 +86,31 @@ def _attest(path: str) -> int:
     committed), and the binding is a pure function of the probe's bytes and the artifact's
     own payload. It refuses an artifact that carries no measurement, and one whose provenance
     does not name a row source, so neither a truncated report nor a stripped artifact can be
-    attested into evidence.
+    attested into evidence. Every refusal exits ``2``: the artifact's SHAPE is checked before any
+    ``.get`` is called on it, so a non-object ``provenance`` is a documented refusal rather than
+    an ``AttributeError`` out of ``main()`` (#12476).
     """
     try:
         report = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         _say(f"ATTEST-UNREADABLE({path}): {e}\n")
         return 2
+    if not isinstance(report, dict):
+        _say(f"ATTEST-REFUSED({path}): the artifact is not a JSON object "
+             f"(`{type(report).__name__}`), so it carries no root-cause measurement\n")
+        return 2
     if "measured_points" not in report or "shared_composed_text_groups" not in report:
         _say(f"ATTEST-REFUSED({path}): no root-cause measurement in this artifact\n")
         return 2
-    rows_source = str((report.get("provenance") or {}).get("rows_source") or "")
+    # Same type discipline as `composed_gate.py::_attest` (#12476): `(report.get("provenance") or
+    # {})` passes a non-object straight through to `.get`, so a hand-edit that replaced the block
+    # with a list exited 1 with an AttributeError instead of the documented 2.
+    provenance = report.get("provenance")
+    if not isinstance(provenance, dict):
+        _say(f"ATTEST-REFUSED({path}): `provenance` is not an object "
+             f"(`{type(provenance).__name__}`), so `rows_source` cannot be read\n")
+        return 2
+    rows_source = str(provenance.get("rows_source") or "")
     if not rows_source:
         _say(f"ATTEST-REFUSED({path}): no `provenance.rows_source`, so the row cache the "
              "numbers came from cannot be recorded\n")

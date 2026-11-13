@@ -332,6 +332,19 @@ def _attest_a_tmp_copy(probe_name: str, artifact_name: str, mutate) -> tuple[int
     # is the ONLY thing that refuses it, so this case reds if it is removed.
     ("no-gates-but-green", lambda a: (a["verdict"].pop("gates"),
                                       a["verdict"].__setitem__("all_pass", True))),
+    # #12476 — the PARTIAL deletion. One flag removed leaves `all_pass: false` AGREEING with
+    # `all({False, False})`, so neither the inconsistency check nor a non-empty test can see it:
+    # measured, deleting `gate2` was attested, exit 0. This case reds if the exact-name bound is
+    # weakened back to "non-empty".
+    ("gates-missing-one", lambda a: a["verdict"]["gates"].pop("gate2")),
+    # …and the block being the WRONG TYPE. Both raise out of `main()` in the pre-#12476 code
+    # (`AttributeError`: 'list'/'str' object has no attribute 'values'/'get'), so the documented
+    # exit 2 became 1 — the shape a lane script cannot tell from a crash.
+    ("gates-non-dict", lambda a: a["verdict"].__setitem__("gates", ["gate1"])),
+    ("verdict-non-dict", lambda a: a.__setitem__("verdict", "green")),
+    # A parseable artifact whose ROOT is not an object is the same defect one level up (reachable
+    # by the same hand-edit, or by a probe that wrote a bare list) — it is driven by its own test
+    # below, because it cannot be expressed as a mutation of a dict.
     ("all-pass-disagrees", lambda a: a["verdict"].__setitem__("all_pass", True)),
     ("no-source", lambda a: a.pop("source")),
 ])
@@ -351,6 +364,10 @@ def test_composed_gate_attest_refuses_the_tamper_shapes(shape, mutate):
     ("no-measurement", lambda a: a.pop("measured_points")),
     ("no-groups", lambda a: a.pop("shared_composed_text_groups")),
     ("no-rows-source", lambda a: a["provenance"].pop("rows_source")),
+    # #12476 — the same type discipline as `composed_gate.py`. `(report.get("provenance") or {})`
+    # passes a non-object through to `.get`, so this exited 1 with an AttributeError before the
+    # guard; the README documents exit 2 for every arm.
+    ("provenance-non-dict", lambda a: a.__setitem__("provenance", ["rows_source"])),
 ])
 def test_quote_identity_attest_refuses_the_tamper_shapes(shape, mutate):
     """FAILS IF `quote_identity.py --attest` (an arm this PR ADDS) loses a refusal.
@@ -361,6 +378,33 @@ def test_quote_identity_attest_refuses_the_tamper_shapes(shape, mutate):
     rc, before, after = _attest_a_tmp_copy("quote_identity.py", "quote_identity.json", mutate)
     assert rc == 2, f"`{shape}` was attested instead of refused (rc={rc})"
     assert before == after, f"`{shape}` was refused but the file was REWRITTEN anyway"
+
+
+@pytest.mark.parametrize("probe_name,root", [
+    # ⛔ The root must be one whose MEMBERS satisfy the probe's own membership arm below, so the
+    # unchecked `.get` is actually REACHED. A bare `[]` does NOT discriminate: with the guard
+    # deleted it still exits 2, because `"verdict" not in []` is True and the membership arm
+    # answers first (measured — this test's first version asserted on `[]` and was green in both
+    # worlds, i.e. it pinned nothing).
+    ("composed_gate.py", ["verdict", "gate1_similarity"]),
+    ("quote_identity.py", ["measured_points", "shared_composed_text_groups"]),
+])
+def test_attest_refuses_an_artifact_whose_root_is_not_an_object(probe_name, root):
+    """FAILS IF either probe's shape guard is removed, so a JSON ARRAY exits 1 instead of 2.
+
+    `json.loads("[…]")` parses fine, so `ATTEST-UNREADABLE` cannot catch it. Once the membership
+    arm passes, the pre-#12476 code called `.get` on a LIST and raised `AttributeError` out of
+    `main()` — exit 1, the one code a lane script cannot tell from a crash; the documented code
+    for every refusal is 2 (`README`, `config/ci-surfaces.yml`). Driven on a TEMP file, never the
+    committed artifact.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "artifact.json"
+        target.write_text(json.dumps(root) + "\n", encoding="utf-8")
+        before = target.read_bytes()
+        rc = _load_probe(probe_name)._attest(str(target))
+        assert rc == 2, f"{probe_name} exited {rc}, not 2, on a non-object artifact root"
+        assert target.read_bytes() == before, "a refused artifact was rewritten anyway"
 
 
 def test_attest_rewrites_on_a_legitimate_rebind_and_still_carries_the_residual():
