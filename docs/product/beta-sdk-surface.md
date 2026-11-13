@@ -28,6 +28,19 @@ they do — not pruned from the existing 124.
 > 2026-10-17 — see the current-target note below). See `vision-mcp-sdk-surface.md`
 > §"Cross-artifact tensions".
 
+**This document is a PROPOSAL, and it is NOT the authority for the MCP target** (⛔). Where it
+and `docs/product/canonical-mcp-tools.md` name different MCP tools, **canonical governs**: that
+document declares itself canonical, carries the approval PR (`#4120`), and holds every one of
+the amendments — and this document already defers to it in the scope note above. The SDK set
+below is the recommendation the owner approved on 2026-09-21; its live form is the declaration
+in `tortoise/__all__.py`, which is what the surface instruments read. **Do not reconcile the
+two documents tool by tool** — #11609 settled that there is **no per-tool destination**: a tool
+is either in the target set, or it is removed from the product and its code archived — under
+`archive/` by the `#11609` mechanism, and for the 26 SDK methods removed by `#4282` before that
+mechanism existed, at the git tag `archive/4282-surplus-sdk-methods`
+(`docs/product/archived-sdk-methods-2026-10.md`). A reader who finds the two lists disagreeing
+has found a stale proposal, not an open question.
+
 **Canonical terms:** an **organisation account** (the customer's account — the billing and
 plan boundary) owns many **memory graphs** (the unit of memory).
 

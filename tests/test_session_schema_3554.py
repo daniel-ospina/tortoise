@@ -32,6 +32,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import traceback
 import types
 from pathlib import Path
 
@@ -2469,9 +2470,15 @@ def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
     residual and not machinery: a value-recording check cannot supply the missing
     oracle, only a second one.
     And it records CALLS: an arm wrapped in ``try: … except AssertionError: pass`` is
-    still recorded and still neutralised (measured: 57 passed). Deciding that would
-    mean reading source again, which is the mechanism this test was rewritten to stop
-    relying on — so it is named here and left to review.
+    still recorded and still neutralised (measured at ``9828250732``: that shape alone
+    left the file at 59 passed, while the other four inert-call shapes #12223 lists
+    redded it at ``1 failed, 58 passed``). ⛔ THAT SHAPE IS NOW DECIDED, and NOT by
+    reading source — which is what this paragraph used to claim the remedy would
+    require: ``test_the_citation_pin_propagates_every_planted_defect`` plants the defect
+    in the pin's INPUT and requires the pin to FAIL, so a swallowed refusal reds an
+    OUTCOME assertion. Measured with that probe added at the same base: the swallowing
+    shape now reds this file at ``1 failed, 59 passed``, together with a swallow at each
+    of the pin's other four call sites.
     """
     recorded: dict[str, list[tuple[tuple[object, ...], dict[str, object]]]] = {}
 
@@ -2656,6 +2663,205 @@ def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
         "or moved into a deferred `def`/`lambda` body) or was reached with the wrong "
         "subject (a narrowed module-wide sweep, or a carrier pointing at a different "
         "docstring or block).")
+
+
+
+def test_the_citation_pin_propagates_every_planted_defect(monkeypatch, tmp_path) -> None:
+    """Each arm's REFUSAL must escape the pin — a recorded call is not enough.
+
+    ⛔ THE THIRD HALF of this pin's own three guards, and the one #12223 measured
+    missing. ``test_every_declared_sweep_arm_refuses_a_stale_restatement`` drives the
+    arms from synthetic text (the ARM works); ``test_the_citation_pin_calls_every_arm_it_declares``
+    records the arguments the pin passes (the pin REACHES each arm with
+    the right subject). Neither decides whether a reached arm still REFUSES anything in
+    the pin's own run: an arm wrapped in ``try: … except AssertionError: pass`` is
+    reached, records its arguments, and is neutralised. Measured on the base this
+    change builds on (``9828250732``, 59 tests) — that shape left the file at **59
+    passed**, while the other four inert-call shapes #12223 lists (dead branch, rebound
+    argument, never-called nested ``def``, never-evaluated comprehension) all redded
+    it. So the value-recording cut closed four of the five, and this test closes the
+    fifth.
+
+    ⛔ HOW IT DECIDES, and why this does not reintroduce source reading: the defect is
+    planted in the pin's INPUT and the pin must FAIL — the mutation-testing question
+    ("is the mutant killed?"), answered from the pin's own OUTCOME. A surviving mutant
+    here is a false PASS. ⛔ WHAT THAT DOES AND DOES NOT MEAN, stated exactly: no VERDICT
+    is derived from the source's shape — the one observation is whether a refusal
+    ESCAPES the pin, which is why the mechanism this file was rewritten to stop
+    relying on stays gone. The PLANTS, however, are built as text (a plant is appended
+    to the module source, and ``repointed`` finds a docstring's permalinks by regex —
+    which is exactly why the permalink FORM is named there), and the plant set is an
+    ENUMERATION of the five call sites, so a sixth call site added later is not
+    covered — the last paragraph says so rather than implying otherwise. A cut of this
+    docstring claimed "nothing is parsed as text and no call site is enumerated" and
+    was false on both halves.
+
+    ⛔ ONE PLANT PER CALL SITE — the pin makes FIVE, not three: the module-wide
+    permalink call, TWO ``carrier=`` calls (the sibling docstring's and this pin's
+    own), the uniqueness scan, and the stale-restatement sweep. The two carrier calls
+    are separate sites and each needs its own plant, because a ``try/except`` around
+    one of them leaves the other to refuse nothing while the suite stays green
+    (measured on the previous cut of this probe: 60 passed with the sibling's carrier
+    call swallowed). The plants are, in that order: a docstring citing a permalink no
+    block carries; each named docstring REPOINTED at a real id another block carries;
+    a second copy of the bold count pair; an ordinal sentence naming the lander with
+    the WRONG ordinal.
+
+    ⛔ THE SEAM IS TWO SEAMS, and they are not interchangeable. ``module_source`` and
+    ``prose`` are read from ``Path(__file__)``, so a planted copy reached by pointing
+    that name at it exercises them. The carrier arms' subject is a LIVE ``__doc__``
+    ATTRIBUTE, which no ``__file__`` plant can reach — measured, a carrier defect
+    delivered through ``__file__`` alone leaves the pin PASSING, so that plant would
+    appear to cover the carrier arm and measure nothing. Each carrier plant therefore
+    also patches the attribute (``<function>.__doc__``). ``Path.read_text`` is
+    deliberately NOT patched: it is process-global, so it would also intercept the
+    changelog read and every other read in the pin's call graph.
+
+    ⛔ ISOLATION IS MECHANICAL, NOT PROSE. For each probe the OTHER arms are replaced
+    by pass-throughs, so "only this arm can refuse the plant" is enforced rather than
+    asserted in a comment — and no probe depends on an arm's message WORDING, so a
+    legitimate reword cannot red this test while nothing is wrong.
+
+    ⛔ THE CONTROL RUN IS PART OF THE TEST: the pin is called once on the REAL inputs
+    and must NOT raise. Without it a probe that raises for an unrelated reason would
+    satisfy every ``pytest.raises`` below, and the whole test would report success
+    while measuring nothing.
+
+    ⛔ WHAT THIS STILL CANNOT DECIDE, stated rather than implied: it proves a refusal
+    escapes the pin for the defect PLANTED, not that every refusal path is unwrapped.
+    A ``try/except`` around a refusal no plant reaches survives, and the plant set
+    above IS the coverage — it covers all five call sites the pin makes, and nothing
+    else. It also cannot see an edit that removes an assertion from both the pin and
+    this test, which is the class no in-file test can decide.
+    """
+    pin = test_the_citation_scope_docstring_states_the_measured_count
+    module = sys.modules[__name__]
+    sibling = test_the_newest_block_recording_4_3_cites_a_comment_id
+    blocks = _block_bodies(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+    citing = [block for block in blocks if _CITATION_RE.search(block)]
+    lands_d2 = [block for block in blocks if "D2 " + "— A" in block]
+    v333 = [block for block in blocks
+            if _BLOCK_VERSION_RE.match(block).group(1) == "3.33"]
+    assert len(lands_d2) == 1 and v333, (
+        "the changelog no longer records one lander among the v3.33 entries, so the "
+        "ordinal plant below cannot be built — re-read this probe before dropping it")
+    lands_first = lands_d2[0] == v333[0]
+    wrong_ordinal = "second" if lands_first else "first"
+    lander_ids = set(_citation_ids(lands_d2[0]))
+    elsewhere = [identifier for block in blocks if block != lands_d2[0]
+                 for identifier in _citation_ids(block)
+                 if identifier not in lander_ids]
+    assert elsewhere, (
+        "no block other than the lander carries a comment id, so the carrier plants "
+        "cannot be built — re-read this probe before dropping it")
+    # ⛔ EVERY PLANTED NUMBER IS COMPUTED, never spelled. The practice is right but
+    # the earlier reason given for it was an over-claim, corrected here after
+    # measurement: a plain UNBOLDED count in this docstring is not read by any arm at
+    # all, and a bold pair carrying the CORRECT measurement passes ``allowed_bold``.
+    # A bold STALE one reds the pin (measured), and that is the case computing avoids.
+    real_arm = module._refuse_unresolvable_evidence
+
+    def module_wide_only(prose: str, block_texts: list[str], *,
+                         carrier: str | None = None) -> None:
+        """Pass the module-wide call through; the carrier calls are inert."""
+        return None if carrier is not None else real_arm(prose, block_texts)
+
+    def carrier_only(prose: str, block_texts: list[str], *,
+                     carrier: str | None = None) -> None:
+        """Pass a carrier call through; the module-wide call is inert."""
+        return None if carrier is None else real_arm(
+            prose, block_texts, carrier=carrier)
+
+    def inert(*args: object, **kwargs: object) -> None:
+        return None
+
+    def sweep_inert(*args: object, **kwargs: object) -> list[str]:
+        """Truthy, because the pin requires the module to name the lander's ordinal."""
+        return ["first" if lands_first else "second"]
+
+    def repointed(doc: str) -> str:
+        """The same docstring, citing a real id that belongs to ANOTHER block.
+
+        ⛔ THE PERMALINK FORM SPECIFICALLY. The carrier arm reads
+        ``#issuecomment-<id>`` only, so repointing an id that appears solely in the
+        inline ``comment <id>`` form changes nothing it reads — measured on the first
+        cut of this probe: the sibling's docstring cites four ids and its FIRST is an
+        inline one, so replacing that one left the carrier arm passing and this probe
+        reporting a defect it had not planted.
+        """
+        cited = re.findall(r"#issuecomment-(\d{6,})", doc)
+        assert cited, "the docstring this probe repoints cites no permalink"
+        return doc.replace("#issuecomment-" + cited[0],
+                           "#issuecomment-" + elsewhere[0], 1)
+
+    source = Path(__file__).read_text(encoding="utf-8")
+    carrier_arms = {"_refuse_unresolvable_evidence": carrier_only,
+                    "_refuse_a_duplicated_statement": inert,
+                    "_assert_no_stale_citation_claim": sweep_inert}
+    plants = (
+        (
+            "the module-wide permalink arm", "_refuse_unresolvable_evidence",
+            source + "\n\ndef _planted_unresolvable_permalink() -> None:\n"
+            '    """Planted defect: ``#issuecomment-'
+            + "9" * 10 + "`` resolves to no changelog block.\"\"\"\n",
+            None,
+            {"_refuse_unresolvable_evidence": module_wide_only,
+             "_refuse_a_duplicated_statement": inert,
+             "_assert_no_stale_citation_claim": sweep_inert},
+        ),
+        (
+            "the sibling docstring's carrier arm", "_refuse_unresolvable_evidence",
+            source, (sibling, repointed(sibling.__doc__ or "")), carrier_arms,
+        ),
+        (
+            "this pin's own carrier arm", "_refuse_unresolvable_evidence",
+            source, (pin, repointed(pin.__doc__ or "")), carrier_arms,
+        ),
+        (
+            "the uniqueness scan over the count pair", "_refuse_a_duplicated_statement",
+            source + "\n\n_PLANTED_DUPLICATE = "
+            f"'**{len(citing)} of {len(blocks)}** blocks cite a comment id'\n",
+            None,
+            {"_refuse_unresolvable_evidence": inert,
+             "_assert_no_stale_citation_claim": sweep_inert},
+        ),
+        (
+            "the stale-restatement sweep's ordinal arm", "_assert_no_stale_citation_claim",
+            source + "\n\n_PLANTED_ORDINAL = "
+            f"'the {wrong_ordinal} of the two v3.33 entries landed `D2 " + "— A`'\n",
+            None,
+            {"_refuse_unresolvable_evidence": inert,
+             "_refuse_a_duplicated_statement": inert},
+        ),
+    )
+    pin()
+    for index, (label, target_arm, patched_source, live_doc, arms) in enumerate(plants):
+        target = tmp_path / f"planted_{index}.py"
+        target.write_text(patched_source, encoding="utf-8")
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "__file__", str(target))
+            for name, replacement in arms.items():
+                patch.setattr(module, name, replacement)
+            if live_doc is not None:
+                holder, text = live_doc
+                patch.setattr(holder, "__doc__", text)
+            with pytest.raises(AssertionError) as raised:
+                pin()
+            # ⛔ THE RAISE MUST COME OUT OF THE TARGET ARM, not merely happen. Measured
+            # on the previous cut of this probe: swallowing the SWEEP call as
+            # `except AssertionError: ordinals = []` left the pin's own downstream
+            # `assert ordinals` to raise instead, so a bare `pytest.raises` reported
+            # success while the swept arm had refused nothing — 60 passed, a surviving
+            # mutant. The frame name is read from the traceback, so no arm's message
+            # wording is involved and a legitimate reword cannot red this test.
+            frames = {frame.name for frame in traceback.extract_tb(raised.tb)}
+            assert target_arm in frames, (
+                f"{label}: the pin raised, but not out of {target_arm} — a neighbouring "
+                "check fired instead (the pin's own downstream assertion, or another "
+                f"arm), so this probe measured nothing. Frames seen: {sorted(frames)}")
+        assert module.__file__ != str(target), (
+            f"{label}: the planted `__file__` outlived its probe, so the control run "
+            "above no longer describes the pin this suite ships")
 
 
 

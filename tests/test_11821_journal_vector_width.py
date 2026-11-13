@@ -36,6 +36,7 @@ from __future__ import annotations
 import contextlib
 import json
 import struct
+from decimal import Decimal
 
 import numpy as np
 import pytest
@@ -49,6 +50,7 @@ from tortoise.embeddings import (
     stamp_journal_embedding,
 )
 from tortoise.log import EventLog
+from tortoise.percent import PercentValueError
 
 #: The pinned embedder's width (`EMBEDDING_DIM`); the corpus measurement's shape.
 WIDTH = 384
@@ -1312,7 +1314,7 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     arm must not silently convert a caller's bug into a lost record: the
     refusal now happens where `point=`'s does, before the arm.
     """
-    from tortoise.api import EventAPI
+    from tortoise.api import EventAPI, provenance
     from tortoise.log import EventLog
 
     events = tmp_path / "belief-door"
@@ -1350,10 +1352,251 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     # sibling door raised on the identical payload. Pinned at BOTH doors for
     # the reason the money and kind rows are: the enumeration rots, the pin
     # does not.
-    with pytest.raises(Exception, match=r"percent|basisPoints|ratio"):
+    with pytest.raises(PercentValueError, match="percent value refused"):
         api.emit_belief("ConfidenceChanged", id="node-1", basisPoints=20000)
-    with pytest.raises(Exception, match=r"percent|basisPoints|ratio"):
+    with pytest.raises(PercentValueError, match="percent value refused"):
         api.add_object("an object", "skill", id="obj-pct", basisPoints=20000)
+    # …and the record facts a caller must not set on EITHER channel of the
+    # funnel: no seam call here mints them, and each corrupts something
+    # of its own — "of its own", not "a different thing": the three source-ref
+    # keys SHARE one harm, which is why they share one clause (#11996 review
+    # round 14 — this comment kept the wording `api.py` records as corrected,
+    # and then contradicted itself two clauses later by grouping those three).
+    # `embedding_preserved` asserts a precedent capture nothing on
+    # this door can contradict (⛔ NOT an attestation suppressor here: no channel
+    # of `_emit` attests a record — `_point` and `sdk._write_capture_turns` do,
+    # and that is where the suppression it is known for actually happens),
+    # `embedding_verbatim` ALSO writes the node's declared property (so the lie
+    # survives on both sides), `evidence_fold` makes a flat record read as a fold
+    # (`projection.record_is_evidence_fold`), `embeddingText` forges the
+    # text↔vector identity, and the three source-ref keys put the payload's
+    # edges AHEAD of the `:Source` resolution the seam performs.
+    # Measured before the guard: `_emit("PointAdded", {"...": "..",
+    # "embedding_preserved": True, "embedding_model": "not-a-real-model"})`
+    # journalled the identity key VERBATIM — by CARRIAGE (this channel carries
+    # whatever it is handed and stamps nothing), not by suppression — and
+    # `_emit("PointAdded", evidence_fold=True)` — the KEYWORD channel —
+    # journalled a record `record_is_evidence_fold` reads as a fold.
+    for marker in ("embedding_preserved", "embedding_verbatim",
+                   "evidence_fold", "embeddingText",
+                   "extractedFromAll", "sourceVersion", "sourceVersions"):
+        with pytest.raises(ValueError, match="server-minted record facts"):
+            api._emit("PointAdded", {
+                "id": f"forged-{marker}", "content": "c",
+                "embedding": [0.1], marker: True})
+        if marker in ("embedding_preserved", "embedding_verbatim"):
+            # …already refused on this channel by the vector family's own guard,
+            # with its own message — the two must not be merged into one claim.
+            with pytest.raises(ValueError, match="server-managed"):
+                api._emit("PointAdded", **{marker: True})
+        else:
+            # …and the same key on the keyword payload, which is the more
+            # dangerous channel on a flat record (`evidence_fold` there IS a fold:
+            # `projection.record_is_evidence_fold` reads it and the replay's
+            # recreate anchor is skipped).
+            with pytest.raises(ValueError, match="server-minted record facts"):
+                api._emit("PointAdded", **{marker: True})
+    # The sibling that looks identical but is NOT refused: `add_point` mints it,
+    # so it is a seam fact rather than a caller's claim. Asserted as set
+    # membership rather than by journalling a record — this test's last
+    # assertion is that the refusals above left the journal EMPTY.
+    from tortoise.api import _UNCALLERABLE_RECORD_KEYS
+    from tortoise.projection import EVIDENCE_FOLD_KEY
+
+    assert "sourceVersionTransit" not in _UNCALLERABLE_RECORD_KEYS
+    assert {"extractedFromAll", "sourceVersion", "sourceVersions"} <= (
+        _UNCALLERABLE_RECORD_KEYS)
+    # ⛔ …AND THE EXEMPTION IS SCOPED TO THE CHANNEL THAT MINTS IT (#11996 review
+    # round 6, measured). `sourceVersionTransit` is exempt from the SET because
+    # `add_point` mints it INTO ITS RECORD; no seam call mints it on a keyword
+    # payload, where the replay consumes it as the `:Source` read-version anchor
+    # — the same harm `sourceVersion`/`sourceVersions` are refused for:
+    #
+    #     api._emit("PointAdded", id="p1", content="c", extractedFrom=["src:1"],
+    #               sourceVersionTransit={"src:1": "h-forged"})   -> LANDED
+    #     api._emit("PointAdded", id="p1", content="c", sourceVersion="x")
+    #                                                             -> REFUSED
+    #
+    # Each door is exercised because each splats its OWN kwargs; the funnel is
+    # the one place that knows the channel, so the refusal lives there.
+    with pytest.raises(ValueError, match="sourceVersionTransit"):
+        api._emit("PointAdded", id="p-transit", content="c",
+                  sourceVersionTransit={"src:1": "h-forged"})
+    with pytest.raises(ValueError, match="sourceVersionTransit"):
+        api.emit_belief("ConfidenceChanged", id="n-transit",
+                        sourceVersionTransit={"src:1": "h-forged"})
+    with pytest.raises(ValueError, match="sourceVersionTransit"):
+        api.add_object("obj-transit", "skill",
+                       sourceVersionTransit={"src:1": "h-forged"})
+    with pytest.raises(ValueError, match="sourceVersionTransit"):
+        api.add_event("ev-transit", "something_happened",
+                      sourceVersionTransit={"src:1": "h-forged"})
+    # ⛔ AND THE KEYS ARE WRITTEN BY VALUE WHILE THE GUARDS READ THEM BY HASH
+    # (#11996 review round 8, measured). A `str` SUBCLASS whose `__hash__` differs
+    # from `str`'s passes every `k in frozenset(...)` test in `api.py` and is
+    # journalled under the name it claims:
+    #
+    #     class _K(str):
+    #         def __hash__(self): return 0x5f3a1
+    #     _K("evidence_fold") == "evidence_fold"              # True
+    #     _K("evidence_fold") in frozenset({"evidence_fold"}) # False  ← the guard
+    #     json.dumps({_K("evidence_fold"): True})             # '{"evidence_fold":true}'
+    #
+    # Measured before the guard: this LANDED on the positional record and on the
+    # keyword payload, `record_is_evidence_fold` read it as a fold, and the same
+    # carrier re-typed (`_K("type")`) and re-identified (`_K("event_id")`) the
+    # record. Falsifier: delete `_refuse_non_str_keys` and every row below FAILS —
+    # on the MESSAGE, not by landing: `_named_from_caller` carries its own
+    # `type(k) is not str` clause, so the carrier is still refused, as a
+    # RECORD-SHAPED / envelope field, which is a message these rows do not match
+    # (#11996 review round 12, measured — the earlier text claimed they would
+    # land, which reads as "this arm is unpinned"). What the rows pin is this
+    # arm's OWN diagnostic, so they red if it is removed and they red if it
+    # starts letting the carrier through.
+    class _K(str):
+        def __hash__(self):  # deliberately NOT str's hash
+            return 0x5F3A1
+
+    for _forged in ("evidence_fold", "type", "event_id",
+                    "sourceVersionTransit", "embedding_width"):
+        with pytest.raises(ValueError, match="not an exact `str`"):
+            api._emit("PointAdded", {"id": f"p-key-{_forged}", "content": "c",
+                                     _K(_forged): True})
+        with pytest.raises(ValueError, match="not an exact `str`"):
+            api._emit("PointAdded", id=f"p-keyw-{_forged}", content="c",
+                      **{_K(_forged): True})
+    with pytest.raises(ValueError, match="not an exact `str`"):
+        api.add_object("o-key", "skill", **{_K("extractedFromAll"): ["src:1"]})
+    with pytest.raises(ValueError, match="not an exact `str`"):
+        api.emit_belief("ConfidenceChanged", id="n-key",
+                        **{_K("evidence_fold"): True})
+    with pytest.raises(ValueError, match="not an exact `str`"):
+        api.add_event("ev-key", "something_happened",
+                      **{_K("sourceVersionTransit"): {"src:1": "x"}})
+    # ⛔ AND THE RECORD CHANNEL IS NOT EXEMPT FROM THE TRANSIT REFUSAL UNLESS THE
+    # DOOR SAYS IT MINTED IT (#11996 review round 9, measured). Scoping the
+    # exemption by CHANNEL NAME left it forgeable by any direct `_emit` caller,
+    # because `_emit` cannot tell `add_point`'s record from a caller-built one:
+    #
+    #     _emit("PointAdded", {"id": "p1", "content": "c",
+    #                          "sourceVersionTransit": [["src:1", "h-forged"]]})
+    #       -> LANDED, and `projection.entities._point_source_transit` consumed it
+    #          as the `:Source` read-version anchor
+    #
+    # The exemption is a DERIVED PREDICATE, not a declared signal: `_emit`
+    # re-derives `_source_version_transit(resolve_source_versions(g,
+    # extractedFrom))` and refuses a mismatch or an underivable value (the
+    # `_DERIVE_ON_RECORD` arm of `_emit`), and it checks the SHAPE
+    # (`type(...) is list` of exact `[str, str]` pairs) BEFORE comparing, because
+    # `!=` would delegate to a caller's `__eq__`. Both earlier designs are recorded
+    # in that same comment as MEASURED caller-suppliable — a channel-name scope AND
+    # a caller-passable `seam_mints` keyword (`_emit(…, _seam_mints=True)` LANDED
+    # the same forgery) — so neither is a mechanism and this comment must not name
+    # one. Falsifier: replace the derive arm with either of those signals and this
+    # row lands.
+    # ⛔ AND `projection_version` IS REFUSED AT THE DOORS TOO, not only inside the
+    # record (#11996 review round 10, measured): putting the key ONE LEVEL OUT
+    # defeated the #49 v2 stop-write on a public door —
+    #
+    #     api.emit_belief("PointRevised", id=pid, new_content="c2",
+    #                     new_context={"secret": "leaked"}, projection_version=1)
+    #       -> LANDED, and the fold KEPT `context` (pv=1) where the seam's own
+    #          pv=2 strips it
+    #
+    # so all three doors refuse it now. Falsifier: drop `record=True` from the
+    # funnel's envelope call and these three rows land.
+    for _door, _call in (
+            ("emit_belief", lambda: api.emit_belief(
+                "PointRevised", id="n-pv", new_content="c2",
+                new_context={"s": "leaked"}, projection_version=1)),
+            ("add_event", lambda: api.add_event("e-pv", "something_happened",
+                                                projection_version=1)),
+            ("add_object", lambda: api.add_object("o-pv", "skill",
+                                                  projection_version=1))):
+        with pytest.raises(ValueError, match="projection_version"):
+            _call()
+    # ⛔ …AND `_emit`'s OWN KEYWORD CHANNEL CANNOT REFUSE PRESENCE, SO IT REFUSES
+    # THE TYPE (#11996 review round 18, measured). `projection_version` is out of
+    # `_ENVELOPE_KEYS` because `add_point`/`add_operator` pass THEIR OWN int through
+    # this channel — but nothing then checked the type, and this append is the
+    # commit point:
+    #
+    #     api._emit("PointAdded", id="p", content="c", projection_version="x")
+    #       -> JOURNALLED with a `str` version, and the flat record is then folded
+    #          AWAY: `fold([ev])` returns `{}` with NO exception (no `point` in a
+    #          flat record, so `_apply_one` returns at its non-dict-point guard),
+    #          i.e. the write survives and the fold silently loses the point. The
+    #          LOUD shape is record-positional — `_emit("PointAdded", {"id": …,
+    #          "content": …}, projection_version="x")` — which raises
+    #          TypeError: '>=' not supported between instances of 'str' and 'int'
+    #          on every replay (both measured at this head).
+    #
+    # A record every replay refuses is the durable-corruption shape this whole fix
+    # exists to prevent. Falsifier: delete the `type(_pv) is not int` arm and the
+    # four rows below land (measured).
+    for _pv in ("x", 1.5, True, None):
+        with pytest.raises(ValueError, match="must be an exact `int`"):
+            api._emit("PointAdded", id=f"p-pv-type-{_pv}", content="c",
+                      projection_version=_pv)
+    # ⛔ …and the two ints that DO land are stated, not implied — but they are
+    # pinned in their OWN test (`test_emit_keyword_pins_the_int_projection_
+    # versions_that_still_land`), because everything above this line asserts that
+    # no refusal left a record behind and these two DO write.
+
+    with pytest.raises(ValueError, match="sourceVersionTransit"):
+        api._emit("PointAdded", {"id": "p-transit-rec", "content": "c",
+                                 "embedding": [0.5],
+                                 "sourceVersionTransit": [["src:1", "h-forged"]],
+                                 JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+
+    # ⛔ …and a MAPPING SUBCLASS that shows the guards one set of keys while the
+    # encoder writes another is refused as a container, not inspected:
+    #
+    #     _emit("PointAdded", _Hidden({"id": "p", "content": "c",
+    #                                  "evidence_fold": True}, {"id", "content"}))
+    #       -> LANDED before the guard, and read as a fold
+    class _Hidden(dict):
+        def __init__(self, data, shown):
+            super().__init__(data)
+            self._shown = shown
+
+        def __iter__(self):
+            return iter(self._shown)
+
+        def keys(self):
+            return list(self._shown)
+
+    with pytest.raises(ValueError, match="exact `dict`"):
+        api._emit("PointAdded", _Hidden({"id": "p-hidden", "content": "c",
+                                         "evidence_fold": True},
+                                        {"id", "content"}))
+    assert EVIDENCE_FOLD_KEY in _UNCALLERABLE_RECORD_KEYS
+    # The fold key is the READER's constant, not a second spelling of it.
+    # ⛔ This assert alone does NOT prove it: api.py IMPORTS the symbol, so a
+    # rename at the consumer moves both sides together and the assert stays
+    # green. What actually pins the identity is the loop below, whose literal
+    # "evidence_fold" — the name the projection READS — would red on a consumer
+    # rename. This row is a cheap spelling check; the loop is the pin. (Review
+    # note at #11996: this comment used to sit ~140 lines above the assert it
+    # describes, so "this assert" / "this line" had no referent — round 17 moved
+    # it here and kept the note.)
+    # …and `emit_belief` must RAISE these rather than drop them: its refusal is
+    # armed before the best-effort arm, which is the whole point of #11948 F2.
+    for marker in ("evidence_fold", "embeddingText", "extractedFromAll",
+                   "sourceVersion", "sourceVersions"):
+        with pytest.raises(ValueError, match="server-minted record facts"):
+            api.emit_belief("ConfidenceChanged", id="n-belief-forged",
+                            **{marker: True})
+    # …and the TWO ownership markers are refused here too, but by the MARKER arm,
+    # whose message is different — `_refuse_caller_named_funnel_keys` runs the
+    # marker family BEFORE the uncallerable one, so pinning the order is the
+    # point of these two rows (#11996 review round 14: the loop above covers
+    # five of the seven keys, and the PR body claimed "the same keys at
+    # emit_belief" — true of the refusal, not of the message).
+    for marker in ("embedding_preserved", "embedding_verbatim"):
+        with pytest.raises(ValueError, match="server-managed journal fields"):
+            api.emit_belief("ConfidenceChanged", id="n-belief-owner",
+                            **{marker: True})
     assert not journal.exists() or not journal.read_text().strip(), (
         "the refusal must not leave a half-record behind")
 
@@ -1364,6 +1607,158 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
                journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert [r["type"] for r in records] == ["ConfidenceChanged"]
     assert records[0]["confidence"] == 0.5
+
+    # …and `add_point` still lands, so the refusal above is not a refusal of the
+    # door's own record. ⛔ THIS ROW IS A SMOKE ROW, NOT THE MINT'S PIN: this
+    # `EventAPI` is built with `projection=None`, so `add_point` mints nothing and
+    # the derivation arm is never reached here — measured, wrapping `_emit` so no
+    # door supplies the value leaves this row PASSING. The mint itself is pinned
+    # where it can be: `tests/test_source_version_extractedfrom_5038.py::
+    # test_eventapi_add_point_anchors_the_version` (a real graph handle, the
+    # journalled `sourceVersionTransit` compared to the Source's hash). Stated
+    # rather than implied, because "pinned here" was an over-claim.
+    _minted = api.add_point("a point with a source",
+                            provenance("src:9", [0, 1], "q"),
+                            embedding=[0.5], fields={"extractedFrom": ["src:9"]})
+    assert _minted
+
+
+def test_emit_keyword_pins_the_int_projection_versions_that_still_land(tmp_path):
+    """`_emit`'s keyword channel refuses a NON-int `projection_version`, not the key.
+
+    `projection_version` cannot be refused by PRESENCE on this channel: `add_point`
+    and `add_operator` pass their OWN `2` here, so the arm is a TYPE check (#11996
+    review round 18, measured). What that leaves — an `int` a caller supplies — is
+    the residual, and it is pinned as LANDING rather than described in prose, so
+    nobody reads "projection_version is guarded" and assumes more than the type
+    arm buys: `2` is the producers' own value and `1` suppresses the `#49` v2
+    context strip on a record the fold then reads.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    api = EventAPI(EventLog(tmp_path / "events.jsonl"),
+                   initiated_by="extractor", projection=None)
+    for _pv in (2, 1):
+        api._emit("PointAdded", id=f"p-pv-int-{_pv}", content="c",
+                  projection_version=_pv)
+    assert len((tmp_path / "events.jsonl").read_text().splitlines()) == 2
+
+
+def test_the_transit_anchor_is_derived_and_a_caller_cannot_forge_it(tmp_path):
+    """#11996 review round 11: the record channel DERIVES `sourceVersionTransit`.
+
+    `add_point` mints the `:Source` read-version anchor into the record it hands
+    `_emit`, so the key cannot be refused outright on that channel — but every
+    TRUST signal is caller-suppliable (the channel name, a `seam_mints` boolean),
+    and the comparison itself was untyped, so a `str` subclass answering `==` for
+    anything landed a forged anchor:
+
+        class _Eq(str):
+            def __eq__(self, other): return True
+        _emit("PointAdded", {… "extractedFrom": [DOC],
+              "sourceVersionTransit": [[DOC, _Eq("h-FORGED")]]})
+          -> LANDED, and the replay stamped `h-FORGED` as the `:Source` read-version
+
+    The arm now checks the SHAPE (`[[exact str, exact str], …]`) before it
+    compares, which is what a caller cannot lie about: `_source_version_transit`
+    mints nothing else. This test is the live-graph half — without it the
+    comparison branch is unreachable, because no OTHER row here presents a
+    `sourceVersionTransit` on a record whose `EventAPI` has a bound graph handle
+    (three rows do build one — `_added_point_with_caller`,
+    `_ApprovedGraphProjection`, `_UnreadableProjection` — so the reason is "no
+    row exercises the arm", not "every row is projection-less": #11996 review
+    round 16 corrected the earlier wording, which the file itself contradicted).
+
+    FAILS IF: the forged rows land (no derivation, or an untyped compare), or the
+    truthful row is refused (the arm refusing the seam's own record).
+    """
+    from tortoise.api import EventAPI, provenance
+    from tortoise.sdk import TortoiseSDK
+
+    doc = "https://doc.example/transit"
+    events = tmp_path / "transit-events"
+    events.mkdir()
+    log_path = events / "events.jsonl"
+    sdk = TortoiseSDK(str(tmp_path / "transit.db"), event_log_path=str(log_path))
+    try:
+        sdk.create_source(doc, "document", contentHash="h1")
+        api = EventAPI(EventLog(log_path), initiated_by="extractor",
+                       projection=sdk._get_proj())
+
+        # 1. The TRUTHFUL value the seam would mint lands (the control that stops
+        #    the derive arm from becoming a blanket refusal of the channel).
+        api.add_point("a point with a source",
+                      provenance(doc, [0, 4], "q"),
+                      embedding=[0.5], extractedFrom=[doc])
+        # 2. A plain forged pair is refused: the derived value disagrees.
+        with pytest.raises(ValueError, match="sourceVersionTransit"):
+            api._emit("PointAdded", {"id": "p-forged-plain", "content": "c",
+                                     "embedding": [0.5],
+                                     "extractedFrom": [doc],
+                                     "sourceVersionTransit": [[doc, "h-forged"]],
+                                     JOURNAL_VECTOR_WIDTH_KEY:
+                                         JOURNAL_VECTOR_WIDTH_F32})
+        # 3. …and so is the `__eq__`-lying carrier, which is what the SHAPE arm
+        #    is for: without it the comparison delegates to the caller and lands.
+        class _Eq(str):
+            def __eq__(self, other):
+                return True
+
+        with pytest.raises(ValueError, match="sourceVersionTransit"):
+            api._emit("PointAdded", {"id": "p-forged-eq", "content": "c",
+                                     "embedding": [0.5],
+                                     "extractedFrom": [doc],
+                                     "sourceVersionTransit": [[doc, _Eq("h-x")]],
+                                     JOURNAL_VECTOR_WIDTH_KEY:
+                                         JOURNAL_VECTOR_WIDTH_F32})
+        # 4. …and a CONTAINER that lies the same way is refused by the same arm.
+        class _LyingPairs(list):
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+
+        with pytest.raises(ValueError, match="sourceVersionTransit"):
+            api._emit("PointAdded", {"id": "p-forged-list", "content": "c",
+                                     "embedding": [0.5],
+                                     "extractedFrom": [doc],
+                                     "sourceVersionTransit":
+                                         _LyingPairs([[doc, "h-x"]]),
+                                     JOURNAL_VECTOR_WIDTH_KEY:
+                                         JOURNAL_VECTOR_WIDTH_F32})
+        # 5. ⛔ A `tuple` PAIR IS A SHAPE REFUSAL, not a value refusal (#11996
+        #    review round 16, measured): `_source_version_transit` mints
+        #    `[[ref, h], …]` (`[[…] for … in versions.items()]`), so the shape arm
+        #    admits `list` pairs only. It used to admit `(list, tuple)`, and a
+        #    tuple pair then failed the VALUE comparison — the caller was told
+        #    "this seam did not mint for it" about a value whose shape was the
+        #    problem. Falsifier: restore `type(_pair) in (list, tuple)` and this
+        #    row matches the other message instead (measured).
+        with pytest.raises(ValueError, match="is not the shape"):
+            api._emit("PointAdded", {"id": "p-tuple-pair", "content": "c",
+                                     "embedding": [0.5],
+                                     "extractedFrom": [doc],
+                                     "sourceVersionTransit": [(doc, "h-x")],
+                                     JOURNAL_VECTOR_WIDTH_KEY:
+                                         JOURNAL_VECTOR_WIDTH_F32})
+        # 6. ⛔ AND AN `extractedFrom` THE RESOLVER CANNOT ITERATE IS A
+        #    `ValueError`, not a `TypeError` escaping the arm (#11996 review round
+        #    16, measured): `resolve_source_versions` starts with
+        #    `list(source_ref)`, so `extractedFrom=123` raised a bare `TypeError`
+        #    from a guard whose every other exit is a documented refusal.
+        #    Falsifier: drop the `except TypeError` and this row reads `TypeError`
+        #    (measured).
+        with pytest.raises(ValueError, match="cannot resolve"):
+            api._emit("PointAdded", {"id": "p-bad-refs", "content": "c",
+                                     "embedding": [0.5],
+                                     "extractedFrom": 123,
+                                     "sourceVersionTransit": [[doc, "h-x"]],
+                                     JOURNAL_VECTOR_WIDTH_KEY:
+                                         JOURNAL_VECTOR_WIDTH_F32})
+    finally:
+        sdk.close()
 
 
 def test_the_envelope_collision_guard_keeps_add_documents_event_id_pin(tmp_path):
@@ -1392,6 +1787,31 @@ def test_the_envelope_collision_guard_keeps_add_documents_event_id_pin(tmp_path)
     assert [r["event_id"] for r in records] == ["evt-1", None], (
         "`add_document`'s event_id pin and its None default are #125/#167 "
         f"decisions, got {[r['event_id'] for r in records]!r}")
+    # ⛔ …AND THE EXCEPTION IS SCOPED TO THAT ONE TYPE, NOT THAT ONE PRODUCER
+    # (corrected in review round 22: "producer" was a claim the code cannot make —
+    # `_emit` has no caller identity to check, so a direct `_emit("DocumentCreated",
+    # …, event_id=…)` still lands and may duplicate an id. That is the residual the
+    # arm states; what this row pins is the `#125`/`#167` half). Excluding
+    # `event_id` from `_ENVELOPE_KEYS` had applied to EVERY type
+    # on the funnel's keyword channel, so a caller could choose the identity of its
+    # own record:
+    #
+    #     api._emit("PointAdded", id="p1", content="c", event_id="forged-id")
+    #       -> JOURNALLED {"event_id": "forged-id", …, "type": "PointAdded"}
+    #
+    # `projection._warn_entity_mutation_fold_miss`'s docstring calls `event_id`
+    # "the only handle that locates the diverging journal line", and the record
+    # channel and all three splatting doors already refused it — this was the
+    # last open channel for those types.
+    # Falsifier: replace the `type_ != "DocumentCreated"` scope with an impossible
+    # one (e.g. `type_ is None`) and the two rows below land while the
+    # `add_document` assertions above still pass (measured, round 22).
+    before = len(journal.read_text(encoding="utf-8").splitlines())
+    for _type in ("PointAdded", "ConfidenceChanged"):
+        with pytest.raises(ValueError, match="ENVELOPE"):
+            api._emit(_type, id="p-event-id", content="c", event_id="forged-id")
+    assert len(journal.read_text(encoding="utf-8").splitlines()) == before, (
+        "a refused `event_id` must not leave a record behind")
 
 
 def test_the_funnel_itself_refuses_an_envelope_key_from_any_future_door(tmp_path):
@@ -1597,14 +2017,23 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
                    JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
                   embedding=[0.1234567890123, 1 / 3])
 
-    # 5. …and a declared width over NO vector anywhere is refused rather than
-    #    the undecidable case: `_stamp_journal_vector_width` POPS the key when
-    #    there is no vector, so "width over no vector" is a state the contract
-    #    says cannot exist.
-    with pytest.raises(ValueError, match="declared over NO vector"):
-        api._emit("PointAdded",
-                  {"id": "p-nowidth", "content": "c",
-                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+    # 5. …and a declared width over NO vector anywhere is refused — for EITHER
+    #    of the seam's two widths, not only `f32` (#11996 review round 2,
+    #    measured: inside the `f32` arm only, `f64` over no vector LANDED and
+    #    journalled `embedding_width: "f64"`). The reasoning is
+    #    width-INDEPENDENT — `_stamp_journal_vector_width` POPS the key when
+    #    there is no vector, so a width with no vector is a state the seam can
+    #    never have minted — which is why the refusal now precedes the `f64`
+    #    return. Falsifier: move it back below that return and the `f64` row
+    #    below reds on the MESSAGE, not on `DID NOT RAISE` — the `f64` arm's own
+    #    seam probe refuses the absent vector FIRST, with "can only DROP"
+    #    (measured, review round 20). The ordering is still pinned; the message
+    #    is what changes.
+    for _declared in (JOURNAL_VECTOR_WIDTH_F32, JOURNAL_VECTOR_WIDTH_F64):
+        with pytest.raises(ValueError, match="declared over NO vector"):
+            api._emit("PointAdded",
+                      {"id": f"p-nowidth-{_declared}", "content": "c",
+                       JOURNAL_VECTOR_WIDTH_KEY: _declared})
     assert [json.loads(ln) for ln in
             journal.read_text(encoding="utf-8").splitlines() if ln.strip()] == records, (
         "both refusals precede the commit point — the journal must be unchanged")
@@ -1617,8 +2046,13 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
     #     early return, so half the declaration surface was unchecked: a
     #     caller-declared `f64` over no vector was ACCEPTED and journalled, a
     #     durable width no door can produce. Measured at `25127b61b6` before the
-    #     fix — this row is the pin, and deleting the moved check reds it while
-    #     every `f32` row above still passes.
+    #     fix — this row is the pin. ⛔ AND THE MUTANT'S OBSERVABLE IS THE MESSAGE:
+    #     move the check back below the `declared != _F32` return and THIS row reds
+    #     on "can only DROP" (the `f64` arm's seam probe refusing the absent vector
+    #     first), NOT on a missing refusal; delete the whole pre-stamp block and it
+    #     is an `f32` row above that reds, on "is not what the values say"
+    #     (measured, review round 20 — "reds it while every `f32` row above still
+    #     passes" was false on both halves).
     with pytest.raises(ValueError, match="declared over NO vector"):
         api._emit("PointAdded",
                   {"id": "p-nowidth-f64", "content": "c",
@@ -1636,17 +2070,20 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
         JOURNAL_VECTOR_WIDTH_KEY) == JOURNAL_VECTOR_WIDTH_F64, (
         "a declared f64 beside a vector is the seam's own raw answer and must land")
 
-    # 5c. ⛔ THE BELT'S OWN `f64` ROW (#12059 review, P3 — measured). Arm 5b
-    #     exercises the PRE-stamp site; this drives the POST-stamp one, which is
-    #     the only thing that catches a width left over a vector the seam DROPS.
-    #     A declared `f64` beside a non-numeric vector reaches neither refusal
-    #     above: the merged view still carries the junk (so it is not the
-    #     no-vector arm) and `f64` is not value-checked (so it is not the grid
-    #     arm). Measured — deleting the post-stamp `_verify_record_vector_width`
-    #     call reds THIS row and nothing else for `f64`; the `f32` analogue is
-    #     pinned by #12000 F1b's empty-vector row, which is why the belt looked
-    #     covered while its `f64` half was not.
-    with pytest.raises(ValueError, match="declared over NO vector"):
+    # 5c. ⛔ A DECLARED `f64` OVER A VECTOR THE SEAM DROPS (#12059 review, P3 —
+    #     measured on `main` before the rebase; re-measured here). A declared
+    #     `f64` beside a non-numeric vector used to reach NEITHER refusal: the
+    #     merged view still carried the junk (so not the no-vector arm) and
+    #     `f64` was not value-checked (so not the grid arm). On `main` only the
+    #     POST-stamp belt caught it, one call later; on THIS branch the
+    #     pre-stamp `f64` arm asks the seam and refuses it first, with the
+    #     narrower reason — so either message is a valid refusal of the same
+    #     state, and the belt is now defence in depth for `f64` rather than
+    #     independently pinned here. Both are asserted so the row pins the
+    #     REFUSAL, which is the property that matters, not which of two guards
+    #     on the same path gets there first.
+    with pytest.raises(ValueError,
+                       match=r"can only DROP|declared over NO vector"):
         api._emit("PointAdded",
                   {"id": "p-dropped-f64", "content": "c",
                    JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64},
@@ -1691,17 +2128,21 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
                    JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
                   embedding="abc")
 
-    # ⛔ …AND THE BELT HAS ITS OWN ROW, which is the one shape that reds when it
-    #    is removed (#12000 mutation pass, agent-infra#3442 — measured: with the
-    #    post-stamp call disabled, every other arm above still passes, because
-    #    they are all refused by the PRE-stamp check). An EMPTY vector is the
+    # ⛔ …AND THE BELT HAS ITS OWN ROW, which is the one shape IN THIS TEST that
+    #    reds when it is removed (#12000 mutation pass, agent-infra#3442 —
+    #    measured: with the post-stamp call disabled, every other arm above still
+    #    passes, because they are all refused by the PRE-stamp check). ⛔ NOT the
+    #    belt's ONLY pin: `p-merged-lie` below reds on that same mutation and no
+    #    other arm can see it, because neither channel declared a width there
+    #    (measured, review round 18 — the earlier wording claimed "the one shape"
+    #    for the whole belt and was false). An EMPTY vector is the
     #    case that separates them: `_is_shortest_f32_text([])` is `True`
     #    ("representable at every width" — `tortoise/embeddings.py`), so the
     #    pre-stamp arm passes it truthfully, the seam then DROPS it to an owned
     #    `None`, and the belt is what refuses the resulting `f32` over `None`.
-    #    Without this row the belt is unexercised — a guard with no attributable
-    #    mutant, which is how five PRs in one night were reviewed clean over
-    #    restored bugs.
+    #    Without this row the belt is unexercised BY THIS TEST — a guard with no
+    #    attributable mutant here, which is how five PRs in one night were
+    #    reviewed clean over restored bugs.
     with pytest.raises(ValueError, match="declared over NO vector"):
         api._emit("PointAdded",
                   {"id": "p-empty", "content": "c",
@@ -1729,6 +2170,733 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
                       {"id": "p-record-junk", "content": "c",
                        "embedding": _junk,
                        JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+
+    # 9. ⛔ AND THE `f64` ARM IS NOT A LICENCE TO CARRY A NON-VECTOR (#11996
+    #    review round 3, measured). `f64` answers "this vector is the raw
+    #    float64 form, not narrowed"; it says nothing about a value that is not
+    #    a vector at all. Before this row, the `f64` arm returned before any
+    #    predicate ran, so every shape below LANDED and the FOLD stored it as
+    #    the point's embedding:
+    #
+    #        _emit("PointAdded", {… "embedding": "123", KEY: "f64"})
+    #          -> journalled `embedding: "123"` with `width: "f64"`
+    #
+    #    The refusal asks the SEAM (`stamp_journal_embedding` sets an unusable
+    #    vector to an owned `None`) rather than re-implementing its
+    #    normalisation, and only what the seam would DROP is refused. Falsifier:
+    #    delete the `dropped` arm and every shape below reads `DID NOT RAISE`.
+    for _junk in ("123", {"0": 0.1}, b"12", 7, True, [float("nan")],
+                  [float("inf")], []):
+        with pytest.raises(ValueError, match=r"can only.*DROP"):
+            api._emit("PointAdded",
+                      {"id": "p-f64-junk", "content": "c",
+                       "embedding": _junk,
+                       JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64})
+    # ⛔ A LIST IS REFUSED BY THE ELEMENT ARM, not by the DROP arm, and the two
+    # messages must not be merged into one claim: `["abc"]` and `[[0.1]]` are
+    # LIST vectors (so the element arm sees them) while a bare `"123"` is not.
+    # Measured: this is the ordering the code has, and an earlier revision of
+    # this row asserted the DROP message for both and so would have failed on a
+    # correct tree -- which is why the two lists are separate here.
+    for _junk in (["abc"], [[0.1]]):
+        with pytest.raises(ValueError, match="not an exact"):
+            api._emit("PointAdded",
+                      {"id": "p-f64-elem", "content": "c",
+                       "embedding": _junk,
+                       JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64})
     assert [json.loads(ln) for ln in
             journal.read_text(encoding="utf-8").splitlines() if ln.strip()] == records, (
         "every refusal precedes the commit point — the journal is unchanged")
+
+    # 9b. …and the CONTROL that stops the new arm becoming a blanket refusal of
+    #     the `f64` channel: a vector float32 cannot HOLD is exactly what `f64`
+    #     is for, and it must still land (measured: `stamp_journal_embedding`
+    #     keeps `[1e300, -1e300]` and declares `f64`).
+    api._emit("PointAdded", {"id": "p-f64-huge", "content": "c",
+                             "embedding": [1e300, -1e300],
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64})
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert records[-1]["point"][JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
+    assert records[-1]["point"]["embedding"] == [1e300, -1e300], (
+        "an f64 vector float32 overflows must survive the new arm untouched")
+
+    # 10. ⛔ THE `f32` ARM HAS THE SAME HOLE FOR AN **EMPTY** VECTOR (#11996
+    #     review round 4, measured). `_is_shortest_f32_text([])` is True by
+    #     design ("representable at every width") and the grid arm finds `[]` on
+    #     the grid, so the two questions above answer truthfully about a vector
+    #     `stamp_journal_embedding` DROPS:
+    #
+    #         _emit("PointAdded", {… "embedding": [], KEY: "f32"})  -> LANDED
+    #
+    #     The refusal is gated on the RECORD carrying the vector, and the reason
+    #     is the BELT's ROW, not its blindness (#11996 review round 5, measured):
+    #     the belt calls this same function with the same record, so it DOES see
+    #     the record-carried shape and refuses it with the same message. What the
+    #     gate preserves is the ENVELOPE-carried `[]` — the belt's own row and its
+    #     only attributable mutant (`declared over NO vector`, pinned separately);
+    #     refusing here unconditionally would take that row before the stamp runs.
+    #     Falsifier: delete the `empty` arm and this row reads `DID NOT RAISE`.
+    with pytest.raises(ValueError, match="over an EMPTY vector"):
+        api._emit("PointAdded",
+                  {"id": "p-f32-empty", "content": "c", "embedding": [],
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+    # …and the belt keeps its own attributable mutant: an ENVELOPE-carried empty
+    # vector is refused by the POST-stamp belt (after the stamp has made it
+    # absent), NOT by the pre-stamp arm above, which is what keeps that arm
+    # from becoming the belt's shadow.
+    with pytest.raises(ValueError, match="declared over NO vector"):
+        api._emit("PointAdded",
+                  {"id": "p-belt-empty", "content": "c",
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+                  embedding=[])
+
+    # 11. ⛔ EVERY ELEMENT IS READ BY TWO DIFFERENT PATHS, so a vector may only
+    #     carry elements BOTH readers agree on — an exact `int` / `float`
+    #     (#11996 review rounds 6 and 7, each measured). The guard asks the SEAM,
+    #     which converts with `float(x)`; the journal's JSON encoder writes the
+    #     element AS IT IS. Every arm above therefore answers truthfully about a
+    #     value the journal may not store:
+    #
+    #         class _Sneaky(float):
+    #             def __float__(self): return 0.5        # what the SEAM reads
+    #         json.dumps([_Sneaky(nan)])            -> [NaN]   # what the JOURNAL writes
+    #         json.dumps([_Sneaky(0.1234567890123)])-> [0.1234567890123]
+    #         json.dumps(["0.5", "0.25"])           -> ["0.5", "0.25"]
+    #
+    #         _emit("PointAdded", {… "embedding": [_Sneaky(nan)], KEY: "f32"})
+    #           -> LANDED, journalled `f32` over [NaN]     (the plain [nan] is refused)
+    #         _emit("PointAdded", {… "embedding": [_Sneaky(0.1234567890123)], KEY: "f32"})
+    #           -> LANDED, journalled `f32` over an OFF-GRID double ← #5004 round-7
+    #         _emit("PointAdded", {… "embedding": ["0.5", "0.25"], KEY: "f32"})
+    #           -> LANDED, journalled `f32` over STRINGS, which the FOLD then stored
+    #              as the Point's embedding ← the same lie, one reader over
+    #
+    #     Falsifier: WEAKEN the arm to `isinstance(x, (int, float)) and
+    #     type(x) not in (int, float)` (a hypothetical loosening, NOT an earlier
+    #     revision — every revision on this branch has used exact `type(...)`,
+    #     #11996 review round 17) and the `str` row reads `DID NOT RAISE` while the
+    #     subclass rows stay refused (measured). ⛔ NOT every row: `bool` is an
+    #     `int` subclass, so the widened arm catches it itself, and a nested
+    #     sequence is refused by the grid / DROP arm instead — those rows red on
+    #     the MESSAGE, not on a missing refusal. The rows this arm alone decides
+    #     are the `str` and `Decimal` ones; the `_Sneaky`/`_Unfloatable` rows are
+    #     `float` SUBCLASSES, so the widened arm catches them exactly as it
+    #     catches `bool` (measured: same `not an exact` message, still green).
+    class _Sneaky(float):
+        def __float__(self):
+            return 0.5
+
+    class _Unfloatable(float):
+        def __float__(self):
+            raise RuntimeError("boom")
+
+    for _width in (JOURNAL_VECTOR_WIDTH_F32, JOURNAL_VECTOR_WIDTH_F64):
+        for _elem in (_Sneaky(float("nan")), _Sneaky(0.1234567890123),
+                      _Unfloatable(float("nan")), "0.5", True, [0.5],
+                      Decimal("0.5")):
+            with pytest.raises(ValueError, match="not an exact"):
+                api._emit("PointAdded",
+                          {"id": f"p-subclass-{_width}", "content": "c",
+                           "embedding": [_elem],
+                           JOURNAL_VECTOR_WIDTH_KEY: _width})
+    #     ⛔ …and the CONTROL that keeps this a refusal of the ELEMENT, not of
+    #     vectors: exact `int`/`float` elements still land under both widths, so
+    #     the arm cannot quietly become a blanket refusal of vectors.
+    api._emit("PointAdded", {"id": "p-exact-f32", "content": "c",
+                             "embedding": [0.5, 1],
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+    api._emit("PointAdded", {"id": "p-exact-f64", "content": "c",
+                             "embedding": [1e300, -1e300],
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64})
+    # 11b. ⛔ …AND THE CONTAINER AND THE INTEGER ARE HELD TO THE SAME RULE
+    #      (#11996 review round 8, measured), because both were measured to
+    #      disagree between the guard's read and the encoder's write:
+    #
+    #        * a `list` SUBCLASS whose `__iter__` stages its answer landed `[NaN]`
+    #          under a declared `f32` (seven "good" iterations for the guards, the
+    #          eighth for the encoder);
+    #        * an `int` above 2**53 is read as `float(x)` and written EXACTLY, so
+    #          `[2**53 + 1]` landed under `f32` with the width describing the
+    #          rounded value.
+    #
+    #      Falsifier: drop the `type(values) not in (list, tuple)` arm and the
+    #      staged row lands; drop the exactness test's clause and the big-int row
+    #      lands (both measured).
+    #
+    #      ⛔ AND THE EXACTNESS TEST IS TOTAL (#11996 review round 12, measured):
+    #      `float()` raises for an `int` above ~1.8e308, so the inline
+    #      `float(x) != x` left this ONE arm raising `OverflowError` while every
+    #      neighbouring arm raises the documented `ValueError` —
+    #
+    #          _emit(… "embedding": [2 ** 2000], KEY: "f32")
+    #            -> OverflowError: int too large to convert to float
+    #
+    #      Nothing is journalled either way, so the harm was the TYPE of the
+    #      refusal: a caller wrapping a door in `except ValueError` saw a crash.
+    #      Falsifier for the `except` branch: revert
+    #      `_int_is_float_exact` to `float(value) == value` and the rows below
+    #      raise `OverflowError` (measured).
+    class _Staged(list):
+        def __init__(self, good, bad, good_reads):
+            super().__init__([0.5])
+            self._good, self._bad, self._left, self.calls = (
+                good, bad, good_reads, 0)
+
+        def __iter__(self):
+            self.calls += 1
+            return iter(list(self._good) if self.calls <= self._left
+                        else list(self._bad))
+
+    with pytest.raises(ValueError, match="only an exact `list`"):
+        api._emit("PointAdded",
+                  {"id": "p-staged", "content": "c",
+                   "embedding": _Staged([0.5], [float("nan")], 6),
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+    # 11c. ⛔ AND THE TYPE TESTS ARE IDENTITY, NOT MEMBERSHIP (#11996 review
+    #      round 17, measured). `type(x) not in (list, tuple)` is
+    #      `not (list == type(x) or tuple == type(x))`, so it runs the REFLECTED
+    #      `type(x).__eq__(list)` — the METACLASS's `__eq__` — and a carrier whose
+    #      metaclass answers `True` passed BOTH arms while the encoder wrote what
+    #      the guard never read:
+    #
+    #        class _M(type):
+    #            def __eq__(cls, other): return True
+    #            def __hash__(cls): return id(cls)
+    #
+    #      Measured before this row existed: a `_Staged` under such a metaclass
+    #      landed `f32` over `[NaN]`, and a `_Sneaky`-shaped `float` subclass
+    #      landed it with no staging at all. Falsifier: restore either
+    #      `not in (...)` membership test and the matching row below lands
+    #      (measured). ⛔ Every neighbouring arm already compared by identity for
+    #      this reason, which is why the two membership forms were the exception
+    #      rather than the rule.
+    class _LyingMeta(type):
+        def __eq__(cls, other):
+            return True
+
+        def __hash__(cls):
+            return id(cls)
+
+    class _MetaStaged(list, metaclass=_LyingMeta):
+        def __iter__(self):
+            return iter([0.5])
+
+    class _MetaSneaky(float, metaclass=_LyingMeta):
+        def __float__(self):
+            return 0.5
+
+    for _width in (JOURNAL_VECTOR_WIDTH_F32, JOURNAL_VECTOR_WIDTH_F64):
+        with pytest.raises(ValueError, match="only an exact `list`"):
+            api._emit("PointAdded",
+                      {"id": f"p-meta-list-{_width}", "content": "c",
+                       "embedding": _MetaStaged([float("nan"), 0.5]),
+                       JOURNAL_VECTOR_WIDTH_KEY: _width})
+        with pytest.raises(ValueError, match="not an exact"):
+            api._emit("PointAdded",
+                      {"id": f"p-meta-float-{_width}", "content": "c",
+                       "embedding": [_MetaSneaky(float("nan"))],
+                       JOURNAL_VECTOR_WIDTH_KEY: _width})
+    with pytest.raises(ValueError, match="no float reproduces exactly"):
+        api._emit("PointAdded", {"id": "p-bigint", "content": "c",
+                                 "embedding": [2 ** 53 + 1],
+                                 JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+    # …and an `int` the float conversion cannot represent AT ALL is the same
+    # verdict, with the same exception TYPE — both widths, because the element
+    # arm runs before the `f32` narrowing.
+    # ⛔ AND BOTH HAVE THEIR OWN MESSAGE (#11996 review round 13, measured): these
+    # are exact `int`s, so `match="not an exact"` pinned a sentence that
+    # contradicted itself ("…that is not an exact `int` / `float` (int)") and told
+    # the caller to resend the same value. The TYPE arm and the MAGNITUDE arm are
+    # separate refusals now, and these rows pin the magnitude one.
+    for _width in (JOURNAL_VECTOR_WIDTH_F32, JOURNAL_VECTOR_WIDTH_F64):
+        with pytest.raises(ValueError, match="no float reproduces exactly"):
+            api._emit("PointAdded",
+                      {"id": f"p-hugeint-{_width}", "content": "c",
+                       "embedding": [2 ** 2000],
+                       JOURNAL_VECTOR_WIDTH_KEY: _width})
+    # 12. ⛔ THE TWO ABSTENTION ARMS ARE DEFENCE IN DEPTH, and this is the row
+    #     that reaches them (#11996 review round 7, measured). The element arm
+    #     above refuses every LIST element that is not an exact `int`/`float`, so
+    #     the only vector left for the seam arms is one this guard cannot
+    #     enumerate — here a numpy object array, whose single element raises
+    #     from `float()`. Without the fix each row below is not a forged record
+    #     but a `TypeError` at the JSON encoder (the array is not serialisable),
+    #     which is exactly why the element arm, and not this one, is the guard
+    #     that closes the harm: Falsifier — revert the import/call split in
+    #     `_verify_record_vector_width` and the `f64` row here reads `TypeError`;
+    #     revert the `f32` arm's `truthful = False` to `return` and the `f32` row
+    #     does the same (both measured).
+    class _Boom:
+        def __float__(self):
+            raise RuntimeError("boom")
+
+    for _width, _match in ((JOURNAL_VECTOR_WIDTH_F64, "cannot normalise"),
+                           (JOURNAL_VECTOR_WIDTH_F32, "is not what the values say")):
+        with pytest.raises(ValueError, match=_match):
+            api._emit("PointAdded",
+                      {"id": f"p-boom-{_width}", "content": "c",
+                       "embedding": np.array([_Boom()], dtype=object),
+                       JOURNAL_VECTOR_WIDTH_KEY: _width})
+    _tail = [json.loads(ln) for ln in
+             journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert [_r["point"][JOURNAL_VECTOR_WIDTH_KEY] for _r in _tail[-2:]] == [
+        JOURNAL_VECTOR_WIDTH_F32, JOURNAL_VECTOR_WIDTH_F64]
+
+
+def test_a_declared_width_the_seam_never_mints_is_refused_not_ignored(tmp_path):
+    """#11948 F1: `_emit`'s positional record ENUMERATES the declared width.
+
+    The guard used to compare against `f32` and return for everything else, so
+    every OTHER declaration was worse than unverified — it was UNEXAMINED, on
+    the one channel built to be unreachable from any door. Measured at
+    `cb868c43ff` (the head this row was added at), through the private channel:
+
+        _emit("PointAdded", {"id": "p", "content": "c",
+                             "embedding": [0.1], "embedding_width": "f16"})
+          -> journalled with `embedding_width: "f16"`   ← same for "f32 ",
+             "F32", "garbage" and a non-string declaration
+
+    That is not "undecidable input" (which keeps the pre-guard posture): it is a
+    definite claim `stamp_journal_embedding` can never produce — it writes
+    exactly `f32` or `f64` — and it becomes a durable journal FACT that a later
+    width/base64 migration trusts. The seam's mint enumeration is closed, so the
+    declaration is refused; the production widths are untouched.
+
+    Falsifier: restore `if declared is None or declared != _F32: return` and every
+    DECLARATION row below (1–1d) reads `DID NOT RAISE`. ⛔ Row 5 does NOT — the
+    mutant disables the PRE-stamp arm only, so the post-stamp belt still refuses
+    the merged-view lie with the same message row 5 matches (measured, review
+    round 21). "Every row below" was an over-claim, and it mattered: row 5 is the
+    only row that pins the belt's independent reach, which the end of this test
+    asserts.
+    """
+    from tortoise.api import EventAPI, provenance
+    from tortoise.log import EventLog
+
+    events = tmp_path / "unenumerated-width"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    # 1. Every declaration the seam cannot mint is REFUSED — not journalled.
+    for bogus in ("f16", "f32 ", "F32", "garbage", "", "f64 "):
+        with pytest.raises(ValueError, match="is not a width this seam mints"):
+            api._emit("PointAdded", {"id": f"p-{bogus!r}", "content": "c",
+                                     "embedding": [0.1, 0.2],
+                                     JOURNAL_VECTOR_WIDTH_KEY: bogus})
+
+    # 1b. …and a NON-STRING declaration is refused as the same refusal. The
+    #     guarantee this row pins is that the enumeration is `str`-ONLY: written
+    #     as `isinstance(declared, str) and declared not in (…)` these shapes
+    #     would LAND (`32`, `True` and `["f32"]` all compare unequal and so pass
+    #     the value half). ⛔ NOT "a `TypeError` escaping the membership test" —
+    #     an earlier revision said that and it is false: the container is a
+    #     TUPLE, so membership is an `==` scan that never hashes, and none of
+    #     these shapes raises. Row 1d is the one that pins the exact-TYPE arm
+    #     (`type(declared) is not str`); this row pins the refuse-non-`str` half.
+    for bogus in (["f32"], {"f32"}, 32, True):
+        with pytest.raises(ValueError, match="is not a width this seam mints"):
+            api._emit("PointAdded", {"id": "p-nonstr", "content": "c",
+                                     "embedding": [0.1, 0.2],
+                                     JOURNAL_VECTOR_WIDTH_KEY: bogus})
+
+    # 1b'. …and `None` is a DECLARATION, not an absence (#11996 review round
+    #      14, measured). Written as `declared = record.get(KEY); if declared is
+    #      None: return`, an explicit `embedding_width: None` was read as "no
+    #      declaration" and journalled as `"embedding_width": null` — the one
+    #      value that is neither of the seam's two widths, and a durable fact the
+    #      seam can never mint (it POPS the key when there is no vector).
+    #      Falsifier: restore the `record.get` form and this row reads
+    #      `DID NOT RAISE ValueError` (measured). Whether ABSENCE stays accepted
+    #      is pinned at the end of this row set, so this refusal cannot be bought
+    #      by refusing a record that simply declares nothing.
+    with pytest.raises(ValueError, match="is not a width this seam mints"):
+        api._emit("PointAdded", {"id": "p-none-width", "content": "c",
+                                 "embedding": [0.1, 0.2],
+                                 JOURNAL_VECTOR_WIDTH_KEY: None})
+
+    # 1c. ⛔ THE TYPE ARM, which needs its own shape to be falsifiable: a
+    #     non-`str` whose `__eq__` answers `True` for `"f32"` passes tuple
+    #     membership (`Liar() in ("f32", "f64")` is `True`). Falsifier: change
+    #     `type(declared) is not str` to `not isinstance(declared, str)` in
+    #     `_verify_record_vector_width`, and row 1d reads `DID NOT RAISE`
+    #     (measured).
+    #     ⛔ The liar subclasses `float` deliberately, so it is JSON-serialisable:
+    #     a non-serialisable liar reds the same row for the WRONG reason (the
+    #     mutant would die at the append with `TypeError: … not JSON
+    #     serializable`), and a row that reds for the wrong reason is not a pin.
+    #     With the type arm dropped, `declared != F32` is TRUE for this liar
+    #     (`float.__ne__` is not overridden), so it is routed to the `f64` arm and
+    #     JOURNALLED as `0.0` (`_LyingWidth()` is `float()`; `json` renders the subclass
+    #     by its float value) — it does not reach the `f32` lie check.
+    class _LyingWidth(float):
+        def __eq__(self, other):
+            return other in (JOURNAL_VECTOR_WIDTH_F32, JOURNAL_VECTOR_WIDTH_F64)
+
+        def __repr__(self):
+            return "<a width the seam never mints>"
+
+    with pytest.raises(ValueError, match="is not a width this seam mints"):
+        api._emit("PointAdded", {"id": "p-lying-eq", "content": "c",
+                                 "embedding": [0.1, 0.2],
+                                 JOURNAL_VECTOR_WIDTH_KEY: _LyingWidth()})
+
+    # 1d. ⛔ AND THE SAME LIE FROM A `str` SUBCLASS, which is why the type arm is
+    #     `type(declared) is not str` and NOT `isinstance` (#11996 review round 4,
+    #     measured): Python gives the SUBCLASS's `__eq__` priority in the
+    #     membership scan, so an `isinstance` form passes BOTH halves and the
+    #     record is journalled as `"zz"` — a width the seam never mints. Falsifier:
+    #     change the arm back to `not isinstance(declared, str) or` and this row
+    #     reads `DID NOT RAISE`.
+    class _StrLyingWidth(str):
+        def __eq__(self, other):
+            return other in (JOURNAL_VECTOR_WIDTH_F32, JOURNAL_VECTOR_WIDTH_F64)
+
+        def __repr__(self):
+            return "<a str width the seam never mints>"
+
+    with pytest.raises(ValueError, match="is not a width this seam mints"):
+        api._emit("PointAdded", {"id": "p-str-lying-eq", "content": "c",
+                                 "embedding": [0.1, 0.2],
+                                 JOURNAL_VECTOR_WIDTH_KEY: _StrLyingWidth("zz")})
+
+    # 2. The refusal precedes the COMMIT POINT: nothing above reached the log.
+    assert not journal.exists() or not journal.read_text().strip(), (
+        "a refused declaration was journalled anyway — the guard must run "
+        "before `self.log.append`, or the claim is already durable")
+
+    # 3. The seam's OWN two widths are still accepted, so the enumeration did
+    #    not become a blanket refusal of the channel.
+    api._emit("PointAdded", {"id": "p-f64", "content": "c",
+                             "embedding": [0.1, 0.2],
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64})
+    api.add_point("a real point", provenance("src:2", [0, 4], "q"),
+                  embedding=[0.1, 0.2])
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    widths = [r["point"].get(JOURNAL_VECTOR_WIDTH_KEY) for r in records]
+    assert widths == ["f64", "f64"], (
+        "a declared `f64` and the door's own stamp must both still land — the "
+        f"enumeration refuses only what the seam cannot mint, got {widths}")
+    assert all(r["point"].get("embedding") == [0.1, 0.2] for r in records), (
+        "the accepted records' vectors must reach the journal untouched")
+
+    # 4. …and a record that declares NO width at all still lands, untouched: the
+    #    `None` row above must not have been bought by refusing absence.
+    api._emit("PointAdded", {"id": "p-absent-width", "content": "c",
+                             "embedding": [0.1, 0.2]})
+    tail = [json.loads(ln) for ln in
+            journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert tail[-1]["point"]["id"] == "p-absent-width"
+    assert JOURNAL_VECTOR_WIDTH_KEY not in tail[-1]["point"], (
+        "a record that declares no width must land without the guard adding "
+        "one — `embedding_width` is the seam's to mint, not this guard's")
+
+    # 5. ⛔ THE MERGED VIEW DECLARES THE WIDTH, not the record alone (#11996
+    #    review round 15, measured). The READER takes `{**ev, **ev["point"]}`,
+    #    so when the ENVELOPE carries the width (which is where the seam mints
+    #    it) and the RECORD carries the vector, reading only the record's
+    #    declaration abstained on the pair the fold actually sees:
+    #
+    #      _emit("PointAdded", {"id": "h", "content": "c",
+    #                           "embedding": [0.1234567890123, 1/3]},
+    #            embedding=[0.5, 0.25])   -> journalled `f32` over the OFF-GRID
+    #                                        record vector the fold then reads
+    #
+    #    Falsifier: restore the RECORD-ONLY read (`declared = record.get(KEY)`
+    #    plus `if declared is None: return`, which is how it was written) and this
+    #    row lands. ⛔ Restoring the ASSIGNMENT ALONE reds it on a different
+    #    message instead — "embedding_width=None is not a width this seam mints"
+    #    — because the run then reads `payload.get(KEY)` as `None` and the
+    #    enumeration arm fires first (measured, review round 21: the two-part
+    #    mutant is what the comment must name, or a maintainer runs half of it and
+    #    reads a refusal about `None` over a record that declared nothing).
+    before = len([ln for ln in
+                  journal.read_text(encoding="utf-8").splitlines() if ln.strip()])
+    with pytest.raises(ValueError, match="is not what the values say"):
+        api._emit("PointAdded", {"id": "p-merged-lie", "content": "c",
+                                 "embedding": [0.1234567890123, 1 / 3]},
+                  embedding=[0.5, 0.25])
+    assert len([ln for ln in
+                journal.read_text(encoding="utf-8").splitlines() if ln.strip()]) == before, (
+        "the merged-pair refusal must precede the append")
+    # …and the TRUTHFUL version of the same shape still lands, so the row above
+    # is a refusal of the lie rather than of the shape.
+    api._emit("PointAdded", {"id": "p-merged-truth", "content": "c",
+                             "embedding": [0.5, 0.25]},
+              embedding=[0.25, 0.5])
+    merged = [json.loads(ln) for ln in
+              journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert merged[-1]["point"]["id"] == "p-merged-truth"
+
+
+def test_a_declared_width_reads_a_one_shot_iterable_exactly_once(tmp_path):
+    """#11996 round 14: the guard's seam probe must not EAT the caller's vector.
+
+    Every arm of `_verify_record_vector_width` asks the seam, and the seam reads
+    with `list(raw)`; the stamp that runs afterwards asks it a second time. A
+    generator is exhausted by the first read, so the second saw an empty vector:
+    the probe's own reading was fine, the stamp dropped it, and the post-stamp
+    belt then refused with "declared over NO vector". Measured consequence — a
+    write that LANDED on `main` became a refusal:
+
+        _emit("PointAdded", {… KEY: "f64"}, embedding=(x for x in [0.1, 0.2]))
+          -> `main`: journalled `f64` over [0.1, 0.2]
+          -> without materialisation: "declared over NO vector", nothing journalled
+
+    Falsifier: delete the `seam_values = list(values)` materialisation (leave the
+    probes reading `values`) and this row reds with that belt refusal, because the
+    stamp consumed the generator before the belt ran (measured).
+
+    Both channels are pinned, because the write-back that makes this work is
+    PER-CHANNEL and one of them was missing (#11996 review round 23, measured).
+    The round-14 write-back covered the ENVELOPE only, so a RECORD-carried
+    generator kept the exhausted iterator and the post-stamp belt refused a value
+    the seam ACCEPTS — under `f64` as "declared over a value the seam can only
+    DROP", under `f32` as "declared over an EMPTY vector", while
+    `stamp_journal_embedding({"embedding": (x for x in [0.1, 0.2])}, creating=False)`
+    returns `[0.1, 0.2]`. Both messages named a cause that is not the cause.
+    Falsifier for
+    the record rows: drop the record write-back and this row reds at the FIRST
+    record emit — `p-rec-gen-f64`, "declared over a value the seam can only DROP"
+    (measured). ⛔ The `f32` "declared over an EMPTY vector" refusal is real but is
+    NOT co-observed here: the row aborts on the `f64` emit before the `f32` one
+    runs, so it reproduces only when that shape is probed alone (measured). An
+    earlier revision of this sentence claimed the record rows red "with those two
+    belt refusals", which this row's own control flow falsifies (#11996 review
+    round 24).
+
+    ⛔ What is NOT pinned here, stated rather than implied (review round 24,
+    measured) — `iter(x) is x` is the arm's CONSERVATIVE test for a one-shot
+    iterator, not the boundary of one:
+
+    * a CONTAINER whose `__iter__` hands out a CACHED iterator is also one-shot
+      (`iter(shared) is not shared` — the same object) and is NOT caught, so the
+      record channel still raises the fabricated "the seam can only DROP" / "an
+      EMPTY vector" message for it while the same object lands on the envelope
+      channel;
+    * a RE-ITERABLE non-container (a numpy array) is left as it is on purpose —
+      on the record channel it never reaches the element arm (that arm's container
+      test skips it) and fails later at the JSON encoder with `TypeError: not JSON
+      serializable`, while the envelope channel lands it.
+
+    Both are the stated residual `#11948-non-list-iterable`. ⛔ Widening the gate
+    would NOT turn it into an over-block — an earlier revision of this paragraph
+    said so, and measurement says the opposite (#11996 review round 25): the
+    cached-iterator container would LAND on the record channel and the numpy
+    array's refusal would move from the JSON encoder to the element arm. Widening
+    is therefore a DECISION recorded in the PR body's `residuals=` line, and this
+    docstring does not assume it in either direction.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    events = tmp_path / "one-shot-vector"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    api._emit("PointAdded", {"id": "p-gen-f64", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64},
+              embedding=(x for x in [0.1, 0.2]))
+    api._emit("PointAdded", {"id": "p-gen-f32", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+              embedding=(x for x in shortest_float32_vector([0.5, 0.25])))
+    # …and the same two on the RECORD channel, which had no write-back at all
+    # until round 23 — the channel the merged view lets WIN.
+    api._emit("PointAdded", {"id": "p-rec-gen-f64", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64,
+                             "embedding": (x for x in [0.1, 0.2])})
+    api._emit("PointAdded", {"id": "p-rec-gen-f32", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32,
+                             "embedding": (x for x in
+                                           shortest_float32_vector([0.5, 0.25]))})
+    api._emit("PointAdded", {"id": "p-rec-iter", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64,
+                             "embedding": iter([0.1, 0.2])})
+
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert [r["point"]["id"] for r in records] == [
+        "p-gen-f64", "p-gen-f32", "p-rec-gen-f64", "p-rec-gen-f32",
+        "p-rec-iter"], (
+        "a declared width over a one-shot iterable must land exactly like the "
+        "same values spelled as a list — on BOTH channels — the guard reads it "
+        "ONCE and hands the stamp what it read")
+    assert records[0]["embedding"] == [0.1, 0.2], (
+        "the materialised vector must be the one journalled, not an exhausted "
+        f"iterator, got {records[0].get('embedding')!r}")
+    assert records[0]["point"][JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
+    assert records[1]["point"][JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32
+    # The record channel journals under `point` (the merged view the fold reads),
+    # so the materialised list must be THERE — an exhausted iterator left on the
+    # record is what the belt re-read as empty.
+    assert records[2]["point"]["embedding"] == [0.1, 0.2], (
+        "a RECORD-carried one-shot iterable must be written back, not left "
+        f"exhausted on the record, got {records[2]['point'].get('embedding')!r}")
+    assert records[2]["point"][JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
+    assert records[3]["point"][JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32
+    assert records[4]["point"]["embedding"] == [0.1, 0.2], (
+        "every one-shot iterator type must be written back, not only `generator` "
+        f"— got {records[4]['point'].get('embedding')!r}")
+
+
+def test_the_two_one_shot_shapes_outside_the_write_back_keep_their_residual(tmp_path):
+    """The residual `#11948-non-list-iterable`, PINNED as a disposition.
+
+    `_verify_record_vector_width`'s record write-back is gated on
+    `iter(x) is x` — a CONSERVATIVE test for "a second read is EMPTY, not merely
+    redundant" (#11996 review round 24, measured). Two shapes fall outside it and
+    this row pins what happens to them, so the prose in that arm cannot go stale
+    the way "it reaches the element check" did:
+
+    1. a CONTAINER whose `__iter__` hands out a CACHED iterator — also one-shot,
+       `iter(shared) is not shared`, so the gate does not catch it and
+       the record channel refuses a vector the seam ACCEPTS (the message it raises
+       names the wrong cause: the seam does not DROP it — that is the residual's
+       cost, not a guarantee of the arm);
+    2. a RE-ITERABLE non-container (a numpy array) — never reaches the element arm
+       on this channel (the arm's container test skips it), so it dies at the JSON
+       encoder instead.
+
+    BOTH land on the ENVELOPE channel, which is what makes this a CHANNEL
+    asymmetry rather than a rule about the value. ⛔ WIDENING THE GATE IS A
+    DECISION and this row is its tripwire — but NOT because widening would
+    over-block (an earlier revision of this docstring said that; measured, review
+    round 25, it is the opposite): widening to the identity half would LAND the
+    cached-iterator container on the record channel and MOVE the numpy array's
+    refusal from the JSON encoder to the element arm. It is recorded as deferred
+    in the PR body's `residuals=` line — if someone widens it, come here,
+    re-measure, and update both the arm's comment and this docstring.
+
+    FAILS IF: either shape starts LANDING on the record channel (the residual was
+    widened without the decision), the envelope control stops landing (the
+    asymmetry claim itself is then false), or a refusal's MESSAGE moves — both
+    `raises` carry `match=` on the width-specific text the arm's comment quotes,
+    at both widths, because a reworded belt would otherwise leave that prose stale
+    with the row still green (#11996 review round 25).
+    """
+    import numpy as np
+
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    class Shared:
+        """A one-shot vector that is NOT its own iterator (`iter(x) is not x`)."""
+
+        def __init__(self, values):
+            self._it = iter(values)
+
+        def __iter__(self):
+            return self._it
+
+    events = tmp_path / "residual-shapes"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    shared = Shared([0.1, 0.2])
+    assert iter(shared) is not shared, (
+        "the premise of the gate: a cached-iterator CONTAINER is not its own "
+        "iterator, so `iter(x) is x` cannot see it")
+
+    # 1. The cached-iterator container is REFUSED on the record channel…
+    # ⛔ `match=` on BOTH widths, because the messages are the CLAIM this row's
+    # docstring makes (the seam does not DROP the vector; the refusal says it
+    # does). Without `match=` any `ValueError` satisfies it, so the belt could
+    # reword itself — or start refusing `f32` differently — and leave the prose
+    # stale, which is the exact failure this row exists to prevent
+    # (#11996 review round 25).
+    with pytest.raises(ValueError, match="declared over a value the seam can only DROP"):
+        api._emit("PointAdded", {"id": "p-shared-rec", "content": "c",
+                                 JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64,
+                                 "embedding": Shared([0.1, 0.2])})
+    with pytest.raises(ValueError, match="declared over an EMPTY vector"):
+        api._emit("PointAdded", {"id": "p-shared-rec-f32", "content": "c",
+                                 JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32,
+                                 "embedding": Shared([0.5, 0.25])})
+    # …and LANDS on the envelope channel, at both widths.
+    api._emit("PointAdded", {"id": "p-shared-env", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64},
+              embedding=Shared([0.1, 0.2]))
+    api._emit("PointAdded", {"id": "p-shared-env-f32", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+              embedding=Shared([0.5, 0.25]))
+
+    # 2. The re-iterable non-container dies at the ENCODER on the record channel…
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        api._emit("PointAdded", {"id": "p-nd-rec", "content": "c",
+                                 JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64,
+                                 "embedding": np.array([0.1, 0.2])})
+    # …and LANDS on the envelope channel.
+    api._emit("PointAdded", {"id": "p-nd-env", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64},
+              embedding=np.array([0.1, 0.2]))
+
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert [r["point"]["id"] for r in records] == [
+        "p-shared-env", "p-shared-env-f32", "p-nd-env"], (
+        "only the envelope-channel controls may land; a record-channel LANDING "
+        "here means the residual was widened and this row must be re-decided, "
+        f"got {[r['point']['id'] for r in records]}")
+    assert records[0]["embedding"] == [0.1, 0.2], (
+        "the envelope channel must journal the materialised vector, not the "
+        f"one-shot object, got {records[0].get('embedding')!r}")
+
+
+def test_an_envelope_carried_one_shot_iterable_is_not_written_onto_the_record(
+        tmp_path):
+    """The write-back is scoped by IDENTITY, not by "the value is one-shot".
+
+    The round-23 write-back exists because the vector is read a SECOND time after
+    this guard returns, on whichever channel carried it, and the second reader is
+    CHANNEL-specific: the stamp re-reads the ENVELOPE's top-level `embedding`, and
+    the post-stamp belt — the second `_verify_record_vector_width` call inside
+    `_emit` — re-reads the MERGED view (`{**payload, **record}`, the record winning
+    per key), so only the BELT can re-read a RECORD-carried vector (measured,
+    #11996 review round 25: a record-carried generator is still unconsumed after
+    the stamp returns). A channel left holding the object the guard consumed is
+    therefore read a second time and refuses a value the guard had just ACCEPTED.
+    Hence the scope is the channel that actually CARRIED the vector:
+    `record.get("embedding") is values`.
+
+    ⛔ THE IDENTITY HALF WAS UNPINNED until this row (#11996 review round 24,
+    measured): the neighbouring rows exercise the arm's OTHER half — `iter(x) is
+    x` — so replacing the whole gate with `if iter(values) is values:` leaves this
+    row as the SOLE red in this file (measured; every other row stays green at
+    both heads this was measured on). What that mutation changes is not cosmetic,
+    because the RECORD WINS the merge: a one-shot generator riding the ENVELOPE
+    gets written onto the RECORD as well, and the journalled `point` gains an
+    `embedding` key it never carried.
+
+    FAILS IF: the record gains an `embedding` it did not carry (the gate lost its
+    identity half), or the envelope stops carrying the materialised vector (the
+    write-back was removed rather than scoped).
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    events = tmp_path / "envelope-one-shot"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    # The ENVELOPE carries the generator; the RECORD carries the WIDTH and nothing
+    # else — no `embedding` key at all, so nothing on the record is the object the
+    # guard consumed and there is nothing there to write back onto.
+    api._emit("PointAdded", {"id": "p-env", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64},
+              embedding=(x for x in [0.1, 0.2]))
+
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(records) == 1, f"one emit must journal one line, got {len(records)}"
+    assert records[0]["embedding"] == [0.1, 0.2], (
+        "the ENVELOPE still carries the materialised vector — the write-back is "
+        f"scoped by channel, not a no-op; got {records[0].get('embedding')!r}")
+    assert "embedding" not in records[0]["point"], (
+        "the RECORD did not carry the vector, so the write-back must not put one "
+        "there: the record WINS the merged view, so adding it changes what lands — "
+        f"got {records[0]['point'].get('embedding')!r}")

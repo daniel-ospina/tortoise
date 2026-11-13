@@ -3716,40 +3716,73 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     characters, so without `-ww` the `command=` column is cut before its basename and the
     census cannot see a live lane. Verified red with the flag removed.
 
-    A copy of a real binary (never a `#!` script — the kernel rewrites argv[0] to the
-    interpreter, which `_pi_pids_from_ps` documents). SKIPS where `sleep` is unavailable
-    or the process table cannot be read at all (reported as an error by the reader), so a
-    box without those does not red a census that is fine.
+    A real process carrying an arbitrary argv[0] (never a `#!` script — the kernel
+    rewrites argv[0] to the interpreter, which `_pi_pids_from_ps` documents). SKIPS only
+    where the process table cannot be read at all (reported as an error by the reader),
+    so a box without that does not red a census that is fine.
+
+    ⛔ IT IS NOT A COPY OF `sleep` ANY MORE (measured on the `ubuntu-26.04` hosted
+    runner `GitHub Actions 1000848497`, `test (c)`, head `70116a870dbb`). On that image
+    `/usr/bin/sleep` is a symlink into the uutils MULTI-CALL binary
+    (`/usr/lib/cargo/bin/coreutils/sleep`, 11.8 MB), and a multi-call binary dispatches on
+    `basename(argv[0])`. Copied to this fixture's long name it dies before it can sleep:
+    `cp /usr/bin/sleep <dir>/pi && <dir>/pi 60` prints `coreutils: unknown program 'pi'`
+    and exits 1. The census then answered `pids seen: []` about a child that never
+    existed — CORRECTLY — and no bounded poll can repair that, so the fixture, not the
+    census, was the defect.
+
+    The pin itself was re-measured on that same image before this change: at `COLUMNS=80`
+    `ps -ww -axo pid=,ppid=,uid=,command=` shows the whole long path (basename `pi`
+    matches), and the identical call WITHOUT `-ww` is cut at exactly 80 characters —
+    measured on this fixture's shape, the row ends inside the PATH, so what a matcher
+    reads as `basename(argv[0])` is the truncated directory name
+    (`pi-census-xxxx…sx8`), never `pi`. So `-ww` is still load-bearing; only the
+    fixture's way of putting an arbitrary argv[0] in front of a live process changed.
+    `executable=` runs this interpreter under the long path — exactly the argv[0] the
+    matcher reads — with no dependence on a copied binary accepting its new name.
+
+    ⛔ A BOUNDED POLL, AND THE REASON IS NOT THE FORK WINDOW THIS ONCE CLAIMED (#12039,
+    measured). `Popen` returns after a successful `execve` on CPython/Linux (the parent
+    blocks on the CLOEXEC errpipe), and a `/proc/<pid>/cmdline` read taken the instant it
+    returned never carried the parent's argv — though it CAN be readable-and-EMPTY while
+    the child is state `R` (measured: 13-30 OURS / 10-27 EMPTY over 40-spawn samples,
+    load- and spawn-mode dependent). So a `/proc` read is not a witness that the row is
+    populated; a `ps` invocation costs ~43 ms here, which is why a poll on the TABLE (what
+    the census itself reads) is the shape that settles.
+
+    What this test has actually measured is worse for the one-shot form: at `70116a870dbb`
+    the census redded with `pids seen: []` AFTER the full 10 s poll, which a window cannot
+    produce — a window resolves inside the deadline, so that red was the FIXTURE (a copied
+    multi-call `sleep` that refuses its new name on `ubuntu-26.04`), which `executable=`
+    fixes.
+
+    The poll is kept because it costs nothing on the green path and it makes a red
+    legible (the deadline plus the table's own row, below), NOT because a race here was
+    measured. It does not widen the match, so the truncation pin keeps its power: a
+    `-ww`-less census truncates on every sample, burns the deadline and fails.
     """
     import shutil
     import subprocess
     import tempfile
 
-    sleep_bin = shutil.which("sleep") or "/bin/sleep"
-    if not os.path.exists(sleep_bin):
-        pytest.skip(f"no `sleep` binary at {sleep_bin} for the fixture lane")
     long_dir = Path(tempfile.mkdtemp(prefix="pi-census-" + "x" * 40))
     # ⛔ The narrow width is the FIXTURE, not the environment: without this the test
     # measures whatever terminal the suite happens to run under.
     monkeypatch.setenv("COLUMNS", "80")
     try:
         pi = long_dir / "pi"
-        shutil.copy(sleep_bin, pi)
-        proc = subprocess.Popen([str(pi), "60"],
+        # argv[0] is the long path — what the census matcher reads. `executable=`
+        # decides what actually RUNS, so no copied binary has to accept being named
+        # `pi`, and the child is a live process on every image (see the docstring).
+        proc = subprocess.Popen([str(pi), "-c", "import time; time.sleep(60)"],
+                                executable=sys.executable,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            # ⛔ A BOUNDED POLL, NOT ONE SAMPLE (#12039). `Popen` returns at FORK time;
-            # the census may then run before the child's `execve` completes, and until it
-            # does the child carries the PARENT's `command=` (the pytest worker's argv),
-            # whose basename is not `pi`. Measured on a 4-vCPU CI runner: `pids seen: []`
-            # — a healthy spawn reported invisible, on a REQUIRED check, which is also the
-            # false-PASS half (re-run until green is how a real regression here would be
-            # waved through).
-            #
-            # ⛔ IT DOES NOT WEAKEN THE `-ww` PIN. A census without `-ww` truncates the
-            # long argv[0] on EVERY sample, so it still matches nothing — it just takes the
-            # whole deadline instead of one attempt. Verified by removing `-ww` from
-            # `fleet_state.pi_processes` and re-running this test: still RED.
+            # Bounded poll on the CENSUS ITSELF — never a widened or loosened match
+            # (see the docstring: the reason is a legible red, not a measured race).
+            # A census missing `-ww` still never matches (its rows are cut before the
+            # basename), so the truncation pin keeps its discriminating power: it takes
+            # the FULL deadline and fails, it does not go green.
             deadline = time.time() + 10.0
             pids: list[int] = []
             while True:
