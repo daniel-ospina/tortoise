@@ -30,6 +30,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -442,6 +443,38 @@ def test_the_workflow_files_the_drift_ON_A_FAILING_READING() -> None:
     )
     assert not failing[0].get("continue-on-error"), (
         "the check step must never `continue-on-error` — that turns a measured split into a green run"
+    )
+
+    # ⛔ AND THE STEP MUST STILL DO THE MEASURING. Cycle 2 measured the content of this step unpinned:
+    # replacing the invocation with `rc=0` left 36/36 consent tests GREEN (a run that reads nothing
+    # exits 0, so the auto-file step takes the GREEN path, RESOLVES both standing issues and files
+    # nothing — a monitor reporting green forever while clearing its own ledger), and dropping the two
+    # `--*-url` flags left 23/23 green (a `workflow_dispatch` with `api_url`/`app_url` — the ad-hoc
+    # path §2.5 and runbook §4.4 both send the operator to — would silently read PRODUCTION).
+    check_run = failing[0].get("run") or ""
+    for needle in (
+        "tools/consent_key_check.py",
+        '--api-url "$API_URL"',
+        '--app-url "$APP_URL"',
+        "--json > ",
+    ):
+        assert needle in check_run, (
+            f"the check step no longer invokes the checker with {needle!r} — the run would exit with no "
+            f"reading (or measure the wrong origins) and still look green: {check_run[:400]!r}"
+        )
+
+    # The reading is handed between the check step and BOTH consumers through one path; if the writer
+    # and a reader diverge, the reader's `|| echo '{"verdict": "UNVERIFIABLE"}'` fabricates a reading
+    # into a PUBLIC issue body presented as "The reading (this run)" and the real evidence is lost —
+    # the hazard the `outcome != 'skipped'` clause above closes, through a different door. Pinned as a
+    # SET of every `/tmp/consent-key*.json` spelling in the file, so a one-sided rename reds here.
+    paths = {
+        m
+        for s in _steps()
+        for m in re.findall(r"/tmp/consent-key[\w.-]*\.json", s.get("run") or "")
+    }
+    assert paths == {"/tmp/consent-key.json"}, (
+        f"the reading's path diverges between producer and consumer(s): {sorted(paths)}"
     )
 
 
