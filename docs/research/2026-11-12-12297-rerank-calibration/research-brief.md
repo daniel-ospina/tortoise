@@ -289,7 +289,9 @@ Every caller that must not have its page re-picked **opts out** via
 `_rerank_candidates=False`, in three classes — and two product reads deliberately do
 NOT, because the re-pick is the lever: `hosted_api`'s search route and
 `selfhost_api`'s search. **Order re-owners**: `_review_pool`, `suggest_entry_points`,
-`issue_insight`, `recall_state`, `recall_gaps`, `_resolve_subgraph_seed` sort the
+`issue_insight`, `recall_state`, `recall_gaps`, `_resolve_subgraph_seed`, and
+`volunteer_context` (which binds the read as a `_search_fn=` seam rather than calling
+it, so its opt-out travels in `_search_kwargs`) sort the
 whole pool downstream, and `search_sessions` re-sorts its pool by the PRE-rerank
 `rrf` score before slicing — so a pre-cut reorder could only move which ids survive
 `limit` (and, for `search_sessions`, is a permutation that sort discards: it cannot

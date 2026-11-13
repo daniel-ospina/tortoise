@@ -42026,8 +42026,14 @@ class TortoiseSDK:
                 **{RERANK_POOL_KEY: fused_rerank_pool_width(),
                    RERANK_SCORED_KEY: 0,
                    RERANK_UNSCORED_KEY: len(result_ids)}))
+        # ⛔ AND NOT THE OPT-OUT: the two arms are not exclusive by construction —
+        # a caller that opted out AND has a live recency spread satisfied both and
+        # emitted TWO ``leg="rerank"`` entries for ONE read with two different
+        # reasons (measured: ``tools/longmem_eval/retrieve.py`` passes exactly that
+        # combination). The first reason the read has is the one that wins: it
+        # declined the rerank for its own sake, and recency never got a vote.
         if (result_ids and _rr_on and (query or "").strip()
-                and _rr_order_by_ok
+                and _rr_order_by_ok and _rerank_candidates
                 and _rr_recency_conflict and status_trace is not None):
             status_trace.append(dict(
                 _trace_entry("rerank", ran=False, degraded=False,
@@ -44344,7 +44350,13 @@ class TortoiseSDK:
         return run_volunteer_pipeline(
             proj, window, session_id=session_id, prior_context=prior_context,
             min_confidence=min_confidence, max_pointers=max_pointers, why=why,
+            # #12297: the volunteer resolve pool is another page whose ORDER
+            # this read does not own — the pipeline re-sorts the pool (stage 6)
+            # before the cut, so a pre-cut re-pick moves MEMBERSHIP only.
+            # Passed as a kwargs SEAM rather than at a call site, which is why
+            # the AST census over ``.tortoise_fts_query(`` calls cannot see it.
             _search_fn=self.tortoise_fts_query,
+            _search_kwargs={"_rerank_candidates": False},
         )
 
     def _state_counter_evidence(self, point_ids: list[str]) -> dict[str, list[dict]]:

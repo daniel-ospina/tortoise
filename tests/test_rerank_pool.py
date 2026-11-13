@@ -913,6 +913,26 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         "these in-sdk call sites read the rerankable page WITHOUT opting out, "
         f"so the armed gate re-picks their page: lines {offenders}")
 
+    # ⛔ AND THE CENSUS MUST SEE THE SEAM. A read bound as ``_search_fn=`` (the
+    # volunteer pipeline does exactly that) is not an ``ast.Call`` on
+    # ``tortoise_fts_query``, so the census above was BLIND to it while the
+    # armed gate re-picked that pool — measured: 12 of 18 ids replaced at the
+    # volunteer resolve limit. Every ``_search_fn=`` binding must carry its
+    # opt-out in the adjacent ``_search_kwargs``.
+    seams = [n for n in _ast.walk(tree)
+             if isinstance(n, _ast.keyword) and n.arg == "_search_fn"
+             and getattr(n.value, "attr", None) == "tortoise_fts_query"]
+    kw_seams = [n for n in _ast.walk(tree)
+                if isinstance(n, _ast.keyword) and n.arg == "_search_kwargs"]
+    assert len(kw_seams) >= len(seams), (
+        f"{len(seams)} ``_search_fn=tortoise_fts_query`` seam(s) but only "
+        f"{len(kw_seams)} ``_search_kwargs`` — a seam without kwargs inherits "
+        "``_rerank_candidates=True`` and re-picks its pool")
+    for kw in kw_seams:
+        assert "_rerank_candidates" in _ast.unparse(kw.value), (
+            "_search_kwargs at line "
+            f"{kw.lineno} does not opt out of the rerank")
+
 
 def test_a_non_relevance_order_by_is_never_re_picked_by_the_rerank(sdk, monkeypatch):
     """The second pre-cut reorder must not touch a page another ordering owns.
