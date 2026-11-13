@@ -2927,6 +2927,54 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
                                   # merely displayed. No-op for the non-Point legs
                                   # (the selection is gated on
                                   # ``entity_type == "point"``).
+                                  #
+                                  # ⛔ OVERRIDES: #8487's "no selection on the
+                                  # capture path" ruling is departed for the
+                                  # #12297 FUSED RERANK, and the departure is
+                                  # deliberate. That ruling refused a lever whose
+                                  # effect here was UNMEASURED reordering of the
+                                  # persisted prior; #12297 measured exactly this
+                                  # leg's recall@3 on the #11901 noun-path corpus
+                                  # at the SHIPPED width (40): exact arm
+                                  # 244→300 / 300 (+56, every mention inside the
+                                  # window); variant arm 406→424 of 426 — NET
+                                  # **+18**, of which **19 gained** and **−1**: a
+                                  # candidate fusion ALREADY HAD inside the cut is
+                                  # dropped, which is the risk this record exists
+                                  # to state. (The three figures are distinct; a
+                                  # bare "−1" beside an arrow reads as the delta.) (At the narrower width
+                                  # 15 the same arms read 244→277 and 406→425.) The
+                                  # width is named because the pool-15 arm is not
+                                  # the shippable configuration and quoting it
+                                  # alone would credit the lever with a gain it
+                                  # does not earn where it runs. Artifact
+                                  # `docs/research/2026-11-12-12297-rerank-
+                                  # calibration/measurement-noun-path.json`, whose
+                                  # brief calls that row the honest counter-case —
+                                  # and the lever ships OFF by default behind a
+                                  # gate whose OFF path is byte-identical. SCOPE: the
+                                  # measurement covers candidate COMPOSITION at
+                                  # the cut. It does NOT cover downstream
+                                  # link-before-create or supersession outcomes,
+                                  # which is why the gate's default is OFF and why
+                                  # `research-brief.md` §4 states the lexical
+                                  # near-identity bound on the claim. ⛔ THE PRICE
+                                  # IS PART OF THE RECORD, because the price is the
+                                  # stated reason the gate ships OFF: ~5.18 ms/pair
+                                  # on name-length candidates ⇒ ≈207 ms added per
+                                  # mention, ≈3.1 s added per capture at the
+                                  # product's `max_queries=15` (brief §6, artifact
+                                  # `measurement-noun-path.json` →
+                                  # `arms.rerank.latency`). The gate is ONE
+                                  # process-wide variable at ONE wiring point
+                                  # shared with interactive search AND the ask lane's
+                                  # retrieval (every caller of that read is behind
+                                  # it), where the same
+                                  # lever prices at ~3.4 s/query (brief §5) — so
+                                  # enabling it here buys BOTH, and the recall gain
+                                  # above is bought at that cost. `_valid_time`
+                                  # selection stays OFF here — the rerank is a
+                                  # relevance reorder, not a temporal one.
                                   _valid_time_rerank=False,
                                   **extra)
     out = []

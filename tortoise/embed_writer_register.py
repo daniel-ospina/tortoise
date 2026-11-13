@@ -278,8 +278,12 @@ claim and a slogan:
   be read as if it were: for a builder the alias is the only discovery signal (`_EMBED_WRITE`
   cannot see `SET y += $p`), so suppressing a shadowed call DELETES a real writer instead of
   demoting it — measured, and the reason the builder arm is deliberately shadow-BLIND and
-  over-credits instead. Its residual has its own naming entry in `UNDECIDABLE_WRITE_SHAPES`
-  ("a builder alias ESCAPES as an argument") and its own two pins; this bullet is the SEAM's.
+  over-credits instead. ⛔ Its over-credit residual is NOT in `UNDECIDABLE_WRITE_SHAPES` — it is named
+  where it is implemented, `probe._writes_an_embedding`'s builder-arm comment, and pinned by two
+  arms; the table entry that reads like it ("a builder alias ESCAPES as an argument") documents the
+  OPPOSITE direction (a builder PASSED rather than called, so the writer is absent), and citing it
+  here sent a reader to a differently-signed shape (`#12020` round 8 cycle 5, P3). This bullet is
+  the SEAM's.
   (`nonlocal` is NOT part of that residual and must not be read as
   one: a `nonlocal` naming a module-level alias does not compile — `SyntaxError: no binding for
   nonlocal … found` — so no runnable writer can be in that shape.) ⛔ The
@@ -968,24 +972,65 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
         "tortoise.sdk::create_source",
         WriterClass(
             EXEMPT,
-            "`tortoise/sdk.py::create_source` — this door REFUSES a caller-supplied "
-            "embedding MARKER (`_SERVER_MANAGED_EMBEDDING_MARKERS`, `#11858`) and writes "
-            "no vector of its own; the vector it stores is the caller's `embedding`, "
-            "carried through the same `_emit_event` / `_create_entity` path as every "
-            "other `:Source` writer. The instrument's only match is the guard's own "
-            "MESSAGE (\"pass `embedding=` and it declares the truth\"), and "
-            "`_EMBED_WRITE` reads raw SOURCE, so prose quoting the key enrols the "
-            "function — the same false-positive class as "
-            "`tortoise.api::_int_is_float_exact` below. ⛔ It arrived at `origin/main` in "
-            "`18d43e0462` (`#12113`) without an entry, so the probe was red on `main` "
-            "before this branch touched it (measured); `#11858` owns that instrument-match "
-            "provenance. Exempt as a CARRIER on `#5004`, the same disposition "
-            "`tortoise.api::add_point` carries: the store is DELEGATED to `_create_entity` "
-            "/ `tortoise/projection/entities.py::_upsert_source`, whose passthrough "
-            "stores `s.embedding` for the vector retrieval leg to read — NOT because no "
-            "store is reachable through it",
+            "`tortoise/sdk.py::create_source` issues no Cypher LITERAL of its own (measured: "
+            "zero `.query(`, no `SET `, in 35,275 CHARACTERS (35,541 bytes) \u2014 its `MERGE`/`CREATE` spellings are ALL prose "
+            "\u2014 docstring and `#` comments, none in executable code. The COUNT, with its tokenisation "
+            "named because that is what two readers disagreed about (`#12182` cycles 7-8): 8 "
+            "word-boundary spellings \u2014 3 in the docstring, 5 in `#` comments \u2014 plus 2 forms that are "
+            "not the keyword (`re-MERGEs`, `MERGEs`), which is why an unanchored substring count reads "
+            "10. Both figures reproduce; only the anchored one is the published split, so say which "
+            "when quoting it. \u26d4 That is not the same as \"issues no Cypher\": it DELEGATES the "
+            "`:Source` MERGE to `self._create_entity` (`tortoise.sdk::_create_entity` — a SYMBOL, "
+            "not a `path:LINE`, which this table bans because an offset rots silently), which "
+            "funnels to "
+            "`tortoise.projection.entities::_upsert_source` — and ⛔ THAT DELEGATE ISSUES NO CLAUSE OF "
+            "ITS OWN BUT IT DOES PERSIST THE CALLER'S VECTOR, which this entry said it did not until "
+            "`#12182` cycle 9 (P1, corrected). The measurement behind the old sentence was taken on the "
+            "STATIC clause text and is true only there: `_upsert_source`'s own `SET` lists name no "
+            "vector property, and its one occurrence of the word `embedding` is the comment "
+            "“Identity is a canonicalised URL — NEVER an embedding (STORAGE §9.4)”. But it ends by "
+            "funnelling EXTRA PROPS through `_persist_extra_props(..., allow_keys=_allow)`, "
+            "where `_allow = self._SOURCE_EXTRA_PROPS`, widened only under `_stub_completion` by "
+            "`_SOURCE_CAPTURE_REPLAY_PROPS` (`#12182` cycle 10, P3 — name the SET, not the constant), "
+            "whose closed surface DECLARES `embedding` (beside `domain`/`summary`/`topics`/`status`), "
+            "and that helper emits `SET n += $extra`. So a caller-supplied `embedding` IS persisted: "
+            "measured live, `create_source(url, kind, props={'embedding': [0.1, 0.2, 0.3]})` then "
+            "`MATCH (s:Source {url:$u}) RETURN s.embedding` returns the caller's array and `keys(s)` "
+            "carries the field, while a no-props control node has no such key. ⛔ THAT IS `#12180`'s "
+            "SUBJECT AND ITS PREMISE IS CORRECT (a caller vector lands on `:Source` with no gate and "
+            "no width check); this entry does not close it, and nobody may read `NO_LIVE_VECTOR` here "
+            "as proof that the door stores nothing — see the residual at the head of this table: the "
+            "pin covers the SYMBOL'S OWN BODY, which is not a claim about what it stores. ⛔ The "
+            "`#5004` caller-vector contract is what makes the store legitimate for "
+            "`tortoise.api::add_point`; `create_source` rides the same passthrough without the width "
+            "check, which is the difference `#12180` records. ⛔ A `:Source` vector ALSO exists on the "
+            "document path: `_upsert_document` writes one via "
+            "`set_embedding_clause(\"s\")`, so `no-live-vector` here is a claim "
+            "about this body, NOT about the label (`#12182` review cycle 3, P3). The instrument's ONE "
+            "match is a REFUSAL MESSAGE: the "
+            "`#11858` marker family's error string says \u201cpass `embedding=` and it declares the "
+            "truth\u201d, and `_EMBED_WRITE` reads raw SOURCE, so quoting the rejected keyword "
+            "enrols the function \u2014 the same PROSE class as `tortoise.api::_emit` and "
+            "`tortoise.api::_verify_record_vector_width`. The body issues no clause of its own: the "
+            "MERGE is delegated, and the only label it names is the `\"Source\"` literal it hands "
+            "that delegate. `#12180` owns the "
+            "finding that this writer arrived on `main` undeclared by `#12113`. \u26d4 That guard "
+            "is no longer RED — `#12016` landed the FIRST declaration for this same key and "
+            "`#11996` a SECOND, i.e. the duplicate, and `load()` refuses it at import (`#12182` "
+            "review cycles 6/9). \u26d4 THAT ordinal is measured TRUE for THIS table and is RESTATED "
+            "here, not retracted: `_DECLARATIONS` held the key 1\u00d7 after `a7b2d51bf1` (`#12016`) and "
+            "2\u00d7 after `11e733f938` (`#11996`), re-counted by AST in `#12182` cycle 11. What was "
+            "WRONG in the earlier wording was only its appositive \"the maximum either table ever "
+            "held was TWO, one per dict\": there is ONE register table, and \"one per dict\" is a "
+            "claim about the CENSUS dicts, a DIFFERENT population — those held the key once per dict "
+            "after `#12016` (two file-wide) and twice per dict after `#11996` (four file-wide, two in "
+            "any one dict; see the probe's census row). Count each table separately; do not carry one "
+            "table's number onto the other. "
+            "THIS entry is the survivor. \u26d4 Its survival is NOT a claim that `#12016`'s copy "
+            "was wrong: the passthrough it described is real (see the correction above), and the "
+            "pair is deleted for being a DUPLICATE, which is what makes the register unimportable",
             "#5004",
-            stores=NO_LIVE_VECTOR,  # the match is the guard's own MESSAGE, all prose
+            stores=NO_LIVE_VECTOR,
         ),
     ),
     (
