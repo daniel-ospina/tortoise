@@ -485,6 +485,14 @@ _DIRECTIONAL = frozenset({
     # cover polarities.
     "any", "no", "none", "both", "neither", "nothing", "something", "all",
     "every", "only", "plus", "minus",
+    # ⛔ The FAMILIES of the entries above, not just the instances a reviewer
+    # happened to measure (round-24 reviewer, cycle 7: six one-token
+    # falsifications at five live claims all pinned green — `constant`→`variable`,
+    # `holds`→`breaks`, `largest`→`smallest`, `find`→`miss`,
+    # `shipped`→`postgres`, `above`→`below`).
+    "larger", "smaller", "largest", "smallest", "higher", "lower", "holds",
+    "breaks", "constant", "variable", "find", "miss", "above", "below", "still",
+    "never", "shipped",
     "==", "!=", ">=", "<=", "<", ">", "\u2192", "\u00d7", "\u00f7", "\u00b1",
     "\u2248",
 })
@@ -497,6 +505,23 @@ _WORD_OR_OPERATOR = re.compile(
     r"[A-Za-z][A-Za-z'\-]*|[<>=!]=?|\u2192|\u00d7|\u00f7|\u00b1|\u2248")
 
 
+def _strip_free(text: str, free: tuple[str, ...]) -> str:
+    """Remove each named free ALTERNATIVE at TOKEN boundaries, case-insensitively.
+
+    ⛔ Substring removal is a fail-OPEN in the gate (#12349 round-24 reviewer,
+    cycle 7): naming `no` deleted every `not`/`nothing` in the claim, and naming
+    `identical` deleted every `identically`, so the gate reported nothing while a
+    pivot sat literal. A free entry must only ever remove ITSELF — and it must
+    remove it at a token boundary, or `not` eats the `not` inside `nothing`.
+    """
+    alts = sorted({a for entry in free for a in entry.split("|")},
+                  key=len, reverse=True)
+    for alt in alts:
+        text = re.sub(r"(?<![A-Za-z0-9_])" + re.escape(alt) + r"(?![A-Za-z0-9_])",
+                      " ", text, flags=re.I)
+    return text
+
+
 def _unnamed_words(true: str, free: tuple[str, ...]) -> list[str]:
     """DIRECTIONAL words/operators in `true` that the caller did not name in `free`.
 
@@ -505,10 +530,7 @@ def _unnamed_words(true: str, free: tuple[str, ...]) -> list[str]:
     shape, so a falsified copy no longer matches and the restated truth satisfies
     the pin — the same silent degradation an unnamed number causes.
     """
-    residual = true
-    for alt in sorted({a for entry in free for a in entry.split("|")},
-                      key=len, reverse=True):
-        residual = residual.replace(alt, " ")
+    residual = _strip_free(true, free)
     return [tok for tok in _WORD_OR_OPERATOR.findall(residual)
             if tok.lower() in _DIRECTIONAL]
 
@@ -529,10 +551,7 @@ def _unnamed_values(true: str, values: tuple[str, ...],
     and must be named, because an unnamed value is the one thing that turns this
     helper back into a presence pin without anybody noticing.
     """
-    residual = true
-    for alt in sorted({a for entry in free for a in entry.split("|")},
-                      key=len, reverse=True):
-        residual = residual.replace(alt, " ")
+    residual = _strip_free(true, free)
     named = {_magnitude(v) for v in values}
     out = []
     for match in re.finditer(_SIGNED_NUMBER, residual):
@@ -689,7 +708,12 @@ def _only_claim(scope: str, true: str, where: str,
         "causes, and the class five review cycles found by hand (#12349 round "
         "24). Add the word to `free=` (it becomes `\\S+`, which is the point: the "
         "claim's CONTENT must not be literal, its identity must be)")
-    found = re.findall(_shape(true, values, free), scope)
+    # ⛔ Case-INSENSITIVE matching (#12349 round-24 reviewer, cycle 7): a free
+    # slot declared lowercase did not match the document's `Postgres`, so the
+    # falsified copy stayed unmatched and the pin went green. A case flip is not a
+    # change of claim, and `found == [true]` still compares the stored text
+    # exactly, so a case-differing copy counts as a second statement (RED).
+    found = re.findall(_shape(true, values, free), scope, re.I)
     assert found == [true], (
         f"{where} must state this claim EXACTLY ONCE and to the artifact's "
         f"numbers ({true!r}) — it carries {found!r}. A §-scoped PRESENCE pin is "
@@ -711,7 +735,7 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     """
     claim = "while at k=5 it is \u22120.67 pts (the shipped leg ahead 2\u20130)"
     values = ("0.67", "2", "0")
-    claim_free = ("ahead",)
+    claim_free = ("ahead", "shipped|postgres")
     # 1. the true claim alone is accepted
     _only_claim(claim, claim, "scope", values=values, free=claim_free)
     # 2. a SECOND, DIFFERENT claim about another window is NOT a duplicate.
@@ -771,7 +795,8 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
                 values=("1.33", "0.34"))
     _only_claim("while at k=5 it is −0.67 pts", "while at k=5 it is −0.67 pts",
                 "scope", values=("0.67",))
-    _only_claim("recall@3 is higher", "recall@3 is higher", "scope")
+    _only_claim("recall@3 is higher", "recall@3 is higher", "scope",
+                free=("higher|lower",))
     # 11. a bare `=` is NOT a label (round-24 reviewer, cycle 4): `p = 0.34` is how
     #     every p-value in these documents is written, so exempting `=` exempted
     #     the very values the gate exists to require.
@@ -794,6 +819,15 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
         _only_claim("is weakly less than, and elsewhere is strictly greater than",
                     "is strictly greater than", "scope",
                     free=("strictly|weakly", "greater|less"))
+    # 15. a free entry must not MASK a different pivot it is a SUBSTRING of.
+    #     ⛔ Naming `no` used to delete every `not`/`nothing` from the residual, so
+    #     the gate reported success while a pivot sat literal — a fail-OPEN in the
+    #     gate itself (#12349 round-24 reviewer, cycle 7).
+    with pytest.raises(AssertionError, match="DIRECTION words are not all named"):
+        _only_claim("nothing else is accepted", "nothing else is accepted",
+                    "scope", free=("not",))
+    _only_claim("nothing else is accepted", "nothing else is accepted",
+                "scope", free=("nothing",))
 
 
 # ── 1. the defect claim, asserted against the shipped tokenizer ─────────────
@@ -1658,7 +1692,7 @@ def test_brief_fixture_table_is_the_artifact(artifact, brief: str) -> None:
     # 24): even §-scoped, a restatement inside §3.5 kept the falsified summary
     # green, so the numbers must appear exactly once.
     _only_claim(_scoped(brief, "3.5"), sentence, "§3.5's fixture summary",
-                free=("reachable",),
+                free=("reachable", "shipped"),
                 values=(str(sh["reachable"]), str(n), str(fx["reachable"]),
                         str(tk["reachable"]), str(nv["reachable"])))
 
@@ -2074,7 +2108,7 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
             f"+{(sn_fx - sn_sh) / len(snake) * 100:.1f} pts")
     _only_claim(plain33, want,
                 "§3.3's `snake_case` decomposition (re-derived from the ranks)",
-                free=("\u2192",),
+                free=("\u2192", "shipped"),
                 values=(str(len(snake)), str(sn_sh),
                         f"{sn_sh / len(snake):.3f}", str(sn_fx),
                         f"{sn_fx / len(snake):.3f}",
@@ -2140,7 +2174,7 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, population,
                 f"terms {reach['postgres_bm25/tokens']} of {n}, BM25 with its own "
                 f"analyser {reach['postgres_bm25/native']} of {n}.")
     _only_claim(text, sentence, "the changelog's `#8933` fixture counts",
-                free=("reachable",),
+                free=("reachable", "shipped"),
                 values=(str(reach["falkordb_tfidf"]), str(n),
                         str(reach["falkordb_tfidf__tokens_fixed"]),
                         str(reach["postgres_bm25/tokens"]),
@@ -2163,7 +2197,7 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, population,
         # ⛔ `values` is what makes the falsified copy MATCH the shape: without it
         # the shape is the literal sentence and a plant beside it went green
         # (measured: P3 GREEN on the first cut of this round).
-        values=(str(a), str(b)))
+        values=(str(a), str(b)), free=("shipped",))
 
 
 # ── 6. the two things a re-run would otherwise decide wrongly ───────────────
@@ -2384,7 +2418,8 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     # claim carries its own words — a bare `73.5 %` shape (`\d+\.\d+ %`) matches
     # every other percentage in the section, which is a false red, not a pin.
     _only_claim(_s43, f"the rows above sum to {total:.1f} %",
-                "§4.3's published share total", values=(f"{total:.1f}",))
+                "§4.3's published share total", values=(f"{total:.1f}",),
+                free=("above|below",))
     _only_claim(_s43, f"i.e. **{100 - total:.1f} %**",
                 "§4.3's published remainder",
                 values=(f"{100 - total:.1f}",))
@@ -2458,7 +2493,8 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         # passed magnitude (`str(0)`) can never match a token in the claim — the
         # word IS the value there (round-24 reviewer, P2: `ZERO` → `two` with the
         # truth restated was green).
-        free=("ZERO",) if k15["discordant"] == 0 else ())
+        free=("constant|variable", "holds|breaks")
+        + (("ZERO",) if k15["discordant"] == 0 else ()))
     k5 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k5"]
     assert k5["only_b"] == 0 and k5["only_a"] > 0, (
         "the k=5 comparison no longer favours the shipped leg \u2014 the bullet's "
@@ -2480,7 +2516,7 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         # token whose magnitude is already named, and `k=5` stays literal.
         values=(f"{abs(k5['delta_pts']):.2f}", str(k5["only_a"]),
                 str(k5["only_b"])),
-        free=("ahead",))
+        free=("ahead", "shipped|postgres"))
 
     # §0's Reading-1 figure — the falsifier's own numbers, quoted verbatim by
     # every downstream reader, and unpinned until round 24 (ONE edit was green).
@@ -2525,7 +2561,8 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         # ⛔ `inside` is the claim's direction (`inside` → `outside`) and
         # `differently` is its point (`rank differently` → `identically`) —
         # both planted green when left literal (round-24 reviewer, cycles 4-5).
-        free=("inside", "differently", "both"))
+        free=("inside", "differently", "both", "largest|smallest",
+              "find|miss"))
 
     _only_claim(
         plain,
@@ -3060,7 +3097,7 @@ def test_brief_states_what_the_reuse_guards_actually_do(brief_text,
                 "nothing else is still accepted",
                 "§2's accepted-reuse disclosure",
                 values=(str(len(population["names"])),),
-                free=("accepted", "nothing"))
+                free=("accepted", "nothing", "still|never"))
     assert "with the SAME population is ACCEPTED" not in flat
     assert "numDocuments >= n" not in flat, (
         "§2 still says the wait accepts an at-least-full index — it requires "
