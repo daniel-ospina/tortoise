@@ -43,13 +43,17 @@ check), so the `label is None` branch is not taken. No statement in `entity_reso
 ⛔ **THE SCOPE ABOVE IS THE PRODUCT CODE — NOT THE HARNESS, WHICH ALSO MOVED.** The code that
 PRODUCES this artifact is `tools/candidate_recall_11901.py`, and `git diff --stat e9a572d4b4
 <code_head> -- tools/candidate_recall_11901.py` is `494 insertions(+), 7 deletions(-)`: the `#12294`
-name-entropy arms arrived with the base move. So a re-run at the declared head emits **two arms
-this artifact does not contain** — `arms.gate_variant` and `arms.pooled_gate` are unconditional
-assignments in today's harness, and this artifact's `arms` keys are exactly `blocking` /
-`duplicate_rate` / `exact*` / `pooled` / `variant*`. Read it as the reproduction contract: these
+name-entropy arms arrived with the base move. So a re-run at the declared head emits **six arms
+this artifact does not contain** — `gate`, `gate_by_class`, `gate_gated_names`, `gate_variant`,
+`pooled_coverage`, `pooled_gate`, every one an unconditional `arms[...] = ...` assignment in
+today's harness (16 assigned vs the 10 held here: `blocking`, `duplicate_rate`, `exact*`,
+`pooled`, `variant*`). ⛔ Do not verify that set with a grep for two of the names — that is how
+this paragraph first undercounted it by four; enumerate instead:
+`git show <code_head>:tools/candidate_recall_11901.py | grep -o 'arms\["[a-z_]*"\]' | sort -u`
+against the artifact's own `arms` keys. Read it as the reproduction contract: these
 numbers are the RUN's (the harness as it stood at `e9a572d4b4`); a re-run at the declared head
-reproduces every arm here **plus** the two `#12294` ones, whose absence is the base having moved
-and not a lost measurement. Those arms have their own run and their own artifact
+reproduces every arm here **plus** those six, whose absence is the base having moved
+and not a lost measurement. The `#12294` gate arms have their own run and their own artifact
 (`measurement-entropy-gate-12294.json`), and `code_head_note` carries this same disclosure.
 
 **Search rung, stated because it was taken twice and failed twice.**

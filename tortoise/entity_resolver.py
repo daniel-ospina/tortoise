@@ -82,8 +82,11 @@ exactly what the ``T`` (word order / transposition) and ``S`` (typo and separato
 classes) keys reach, and `test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_shares_only_it`
 pins each of ``P``/``T``/``S`` with a pair whose own namespace its arm REQUIRES (not
 "shares alone" — measured, only the ``P`` witness shares ``P`` by itself; the ``T``
-witness shares ``T`` and ``S``, the ``S`` witness all three, which is why each arm
-asserts membership of its OWN namespace rather than equality of the intersection).
+witness shares ``T`` and ``S``, the ``S`` witness all three). ⚠️ And the arms do NOT all
+assert the same shape, which is the point: the ``P`` arm asserts set EQUALITY (its
+intersection is exactly ``{"P:ab "}``, so it is the exclusive pin), while the ``T`` and
+``S`` arms assert MEMBERSHIP of their own namespace in an intersection that also holds
+others.
 ⚠️ The
 transposition test (`test_the_scan_finds_a_transposition_the_single_prefix_key_could_not`)
 does NOT pin the namespace: its pair shares ``T`` *and* ``S``, so deleting either
