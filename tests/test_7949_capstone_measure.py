@@ -5368,12 +5368,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # own review).
     # ⛔ AND IT IS CALLED **BEFORE** `assert not failures` ON PURPOSE — THE ORDER IS
     # LOAD-BEARING, so do not tidy it down beside that assert. This test is RED on
-    # `main` for unrelated rows — `04-plan.md` CITED `tortoise/sdk.py:25284` for
-    # `declared = declared_relation_predicates()`, which the merged tree carries at
-    # `25393`, and this branch's row now reads `25393` while the rows #12456 / #12381
-    # track stay red — and it was no better at this branch's old base: at `ca74f2375e` the row
-    # cited `25189` and `git show ca74f2375e:tortoise/sdk.py | sed -n '25189p'` is a
-    # bare `)`; the same cite rot is tracked in #12456 / #12381. And
+    # `main` for unrelated rows, and THIS PR REPAIRS THEM — `04-plan.md` cited
+    # `tortoise/sdk.py:25284` for `declared = declared_relation_predicates()`, which the
+    # merged tree carries at `25393`, and the row above now reads `25393` — and the other
+    # rows red on the same tree are re-derived by the same commit, not left behind:
+    # `00-plan.md` and `03-test-design.md` both cite `sdk.py:9955`/`10008` (now `:10064`
+    # /`:10117`), `00-plan.md` also `18547` (`:18656`), `00-align.md`
+    # `16346`/`16347` (`:16455`/`:16456`), and `RECONCILE-A1-A2-A5.md`
+    # `18887`/`18899`/`18900` (`:18996`/`:19008`/`:19009`) — so the order still decides
+    # whether this pin runs. Nor was it better at this branch's old base: at `ca74f2375e`
+    # the row cited `25189` and
+    # `git show ca74f2375e:tortoise/sdk.py | sed -n '25189p'` is a bare `)`; the same
+    # cite rot is tracked in #12456 / #12381. And
     # an `assert` that raises ends the test: placed after it, this pin was **never
     # executed at the head that merged** and every arm below was unexercised — measured
     # at `ca74f2375e` by appending a `config/ci-surfaces.yml:10076` cite to the
