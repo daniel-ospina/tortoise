@@ -599,6 +599,26 @@ class TestTheRecordedMeasurement:
         assert isinstance(sub, str) and len(sub) > 80, sub
 
 
+    def test_the_published_ndcg_and_p_are_pinned(self):
+        """nDCG@10 and p were only ever cross-checked run-to-run (round 5).
+
+        ``test_the_repeat_run_agrees_on_the_numbers`` compares the two committed
+        runs, so an edit applied to BOTH files left the figures quoted in
+        ``.env.example``, the brief and the PR body unguarded with every test
+        green. They are pinned here to the published values instead.
+        """
+        art = self._artifact()
+        for door in ("fts_leg", "mcp_search", "capture_prior"):
+            arm = art["arms"][door]
+            assert arm["off"]["ndcg@10"] == 0.6917, (door, arm["off"]["ndcg@10"])
+            assert arm["on"]["ndcg@10"] == 0.9273, (door, arm["on"]["ndcg@10"])
+            verdict = art["verdict"][door]
+            assert verdict["delta_pts"] == 25.0, (door, verdict)
+            assert verdict["p"] == 5.293955920339377e-23, (door, verdict["p"])
+            assert verdict["p_display"] == "<1e-22", (door, verdict)
+            assert verdict["regressions"] == 0 and verdict["passes_10pts"], door
+        assert art["verdict"]["passes"] is True
+
 class TestHarnessStatistics:
     """The two numbers the verdict rests on, checked against hand values."""
 

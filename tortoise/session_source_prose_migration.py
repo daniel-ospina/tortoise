@@ -1482,13 +1482,33 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # :func:`_indexed_term_runs`' unicode-aware split, so an accented letter is
     # not counted as a separator.
     if len(runs) > 1:
+        # ⚠️ The two causes are NOT one problem, so the message DISCRIMINATES
+        # (#12360 review round 5, P3). An inner `_` really IS one indexed term —
+        # MEASURED ``build_or_query("x_y") == "x_y"`` (degenerate, so the read
+        # sends the literal) and ``build_or_query("web_search") ==
+        # "search|web|web_search"`` (the composite rides as an extra OR
+        # alternative) — while for any OTHER separator the ESCAPED literal cannot
+        # address one indexed term at all (``zx-99`` -> ``zx\-99``, which the index
+        # split). Before this wording BOTH clauses were stated unconditionally, so
+        # a probe the check 20 lines below would ACCEPT was refused with a false
+        # explanation.
+        has_us = "_" in token
+        has_other_sep = any(not (ch.isalnum() or ch == "_") for ch in token)
+        if has_us and not has_other_sep:
+            return (f"it splits into {len(runs)} alphanumeric runs {runs!r}; the "
+                    f"FTS index treats `_` as a WORD character (#12360), so a "
+                    f"token with an inner `_` IS one indexed term — but this read "
+                    f"either OR-expands it (`web_search` -> "
+                    f"`search|web|web_search`) or, where the plain segments all "
+                    f"die, sends the escaped literal (`x_y` -> `x_y`), so it "
+                    f"cannot be a ONE-TERM probe — pass a SINGLE RARE token (no "
+                    f"digits, dashes, underscores or punctuation inside it)")
         return (f"it splits into {len(runs)} alphanumeric runs {runs!r}; the "
                 f"FTS index splits on every non-alphanumeric character EXCEPT "
-                f"`_` (which it treats as a word character, #12360), so a "
-                f"token with an inner `_` IS one indexed term while the read "
-                f"OR-expands it and any other separator cannot address ONE "
-                f"indexed term at all — pass a SINGLE RARE token (no digits, "
-                f"dashes, underscores or punctuation inside it)")
+                f"`_` (which it treats as a word character, #12360), so the "
+                f"escaped literal the read sends cannot address ONE indexed term "
+                f"at all — pass a SINGLE RARE token (no digits, dashes, "
+                f"underscores or punctuation inside it)")
     # ⛔ AND A TOKEN THE READ WILL **ESCAPE** IS NOT A PROBE (#11536 review
     # round 7, P0). `build_or_query`'s degenerate single-token branch sends the
     # token through :func:`tortoise.sparse.escape_redisearch_literal`, which
