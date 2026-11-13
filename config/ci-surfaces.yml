@@ -1109,7 +1109,7 @@ surfaces:
   # arms are load-bearing — measured with `select()`, not assumed:
   # `['tortoise/__main__.py']` → `['api']` (a named-surface match REPLACES the
   # `core` fallback), so without this row the guard ran ZERO times on a
-  # `__main__.py`-only diff — and `__main__.py` is exactly where what this file pins
+  # `__main__.py`-only diff — and `__main__.py` is where most of what this file pins
   # lives (`_cmd_config`'s `.env` disclosure, `_dotenv_unread_candidates`, and the
   # `_dotenv_*` / redaction helpers it imports from there). `tortoise/dotenv_file.py`
   # reaches it through `core`; `tortoise/mcp_server.py` is a SHARED_MODULES path
