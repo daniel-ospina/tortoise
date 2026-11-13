@@ -5635,11 +5635,16 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     # only whether THIS entry moved, so a second family file registered into
     # `carve_out:` makes the row false with it green.
     #
-    # `_name(n) != entry` is DEFENSIVE, not load-bearing: the entry is not in `family`
-    # today (it matches none of the four globs), so no mutation currently reaches this
-    # clause. It is kept because the family is read FROM the document — a row that
-    # added a glob matching this entry would otherwise make the pin count the entry as
-    # a SECOND family file and red on a correct tree.
+    # `_name(n) != entry` is reachable and load-bearing, measured (#12266 review): the
+    # entry matches none of the four globs TODAY, so it is never in `family` as the
+    # globs stand — but the family is read FROM the document, and adding `*writeprobe*`
+    # to that row's globs makes `_is_family(entry)` true. With the clause intact that
+    # document still grades GREEN (0 helper messages); with the clause deleted it reds
+    # on a correct tree with a message of the form `carve_out:` holds 1 OTHER
+    # capstone-family entry/entries … [(10132, '- test_pack_logic_writeprobe_11083.py')].
+    # So do not delete it as
+    # unreachable: it is the clause that keeps a document edit from turning the entry
+    # into its own second family member.
     kin = [(n + 1, _name(n)) for n in range(start, end)
            if _is_family(n) and _name(n) != entry]
     assert not kin, (
