@@ -131,7 +131,9 @@ contradiction in favour of the position the read path already records.
 
 ### 2.2 The doctrine is already written down, verbatim, for a neighbouring case
 
-`tortoise-capture.ts` (the retention doctrine comment in `writeSpoolEntry`'s growth-refusal arm):
+`tortoise-capture.ts` (the retention doctrine comment in `writeSpoolEntry`'s too-large arm — the
+`DISCARD_ENTRY_TOO_LARGE` one, which RECORDS and marks terminal rather than unlinking; the separate
+growth-refusal arm below it carries its own comment, quoted in §2.3):
 
 > **A refusal is a delay the operator can reverse (`--retry-terminal`), an unlink is a loss nobody
 > can.**
@@ -178,19 +180,22 @@ legs, because the two legs drain one shared directory
 
 > ⚠️ **Line numbers in the table below are against `origin/main` (PRE-fix), on purpose:** the
 > exact lines they cite are the ones this change removes, so they cannot be cited at HEAD.
-> Everywhere else this document cites **symbols, not line numbers** — the first draft transcribed
+> Elsewhere the citations name **symbols, not line numbers** — the first draft transcribed
 > `capture_spool.py:<line>` offsets against an older revision and only 2 of 11 still resolved at
-> HEAD (review cycle 5 measured it), so each citation now names the function or constant it means
-> and survives the next edit.
+> HEAD (review cycle 5 measured it), so each citation names the function or constant it means and
+> survives the next edit. The exceptions are enumerated once, in the preamble's four groups; this
+> table is the first of them.
 
 | Leg | Site | `catch` |
 |---|---|---|
 | TypeScript (the deployed harness seam) | `tortoise-capture.ts` `listSpoolEntries` (base `:1453-1457`) | `catch { meta = undefined }` — collapses *read failure* and *parse failure* into one outcome, then renders it as `meta is not valid JSON` (base `:1465`). |
 | Python (the CLI drain) | `capture_spool.py` `list_spool_metas` (base `:1370-1375`) | `except (OSError, json.JSONDecodeError, UnicodeDecodeError): meta = None` — `OSError` **includes `PermissionError`**. Same collapse, same `corrupt_entry`, same quarantine + unlink (base `:1392-1395`). |
 
-The TS comment above `listSpoolEntries`'s parse arm claims the function "Mirrors
-`capture_spool.list_spool_metas`" — it does, which is why fixing one leg alone would leave the other
-leg destroying the same files on the next tick.
+The TS comment above `listSpoolEntries`'s parse arm says the function "Mirrors
+`capture_spool.list_spool_metas` EXCEPT on non-UTF-8 bytes": on the destruction semantics this section
+is about it does mirror exactly — which is why fixing one leg alone would leave the other leg
+destroying the same files on the next tick — while the carve-out is the pre-existing divergence
+recorded in §7 residual (4).
 
 ---
 
