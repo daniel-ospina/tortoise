@@ -624,11 +624,19 @@ def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
             # longer overwrites a sibling's clock, while main's direct read always did
             # — so on a colliding pair the shard can be judged on the EARLIER of the
             # two, which is a cancel main would not make. That collision is
-            # pre-existing (last-write-wins, order-dependent, in both directions) and
-            # no workflow in this repo names a two-parameter matrix job, so it is not
-            # reachable today; fixing it means deciding deliberately how two legs' work
-            # clocks compose, which adds a cancel path and is filed rather than folded
-            # in (#12449).
+            # pre-existing (last-write-wins, order-dependent, in both directions). The
+            # SHAPE DOES EXIST HERE — `mirror-images.yml` names each leg
+            # `mirror (<source>, <target>)`, a genuine two-axis name — but
+            # `norm_job_name` keys on the FIRST axis and those sources are distinct
+            # today (`falkordb/falkordb-server:latest`, `…:v4.20.6`,
+            # `rhysd/actionlint:1.7.12`), so no two legs share a key and the collision
+            # is not reachable AT THIS MOMENT (measured: 0 colliding runs across 110,
+            # rev12421 review cycle 5). ⛔ THAT IS ONE EDIT FROM FALSE: a second
+            # `include:` target for an existing source — the very edit that file's own
+            # comment warns about — makes it live in a workflow this module cancels,
+            # and an earlier draft of this comment claimed no such workflow existed.
+            # Fixing it means deciding deliberately how two legs' work clocks compose,
+            # which adds a cancel path, so it is filed rather than folded in (#12449).
             #
             # ⛔ AND AN INTERMEDIATE HEAD OF THIS PR CARRIED A SECOND PERMITTING
             # BRANCH, which this paragraph used to cite as one that still exists. A
