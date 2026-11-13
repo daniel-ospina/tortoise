@@ -58,9 +58,16 @@ no fail-safe and no global constant here. The start clock is ``run_started_at``
 cancel tool toward cancelling a healthy run that only just started.
 
 The SAME argument applies to a shard's own clock (`job_work_start`): an
-UNFINISHED shard with no work clock — one no runner has claimed, i.e. every
-`queued`/`waiting`/`requested`/`pending` job — makes the bound **UNDERIVABLE**
-(#11045). That is the dominant skip on a starved fleet: a run whose only
+UNFINISHED shard with no work clock — a job whose status is
+`queued`/`waiting`/`requested`/`pending` AND which no runner has claimed — makes
+the bound **UNDERIVABLE**
+(#11045). ⛔ THE CLASS IS NARROWER THAN THE STATUS LIST, and the difference is a
+claim: a job still reported `queued` but carrying an assigned `runner_name` DID
+get a runner, so its `started_at` is its claim time and `job_work_start` hands
+that out as the clock (see the gate in that function). No instance was observed
+live — 0 of 250 job rows across 50 non-completed runs (outside review, cycle 3)
+— but the docstring must not state a guarantee the gate does not give.
+That is the dominant skip on a starved fleet: a run whose only
 unfinished shards are queueing is a CAPACITY WAIT. ⛔ AND IT IS THE DEFAULT OUTCOME
 FOR A MIXED MATRIX — one claimed shard plus any queued sibling — which is a
 CAPABILITY LOSS, stated plainly rather than argued away (review E, cycle 2):
