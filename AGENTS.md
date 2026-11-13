@@ -603,7 +603,7 @@ through `credential.helper = !gh auth git-credential`. Measured 2026-11-05: a **
 0 landings** while every lane honestly reported "built, parked" — none misreported itself; nothing
 had asked whether the credential could push at all.
 
-**Two proxies are rejected, both having been relied on in the fleet** — neither is this test:
+**Three proxies are rejected, all of them relied on in the fleet at some point** — none of them is this test:
 
 - **`gh auth status`** exits **0** for a read-only credential: it reports that the credential exists
   and is valid, never that it can write.

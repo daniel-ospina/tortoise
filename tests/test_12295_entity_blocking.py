@@ -241,6 +241,34 @@ def test_index_never_pairs_a_member_with_itself():
     assert index.candidates("the plan doc", label="Object", exclude="a") == []
 
 
+def test_a_from_rows_index_answers_its_own_candidates():
+    """`from_rows` rows carry no label, so `candidates()` must not assume one.
+
+    ⛔ MEASURED before the fix: `from_rows([{id,name},…]).candidates(name)` was
+    `[]` while `.blocks()` held the members — the index stored label `""` (the
+    row shape has no label) but `candidates(label=None)` iterated the
+    :data:`ENTITY_LABELS` constant, so every lookup missed. An empty list is
+    indistinguishable from "nothing shares this key", which is exactly the false
+    negative `test_oversized_block_is_skipped_by_a_QUERY_and_REPORTED` exists to
+    prevent — and `from_rows` is the constructor the measurement tool uses.
+    """
+    index = BlockIndex.from_rows([{"id": "o1", "name": "the plan doc"},
+                                  {"id": "o2", "name": "the plan doc"},
+                                  {"id": "o3", "name": "another name"}])
+    found = index.candidates("the plan doc")
+    assert sorted(found) == ["o1", "o2"], (
+        f"a from_rows index answered {found!r}; its own blocks() hold "
+        f"{index.blocks()!r}")
+    #: The stored fold is what the index blocks on, so a re-fold of the mention
+    #: must still find them. (Do NOT assert that an unrelated name finds nothing:
+    #: the SHINGLE bands deliberately surface fuzzy candidates, so blocking is not
+    #: an exact-key lookup and that assertion would pin the wrong contract.)
+    assert sorted(index.candidates("The Plan-Doc")) == ["o1", "o2"]
+    #: Reverting the label fallback reds THIS assertion and nothing else.
+    assert index.candidates("the plan doc", label="Object") == [], (
+        "an explicit label must still scope the query to that label's blocks")
+
+
 def test_candidate_union_is_deduplicated_and_order_stable():
     index = BlockIndex()
     index.add("a", "the plan doc", label="Object")

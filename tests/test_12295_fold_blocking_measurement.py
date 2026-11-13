@@ -69,15 +69,28 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
         f"code_head is not a full commit sha: {report['code_head']!r}")
     repo = Path(__file__).resolve().parent.parent
     if (repo / ".git").exists():
-        present = subprocess.run(
-            ["git", "-C", str(repo), "cat-file", "-e", f"{report['code_head']}^{{commit}}"],
-            capture_output=True)
-        if present.returncode == 0:
-            ancestor = subprocess.run(
-                ["git", "-C", str(repo), "merge-base", "--is-ancestor",
-                 report["code_head"], "HEAD"], capture_output=True)
+        #: ⛔ EVERY git subprocess here needs a timeout: on a promisor/partial
+        #: clone an ABSENT object makes `git cat-file -e` spawn a lazy fetch whose
+        #: negotiation can burn minutes before failing (MEMORY.md
+        #: `[git-exit-code-is-not-proof]`: 5m46s of CPU, suite aborted at pytest's
+        #: 280 s faulthandler). A timeout is "could not answer", which this guard
+        #: must treat exactly like a shallow checkout — never as a red.
+        try:
+            present = subprocess.run(
+                ["git", "-C", str(repo), "cat-file", "-e",
+                 f"{report['code_head']}^{{commit}}"],
+                capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            present = None
+        if present is not None and present.returncode == 0:
+            try:
+                ancestor = subprocess.run(
+                    ["git", "-C", str(repo), "merge-base", "--is-ancestor",
+                     report["code_head"], "HEAD"], capture_output=True, timeout=10)
+            except subprocess.TimeoutExpired:
+                ancestor = None
             #: 0 = ancestor, 1 = not an ancestor, anything else = could not answer.
-            if ancestor.returncode in (0, 1):
+            if ancestor is not None and ancestor.returncode in (0, 1):
                 assert ancestor.returncode == 0, (
                     f"code_head {report['code_head']} exists but is not in this "
                     "branch's history — a rebase rewrote it out of every ref, so "
@@ -205,3 +218,36 @@ def test_the_brief_exists_and_quotes_the_artifact(report):
                    str(report["arms"]["variant"]["3"]["attached_folded"]),
                    f"{b['multikey']['reduction_ratio']}"):
         assert needle in text, f"the brief does not quote {needle!r} from the artifact"
+
+
+def test_the_per_k_width_claim_matches_the_artifact(report):
+    """The brief's article-anchor section turns on ONE class's per-`k` rows.
+
+    ⛔ A substring needle cannot see this: `"180"`, `"179"`, `"207"` and `"386"`
+    occur throughout the prose, so a brief quoting a SUPERSEDED row would stay
+    green while its central claim went stale — the #11901 erratum class this file
+    exists to prevent. So assert the artifact's shape, then assert the brief
+    quotes the figures derived from it.
+    """
+    cls = report["arms"]["variant_by_class"]["space-to-hyphen"]
+    ks = ("3", "5", "10", "15")
+    pairs = {cls[k]["pairs"] for k in ks}
+    assert len(pairs) == 1, (
+        f"the class population moved between ``k`` ({sorted(pairs)}) — the rows "
+        "are no longer a window sweep of ONE population")
+    total = pairs.pop()
+    windows = [cls[k]["in_window"] for k in ks]
+    assert windows == sorted(windows), (
+        f"a wider window cannot lose a member, measured {windows} at k={ks}")
+    assert windows[-1] == total, (
+        f"the widest window holds {windows[-1]} of {total} — the brief's "
+        "``width therefore cannot recover them`` is false once a member is "
+        "still out of reach")
+    assert [cls[k]["attached"] for k in ks] == [0] * len(ks), (
+        "some member of the class attached, so the article anchor is not the "
+        "sole cause — the brief's diagnosis is then wrong")
+    text = BRIEF.read_text()
+    assert f"{windows[0]} of {total}" in text, (
+        f"the brief does not quote the narrowest window ({windows[0]} of {total})")
+    assert f"all {windows[-1]} are in the window" in text, (
+        f"the brief does not quote the widest window (all {windows[-1]})")

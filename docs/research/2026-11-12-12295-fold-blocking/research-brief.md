@@ -32,9 +32,9 @@ and it is the reason no new field, no new fold and no second source of truth app
 | mechanism | where | what it does |
 |---|---|---|
 | `normalize_entity_name` | `entity_resolver.py:141` | NFKC → casefold → drop a leading **article** → non-word run → space → whitespace collapse |
-| write doors that persist it as `canonical_name` | `sdk.py:45593` (the `_emit` funnel), `api.py:2628` (`add_subject`), `api.py:2671` (`add_object`), `sdk.py:46935` (a real rename) | filled at every door, `setdefault`, so a caller-supplied fold wins |
-| the projection | `projection/entities.py:5077` (ON CREATE), `:5084` (`coalesce` fill) | `canonical_name` is written ON CREATE only, so a re-mention cannot rewrite the key that resolved it |
-| identity | `projection/entities.py:5061` (`merge_key = "id"`) | `name` is a mutable natural key; the id is the identity (`#3584`/`#3590`) |
+| write doors that persist it as `canonical_name` | `sdk.py:45886` (the `_emit` funnel), `api.py:2628` (`add_subject`), `api.py:2671` (`add_object`), `sdk.py:47229` (a real rename) | filled at every door, `setdefault`, so a caller-supplied fold wins |
+| the projection | `projection/entities.py:5094` (ON CREATE, objects) / `:4958` (subjects), coalesce fill at `:5101` / `:4975` | `canonical_name` is written ON CREATE only, so a re-mention cannot rewrite the key that resolved it |
+| identity | `projection/entities.py:4907` (`merge_key = "id"`) | `name` is a mutable natural key; the id is the identity (`#3584`/`#3590`) |
 
 So item 1 of the issue — *"a comparison-side normalised key … never rewrite `name`"* — is **built**,
 as of `#12047`. What did not exist, and is what this lane adds:
@@ -42,7 +42,7 @@ as of `#12047`. What did not exist, and is what this lane adds:
 | gap | site | measured consequence |
 |---|---|---|
 | the capture prior compared `_norm` only — whitespace + lowercase, byte-identical to Zep's `_normalize_string_exact` | `extractor_v2._norm` at `:4232`, the historical arm in `_find_existing_entity` (`:5769` now carries the folded rung this lane added at `:5813`) | **0 of 422** variant pairs attach at any `k`, both modes — the before-half of every rate in §3 |
-| the dedupe scan blocks on ONE key — `folded[:3]` | `entity_resolver.py:394` | a transposition (`the project alpha` / `alpha project`) is never compared, at any similarity |
+| the dedupe scan blocks on ONE key — `folded[:3]` | `entity_resolver.py:394` **on `origin/main`** (this change moves it) | a transposition (`the project alpha` / `alpha project`) is never compared, at any similarity |
 
 External confirmation at source (rung 3): Zep's `_normalize_string_exact` is *"Lowercase text and
 collapse whitespace so equal names map to the same key"* — i.e. **we were already at Zep's exact
