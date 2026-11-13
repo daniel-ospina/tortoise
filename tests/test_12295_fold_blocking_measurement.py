@@ -504,11 +504,26 @@ def test_the_cost_column_and_the_population_are_bound_to_the_artifact(report):
     #: The verdict's ratio, derived from the two pinned figures.
     ratio = (report["arms"]["blocking"]["multikey"]["candidates_mean_per_mention"]
              / per_mention[str(max(widths))])
-    assert _quotes(text, round(ratio, 1)), (
-        f"the brief does not quote the artifact's own cost ratio ({round(ratio, 1)}x)")
-    assert "the cost" in text, (
+    #: ⛔ BOUND IN THE MULTIPLIER FORM, IN THE SENTENCE THAT MAKES THE COST CLAIM
+    #: (round 28). The first cut asked only whether `round(ratio, 1)` appeared
+    #: ANYWHERE (`_quotes(text, ...)`), which the brief's own prose satisfies by
+    #: accident: `round(50.0/15, 1)` is `3.3`, and the brief is full of section
+    #: numbers like `### 3.3` and `see 3.3`. Measured: mutating
+    #: `multikey.candidates_mean_per_mention` `34.9` -> `50.0` in the artifact AND
+    #: the brief's two `34.9` occurrences kept the suite **`14 passed`** while the
+    #: artifact derived `3.3x` and the verdict sentence still said `2.3x the cost`
+    #: — the pin was satisfied by a heading. A bare number cannot carry this claim,
+    #: so the needle is the `×` form and it must sit in the cost sentence.
+    ratio_txt = f"{round(ratio, 1)}\u00d7"
+    cost_sentences = [s for s in re.split(r"(?<=[.!?])\s+", text) if "the cost" in s]
+    assert cost_sentences, (
         "the ratio is quoted somewhere, but not attached to a COST claim — the "
         "verdict sentence is about cost and that sentence has gone")
+    assert any(ratio_txt in s for s in cost_sentences), (
+        f"the cost sentence does not quote the artifact's own ratio as {ratio_txt!r} "
+        f"(sentences carrying 'the cost': {cost_sentences[:2]}) — a BARE number is "
+        "satisfied by the brief's own section numbering, which is how a wrong ratio "
+        "stayed green")
     for rendered in (f"--population {corpus_pop}", f"all {corpus_pop}",
                      f"C({corpus_pop}, 2)"):
         assert rendered in text, (
