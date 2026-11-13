@@ -900,7 +900,11 @@ def run(args: argparse.Namespace) -> int:
         # ⛔ A reranker REORDERS what retrieval returned; it cannot surface a row
         # the leg never produced. So this arm's ceiling is arm 1's `miss_past_k`
         # — the rows inside a 15-window that fell past the `limit=3` cut — and
-        # never the `miss_absent_at_max_k` 81. That bound is stated here rather
+        # never `miss_absent_at_max_k` (the rows absent at every width this run
+        # measured; their count is this artifact's own `arms.exact[k]` field, so
+        # it is deliberately NOT restated as a literal here — an earlier draft
+        # said 81, which was the previous 219/300 run's number, not this one's).
+        # That bound is stated here rather
         # than left for a reader to infer, because a rerank arm that reports a
         # recall figure without it invites the reading "the reranker fixed
         # recall", which is the one thing it cannot do (issue #12297).

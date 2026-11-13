@@ -41604,32 +41604,54 @@ class TortoiseSDK:
                     # scored head reordered, the unscored tail in its retrieval
                     # order — so the read's id set is unchanged.
                     result_ids = [r["id"] for r in _reranked]
-                # ⛔ THE CAP IS DISCLOSED, NEVER SILENT. ``rerank_pool`` bounds
-                # how many leading candidates are SCORED; rows past that width
-                # keep their retrieval order and can never be promoted, so a
-                # caller that opted into the lever must be able to tell "the
-                # reranker decided" from "the reranker never saw it". Before
-                # this, the stats were written to ``_trunc["rerank"]`` and read
-                # by NOTHING (``mark_truncation`` publishes only
-                # candidates/exact/incomplete), i.e. the cap was undisclosed.
-                # ``ran``/``reason``/``count`` follow the #8487 ``valid_time``
-                # leg precedent (``count`` = what the lever DID); the width rides
-                # as ADDITIVE keys (#4999) and ``degraded`` stays False — in a
-                # leg trace that flag means "a retrieval leg did not run".
-                if status_trace is not None:
-                    _rr_applied = bool(_rr_stats.get("applied"))
-                    status_trace.append(dict(
-                        _trace_entry(
-                            "rerank",
-                            ran=_rr_applied,
-                            degraded=False,
-                            reason=("ok" if _rr_applied else str(
-                                _rr_stats.get("degrade_reason") or "not_applied")),
-                            count=int(_rr_stats.get("moved") or 0)),
-                        **{RERANK_POOL_KEY: _pool_n,
-                           RERANK_SCORED_KEY: int(_rr_stats.get("scored") or 0),
-                           RERANK_UNSCORED_KEY: int(
-                               _rr_stats.get("unscored") or 0)}))
+            else:
+                # ⛔ AN OPTED-IN LEVER THAT DID NOTHING MUST SAY SO. The pool
+                # text read is best-effort (it returns {} on any graph error),
+                # so without this arm a transient failure made the trace
+                # IDENTICAL to the never-opted-in one — "the reranker silently
+                # did nothing" indistinguishable from "the flag was never set".
+                # #8487's ``valid_time`` leg records ``state_read_failed`` for
+                # exactly this case; this is the same rule.
+                _rr_stats = {
+                    "applied": False,
+                    "degrade_reason": (
+                        "no_text_field"
+                        if _rerank_text_field(entity_type, graph_label) is None
+                        else "pool_text_read_failed"),
+                }
+            # ⛔ THE CAP IS DISCLOSED, NEVER SILENT. ``rerank_pool`` bounds how
+            # many leading candidates are SCORED; rows past that width keep
+            # their retrieval order and can never be promoted, so a caller that
+            # opted into the lever must be able to tell "the reranker decided"
+            # from "the reranker never saw it". Before this, the stats were
+            # written to ``_trunc["rerank"]`` and read by NOTHING
+            # (``mark_truncation`` publishes only candidates/exact/incomplete),
+            # i.e. the cap was undisclosed.
+            # ``ran``/``reason``/``count`` follow the #8487 ``valid_time`` leg
+            # precedent (``count`` = what the lever DID); the width rides as
+            # ADDITIVE keys (#4999) and ``degraded`` stays False — in a leg
+            # trace that flag means "a retrieval leg did not run".
+            if status_trace is not None:
+                _rr_applied = bool(_rr_stats.get("applied"))
+                _rr_scored = int(_rr_stats.get("scored") or 0)
+                _rr_unscored = int(_rr_stats.get("unscored") or 0)
+                if not _rr_applied:
+                    # A degraded rerank ORDERED NOTHING, so every candidate went
+                    # unscored. Reporting the stats' absent keys as 0 would say
+                    # "nothing was left unscored" on a read where nothing was
+                    # scored — the same false all-clear one branch up.
+                    _rr_scored, _rr_unscored = 0, len(result_ids)
+                status_trace.append(dict(
+                    _trace_entry(
+                        "rerank",
+                        ran=_rr_applied,
+                        degraded=False,
+                        reason=("ok" if _rr_applied else str(
+                            _rr_stats.get("degrade_reason") or "not_applied")),
+                        count=int(_rr_stats.get("moved") or 0)),
+                    **{RERANK_POOL_KEY: _pool_n,
+                       RERANK_SCORED_KEY: _rr_scored,
+                       RERANK_UNSCORED_KEY: _rr_unscored}))
 
         # 5e. (#8487) VALID-TIME SELECTION — prefer the CURRENTLY-VALID version.
         #     Runs at the SAME pre-truncation seam as ``exclude_status`` (#898)

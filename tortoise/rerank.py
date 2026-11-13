@@ -40,6 +40,7 @@ a hard per-session cap (one session can't monopolize the context).
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -174,8 +175,9 @@ def rerank_pool(
     unscored tail follows unchanged.
 
     Degrade (``applied: False`` + ``degrade_reason``) on: the gate off, an empty
-    query or pool, a scorer that will not load, a score exception, and a
-    length-mismatched score vector. Every one of them returns the input order
+    query or pool, a scorer that will not load, a score exception, a
+    length-mismatched score vector, a non-numeric score entry, a non-finite
+    (``nan``/``inf``) score. Every one of them returns the input order
     untouched — this function never raises and never changes a caller's
     behaviour on failure.
     """
@@ -208,7 +210,22 @@ def rerank_pool(
                               f"vs {len(texts)})",
         }
 
-    order = sorted(range(n_scored), key=lambda i: (-float(scores[i]), i))
+    # ⛔ THE COERCION IS INSIDE THE GUARD, not just the call: a scorer that
+    # returns ``None``/a string for one entry raised ``TypeError`` out of
+    # ``sorted``/``min`` below and failed the whole SEARCH, while the contract
+    # says every failure degrades to the retrieval order. A non-finite value is
+    # a failure too, and it also must not reach a trace a caller serializes
+    # (``NaN`` is not JSON).
+    try:
+        values = [float(s) for s in scores]
+    except (TypeError, ValueError) as e:
+        return untouched, {"applied": False,
+                           "degrade_reason": f"non-numeric scores: {e!r}"}
+    if not all(math.isfinite(v) for v in values):
+        return untouched, {"applied": False,
+                           "degrade_reason": "non-finite scores"}
+
+    order = sorted(range(n_scored), key=lambda i: (-values[i], i))
     reordered = [head[i] for i in order] + untouched[n_scored:]
     moved = sum(1 for rank, i in enumerate(order) if rank != i)
     return reordered, {
@@ -217,8 +234,8 @@ def rerank_pool(
         "scored": n_scored,
         "unscored": len(untouched) - n_scored,
         "moved": moved,
-        "top_score": round(float(scores[order[0]]), 4),
-        "min_scored": round(min(float(s) for s in scores), 4),
+        "top_score": round(values[order[0]], 4),
+        "min_scored": round(min(values), 4),
     }
 
 

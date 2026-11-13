@@ -60,9 +60,16 @@ def _clean_state(monkeypatch):
     rerank._fail_cache.clear()
 
 
-def _inject(scorer):
-    """Patch the ONE shared load policy, so the rerank sees a fake scorer."""
-    rerank.load_scorer = _make_loader(scorer)
+def _inject(scorer, monkeypatch):
+    """Patch the ONE shared load policy, so the rerank sees a fake scorer.
+
+    ⛔ THROUGH ``monkeypatch``, never a bare assignment: a plain module attribute
+    write is undone only by this module's own teardown helper, so a test that
+    forgets it leaks the fake scorer into every later test in the SESSION —
+    measured: two ``tests/test_product_rerank.py`` tests red once a wiring test
+    that omitted the helper ran first. ``monkeypatch`` restores per test.
+    """
+    monkeypatch.setattr(rerank, "load_scorer", _make_loader(scorer))
 
 
 def _make_loader(scorer):
@@ -83,11 +90,16 @@ class _ShortScorer:
         return [1.0]     # wrong length on purpose
 
 
-@pytest.fixture
-def _restore_loader():
-    original = rerank.load_scorer
-    yield
-    rerank.load_scorer = original
+class _NoneScorer:
+    """A scorer that returns a placeholder instead of a float."""
+
+    def score(self, query, contents):
+        return [None] * len(contents)
+
+
+class _NanScorer:
+    def score(self, query, contents):
+        return [float("nan")] * len(contents)
 
 
 # ── 1. default-off is byte-identical and loads no scorer ───────────────────
@@ -106,10 +118,10 @@ def test_gate_fails_safe_off(monkeypatch):
             assert rerank.rerank_pool_enabled(None) is False
 
 
-def test_off_path_returns_input_order_and_never_loads_a_scorer(_restore_loader):
+def test_off_path_returns_input_order_and_never_loads_a_scorer(monkeypatch):
     def _must_not_be_called(name, **kw):
         raise AssertionError("the OFF path must not load a cross-encoder")
-    rerank.load_scorer = _must_not_be_called
+    monkeypatch.setattr(rerank, "load_scorer", _must_not_be_called)
 
     out, stats = rerank.rerank_pool(QUERY, ROWS)
     assert [r["id"] for r in out] == ["x0", "x1", "x2"]
@@ -120,9 +132,9 @@ def test_off_path_returns_input_order_and_never_loads_a_scorer(_restore_loader):
 
 # ── 2. flag-on is a PERMUTATION ────────────────────────────────────────────
 
-def test_on_path_reorders_but_is_a_permutation(monkeypatch, _restore_loader):
+def test_on_path_reorders_but_is_a_permutation(monkeypatch):
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
-    _inject(rerank.FakeScorer())
+    _inject(rerank.FakeScorer(), monkeypatch)
 
     out, stats = rerank.rerank_pool(QUERY, ROWS)
     ids = [r["id"] for r in out]
@@ -135,7 +147,7 @@ def test_on_path_reorders_but_is_a_permutation(monkeypatch, _restore_loader):
     assert stats["scored"] == 3 and stats["unscored"] == 0
 
 
-def test_ties_break_on_the_original_index(monkeypatch, _restore_loader):
+def test_ties_break_on_the_original_index(monkeypatch):
     """A scorer that returns one constant must leave the order UNCHANGED.
 
     Without the index tie-break a stable sort of equal keys is incidental to the
@@ -148,7 +160,7 @@ def test_ties_break_on_the_original_index(monkeypatch, _restore_loader):
         def score(self, query, contents):
             return [0.5] * len(contents)
 
-    _inject(_Flat())
+    _inject(_Flat(), monkeypatch)
     out, stats = rerank.rerank_pool(QUERY, ROWS)
     assert [r["id"] for r in out] == ["x0", "x1", "x2"]
     assert stats["applied"] is True and stats["moved"] == 0
@@ -157,9 +169,9 @@ def test_ties_break_on_the_original_index(monkeypatch, _restore_loader):
 # ── 3. pool bounds what is SCORED; the tail keeps its order ────────────────
 
 def test_pool_width_bounds_scoring_and_preserves_the_tail(
-        monkeypatch, _restore_loader):
+        monkeypatch):
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
-    _inject(rerank.FakeScorer())
+    _inject(rerank.FakeScorer(), monkeypatch)
 
     out, stats = rerank.rerank_pool(QUERY, ROWS, pool=2)
     assert stats["scored"] == 2 and stats["unscored"] == 1 and stats["pool"] == 2
@@ -171,10 +183,10 @@ def test_pool_width_bounds_scoring_and_preserves_the_tail(
     assert len(out) == len(ROWS)
 
 
-def test_pool_env_knob_and_explicit_kwarg_precedence(monkeypatch, _restore_loader):
+def test_pool_env_knob_and_explicit_kwarg_precedence(monkeypatch):
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     monkeypatch.setenv(rerank.FUSED_RERANK_POOL_ENV, "1")
-    _inject(rerank.FakeScorer())
+    _inject(rerank.FakeScorer(), monkeypatch)
     _out, stats = rerank.rerank_pool(QUERY, ROWS)
     assert stats["pool"] == 1 and stats["scored"] == 1
     # an explicit kwarg wins over the env (the `_clamp_int` contract)
@@ -182,10 +194,10 @@ def test_pool_env_knob_and_explicit_kwarg_precedence(monkeypatch, _restore_loade
     assert stats["pool"] == 3 and stats["scored"] == 3
 
 
-def test_pool_env_garbage_falls_back_to_the_default(monkeypatch, _restore_loader):
+def test_pool_env_garbage_falls_back_to_the_default(monkeypatch):
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     monkeypatch.setenv(rerank.FUSED_RERANK_POOL_ENV, "not-a-number")
-    _inject(rerank.FakeScorer())
+    _inject(rerank.FakeScorer(), monkeypatch)
     _out, stats = rerank.rerank_pool(QUERY, ROWS)
     assert stats["pool"] == rerank.DEFAULT_FUSED_RERANK_POOL
 
@@ -196,11 +208,18 @@ def test_pool_env_garbage_falls_back_to_the_default(monkeypatch, _restore_loader
     (RuntimeError("model unavailable"), "model unavailable"),
     (_RaisingScorer(), "boom"),
     (_ShortScorer(), "length-mismatched"),
+    # ⛔ The contract is "never raises", so a non-numeric or non-finite score
+    # degrades like every other failure. Before this, ``float(None)`` inside
+    # ``sorted`` raised ``TypeError`` out of the search path, and a ``nan``
+    # reached ``top_score`` — where a caller serializing the trace gets NaN,
+    # which is not JSON.
+    (_NoneScorer(), "non-numeric"),
+    (_NanScorer(), "non-finite"),
 ])
 def test_scorer_failures_degrade_to_the_untouched_order(
-        monkeypatch, _restore_loader, scorer, needle):
+        monkeypatch, scorer, needle):
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
-    _inject(scorer)
+    _inject(scorer, monkeypatch)
     out, stats = rerank.rerank_pool(QUERY, ROWS)
     assert [r["id"] for r in out] == ["x0", "x1", "x2"]
     assert stats["applied"] is False
@@ -211,18 +230,18 @@ def test_scorer_failures_degrade_to_the_untouched_order(
     ("   ", ROWS, "empty_query"),
     (QUERY, [], "empty_pool"),
 ])
-def test_empty_inputs_degrade(monkeypatch, _restore_loader, query, rows, reason):
+def test_empty_inputs_degrade(monkeypatch, query, rows, reason):
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
-    _inject(rerank.FakeScorer())
+    _inject(rerank.FakeScorer(), monkeypatch)
     out, stats = rerank.rerank_pool(query, rows)
     assert list(out) == list(rows)
     assert stats == {"applied": False, "degrade_reason": reason}
 
 
 def test_none_content_truncates_to_empty_and_does_not_degrade(
-        monkeypatch, _restore_loader):
+        monkeypatch):
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
-    _inject(rerank.FakeScorer())
+    _inject(rerank.FakeScorer(), monkeypatch)
     rows = [{"id": "a", "content": None}, {"id": "b", "content": "gym gym"}]
     out, stats = rerank.rerank_pool(QUERY, rows)
     assert stats["applied"] is True
@@ -287,6 +306,25 @@ def test_pool_text_read_predicates(entity_type, label, id_field, fragments):
     assert len(g.calls) == 1
 
 
+def test_the_two_restated_predicates_are_pinned_against_step_7():
+    """The duplication's ONLY guard: the read's query must still say what the
+    real content fetch says.
+
+    §5 of the pool-read rewrite restates step 7's two predicates. Pinning them
+    to literals in THIS file would only pin the test to itself — an edit to
+    step 7 would leave the rerank scoring a row set the caller never sees, with
+    nothing red. So the same predicate TEXT is asserted present in step 7's own
+    source: change one side and the other reds.
+    """
+    step7 = inspect.getsource(sdk_mod.TortoiseSDK.tortoise_fts_query)
+    for predicate in ("AND n.documentKind IS NOT NULL ",
+                      "MATCH (n:Point {is_operator: true})"):
+        assert predicate in step7, predicate
+        # …and the pool read still emits it (the other half of the pair).
+        assert predicate in inspect.getsource(
+            sdk_mod._fetch_rerank_pool_texts), predicate
+
+
 def test_pool_text_read_is_best_effort():
     class _Broken:
         def query(self, *a, **k):
@@ -335,7 +373,7 @@ def _rerank_entries(trace):
 
 
 def test_the_wiring_is_a_permutation_and_discloses_the_cap(
-        sdk, monkeypatch, _restore_loader):
+        sdk, monkeypatch):
     """One sentence, two halves: the row SET is unchanged, and the cap is SAID.
 
     A test that pinned the width without the disclosure would pass while the
@@ -348,7 +386,7 @@ def test_the_wiring_is_a_permutation_and_discloses_the_cap(
     # used to be silently ignored (the read sliced with the constant).
     monkeypatch.setattr(rerank, "DEFAULT_FUSED_RERANK_POOL", 2)
     monkeypatch.setenv(rerank.FUSED_RERANK_POOL_ENV, "4")
-    _inject(rerank.FakeScorer())
+    _inject(rerank.FakeScorer(), monkeypatch)
     _seed(sdk, 5)
 
     off = sdk.tortoise_fts_query("zebra migration", entity_type="point",
@@ -394,6 +432,47 @@ def test_the_off_path_writes_no_rerank_trace_entry(sdk, monkeypatch):
     sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=3,
                            leg_trace=trace)
     assert _rerank_entries(trace) == []
+
+
+def test_an_opted_in_rerank_that_could_not_read_its_texts_says_so(
+        sdk, monkeypatch):
+    """A silent no-op on an OPTED-IN lever is not allowed to look like "off".
+
+    The pool text read is best-effort, so a transient graph error used to skip
+    the whole block — INCLUDING the trace entry — leaving a caller with the same
+    trace a non-opted caller sees. #8487's ``valid_time`` leg records its dead
+    read for the same reason.
+    """
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    _seed(sdk, 4)
+    monkeypatch.setattr(sdk_mod, "_fetch_rerank_pool_texts",
+                        lambda *a, **k: {})
+    trace: list[dict] = []
+    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
+                           leg_trace=trace)
+    entries = _rerank_entries(trace)
+    assert len(entries) == 1, trace
+    assert entries[0]["ran"] is False
+    assert entries[0]["reason"] == "pool_text_read_failed"
+    # and it still accounts for the candidates it never saw.
+    assert entries[0][rerank.RERANK_SCORED_KEY] == 0
+    assert entries[0][rerank.RERANK_UNSCORED_KEY] > 0
+
+
+def test_a_degraded_scorer_reports_every_candidate_unscored(sdk, monkeypatch):
+    """A rerank that ORDERED NOTHING left the whole pool unscored — reporting
+    ``unscored: 0`` there is the same false all-clear as the pre-fix applied arm."""
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    _inject(RuntimeError("model unavailable"), monkeypatch)
+    _seed(sdk, 4)
+    trace: list[dict] = []
+    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
+                           leg_trace=trace)
+    entry = _rerank_entries(trace)[0]
+    assert entry["ran"] is False
+    assert entry[rerank.RERANK_SCORED_KEY] == 0
+    assert entry[rerank.RERANK_UNSCORED_KEY] > 0
+    assert "model unavailable" in entry["reason"]
 
 
 def test_the_rerank_runs_before_the_valid_time_demotion():

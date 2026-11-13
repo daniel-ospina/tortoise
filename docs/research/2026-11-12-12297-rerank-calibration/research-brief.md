@@ -212,7 +212,7 @@ Measured over **39,930 pairs** in the arm-4 run, torch intra-op threads pinned t
 | pairs per mention at pool 40 | 40 |
 | **added latency per mention at pool 40** | **≈ 207 ms** |
 | added latency per mention at pool 15 | ≈ 78 ms |
-| model load (from local HF cache) | 6.4 s, once, cached by name across both gates |
+| model load (from local HF cache) | 6.4 s, once, cached by name across both gates — **an observation, not a reproducible figure: it is NOT in the artifact**, whose `latency.note` says load is excluded |
 
 **Cost at the production shape:** a capture issues up to `max_queries=15` derived
 object queries, so pool 40 costs **≈ 3.1 s added per capture** (pool 15 ≈ 1.2 s).
@@ -220,8 +220,12 @@ That is the price of the gate, and it is the reason the gate ships **OFF** and
 opt-in rather than default-on.
 
 This is a **CPU** figure. It is not comparable to the model card's
-"1800 docs/sec" (computed on a **V100**), and quoting that number as ours would
-be a category error — it is ~5,400× the throughput measured here.
+"1800 docs/sec" (computed on a **V100**). The comparable number is the measured
+throughput: **1 / 0.005179 s ≈ 193 pairs/s**, so the V100 figure is **≈ 9×** this
+box's, not thousands. (An earlier draft of this sentence said ~5,400×, which is
+the arithmetic of 3 s/pair, not 5 ms/pair — the correction matters because the
+ratio is the whole reason a reader might wrongly assume the CPU cost is
+irreducible.)
 
 ---
 
