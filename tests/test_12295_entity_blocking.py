@@ -813,3 +813,66 @@ def test_a_whitespace_only_fold_is_never_indexed():
     assert index.stats()["members"] == 1, (
         "a punctuation-only name was dropped as if its fold were empty — `key_of` "
         "falls back to the stripped fold, so `!!!` keys as `!!!`")
+
+
+def test_the_folded_bare_arm_attaches_only_when_the_bare_kind_carrier_is_UNIQUE():
+    """Pins `folded_bare` — a REACHABLE rung of the `#12295` fold that had no test.
+
+    ⛔ MEASURED before this test: `grep -rn folded_bare --include=*.py .` returned
+    only the three `extractor_v2.py` sites (the docstring line, the `return`, the
+    summary line) — every arm of `_find_by_folded_key` was pinned by some test
+    EXCEPT this one, so the rung could be made unreachable, or have its uniqueness
+    condition dropped, with all suites green. It is not a dead branch: at this head
+    `_find_existing_entity([{"id": "o1", "name": "the plan doc", "kind": "other"}],
+    "plan doc", "core:other")` returns mode `folded_bare`, because `the plan doc`
+    folds to the mention's key `plan doc` while its kind does NOT match the
+    mention's folded kind — so `folded` misses and the bare-kind arm is the one
+    that binds it.
+
+    The contract this asserts is the SAME one the two exact arms make, and it is
+    the reason the rung can attach at all: **one** carrier resolves, **two or more**
+    is `ambiguous` and attaches nothing. That is what keeps the fold from guessing
+    which of two colliding carriers was meant (`entity_blocking.py` invariant 3;
+    §4.4 I1 — an unresolved identity is never asserted `new`, `#11653`). Both
+    carriers here share one folded key, which is exactly the non-injective class.
+    """
+    from tortoise.extractor_v2 import _find_existing_entity
+
+    #: (a) ONE bare-kind carrier: the arm attaches, and it is `folded_bare` — not
+    #: `folded`, which is the same-kind arm and must miss on a kind mismatch.
+    lone = [{"id": "o1", "name": "the plan doc", "kind": "other"}]
+    assert key_of(lone[0]["name"]) == key_of("plan doc"), (
+        "this test's premise is gone: `the plan doc` no longer folds to the "
+        "mention's key, so the folded arms cannot be reached at all")
+    node, method = _find_existing_entity(lone, "plan doc", "core:other")
+    assert (node["id"], method) == ("o1", "folded_bare"), (
+        f"`plan doc` no longer binds a lone bare-kind `the plan doc` carrier through "
+        f"the folded_bare rung (got {(node['id'] if node else None, method)!r}) — the "
+        "rung is either unreachable or the wrong arm answered")
+
+    #: The arm is distinguished from `folded`: a SAME-kind carrier answers `folded`.
+    #: Without this, an arm collapse (both rungs returning `folded`) would pass (a).
+    same_kind = [{"id": "o1", "name": "the plan doc", "kind": "core:other"}]
+    node, method = _find_existing_entity(same_kind, "plan doc", "core:other")
+    assert (node["id"], method) == ("o1", "folded"), (
+        f"a SAME-kind carrier no longer answers `folded` (got {(node['id'], method)!r}) "
+        "— the two folded arms are no longer distinct, so (a) proves nothing")
+
+    #: (b) TWO bare-kind carriers on one folded key: `ambiguous`, and NOTHING
+    #: attaches. This is the uniqueness condition — drop it and the rung returns
+    #: the first carrier, silently picking a winner between two colliders.
+    colliders = [
+        {"id": "o1", "name": "the plan doc", "kind": "other"},
+        {"id": "o2", "name": "the plan doc", "kind": "other"},
+    ]
+    assert key_of(colliders[0]["name"]) == key_of(colliders[1]["name"]), (
+        "this test's premise is gone: the two carriers no longer share one folded "
+        "key, so they cannot collide on this rung")
+    node, method = _find_existing_entity(colliders, "plan doc", "core:other")
+    assert node is None, (
+        f"two colliding bare-kind carriers attached {node['id']!r} through "
+        "folded_bare — the rung is guessing which carrier was meant instead of "
+        "holding it `ambiguous` (entity_blocking.py invariant 3, §4.4 I1 #11653)")
+    assert method == "ambiguous", (
+        f"two colliding bare-kind carriers reported {method!r}, not `ambiguous` — the "
+        "uniqueness condition on the folded_bare arm is gone")

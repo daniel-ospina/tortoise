@@ -157,6 +157,20 @@ names over `C(1000, 2)` (`entity_blocking.reduction_ratio`, computed by that one
 the pairs proposed by the 300-row variant sample — mixing the two published a ratio ~3× cheaper
 than the quantity its own definition names (`#12295` round-2 B3, fixed before this run).
 
+⚠️ **Two recall bounds sit under every blocking figure in this section, and neither one is a
+property of the blocker alone.** The first is `MAX_BLOCK_SIZE = 200` in `BlockIndex.candidates()`
+(`tortoise/entity_blocking.py`): a block larger than that is **skipped, not scored**, and the skip
+is recorded under `oversized_skipped` — and this table's pair-completeness and candidates-per-mention
+columns are both computed through that same call (`tools/candidate_recall_11901.py`'s `_in_block`
+and `_blocked_pair_set`). The second is the `low_entropy(key)` gate in `block_keys`, which drops
+every `S:` (shingle) band for a short or repetitive name, so typo/separator reach is unavailable for
+exactly those names. **Neither bound shrinks these figures:** the measured run's
+`arms.blocking.index_stats` reports `max_block_size` **93** against the 200 cap, with
+`oversized_skipped` **empty** — so **these counts are complete for THIS corpus**. On a larger
+corpus the cap would deflate pair completeness **silently**: nothing refuses, warns, or fails on a
+non-empty `oversized_skipped`, so a reader must check that field to know whether the number still
+means what this column says it means.
+
 ### 3.2 The falsifier, answered — and it fires against the BLOCKER
 
 > *If pair completeness is already ≥ 0.99 on the measured corpus, the loss is not here — stop and
