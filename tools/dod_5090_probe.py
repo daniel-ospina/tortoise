@@ -881,7 +881,10 @@ def _import_aliases(*roots: ast.AST) -> dict[str, str]:
                 # "first-seen" is the lexically LAST binding, so the common idiom
                 # `try: import encode_for_store as _a / except ImportError: import encode_for_row as _a`
                 # resolved to the SEAM spelling that never runs and the writer measured `gated` —
-                # HIDDEN, a regression against `main` for a writer whose live binding is ungated.
+                # HIDDEN. ⛔ That is NOT a "regression against `main`", which is what this comment
+                # said and what `#12182`'s rebase review measured FALSE: `origin/main` at `f33f5e2c32`
+                # has no rank rule at all and yields `gated` for this same arm too. The ranked rule
+                # CLOSES a pre-existing hide; it does not restore one.
                 # ⛔ So the collision is decided by what the CREDIT DOES to the writer, highest wins,
                 # independent of source order: builders (KEEP the writer, `unresolved_write`) >
                 # `UNGATED_CALLS` (`ungated` INSIDE `NEEDS_A_DECLARATION` when the writer also writes,
@@ -1235,7 +1238,9 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
     # version are the same detector written independently, and this rebase keeps ONE of them — the
     # `#12182` one, which also covers `WRITER_LABEL_OVERRIDES` and asserts each literal's key count
     # still equals its runtime dict's. Only the NAME changed here; re-derive the pin, never cite the
-    # deleted name.
+    # deleted name. ⛔ And do not RE-WIDEN that pin's source scan to `ast.walk`: it is module-top-level
+    # on purpose, because a walk visits a same-named literal anywhere and a decoy could hide a real
+    # duplicate (`#12182` rebase review, P2 — measured).
     # Provenance and the carrier rationale are merged into this row so neither reading is lost.
     "tortoise.sdk::create_source": (
         CENSUS_EXEMPT,
@@ -1789,7 +1794,11 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # module's whatever its rank — and a writer-scope import is not automatically the live
             # one: the PR's own pins use `if TYPE_CHECKING:` for exactly this idiom, so a DEAD
             # writer-scope seam import beat a live module-level BUILDER alias and the writer measured
-            # `gated` (outside `NEEDS_A_DECLARATION`), a regression against `main`. Ranks are the
+            # `gated` (outside `NEEDS_A_DECLARATION`). ⛔ Measured at `origin/main` `f33f5e2c32`: that
+            # arm reads `gated` there as well (plain `{**module, **writer}`), and the rank-1 variant
+            # reads `ungated` — so these are a pre-existing HIDE and a pre-existing DEMOTION this rule
+            # closes, NOT a regression against `main` (the rebase review measured the earlier wording
+            # false). Ranks are the
             # same ones `_import_aliases` uses for a same-scope collision, so the resolution cannot
             # depend on WHICH map a binding came from either.
             aliases = dict(module_aliases)
