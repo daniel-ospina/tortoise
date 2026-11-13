@@ -60,6 +60,14 @@
 #      failing `tr` and an all-non-ASCII tail are indistinguishable here)
 #  17j. a converter's own stderr diagnostic is suppressed, so the job log carries the
 #      alert rather than a second, phantom failure (#12200)
+#  17k. a BIG report whose TAIL is blank says the TAIL held nothing, not the FILE, and names
+#      the report's real size — so a 15,400-byte report is never described as empty and the
+#      6000-byte cut the intro promises is declared in that state too (#12283 F7)
+#  17l. a HEALTHY converter that emits nothing is not a MISSING one: a tail that is entirely
+#      undecodable makes `iconv -c` emit zero bytes with a status glibc uses to say it dropped
+#      everything, and the state sentence names that cause instead of blaming the host
+#  17m. the ASCII fallback's own stderr diagnostic is suppressed too — `tr` shares the
+#      notifier's job, so its complaint must not read as a second failure
 #  18. a LATE `deploy-api` failure must not read as "nothing shipped"
 #  19-21. `--resolve` (#8841) retires EXACTLY the keys whose steps reported
 #      `success` in this run (plus the job-level key only when `job.status` is
@@ -869,8 +877,12 @@ assert_not_contains "$BIGTAIL_BODY" '```' "case 17k: and it pastes no fenced blo
 #    (review round 5, note 1) ───────────────────────────────────────────────────
 # The empty-fallback sentence used to name two causes — no `iconv`, or one that refused — while
 # a THIRD is reachable and needs no broken converter at all: the tail's last 6000 bytes are
-# entirely undecodable, so `iconv -c` succeeds, emits ZERO bytes, and the ASCII fallback finds
-# nothing to keep either. On such a host the old sentence told the on-call reader the converter
+# entirely undecodable, so `iconv -c` emits ZERO bytes and the ASCII fallback finds nothing to
+# keep either. ⚠️ Its STATUS there is 1, not 0 (measured on glibc 2.39: `printf '\x92' | iconv
+# -c` → rc 1, 0 bytes; `printf 'A\xffB' | iconv -c` → rc 0, 2 bytes, so a converter returns 0
+# only when it emitted something) — an earlier draft of this comment said it "succeeds", which
+# is false on every host the suite runs on, and the alert does not read that status (`if !
+# excerpt=…; then :`). On such a host the old sentence told the on-call reader the converter
 # was missing while it had just run. The row pins the STATE ("emitted nothing it could convert")
 # and the absence of the two-cause form; it is a phrase-level pin, which is the residual #12283
 # records for this whole harness.
