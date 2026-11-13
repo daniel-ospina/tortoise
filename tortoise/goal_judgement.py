@@ -914,8 +914,26 @@ def _newest_first_key(reading: Reading) -> tuple[int, Any, str]:
     caller can sort DESCENDING and still leave an undated reading LAST — an
     unparseable as-of cannot PROVE it is recent, so it must never displace a
     dated one. ``reading_id`` is the tie-break (the ``e.id DESC`` the query
-    itself used to carry), so equal instants keep a total order and two reads of
-    an unchanged graph agree.
+    itself used to carry), so equal instants keep a total order **when the
+    readings carry ids** and two reads of an unchanged graph agree.
+
+    ⛔ NOT TOTAL IN ONE REACHABLE CORNER, stated rather than implied: two
+    readings at the same instant that BOTH lack a ``reading_id`` (an
+    outside-written event carries no ``id`` property — see
+    ``test_a_reading_whose_event_carries_no_id_still_orders_without_raising``)
+    produce IDENTICAL keys, because ``str(reading_id or "")`` maps "absent" and
+    "empty" to the same value. ``sorted(..., reverse=True)`` then falls back to a
+    stable sort over ``rows``, which is ``id(e)`` ASCENDING — the OPPOSITE
+    direction to the ``e.id DESC`` the pre-fix query carried. The result is still
+    deterministic (two reads of an unchanged graph agree, which is the property
+    that keeps a judgement reproducible), but it is NOT the documented direction,
+    and this is the honest scope of the claim. It is left as prose rather than
+    repaired in the key because the two rows are indistinguishable by every field
+    this read exposes AND name the same instant, so no order between them is
+    more correct than the other; what would have been false is saying the
+    direction holds. A key that also carried ``id(e)`` would restore the
+    documented direction, and that is a behaviour change with its own pin, not a
+    docstring correction.
     """
     from .search_engine import _created_sort_key
 
@@ -945,11 +963,12 @@ def latest_readings(
 
     ⚠️ ``limit`` DOES NOT BOUND THE FETCH. The whole per-indicator history is
     paged and parsed regardless of ``limit``, because the ordering cannot be
-    delegated to the server (see below) — so ``limit=1`` still costs
-    ``ceil(N / _READINGS_PAGE_SIZE)`` page queries, ONE MORE when ``N`` is an
-    exact multiple of the page size (a FULL page never ends the loop; only a short
-    one does), PLUS the one aggregate ``count(e)`` the truncation guard compares
-    against. Instant PARSES are ``M`` for the ordering — ``M`` being the readings
+    delegated to the server (see below) — so ``limit=1`` still costs ONE page
+    query when there is nothing to read (the loop always asks once; an empty
+    first page ends it) and ``ceil(N / _READINGS_PAGE_SIZE)`` page queries for
+    ``N > 0``, ONE MORE when ``N`` is an exact multiple of the page size (a FULL
+    page never ends the loop; only a short one does), PLUS the one aggregate
+    ``count(e)`` the truncation guard compares against. Instant PARSES are ``M`` for the ordering — ``M`` being the readings
     that SURVIVE ``since``, because the filter runs BEFORE the sort (``M = N`` when
     no boundary is given) — plus ``2N`` for ``since`` (``instant_at_or_after``
     parses both operands per reading, boundary included): ``2N + M``, which is
