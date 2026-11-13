@@ -196,10 +196,21 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
 
 
 def test_the_two_named_tools_declare_a_shape_fastmcp_accepts():
-    """The named regressions, asserted at the contract level: each tool is on
-    the surface, its SDK method returns a LIST, and the wrapper advertises a
-    shape a client can actually read — an object envelope, never an object
-    annotation over the raw list (which FastMCP refuses)."""
+    """Both named tools are on the surface, their SDK method returns a LIST, and
+    the wrapper advertises a shape FastMCP can ACCEPT.
+
+    Two advertised shapes are acceptable and this asserts the disjunction, not
+    one branch of it (`-> dict` over an ENVELOPE, or `-> list[dict]`, which
+    FastMCP wraps itself into `{"result": …}` with `x-fastmcp-wrap-result`) —
+    the alternative a fixer may legitimately pick must not red the test that
+    tells them to pick it.
+
+    ⚠️ This is a CONTRACT pin, not the discriminating test: it also holds on the
+    broken tree, because `-> dict` + an object schema IS the broken state. The
+    tools being DEAD is what the round-trip tests below measure, and the class is
+    what the scan above measures. Do not delete those on the strength of this
+    passing.
+    """
     for name, sdk_method in (("tortoise_belief_timeline", "belief_timeline"),
                              ("tortoise_list_dedup_candidates", "list_dedup_candidates")):
         assert callable(getattr(ms, name, None)), f"{name} is not on the MCP surface"
@@ -210,11 +221,20 @@ def test_the_two_named_tools_declare_a_shape_fastmcp_accepts():
             f"premise changed; re-derive the guard instead of deleting it")
         wrapper_kind = _annotation_kind(
             inspect.signature(getattr(ms, name)).return_annotation)
-        assert wrapper_kind == "dict", (
-            f"{name} declares {wrapper_kind!r} over a list-returning SDK method; "
-            f"either envelop the rows (-> dict) or annotate -> list[dict]")
         schema = _output_schema(getattr(ms, name))
-        assert schema.get("type") == "object"
+        wrapped = bool(schema.get("x-fastmcp-wrap-result"))
+        if wrapped:
+            # FastMCP's own envelope: the wrapper must declare the list it returns.
+            assert wrapper_kind == "list", (
+                f"{name} advertises a wrap envelope but declares {wrapper_kind!r}")
+        else:
+            # The wrapper's own envelope: object schema, and the rows are inside it.
+            assert wrapper_kind == "dict", (
+                f"{name} declares {wrapper_kind!r} over a list-returning SDK "
+                f"method, and advertises no wrap envelope — the object schema "
+                f"would be refused at call time. Envelop the rows (-> dict) or "
+                f"annotate -> list[dict]")
+            assert schema.get("type") == "object", schema
 
 
 # ── 2. THE ROUND-TRIP: a real call_tool must not be refused ───────────────
