@@ -5308,9 +5308,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # files above it (`ba84fbfabf` 9949, `e200623286` 9965, `cd22562c24`
         # 9973) — and `main`'s last advance to `abf186f1109a` then read 9987.
         # TWO landing blocks now sit above the entry: this PR's own 39-line
-        # `core` registration at 7507 (9987 + 39 = 10026 on its own merged tree)
+        # `core` registration at 7507 (9987 + 39 = 10026 on its own merged tree;
+        # 7507 is that pre-`+2` tree — this tree reads 7509)
         # and the #12108 block that landed on `main` at `ea2c41a696`
-        # (7535 there, 7574 here)
+        # (7535 there, 7576 here)
         # (9987 + 32 = 10019 there) — so THAT merge tree read 9987 + 39 + 32 = 10058.
         # ⛔ `main` advanced AGAIN after that merge (`7d49270e56` -> `87c07462a8`) and
         # moved the entry by +2, so 10058 is a HISTORICAL value, not this tree's:
@@ -5321,8 +5322,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ⛔ The `9951` this comment used to defend was never a value on
         # `main`: it was 9943 + the 8 lines #12060 was predicted to add, and two
         # other registrations landed first, so the prediction described no
-        # checkable commit — which is why this one number has now been
-        # "re-derived" three times. That is the row's real defect and not a
+        # checkable commit — which is why this one number had been
+        # "re-derived" three times BEFORE this merge (five at this head). That is
+        # the row's real defect and not a
         # transcription slip: the number is owned by another tool, so every
         # landing PR above it is a re-derivation this pin cannot do for itself.
         #
@@ -5336,10 +5338,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # (+14: a 13-line `surfaces:` block inserted at 2237 and a 1-line
         # `tier1:` one at 9150); 10005 at #12108's branch alone
         # (`d036b9859960`, +32 from its one 32-line block at 7522-7553 on its
-        # OWN branch tree — 7535 once landed, 7574 here — the +1
+        # OWN branch tree — 7535 once landed, 7576 here — the +1
         # it also adds sitting below the entry). At THIS merge both landing
         # blocks sit above the entry — this branch's 39-line `core` block at
-        # 7507 and #12108's 32-line one at 7574 — and `main`'s +2 advance after
+        # 7509 and #12108's 32-line one at 7576 — and `main`'s +2 advance after
         # that merge adds two more of the same kind (the last two rows of the
         # table below), so it reads 9987 + 32 + 2 + 39 = 10060,
         # `carve_out:` opens 9934 and `uri_requiring:` 10265, so 10060 is inside
@@ -5348,7 +5350,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # pair shows the two cases over `9828250732`'s 6082 / 8459. Each
         # insertion below is attributed to the LANDING COMMIT that made it
         # (measured with `git diff -U0 <a> <b> -- config/ci-surfaces.yml`), and
-        # its position is where that commit put it:
+        # its position is where that commit put it — so the two rows that land
+        # ABOVE the entry read `7507` / `7535` as the commits made them, and
+        # `7509` / `7576` on THIS tree:
         #   +8  @2725  `cd22562c24` (#12060)   → above BOTH twins
         #   +6  @6721  `ba84fbfabf` (#11609)   → above the sdk twin only
         #  +16  @7514  `e200623286` (#11926)   → above the sdk twin only
@@ -5416,7 +5420,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # config/ci-surfaces.yml`), never carried forward from either side of
             # the merge — and now that #12108 has LANDED (`ea2c41a696`), no
             # earlier value in this file's history describes a tree holding both
-            # blocks, which is why this number has been re-derived four times.
+            # blocks, which is why this number has been re-derived five times.
             # Measured values, not a delta: 9943 at `9828250732`, 9949 at
             # `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24e4`, 9987 at
             # the `main` tip `abf186f1109a` (+14: a 13-line `surfaces:` block at
@@ -5431,9 +5435,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # ⛔ `9951` is in that history only because this row printed it — it
             # was a predicted merge-tree value (9943 + 8), never a line any commit
             # on `main` carried. The deltas are just where the registrations
-            # landed: this branch's 39-line `core` block at 7507 and #12108's
-            # 32-line block at 7574, both above the entry, while this branch's
-            # 1-line `durations:` addition at 10363 falls below it. A row sitting
+            # landed: this branch's 39-line `core` block at 7509 and #12108's
+            # 32-line block at 7576, both above the entry, while this branch's
+            # 1-line `durations:` addition at 10365 falls below it (the same three
+            # read 7507 / 7574 / 10363 on the previous merge tree, before `main`'s
+            # +2). A row sitting
             # BELOW every insertion moves by the whole +73. The `core:` sub-key
             # reads 2236 here (2235 before `main`'s +1 at 1039) — it is the ONE
             # sub-key the @2237 registration cannot move, because that insertion
