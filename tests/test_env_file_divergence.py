@@ -1009,7 +1009,12 @@ def test_doctor_error_arm_does_not_deny_an_applied_read(capsys, _isolated, monke
 
     assert "❌ Config: .env" in row, row
     assert "do not show that error" not in row, row
-    assert "fail the same way" in row, row
+    # ⛔ And not the opposite over-claim either: the graded store resolved fine
+    # here (`TORTOISE_DB_PATH` outranks the file's broken URI on the CLI's
+    # ladder), so "the rows below fail the same way" was false — an earlier
+    # round's own pin asserted it (#12428 review).
+    assert "graded the store above" in row, row
+    assert "fail the same way" not in row, row
 
 
 def test_doctor_unresolved_arm_does_not_deny_an_applied_read(capsys, _isolated,
@@ -1340,3 +1345,53 @@ def test_the_unresolved_arm_does_not_credit_a_provider_only_file(capsys, _isolat
 
     assert "sets the daemon's store" not in row, row
     assert "sets no graph key" in row, row
+
+
+def test_a_broken_target_from_the_FILE_is_not_called_an_environment_error(
+        _isolated, monkeypatch):
+    """The pre-existence probe must not read the file's own applied value.
+
+    Reproduced on the real CLI (the documented setup, empty shell, `.env` =
+    `TORTOISE_DB_URI=relative/x.db`): `doctor` imports the daemon module
+    mid-run, so the file is already applied when `_dotenv_divergence` runs — the
+    probe then saw the file's own broken value, concluded the ENVIRONMENT was
+    broken, and printed "this `.env` is disclosed, but the DAEMON's target is
+    unresolvable from the environment itself … this file did not cause it and
+    the rows below fail the same way". Three false claims: the file caused it,
+    and the rows below graded a store normally (#12428 review).
+    """
+    from tortoise import dotenv_file
+    from tortoise.__main__ import _dotenv_divergence, _dotenv_rows
+
+    path = _write_env(_isolated, "TORTOISE_DB_URI=relative/x.db\n")
+    # The applied state: the key IS in this process, recorded as loaded.
+    monkeypatch.setenv("TORTOISE_DB_URI", "relative/x.db")
+    monkeypatch.setattr(dotenv_file, "LOADED_PATHS", {str(path)}, raising=False)
+
+    payload = _dotenv_divergence(graded_target="/tmp/graded-by-the-rows.db")
+    assert payload["read_by_this_command"] is True, payload
+    assert not payload.get("daemon_error_from_env"), payload
+    assert "supplied" in str(payload.get("daemon_error")), payload
+
+    row = " ".join(str(detail) for _c, _s, detail in _dotenv_rows(payload))
+    assert "this file did not cause it" not in row, row
+    assert "the rows below fail the same way" not in row, row
+
+
+def test_a_client_error_never_quotes_the_password_prefix():
+    """A parser that cuts at `#` quotes only the credential's PREFIX.
+
+    `docker://:Abc#rest@h:6379/g` makes the port `Abc`, so the client's own
+    message says "Port could not be cast to integer value as 'Abc'" — the head of
+    the password. Scrubbing with the full target alone missed it (measured,
+    #12428 review): `_scrub` derives `Abc#rest` from the value, not `Abc`.
+    """
+    from tortoise.__main__ import _scrub_uri_error
+
+    uri = "docker://:Abc#rest@h:6379/g"
+    message = f"bad port in URI '{uri}': Port could not be cast to integer value as 'Abc'"
+
+    scrubbed = _scrub_uri_error(message, uri)
+
+    assert "Abc" not in scrubbed, scrubbed
+    assert "rest" not in scrubbed.split("bad port in URI")[1], scrubbed

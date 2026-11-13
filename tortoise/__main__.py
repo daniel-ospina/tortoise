@@ -3145,6 +3145,33 @@ def _redact_db_value(text: str, *values: object) -> str:
     return out
 
 
+def _scrub_uri_error(text: str, uri: str | None) -> str:
+    """Redact a CLIENT's error text about ``uri`` — including its cut-down forms.
+
+    A parser that splits the URI at `#`/`?` quotes only the PREFIX of a
+    credential: `docker://:Abc#rest@h:6379/g` yields "Port could not be cast to
+    integer value as 'Abc'", and scrubbing with the full value alone leaves that
+    prefix of the password on stdout (measured, #12428 review). Each
+    delimiter-truncated form is supplied to :func:`_scrub` as well, so the
+    fragment the parser echoed is a fragment we can name.
+    """
+    forms: list[str] = [uri] if isinstance(uri, str) and uri else []
+    for sep in ("#", "?"):
+        if uri and sep in uri:
+            forms.append(uri.split(sep, 1)[0])
+    # ⛔ A credential with an EMPTY user part (`docker://:Abc@h/…`, the shape
+    # every `--db` example in this repo uses) is not derivable by `_scrub`: it
+    # reads userinfo only when the value carries an `@`, and the truncated form
+    # above has none left. Supply the bare value so the fragment a client echoed
+    # is a fragment we can name.
+    for form in list(forms):
+        if "://" in form:
+            tail = form.split("://", 1)[1]
+            if tail.startswith(":") and "@" not in tail and len(tail) > 1:
+                forms.append(tail[1:])
+    return _scrub(text, *forms)
+
+
 def _scrub(text: str, *secrets: object) -> str:
     """Remove credentials from text that an exception or a reply copied verbatim.
 
@@ -11363,6 +11390,25 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         # answer "does the daemon serve the store I am grading?", which is the
         # only question this row is allowed to answer.
         cli_target, cli_error = graded_target, None
+    # ⛔ Does the ENVIRONMENT alone already fail? Asked BEFORE the overlay, and
+    # with the FILE's values REMOVED: `doctor` imports the daemon module
+    # mid-run, so by now the file may already be applied and its values ARE in
+    # `os.environ` — probing them unchanged made a broken value FROM THE FILE
+    # read as a pre-existing environment error, and the row then said "this file
+    # did not cause it and the rows below fail the same way" about the only
+    # error the file caused, while the rows below graded normally (#12428
+    # review). Hoisted so the "nothing left to overlay" arm — the APPLIED state,
+    # where `effective` is empty precisely because the file is already in the
+    # environment — attributes its refusal correctly too.
+    _probe_saved = {key: os.environ.pop(key)
+                    for key in list(assignments) if key in os.environ}
+    _env_error_preexists = False
+    try:
+        daemon_db_target()
+    except ValueError:
+        _env_error_preexists = True
+    finally:
+        os.environ.update(_probe_saved)
     if effective:
         # Only ask again when the `.env` actually changes something. An empty
         # overlay would re-resolve to the same target AND re-emit the resolver's
@@ -11383,11 +11429,6 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         # loaded at all", then "the target above does not show that error") makes
         # two false statements about a healthy file, in a diagnostic the user is
         # reading to find out what is wrong (#12428 review).
-        _env_error_preexists = False
-        try:
-            daemon_db_target()
-        except ValueError:
-            _env_error_preexists = True
         # The overlay APPLIES the file, so everything that can fail — including
         # the redactor, which must see the `.env`'s value in `os.environ` —
         # happens INSIDE it. Redacting after the overlay's `finally` restored the
@@ -11438,14 +11479,20 @@ def _dotenv_divergence(graded_target: str | None = None, *,
             if daemon_rung == "refuses":
                 daemon_target = None
         except ValueError as exc:
-            daemon_target, daemon_error = None, _redact_db_value(
-                f"{type(exc).__name__}: {exc}",
+            # ⛔ This arm is reached in the APPLIED state too: `effective` is empty
+            # because there is nothing LEFT to fill, not because the file did not
+            # act — so `os.environ` may hold the file's own value here. Blame the
+            # ENVIRONMENT only when it fails WITHOUT the file's keys.
+            daemon_target = None
+            daemon_error = _redact_db_value(
+                f"{type(exc).__name__}: {exc}"
+                + ("" if _env_error_preexists else
+                   " — the value is the one this `.env` supplied"),
                 os.environ.get("TORTOISE_DB_URI"),
                 os.environ.get("TORTOISE_DB_PATH"),
             )
-            # No `.env` key took effect here, so the refusal is the ENVIRONMENT's
-            # — the printing arms must not blame the file for it (#12428 review).
-            payload["daemon_error_from_env"] = True
+            if _env_error_preexists:
+                payload["daemon_error_from_env"] = True
     if cli_error:
         payload["cli_error"] = cli_error
     if daemon_error:
@@ -11607,20 +11654,34 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
         # ⛔ The clause is conditional here too: when this process applied the
         # file, the rows below resolved from the SAME values and DO show the
         # error, so the round-4 sentence was false in that state (#12428 review).
+        _rows_failed = bool(env_file.get("cli_error")
+                            or env_file.get("graded_unresolved"))
+
+        def _rows_below_fail() -> str:
+            return ("this file did not cause it" +
+                    (", and the rows below fail the same way"
+                     if _rows_failed else
+                     " — the rows below graded a target of their own"))
+
+        _applied_tail = ("this process applied that file at import as well, so the "
+                         "rows below resolved from the same values" +
+                         (" and fail the same way" if _rows_failed else
+                          " and graded the store above"))
         rows.append(("Config: .env", "❌",
                      (f"{path} is disclosed, but the DAEMON's target is unresolvable "
                       f"from the environment itself: "
                       if env_file.get("daemon_error_from_env") else
                       f"{path} makes the DAEMON's target unresolvable: ")
                      + f"{_printable(str(env_file['daemon_error'])[:90])} — "
-                     + ("this file did not cause it and the rows below fail the "
-                        "same way"
+                     # ⛔ "the rows below fail the same way" is a claim about
+                     # THIS run's own resolution, so it needs that run's own
+                     # outcome — not the file's applied state. Measured: an
+                     # applied `.env` with a broken URI and a healthy graded
+                     # target printed "so the rows below fail the same way" while
+                     # they graded normally (#12428 review).
+                     + (_rows_below_fail()
                         if env_file.get("daemon_error_from_env") else
-                        "this process applied that file at import as well, so "
-                        "the rows below fail the same way"
-                        if _applied else
-                        "this command does not read it, so the rows below do not "
-                        "show that error")))
+                        _applied_tail)))
         return rows
     # The store the rows BELOW grade. It is the payload's `cli_target` because
     # `_cmd_doctor` hands `_dotenv_divergence` the target it already resolved —
@@ -14888,12 +14949,23 @@ def _cmd_doctor(args):
             if parsed is None:
                 # Malformed URI — urlparse never completed; mask userinfo so
                 # a credential in --db never reaches the terminal.
-                results.append(("Graph: FalkorDB", "❌", f"bad URI '{_mask_uri_userinfo(target)}': {str(e)[:60]}"))
+                # `str(e)` is the CLIENT's text: a URI parser that quotes the
+                # offending fragment can quote the password's head (`bad port …
+                # Port could not be cast to integer value as 'Abc'` for
+                # `docker://:Abc#rest@h:6379/g`). Scrub BEFORE slicing, so the
+                # retained 60 chars cannot carry a fragment of the credential.
+                results.append(("Graph: FalkorDB", "❌",
+                                f"bad URI '{_mask_uri_userinfo(target)}': "
+                                f"{_scrub_uri_error(str(e), target)[:60]}"))
             elif probe_port is None:
                 # Non-numeric port — probe never reached the client.
-                results.append(("Graph: FalkorDB", "❌", f"bad port in URI '{_mask_uri_userinfo(target)}': {str(e)[:60]}"))
+                results.append(("Graph: FalkorDB", "❌",
+                                f"bad port in URI '{_mask_uri_userinfo(target)}': "
+                                f"{_scrub_uri_error(str(e), target)[:60]}"))
             else:
-                results.append(("Graph: FalkorDB", "❌", f"{probe_host}:{probe_port} (graph {graph_name}) — {str(e)[:60]}"))
+                results.append(("Graph: FalkorDB", "❌",
+                                f"{probe_host}:{probe_port} (graph {graph_name}) — "
+                                f"{_scrub_uri_error(str(e), target)[:60]}"))
     elif target is not None:
         # Embedded mode (resolved to a file path) — no Docker server to
         # probe. ⚠️ (not ❌) keeps embedded setups healthy; the graph-health
