@@ -1037,7 +1037,13 @@ def test_a_fold_that_raises_mid_way_leaves_no_partial_support_chain(
             # then raise before this leg's own publish. (A genuine mid-fold raise
             # never reaches the publish at the end of _assemble_supports; this
             # models that, and models nothing stronger.)
-            real(rows[:1], {}, operator_leg=True, seen=seen, rank=rank)
+            # ⛔ the throwaway MUST be seeded with the pid: `_assemble_supports`'
+            # publish loop does `by_id[pid]["support_chain"] = …`, so an EMPTY
+            # dict raises KeyError before this line — which is what the first
+            # version of this pin did (the injected ValueError was dead code and
+            # the red was a KeyError). Seeded, the real fold publishes harmlessly
+            # into the throwaway and the intended raise is the one that fires.
+            real(rows[:1], {rows[0][0]: {}}, operator_leg=True, seen=seen, rank=rank)
             raise ValueError("injected mid-fold failure")
         return real(rows, by_id, operator_leg=operator_leg, seen=seen, rank=rank)
 
@@ -1047,6 +1053,91 @@ def test_a_fold_that_raises_mid_way_leaves_no_partial_support_chain(
     assert blocks[goal["id"]]["support_chain"] == [], (
         "a leg that raised mid-fold left partial state that the surviving leg "
         "published as final: " + repr(blocks[goal["id"]]["support_chain"]))
+
+
+def test_the_supersession_line_renders_by_the_labels_own_status_rule(
+        sdk, monkeypatch):
+    """``line`` follows ``live.status_as_reported``, not a blanket "live"
+    (review round 6, finding 1 — CORRECTED, see below).
+
+    The block omits ``supersession`` for a NON-Point anchor by design (the read is
+    ``:Point``-only, #11824), so the projection's fallback is what a goal
+    ``:Object`` / reading ``:Event`` gets. The old blanket ``or "live"`` put a
+    POINT-LANE lifecycle word on an ``:Event``, whose layer carries no ``status``
+    family at all (its lifecycle is ``eventStatus`` — the #6976 conflation).
+
+    ⛔ THE REVIEWER'S PROPOSED FIX WAS NOT APPLIED, and the reason is a recorded
+    rule, not a preference: it proposed omitting the view entirely for a non-Point.
+    But ``status_as_reported`` (``tortoise/live.py``) is the ONE recorded rendering
+    rule — an ABSENT status READS ``live`` on the status-carrying layers and ``""``
+    on ``:Event`` — and an existing pin in ``test_w4_why_enrichment``
+    (``test_supersession_fetch_failure_degrades_honestly``) asserts the absent case
+    defaults to ``live``/``None``. So ``live`` on an ``:Object`` is the recorded
+    rule, not a fabrication; the defect was only the ``:Event`` conflation, which
+    is what changed.
+
+    Measured as a mutant: restore the blanket ``or "live"`` and the ``:Event``
+    rows below report ``'live'``.
+    """
+    from tortoise import why as why_module
+
+    bare_block = {"support_chain": [], "ep": {"contested": False}}
+    event_view = why_module.project_item(
+        {"id": "ev1", "content": "a reading", "entity_type": "event"}, bare_block,
+    )["supersession"]
+    assert event_view["line"] == "", (
+        "an :Event carries no `status` family — a `live` line is the #6976 "
+        "conflation: " + repr(event_view))
+    object_view = why_module.project_item(
+        {"id": "obj1", "content": "a goal", "entity_type": "object"}, bare_block,
+    )["supersession"]
+    assert object_view["line"] == "live", (
+        "an absent status on a status-carrying layer reads `live` (the recorded "
+        "rule in status_as_reported): " + repr(object_view))
+
+    event_entry = why_module.item_to_why_entry(
+        {"id": "ev1", "entity_type": "event", "why": {"support_chain": []}})
+    assert event_entry is not None and event_entry["supersession"]["status"] == "", (
+        "item_to_why_entry put a Point-lane status on an :Event: "
+        + repr((event_entry or {}).get("supersession")))
+
+    # End to end on the fixture this PR is about: the goal block really carries no
+    # supersession view, so the projection's fallback is what a consumer sees.
+    monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
+    indicator, target_node, goal = _world(sdk, tag="status-rule")
+    _judge(sdk, indicator, target_node, goal, 12.0, at="2026-11-11T10:00:00Z")
+    block = assemble_why_blocks(sdk._get_proj(), [goal["id"]])[goal["id"]]
+    assert "supersession" not in block, (
+        "fixture: the :Object block must carry no supersession view")
+    goal_item = dict(goal, content="CI is fast", entity_type="object")
+    assert why_module.project_item(goal_item, block)["supersession"]["line"] == "live"
+
+
+def test_a_point_item_keeps_its_supersession_view(sdk):
+    """The guard above must not narrow the ``:Point`` lane (its flat keys are the
+    reason the view exists at all).
+
+    Unit-level on purpose: these two projections are pure dict functions, and a
+    ``:Point`` item is the shape that CARRIES the flat keys the guard tests.
+    """
+    from tortoise import why as why_module
+
+    item = {"id": "1a1d273dfde-861cd9c6de2d", "status": "superseded",
+            "superseded_by": {"id": "1a1d273dfff-aaaaaaaaaaaa",
+                              "content_snippet": "the successor"}}
+    projected = why_module.project_item(item, {})
+    assert projected.get("supersession", {}).get("line") == "superseded", (
+        "a :Point-shaped item lost its supersession view: "
+        + repr(projected.get("supersession")))
+
+    # `item_to_why_entry` returns None unless the item carries W4 data, so give it
+    # the smallest one a Point item really has.
+    enriched = dict(item, why={"support_chain": []})
+    entry = why_module.item_to_why_entry(enriched)
+    assert entry is not None, "a :Point item with W4 data projected to no entry"
+    assert entry.get("supersession", {}).get("status") == "superseded", (
+        "a :Point item lost its supersession status: "
+        + repr(entry.get("supersession")))
 
 
 def test_the_enriched_item_and_ask_entry_carry_the_assessment(sdk, monkeypatch):

@@ -80,6 +80,7 @@ from .live import (
     epistemic_identity,  # #11928: coalesce(id, eventId) — NOT a bare id
     is_terminal_status,  # #2490: terminal rows override has_ep
     kind_expression,  # #11928: the KIND, whatever property its label stores it under
+    status_as_reported,  # #11928 r6: the ONE status-rendering rule (per label)
 )
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
@@ -172,6 +173,23 @@ def w4_enrichment_enabled() -> bool:
 def _snippet(text: str) -> str:
     text = (text or "").strip()
     return text[:SNIPPET_MAX]
+
+
+#: The label an item's ``entity_type`` names (#11928 review round 6). The search
+#: surfaces spell the four epistemic layers in lower case; ``document``/``source``
+#: have no epistemic label and resolve to None.
+_ENTITY_TYPE_LABELS = {"point": "Point", "subject": "Subject",
+                       "object": "Object", "event": "Event"}
+
+
+def _entity_label(entity_type) -> str | None:
+    """The epistemic label an item's ``entity_type`` names, or None when it does
+    not say — and an UNNAMED label is treated as STATUS-CARRYING, which is
+    ``live.status_as_reported``' own rule (right for Point/Subject/Object, and
+    only wrong for an ``:Event`` the caller failed to name)."""
+    if not isinstance(entity_type, str):
+        return None
+    return _ENTITY_TYPE_LABELS.get(entity_type.strip().lower())
 
 
 def _mitigation_text(text: str | None) -> str | None:
@@ -1093,6 +1111,14 @@ def assemble_why_blocks(
       dimension, PER LEG) and the block is still returned, with THAT dimension
       absent for that label.
 
+    ⛔ #11928 review round 6 — a FOURTH residual, stated here because it decides
+    whether these blocks reach a user: the search and recall call sites still
+    gate the enrichment on the ENTITY TYPE being a point (``sdk.py``:
+    ``entity_type == "point"`` and the ``entity_type == "point"`` filter before
+    ``enrich_items``), so a goal ``:Object`` is explainable through
+    ``tortoise_analyze`` and through direct assembly, NOT through search/recall
+    yet. Widening those gates is its own change; the block is already correct.
+
     ⛔ The consequence is stated rather than implied: an absent dimension cannot
     currently be told apart from an empty one on the wire (``conflicts`` absent
     because the node is uncontested, or because its read failed for this label),
@@ -1132,8 +1158,17 @@ def assemble_why_blocks(
         #    EVERY node, including nodes with zero active NANDers; only
         #    existing epistemic ids return rows). FIRST-WINS over the ids each
         #    leg has not resolved, so a multi-labelled ``:Point:Object`` node
-        #    resolves ONCE, as Point — ``live.epistemic_labels_of``' rule —
-        #    and its ids are never re-read on a second label.
+        #    resolves ONCE — under the FIRST label that resolves it —
+        #    ``live.epistemic_labels_of``' rule.
+        #
+        #    ⛔ #11928 review round 6: FIRST-WINS is "the first label that
+        #    RESOLVES it", not unconditionally ``Point``. Where a label's probe
+        #    FAILS its ids stay in ``unresolved`` and a later label resolves them
+        #    (``update_point``'s promote arm really does mint ``:Point:Object``).
+        #    The outcome is identical either way — every ``{label}`` substitution
+        #    in this module is the anchor ``MATCH (n:{label})``, and no block key
+        #    records the resolved label — so the only thing an unconditional
+        #    claim would buy is a false sentence for the next editor.
         #
         #    The resolution is RETURNED by this read rather than probed by a
         #    separate query: the hot path (a Point-only batch) keeps exactly
@@ -1151,8 +1186,9 @@ def assemble_why_blocks(
             #    failed `:Object` probe removed the `:Point` block too, i.e. the
             #    enrichment for the entire recall turn.
             #
-            #    A label whose probe fails simply does not resolve, so its ids get
-            #    no block — the same honesty `return {}` was reaching for, scoped
+            #    A label whose probe fails does not resolve, so its ids fall
+            #    through to the NEXT label (and, if none resolves them, get no
+            #    block) — the same honesty `return {}` was reaching for, scoped
             #    to the label that actually failed. A batch where NOTHING resolves
             #    still yields `{}`, through the empty `existing_ids` in the final
             #    loop (never by discarding other labels' work).
@@ -1431,7 +1467,6 @@ def project_item(item: dict, block: dict) -> dict:
     # "live" line for a point whose flat status is terminal (a superseded
     # predecessor reads superseded even on a degraded read; absent = not
     # computed is honest, a false "live" is a wrong-side degradation).
-    line = ss.get("status") or item.get("status") or "live"
     successor_label = ss.get("successor_label")
     if successor_label is None and not ss.get("superseded_by"):
         flat_sb = item.get("superseded_by")
@@ -1439,8 +1474,18 @@ def project_item(item: dict, block: dict) -> dict:
             successor_label = (
                 _snippet(flat_sb.get("content_snippet") or "")
                 or flat_sb["id"])
+    # ⛔ #11928 review round 6: `line` is rendered by the ONE rule for a status
+    # (`live.status_as_reported`), not by a "live" default. The block omits
+    # `supersession` for a NON-Point anchor by design (the read is Point-only,
+    # #11824), so the projection's fallback is what a goal `:Object` / reading
+    # `:Event` gets — and the old blanket `or "live"` put a POINT-LANE lifecycle
+    # word on an `:Event`, whose layer carries no `status` family at all (its
+    # lifecycle is `eventStatus`; the #6976 conflation). An ABSENT status still
+    # reads `live` on the status-carrying layers, which is the recorded rule and
+    # is why an `:Object` keeps the word.
     out["supersession"] = {
-        "line": line,
+        "line": ss.get("status") or item.get("status") or status_as_reported(
+            None, label=_entity_label(item.get("entity_type"))),
         "successor_label": successor_label,
     }
     if block.get("assessment"):
@@ -1490,9 +1535,14 @@ def item_to_why_entry(item: dict) -> dict | None:
     if "conflicts" in item:
         entry["conflicts"] = item["conflicts"]
     # Canonical supersession from the item's flat canonical keys + view.
+    # ⛔ #11928 review round 6: the `status` follows the ONE rendering rule
+    # (`live.status_as_reported`) with the item's own label, exactly as
+    # `project_item` does — an absent status reads `live` on a status-carrying
+    # layer and `''` on `:Event` (whose lifecycle is `eventStatus`).
     superseded_by = item.get("superseded_by")
     entry["supersession"] = {
-        "status": item.get("status") or "live",
+        "status": item.get("status") or status_as_reported(
+            None, label=_entity_label(item.get("entity_type"))),
         "superseded_by": (
             {"point_id": superseded_by["id"],
              "content_snippet": _snippet(superseded_by.get("content_snippet") or "")}
