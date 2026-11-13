@@ -141,6 +141,7 @@ __all__ = [
     "invalidation_for",
     "mark_definition_change",
     "reconcile_goal_state_cache",
+    "reconcile_goal_states",
     "verdicts",
 ]
 
@@ -907,6 +908,219 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
                 "from": remaining.get("id"), "cleared": cached is None}
     sdk.update_entity(goal_id, goalState=None)
     return {"checked": True, "goalState": None, "from": None, "cleared": True}
+
+
+#: The node labels that can carry a cached ``goalState`` — BOTH, and that is a
+#: fact about the writers rather than defensive padding. ``goalState`` is
+#: declared for the POINT write path in ``projection/entities.py`` precisely
+#: because a legacy goal POINT carries it (#7856), while ONTOLOGY §5 makes the
+#: canonical goal an OBJECT. A sweep that read one label would leave the other
+#: half of the same defect standing, which is the failure this issue is about one
+#: level down.
+GOAL_STATE_LABELS = ("Object", "Point")
+
+#: Candidates are selected by the PROP, never by the node's kind: this module's
+#: gate is the WORD a cache holds (:data:`DERIVED_GOAL_STATES`), so a node holding
+#: a word ``record_judgement`` can write IS a cache of a judgement — whatever its
+#: ``kind``/``objectKind`` says, including nothing. Selecting by kind would let a
+#: goal whose kind is absent or mislabelled keep a stale word forever, which is
+#: the read-side twin of the bug being repaired.
+#:
+#: ``LIMIT`` is asked for ``limit + 1`` rows so the caller can tell a scan that
+#: exactly filled its bound from one that OVERFLOWED it — the same disclosure
+#: :func:`invalidate_stale` owes with ``truncated``.
+_GOAL_STATE_CANDIDATES = (
+    "MATCH (n:{label}) WHERE toStringOrNull(n.goalState) IN $words "
+    "RETURN n.id AS id, n.goalState AS word ORDER BY n.id LIMIT $lim"
+)
+
+
+def reconcile_goal_states(
+    sdk: Any,
+    *,
+    dry_run: bool = False,
+    limit: int = 10000,
+) -> dict:
+    """Repair every goal whose cached ``goalState`` word does not stand — the
+    GOAL-side sweep (#12336).
+
+    ⛔ WHY A SWEEP OVER GOALS AND NOT OVER CLAIMS. ``invalidate_stale``
+    enumerates LIVE claims, so a claim that stops being live by any route that
+    does not go through :func:`invalidate` — a hard delete (a purge, a concurrent
+    cleanup), or a retirement written out of band — takes its goal out of every
+    later scan. The cached word then names a claim nothing backs, and NO later
+    pass revisits the goal: :func:`reconcile_goal_state_cache`'s own docstring
+    records the same shape for the goal-retired arm (*"no later pass able to
+    repair it (the claim is no longer live, so no sweep revisits the goal)"*).
+    Repairing the `alreadyRetired` arm inside the door closes the BUCKET, not
+    this: nobody calls the door on a route it never sees. So the enumeration has
+    to start from the GOAL — the surface that displays the word — and this is
+    that sweep.
+
+    Two shapes are repaired, and they are the same predicate seen twice:
+
+    * **unsupported** — the goal holds a derived word and nothing live backs it
+      (route A: the claim was deleted; route B: it was retired out of band), so
+      the cache is CLEARED, because 'no live judgement' is precisely the state
+      the cache has no word for (:data:`goal_judgement.GOAL_STATE_CACHE` maps
+      ``unknown`` to no write for the same reason);
+    * **lagging** — the goal holds a derived word while the newest LIVE
+      judgement maps to a different one, so the cache is REWRITTEN to the live
+      word. This is a real, documented shape rather than a hypothetical: a flip
+      whose cache write was refused leaves the PREVIOUS word under a live claim
+      (``goal_judgement._cache_then_arrow`` names that arm), and its self-healing
+      pass only runs if something re-derives the goal — which nothing does while
+      #7860's D13 ("what triggers the loop?") is unruled.
+
+    Both go through the public, idempotent :func:`reconcile_goal_state_cache`, so
+    there is ONE set of cache predicates in this module and this function cannot
+    drift from the door's step 4. It adds no write of its own and no new
+    vocabulary.
+
+    ⛔ IT IS NOT WIRED INTO ANYTHING, deliberately: it is the repairing caller's
+    call today and the trigger's call once D13 rules one — the same posture as
+    :func:`invalidate_stale`, and the same reason `mark_definition_change` fires
+    on nothing.
+
+    ⛔ THE GATE IS ON THE WORD, AT BOTH ENDS. Only a goal holding a word in
+    :data:`DERIVED_GOAL_STATES` is even a candidate (so a human's ``active``,
+    ``blocked``, ``guideline``, ``superseded`` or ``abandoned`` is not scanned, let
+    alone rewritten), and a word a human sets between the scan and the reconcile
+    is PRESERVED and reported — never cleared, never rewritten.
+
+    ``dry_run=True`` reports what it WOULD do and writes nothing: the safe
+    preview for a graph-wide call, which is the one shape that can touch every
+    goal.
+
+    ⛔ A FAILED SCAN RAISES. A summary of zero goals over a scan that never ran is
+    exactly the false PASS this module exists against, so an unreadable
+    candidate read is not caught here (there is no partial sweep to report) —
+    unlike a PER-GOAL failure, which IS reported: one goal's refused write is
+    recorded on that goal and the rest of the sweep still lands, because a repair
+    sweep whose first refusal discarded the remaining repairs would hide the very
+    words it can fix.
+
+    Returns, always: ``dryRun``, ``truncated`` (true when the candidate scan hit
+    ``limit`` — an arbitrary subset in id order, NOT the newest ``limit`` goals, so
+    a caller that must cover the graph should pass a bound above the candidate
+    count), ``limit``, ``goals`` (a record per SCANNED goal: ``goalId``, ``from``,
+    ``to``, ``action`` — ``cleared``/``rewritten``/``consistent``/``preserved``/
+    ``gone``/``failed``, or ``would-clear``/``would-rewrite`` under ``dry_run`` —
+    plus ``error`` on a failure and ``reason`` where the door reported one), and
+    ``counts``.
+
+    ``counts`` is a set of PER-GOAL predicates, not a partition, and it is
+    deliberately its OWN (this call is not a retirement sweep, so folding it into
+    ``invalidate_stale``'s counters would make one summary answer two questions —
+    and #12315 rejected a fifth counter there for exactly that reason):
+
+    * ``scanned`` — candidates the scan returned (bounded by ``limit``);
+    * ``repaired`` — ``cleared + rewritten``, i.e. the cache was CHANGED;
+    * ``cleared`` — the goal now holds no derived word (nothing live stands);
+    * ``rewritten`` — the goal now holds the newest live judgement's word;
+    * ``consistent`` — the word already matched, and NOTHING was written (a
+      re-write per goal per run would journal a revision for work not done);
+    * ``preserved`` — a word this engine never wrote appeared between the scan and
+      the reconcile, so it was left alone (and reported, so a sweep cannot read
+      clean over a goal it refused to touch);
+    * ``gone`` — the goal no longer exists, so there is no cache to reconcile
+      (reported the same way :func:`invalidate_stale` reports ``counts.gone``);
+    * ``failed`` — the reconcile could not run or its write was refused. A sweep
+      may not read clean while a goal still displays a word it could not repair;
+    * ``wouldRepair`` — what a ``dry_run`` WOULD change; always ``0`` when
+      ``dry_run`` is false, because nothing was previewed.
+    """
+    words = sorted(DERIVED_GOAL_STATES)
+    rows: list[tuple[str, str]] = []
+    for label in GOAL_STATE_LABELS:
+        result = sdk._get_proj().g.query(
+            _GOAL_STATE_CANDIDATES.format(label=label),
+            params={"words": words, "lim": limit + 1},
+        ).result_set or []
+        rows.extend((row[0], row[1]) for row in result if row and row[0])
+    # ⛔ DETERMINISTIC, NOT TEMPORAL: two label scans are concatenated above, so
+    # the order is imposed here rather than inherited from the engine. `truncated`
+    # is answered from the UNTRIMMED length, and the bound is one goal over the
+    # caller's limit so a scan that exactly filled it is not read as exhaustive.
+    rows.sort(key=lambda row: row[0])
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+
+    goals: list[dict[str, Any]] = []
+    counts = {"scanned": 0, "repaired": 0, "cleared": 0, "rewritten": 0,
+              "consistent": 0, "preserved": 0, "gone": 0, "failed": 0,
+              "wouldRepair": 0}
+    for goal_id, word in rows:
+        counts["scanned"] += 1
+        record: dict[str, Any] = {"goalId": goal_id, "from": word}
+        try:
+            standing = latest_judgement(sdk, goal_id=goal_id)
+            state = standing.get("judgementState") if standing else None
+            # The SAME mapping the door applies (one predicate, not a second
+            # spelling of "what word should this be"): a live claim whose state
+            # maps to no word means the cache holds no derived word either.
+            expected = GOAL_STATE_CACHE.get(state) if state else None
+        except Exception as exc:
+            record.update(action="failed",
+                          error=f"{type(exc).__name__}: {exc}")
+            counts["failed"] += 1
+            goals.append(record)
+            continue
+        if expected == word:
+            # ⛔ NOTHING IS WRITTEN HERE, and that is the point of the branch: the
+            # word already stands, so re-writing it would journal a revision per
+            # goal per sweep and report "repaired" for work not done.
+            record.update(action="consistent", to=word)
+            counts["consistent"] += 1
+            goals.append(record)
+            continue
+        if dry_run:
+            record.update(action="would-clear" if expected is None
+                          else "would-rewrite", to=expected)
+            counts["wouldRepair"] += 1
+            goals.append(record)
+            continue
+        try:
+            repaired = reconcile_goal_state_cache(sdk, goal_id)
+        except Exception as exc:
+            record.update(action="failed",
+                          error=f"{type(exc).__name__}: {exc}")
+            counts["failed"] += 1
+            goals.append(record)
+            continue
+        if repaired.get("gone") is True:
+            record.update(action="gone", reason=repaired.get("reason"))
+            counts["gone"] += 1
+        elif repaired.get("error"):
+            record.update(action="failed", error=repaired["error"])
+            counts["failed"] += 1
+        elif repaired.get("preserved") is True:
+            record.update(action="preserved", to=repaired.get("goalState"))
+            counts["preserved"] += 1
+        elif repaired.get("checked") is not True:
+            # ⛔ A RECONCILE THAT DID NOT RUN IS NEVER A REPAIR, and this arm exists
+            # precisely so it cannot be counted as one: the door answers
+            # `checked: False` (plus a `reason`, no `error`) when it was handed no
+            # goal id at all. Unreachable from THIS call path — the candidate read
+            # keeps only rows carrying an id — but a sweep that folded it into
+            # `rewritten` would report a repair that never happened over a goal
+            # still showing a derived word, which is this module's own defect.
+            record.update(action="failed",
+                          error=repaired.get("reason")
+                          or "the reconcile did not run")
+            counts["failed"] += 1
+        else:
+            # `cleared` is the DOOR's own word for "no derived word stands now"
+            # (it is True both when the cache was emptied and when the live claim
+            # maps to no word), so the sweep reports the outcome with the door's
+            # vocabulary rather than a second definition of it.
+            action = "cleared" if repaired.get("cleared") else "rewritten"
+            record.update(action=action, to=repaired.get("goalState"))
+            counts[action] += 1
+            counts["repaired"] += 1
+        goals.append(record)
+    return {"dryRun": dry_run, "truncated": truncated, "limit": limit,
+            "goals": goals, "counts": counts}
 
 
 def invalidate_stale(
