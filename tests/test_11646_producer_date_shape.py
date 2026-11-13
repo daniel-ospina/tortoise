@@ -28,6 +28,7 @@ parser change cannot satisfy one by breaking the other.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from datetime import UTC, date, datetime, timedelta
@@ -734,6 +735,154 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
         assert calendar_datetime(unreadable_tail) is None, unreadable_tail
 
 
+def _zone_child_env_base() -> dict[str, str]:
+    """The zone child's environment: ``PATH``, the PARENT'S OWN import path, and nothing else.
+
+    ⛔ ``PYTHONPATH`` IS THE PARENT'S ``sys.path``, NOT the repo root alone (#11871/#11878
+    lineage; the failure below was measured on #12330's ``test (h)``).
+    The repo root is not where the project's DEPENDENCIES live, and a scrubbed child that
+    carries only the root can import ``tortoise`` and still fail on the first third-party
+    import — measured on `test (h)` of tortoise run 43352300482 (jobs 131694957585 and
+    131651680296, both attempts, identical):
+
+        stderr: Traceback (most recent call last):
+                  File "<string>", line 2, in <module>
+                  File ".../tortoise/commit_schema.py", line 47, in <module>
+                    from pydantic import (
+                ModuleNotFoundError: No module named 'pydantic'
+
+    The PARENT's interpreter RESOLVES ``pydantic``: ``sys.executable -c "import pydantic"``
+    succeeds on that runner (2.13.4 on the box this was written on). ⛔ That is a statement about
+    RESOLUTION, and it is the only one this paragraph rests on. ``tortoise.commit_schema`` — the
+    module that imports ``pydantic`` — is NOT imported by this file (only by the CHILD's script),
+    so a ``sys.modules`` snapshot taken while these tests run is NOT stable evidence either way:
+    measured both ways at this head (one probe reported ``pydantic`` present, a narrower one did
+    not, and the population moves with what has already been imported by the time you sample it).
+    ⛔ Do not quote a ``sys.modules`` reading, or a module COUNT, here — a later reader cannot
+    re-derive either. So the package is installed and this very interpreter resolves it, and the
+    child's failure is about the ENVIRONMENT it was handed — not about a package that is absent
+    from the runner. ⛔ Do NOT read the parent's success as evidence ABOUT
+    ``tortoise.commit_schema``: it says nothing about that module, only about resolution. (An
+    earlier cut of this paragraph named ``tortoise.commit_schema`` as the parent's import site;
+    that was FALSE and was corrected in `6246f633b0c1`'s follow-up — the corrected claim here is
+    the measured one.)
+    That is what #11871/#11878 could not name — they established only that the red was
+    undiagnosable because ``check=True`` discarded the child's stderr, and the stderr this
+    helper now carries is what named it.
+
+    Why NOT assert the deps are on a bare env's path: that holds only for the install shapes
+    where ``sys.executable``'s own prefix carries them (a plain venv, a system install). It
+    does NOT hold for a user-site install, for a runner whose project deps sit in a
+    ``uv sync`` environment, or for any shape where the parent's packages are reachable
+    through ``sys.path`` contributions the child's env does not reconstruct. A test whose
+    verdict is "can a bare interpreter import the project" reds on the runner class rather
+    than on the behaviour it exists to pin (a zone's calendar verdict).
+
+    ``TZ`` is NOT here: it is the one thing that must vary per child, and it is set by
+    ``_run_zone_child`` on top of this base, so the isolation this helper's subprocess
+    shape buys is unchanged — each child still reads exactly one zone and leaks nothing.
+    """
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    # Preserve the parent's ORDER (it is the resolution order) and drop duplicates; a
+    # pre-existing root entry would otherwise be searched twice.
+    paths = list(dict.fromkeys([repo_root, *[p for p in sys.path if p]]))
+    return {
+        "PATH": str(Path(sys.executable).parent),
+        "PYTHONPATH": os.pathsep.join(paths),
+    }
+
+
+def test_the_zone_child_gets_the_parents_sys_path_not_just_the_repo_root() -> None:
+    """⛔ THE `sys.path` HAND-OFF IS PINNED STRUCTURALLY, NOT BY IMPORTING (#12330).
+
+    Reverting `_zone_child_env_base` to `"PYTHONPATH": repo_root` LEFT THIS WHOLE FILE GREEN
+    BEFORE THIS PIN EXISTED — the parent's `pydantic` resolves through the venv prefix, so a
+    LOCAL child imports fine in BOTH shapes and the fix was unpinned on the box its author
+    runs on. An import-based assertion does not rescue that: it only moves the
+    defect to the runner's install shape, which the helper's own docstring argues against.
+    ⚠️ Present tense would be FALSE: with the pin below in place that revert REDS it, which
+    is the whole point of the pin. Do not quote a pass count for the revert without saying
+    which head it was counted at.
+
+    So the contract is asserted directly on the value the helper returns: the repo root is
+    FIRST (a stray installed `tortoise` must not shadow the tree under test), EVERY
+    non-empty parent `sys.path` entry is carried (exactly what a scrubbed child was
+    missing), and the list is deduplicated with the parent's ORDER preserved (it is the
+    resolution order). All three hold for any install shape, and reverting to the root
+    alone reds the second.
+    """
+    entries = [p for p in _zone_child_env_base()["PYTHONPATH"].split(os.pathsep) if p]
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    assert entries[0] == repo_root, (
+        "the repo root must be searched FIRST, so a stray installed `tortoise` cannot "
+        f"shadow the tree under test — got {entries[:3]}"
+    )
+    missing = [p for p in sys.path if p and p not in entries]
+    assert not missing, (
+        "the zone child's PYTHONPATH omits parent `sys.path` entries "
+        f"({missing[:5]}) — a child carrying the repo root alone cannot import the "
+        "project's DEPENDENCIES (#11871/#11878), which is the failure #12330 fixed"
+    )
+    assert len(entries) == len(set(entries)), (
+        "PYTHONPATH carries duplicate entries — the parent's order was not deduped: "
+        f"{entries}"
+    )
+    # ⛔ ORDER, not just membership (#12330 review, P3). `sys.path` order IS the
+    # resolution order, so a dedupe that sorts — or that moves an entry — changes WHICH
+    # module a child resolves, and NO assertion above can see it: first-position,
+    # membership and uniqueness all survive a pure reordering. ⚠️ The mutant must leave
+    # those three untouched and must ACTUALLY REORDER the tail — so it keeps the helper's
+    # `list(dict.fromkeys(...))` dedupe AND keeps `repo_root` first, reordering only the
+    # rest:
+    #
+    #     list(dict.fromkeys([repo_root,
+    #                         *reversed([p for p in sys.path if p and p != repo_root])]))
+    #
+    # ⛔ KEEP THE DEDUPE. Dropping it from the mutant is not a simplification: pytest's
+    # `sys.path` on this repo already carries `<repo>/tests` TWICE, so a bare
+    # `[repo_root, *reversed(...)]` reds `assert len(entries) == len(set(entries))` at the
+    # uniqueness arm above and the ORDER assert is never reached — measured: `1 failed`, on
+    # the uniqueness assert. ⚠️ The digits of that comparison are BOX-DEPENDENT (they count
+    # how many entries `sys.path` happens to carry), so no `assert N == M` literal is quoted
+    # here: one more duplicate is all the claim needs, and a reader who measures a different
+    # N will conclude the note is wrong rather than that their box differs. That is the same
+    # trap this paragraph exists to name, and it was wrong in an earlier cut of this comment.
+    # ⛔ VERIFY THE MUTANT CHANGED `entries` BEFORE TRUSTING A GREEN RUN. `sorted(...)` over
+    # a tail that is ALREADY non-decreasing is the IDENTITY — the mutant asserts nothing,
+    # passes, and a reader concludes the order arm is unpinned; `reversed(...)` below is a
+    # no-op in the mirror case (an already-reverse-sorted tail), which is the strictly less
+    # likely shape but the same trap. A mutant that leaves its input unchanged is not a
+    # falsifier, whichever way it is spelled, and a mutant that trips a DIFFERENT arm proves
+    # nothing about this one.
+    # ⛔ And `sorted({p for p in sys.path if p})` with NO `repo_root` prefix does NOT
+    # isolate this assertion at all: it reds `entries[0] == repo_root` whenever some
+    # `sys.path` entry sorts before the repo root — a macOS `/Library/Frameworks/...`
+    # against a repo under `/Users/...`, or a user-site `/home/<u>/.local/...` against
+    # `/home/<u>/tortoise` (`.` < `t`) — so the order assert is never reached. An earlier
+    # cut of this comment called that "the correct mutant"; it reproduced only because this
+    # box's repo root HAPPENS to be the lexicographically smallest `sys.path` entry. Same
+    # class as this repo's `MEMORY.md` `[pin-defensive-claim]` row — a falsifier entry must
+    # name the assert its mutant actually reds, on the box the next reader runs.
+    #
+    # ⛔ FIRST occurrence, not last: `entries` is built with `dict.fromkeys`, which keeps
+    # each path's FIRST position, so a `sys.path` carrying a non-adjacent duplicate
+    # (`[root, "X", "Y", "Y", "X"]`) would invert the indices under a last-wins map and
+    # red this assertion on a CORRECT helper (measured: tail `[4, 3]` against sorted
+    # `[3, 4]`). ⚠️ The trigger is IN this repo, not exotic: `tests/` mutates `sys.path`
+    # in hundreds of `insert(0, …)` sites, and `insert(0, X)` for an `X` already present
+    # LATER is exactly the non-adjacent duplicate that inverts under a last-wins map — the
+    # first-occurrence keying below is what keeps that green.
+    position: dict[str, int] = {}
+    for i, p in enumerate(sys.path):
+        position.setdefault(p, i)
+    tail = [position[p] for p in entries[1:]]
+    assert tail == sorted(tail), (
+        "the child's PYTHONPATH does not preserve the PARENT's `sys.path` order — that "
+        "order is the resolution order, so reordering changes what the child resolves: "
+        f"{entries[:6]}"
+    )
+
+
 def _run_zone_child(script: str, env_base: dict[str, str], zone: str) -> list[str]:
     """Run ``script`` in a child under ``zone``; return its output lines.
 
@@ -859,8 +1008,7 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
         "print((k('2023/03/12 (Sun) 02:50')[1] - k('2023/03/12 (Sun) 03:10')[1],\n"
         "       k('2023/03/12 (Sun) 03:50')[1] - k('2023/03/12 (Sun) 02:50')[1]))\n"
     )
-    env_base = {"PATH": str(Path(sys.executable).parent), "PYTHONPATH": str(
-        Path(__file__).resolve().parent.parent)}
+    env_base = _zone_child_env_base()
     observed = {}
     for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles",
                  "Africa/Johannesburg"):
@@ -1012,12 +1160,7 @@ def test_a_failing_zone_child_names_its_stderr_not_just_its_argv():
         "sys.exit(1)\n"
     )
     with pytest.raises(AssertionError) as excinfo:
-        _run_zone_child(
-            broken,
-            {"PATH": str(Path(sys.executable).parent),
-             "PYTHONPATH": str(Path(__file__).resolve().parent.parent)},
-            "UTC",
-        )
+        _run_zone_child(broken, _zone_child_env_base(), "UTC")
     message = str(excinfo.value)
     assert "child exited 1" in message, message
     # ⛔ Cut pytest's appendix off FIRST. pytest appends its assertion-rewrite
