@@ -705,6 +705,10 @@ def load(
 #:   * `#5008` — the session-chain exemption, stated by the seam that built it;
 #:   * `#4094` — the map-merge exemption (`SET n += $p` keeps a caller-supplied `embedding`);
 #:   * `#10541` — a *reading of the code* the census recorded (this function is not a producer);
+#:   * `#5004` — the caller-vector CARRIER contract: the door stores no vector of its own, the
+#:     vector it persists is the caller's, delegated to `_create_entity`/`_upsert_source`;
+#:   * `#11858` — the instrument-match PROVENANCE of a name the census learned about from a
+#:     guard's own message (that is why it enrols, not why it is `EXEMPT`);
 #:   * `#11085` — the three writers that carried **no declared exemption in the product at all**
 #:     before this register existed. That is this issue's whole job: reading (b) says an exception
 #:     must be NAMED in the product, so the naming is the acceptance — not a re-litigation of what
@@ -788,28 +792,6 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`set_embedding_clause(\"e\")`, the same canonical chain",
             "#5008",
             stores=("Event",),  # `set_embedding_clause("e")` in both of its write arms
-        ),
-    ),
-    # ── A prose-matched CARRIER (the match is a message; the vector is the caller's) ──────────
-    (
-        "tortoise.sdk::create_source",
-        WriterClass(
-            EXEMPT,
-            "`tortoise/sdk.py::create_source` — the instrument's match is an operator-facing "
-            "REFUSAL message, not a write clause: the only `embedding=` in the body is the "
-            "`#11858` guard's own sentence (\"pass `embedding=` and it declares the truth\"), "
-            "which names the keyword to say the `_SERVER_MANAGED_EMBEDDING_MARKERS` family may "
-            "NOT be set by hand. The door computes NO vector: a caller-supplied `embedding` is "
-            "CARRIED into `_create_entity`'s `:Source` write, which is the `#5004` "
-            "caller-vector contract — `tortoise/projection/entities.py::_upsert_source`'s "
-            "passthrough legitimately stores `s.embedding` for the vector retrieval leg to "
-            "read, so the store is DELEGATED and the vector is the caller's, never one this "
-            "door produces. Exempt as a CARRIER on `#5004`, the same disposition "
-            "`tortoise.api::add_point` carries — NOT because no store is reachable through it",
-            "#5004",
-            # The store is DELEGATED to `_create_entity`/`_upsert_source` and the vector is the
-            # caller's: the body issues no clause of its own and produces nothing.
-            stores=NO_LIVE_VECTOR,
         ),
     ),
     (
@@ -996,8 +978,13 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "function — the same false-positive class as "
             "`tortoise.api::_int_is_float_exact` below. ⛔ It arrived at `origin/main` in "
             "`18d43e0462` (`#12113`) without an entry, so the probe was red on `main` "
-            "before this branch touched it (measured)",
-            "#11858",
+            "before this branch touched it (measured); `#11858` owns that instrument-match "
+            "provenance. Exempt as a CARRIER on `#5004`, the same disposition "
+            "`tortoise.api::add_point` carries: the store is DELEGATED to `_create_entity` "
+            "/ `tortoise/projection/entities.py::_upsert_source`, whose passthrough "
+            "stores `s.embedding` for the vector retrieval leg to read — NOT because no "
+            "store is reachable through it",
+            "#5004",
             stores=NO_LIVE_VECTOR,  # the match is the guard's own MESSAGE, all prose
         ),
     ),

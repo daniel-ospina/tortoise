@@ -131,13 +131,36 @@ def _child_pids(pid: int) -> list[int]:
     return kids
 
 
-def _spawn(cmd: list[str], cwd: Path) -> subprocess.Popen:
-    """A detached process, like `wrangler pages dev` under a runner step."""
+def _spawn(cmd: list[str], cwd: Path, executable: str | None = None) -> subprocess.Popen:
+    """A detached process, like `wrangler pages dev` under a runner step.
+
+    `executable=` decouples WHAT RUNS from `argv[0]`: the census/`pkill` name and the
+    program are then two different things, which is the only portable way to put an
+    arbitrary name in front of a live process (#12039).
+    """
     return subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True)
+                            stderr=subprocess.DEVNULL, start_new_session=True,
+                            executable=executable)
 
 
 def _wait_alive(pid: int, timeout: float = 5.0) -> None:
+    """Wait for the pid to be RUNNING — ⚠️ in the sense `_pid_alive` means, which is NOT
+    "the decoy is up".
+
+    ⛔ `Popen` DOES NOT RETURN BEFORE `execve` on CPython/Linux (the parent blocks on the
+    CLOEXEC errpipe), so this never samples a pre-exec fork of THIS process. What it does
+    sample is the window right after exec: reading `/proc/<pid>/cmdline` the instant
+    `Popen` returned NEVER carried the parent's argv, but it CAN succeed and be EMPTY
+    while the child is state `R`, the same file reading our `argv[0]` microseconds later
+    (measured over 40-spawn samples: OUR argv 13-30, EMPTY 10-27 depending on spawn mode
+    and load — load-dependent, so not a constant to quote). Against `executable=/bin/false`
+    (execs and exits at once) every wait passed, 6/6, because the process is still live
+    when the wait looks. ⚠️ `posix_spawn` paths on other platforms may return earlier, so
+    this is a statement about this box's CPython, not a guarantee everywhere.
+
+    Use `_await_exec` when the question is "does a row NAME what we spawned", which is
+    what a census matcher and a human reading a failure both need.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _pid_alive(pid):
@@ -146,12 +169,250 @@ def _wait_alive(pid: int, timeout: float = 5.0) -> None:
     pytest.fail(f"decoy pid {pid} never came alive — the harness cannot measure")
 
 
+def _await_exec(pid: int, argv0: str, timeout: float = 5.0) -> None:
+    """Wait until a process-table row NAMES the command we spawned (#12039).
+
+    `_wait_alive` cannot answer that: it reads `/proc/<pid>/stat` directly and returns in
+    the milliseconds a doomed decoy is still alive (measured 6/6 against a decoy that
+    execs and exits immediately), so it reports a decoy as up that `record` will refuse
+    moments later. A `ps` row costs ~40 ms, which is longer than that window — so this
+    fails HERE, naming the row it last saw, instead of surfacing later as `record`
+    refusing a pid the harness had "just confirmed alive".
+    """
+    deadline = time.time() + timeout
+    seen = ""
+    while time.time() < deadline:
+        seen = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        if seen.startswith(argv0):
+            return
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.05)
+    why = (f"the last row read for it named {seen!r}, not {argv0!r}" if seen
+           else "the table had no row for it")
+    pytest.fail(
+        f"decoy pid {pid} never showed a row starting {argv0!r} — the harness cannot "
+        f"measure ({why})"
+    )
+
+
+def _kill0(pid: int) -> str:
+    """`kill -0 pid` from THIS process — the leg `record` grades with (#12039).
+
+    Read only into a FAILURE message, never into an assertion: it is the other
+    predicate's answer, printed so that a disagreement between the two is legible
+    instead of being collapsed into "not running".
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "ESRCH (no such process)"
+    except PermissionError:
+        return "EPERM (exists, not signalable by this user)"
+    except OSError as exc:  # pragma: no cover — exhaustive on Linux/macOS
+        return f"{exc}"
+    return "ok"
+
+
+def _record_when_running(name: str, pid: int, env: dict[str, str],
+                        timeout: float = 10.0) -> subprocess.CompletedProcess:
+    """`record` a just-spawned pid, asking the SUT until it answers — and naming why not.
+
+    ⛔ THEY AGREE FOR ANY PID THIS USER CAN SIGNAL. `kill -0` succeeds on a zombie — it
+    is the state letter that rules one out, on either side — so both ask "exists and is
+    not a zombie". The only one-sample divergences are EPERM (exists, not signalable)
+    and an unreadable `/proc`, and neither is reachable for a child of THIS process. So a
+    single sample cannot disagree, and what the reds this issue reports actually are is
+    not a predicate mismatch:
+
+      * at the preview decoy the decoy reached `execve` and died there — a renamed
+        multi-call binary cannot run under its new name (#12039 measured on
+        `ubuntu-26.04`) — the fixture's; fixed here, and now probed with `_await_exec`,
+        because a decoy that dies in the millisecond after exec is still "alive" to the
+        `/proc` read `_wait_alive` uses and is refused moments later;
+      * otherwise the process was gone by the time `record` spawned its shell — a GAP IN
+        TIME, which no retry reverses (issue #12039; `test (a)` red on main at
+        `4b1d6cd0d4`).
+
+    ⚠️ WHAT THE POLL CAN AND CANNOT REPAIR — stated because the honest answer
+    determines whether a red here blames the code or the box. The poll re-asks `record`
+    until it answers or the deadline expires. ⛔ IT DOES MASK A FIRST REFUSAL — that is
+    its whole point, and `test_the_record_poll_retries_a_refusal_until_the_sut_answers`
+    pins exactly that (a refusal on call 1, `returncode == 0` on call 2). What it never
+    does is MANUFACTURE a success: every success returned from here is an answer the SUT
+    gave, and a refusal the SUT repeats survives the deadline as a FAILURE.
+    Of the two arms: the LIVENESS arm (`kill -0` says ESRCH/EPERM, or the state letter
+    is `Z`) is a POSITIVE observation that the process is gone or a zombie, and no number
+    of retries brings it back. The START-TIME arm (`pid_starttime` returned nothing) is
+    only the observation that a READ FAILED — on Linux, `/proc/<pid>/stat` could not be
+    read, which for a child this test spawned means the pid went away before that read
+    (a row it COULD parse cannot produce this refusal at all: a short row yields an empty
+    start and exit 0, so `record` would not refuse). So this is not a fix for "the decoy
+    was OOM-killed on a thrashing runner", and it does not turn a dead pid green: what it
+    buys is a SECOND SAMPLE, plus a refusal that says WHICH leg refused so the next
+    reader does not have to guess. ⚠️ The loop re-asks on ANY refusal (gating it on the
+    arm would make a message an assertion condition, which this file forbids), so a
+    liveness refusal costs the full deadline and still fails — correctly.
+
+    A refusal that survives the deadline stays a FAILURE: this is a bounded second
+    look at a transient window, not a licence for a dead pid to go green.
+    """
+    deadline = time.time() + timeout
+    result = _script("record", "--name", name, "--pid", str(pid), env=env)
+    while result.returncode != 0 and time.time() < deadline:
+        time.sleep(0.05)
+        result = _script("record", "--name", name, "--pid", str(pid), env=env)
+    return result
+
+
+def _refusal_arm(env: dict[str, str], name: str, pid: int) -> str:
+    """WHICH of `record`'s two refusal arms fired — read from the SUT's OWN witness.
+
+    ⛔ THE ARM IS A FACT THE SUT WROTE AT REFUSAL TIME, not an inference from the pid
+    afterwards. `cmd_record` writes `refused <pid> not-running|no-start-time` before
+    either refusal can fire (`preview-server.sh::cmd_record`), precisely because the
+    two arms send the reader to different places. Probing the pid here instead would
+    be a measurement of a LATER instant: a decoy that was alive at refusal (the
+    start-time arm, the one this change exists to surface) can be a zombie
+    by the time the message is formatted, and a derived "the decoy died" would then
+    invert the attribution in the very message #12039 asks to be legible.
+
+    ⛔ AND THE WITNESS MUST NAME *THIS* PID. The file is never removed by `stop` or
+    `stop-all`, and `cmd_record` writes nothing at all on its `die`/`mkdir` paths — so
+    a refusal that does not reach either arm (an unwritable `PREVIEW_STATE`, a bad
+    argument) leaves an EARLIER refusal's witness in place. Reading it unqualified would
+    report a confident arm for a refusal that never happened, which is the same
+    attribution inversion this helper exists to end, one layer up.
+
+    An unrecognised, mismatched or missing witness is reported as such, never guessed.
+
+    ⛔ AND "MISSING" MUST BE ASKED OF THE SUT'S OWN STATE DIRECTORY. `Path(env.get(
+    "PREVIEW_STATE", ""))` is `Path("")` → `.`, the TEST's cwd, when the variable is
+    unset — while the SUT's `state_dir` falls back to
+    `${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tortoise-preview/<run>-<job>`. Reading the wrong
+    directory would report "no witness was written" about a witness `cmd_record` DID
+    write, i.e. the same attribution inversion this helper exists to end, one layer
+    down. The SUT answers this question itself (`dir`), so this mirrors nothing and
+    there is no second derivation to drift.
+    """
+    root = env.get("PREVIEW_STATE", "")
+    if root:
+        state_dir = Path(root)
+    else:
+        resolved = _script("dir", env=env)
+        reported = resolved.stdout.strip()
+        if resolved.returncode != 0 or not reported:
+            return (
+                "`PREVIEW_STATE` is unset and the SUT's own `dir` verb reported no state "
+                "directory — the arm is unrecorded (the witness cannot be located)"
+            )
+        state_dir = Path(reported)
+    path = state_dir / f"{name}.refused"
+    try:
+        text = path.read_text().strip()
+    except OSError:
+        return f"no `{name}.refused` witness was written — the arm is unrecorded"
+    parts = text.split()
+    if len(parts) < 3 or parts[0] != "refused":
+        return f"unrecognised refusal witness {text!r} — the arm is not covered here"
+    if parts[1] != str(pid):
+        return (
+            f"the witness on disk names pid {parts[1]}, not this refusal's pid {pid} — "
+            "the arm is unrecorded for this pid (a refusal that writes no witness, e.g. "
+            "an unwritable state dir, leaves an EARLIER one in place)"
+        )
+    arm = parts[2]
+    if arm == "not-running":
+        return (
+            "the LIVENESS leg refused (`pid_running`). ⚠️ THE WITNESS DOES NOT SAY WHICH "
+            "OF THAT ARM'S THREE CAUSES FIRED — `kill -0` failing gives ESRCH (gone) or "
+            "EPERM (unsignalable), and a `Z` state letter is the third — so this names "
+            "the candidates and not a culprit: the decoy we spawned died — at the "
+            "sites that run an interpreter under a fake `argv[0]` its own `-c` code can "
+            "be the cause, and elsewhere it is the box that killed it (a thrashing "
+            "runner OOM-killing a decoy is #12039's own wording for this case) — or a "
+            "peer job's machine-global reap killed it (#10283's actual defect, i.e. a "
+            "REAL finding). ⚠️ A pid the read could not SEE is NOT one of them and "
+            "lands on the start-time arm instead: `pid_state` returns empty, "
+            "`[[ \"\" != \"Z\" ]]` is true, so `pid_running` passes and "
+            "`pid_starttime` is what refuses. Read the decoy's own exit status and the "
+            "job log before closing a red here as flake (`stderr` says 'is not "
+            "running' for every cause named above)"
+        )
+    if arm == "no-start-time":
+        return ("the START-TIME leg refused (`pid_starttime`): the SUT read no start "
+                "time for the pid — `/proc/<pid>/stat` on Linux, `ps -o lstart=` on a "
+                "host without it. ⚠️ THIS IS NOT THE SUT MISREADING A ROW: "
+                "`proc_starttime` cannot refuse on a row it could parse — a short row "
+                "yields an EMPTY start and exit 0, so `cmd_record` would write "
+                "`<name>.start` and not refuse at all — so the witness means the READ "
+                "ITSELF failed. That read is `/proc/<pid>/stat`, so the pid went away "
+                "between `pid_running` and this read (a `pid_state` that returned "
+                "EMPTY lands here too: `[[ \"\" != \"Z\" ]]` passes and the "
+                "start-time read is then what refuses), or `/proc` could not be read "
+                "at all. Either way the cause is the box or the decoy — never a wrong "
+                "start time — and the poll does not repair it: a reaped process does "
+                "not come back")
+    return f"unrecognised refusal witness {text!r} — the arm is not covered here"
+
+
+def _pid_now(pid: int) -> str:
+    """The pid's state NOW — an OBSERVATION for the failure message, never an attribution.
+
+    Kept strictly separate from `_refusal_arm`: this is sampled seconds after the
+    refusal, so it may not be used to explain it.
+    """
+    kill0 = _kill0(pid)
+    if not kill0.startswith("ok"):
+        return f"kill -0 says {kill0}"
+    return f"kill -0 says ok, state is {_pid_state_letter(pid) or 'unreadable'!r} " \
+        "(from `/proc/<pid>/stat`, or `ps -o state=` on a host without /proc)"
+
+
+def _recorded(result: subprocess.CompletedProcess, pid: int, env: dict[str, str],
+              name: str = "app", timeout: float = 10.0) -> str:
+    """The assertion message for a `record` refusal: the arm, then the current state.
+
+    `timeout` is read from the caller rather than assumed — a message that claims a
+    deadline the poll never spent sends the next reader to the wrong conclusion — so a
+    caller that did NOT poll passes `timeout=0.0`, which omits the duration instead of
+    rendering `for 0s`. The default matches `_record_when_running`'s.
+    The pid's state NOW is labelled as an observation, because attributing a refusal
+    to what the pid looks like afterwards is how a fixture death gets blamed on the
+    SUT (or the reverse).
+    """
+    spent = f" for {timeout:g}s" if timeout else ""
+    return (
+        f"`record` refused pid {pid}{spent}: {result.stderr.strip()!r} — "
+        f"the SUT's own arm: {_refusal_arm(env, name, pid)}; observed NOW: {_pid_now(pid)} "
+        "(#12039: the refusing arm is the SUT's witness, not a later guess)"
+    )
+
+
 def _reap(*pids: int) -> None:
     for pid in pids:
         # Already-exited decoys are the normal case here: the point is that the
         # helper killed them, not that we did. SIM105's `suppress` is the idiom.
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, 9)
+
+
+def _reap_group(pid: int) -> None:
+    """Kill a `_spawn`ed tree by its SESSION, not by an enumerated child list (#12227).
+
+    `_spawn` sets `start_new_session=True`, so `pid` is the group leader and every
+    descendant is in its group — including a child forked AFTER the last
+    `_child_pids` sample. Reaping the ENUMERATION cannot cover that window: the one
+    place this matters is `assert len(children) == 2`, whose whole content is that the
+    enumeration is incomplete, and SIGKILL to the supervisor does not reach a child.
+    Measured before this change: a guard reaping only one of two enumerated children
+    left `sleep 120` (ppid 1) on the box, one per red shard.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, 9)
 
 
 @pytest.fixture()
@@ -404,33 +665,126 @@ def test_every_preview_boot_tolerates_a_dead_pid_from_record() -> None:
 def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) -> None:
     """#10283's own indicator (a): job A's cleanup leaves job B's decoy alive.
 
-    The decoy is a process whose `comm` is literally `workerd` — the name the
-    pre-fix teardown matched with `pkill workerd` — belonging to a DIFFERENT
-    job's state directory.
+    The decoy is a process whose `comm` is literally `workerd` — the process NAME
+    the pre-fix teardown matched with `pkill workerd` (no `-f`, so `pkill` reads the
+    name, not the command line) — belonging to a DIFFERENT job's state directory.
+
+    ⚠️ Scoped to a Linux host, and stated rather than implied: `comm` is set with
+    `prctl(PR_SET_NAME)`, which is Linux-only, and the assertion that the name really
+    took is read from `ps -o comm=` behind a `Path("/proc").is_dir()` guard. On a host
+    without `/proc` the decoy is still spawned and still recorded, but its `comm` stays
+    the interpreter's — so this test does not reproduce the `pkill workerd` shape there.
     """
     assert SCRIPT.is_file(), f"missing {SCRIPT}"
 
     # Job B: a `workerd`-named decoy, registered in ITS OWN state directory.
+    #
+    # ⛔ NOT A SYMLINK TO `sleep` (#12039, measured). On the `ubuntu-26.04` hosted image
+    # `/usr/bin/sleep` is a uutils MULTI-CALL binary that dispatches on
+    # `basename(argv[0])`, so a process renamed to `workerd` refuses to run at all
+    # (`coreutils: unknown program 'workerd'`, exit 1). The decoy then never exists and
+    # this test reds as `record: pid N is not running` — #12039's exact signature — with
+    # nothing wrong in the SUT. The sibling census fixture in `tests/test_fleet_state.py`
+    # carries the same fix (`executable=`), for the same reason.
+    #
+    # ⛔ `argv[0]` IS NOT WHAT `pkill workerd` MATCHED — `pkill` with no `-f` matches the
+    # process NAME, which on Linux is `comm`, so `prctl(PR_SET_NAME)` is the half that
+    # makes this decoy faithful to #10283's shape. `argv[0]` is here only as the handle
+    # the interpreter is spawned under, and `executable=` is what removes the dependency
+    # on a copied binary accepting its new name.
     peer_bin = tmp_path / "bin"
     peer_bin.mkdir()
     peer_workerd = peer_bin / "workerd"
-    peer_workerd.symlink_to("/bin/sleep")
     peer_state = dict(state, PREVIEW_STATE=str(tmp_path / "peer-preview"), GITHUB_JOB="dashboard-e2e")
-    peer = _spawn([str(peer_workerd), "120"], tmp_path)
-    _wait_alive(peer.pid)
-    assert (peer_bin / "workerd").exists()
-    assert _script("record", "--name", "app", "--pid", str(peer.pid), env=peer_state).returncode == 0
+    peer = _spawn(
+        [str(peer_workerd), "-c",
+         "import ctypes, time\n"
+         "try:\n"
+         "    ctypes.CDLL(None).prctl(15, b'workerd', 0, 0, 0)\n"
+         "except (OSError, AttributeError):\n"
+         "    pass\n"              # no prctl (macOS): `comm` stays the interpreter's,
+         "                        #  and the name pin below cannot run without /proc\n"
+         "time.sleep(120)\n"],
+        tmp_path, executable=sys.executable,
+    )
+    # ⛔ THE DECOY IS SPAWNED BEFORE THE `try:` THAT OWNS ITS `finally: _reap(...)`
+    # further down, so every assertion between the two is a leak path for a 120 s
+    # process in its own session. This guard reaps on those paths only.
+    try:
+        _await_exec(peer.pid, str(peer_workerd))
+    except BaseException:
+        _reap(peer.pid)
+        raise
+    # The decoy must really BE a `workerd` process, or this test proves nothing about the
+    # name `pkill workerd` matched (#12039 replaced the symlinked `sleep` with an
+    # interpreter under that argv[0] + `prctl`, so the pin moves from "the symlink exists"
+    # to "the process is named workerd"). `ps -o comm=` is what `pkill` reads.
+    #
+    # ⛔ `ctypes.CDLL(None)` RESOLVES `prctl` FROM THE LIBC PYTHON ALREADY LOADED, so no
+    # soname is assumed — hardcoding `libc.so.6` would fail on musl, where `/proc` DOES
+    # exist, and the pin below would then red a fixture on a box where the SUT is fine
+    # (the class this PR exists to remove). The `/proc` guard is a Linux test, because
+    # `prctl` is Linux-only and comm stays the interpreter's elsewhere.
+    #
+    # ⛔ A BOUNDED POLL, because `prctl` is NOT part of the `execve` `_await_exec` waits
+    # for: it runs later, inside the child's `-c` code, ~13-22 ms after exec on this box
+    # (measured), while `ps -o comm=` costs ~42 ms — so a one-shot sample passes here by
+    # luck of relative latency. It fails deterministically on a faster process table
+    # (measured: 4/4 reds in a PID namespace where `ps` takes ~4 ms). The poll still reds
+    # if `prctl` never runs at all.
+    if Path("/proc").is_dir():
+        deadline, comm = time.time() + 5.0, ""
+        while time.time() < deadline:
+            comm = subprocess.run(["ps", "-o", "comm=", "-p", str(peer.pid)],
+                                  capture_output=True, text=True).stdout.strip()
+            if comm == "workerd":
+                break
+            time.sleep(0.02)
+        try:
+            assert comm == "workerd", (
+                f"the peer decoy is named {comm!r}, not `workerd` — the shape #10283's "
+                "pre-fix machine-global `pkill workerd` matched is not reproduced"
+            )
+        except BaseException:
+            _reap(peer.pid)
+            raise
+    try:
+        result = _record_when_running("app", peer.pid, env=peer_state)
+        assert result.returncode == 0, _recorded(result, peer.pid, peer_state)
+    except BaseException:
+        _reap(peer.pid)
+        raise
 
     # Job A: a real tree (a supervisor + two children, like wrangler + workerd).
+    # ⛔ JOB A'S OWN SPAWN IS A LEAK PATH TOO (#12227 review cycle 6). It runs BEFORE the
+    # `try:` below, so a failure in ANY of the three asserts that shape the tree leaks the
+    # supervisor, its two children AND the peer decoy — three 120 s processes in their own
+    # sessions — which the comment above used to claim "the later `finally` still reaps on
+    # the rest". It did not. This guard covers exactly that window; the `finally` below
+    # covers everything after it, and a double reap is a suppressed no-op.
+    #
+    # ⛔ AND IT REAPS THE SESSION, NOT THE ENUMERATION (#12227 review cycle 8). Reaping
+    # `own.pid` plus the `children` LIST could not cover this guard's own failure mode:
+    # the list is exactly what `assert len(children) == 2` is about to reject when the
+    # poll timed out, and a child forked after the last sample is in the group but not in
+    # the list — SIGKILL to the supervisor does not reach it. Measured: omitting one
+    # enumerated child from the reap left `sleep 120` (ppid 1) behind.
     own = _spawn(["bash", "-c", "sleep 120 & sleep 120"], tmp_path)
-    _wait_alive(own.pid)
-    deadline = time.time() + 5
-    while time.time() < deadline and len(_child_pids(own.pid)) < 2:
-        time.sleep(0.05)
-    children = _child_pids(own.pid)
-    assert len(children) == 2, f"the tree did not form (children={children})"
+    children: list[int] = []
+    try:
+        _wait_alive(own.pid)
+        deadline = time.time() + 5
+        while time.time() < deadline and len(_child_pids(own.pid)) < 2:
+            time.sleep(0.05)
+        children = _child_pids(own.pid)
+        assert len(children) == 2, f"the tree did not form (children={children})"
 
-    assert _script("record", "--name", "app", "--pid", str(own.pid), env=state).returncode == 0
+        recorded = _record_when_running("app", own.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, own.pid, state)
+    except BaseException:
+        _reap_group(own.pid)
+        _reap(peer.pid)
+        raise
     result = _script("stop-all", env=state)
     try:
         assert result.returncode == 0, result.stderr
@@ -452,7 +806,44 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
             "ERR_CONNECTION_REFUSED"
         )
     finally:
-        _reap(own.pid, *children, peer.pid)
+        _reap_group(own.pid)
+        _reap(peer.pid)
+
+
+def test_await_exec_REFUSES_a_decoy_that_never_shows_its_name(tmp_path: Path) -> None:
+    """`_await_exec` is the predicate that can refuse — pin the refusal, not just the pass.
+
+    #12039 replaced a liveness read that could only ever say "alive" in the window that
+    matters. Mutating `_await_exec` to a bare `return` leaves every other test in this
+    file green, because a healthy decoy is visible to both predicates; only the refusal
+    tells the two apart.
+
+    ⛔ AND THE DECOY MUST BE ALIVE FOR THE ARM THAT DISCRIMINATES (#12227 review cycle 8).
+    A pid that is gone is the cheapest input to reject — but a LIVENESS-ONLY predicate
+    rejects it too, so a dead-pid-only pin stays green when `_await_exec` regresses to
+    exactly the check #12039 removed (measured: splicing `_wait_alive(pid, timeout);
+    return` in left every runnable test in this file green). The live-but-unnamed case is
+    the one that separates them: the row reads `/bin/sleep 60`, `_pid_alive` answers True,
+    and the row still does not start with the argv0 asked for — so only the name read can
+    be what refuses.
+    """
+    victim = _spawn(["/bin/sleep", "60"], tmp_path)
+    try:
+        _wait_alive(victim.pid)
+        # THE DISCRIMINATING ARM: alive, and the table names something else.
+        with pytest.raises(pytest.fail.Exception):
+            _await_exec(victim.pid, "/nonexistent/never-shown", timeout=0.3)
+    finally:
+        _reap(victim.pid)
+    deadline = time.time() + 10
+    while time.time() < deadline and _pid_alive(victim.pid):
+        time.sleep(0.02)
+    assert not _pid_alive(victim.pid), "the harness cannot measure: the decoy survived its own kill"
+
+    # The cheap arm, kept: a pid that is gone is still rejected — legibly, without waiting
+    # out the deadline.
+    with pytest.raises(pytest.fail.Exception):
+        _await_exec(victim.pid, "/nonexistent/never-shown", timeout=0.3)
 
 
 def test_stop_refuses_a_pid_whose_start_time_changed(tmp_path: Path, state) -> None:
@@ -460,7 +851,8 @@ def test_stop_refuses_a_pid_whose_start_time_changed(tmp_path: Path, state) -> N
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
     _wait_alive(victim.pid)
     try:
-        assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
         start_file = Path(state["PREVIEW_STATE"]) / "app.start"
         assert start_file.is_file()
         start_file.write_text("1\n")  # a DIFFERENT process now supposedly owns this pid
@@ -545,9 +937,8 @@ def test_ready_requires_the_preview_to_SERVE_not_just_bind(tmp_path: Path, state
     healthy = None
     try:
         assert _wait_port(port), f"the decoy listener never bound :{port}"
-        assert _script(
-            "record", "--name", "app", "--pid", str(broken.pid), env=state
-        ).returncode == 0
+        recorded = _record_when_running("app", broken.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, broken.pid, state)
         assert _script("ready", "--name", "app", env=state).returncode == 1, (
             f"a listener on :{port} that is bound, alive and answering 500 was reported "
             "READY — the specs behind this gate require 200, so the boot step would "
@@ -561,9 +952,8 @@ def test_ready_requires_the_preview_to_SERVE_not_just_bind(tmp_path: Path, state
 
         healthy = _spawn_http(port, 200, tmp_path)
         assert _wait_port(port), f"the healthy listener never bound :{port}"
-        assert _script(
-            "record", "--name", "app", "--pid", str(healthy.pid), env=state
-        ).returncode == 0
+        recorded = _record_when_running("app", healthy.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, healthy.pid, state)
         result = _script("ready", "--name", "app", env=state)
         assert result.returncode == 0, (
             f"a serving 200 preview on :{port} was reported NOT ready — the boot loop "
@@ -618,8 +1008,10 @@ def test_alive_calls_a_zombie_GONE_not_alive(tmp_path: Path, state) -> None:
     child = _spawn(["/bin/sleep", "2"], tmp_path)
     pid = child.pid
     try:
-        assert _script("record", "--name", "app", "--pid", str(pid), env=state).returncode == 0, (
+        recorded = _record_when_running("app", pid, env=state)
+        assert recorded.returncode == 0, (
             "the child must be recorded while it is still running, like a boot step does"
+            f" — {_recorded(recorded, pid, state)}"
         )
         deadline = time.time() + 15
         while time.time() < deadline and _pid_state_letter(pid) != "Z":
@@ -654,7 +1046,8 @@ def test_alive_refuses_a_recycled_pid(tmp_path: Path, state) -> None:
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
     _wait_alive(victim.pid)
     try:
-        assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
         (Path(state["PREVIEW_STATE"]) / "app.start").write_text("1\n")  # a different process
         result = _script("alive", "--name", "app", env=state)
         assert result.returncode == 8, (
@@ -687,9 +1080,8 @@ def test_the_recycled_sentence_is_WELL_FORMED_when_no_port_was_recorded(
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
     _wait_alive(victim.pid)
     try:
-        assert _script(
-            "record", "--name", "app", "--pid", str(victim.pid), env=state
-        ).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
         (Path(state["PREVIEW_STATE"]) / "app.start").write_text("1\n")
         assert not (Path(state["PREVIEW_STATE"]) / "app.port").exists()
 
@@ -758,6 +1150,218 @@ def test_alive_names_a_record_that_RAN_and_REFUSED(tmp_path: Path, state) -> Non
     assert "no pid was ever recorded for this name" not in result.stdout, result.stdout
 
 
+def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, state) -> None:
+    """#12039, the other half of the fix: a refusal must be ATTRIBUTABLE.
+
+    `record` prints one line for every path, so a red on a required shard could not be
+    read as "the fixture died" or "the SUT could not read the pid's start time". The
+    SUT already answers this at refusal time — `cmd_record` writes
+    `refused <pid> not-running|no-start-time` BEFORE either refusal fires — so the
+    message reads THAT witness instead of inferring an arm from the pid's state
+    afterwards (a later sample, which can invert the attribution: a decoy alive at
+    refusal can be a zombie by the time the message is formatted).
+
+    ⚠️ THE LIVENESS ARM IS NAMED BY CANDIDATES, NOT BY A CULPRIT — the witness records
+    the VERDICT and none of the three legs that can produce it (ESRCH, EPERM, `Z`), and
+    a dead decoy is *possibly a true positive* (#10283's machine-global reap, the defect
+    that is then named). Calling it "the fixture's" would tell the next reader to close
+    a real defect as flake.
+
+    ⛔ THE LIVENESS WITNESS IS PRODUCED BY THE SUT, NOT WRITTEN BY HAND. The parser
+    couples to `cmd_record`'s exact wording, and a fabricated string cannot notice the
+    day that wording moves — every arm would silently degrade to "arm is unrecorded"
+    and every run would stay green. Recording a dead pid is the real, cheap way to make
+    the SUT emit it (rc 4, `refused <pid> not-running`).
+
+    The START-TIME arm cannot be forced on demand (it needs `/proc` to lose a live pid
+    between two reads), so that one witness IS fabricated and is therefore the weaker
+    half of this test — said here rather than passed off as equal.
+
+    The pid's current state is labelled an observation — never the explanation.
+    """
+    state_dir = Path(state["PREVIEW_STATE"])
+    state_dir.mkdir(parents=True, exist_ok=True)
+    dead = subprocess.CompletedProcess([], 4, "", "pid 4242 is not running — nothing recorded")
+
+    sut_refusal = _script("record", "--name", "app", "--pid", "99999999", env=state)
+    assert sut_refusal.returncode == 4, (
+        f"the harness cannot measure: the SUT must refuse a dead pid (rc 4): {sut_refusal.stderr}"
+    )
+    # ⛔ NO POLL HAPPENED FOR THESE FOUR, so the message must not claim a deadline
+    # (`timeout=0.0`): one result came from a single `record` invocation and three are
+    # fabricated outright.
+    liveness = _recorded(sut_refusal, 99999999, state, timeout=0.0)
+    assert "LIVENESS leg refused" in liveness, (
+        "the SUT's own witness no longer parses — its wording moved and every arm is now "
+        f"attributed to nothing: {liveness}"
+    )
+    assert "the candidates and not a culprit" in liveness, liveness
+    assert "#10283" in liveness, (
+        "the liveness arm's message must name the REAL defect a dead decoy can be "
+        f"(#10283's machine-global reap), not only the fixture: {liveness}"
+    )
+    # ⛔ NO POLL HAPPENED HERE, so the message must not claim a deadline. Pinned
+    # positively — without this the `if timeout` guard could be dropped and every test
+    # would still pass while the message claimed `for 0s` (measured before pinning).
+    assert "refused pid 99999999:" in liveness, liveness
+    assert "observed NOW" in liveness, liveness
+
+    # ⛔ A witness for a DIFFERENT pid is not this refusal's arm. `cmd_record` writes
+    # nothing on its `die`/`mkdir` paths, so an earlier refusal's witness can be the one
+    # on disk — reading it unqualified reports a confident arm for a refusal that never
+    # happened.
+    (state_dir / "app.refused").write_text("refused 4242 not-running\n")
+    stale = _recorded(dead, 4243, state, timeout=0.0)
+    assert "names pid 4242" in stale and "arm is unrecorded for this pid" in stale, stale
+    assert "LIVENESS leg refused" not in stale, stale
+
+    (state_dir / "app.refused").write_text("refused 4242 no-start-time\n")
+    starttime = _recorded(dead, 4242, state, timeout=0.0)
+    assert "START-TIME leg refused" in starttime, starttime
+    # The OTHER arm of the caller-deadline guard: a caller that really polled DOES name
+    # its deadline. Pinned so "never claim one" cannot be implemented as "never state one".
+    assert "refused pid 4242 for 10s:" in _recorded(dead, 4242, state, timeout=10.0)
+    # ⛔ The reachable cause, and the one that is NOT — `proc_starttime` exits 0 with an
+    # EMPTY start on a row it cannot parse, so `cmd_record` writes `<name>.start` and
+    # never refuses; a message blaming a misread row points a reader at a SUT defect this
+    # leg cannot produce. Pinned positively, because a message that merely omits the claim
+    # is indistinguishable from one that never had it.
+    assert "NOT THE SUT MISREADING A ROW" in starttime, (
+        f"the start-time arm must rule out the row-misread cause: {starttime}"
+    )
+    assert "READ ITSELF failed" in starttime, (
+        f"the start-time arm must name the failed read: {starttime}"
+    )
+    # …and it still does not BORROW the liveness arm's three-candidate wording: the two
+    # arms stay tellable apart, which is the whole point of reading the witness.
+    assert "the candidates and not a culprit" not in starttime, (
+        f"the two arms collapsed into one wording: {starttime}"
+    )
+
+    (state_dir / "app.refused").unlink()
+    unrecorded = _recorded(dead, 4242, state, timeout=0.0)
+    assert "arm is unrecorded" in unrecorded, unrecorded
+
+    # The current-state observation is a separate sentence and must not raise on a pid
+    # that never existed, nor claim an arm from it. ⛔ Pinned on BOTH halves: every branch
+    # of `_pid_now` starts with "kill -0 says", so a bare substring check on that prefix
+    # is satisfied by ANY output — including one that wrongly reported it alive.
+    now = _pid_now(99999999)
+    assert "ESRCH" in now, now
+    assert "LIVENESS" not in now and "START-TIME" not in now, (
+        f"the observation asserted an arm — that is what `_refusal_arm` is for: {now}"
+    )
+
+
+def test_a_witness_is_located_by_the_SUTs_own_state_dir_when_PREVIEW_STATE_is_unset(
+    tmp_path: Path, state
+) -> None:
+    """#12227 review cycle 5: "no witness was written" must not be a guess.
+
+    `_refusal_arm` read `Path(env.get("PREVIEW_STATE", "")) / "<name>.refused"`, and
+    `Path("")` is `.` — the TEST's cwd — while the SUT's `state_dir` falls back to
+    `${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tortoise-preview/<run>-<job>`. With the variable
+    unset the helper therefore read a directory the SUT never writes to, and reported
+    "no `app.refused` witness was written" about a witness `cmd_record` DID write —
+    asserting a cause it had not measured, which is the inversion this helper exists to
+    end, one layer down. The SUT answers the question itself (`dir`), so the helper now
+    asks it instead of deriving a second copy of the rule.
+
+    Latent rather than live: every call site in this file passes a `state` fixture with a
+    non-empty `PREVIEW_STATE`, which is exactly why it is pinned here directly — no
+    fixture-shaped test would ever reach the arm.
+    """
+    # ⛔ THE STATE ROOT COMES FROM THE SUT, not from a literal here. A test that spelled
+    # `${RUNNER_TEMP}/tortoise-preview/<run>-<job>` itself would still pass against a
+    # helper carrying the same second copy, and the drift between the two IS the defect.
+    no_state = {k: v for k, v in state.items() if k != "PREVIEW_STATE"} | {
+        "RUNNER_TEMP": str(tmp_path / "runner-temp"),
+        "GITHUB_JOB": "dashboard-e2e",
+    }
+    where = _script("dir", env=no_state)
+    assert where.returncode == 0 and where.stdout.strip(), (
+        f"the harness cannot measure: the SUT must report a state dir: {where.stderr}"
+    )
+    state_dir = Path(where.stdout.strip())
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "app.refused").write_text("refused 4242 no-start-time\n")
+
+    arm = _refusal_arm(no_state, "app", 4242)
+    assert "START-TIME leg refused" in arm, (
+        "the helper did not read the SUT's own state directory when `PREVIEW_STATE` was "
+        f"unset — it reported about a directory the SUT never writes: {arm}"
+    )
+    assert "witness was written" not in arm, (
+        f"the helper claimed no witness exists while one was on disk: {arm}"
+    )
+
+
+def test_the_record_poll_does_not_call_a_dead_pid_running(tmp_path: Path, state) -> None:
+    """#12039: the poll buys the WINDOW, never a green for a pid that is really gone.
+
+    `_record_when_running` retries `record`'s own predicate, so the hazard it must not
+    introduce is the opposite direction: a bounded poll that eventually answers yes
+    about a process that no longer exists (a false PASS, worse than the false red it
+    replaces). The decoy is SIGNAL-killed and not `wait()`ed, so it is a ZOMBIE — which
+    `pid_running` refuses by its `state != "Z"` leg (`kill -0` still succeeds on a
+    zombie, so this pins that leg and not the ESRCH one, whose arm is the
+    `--pid 999999` refusals above). Either way a refusal must leave the state directory
+    without a pid witness.
+    """
+    victim = _spawn(["/bin/sleep", "60"], tmp_path)
+    _wait_alive(victim.pid)
+    _reap(victim.pid)
+    deadline = time.time() + 10
+    while time.time() < deadline and _pid_alive(victim.pid):
+        time.sleep(0.02)
+    assert not _pid_alive(victim.pid), "the harness cannot measure: the decoy survived its own kill"
+
+    result = _record_when_running("app", victim.pid, env=state, timeout=1.0)
+    assert result.returncode == 4, (
+        "the poll turned a dead pid into a recorded one — "
+        f"{_recorded(result, victim.pid, state, timeout=1.0)}"
+    )
+    assert not (Path(state["PREVIEW_STATE"]) / "app.pid").exists(), (
+        "a refused record wrote a pid witness anyway"
+    )
+
+
+def test_the_record_poll_retries_a_refusal_until_the_sut_answers(tmp_path: Path, state, monkeypatch) -> None:
+    """#12039's mechanism itself: the FIRST refusal is not the verdict.
+
+    The mechanism this pins is the LOOP, not an environmental race: on this file's own
+    account (`_record_when_running`) a live, signalable pid cannot be refused at all, so
+    the window it absorbs is the START-TIME read — which cannot be forced on demand. It is
+    therefore pinned by STANDING IN for it: the pid is alive and the SUT refuses exactly
+    once. The poll must ask again and take the second answer. Without the retry this sees
+    one call and a refusal — so deleting the loop cannot pass unnoticed, which is the
+    failure mode a purely environmental reproducer would leave untested. ⚠️ It does NOT
+    follow that the poll rescues a decoy that died: a refusal on the LIVENESS leg survives
+    every retry, by design.
+    """
+    victim = _spawn(["/bin/sleep", "60"], tmp_path)
+    _wait_alive(victim.pid)
+    real = _script
+    calls: list[tuple] = []
+
+    def flaky(*args: str, env: dict[str, str], **kw) -> subprocess.CompletedProcess:
+        calls.append(args)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(args, 4, "", "pid refused once (simulated window)")
+        return real(*args, env=env, **kw)
+
+    monkeypatch.setattr(sys.modules[__name__], "_script", flaky)
+    try:
+        result = _record_when_running("app", victim.pid, env=state, timeout=5.0)
+        assert result.returncode == 0, _recorded(result, victim.pid, state, timeout=5.0)
+        assert len(calls) >= 2, (
+            f"the poll took the first answer as the verdict ({len(calls)} call(s)) — "
+            "a single-shot probe is exactly the #12039 shape"
+        )
+    finally:
+        _reap(victim.pid)
+
+
 @pytest.mark.parametrize("which", ["pid", "start", "booted"])
 def test_a_refusal_is_superseded_by_a_later_successful_record(
     tmp_path: Path, state, which: str
@@ -778,9 +1382,8 @@ def test_a_refusal_is_superseded_by_a_later_successful_record(
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
     _wait_alive(victim.pid)
     try:
-        assert _script(
-            "record", "--name", "app", "--pid", str(victim.pid), env=state
-        ).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
         assert not (Path(state["PREVIEW_STATE"]) / "app.refused").exists(), (
             "a successful record left the earlier refusal witness in place"
         )
@@ -816,7 +1419,8 @@ def test_alive_tells_a_stopped_preview_from_one_that_never_started(
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
     _wait_alive(victim.pid)
     try:
-        assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
         assert _script("stop", "--name", "app", env=state).returncode == 0
         stopped = _script("alive", "--name", "app", env=state)
         assert stopped.returncode == 5, (
@@ -849,7 +1453,8 @@ def test_alive_separates_a_serving_preview_from_a_surviving_one(
     healthy = None
     try:
         assert _wait_port(port), f"the decoy listener never bound :{port}"
-        assert _script("record", "--name", "app", "--pid", str(broken.pid), env=state).returncode == 0
+        recorded = _record_when_running("app", broken.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, broken.pid, state)
         result = _script("alive", "--name", "app", env=state)
         assert result.returncode == 7, (
             "an alive process whose port answers 500 was reported as a preview that "
@@ -865,7 +1470,8 @@ def test_alive_separates_a_serving_preview_from_a_surviving_one(
 
         healthy = _spawn_http(port, 200, tmp_path)
         assert _wait_port(port), f"the healthy listener never bound :{port}"
-        assert _script("record", "--name", "app", "--pid", str(healthy.pid), env=state).returncode == 0
+        recorded = _record_when_running("app", healthy.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, healthy.pid, state)
         result = _script("alive", "--name", "app", env=state)
         assert result.returncode == 0, (
             f"a serving, surviving preview was not reported whole: {result.stdout}{result.stderr}"
@@ -887,7 +1493,8 @@ def test_alive_does_not_claim_an_identity_it_could_not_check(tmp_path: Path, sta
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
     _wait_alive(victim.pid)
     try:
-        assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
         (Path(state["PREVIEW_STATE"]) / "app.start").unlink()
         result = _script("alive", "--name", "app", env=state)
         # 9, not 0: no port was recorded for this name, so the SERVING leg was not
@@ -940,9 +1547,8 @@ def test_alive_does_not_claim_an_identity_it_could_not_READ(tmp_path: Path, stat
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
     _wait_alive(victim.pid)
     try:
-        assert _script(
-            "record", "--name", "app", "--pid", str(victim.pid), env=state
-        ).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
         # Positive control: with a working `awk` the same state DOES report the
         # match, so the arm below cannot pass for the wrong reason (no match was
         # ever expected here).
@@ -1005,9 +1611,8 @@ def test_alive_does_not_borrow_an_unchecked_identity_for_a_serving_verdict(
     server = _spawn_http(port, 200, tmp_path)
     try:
         assert _wait_port(port), f"the listener never bound :{port}"
-        assert _script(
-            "record", "--name", "app", "--pid", str(victim.pid), env=state
-        ).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
         result = _script(
             "alive", "--name", "app",
             env={**state, "PATH": f"{blind}:{state['PATH']}"},
@@ -1043,9 +1648,8 @@ def test_alive_refuses_to_call_an_unchecked_port_leg_a_serving_verdict(
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
     _wait_alive(victim.pid)
     try:
-        assert _script(
-            "record", "--name", "app", "--pid", str(victim.pid), env=state
-        ).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
         assert not (Path(state["PREVIEW_STATE"]) / "app.port").exists(), (
             "the harness cannot measure: `record` must not have written a port"
         )
@@ -1154,9 +1758,8 @@ def test_a_later_refusal_outranks_an_earlier_boot(tmp_path: Path, state) -> None
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
     _wait_alive(victim.pid)
     try:
-        assert _script(
-            "record", "--name", "app", "--pid", str(victim.pid), env=state
-        ).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
         assert _script("stop", "--name", "app", env=state).returncode == 0
         refused = _script("record", "--name", "app", "--pid", "999999", env=state)
         assert refused.returncode == 4, refused.stderr
@@ -1202,9 +1805,8 @@ def test_an_unreadable_pid_file_is_not_the_gone_verdict(tmp_path: Path, state) -
     _wait_alive(victim.pid)
     pfile = Path(state["PREVIEW_STATE"]) / "app.pid"
     try:
-        assert _script(
-            "record", "--name", "app", "--pid", str(victim.pid), env=state
-        ).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
 
         pfile.write_text("")
         empty = _script("alive", "--name", "app", env=state)
@@ -1260,9 +1862,8 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
     _wait_alive(victim.pid)
     state_dir = Path(state["PREVIEW_STATE"])
     try:
-        assert _script(
-            "record", "--name", "app", "--pid", str(victim.pid), env=state
-        ).returncode == 0
+        recorded = _record_when_running("app", victim.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, victim.pid, state)
 
         # The matched-witness shape keeps the claim: positive control, and it also
         # pins the FIRST exit-9 sentence's port leg (an empty port file must not be
@@ -1408,9 +2009,8 @@ def test_ready_refuses_a_witness_that_no_longer_describes_the_recorded_pid(
     listener = _spawn_http(int(port.stdout.strip()), 200, tmp_path)
     try:
         assert _wait_port(int(port.stdout.strip())), "the decoy listener never bound"
-        assert _script(
-            "record", "--name", "app", "--pid", str(listener.pid), env=state
-        ).returncode == 0
+        recorded = _record_when_running("app", listener.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, listener.pid, state)
         healthy = _script("ready", "--name", "app", env=state)
         assert healthy.returncode == 0, (
             "the positive control failed: our own recorded listener serves 200 and "
