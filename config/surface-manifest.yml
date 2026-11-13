@@ -2978,7 +2978,7 @@ rows:
   job: Public SDK method TortoiseSDK.annotate_operator.
   dependency: 'reached by 1 registered tool(s): tortoise_annotate_operator'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3116,7 +3116,7 @@ rows:
   job: Public SDK method TortoiseSDK.audit.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_audit (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -3162,7 +3162,7 @@ rows:
   job: Public SDK method TortoiseSDK.belief_timeline.
   dependency: 'reached by 1 registered tool(s): tortoise_belief_timeline'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3231,7 +3231,7 @@ rows:
   job: Public SDK method TortoiseSDK.check_structure.
   dependency: 'reached by 1 registered tool(s): tortoise_check_structure'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3254,7 +3254,7 @@ rows:
   job: Public SDK method TortoiseSDK.checkpoint.
   dependency: 'reached by 1 registered tool(s): tortoise_checkpoint'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3278,7 +3278,7 @@ rows:
   dependency: 'reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling,
     tenant-rest'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest'
   recommended_family: null
@@ -3301,7 +3301,7 @@ rows:
   job: Public SDK method TortoiseSDK.compute_confidence.
   dependency: 'reached by 1 registered tool(s): tortoise_compute_confidence'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3370,7 +3370,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_direct_edge.
   dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine, other-tooling'
   recommended_family: null
@@ -3416,7 +3416,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_edge.
   dependency: 'reached by 1 registered tool(s): tortoise_create_edge'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3508,7 +3508,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_operator.
   dependency: 'reached by 1 registered tool(s): tortoise_create_operator'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3531,7 +3531,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_point.
   dependency: 'reached by 1 registered tool(s): tortoise_create_point'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3600,7 +3600,7 @@ rows:
   job: Public SDK method TortoiseSDK.delete.
   dependency: 'reached by 1 registered tool(s): tortoise_delete'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3623,7 +3623,7 @@ rows:
   job: Public SDK method TortoiseSDK.delete_entity.
   dependency: 'reached by 1 registered tool(s): tortoise_delete_entity'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3669,7 +3669,7 @@ rows:
   job: Public SDK method TortoiseSDK.delete_point.
   dependency: 'reached by no registered MCP tool; caller categories: documentation, engine, other-tooling'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: documentation, engine, other-tooling'
   recommended_family: null
@@ -3715,7 +3715,7 @@ rows:
   job: Public SDK method TortoiseSDK.diary_read.
   dependency: 'reached by 1 registered tool(s): tortoise_diary_read'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3738,7 +3738,7 @@ rows:
   job: Public SDK method TortoiseSDK.diary_write.
   dependency: 'reached by 1 registered tool(s): tortoise_diary_write'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3761,7 +3761,7 @@ rows:
   job: Public SDK method TortoiseSDK.dream.
   dependency: 'reached by 1 registered tool(s): tortoise_dream'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4061,7 +4061,7 @@ rows:
   job: Public SDK method TortoiseSDK.get_session.
   dependency: 'reached by 1 registered tool(s): tortoise_get_session'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4222,7 +4222,7 @@ rows:
   job: Public SDK method TortoiseSDK.ingest.
   dependency: 'reached by 1 registered tool(s): tortoise_ingest'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4268,7 +4268,7 @@ rows:
   job: Public SDK method TortoiseSDK.invalidate_point.
   dependency: 'reached by 1 registered tool(s): tortoise_invalidate'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4429,7 +4429,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_batch.
   dependency: 'reached by 1 registered tool(s): tortoise_list_batch'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4567,7 +4567,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_pointkinds.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_pointkinds (retired)'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -4590,7 +4590,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_relations.
   dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
@@ -4613,7 +4613,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_sources.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_sources (retired)'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -4751,7 +4751,7 @@ rows:
   job: Public SDK method TortoiseSDK.mitigate_operator.
   dependency: 'reached by 1 registered tool(s): tortoise_mitigate_operator'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4889,7 +4889,7 @@ rows:
   job: Public SDK method TortoiseSDK.provenance.
   dependency: 'reached by 1 registered tool(s): tortoise_provenance'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5028,7 +5028,7 @@ rows:
   job: Public SDK method TortoiseSDK.recall_subgraph.
   dependency: 'reached by no registered MCP tool; caller categories: mcp-handler'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: mcp-handler'
   recommended_family: null
@@ -5235,7 +5235,7 @@ rows:
   job: Public SDK method TortoiseSDK.set_point_baseline.
   dependency: 'reached by 1 registered tool(s): tortoise_set_point_baseline'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5373,7 +5373,7 @@ rows:
   job: Public SDK method TortoiseSDK.status.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_status (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -5396,7 +5396,7 @@ rows:
   job: Public SDK method TortoiseSDK.suggest_entry_points.
   dependency: 'reached by 1 registered tool(s): tortoise_suggest_entry_points'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5419,7 +5419,7 @@ rows:
   job: Public SDK method TortoiseSDK.summarize_structure.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_summarize_structure (retired)'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -5442,7 +5442,7 @@ rows:
   job: Public SDK method TortoiseSDK.supersede.
   dependency: 'reached by 1 registered tool(s): tortoise_supersede'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5465,7 +5465,7 @@ rows:
   job: Public SDK method TortoiseSDK.supersede_point.
   dependency: 'reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling, tenant-rest'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine, eval-harness, other-tooling, tenant-rest'
   recommended_family: null
@@ -5511,7 +5511,7 @@ rows:
   job: Public SDK method TortoiseSDK.taxonomy.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_taxonomy (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -5580,7 +5580,7 @@ rows:
   job: Public SDK method TortoiseSDK.tortoise_fts_query.
   dependency: 'reached by 1 registered tool(s): tortoise_search'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5649,7 +5649,7 @@ rows:
   job: Public SDK method TortoiseSDK.update.
   dependency: 'reached by 1 registered tool(s): tortoise_update'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5741,7 +5741,7 @@ rows:
   job: Public SDK method TortoiseSDK.update_point.
   dependency: 'reached by 1 registered tool(s): tortoise_update_point'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5764,7 +5764,7 @@ rows:
   job: Public SDK method TortoiseSDK.validate_domain.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_validate_domain (retired)'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null

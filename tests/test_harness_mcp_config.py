@@ -1481,15 +1481,22 @@ class TestDocsPageAndSkillConfig:
         # on the HTTP surface, and the row names it — so it must stay active,
         # un-retired and http-exposed, or the card prescribes a call that cannot
         # be made (the #3883 class this suite already guards for other tools).
-        assert "tortoise_packs_list" in steps, (
-            "the row must name the pack read tool instead of telling the user "
-            "the set is invisible from ChatGPT")
-        assert "tortoise_packs_list" in active, (
-            "the row names tortoise_packs_list, so it must stay in tools/list")
-        assert "tortoise_packs_list" not in retired
-        assert active["tortoise_packs_list"].http_policy is True, (
-            "a connector reaches tools over HTTP; a packs read that is not "
-            "http-exposed cannot answer the card's instruction")
+        # ⛔ #11609 batch 1 ARCHIVED `tortoise_packs_list` (no destination in the
+        # approved surface), so the row may no longer name it. What the row must
+        # still do is answer the question it asked — where the pack set comes from
+        # — and the answer is the dashboard (`Settings → Configured packs`) or the
+        # REST route `GET /v1/packs`. A row that named a removed tool would
+        # prescribe a call that cannot be made, which is the #3883 class this suite
+        # guards for other tools; a row that dropped the answer entirely would
+        # leave the user told the set is invisible.
+        assert "tortoise_packs_list" not in steps, (
+            "the row names an ARCHIVED tool — the ChatGPT card would prescribe a "
+            "call that no longer exists")
+        assert "Configured packs" in row, (
+            "the row must still tell the user WHERE the pack set lives")
+        assert "GET /v1/packs" in row, (
+            "the row must name the live pack read, or the user is left told the "
+            "set is invisible from a ChatGPT session")
         assert "does not choose packs" in row_norm, (
             "the row must state that creating a graph does not choose its packs "
             "— scoped to the dashboard form, which posts {org_id, name}; the "
@@ -1568,7 +1575,7 @@ class TestDocsPageAndSkillConfig:
         handoff = "Install the Tortoise skills"
         assert handoff in steps, (
             "the row must keep the workflows hand-off step (#9660)")
-        for call in ('section="graphs"', "tortoise_packs_list"):
+        for call in ('section="graphs"', "Configured packs"):
             assert row.index(handoff) < row.index(call), (
                 f"the {call} call must be asked of the agent AFTER the chat "
                 "exists and the document is pasted — before that the instruction "

@@ -99,7 +99,7 @@ class TestRegistryEquivalence:
         sets) and compose: neither side's own figure survives the merge.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 72, f"Expected 72, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 68, f"Expected 68, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
         # consolidated and the 5 #4282 container members are NOT live, and each one is
@@ -114,7 +114,11 @@ class TestRegistryEquivalence:
         assert "tortoise_graph_overview" in names, "Missing the graph_overview container"
         from tortoise.tool_registry import RETIRED_USE_INSTEAD
         assert "validate_domain" in RETIRED_USE_INSTEAD["tortoise_validate_domain"]
-        assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
+        # ⛔ `tortoise_packs_list` is ARCHIVED in #11609 batch 1 (no destination in
+        # the approved surface): the name is GONE, not retired, so there is no
+        # forward entry to assert. Packs are still served by REST (`GET /v1/packs`).
+        assert "tortoise_packs_list" not in names
+        assert "tortoise_packs_list" not in RETIRED_USE_INSTEAD
         assert "tortoise_graph_set_recording" in names, "Missing #2302 graph_set_recording tool"
         onboarding = {
                       # #3540 ruling B: ONE consolidated operation carries the
@@ -1361,15 +1365,23 @@ class TestCapabilityModel:
                    for v in declared_set_violations(TOOL_REGISTRY,
                                                    sdk_src="class TortoiseSDK:\n    pass\n"))
 
-    def test_read_through_non_sdk_binding_is_checked_by_tool_name(self):
+    def test_read_through_non_sdk_binding_is_checked_by_tool_name(
+            self, monkeypatch):
         """#4035 review (P1): the READ_THROUGH read-classification property must
-        survive the blanked declaration.  `tortoise_packs_list` no longer declares
-        `sdk_method="get_tenant_packs"`, so the `by_method` loop in
-        declared_set_violations can never key on it; the property is asserted per
-        TOOL NAME via NON_SDK_READ_BINDINGS.  Mutation: re-classify the tool as a
-        pure `read` and the guard must go red — #4122 moved the required posture
-        from "readOnlyHint is True" to `risk == "maintenance"`, so the mutation
-        that must be caught is a return to the tier the ruling retired.
+        survive a blanked declaration.  A handler-served read-through op declares no
+        `sdk_method`, so the `by_method` loop in declared_set_violations can never
+        key on it; the property is asserted per TOOL NAME via NON_SDK_READ_BINDINGS.
+
+        The live ledger is EMPTY since #11609 batch 1 archived every handler-served
+        read-through door (`tortoise_packs_list` was the last), so this test drives
+        the SAME arm with a probe declaration over a live handler-served row —
+        emptying the ledger must not retire the check it pays for.
+
+        Mutation: re-classify the bound tool as a pure `read` and the guard must go
+        red — #4122 moved the required posture from "readOnlyHint is True" to
+        `risk == "maintenance"`, so the mutation that must be caught is a return to
+        the tier the ruling retired.  Deleting the TOOL-NAME arm from
+        `declared_set_violations` also reds this test, which is the point.
         """
         import dataclasses
 
@@ -1378,28 +1390,62 @@ class TestCapabilityModel:
 
         # The real registry is clean — the violation below is caused by the probe.
         assert declared_set_violations(served_registry()) == []
-        # ... and the op is genuinely NOT declared on any entry (the premise of
-        # the finding): if it were, the old `by_method` loop would cover it.
+        # ... and the live ledger genuinely declares no read-through op (the premise
+        # of the finding, restated: the declaration is what makes the arm necessary).
         assert not any(e.sdk_method == "get_tenant_packs" for e in served_registry())
-        assert tsc.NON_SDK_READ_BINDINGS["get_tenant_packs"] == "tortoise_packs_list"
+        assert not (set(tsc.READ_THROUGH_WRITE_METHODS) & set(tsc.NON_SDK_READ_BINDINGS))
 
-        flipped = [dataclasses.replace(e, risk="read")
-                   if e.name == "tortoise_packs_list" else e
-                   for e in served_registry()]
-        assert any("get_tenant_packs" in v and "non-maintenance HTTP tool" in v
-                   for v in declared_set_violations(flipped)), (
-            "the read-classification property is unchecked for a handler-served "
-            "read-through op")
+        probe_op, probe_tool = "probe_read_through", "tortoise_entity_profile"
+        monkeypatch.setitem(tsc.READ_THROUGH_WRITE_METHODS, probe_op,
+                            "synthetic self-heal refresh (probe)")
+        monkeypatch.setitem(tsc.NON_SDK_READ_OPERATIONS, probe_op,
+                            "synthetic handler-served read (probe)")
+        monkeypatch.setitem(tsc.NON_SDK_READ_BINDINGS, probe_op, probe_tool)
 
-    def test_read_through_non_sdk_binding_is_live(self):
-        """#4035 review (P1): the op→tool binding is live — a vanished bound tool
-        fails loudly instead of silently dropping the check."""
+        # Non-vacuity: the probe binds a LIVE handler-served row with no sdk_method,
+        # i.e. exactly the shape the `by_method` loop cannot see.
+        bound = [e for e in served_registry() if e.name == probe_tool]
+        assert bound and not bound[0].sdk_method, (
+            f"{probe_tool} must be a live, handler-served row for this probe")
+        # The probe row is a `read` today, so the declaration reds IMMEDIATELY — that
+        # IS the property (#4122: a read-through write must declare `maintenance`).
+        violations = declared_set_violations(served_registry())
+        assert any(probe_op in v and "non-maintenance HTTP tool" in v
+                   for v in violations), violations
+
+        # ... and the same declaration is CLEAN once the row carries the posture the
+        # ruling requires, so the red above is about the tier and nothing else.
+        repaired = [dataclasses.replace(e, risk="maintenance")
+                    if e.name == probe_tool else e
+                    for e in served_registry()]
+        assert declared_set_violations(repaired) == [], (
+            "the probe declaration must be clean at the required tier")
+
+        # The converse direction: the arm is TOOL-NAME keyed, so deleting the binding
+        # quietly retires the check — this is the #4035 shape, and the `by_method`
+        # loop cannot see a handler-served row at all.
+        assert not bound[0].sdk_method
+        monkeypatch.delitem(tsc.NON_SDK_READ_BINDINGS, probe_op)
+        assert any(
+            f"NON_SDK_READ_OPERATIONS entry {probe_op!r} has no tool binding" in v
+            for v in declared_set_violations(served_registry()))
+
+    def test_read_through_non_sdk_binding_is_live(self, monkeypatch):
+        """#4035 review (P1): the op→tool binding is live — an op with no binding
+        fails loudly instead of silently dropping the check.
+
+        Driven by a probe since #11609 batch 1 emptied the live ledger; deleting the
+        "has no tool binding" arm reds it.
+        """
+        import tool_surface_capabilities as tsc
         from tool_surface_capabilities import declared_set_violations, served_registry
 
-        without = [e for e in served_registry() if e.name != "tortoise_packs_list"]
+        assert declared_set_violations(served_registry()) == []
+        monkeypatch.setitem(tsc.NON_SDK_READ_OPERATIONS,
+                            "probe_unbound_op", "synthetic unbound read (probe)")
         assert any(
-            "NON_SDK_READ_OPERATIONS entry 'get_tenant_packs' has no tool binding" in v
-            for v in declared_set_violations(without))
+            "NON_SDK_READ_OPERATIONS entry 'probe_unbound_op' has no tool binding" in v
+            for v in declared_set_violations(served_registry()))
 
     def test_a_non_read_row_never_claims_read_only_in_its_description(self):
         """#9575: the description is the OTHER string an agent reads before calling.
@@ -1484,7 +1530,13 @@ class TestCapabilityModel:
         assert self_heal_writers <= set(entries), (
             f"a declared read-through writer binds no live tool: "
             f"{sorted(self_heal_writers - set(entries))}")
-        assert "tortoise_packs_list" in self_heal_writers
+        # ⛔ The handler-served half of the declaration is EMPTY since #11609 batch 1
+        # (`tortoise_packs_list` / `get_tenant_packs` are archived). The TOOL-NAME arm
+        # that read it is exercised against a probe in
+        # `test_read_through_non_sdk_binding_is_checked_by_tool_name`, so emptying the
+        # ledger does not quietly retire the check.
+        assert self_heal_writers == {
+            by_method[m] for m in tsc.READ_THROUGH_WRITE_METHODS if m in by_method}
         assert "tortoise_compute_confidence" in self_heal_writers
         assert self_heal_writers <= {
             name for name, e in entries.items() if e.risk != "read"}, (
@@ -1493,9 +1545,11 @@ class TestCapabilityModel:
             + str(sorted(n for n in self_heal_writers
                          if entries[n].risk == "read")))
 
-        # Non-vacuous: the risk-keyed set is live and names the #4122/#9575 row.
-        assert "tortoise_packs_list" in {
+        # Non-vacuous: the risk-keyed set is live and names the #4122 row.
+        maintenance_rows = {
             name for name, e in entries.items() if e.risk != "read"}
+        assert maintenance_rows, "no non-read row exists — the predicate checks nothing"
+        assert "tortoise_compute_confidence" in maintenance_rows
 
         # The predicate itself is falsifiable in both directions.
         assert claim.search("Read-only; empty result when nothing is installed")
@@ -1550,23 +1604,36 @@ class TestCapabilityModel:
         assert any("does not resolve" in v
                    for v in binding_resolution_violations([redeclared]))
 
-    def test_second_nonsdk_writer_declarer_is_checked(self):
+    def test_second_nonsdk_writer_declarer_is_checked(self, monkeypatch):
         """#4035 review (P2d): the writer-op check keeps its OP-KEYED arm.  The
         name-keyed NON_SDK_WRITER_BINDINGS arm alone checked one named tool; a
-        SECOND entry declaring `upsert_tenant_manifest` read-annotated passed both
-        that arm and the resolution exemption.  Mutation: it must now go red.
+        SECOND entry declaring the op read-annotated passed both that arm and the
+        resolution exemption.  Mutation: it must now go red.
+
+        The live ledger is EMPTY since #11609 batch 1 archived every MCP door onto a
+        non-SDK writer helper (`upsert_tenant_manifest`'s was
+        `tortoise_pack_install`, which is now under `archive/mcp-tools/`), so this
+        drives the SAME arm with a probe declaration: emptying the ledger must not
+        retire the #4035 check it pays for.
         """
+        import tool_surface_capabilities as tsc
         from tool_surface_capabilities import (
             served_registry,
             write_classification_violations,
         )
 
         from tortoise.tool_registry import _ro
+        probe_op = "probe_helper_write"
+        monkeypatch.setitem(tsc.NON_SDK_WRITER_OPERATIONS, probe_op,
+                            "synthetic handler-reached write (probe)")
+        monkeypatch.setitem(tsc.NON_SDK_WRITER_BINDINGS, probe_op,
+                            "tortoise_probe_writer_door")
         second = _probe("tortoise_probe_second_manifest_writer",
-                        "upsert_tenant_manifest", annotations=_ro(), http_policy=True)
+                        probe_op, annotations=_ro(), http_policy=True)
         assert any("non-SDK writer operation" in v
                    for v in write_classification_violations(
-                       [*served_registry(), second]))
+                       [*served_registry(), second])), (
+            "a SECOND read-annotated declarer of a non-SDK writer op must go red")
 
     def test_declared_binding_divergence_ledger_is_live(self, monkeypatch):
         """#4337: a ledger key whose registry entry is gone must fail, not persist
@@ -1595,8 +1662,14 @@ class TestCapabilityModel:
                            annotations=_rw(), http_policy=False)
         assert privileged_exposure_violations([unguarded], _PROBE_SRC)
 
-    def test_guard2_undeclared_and_nonsdk_branches_fail(self):
-        """Guard 2's 2c (empty sdk_method) and non-SDK-writer branches fail."""
+    def test_guard2_undeclared_and_nonsdk_branches_fail(self, monkeypatch):
+        """Guard 2's 2c (empty sdk_method) and non-SDK-writer branches fail.
+
+        The non-SDK-writer branch is probed through the ledger seam: since #11609
+        batch 1 no live MCP row reaches a non-SDK writer helper, and an arm with no
+        live subject would otherwise report clean forever.
+        """
+        import tool_surface_capabilities as tsc
         from tool_surface_capabilities import write_classification_violations
 
         from tortoise.tool_registry import _ro
@@ -1604,7 +1677,10 @@ class TestCapabilityModel:
                             http_policy=True)
         assert any("empty sdk_method" in v
                    for v in write_classification_violations([undeclared], _PROBE_SRC))
-        non_sdk = _probe("tortoise_pack_install", "upsert_tenant_manifest",
+        probe_op = "probe_helper_write"
+        monkeypatch.setitem(tsc.NON_SDK_WRITER_OPERATIONS, probe_op,
+                            "synthetic handler-reached write (probe)")
+        non_sdk = _probe("tortoise_probe_pack_install", probe_op,
                          annotations=_ro(), http_policy=True)
         assert any("non-SDK writer" in v
                    for v in write_classification_violations([non_sdk], _PROBE_SRC))
@@ -2076,9 +2152,12 @@ class TestToolIdentity:
         # `tortoise_onboarding_github_connect` (admin) plus
         # `tortoise_onboarding_seed` / `tortoise_onboarding_demo_create` (write),
         # so SERVED 48 -> 45 and LIVE 44 -> 41.
-        assert len(WRITE_TOOL_NAMES) == 45, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+        # #11609 batch 1 then ARCHIVED two served writers — `tortoise_pack_install`
+        # and `tortoise_backfill_v25` — with no destination (owner ruling), so
+        # SERVED 45 -> 43 and LIVE 41 -> 39.
+        assert len(WRITE_TOOL_NAMES) == 43, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 41, f"live write census moved: {len(live)}"
+        assert len(live) == 39, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.
@@ -2106,17 +2185,18 @@ class TestToolIdentity:
 
         served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
         writers = sorted(e.name for e in served if e.writes)
-        # 45 = the served writer census (41 live + 4 retired shims). Pinned
+        # 43 = the served writer census (39 live + 4 retired shims). Pinned
         # here so the derived loop below can never pass by covering nothing.
-        assert len(writers) == 45, writers
-        for name in ("tortoise_backfill_v25", "tortoise_dream",
+        assert len(writers) == 43, writers
+        for name in ("tortoise_index_files", "tortoise_dream",
                      "tortoise_index_sessions", "tortoise_ingest_corpus",
                      "tortoise_org_create"):
             assert name in writers, f"#4474 case dropped: {name}"
-        # #4122: the read-through trio is NOT write-permissioned — the drift the
-        # ruling retires would show up here as an availability loss.
-        for name in ("tortoise_get_confidence", "tortoise_compute_confidence",
-                     "tortoise_packs_list"):
+        # #4122: the read-through pair is NOT write-permissioned — the drift the
+        # ruling retires would show up here as an availability loss. (The third,
+        # `tortoise_packs_list`, was ARCHIVED in #11609 batch 1; `GET /v1/packs`
+        # still serves the read-through.)
+        for name in ("tortoise_get_confidence", "tortoise_compute_confidence"):
             assert name not in writers, f"#4122: {name} must keep graphs:read"
 
         scopes_tok = _current_scopes.set(["graphs:read"])

@@ -226,8 +226,9 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > since been REMOVED — `tortoise_onboarding_state`, `tortoise_onboarding_seed`,
 > `tortoise_onboarding_demo_create`, `tortoise_onboarding_github_connect`,
 > `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools then).
-> **This branch's `graph_overview` container then took the live surface 76 → 72**, so 72 is the
-> figure at that head (`uv run python tools/surface_manifest.py check` is the live count).
+> **This branch's `graph_overview` container then moved the live surface from 76 to 72 at that
+> head**, so 72 was the figure there until #11609 batch 1 took the live surface 72 → 68
+> (`uv run python tools/surface_manifest.py check` is the live count).
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
 > `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
@@ -282,9 +283,15 @@ Any deletion PR must use **26 / 111**.
 status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
 
 **Amended 2026-11-03** (execution record, #4282): the **first container batch has landed**, so the
-surface is now **72 advertised tools** with **23** retired-forward entries — the 18 above plus five
-more. `tortoise_graph_overview` (row 6) absorbs `tortoise_overview`, `tortoise_summarize_structure`,
+surface was **72 advertised tools** at that head with **23** retired-forward entries — the 18 above
+plus five more. `tortoise_graph_overview` (row 6) absorbs `tortoise_overview`, `tortoise_summarize_structure`,
 `tortoise_validate_domain`, `tortoise_audit` and `tortoise_dream_health`.
+
+**Amended 2026-11-13** (execution record, #11609 batch 1): the four remaining no-destination tools
+(`tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`, `tortoise_pack_install`) were
+REMOVED and their code ARCHIVED under `archive/mcp-tools/b1-removed-no-destination/`, per the owner
+ruling quoted below, so the surface is now **68 advertised tools** with **23** retired-forward
+entries. Nothing was retired-forward into a replacement: a name with no destination gets no shim.
 
 Three consequences for readers of the paragraph below, which is left as written because it records
 the 2026-10-27 ruling, not the current state:

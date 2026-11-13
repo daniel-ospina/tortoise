@@ -635,24 +635,34 @@ def test_the_stdio_mcp_lane_never_imports_the_hosted_app(tmp_path):
     assert "STDIO-LANE-CLEAN" in _fresh_interpreter(code, tmp_path)
 
 
-def test_the_selfhost_pack_install_stub_survives_stdio_startup(tmp_path):
-    """P1, second harm — the self-host deployment gate stays reachable.
+def test_the_selfhost_pack_install_stub_is_frozen_with_its_handler(tmp_path):
+    """P1, second harm — the self-host deployment gate must survive a restore.
 
-    ``tortoise_pack_install``'s HOSTED-only stub fires only while
-    ``'tortoise.hosted_api'`` is ABSENT from ``sys.modules``. Once startup
-    imported it, a stdio/self-host call fell past the gate to the
-    transport check. RED before the fix (measured): the error is
-    ``'pack install requires the HTTP transport.'``, not the HOSTED-only stub.
+    The gate used to be proven live: ``tortoise_pack_install``'s HOSTED-only stub
+    fires only while ``'tortoise.hosted_api'`` is ABSENT from ``sys.modules``, so a
+    startup that imported the app turned the stub into a transport error instead
+    (the harm this test named).
+
+    ⛔ #11609 batch 1 ARCHIVED `tortoise_pack_install` (no destination in the
+    approved surface), so there is no live call to probe. The invariant still has
+    to hold for the restore path, so it is asserted on the ARCHIVED source — that
+    the stub keeps reading ``sys.modules`` rather than a module-level flag — and
+    the stdio-lane cleanliness it depended on is still measured by the
+    fresh-interpreter probe above (`_get_sdk()` must not import the app).
     """
-    code = (
-        "import tortoise.mcp_server as m\n"
-        "m._get_sdk()\n"
-        "out = m.tortoise_pack_install('')\n"
-        "assert out.get('installed') is False, out\n"
-        "assert 'HOSTED-only' in (out.get('error') or ''), out\n"
-        "print('PACK-STUB-OK')\n"
-    )
-    assert "PACK-STUB-OK" in _fresh_interpreter(code, tmp_path)
+    frozen = (_ROOT / "archive/mcp-tools/b1-removed-no-destination/"
+              "tortoise_pack_install.py")
+    text = frozen.read_text(encoding="utf-8")
+    assert "HOSTED-only" in text, (
+        "the archived install handler lost its self-host stub — a restore would "
+        "ship an install path that runs where hosted_api does not")
+    assert "sys.modules" in text, (
+        "the stub must read `sys.modules` at CALL time (the #7951 harm was a "
+        "module-level flag that startup had already flipped), not a cached flag")
+    # ...and the tool is genuinely gone from the live surface, so this file cannot
+    # pass by measuring a handler the product still serves.
+    import tortoise.mcp_server as m
+    assert not hasattr(m, "tortoise_pack_install")
 
 
 def test_the_mcp_org_journal_resolves_without_the_hosted_app(tmp_path):

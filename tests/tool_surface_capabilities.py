@@ -297,7 +297,10 @@ NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     # connection down: #1924 made the per-source switch intent, not a disconnect.
     "tortoise_manage_sources",
     # #4035: handler-served writer (reaches pack_manifest_store.upsert_tenant_manifest)
-    "tortoise_pack_install",
+    # ⛔ `tortoise_pack_install` LEFT this set in #11609 batch 1: it is ARCHIVED
+    # (`archive/mcp-tools/b1-removed-no-destination/tortoise_pack_install.py`), so it no
+    # longer resolves. The helper and its REST door (`POST /v1/packs/manifests`) are
+    # untouched; a future MCP door must re-add the tool here AND bind the op above.
     # #3904: handler-served writer (dispatches to sdk.mitigate_operator / sdk.annotate_operator)
     "tortoise_operator_action",
 })
@@ -310,7 +313,11 @@ NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
     # still resolves it, so its empty binding is still checked here.
     "tortoise_overview", "tortoise_get",
     # #4035: handler-served reads (declaration corrected to sdk_method="")
-    "tortoise_packs_list", "tortoise_entity_profile", "tortoise_analyze",
+    # ⛔ `tortoise_packs_list` and `tortoise_analyze` LEFT this set in #11609 batch 1 —
+    # both are ARCHIVED (`archive/mcp-tools/b1-removed-no-destination/`). The read
+    # declarations they carried went with them; a future MCP door onto either must
+    # re-add the name here.
+    "tortoise_entity_profile",
     # #3904: handler-served read (navigation.tortoise_traverse on sdk._get_proj())
     "tortoise_traverse",
 })

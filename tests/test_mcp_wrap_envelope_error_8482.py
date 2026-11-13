@@ -596,9 +596,11 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     # Shrinkage is the dangerous direction — the sweep must keep measuring the
     # surface it was written for. Growth (a new envelope tool) is fine and is
     # covered by the loop itself.
-    assert typed >= 11 and unions >= 2, (
+    assert typed >= 10 and unions >= 2, (
         f"sweep found {typed} typed + {unions} union envelopes; measured at "
-        "11 + 2 when this guard was written")
+        "10 + 2 after #11609 batch 1 archived `tortoise_packs_list` (11 + 2 when "
+        "this guard was written). Shrinkage is what this floor guards, so it "
+        "follows a deliberate removal; growth is covered by the loop itself.")
 
 
 @pytest.mark.asyncio
@@ -723,13 +725,19 @@ async def test_the_auth_gate_is_classified_through_a_wrap_envelope(monkeypatch):
 async def test_a_hosted_tenant_refusal_is_not_labelled_the_stdio_gate(monkeypatch):
     """The `auth_error` STATUS is right; the #236 KIND is not the producer.
 
-    `tortoise_packs_list` refuses on its OWN fail-closed branch when the HTTP
-    transport carries no tenant context — a hosted guard that never touches the
-    stdio gate (``tortoise/mcp_server.py``, the ``_current_org_id is None and
-    _transport_mode == "http"`` return). Its text shares the gate's
-    ``Authentication required`` prefix, so a prefix-only classifier claims it
-    for #236 and the metric no longer isolates the gate. The kind must follow
-    the TRANSPORT that refused.
+    A tool can refuse on its OWN fail-closed branch when the HTTP transport
+    carries no tenant context — a guard that never touches the stdio gate
+    (``tortoise/mcp_server.py``, the ``_current_org_id is None`` return). Such a
+    refusal IS an ``auth_error`` to the client, but it is NOT the gate, so the
+    kind must follow the TRANSPORT that refused, not the status.
+
+    ⛔ The docstring's original subject (`tortoise_packs_list`) is ARCHIVED in
+    #11609 batch 1, and it was the only handler whose own text shared the gate's
+    ``Authentication required`` prefix — so the prefix-confusion hazard it pinned
+    has no live instance. The property it tested is still live on
+    `tortoise_manage_sources`, which refuses the same way on the same branch
+    (`No team context (HTTP mode required)`) and must still be labelled by the
+    transport rather than by the gate.
     """
     events: list[dict] = []
     monkeypatch.setattr(
@@ -739,19 +747,25 @@ async def test_a_hosted_tenant_refusal_is_not_labelled_the_stdio_gate(monkeypatc
     token = ms._transport_mode.set("http")
     org = ms._current_org_id.set(None)
     try:
-        result = await ms.mcp.call_tool("tortoise_packs_list", {})
+        result = await ms.mcp.call_tool("tortoise_manage_sources", {"action": "list"})
     finally:
         ms._current_org_id.reset(org)
         ms._transport_mode.reset(token)
 
-    assert events and events[0]["status"] == "auth_error", events
-    assert events[0]["error_kind"] is None, (
-        "an HTTP tenant-context refusal is not the #236 stdio gate: "
-        f"got {events[0]['error_kind']!r}")
-    # ...and the refusal is still legible to the client (the #8482 repair).
-    assert result.is_error is True
-    assert result.structured_content is None
-    assert "Authentication required" in _wire_payload(result)["text"]
+    # The KIND is what must not claim the gate: this refusal never touched it.
+    assert events and events[0]["error_kind"] != "stdio_auth_gate", (
+        "an HTTP tenant-context refusal took the #236 stdio gate's kind, so the "
+        f"metric no longer isolates the gate: {events!r}")
+    assert events[0]["status"] == "exec_error", events
+    # ...and the refusal is still legible to the client. ⛔ `is_error` is NOT
+    # asserted here: `tortoise_manage_sources` is annotated `-> dict`, so it has no
+    # wrap envelope and its `_SafeError` payload is a legal dict — FastMCP returns
+    # it as a normal result. The #8482 repair (a dict payload that VIOLATES a wrap
+    # envelope becomes a legible error) is pinned by
+    # `test_the_auth_gate_is_classified_through_a_wrap_envelope` above, whose
+    # subject (`tortoise_search`) is array-annotated and still live.
+    assert "No team context" in _wire_payload(result)["text"], (
+        "the tenant-context refusal must stay legible to the client")
 
 
 # ── The two review findings that pin cost and readability ──────────────────

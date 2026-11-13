@@ -16,9 +16,9 @@ aboutObjects: [tortoise-mcp, tortoise-sdk]
 ## The vision, in one paragraph
 
 **A developer should be able to read our entire surface in a sitting and know what to call.**
-Today they cannot: the MCP server serves **95 tools** (72 of them advertised — the `graph_overview`
-container retired five names into one, and #4282 Phase 3.2 deleted five `run_onboarding` tools) and
-the SDK **124 methods** (26 surplus names deleted by `#4282`), with five
+Today they cannot: the MCP server serves **91 tools** (68 of them advertised — the `graph_overview`
+container retired five names into one, #4282 Phase 3.2 deleted five `run_onboarding` tools, and the
+batch-1 archives of #11609 removed four no-destination tools), and the SDK **124 methods** (26 surplus names deleted by `#4282`), with five
 overlapping ways to search, four ways to revise, seven ways to create a node, and a
 lifecycle nobody owns. The target is a surface small enough to hold in your head, where every
 name says what it does, every operation says what it will do to your data, and
@@ -62,12 +62,13 @@ The freeze is on **tools and endpoints** — nothing is added, removed, renamed 
 either surface without explicit human approval. A **response field** that is off by default and
 leaves the response unchanged is **not** a gate failure, but must be recorded.
 
-## The reconciliation — MCP 95 → 27
+## The reconciliation — MCP 91 → 27
 
-> Every figure below is the MERGED surface (72 live + 23 retired shims), not either branch's own
+> Every figure below is the MERGED surface (68 live + 23 retired shims), not either branch's own
 > measurement: the vision started at **99**, the five `run_onboarding` deletions removed five
-> (#4282 Phase 3.2, 81 → 76 advertised), and the `graph_overview` container added one served name
-> while retiring five (#4282, 76 → 72 advertised). 99 − 5 + 1 = **95**. The target remains **27**.
+> (#4282 Phase 3.2, 81 → 76 advertised), the `graph_overview` container added one served name
+> while retiring five (#4282, 76 → 72 advertised), and #11609 batch 1 archived four no-destination
+> tools (72 → 68 live, names gone rather than retired). 99 − 5 + 1 − 4 = **91**. The target remains **27**.
 
 **GENERATED — see `docs/product/bridge-table.md`**, produced by
 `uv run python tools/bridge_table.py`.
@@ -112,7 +113,7 @@ DELETED from the served registry rather than retired into nothing, because the o
 `tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`). The registry fell
 **99 → 94** with them (81 live + 18 retired shims → 76 live + 18 retired shims), the first
 movement of the advertised surface since #3540. The `graph_overview` container then moved the
-same population to **72 live + 23 retired shims = 95 served**, and #11609 batch 1 moved it to
+same population to 72 live + 23 retired shims = 95 served, and #11609 batch 1 moved it to
 **68 live + 23 retired shims = 91 served** — the figures the table above records. Every
 capability those five carried survives
 on REST — each route is hand-written in `tortoise/hosted_api.py` — and the two tenant-visible

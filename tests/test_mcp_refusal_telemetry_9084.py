@@ -103,6 +103,29 @@ from tortoise import tool_registry
 
 MCP_SERVER = pathlib.Path(ms.__file__)
 
+ARCHIVE_B1 = (pathlib.Path(__file__).resolve().parent.parent
+              / "archive/mcp-tools/b1-removed-no-destination")
+
+
+def _archived_handler(name: str) -> tuple[str, ast.FunctionDef]:
+    """The frozen handler body from an `archive/mcp-tools/` record.
+
+    The record is NOT a parseable module: it holds verbatim extracts under
+    `verbatim from <path>` banners (the `ToolDefinition(...)` block is still nested
+    inside `register_all`'s indentation), so the whole file cannot be `ast.parse`d.
+    The HANDLER extract is at column 0, so it parses on its own — and the record is
+    "the source of record" for a restore, which is precisely why properties that
+    must survive a restore are asserted against it after the tool is removed.
+    """
+    text = (ARCHIVE_B1 / f"{name}.py").read_text(encoding="utf-8")
+    at = text.index(f"def {name}(")
+    segment = text[at:]
+    tree = ast.parse(segment)
+    fn = next(n for n in tree.body
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    assert fn.name == name, fn.name
+    return segment, fn
+
 
 @pytest.fixture
 def events(monkeypatch):
@@ -393,8 +416,15 @@ def test_the_gate_coverage_claim_is_scoped_to_what_it_actually_sees():
         "never a stale sentence")
 
     # ... and the one served body that had that shape no longer does.
-    assert "tortoise_pack_install" in _served_tool_names()
-    body = funcs["tortoise_pack_install"]
+    #
+    # ⛔ The subject is the ARCHIVED handler now: #11609 batch 1 archived
+    # `tortoise_pack_install` (`archive/mcp-tools/b1-removed-no-destination/`), so
+    # it is no longer served and `funcs` (parsed from the live `mcp_server.py`)
+    # cannot hold it. The property still has to hold for the frozen copy, because
+    # that file is the restore path: un-archiving a body that answers a rejection
+    # with a plain dict would put the #9084 defect straight back on the surface.
+    assert "tortoise_pack_install" not in _served_tool_names()
+    _segment, body = _archived_handler("tortoise_pack_install")
     keyless_refusals = [sub for sub in ast.walk(body)
                         if isinstance(sub, ast.Return)
                         and isinstance(sub.value, ast.Dict)
@@ -403,8 +433,9 @@ def test_the_gate_coverage_claim_is_scoped_to_what_it_actually_sees():
                                 and k.value == "validation_errors"
                                 for k in sub.value.keys)]
     assert keyless_refusals == [], (
-        "tortoise_pack_install answers a rejection with a plain dict again — "
-        "the row reads `ok` and this module's stated boundary is a lie")
+        "the ARCHIVED tortoise_pack_install answers a rejection with a plain dict "
+        "again — restoring it would put the row back to `ok` and this module's "
+        "stated boundary would be a lie")
 
     # (iii) the nested-refusal limit is still live (not a stale sentence).
     overview = ast.get_source_segment(MCP_SERVER.read_text(), funcs["tortoise_overview"])
@@ -754,44 +785,37 @@ async def test_manage_sources_unreadable_projection_is_recorded_as_a_failure(
     assert row["error_kind"] == "safe_error", row
 
 
-@pytest.mark.asyncio
-async def test_pack_install_rejected_manifest_is_recorded_as_a_failure(
-        events, hosted, monkeypatch):
-    """A refusal carrying NO ``error`` key at all (`validation_errors`).
+def test_pack_install_rejected_manifest_is_ARCHIVED_as_a_failure():
+    """The #9609 refusal conversion is frozen, not lost with the tool.
 
-    A rejected manifest IS a refusal: the install was refused. The two sibling
-    branches in the same body were converted by the first sweep; this one was
-    left as a plain dict because it has no `error` key, so the dispatch was
-    recorded ``status="ok"`` — the #9084 defect on a live, served tool
-    (#9609 review P2). It is classified by the seam's exact-payload arm (the
-    payload is recorded when the `_SafeError` is CONSTRUCTED), which is why the
-    fix does not need — and must not add — a key-presence heuristic (#3926).
+    ⛔ #11609 batch 1 ARCHIVED `tortoise_pack_install` (no destination in the approved
+    surface), so there is no served body left to call: the end-to-end form of this
+    test (dispatch the tool, assert the recorded row is `exec_error` /
+    `safe_error`) has no subject and re-adding a door to satisfy a test would
+    resurrect the removal.
+
+    What still matters is the RESTORE path: the archived handler is what a future
+    re-introduction would ship, so the one branch #9609 fixed — a rejection carrying
+    `validation_errors` and no `error` key, answered with a PLAIN dict, which the
+    seam records `status="ok"` — must still be an `_SafeError` there. The seam's own
+    classification of a constructed `_SafeError` is covered by
+    `test_mcp_safe_error_telemetry_8135.py`, which still has live subjects.
     """
-    import tortoise.pack_manifest_store as store
+    src, body = _archived_handler("tortoise_pack_install")
 
-    def _reject(*_a, **_kw):
-        raise ValueError("packs: 'bogus' is not a known starter pack")
-
-    # The HOSTED-only gate above the branch is a ``sys.modules`` lookup, so
-    # importing the real module is enough — this test is about the refusal, not
-    # deployment (and a placeholder module would break conftest's probe reset).
-    import tortoise.hosted_api  # noqa: F401  — satisfies the hosted-only gate
-
-    monkeypatch.setattr(store, "upsert_tenant_manifest", _reject)
-    monkeypatch.setattr(ms, "_get_org_sdk", lambda: object())
-
-    result = await ms.mcp.call_tool("tortoise_pack_install",
-                                    {"manifest_yaml": "packs: []"})
-
-    payload = result.structured_content
-    assert payload["installed"] is False, payload
-    assert payload["validation_errors"] == [
-        "packs: 'bogus' is not a known starter pack"], payload
-    assert "error" not in payload, payload
-    row = events[-1]
-    assert row["tool_name"] == "tortoise_pack_install", row
-    assert row["status"] == "exec_error", row
-    assert row["error_kind"] == "safe_error", row
+    # The `validation_errors` refusal must be constructed through `_SafeError`, and
+    # no Return in the body may hand back a plain dict carrying `validation_errors`.
+    keyless = [
+        sub for sub in ast.walk(body)
+        if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Dict)
+        and any(isinstance(k, ast.Constant) and k.value == "validation_errors"
+                for k in sub.value.keys)
+    ]
+    assert keyless == [], (
+        "the archived handler answers a rejected manifest with a plain dict — "
+        "that row was recorded `ok` before #9609 and the restore path would "
+        "reintroduce the defect")
+    assert "_SafeError" in src, "the archived handler lost its `_SafeError` refusals"
 
 
 # ── 4. No wire change ─────────────────────────────────────────────────────

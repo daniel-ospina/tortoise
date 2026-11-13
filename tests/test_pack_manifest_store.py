@@ -758,16 +758,34 @@ class TestConcurrency:
 # ── Deployment gate + tenant view ──────────────────────────────────────────
 
 class TestDeploymentGateAndView:
-    def test_mcp_install_stub_on_selfhost(self, monkeypatch):
-        """The MCP tool is an actionable stub when the serving app is not
-        hosted_api (self-host) — deployment-gated (#1935 R10)."""
-        import sys as _sys
+    def test_mcp_install_stub_on_selfhost(self):
+        """The HOSTED-only deployment gate is frozen with its handler.
 
+        ⛔ #11609 batch 1 ARCHIVED `tortoise_pack_install` (no destination in the
+        approved surface), so there is no live MCP tool to call: this test used to
+        stub `tortoise.hosted_api` out of `sys.modules` and assert the handler's
+        self-host refusal (#1935 R10). Re-adding a door to keep the assertion is not
+        an option, and dropping it would let a restore re-ship an ungated install.
+
+        So the gate is asserted on the ARCHIVED handler — the restore path — and
+        the live REST twin `POST /v1/packs/manifests` keeps its own 404/503 gate
+        coverage in `TestDeploymentGateAndView` below.
+        """
+        import pathlib as _pathlib
+
+        frozen = (_pathlib.Path(__file__).resolve().parent.parent
+                  / "archive/mcp-tools/b1-removed-no-destination/"
+                    "tortoise_pack_install.py").read_text(encoding="utf-8")
+        assert "HOSTED-only" in frozen, (
+            "the archived install handler lost its self-host refusal — a restore "
+            "would ship an install path that runs where hosted_api does not")
+        assert 'sys.modules' in frozen or ".get(" in frozen, (
+            "the deployment discriminator (a `sys.modules` lookup on "
+            "`tortoise.hosted_api`) is gone from the archived handler")
+        # ...and the tool really is off the surface, so this file cannot pass by
+        # testing a handler the product still serves.
         import tortoise.mcp_server as mcp_mod
-        monkeypatch.setitem(_sys.modules, "tortoise.hosted_api", None)
-        out = mcp_mod.tortoise_pack_install(VALID_MANIFEST)
-        assert out["installed"] is False
-        assert "HOSTED-only" in out["error"]
+        assert not hasattr(mcp_mod, "tortoise_pack_install")
 
     def test_tenant_view_memoized_and_invalidated(self, client):
         from tortoise.pack_manifest_store import tenant_view

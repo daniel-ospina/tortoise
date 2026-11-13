@@ -16,7 +16,6 @@ import subprocess  # noqa: F401
 import sys
 import tempfile
 import threading
-from contextlib import asynccontextmanager
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
@@ -649,97 +648,44 @@ def _mcp_parse(r):
     return r.json()
 
 
-class TestMcpPacksList:
-    def test_handler_scoped_to_team(self, tmp_path, monkeypatch):
-        """Unit-level: the handler reads the team SDK via the contextvar
-        seam and returns the team's packs (threadpool-safe pattern)."""
-        from tortoise import mcp_auth  # noqa: I001
+class TestMcpPacksListRemoved:
+    """`tortoise_packs_list` is ARCHIVED — the tool, its handler and its HTTP row.
+
+    #11609 batch 1 took the four no-destination MCP tools out of the product on the
+    owner's ruling (no per-tool destination exists), freezing each `ToolDefinition`
+    + handler under `archive/mcp-tools/b1-removed-no-destination/`. What this class
+    used to cover (AC3: a team-scoped packs read over the MCP surface) is a claim
+    about a door that no longer exists, so the tests are replaced by the tombstone
+    that keeps the removal honest: the NAME must stay unresolvable and must not
+    drift back into the HTTP allowlist, while the capability itself is still served
+    by `GET /v1/packs` in `hosted_api` (covered by `tests/test_hosted_api.py`).
+    """
+
+    def test_the_name_is_not_served_in_any_mode(self):
         import tortoise.mcp_server as ms
-        db = str(tmp_path / "mcp.db")
-        sdk = TortoiseSDK(db_path=db, namespace="mcp-team")
-        ensure_tenant_packs(sdk, starter=["dev", "pm"])
-        monkeypatch.setattr(ms, "_get_org_sdk",
-                            lambda: TortoiseSDK(db_path=db,
-                                                namespace=mcp_auth._current_org_id.get()))
-        t_mode = mcp_auth._transport_mode.set("stdio")
-        token = mcp_auth._current_org_id.set("mcp-team")
-        try:
-            packs = ms.tortoise_packs_list()
-        finally:
-            mcp_auth._current_org_id.reset(token)
-            mcp_auth._transport_mode.reset(t_mode)
-        assert [p["namespace"] for p in packs] == ["dev", "pm"]
-
-    def test_handler_fails_closed_on_none_team_http(self, monkeypatch):
-        from tortoise import mcp_auth  # noqa: I001
-        import tortoise.mcp_server as ms
-        token = mcp_auth._transport_mode.set("http")
-        t2 = mcp_auth._current_org_id.set(None)
-        try:
-            out = ms.tortoise_packs_list()
-        finally:
-            mcp_auth._current_org_id.reset(t2)
-            mcp_auth._transport_mode.reset(token)
-        assert out.get("error") and "team context" in out["error"].lower()
-
-    def test_http_surface_registered_and_scoped(self, tmp_path, monkeypatch):
-        """AC3: packs_list over the HTTP MCP surface returns the tenant-
-        scoped set (http_policy=True → in HTTP_ALLOWED)."""
-        from tortoise import mcp_auth  # noqa: I001
-        import tortoise.mcp_server as ms
-        from tortoise.mcp_server import create_http_app
-        from starlette.applications import Starlette
-        from starlette.routing import Mount
-        from starlette.testclient import TestClient
-
-        # registry SDK (auth resolution) + team SDK share one embedded DB
-        db = str(tmp_path / "mcp-http.db")
-        reg_sdk = TortoiseSDK(db_path=db, namespace=f"test_pack_registry_{os.urandom(4).hex()}")
-        team = reg_sdk.org_create("test-team")
-        key_info = reg_sdk.apikey_create(team["id"], "test-fixture")
-        sdk_org = TortoiseSDK(db_path=db, namespace=team["id"])
-        ensure_tenant_packs(sdk_org, starter=["dev", "marketing"])
-
-        # the tool handler resolves _get_org_sdk from mcp_server's module
-        # namespace — patch that name (not mcp_auth's) so the team SDK
-        # targets the shared embedded DB.
-        monkeypatch.setattr(
-            ms, "_get_org_sdk",
-            lambda: TortoiseSDK(db_path=db,
-                                namespace=mcp_auth._current_org_id.get()))
-
-        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
-                              _registry_sdk=reg_sdk)
-
-        @asynccontextmanager
-        async def _lifespan(parent_app):
-            async with app.lifespan(app):
-                yield
-
-        parent = Starlette(lifespan=_lifespan,
-                           routes=[Mount("/mcp", app=app)])
-        with TestClient(parent) as tc:
-            tc.headers.update({
-                "Authorization": f"Bearer {key_info['api_key']}",
-                "Accept": "application/json, text/event-stream",
-                "Content-Type": "application/json",
-            })
-            r = tc.post("/mcp", json={
-                "jsonrpc": "2.0", "method": "tools/call",
-                "params": {"name": "tortoise_packs_list", "arguments": {}},
-                "id": 1})
-            assert r.status_code == 200, r.text
-            body = _mcp_parse(r)
-            assert body and body.get("result"), body
-            content = body["result"]["content"]
-            assert content and content[0].get("text")
-            import json as _json
-            packs = _json.loads(content[0]["text"])
-            assert [p["namespace"] for p in packs] == ["dev", "marketing"]
-
-    def test_http_allowed_contains_packs_list(self):
         from tortoise.mcp_auth import HTTP_ALLOWED
-        assert "tortoise_packs_list" in HTTP_ALLOWED
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+
+        served = {t.name for t in TOOL_REGISTRY} | {t.name for t in RETIRED_TOOL_REGISTRY}
+        assert "tortoise_packs_list" not in served, (
+            "the archived packs_list tool drifted back into the registry — its "
+            "definition belongs in the archive, not on the surface")
+        # No handler either: a leftover module-level function is a door the
+        # registry no longer advertises but `register_all` would still serve
+        # (that is exactly how a 'removed' tool keeps answering calls).
+        assert not hasattr(ms, "tortoise_packs_list")
+        assert "tortoise_packs_list" not in HTTP_ALLOWED
+
+    def test_the_archive_holds_its_definition_and_handler(self):
+        from pathlib import Path
+
+        frozen = (Path(__file__).resolve().parent.parent
+                  / "archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py")
+        text = frozen.read_text(encoding="utf-8")
+        assert "ToolDefinition(" in text
+        assert "def tortoise_packs_list" in text, (
+            "the archive must freeze the handler too — the definition alone cannot "
+            "restore the tool")
 
 
 # ── Backfill script ────────────────────────────────────────────────────────

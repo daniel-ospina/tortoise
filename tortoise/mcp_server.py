@@ -1613,7 +1613,8 @@ async def _check_mcp_op_budget(name: str, org_id: str) -> None:
 # payload nobody can read. That is the whole of #8482: a failure delivered in
 # the success channel. It is NOT "the tool returns a list" — the four sibling
 # tools the issue could not separate (`tortoise_check_structure`,
-# `tortoise_packs_list`, `tortoise_list_batches`, `tortoise_list_namespaces`)
+# `tortoise_list_batches`, `tortoise_list_namespaces` — and `tortoise_packs_list`,
+# which #11609 batch 1 later archived)
 # carry the SAME envelope and work, because their SDK calls succeed. The
 # discriminator is the RAISE.
 #
@@ -2350,16 +2351,17 @@ def _excluded_writer_writes_the_default_graph(
     `GRAPH_ARGUMENT_EXCLUDED` answers "does this tool take the routing
     argument?" — NOT "does it touch a graph". The seam used to read the second
     answer out of the first, and that is false for
-    `GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`: `tortoise_pack_install`,
-    `tortoise_onboarding_github_index` and `tortoise_manage_sources` each write
-    graph data into the org's DEFAULT graph, and each REJECTS a graph-bound key
+    `GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`: `tortoise_onboarding_github_index`
+    and `tortoise_manage_sources` each write graph data into the org's DEFAULT
+    graph, and each REJECTS a graph-bound key
     (`_reject_graph_bound_mcp_org_surface`), so `workspace-default` is the only
     arm they can be on. Leaving them undisclosed left the #10084 defect in place
     on every tool except the one the issue measured (review P2).
 
     (#4282 Phase 3.2 removed `tortoise_onboarding_demo_create` and
     `tortoise_onboarding_seed` from that frozenset along with the tools
-    themselves, so they are no longer members here.)
+    themselves, and #11609 batch 1 archived `tortoise_pack_install` — the third
+    member then — so both are no longer members here.)
 
     `tortoise_manage_sources` is CONDITIONAL on its own ARGUMENTS, because only
     one branch writes graph data; see
@@ -2761,8 +2763,10 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         if failure is not None and failure.startswith("Authentication required"):
             status = "auth_error"
             # The prefix is shared by producers that are NOT the #236 gate:
-            # `tortoise_packs_list`'s HTTP no-tenant refusal and `_safe`'s
-            # unset-transport refusal both open with it. Stamping
+            # `tortoise_manage_sources`'s no-team-context refusal and `_safe`'s
+            # unset-transport refusal both open with it. (The original example
+            # here — `tortoise_packs_list`'s HTTP no-tenant refusal — is ARCHIVED
+            # in #11609 batch 1.) Stamping
             # `stdio_auth_gate` on those would make the metric's documented
             # meaning false and fold hosted tenant refusals into it, so the
             # KIND follows the transport that actually refused. The STATUS is
@@ -3634,8 +3638,8 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 def _http_excluded_error() -> dict:
     """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
 
-    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding eight
-    tool bodies (five live, three retired-but-served), each of which returns it
+    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding seven
+    tool bodies (four live, three retired-but-served), each of which returns it
     verbatim, so the dispatch used to be recorded ``status="ok"``. The wire
     payload is unchanged (`_SafeError` is a ``dict`` subclass); the seam matches
     it by value. Its ``error`` is a MAPPING, so the seam's text arm cannot see
