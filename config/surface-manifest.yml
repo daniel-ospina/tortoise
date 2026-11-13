@@ -1040,7 +1040,18 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  served_from: tortoise/mcp_server.py:e745fd4824243d93
+  served_from: tortoise/mcp_server.py:0a2683bfc31120f6
+  # ⛔ #12372: `served_from` is the `_code_digest` of the handler's CODE OBJECT, so any
+  # edit inside `tortoise_query` re-stamps it. Refreshed BY HAND to the value `build_doc`
+  # derives (`check` re-derives and compares — it is the code that is authoritative, not
+  # this cell), because `cut` is owner-gated ("ask Daniel FIRST, before the re-cut",
+  # tools/surface_manifest.py) and this change adds/removes/renames NO tool or method.
+  # A full `cut` was measured on this box and DELIBERATELY NOT committed: with `skills/`
+  # dangling it drops `skill-docs` from 38 SDK `used_by` cells, and it DROPS every body
+  # rationale comment (`cut` re-emits only `MANIFEST_HEADER` verbatim, so the header
+  # survives and this note does not — no head-specific count belongs here, it moves with
+  # every line anyone adds). Both kinds are `NON_DERIVABLE` evidence a digest refresh
+  # must not move.
   served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1

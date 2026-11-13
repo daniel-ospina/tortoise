@@ -2276,6 +2276,21 @@ surfaces:
   # branch) — they are not evidence against a narrower registration, and the
   # `sdk` row's own note at ~line 480 says the same. Keep it here.
   - test_12322_latest_readings_order.py
+  # #12372: the `tortoise_query` `entity_type` guard, its per-type remedies and
+  # the refusals that keep a caller from being served the Points population while
+  # asking for another layer. `tortoise/mcp_server.py` is a SHARED_MODULE, so its
+  # own diffs already take the full matrix — this row is the CLASSIFICATION
+  # `tools/ci_selection.integrity()` requires of every `tests/**/test_*.py`
+  # (measured: unclassified, `--integrity` reported the file as manifest drift
+  # and every `test_integrity_covers_all_test_files`-shaped pin in
+  # `tests/test_ci_selection.py` redded, which would have failed `test-slow`
+  # BEFORE the merge could happen). Its only SELECTION effect is on a diff to the
+  # test file itself, which selects `core` (measured: `--changed-files
+  # tests/test_12372_entity_type_dropped.py` -> `surfaces=['core']`); an
+  # `mcp_server.py` diff reaches every test file through the FULL matrix that a
+  # SHARED_MODULES path forces (`--changed-files tortoise/mcp_server.py` ->
+  # `full: true, test_files: ALL`), not through this row.
+  - test_12372_entity_type_dropped.py
   - test_candidate_recall_11901.py
   # #12297: the rerank wiring's own pins — the slot-preserving reorder, the
   # textless-pool load guard, the width resolver reaching BOTH the batch read
