@@ -66,10 +66,9 @@ import numpy as np  # noqa: E402
 from tools.journal_growth import measure  # noqa: E402
 from tortoise.embeddings import (  # noqa: E402
     EMBEDDING_DIM,
-    shortest_float32_vector,
     JOURNAL_VECTOR_WIDTH_F32,
-    JOURNAL_VECTOR_WIDTH_F64,
     JOURNAL_VECTOR_WIDTH_KEY,
+    shortest_float32_vector,
     stamp_journal_embedding,
 )
 from tortoise.log import EventLog  # noqa: E402
@@ -237,7 +236,8 @@ def as_f64_bits(values: list[float]) -> bytes:
     return struct.pack(f"<{len(values)}d", *values)
 
 
-def main() -> int:  # noqa: C901 — a report, read top to bottom
+def main() -> int:
+    # a report, read top to bottom — the length is the deliverable, not a smell
     vec = unit_vector()
     recs = p0_records(vec)
     by_type = richest_by_type(recs)
@@ -467,11 +467,13 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
     for label, text in cases.items():
         try:
             decoded_len = len(base64.b64decode(text.rsplit(":", 1)[1], validate=True))
-        except Exception:  # noqa: BLE001 — an un-decodable body is its own refusal
+        except Exception:
+            # an un-decodable body is its own refusal; the label says which
             decoded_len = None
         try:
             unframe(text)
-        except Exception as exc:  # noqa: BLE001 — the point is that it raises
+        except Exception as exc:
+            # the point is that it raises — the TYPE and the decoded width are the evidence
             where = f", decoded {decoded_len:,} B" if decoded_len else ""
             print(f"  {label:<42} REFUSED ({type(exc).__name__}{where})")
         else:
@@ -493,7 +495,7 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
     for cut in (1, 2, 3, 4, 8, 12, 16, 20):
         try:
             out = base64.b64decode(body[:-cut], validate=True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"   -{cut:<4} {(len(body) - cut) % 4:<8} refused by b64decode "
                   f"({exc})")
             continue
@@ -509,7 +511,7 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
         if len_only:
             accepted_by_length_only.append(cut)
         print(f"   -{cut:<4} {(len(body) - cut) % 4:<8} {len(out):>7,} B  "
-              f"{elems:>7.2f}   {str(len_only):<10}  "
+              f"{elems:>7.2f}   {len_only!s:<10}  "
               f"{'ACCEPTS' if count_ok else 'refuses'}")
     if silent != [4, 8, 12, 16, 20]:
         print(f"  ⛔ unexpected silent cuts {silent} — every multiple-of-4 cut must "
