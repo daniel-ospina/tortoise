@@ -2243,8 +2243,12 @@ surfaces:
   # (measured: unclassified, `--integrity` reported the file as manifest drift
   # and every `test_integrity_covers_all_test_files`-shaped pin in
   # `tests/test_ci_selection.py` redded, which would have failed `test-slow`
-  # BEFORE the merge could happen). It is also what puts the file on an
-  # `mcp_server.py` diff, i.e. the change class it guards.
+  # BEFORE the merge could happen). Its only SELECTION effect is on a diff to the
+  # test file itself, which selects `core` (measured: `--changed-files
+  # tests/test_12372_entity_type_dropped.py` -> `surfaces=['core']`); an
+  # `mcp_server.py` diff reaches every test file through the FULL matrix that a
+  # SHARED_MODULES path forces (`--changed-files tortoise/mcp_server.py` ->
+  # `full: true, test_files: ALL`), not through this row.
   - test_12372_entity_type_dropped.py
   - test_candidate_recall_11901.py
   # #12294: the ported predicate and the falsification that declined it. `core`
