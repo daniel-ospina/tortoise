@@ -502,7 +502,7 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
 #: ``=0`` silently swaps S4's output contract for the legacy complete-list one,
 #: which changes the embed list a run measures without changing the arm.
 DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
-                  # cycle 9 (#10983): `sparse.py:226` `env_flag(IDENTIFIER_ENV,
+                  # cycle 9 (#10983): `sparse.py:316` `env_flag(IDENTIFIER_ENV,
                   # True)` — default-ON, read through `projection/entities.py:1480`
                   # on the write path (`create_point` -> `point_identifier_aliases`),
                   # so it REWRITES `search_keys` on every ``:Point`` the run writes.
