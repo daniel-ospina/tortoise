@@ -130,6 +130,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
 import argparse
 import collections
 import contextlib
+import difflib
 import hashlib
 import json
 import math
@@ -370,6 +371,65 @@ RERANK_POOLS: tuple[int, ...] = (15, 40)
 RERANK_THREADS = 1
 
 
+# ── #12297 residual 1 — the LEXICAL BASELINE CONTROL ─────────────────────
+#
+# The PR's own stated residual, and the decisive missing experiment: **does a
+# 5 microsecond string compare already do what the cross-encoder is being paid
+# 207 ms/mention for?** The noun-path arm asks "does `the credential` match
+# `the credential`", which is token overlap over 2-4 word strings — so if a
+# lexical scorer reproduces the arm's numbers, the lever's justification is
+# gone and its cost is pure overhead.
+#
+# ⛔ This is a CONTROL, never a candidate matcher. It is not shipped, not wired
+# into `rerank_pool`, and reaches no product path: it exists only to be measured
+# against the cross-encoder over the SAME pools. Turning a string score into an
+# attach decision is the refused "second similarity constant" of #11901 §7 and
+# is deliberately out of scope here.
+LEXICAL_MODES: tuple[str, ...] = ("difflib", "overlap")
+
+
+class LexicalScorer:
+    """A deterministic string-compare scorer with the cross-encoder's interface.
+
+    ``score(query, contents) -> list[float]`` mirrors
+    ``rerank.CrossEncoderScorer.score`` exactly, so the arm can swap it in and
+    change NOTHING else — the same pool, the same cut, the same tie-break, the
+    same paired before/after.
+
+    Two modes, both declared rather than tuned:
+
+    * ``difflib`` — ``SequenceMatcher(None, a, b).ratio()`` on lowercased text.
+      Character-level, so it rewards the surface variants the noun path's
+      character-only perturbations produce.
+    * ``overlap`` — Jaccard over lowercased alphanumeric tokens, with an
+      exact-after-normalisation short-circuit to 1.0. Token-level, so it is the
+      strongest fair form of "a 5 us string compare".
+    """
+
+    def __init__(self, mode: str = "difflib") -> None:
+        if mode not in LEXICAL_MODES:
+            raise ValueError(f"unknown lexical mode {mode!r}")
+        self.mode = mode
+
+    @staticmethod
+    def _tokens(text: str) -> frozenset[str]:
+        return frozenset(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+    def _one(self, a: str, b: str) -> float:
+        a_l, b_l = (a or "").lower().strip(), (b or "").lower().strip()
+        if not a_l or not b_l:
+            return 0.0
+        if self.mode == "difflib":
+            return difflib.SequenceMatcher(None, a_l, b_l).ratio()
+        ta, tb = self._tokens(a_l), self._tokens(b_l)
+        if not ta or not tb:
+            return 0.0
+        return len(ta & tb) / len(ta | tb)
+
+    def score(self, query: str, contents) -> list[float]:
+        return [self._one(query, c) for c in contents]
+
+
 def _ndcg_at(rank: int | None, k: int = NDCG_K) -> float:
     """nDCG@k for ONE gold per query (IDCG = 1, so DCG is the whole value).
 
@@ -392,6 +452,8 @@ def _rerank_arm(
     top_k: int = TOP_K_RERANK_CUT,
     ndcg_k: int = NDCG_K,
     threads: int = RERANK_THREADS,
+    scorer=None,
+    label: str = "rerank",
 ) -> dict:
     """#12297 arm 4 — the cross-encoder over the SAME fused candidates.
 
@@ -433,12 +495,14 @@ def _rerank_arm(
         import torch  # local: arm 4 is this tool's only torch consumer
         torch.set_num_threads(threads)
 
-    scorer, reason = get_scorer(model)
     if scorer is None:
-        return {"applied": False, "degrade_reason": reason, "model": model}
+        scorer, reason = get_scorer(model)
+        if scorer is None:
+            return {"applied": False, "degrade_reason": reason, "model": model}
 
     out: dict = {
         "applied": True,
+        "arm": label,
         "model": model,
         "top_k": top_k,
         "ndcg_k": ndcg_k,
@@ -930,6 +994,27 @@ def run(args: argparse.Namespace) -> int:
                 top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K,
                 threads=args.rerank_threads)
 
+        # ── #12297 residual 1: the LEXICAL BASELINE CONTROL ──────────────────
+        # Same arms, same pools, same pairs, same cut — only the scorer changes.
+        # It is emitted under its own arm name so a reader can never mistake a
+        # string-compare figure for the cross-encoder's, and it records the
+        # `lexical_control` note that says what it is for.
+        if args.lexical_baseline:
+            for mode in ([args.lexical_baseline]
+                         if args.lexical_baseline != "both" else LEXICAL_MODES):
+                key = f"lexical_{mode}"
+                arms[key] = _rerank_arm(
+                    sample, window, variants,
+                    model=f"lexical:{mode}",
+                    pools=tuple(args.rerank_pool or RERANK_POOLS),
+                    top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K,
+                    threads=0, scorer=LexicalScorer(mode), label=key)
+                arms[key]["lexical_control"] = (
+                    "NOT a matcher and NOT shipped: the decisive control for "
+                    "#12297 residual 1. If this reproduces the cross-encoder "
+                    "arm over the same pools, the lever buys name matching a "
+                    "string compare already gives.")
+
         # ⛔ A MIXED run is refused: `legs_seen` OR-s the looser #3005 predicate
         # over thousands of windows, so a run where the dense leg held for some
         # windows and degraded for others would carry the label "hybrid" for a
@@ -1044,6 +1129,14 @@ def main(argv: list[str] | None = None) -> int:
                         f"default measured ~20x slower per pair on this box "
                         f"under fleet load; 0 leaves torch's default in place "
                         f"and the artifact then says so")
+    p.add_argument("--lexical-baseline", choices=(*LEXICAL_MODES, "both"),
+                   default=None,
+                   help="#12297 residual 1 — also measure a LEXICAL string "
+                        "scorer over the SAME pools as the rerank arm, to test "
+                        "whether a ~5us compare reproduces what the "
+                        "cross-encoder is paid 207 ms/mention for. A control "
+                        "only: not shipped, not a matcher, reaches no product "
+                        "path.")
     return run(p.parse_args(argv))
 
 
