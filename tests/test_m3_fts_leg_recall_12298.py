@@ -1276,3 +1276,40 @@ def test_the_index_wait_accepts_at_least_and_not_exactly(tool_mod) -> None:
     assert "last <= expected" not in src and "last == expected" not in src, (
         "the wait became an exact match or an upper bound; a partially built "
         "index would then be measured as misses")
+
+
+def test_the_falsifier_predicate_is_stated_the_same_way_in_every_document(
+        artifact, brief: str, changelog: str, search_arch: str) -> None:
+    """One predicate, four documents — and the artifact is what decides it.
+
+    ⛔ This is not a style rule. `#12298`'s falsifier sentence states a CLOSURE
+    condition ("BM25 does **not** beat the current scorer ⇒ the leg is closed and
+    no SPLADE work happens"). A deployable arm that BEATS the scorer leaves that
+    condition **unmet** — while the *pre-authorisation's* trigger ("if M3 passes,
+    proceed into SPLADE") IS satisfied. Writing the two as one word ("the
+    falsifier is satisfied by the deployable arm") inverts the premise the whole
+    deferral rests on: it reads as "the closure was right, C3 stays closed", the
+    opposite of what the measurement says. It appeared in five places at once and
+    was repaired in stages; nothing pinned the predicate, so it could flip back
+    silently (review cycle 6).
+    """
+    dep = artifact["verdict"]["deployable_arm"]
+    # The FACT the wording must follow: the deployable arm beats the shipped leg,
+    # so the closure condition is not triggered and the trigger is.
+    assert dep["recall_at_3"] > dep["recall_at_3_base"], (
+        "the deployable arm no longer beats the shipped scorer — the whole "
+        "'closure not triggered' reading reverses; re-measure and re-decide")
+
+    inverted = re.compile(r"falsifier[^.]*?is\s+satisfied\s+by", re.I)
+    for name, doc in (("research-brief.md", brief),
+                      ("SEARCH-ARCHITECTURE-CHANGELOG.md", changelog),
+                      ("SEARCH-ARCHITECTURE.md", search_arch)):
+        plain = " ".join(doc.replace("**", "").replace("*", "").split())
+        assert re.search(r"not\s+met|not\s+triggered", plain, re.I), (
+            f"{name} no longer states that the closure condition is not met/"
+            f"triggered — the predicate must be spelled out where a reader takes "
+            f"the C3 ruling from")
+        assert not inverted.search(plain), (
+            f"{name} calls the falsifier 'satisfied by' the arm — that is the "
+            f"closure condition, which the deployable arm leaves UNSATISFIED; only "
+            f"the pre-authorisation's trigger is satisfied")
