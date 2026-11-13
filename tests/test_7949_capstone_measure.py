@@ -5364,8 +5364,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # 10020 at `a53ba8cf53` (+1), 10021 at `73c479ce40` (+1) — the tip
             # `main` carried when this row was FIRST re-derived (`87c07462`).
             # `main` has moved six times since, and the entry with it:
-            # `42409813a7` (+1) -> 10022, `6261c23a4b` (+19) -> 10041,
-            # `276503dad1` (+13) -> 10054, `ca74f2375e` (+22) -> 10076, then
+            # `42409813a7` (+1) -> 10022, then +54 across `6261c23a4b` (+19)
+            # -> 10041, `276503dad1` (+13) -> 10054 and `ca74f2375e` (+22)
+            # -> 10076. ⛔ The 54 is a SPAN, not that tip commit: `git show
+            # ca74f2375e` inserts 23 lines, only 22 above the entry, so it is
+            # not the 54. Then
             # `b85194d6bc` (+18) -> 10094, `0561bdcd80` (+22) -> 10116 and
             # `6408da01ce` (+16) -> 10132, which is THIS merge tree's value.
             # ⚠️ Deltas are what each commit did to the ENTRY, not its net
