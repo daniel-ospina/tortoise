@@ -898,11 +898,16 @@ def test_the_alert_job_keeps_the_write_scope_the_alert_RUNS_under():
         "the workflow's for that job — the alert legs run under THIS one, so `issues: read` "
         "here makes `gh issue create` 403 while the run reads green"
     )
-    canary_perms = workflow["jobs"]["canary"].get("permissions") or {}
-    assert canary_perms.get("issues", "write") == "write", (
-        "the canary job must not lose issues: write if it declares its own block — a job-level "
-        "block replaces the workflow's, and the DEFUSED-close path depends on it"
-    )
+    # ⛔ The `canary` job is deliberately NOT asserted (#12363 round 13). An earlier cut of
+    # this pin wrote `workflow["jobs"]["canary"].get("permissions", {}).get("issues",
+    # "write") == "write"`, which is VACUOUS: the canary declares no `permissions` block at
+    # all, so the `.get` default supplied the answer and the assertion could not fail — while
+    # adding a legitimate `permissions: {contents: read}` to that job (which, per the rule
+    # above, sets every unlisted scope to none) stayed green too. It also modelled the
+    # mechanism backwards: no step in `canary` files, comments, or closes anything (it has no
+    # `gh`; the alert legs live in `report`, which IS asserted). A pin that can only fire on a
+    # harmless change and that names a dependency which does not exist is the "a default
+    # makes the pin vacuous" defect this suite refuses elsewhere.
 
 
 def test_the_transcript_is_written_incrementally_not_only_at_the_end(tmp_path):
@@ -1558,9 +1563,23 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
             assert "needs.canary.outputs.exit_code != '0'" in gate, (
                 f"{name} must skip a run that REACHED a verdict: {gate}"
             )
-    assert "needs.canary.outputs.exit_code == '0'" in close_if, (
-        "close must follow the READING, not the job result: a failed transcript upload on a "
-        "green artifact would otherwise leave a stale release-owed issue open forever"
+    # ⛔ EXACT EQUALITY, not containment (#12363 round 13). The containment form
+    # (`"needs.canary.outputs.exit_code == '0'" in close_if`) is satisfied by a
+    # DISJUNCTION that ALSO closes on an ABSENT reading:
+    #   `!cancelled() && (… == '0' || … == '')`  →  measured, every pin GREEN.
+    # That is the false close this gate was rewritten to prevent, one level down: a canary
+    # that was cancelled, timed out, or never started (checkout failed) publishes no
+    # `exit_code`, so BOTH ledgers would be resolved with "Green: the published artifact now
+    # passes its documented first command" while `File or refresh the alert issue` stays
+    # skipped (`exit_code != '0'` is false) — nothing is filed AND the release-owed issue is
+    # falsified by a run that measured nothing. The residual stated a few lines above declares
+    # that state impossible ("an ABSENT reading closes nothing"); containment cannot enforce
+    # it. Normalised and compared for EQUALITY, the same way the report job's `always()` gate
+    # is pinned — a substring is not the expression, and this is the gate's only input.
+    close_expr = close_if.replace("${{", "").replace("}}", "").strip()
+    assert close_expr == "!cancelled() && needs.canary.outputs.exit_code == '0'", (
+        "the close gate must be EXACTLY `!cancelled() && needs.canary.outputs.exit_code == "
+        f"'0'` — close must follow the READING and nothing else, got {close_if!r}"
     )
     # The canary JOB's published output is the ONLY thing the close gate now reads, so the
     # expression that publishes it is pinned: repointing `outputs.exit_code` at a renamed or
