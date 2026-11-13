@@ -2114,6 +2114,182 @@ def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
     return found
 
 
+# ── the REMOVAL direction (#12237) ──────────────────────────────────────────────
+#
+# `tools/archive_surface.py check` answers ONE direction: an ARCHIVED symbol that is still
+# live is RED. It iterates the archive MANIFEST's entries, never the surface, so code that
+# is simply gone from BOTH — deleted, never archived — is invisible to it (measured: the
+# expected violation list is empty for a surface the manifest does not mention).
+#
+# `cut` is the tool that performs a removal: a re-cut re-derives the row set from the code,
+# so a row that disappeared from the declaration disappears from the baseline here. The
+# other direction is therefore enforced at THAT seam, where the row actually goes away —
+# not in a lint over two artifacts that both lost it. Without this, a batch that deletes 10
+# tools and archives 0 re-cuts cleanly, `surface-guard.py` reds only until a human re-cuts,
+# and then everything is green with the removed code gone from the repo — which is exactly
+# what the #11609 owner ruling forbids ("we archive it in case we made a mistake").
+
+ARCHIVE_KIND_BY_CLASS = {"tool": "mcp-tool", "sdk": "sdk-method"}
+
+REMOVAL_WAYS = (
+    "an `archive/MANIFEST.json` entry of the matching kind (freeze the code FIRST: "
+    "`uv run python tools/archive_surface.py archive <mcp-tool|sdk-method> <symbol> "
+    "--batch <slug> --reason <text>`)",
+    "`RETIRED_USE_INSTEAD` (an MCP tool only — it keeps SERVING the name and names its "
+    "replacement, so it is a retirement, not a removal)",
+    "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` (an SDK method only — the fail-closed "
+    "`AttributeError` record)",
+)
+
+
+def surface_symbols(doc: dict) -> set[tuple[str, str]]:
+    """`{(symbol, surface-class)}` for every row of a manifest document — BOTH halves.
+
+    The symbol is what a removal RECORD names: a tool's registry name, an SDK method's
+    name. `sdk:` is the manifest's ROW-NAME prefix, not part of the method name.
+
+    ⛔ THE `retired:` HALF IS READ TOO, and that is not symmetry for its own sake. Retired
+    names are STILL SERVED — `RETIRED_TOOL_REGISTRY` is derived from `RETIRED_USE_INSTEAD`
+    and every one of those handlers still answers (#3883) — so deleting a name from that
+    map removes BOTH the `retired:` row and the forward record in one ordinary edit. A gate
+    that read only `rows:` would watch that happen and report nothing, which is the same
+    silent wipe through a different door the approvals reset guards against (#4598).
+    Reading the half changes nothing on an ordinary re-cut (those rows are in the derived
+    document too) and nothing on a legitimate retirement (`RETIRED_USE_INSTEAD` still
+    accounts for it).
+
+    The key is `(symbol, class)`, not the symbol alone: a tool whose registry name collides
+    with a live SDK method name would otherwise be overwritten in the mapping and its
+    removal would be invisible.
+    """
+    symbols: set[tuple[str, str]] = set()
+    for key in ("rows", "retired"):
+        half = doc.get(key)
+        if half is None and key == "retired":
+            continue  # an older manifest may predate the retired half; `rows` is required
+        if not isinstance(half, list):
+            raise SurfaceEvidenceUnreadable(
+                f"a manifest document carries no `{key}:` list, so its removed symbols "
+                "cannot be enumerated — a refusal, never an empty removal set"
+            )
+        for row in half:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or row.get("tool") or row.get("key") or "")
+            if not name:
+                raise SurfaceEvidenceUnreadable(
+                    f"a manifest `{key}:` row carries no name: the removal gate cannot tell "
+                    "which symbol disappeared, and guessing one would grade the wrong record"
+                )
+            if name.startswith("sdk:"):
+                symbols.add((str(row.get("method") or name[len("sdk:"):]), "sdk"))
+            else:
+                symbols.add((name, "tool"))
+    return symbols
+
+
+def removal_records(archive_manifest: Path | None = None) -> dict:
+    """The three records a removal may be accounted by, or a REFUSAL.
+
+    Never a partial answer: an unreadable archive and an unimportable retirement map are
+    both refusals. "I could not see the record" and "there is no record" must not be the
+    same verdict for a gate whose failure mode is losing code permanently.
+
+    `archive_manifest` is a parameter so a test can read the manifest it means to read
+    rather than a path bound at import. There is deliberately NO `root`: the retirement maps
+    come from the imported package, so a caller asking about a different checkout would get
+    this one's answer — a parameter that cannot change the verdict is a trap, not an option.
+    """
+    try:
+        from tools import archive_surface
+    except Exception as exc:  # pragma: no cover - an import failure is an environment fault
+        raise SurfaceEvidenceUnreadable(
+            f"could not import tools/archive_surface.py to read the archive record: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    path = Path(archive_manifest) if archive_manifest else Path(archive_surface.MANIFEST_PATH)
+    try:
+        doc = archive_surface.load_manifest(path)
+    except Exception as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"could not read the archive manifest {_display(path)}: {exc}"
+        ) from exc
+    archived: set[tuple[str, str]] = set()
+    for entry in doc.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        kind = str(entry.get("kind") or "")
+        symbol = str(entry.get("symbol") or "")
+        if kind and symbol:
+            archived.add((kind, symbol))
+    try:
+        from tortoise.sdk_retired import REMOVED_SDK_METHODS, RETIRED_SDK_METHODS
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
+    except Exception as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"could not import the retirement records (RETIRED_USE_INSTEAD / "
+            f"RETIRED_SDK_METHODS / REMOVED_SDK_METHODS): {type(exc).__name__}: {exc}"
+        ) from exc
+    return {
+        "archived": archived,
+        "forward": set(RETIRED_USE_INSTEAD),
+        "sdk_retired": set(RETIRED_SDK_METHODS) | set(REMOVED_SDK_METHODS),
+    }
+
+
+def removal_report(
+    prior: set[tuple[str, str]],
+    derived: set[tuple[str, str]],
+    records: dict,
+    *,
+    allowed: set[str] | None = None,
+) -> tuple[list[str], dict[str, str]]:
+    """`(problems, accounting)` for the symbols that disappeared from the surface.
+
+    A symbol present in `prior` and absent from `derived` is a REMOVAL. It is accounted for
+    by EXACTLY ONE record — the archive entry of its own kind, or the retirement map for its
+    own half. Two records is also a problem (not a pass): a name that is both archived and
+    retired-forward is simultaneously "gone" and "still served", which is the inconsistency
+    `archive_surface.check` reds from its own side.
+
+    `allowed` is the deliberate-rename escape hatch (`cut --allow-removal`), applied to a
+    NAMED symbol only — there is no blanket flag, because a blanket flag is how a gate
+    becomes decoration.
+    """
+    allowed = set(allowed or ())
+    problems: list[str] = []
+    accounting: dict[str, str] = {}
+    for symbol, cls in sorted(prior):
+        if (symbol, cls) in derived:
+            continue
+        found: list[str] = []
+        kind = ARCHIVE_KIND_BY_CLASS[cls]
+        if (kind, symbol) in records.get("archived", ()):
+            found.append(f"archive entry ({kind})")
+        if cls == "tool" and symbol in records.get("forward", ()):
+            found.append("RETIRED_USE_INSTEAD")
+        if cls == "sdk" and symbol in records.get("sdk_retired", ()):
+            found.append("RETIRED_SDK_METHODS/REMOVED_SDK_METHODS")
+        if symbol in allowed:
+            accounting[symbol] = "`--allow-removal` (deliberate rename, stated in the PR)"
+            continue
+        if len(found) == 1:
+            accounting[symbol] = found[0]
+            continue
+        if not found:
+            problems.append(
+                f"{symbol} ({cls}) was DROPPED with no record — it is gone from the "
+                "declaration and from the archive both, so there is nothing left to read"
+            )
+            continue
+        problems.append(
+            f"{symbol} ({cls}) is accounted by {len(found)} records "
+            f"({', '.join(found)}) — a symbol that is both archived and still recorded as "
+            "retired/served is an inconsistency; pick ONE"
+        )
+    return problems, accounting
+
+
 def cmd_cut(args: argparse.Namespace) -> int:
     # ⛔ #11057 review P1: `--commit` was written into the record with NO validation, so
     # `cut --commit main` landed a record that `check` could not distinguish from a verified
@@ -2154,11 +2330,13 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # be enumerated, so overwriting it destroys them without ever naming them, which is the
     # #4598 wipe again. Refuse. Never a silent overwrite of a document we could not read.
     doomed: list[tuple[str, str]] = []
+    prior_doc: dict | None = None
     if MANIFEST_FILE.exists():
         try:
-            doomed = _recorded_approvals(_read_manifest(check_provenance=False))
+            prior_doc = _read_manifest(check_provenance=False)
         except SurfaceEvidenceUnreadable as exc:
             return _refuse(exc)
+        doomed = _recorded_approvals(prior_doc)
     if doomed and not getattr(args, "allow_approval_reset", False):
         print(f"::error::cut would reset {len(doomed)} recorded approval(s) to null")
         print(f"REFUSED {_display(MANIFEST_FILE)} carries {len(doomed)} recorded approval(s) "
@@ -2169,6 +2347,58 @@ def cmd_cut(args: argparse.Namespace) -> int:
               "READ from docs/product/canonical-mcp-tools.md (#4185), so no per-row "
               "re-recording is required. Pass --allow-approval-reset to drop them deliberately.")
         return 1
+
+    # FAIL CLOSED ON A REMOVAL THAT LEAVES NO RECORD (#12237). Runs BEFORE the write: a
+    # refusal must not leave a baseline that has already forgotten the symbol, because the
+    # committed baseline is the only list of what USED to be there. A first cut has no prior
+    # to lose, so the ROW comparison is skipped — but the override flags are validated on
+    # EVERY cut, because "no prior document" is the one tree where a stray override cannot
+    # even be checked against a removal, which is exactly when it should be refused.
+    accounting: dict[str, str] = {}
+    allowed = [str(s) for s in (getattr(args, "allow_removal", None) or [])]
+    reason = str(getattr(args, "allow_removal_reason", "") or "").strip()
+    if allowed and not reason:
+        print("::error::--allow-removal requires --allow-removal-reason")
+        print("REFUSED a removal override without a stated reason is an unexplained deletion; "
+              "the reason is recorded in the cut output and the PR.")
+        return 1
+    if reason and not allowed:
+        print("::error::--allow-removal-reason given with no --allow-removal")
+        print("REFUSED a reason with no symbol names an override that did not happen — an "
+              "operator who wrote a justification believes something was waived.")
+        return 1
+    if prior_doc is not None:
+        try:
+            records = removal_records()
+            problems, accounting = removal_report(
+                surface_symbols(prior_doc), surface_symbols(doc), records, allowed=set(allowed)
+            )
+        except SurfaceEvidenceUnreadable as exc:
+            return _refuse(exc)
+        # The override is validated before the removal problems: a bogus `--allow-removal` is
+        # a defect in the invocation, and reporting it as "a removal had no record" would
+        # send the operator to archive a symbol instead of fixing the flag.
+        unexplained = sorted(set(allowed) - set(accounting))
+        if unexplained:
+            print(f"::error::--allow-removal named symbol(s) this cut does not remove: "
+                  f"{', '.join(unexplained)}")
+            print("REFUSED an override must name a symbol that is actually going away — an "
+                  "unused override is a permission granted for something else later.")
+            return 1
+        if problems:
+            print(f"::error::cut would drop {len(problems)} surface row(s) with no usable record")
+            print("REFUSED a removal must leave a record — the #11609 owner ruling archives "
+                  "removed code so a mistake can be inspected later, and a re-cut cannot "
+                  "tell an archived removal from a silent deletion:")
+            for problem in problems:
+                print(f"  {problem}")
+            print("  Account for each symbol by exactly one of:")
+            for way in REMOVAL_WAYS:
+                print(f"    - {way}")
+            print("  A genuine RENAME (the old name is gone by design) passes "
+                  "`--allow-removal <symbol> --allow-removal-reason <why>`; it is logged "
+                  "below and belongs in the PR body.")
+            return 1
 
     MANIFEST_FILE.write_text(
         MANIFEST_HEADER
@@ -2205,6 +2435,16 @@ def cmd_cut(args: argparse.Namespace) -> int:
             "  per-row `approval` audit references reset to null; the approval itself is READ "
             "from docs/product/canonical-mcp-tools.md (#4185)"
         )
+    if accounting:
+        # Named, not summarised: this is the record that a removal was accounted for, and a
+        # count alone cannot be checked against the archive afterwards.
+        print(f"  accounted {len(accounting)} removal(s):")
+        for symbol in sorted(accounting):
+            print(f"    {symbol}: {accounting[symbol]}")
+    if allowed:
+        print("  REMOVAL OVERRIDE (--allow-removal): "
+              f"{', '.join(sorted(set(allowed)))}")
+        print(f"    reason: {getattr(args, 'allow_removal_reason', '')}")
     return 0
 
 
@@ -3192,6 +3432,21 @@ def main() -> int:
         "--allow-approval-reset",
         action="store_true",
         help="permit dropping recorded per-row approvals (default: refuse and name every row)",
+    )
+    p_cut.add_argument(
+        "--allow-removal",
+        action="append",
+        default=[],
+        metavar="SYMBOL",
+        help=(
+            "permit ONE named symbol to disappear from the baseline with no archive or "
+            "retirement record (a genuine rename). Repeatable, requires "
+            "--allow-removal-reason, and logged in the cut output (#12237)."
+        ),
+    )
+    p_cut.add_argument(
+        "--allow-removal-reason",
+        help="why each --allow-removal symbol is going away (required with it; goes in the PR)",
     )
     p_cut.add_argument(
         "--refresh-observations",

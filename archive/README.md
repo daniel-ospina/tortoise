@@ -89,15 +89,34 @@ ruling, not this one.
 
 ## Adding to the archive (the batch procedure)
 
-An archived symbol is removed in the **same** batch that archives it. Of the two directions,
-`check` enforces the one that protects the archive — **an archive entry whose symbol is still
-live is RED** (still in `TOOL_REGISTRY`, still a public `TortoiseSDK` method, still importable
-from the package, or still a `RETIRED_USE_INSTEAD` forward entry). The other direction — code
-deleted with no archive entry — is **not** enforced by this gate: it grades the manifest against
-the surface, and a symbol that is simply gone from both is invisible to it. That direction is
-[#12237](https://github.com/daniel-ospina/tortoise/issues/12237) (`cut`-time enforcement),
-**not** a property of this mechanism — so the batch procedure below is the only guarantee for
-it: run step 1 **before** step 2.
+An archived symbol is removed in the **same** batch that archives it. The two directions are
+enforced at two different seams, deliberately:
+
+- **an archive entry whose symbol is still live is RED** — `tools/archive_surface.py check`
+  (still in `TOOL_REGISTRY`, still a public `TortoiseSDK` method, still importable from the
+  package, or still a `RETIRED_USE_INSTEAD` forward entry). This gate grades the manifest
+  against the surface;
+- **a symbol that disappears with NO record is RED** — `tools/surface_manifest.py cut`
+  ([#12237](https://github.com/daniel-ospina/tortoise/issues/12237)). This gate cannot live
+  in `check`: it iterates the manifest's own entries, so a symbol gone from **both** is
+  invisible to it. `cut` is the seam where a row is actually forgotten, so the refusal is
+  there — **both halves of the baseline are compared** (`rows:` and `retired:`), because a
+  retired name is still SERVED: `RETIRED_TOOL_REGISTRY` is derived from
+  `RETIRED_USE_INSTEAD`, so one edit to that map detaches both, and a gate reading only
+  `rows:` would watch a live name leave the product and report nothing. A dropped symbol must
+  be accounted for by exactly ONE of an archive entry of the matching kind,
+  `RETIRED_USE_INSTEAD` (MCP), or `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` (SDK). Two
+  records is also refused: a name that is both archived and still served is the inconsistency
+  `check` reds from its own side. A genuine rename passes `cut --allow-removal <symbol>
+  --allow-removal-reason <why>`, which is logged in the cut output and belongs in the PR body;
+  a reason with no symbol is refused, because it records an override that did not happen.
+  **The refusal happens BEFORE the write**, so a refused cut never leaves a baseline that has
+  already forgotten the symbol.
+
+So the batch procedure below is no longer the only guarantee for direction two: the cut
+refuses. Run step 1 **before** step 2 anyway — the gate proves the record EXISTS, not that it
+holds the code you meant to keep (an `sdk-method` entry cannot account for an MCP tool, and no
+static gate can tell a correct block from a careless one).
 
 The `module` kind is how code that was archived **inside** the package before this mechanism
 existed is moved out. `tortoise/archived/` is refused by the gate for that reason: a file under
@@ -154,9 +173,14 @@ need history, and both are checked: `verify-anchors` proves each file's cited co
 here, holds the block exactly, and is an ancestor of the default branch (that verb runs in CI on
 a full-history clone), and it refuses an archive with **no entries at all** so an emptied
 manifest cannot pass vacuously. `check` itself is green at zero entries on purpose, because the
-restore path legitimately ends there; pass `--require-entries` when zero must be a failure. What
-no gate sees is ONE entry **removed** from a non-empty manifest — a shrink guard is not built;
-that direction is part of [#12237](https://github.com/daniel-ospina/tortoise/issues/12237).
+restore path legitimately ends there; pass `--require-entries` when zero must be a failure.
+
+⚠️ **What no gate sees: ONE entry REMOVED from a non-empty manifest.** A shrink guard is not
+built. `cut`'s refusal covers the SURFACE direction (a live symbol disappearing with no
+record); it does not cover a manifest that quietly loses a row which the surface also no
+longer carries — the code would then be gone from the repo with every gate green. Tracked in
+[#12291](https://github.com/daniel-ospina/tortoise/issues/12291), separately from #12237, which
+closed the surface direction only.
 
 1. open `archive/mcp-tools/<batch>/<tool>.py` (or `sdk-methods/…`, `modules/…`) and copy **each**
    verbatim block back into the file named in **its own** `verbatim from <path>` banner — one

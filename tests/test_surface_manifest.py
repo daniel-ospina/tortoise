@@ -5023,3 +5023,373 @@ def test_the_required_lint_reds_on_a_declaration_that_is_not_the_owners_list(
     out = capsys.readouterr().out
     assert rc == 1, "the required lint passed a declaration missing an approved method"
     assert "MISSING from __all__" in out, out
+
+
+# ── the REMOVAL direction (#12237) ───────────────────────────────────────────────
+#
+# `tools/archive_surface.py check` grades ONE direction: an archived symbol that is still
+# live is RED. It iterates the archive MANIFEST, never the surface, so a symbol gone from
+# both is invisible to it (`surface_violations([], surface) == []`). `cut` is the seam where
+# a row is actually forgotten, so the other direction is enforced there — and these tests
+# are what prove the detector FIRES, because a gate nobody has seen fire is
+# indistinguishable from one that cannot.
+
+
+def test_removal_records_read_the_REAL_archive_and_retirement_maps():
+    """The reader is wired to the real artifacts, not to a fixture's idea of them.
+
+    Asserting against a synthetic record set would pass while `removal_records` read the
+    wrong path or an empty manifest — and an empty manifest refuses every removal, which
+    reads as "the gate works" until it blocks a legitimate batch.
+    """
+    sm = _load_manifest_tool()
+    records = sm.removal_records()
+    assert ("module", "tortoise.archived.search_legacy") in records["archived"], (
+        "the committed archive manifest was not read — batch 0's entry is missing"
+    )
+    assert "tortoise_get" in records["forward"], "RETIRED_USE_INSTEAD was not read"
+    assert "backfill_sources" in records["sdk_retired"], (
+        "RETIRED_SDK_METHODS/REMOVED_SDK_METHODS was not read"
+    )
+
+
+def test_an_unreadable_archive_manifest_is_a_REFUSAL_not_an_empty_record(tmp_path):
+    """A MISSING manifest is legitimately empty (first run); an UNREADABLE one is not.
+
+    `archive_surface.load_manifest` treats a missing file as `{"entries": []}` so a
+    first-ever archive can start — kept here deliberately. A file that exists and cannot be
+    parsed is a different verdict: it may hold entries that account for removals this cut is
+    about to forget, so "I could not read it" must never grade as "there are none".
+    """
+    sm = _load_manifest_tool()
+    import pytest as _pytest
+
+    broken = tmp_path / "MANIFEST.json"
+    broken.write_text("{not json", encoding="utf-8")
+    with _pytest.raises(sm.SurfaceEvidenceUnreadable):
+        sm.removal_records(archive_manifest=broken)
+
+    # And the documented first-run arm still reads as empty rather than refusing.
+    assert sm.removal_records(archive_manifest=tmp_path / "absent.json")["archived"] == set()
+
+
+def _prior_with_extra_rows(derived_baseline, rows: list[dict]) -> dict:
+    """A committed baseline that carries rows the code no longer has — a REMOVAL."""
+    prior = copy.deepcopy(derived_baseline)
+    prior["rows"].extend(rows)
+    return prior
+
+
+def test_cut_REFUSES_a_dropped_tool_with_no_record(monkeypatch, tmp_path, derived_baseline, capsys):
+    """The #12237 defect, end to end: delete a tool, re-cut, and NOTHING notices.
+
+    This is the acceptance arm — a tool row dropped with no archive entry must refuse, name
+    the symbol, and name the ways to account for it. The refusal must also leave the
+    committed baseline UNWRITTEN: writing first and refusing second would already have
+    forgotten the only list of what used to exist.
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 1, f"a tool vanished with no record and the re-cut passed:\n{out}"
+    assert "tortoise_vanished_probe" in out, out
+    assert "archive_surface.py archive" in out, "the archive route was not named:\n" + out
+    assert "RETIRED_USE_INSTEAD" in out, "the forward-retirement route was not named:\n" + out
+    assert "RETIRED_SDK_METHODS" in out, "the SDK-retirement route was not named:\n" + out
+    assert path.read_text(encoding="utf-8") == before, (
+        "the refusal WROTE the baseline — the removed symbol is now unforgotten"
+    )
+
+
+def test_cut_ACCEPTS_a_dropped_tool_that_is_RETIRED_FORWARD(monkeypatch, tmp_path, derived_baseline, capsys):
+    """The real forward map satisfies the gate (a retirement is a record, not a removal).
+
+    `tortoise_get` is live in `RETIRED_USE_INSTEAD` and is NOT a row of the derived document,
+    so a committed baseline carrying it is exactly the shape of "a name that left the count".
+    """
+    sm = _load_manifest_tool()
+    # The committed baseline carries `tortoise_get` as a RETIRED row; the derived one no
+    # longer does (an ordinary edit to `RETIRED_USE_INSTEAD` detaches both halves at once).
+    prior = copy.deepcopy(derived_baseline)  # already carries `tortoise_get` as retired
+    derived = copy.deepcopy(derived_baseline)
+    derived["retired"] = [
+        row for row in (derived.get("retired") or []) if row.get("name") != "tortoise_get"
+    ]
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "tortoise_get: RETIRED_USE_INSTEAD" in out, out
+
+
+def test_cut_ACCEPTS_a_dropped_sdk_method_recorded_as_REMOVED(monkeypatch, tmp_path, derived_baseline, capsys):
+    """The SDK half's fail-closed map is the second record, read from the real module."""
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:backfill_sources", "method": "backfill_sources"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "backfill_sources: RETIRED_SDK_METHODS/REMOVED_SDK_METHODS" in out, out
+
+
+def test_cut_ACCEPTS_a_dropped_tool_that_is_ARCHIVED(monkeypatch, tmp_path, derived_baseline, capsys):
+    """An archive entry of the MATCHING KIND satisfies the gate — and is reported."""
+    sm = _load_manifest_tool()
+    symbol = "tortoise_vanished_probe"
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": symbol}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": {("mcp-tool", symbol)}, "forward": set(), "sdk_retired": set()},
+    )
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert f"{symbol}: archive entry (mcp-tool)" in out, out
+
+
+def test_an_archive_entry_of_the_WRONG_KIND_does_not_satisfy_the_gate():
+    """`kind` is matched, not ignored: an `sdk-method` entry cannot account for a tool.
+
+    Matched on `(kind, symbol)` because the two halves' records are different artifacts — an
+    SDK entry freezes a method body, which is not the tool the MCP surface lost.
+    """
+    sm = _load_manifest_tool()
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool")},
+        set(),
+        {"archived": {("sdk-method", "tortoise_x")}, "forward": set(), "sdk_retired": set()},
+    )
+    assert problems and not accounting, (problems, accounting)
+    assert "no record" in problems[0], problems
+
+
+def test_TWO_records_is_a_problem_not_a_pass():
+    """Archived AND retired-forward is "gone" and "still served" at once — an inconsistency."""
+    sm = _load_manifest_tool()
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool")},
+        set(),
+        {"archived": {("mcp-tool", "tortoise_x")}, "forward": {"tortoise_x"}, "sdk_retired": set()},
+    )
+    assert problems and not accounting, (problems, accounting)
+    assert "2 records" in problems[0], problems
+
+
+def test_an_override_must_name_a_symbol_this_cut_REMOVES(monkeypatch, tmp_path, derived_baseline, capsys):
+    """A permission granted for one name must not sit unused for the next one."""
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["tortoise_some_other_symbol"],
+            allow_removal_reason="rename",
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "does not remove" in out, out
+
+
+def test_an_override_without_a_reason_is_refused(monkeypatch, tmp_path, derived_baseline, capsys):
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["tortoise_vanished_probe"],
+            allow_removal_reason="",
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "--allow-removal-reason" in out, out
+
+
+def test_a_named_override_with_a_reason_carries_the_removal_and_logs_it(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The rename escape hatch: named, reasoned, LOGGED — never a blanket flag."""
+    sm = _load_manifest_tool()
+    symbol = "tortoise_vanished_probe"
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": symbol}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=[symbol],
+            allow_removal_reason="renamed to tortoise_vanished_probe_v2",
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert f"REMOVAL OVERRIDE (--allow-removal): {symbol}" in out, out
+    assert "renamed to tortoise_vanished_probe_v2" in out, out
+
+
+def test_an_unreadable_record_is_a_REFUSAL(monkeypatch, tmp_path, derived_baseline, capsys):
+    """A gate that cannot read its evidence must not report success (#1382 class)."""
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    def _boom(*a, **k):
+        raise sm.SurfaceEvidenceUnreadable("the archive manifest is unreadable")
+
+    monkeypatch.setattr(sm, "removal_records", _boom)
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "unreadable" in out, out
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_an_ORDINARY_re_cut_reports_no_removals(monkeypatch, tmp_path, derived_baseline, capsys):
+    """NON-VACUITY: the gate must not fire on a re-cut where nothing was removed.
+
+    Without this, a gate that refused every cut would satisfy all the refusal tests above.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(
+        yaml.safe_dump(copy.deepcopy(derived_baseline), sort_keys=False, allow_unicode=True, width=110)
+    )
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "accounted" not in out, out
+
+
+def test_the_RETIRED_half_is_gated_too(monkeypatch, tmp_path, derived_baseline, capsys):
+    """A retired name is STILL SERVED, and dropping it is a removal like any other.
+
+    `RETIRED_TOOL_REGISTRY` is derived from `RETIRED_USE_INSTEAD`, so one ordinary edit
+    (delete a key from the map) removes BOTH the `retired:` row and the forward record. A
+    gate that read only `rows:` watched that happen and reported nothing — the same silent
+    wipe through a different door the approvals reset guards against (#4598). Found by the
+    verification review of this change; this test is the arm that would have caught it.
+    """
+    sm = _load_manifest_tool()
+    symbol = "tortoise_vanished_retired"
+    prior = copy.deepcopy(derived_baseline)
+    prior["retired"] = [*(prior.get("retired") or []), {"name": symbol}]
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 1, f"a RETIRED name vanished with no record and the re-cut passed:\n{out}"
+    assert symbol in out, out
+    assert path.read_text(encoding="utf-8") == before
+
+    # And it is accounted for by an archive entry of the tool kind, exactly like a row.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": {("mcp-tool", symbol)}, "forward": set(), "sdk_retired": set()},
+    )
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert f"{symbol}: archive entry (mcp-tool)" in out, out
+
+
+def test_a_symbol_that_is_BOTH_a_tool_and_a_method_does_not_hide_a_removal():
+    """`(symbol, class)` keys: a name collision must not overwrite one half's removal.
+
+    Keyed by symbol alone, a dropped `tortoise_x` tool row vanished from the mapping because
+    a live `tortoise_x` SDK method wrote the same key — and its removal became invisible. Not
+    reachable today (`tortoise_*` vs bare method names), but it is a silent-pass shape.
+    """
+    sm = _load_manifest_tool()
+    problems, _ = sm.removal_report(
+        {("tortoise_x", "tool"), ("tortoise_x", "sdk")},
+        {("tortoise_x", "sdk")},
+        {"archived": set(), "forward": set(), "sdk_retired": set()},
+    )
+    assert len(problems) == 1 and "tortoise_x (tool)" in problems[0], problems
+
+
+def test_a_reason_without_an_allow_removal_is_refused(monkeypatch, tmp_path, derived_baseline, capsys):
+    """A justification for an override that did not happen is a false record, not a no-op."""
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(
+        yaml.safe_dump(copy.deepcopy(derived_baseline), sort_keys=False, allow_unicode=True, width=110)
+    )
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=[],
+            allow_removal_reason="I thought I was removing something",
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "no --allow-removal" in out, out

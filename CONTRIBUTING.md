@@ -256,6 +256,20 @@ move the census, and it lands in a reviewed diff like any other edit.
    carve-out — it records a method deliberately outside
    the reachable set, and the guard reds if such a method later becomes reachable.
 
+**To REMOVE a symbol** (a tool from `TOOL_REGISTRY` or from `RETIRED_USE_INSTEAD`, a public
+method from `TortoiseSDK`), the cut **refuses** a symbol that disappears with no record — both
+halves of the baseline are compared (`rows:` and `retired:`, because a retired MCP name is still
+served)
+([#12237](https://github.com/daniel-ospina/tortoise/issues/12237)): account for it by **exactly
+one** of an `archive/MANIFEST.json` entry of the matching kind (`tools/archive_surface.py
+archive mcp-tool|sdk-method <symbol> --batch <slug> --reason <text>`, run **before** the
+deletion — see [`archive/README.md`](archive/README.md)), `RETIRED_USE_INSTEAD` (the MCP name
+keeps answering and names its replacement), or `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`
+(the SDK's fail-closed `AttributeError` record). A genuine **rename** passes `--allow-removal
+<symbol> --allow-removal-reason <why>`, which is logged in the cut output and belongs in the PR
+body. The refusal runs **before** the write, so a refused cut leaves the baseline intact —
+the committed baseline is the only list of what USED to be there.
+
 **A red `surface-guard` is the gate working, not a bug.** Do not resolve it by editing the baseline to
 match the registry — that is precisely the unapproved expansion the check exists to catch. The curated
 list, including what each tool does, what uses it, and the recommendation for it, lives in
