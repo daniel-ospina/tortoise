@@ -268,10 +268,15 @@ non-attachment, and no `k` budget fixes it. Recovering
 them inside the window would take the lane from **207/422 = 49.1 %** to **386/422 = 91.5 %**, and the
 artifact's `attached_folded` = 386 (91.5 %) is the number that says so — ⛔ **but the lever that
 number names is not the article anchor.** The arm separator-normalises the MENTION and then runs the
-shipped matcher, so those 179 pairs bind through an **input-side** normalisation the stored fold
-already accepts; that is a different change from reversing `#12047` round-4 finding 5, and it is the
-one the artifact has measured. Reversing the anchor is still not a candidate for quiet adoption — it
-is filed as evidence (see §7), argued from the per-class reach numbers rather than from the 386.
+shipped matcher, so those pairs bind because the separator is gone from the mention — ⛔ but that is
+**not free**: `_fold_punct("a-b")` is `"a b"` and the fold then drops the leading `a` as an
+article, so `key_of("a b") == "b"` and an `a-b` mention binds a stored `b`, the binding `#12047`
+round-4 finding 5 forbids. The artifact measures ATTACH COUNTS only and carries no false-merge arm,
+so nothing here bounds what those binds cost; adopting the lever therefore needs its own precision
+decision (a guard for the article-plus-separator class, plus a false-merge measurement this run does
+not have) or it has to be argued as a reopen. Reversing the anchor is still not a candidate for quiet
+adoption — it is filed as evidence (see §7), argued from the per-class reach numbers rather than from
+the 386.
 
 **`basename-only` — 30 pairs, 30/30 blocked, 0 attach.** Deliberate: a basename is non-injective
 (`lib/config.py` and `server/config.py` share one), so `entity_blocking.attach_matches` attaches on it
@@ -299,7 +304,7 @@ retrieval-miss class `#11901` owns; the folded rung cannot reach what the window
 | `§2.0` (Postgres record / FalkorDB cache) | **not reached** |
 | hosted FalkorDB **no-eviction** finding | **not reached** — nothing is tiered or evicted |
 | `#3584`/`#3590` — identity is the minted id, `name` is a natural key | **upheld** — `name` is never rewritten; every key here is derived and comparison-side |
-| **`#12047` round-4 finding 5** — `a-b` must not fold to `b` | **upheld and pinned**, and its measured cost is the 180-pair residual above |
+| **`#12047` round-4 finding 5** — `a-b` must not fold to `b` | **upheld and pinned on the UNSHIPPED comparison path this PR leaves alone**, and its measured cost is the 180-pair residual above; §7(a)'s separation lever would reintroduce that binding on the MENTION side, which is why it is not free |
 | `§7` + `§17.4.6` — the read ledger is not an admission-control signal | **not read** — the instrument passes `_record_reads=False` throughout |
 
 ---
@@ -330,8 +335,13 @@ retrieval-miss class `#11901` owns; the folded rung cannot reach what the window
    the `k=3` window, 0 attach** (and `0 attach` at every `k`, including the widths where all 180 are
    in the window) — so the pairs are present and unattached, and no `k` budget reaches them.
    **(a) Separator-normalise the MENTION before the comparison** — that recovers **179** of them, it
-   is exactly what the artifact's `attached_folded = 386` measures (386 = 175 + 179 + 21 + 11), it is
-   an input-side lever, and it does **NOT** require reopening `#12047` round-4 finding 5.
+   is exactly what the artifact's `attached_folded = 386` measures (386 = 175 + 179 + 21 + 11). It
+   leaves the STORED key alone, but it is not free and not priced by this artifact —
+   `_fold_punct("a-b")` → `"a b"` → the fold drops the leading `a` → `key_of("a b") == "b"`, so an
+   `a-b` mention binds a stored `b`, the binding `#12047` round-4 finding 5 forbids, and the
+   measurement counts no false merges. Adopting it needs a decision of its own (a guard on the
+   article-plus-separator class, and a false-merge arm this run does not have) rather than being a
+   way to reach the 179 without touching that finding.
    **(b) Reverse the article anchor** — that would fold `the-plan-doc` onto `plan doc` in the stored
    key itself. That IS a reopen of a recorded finding, and it belongs where that finding lives, with
    this brief's §4 as the evidence — **not** a quiet change to `normalize_entity_name`, and not a

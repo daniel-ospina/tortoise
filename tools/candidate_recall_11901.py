@@ -413,9 +413,15 @@ def _fold_punct(text: str) -> str:
 
     Deliberately only the separator class (``-``/``_``/``.``/``/``) plus case and
     whitespace. It is not a general normaliser and it does not touch word order
-    or morphology, so it cannot merge two genuinely different names by itself —
-    which is the asymmetric-error rule this repo already carries (#1370: a false
-    merge is invisible and a false split is cheap, so be conservative).
+    or morphology, ⛔ but it is NOT merge-free: the normalised mention is then
+    folded by a rung that drops a LEADING ARTICLE, so ``_fold_punct("a-b")`` is
+    ``"a b"`` and ``key_of("a b") == "b"``: an ``a-b`` mention binds a
+    stored ``b`` (the binding #12047 round-4 finding 5 forbids, pinned on the
+    shipped path by ``test_the_article_anchor_decision_is_not_reversed``);
+    using it as a comparison key therefore needs a guard for that class plus a
+    false-merge measurement this tool does not carry. That is the
+    asymmetric-error rule this repo already carries (#1370: a false merge is
+    invisible and a false split is cheap, so be conservative).
     """
     t = re.sub(r"[-_./]+", " ", (text or "").strip().lower())
     return re.sub(r"\s+", " ", t).strip()
