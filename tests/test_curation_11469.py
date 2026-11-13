@@ -4516,6 +4516,25 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         "the Event guarantee row must name the row-shape guard's test")
     assert "EVENT_READ_CEILING" in doc, (
         "the Event guarantee row must name the bound it refuses above")
+    # ⛔ The DOC INDEX (PR review cycle 2): `docs/00_index.md` is the routing entry
+    # `AGENTS.md` sends every lane to, and it carried the PRE-Event number set
+    # (21,147 rows / 21,015 undecidable) while this change moved the census to 25,817 /
+    # 25,685 — the exact under-statement #12378 exists to stop, in the index rather than
+    # in the doc the phrase pins cover. The operator layer's own PR updated this line
+    # (`a6948020c6`), so the precedent makes the omission drift.
+    # Pin the CURRENT claim, not the absence of the digits: the index may keep a withdrawn
+    # number as history (it does for 17,420), so a bare `"21,147" not in index` would
+    # forbid a correct footnote while still passing if the current figure regressed.
+    index = (_pathlib.Path(__file__).resolve().parent.parent
+             / "docs" / "00_index.md").read_text(encoding="utf-8")
+    assert "over **21,147** enumerable rows" not in index, (
+        "docs/00_index.md still states the pre-Event-layer population as CURRENT")
+    assert "and 21,015 stay undecidable" not in index, (
+        "docs/00_index.md still states the pre-Event-layer undecidable count as CURRENT")
+    assert "over **25,817** enumerable rows" in index, (
+        "docs/00_index.md must state the population the Event read moved the census to")
+    assert "25,685 stay undecidable" in index, (
+        "docs/00_index.md must state the undecidable count the Event read moved")
 
 
 def test_an_event_with_no_text_is_counted_on_the_report(monkeypatch, tmp_path):

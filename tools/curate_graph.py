@@ -599,11 +599,15 @@ class MCPReader:
           `counts.Event + 1` whenever a count is available (uncapped — see below), so this
           arm can only fire on the UNREPORTED arm, where nothing vouches for the layer's
           size;
-        * a read whose row count disagrees with `counts.Event` is REFUSED. Both describe
-          `:Event` with the same predicate (unlike the operator pair), so equality is
-          expected — but the count is read moments earlier, so a concurrent create can
-          still make `read > reported`, and the refusal names that cause rather than
-          asserting it is impossible.
+        * a read whose row count disagrees with `counts.Event` is re-counted ONCE and then
+          either ACCEPTED or REFUSED. Both surfaces describe `:Event` with the same
+          predicate (unlike the operator pair), so equality was expected — but the count is
+          read moments earlier, and `counts.Event` moves in BOTH directions on a live graph
+          (`index_sessions` creates; the hosted entity-delete path deletes). Completeness
+          rests on `len(raw) < limit_sent`, NOT on the count: a response below the request
+          is the exact layer at any size, so a disagreement whose fresh count equals the
+          rows is ACCEPTED (the disagreement was a stale count) and anything else is
+          REFUSED. The refusal still names `counts.Event` and what the re-read reported.
 
         An UNREPORTED count over a NON-EMPTY read is a lost cross-check, not a lost
         population: the rows came from their own read, so it is recorded on the report.
@@ -763,10 +767,11 @@ class MCPReader:
             # silently collapsed it, so it travels on the artifact.
             self._note(f"{empty_text} of {len(raw)} Event rows carry no name/title/subject "
                        "and therefore an empty text: rows of the SAME KIND among them share "
-                       "one content-addressed `stable_key` in `--rows` (the key is "
-                       "`node_type:kind:sha`, so the sharing is per-kind, not per-layer; no "
-                       "duplicate claim is made for them — every Event decision is "
-                       "`undecidable`, and nothing is carried)")
+                       "one `stable_key` in `--rows` WHEN they carry no `contentHash` of "
+                       "their own (the key is `curate-11469:event:<kind>:<contentHash or "
+                       "sha256(text)>`, so the sharing is per-kind and only for the rows "
+                       "with neither; no duplicate claim is made for them — every Event "
+                       "decision is `undecidable`, and nothing is carried)")
         return out, reported
 
     def _get_entities(self, limit: int) -> Any:
