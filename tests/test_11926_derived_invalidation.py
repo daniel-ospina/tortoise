@@ -1303,11 +1303,19 @@ def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
     """``_reconcile_or_report``'s contract: the idempotent retirement outcome is
     never discarded because the cache follow-up broke.
 
-    ``latest_judgement`` is the one call inside the reconcile that is NOT wrapped,
-    so it is the reachable way to make the reconcile raise. Measured: without the
-    guard the exception propagates out of the sweep loop and the finding lands in
-    NO bucket at all — the #12315 shape coming back through an error path
-    (``counts.alreadyRetired`` 1 -> 0).
+    ``reconcile_goal_state_cache`` wraps only ``sdk.get_entity``; the
+    ``latest_judgement`` read and the two ``update_entity`` writes after it are NOT
+    wrapped, so a read failure there or a write failure (the shape
+    ``test_a_failed_cache_write_counts_as_a_FAILED_sweep`` models) both make the
+    reconcile raise. ``latest_judgement`` is used here because it is the one
+    reachable without patching the SDK's write path.
+
+    MEASURED without the guard: the exception leaves ``invalidate`` and is caught
+    by ``invalidate_stale``'s per-finding handler, so the finding still lands in a
+    bucket — but in ``failed`` rather than ``alreadyRetired`` (``counts``
+    ``alreadyRetired`` 1 -> 0) and the record degrades to the generic refusal
+    shape that carries ``error`` only, so the idempotent outcome AND
+    ``cache.error`` are both lost.
     """
     i, t, g = _world(sdk, tag="reconcile-raises")
     _judge(sdk, i, t, g)
@@ -1324,11 +1332,17 @@ def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
 
     monkeypatch.setattr(di, "latest_judgement", boom)
     monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
-    counts = invalidate_stale(sdk, goal_id=g["id"])["counts"]
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    counts = report["counts"]
     assert counts["stale"] == 1, counts
     assert counts["alreadyRetired"] == 1, counts
     assert counts["failed"] == 1, counts      # reported, never raised
     assert counts["undecidable"] == 0, counts
+    # the finding keeps its idempotent outcome AND its cache report; the generic
+    # refusal shape (the mutant's) has neither
+    per_finding = report["invalidated"][0]
+    assert per_finding["alreadyRetired"] is True, per_finding
+    assert "graph read exploded" in per_finding["cache"]["error"], per_finding
 
 
 def test_the_derived_state_stops_feeding_the_goal(sdk):
