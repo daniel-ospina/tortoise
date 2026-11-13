@@ -42,16 +42,15 @@ DOCSTRINGS/COMMENTS — the `emitted:` note moves, and a
 POST-RUN CHANGES**: the `#12304` rebases rewrote every branch sha, so
 `git log --format=%h ae63e846e410..HEAD -- tortoise/entity_resolver.py tortoise/entity_blocking.py
 tortoise/extractor_v2.py` now prints the whole rewritten branch's commits, and SPANS it. No count
-is stated here — deliberately: the commit that writes this sentence adds itself to the number
-it would quote (measured both ways: the figures were one lower before this paragraph landed),
-so any integer here is a number a reader cannot re-derive. It is not a list of docstring-only
+is stated here — deliberately: an integer quoting a range this same PR keeps extending is a
+number a reader cannot re-derive, and this paragraph quoted one such figure before it was removed. It is not a list of docstring-only
 commits and this paragraph does not claim it is — it holds the branch's own feature and fix
 commits too, which is what a base-moved range holds. What the enumeration DOES establish is the
 IDENTITY of the two statement changes, and it establishes it by CONTENT, not by position: the
 `stats()` key rename (a diagnostic LABEL, which is why the artifact reads `key_memberships` while
 the run emitted `keys`) is `git log -S'key_memberships'` -> `1990cca573`, and the fallback is
 `git log -S'every label this index actually holds'` -> `22e43732e9`; both are members of that
-25-commit list, and both pre-rebase shas are dangling objects no reader can resolve. This run never
+list, and both pre-rebase shas are dangling objects no reader can resolve. This run never
 reaches the fallback: the harness calls
 `index.candidates(surface, label="Object")` (cited BY SYMBOL, never by line — the number has rotted
 three times already, so `grep -n` for the symbol in `tools/candidate_recall_11901.py` is the
