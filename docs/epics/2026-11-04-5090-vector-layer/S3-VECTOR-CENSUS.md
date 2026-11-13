@@ -321,10 +321,10 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 182 collected
+                                 # this tree: 183 collected
 ```
 
-(115 collected before #11088's round 7; the file collects **182 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **183 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -340,17 +340,19 @@ green, so the artefact `#11086` item 4 is ticked on was pinned nowhere), one by 
 (`test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently` — `#9314`'s missing
 pytest-lane catcher for the two census dicts: a duplicated literal key in
 `WRITER_CENSUS`/`CENSUS_EVIDENCE` collapses before any code can see it, so only `ruff`'s `F601`
-caught `#11996`'s pair, post-merge), and two by `#12265`'s generalisation of the same pin
-(`test_the_duplicate_key_detector_catches_a_duplicate` and
-`test_no_module_declares_the_same_dict_key_twice` — the falsifier and the scan over `tortoise/`,
+caught `#11996`'s pair, post-merge), and three by `#12265`'s generalisation of the same pin
+(`test_the_duplicate_key_detector_catches_a_duplicate`,
+`test_no_module_declares_the_same_dict_key_twice` and
+`test_the_scan_REPORTS_a_duplicate_it_finds` — the falsifier, the scan over `tortoise/`,
 `tools/` and `tests/` (not "repo-wide", and deliberately no file count: `battery/`,
 `graph-scripts/`, `docs/`, `eval/` and several smaller roots sit outside them, and a count there
 has already gone stale once) that make a silently-shadowed declaration key a PYTEST red on any tree
-that holds both rows, including the MERGE tree, where the duplicate is actually born and where
+that holds both rows AND whose diff selects this file, including the MERGE tree, where the duplicate is
+actually born and where
 `main-lint.yml`'s ruff gate (`#2174`) only reds it after the fact; the scan also found the live
 `# noqa: F601` duplicate in `tests/test_commit_schema.py`, which the census-scoped pin cannot see —
 and which lint itself does NOT catch, because the suppression is on the repeated line)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 2 = 182`). ⚠️ No figure here names what `main` collects TODAY:
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 = 183`). ⚠️ No figure here names what `main` collects TODAY:
 which of those additions are already merged moves with `main`, so any "`main` at N" would be a moving
 reference this paragraph forbids — the total is bound to THIS TREE alone): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
@@ -365,8 +367,7 @@ from its declaration or blamed as an undeclared one), one that drives the two-la
 itself (every other `partial`-hold fixture injects the sentinel string, so nothing tied the
 derivation to `PARTIAL_LABEL_PREFIX` — see the note below), and one added by `#11437` that drives
 the residual pin's polarity as an executor over its own row set rather than a table in a message —
-and
-reads 181 passed, 1 skipped on the docker lane at this head. The
+and the file reads 182 passed, 1 skipped on the docker lane at this head. The
 skip is the `<3.12` re-derive. The three `main` reds this row recorded for a day are CLEARED:
 `#12045`'s undeclared `tortoise.api::_emit` / `tortoise.api::_verify_record_vector_width` writers were
 the width verifier and a docstring-quoted call, and `#12042` (`b367c54214a2`) CLASSED both
@@ -381,11 +382,11 @@ these nodeids red again at `origin/main` `edcac493a5` (measured there: `3 failed
 A branch sha is a moving tree — the same discipline the paragraph below already imposes on the
 population COUNT — so the claim is bound to the tree it was measured on, and this PR carries the
 declaration that clears it.
-⛔ The SPLIT is lane-bound, and the same tree reads **180 passed, 2 skipped** under
+⛔ The SPLIT is lane-bound, and the same tree reads **181 passed, 2 skipped** under
 `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies. Both splits add
-to the same `182` the pin re-derives, so **neither is a stale figure**: a carve-out run that
-"corrects" 181/1 to 180/2 rewrites a true record into a false one, and the pin deliberately does
+to the same `183` the pin re-derives, so **neither is a stale figure**: a carve-out run that
+"corrects" 182/1 to 181/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
 head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is

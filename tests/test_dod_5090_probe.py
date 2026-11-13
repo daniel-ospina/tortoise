@@ -7880,13 +7880,13 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `181 passed, 1 skipped`
+    defect. Measured at this tree: the docker lane reads `182 passed, 1 skipped`
     (the skip is the `<3.12` re-derive; the three `main` reds this docstring used
     to record — `#12045`'s undeclared `tortoise.api::_emit` /
     `_verify_record_vector_width` writers — are cleared by `#12042`, landed as
-    `b367c54214a2`) and the carve-out lane reads `180 passed, 2 skipped` (that
+    `b367c54214a2`) and the carve-out lane reads `181 passed, 2 skipped` (that
     skip plus `tests/_live_utils.py`'s live-graph fixture, which only a lane with
-    a `TORTOISE_DB_URI` satisfies). Both splits add to the `182` re-derived
+    a `TORTOISE_DB_URI` satisfies). Both splits add to the `183` re-derived
     below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
@@ -8254,10 +8254,15 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 # pushed tree — `F601` twice, 16 minutes after the merge — and that lint job was the
 # whole detection this class had. The register's own copy raised
 # `DuplicateWriterDeclaration` at IMPORT, which is loud but is a different shape (a
-# list of tuples, checked by `load()` — see
+# tuple of pairs, checked by `load()` — see
 # `tests/test_embed_writer_register.py::test_a_duplicate_key_raises`).
 #
-# So this is the DICT half: one scan, run wherever a tree holds both rows.
+# So this is the DICT half: one scan, run wherever a diff SELECTS this module. ⛔ Not
+# on every tree that holds a duplicate: `config/ci-surfaces.yml`'s selection sends a
+# `tools/`-only diff to `tools/dod_5090_probe.py`'s own tests, not to this file
+# (measured: `select(["tools/min_signal.py"], "pull_request")` → 90 test files, this
+# one absent). So the catch is real but SELECTION-BOUND, and the honest claim is the
+# narrower one — a `tests/` or `tortoise/` diff, or any full-lane run, reaches it.
 
 #: Roots the declaration dicts live under today. ⛔ NOT the whole repo: `battery/`,
 #: `graph-scripts/`, `docs/`, `eval/` and several smaller roots sit outside these three,
@@ -8308,6 +8313,12 @@ def _constant_key_value(node: ast.expr) -> tuple[bool, object]:
     skipped like any other non-literal key. Element values are compared by Python's
     own `==`/hash, so `(1, 2)` and `(True, 2)` are ONE key, exactly as a dict treats
     them.
+
+    Recurses through a SIGNED numeric literal too (`{-1: …}`, `{+1: …}`, and
+    `{(-1, 2): …}` via the tuple arm), because `ruff`'s `F601` flags all three and
+    `{+1: 'a', 1: 'b'}` is a real duplicate — Python collapses it to one key. A
+    `Constant`-only reading would skip the class, and a skipped duplicate is one that
+    no lane catches at all when the survivor carries a `noqa` marker.
     """
     if isinstance(node, ast.Constant):
         return True, node.value
@@ -8319,6 +8330,13 @@ def _constant_key_value(node: ast.expr) -> tuple[bool, object]:
                 return False, None
             values.append(value)
         return True, tuple(values)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        ok, operand = _constant_key_value(node.operand)
+        # Numeric only: `-`/`+` on anything else is a TypeError at runtime, so there
+        # is no key to compare. `bool` is an `int` here on purpose — `+True` IS `1`,
+        # so `{+True: 'a', True: 'b'}` is a real duplicate.
+        if ok and isinstance(operand, (int, float, complex)):
+            return True, (-operand if isinstance(node.op, ast.USub) else +operand)
     return False, None
 
 
@@ -8337,17 +8355,15 @@ def _duplicate_constant_key_sites(
     (`f"{x}"`) is not a declaration this can read, and guessing would report a
     duplicate that is not one. `**splat` in a literal parses as a `None` entry in
     `node.keys`, not a Constant, so it is skipped rather than mistaken for the key
-    `None`; `_constant_key_value` recurses through tuple literals so a fully-literal
-    `{(1, 2): …}` is compared too (390 tuple-literal keys under these roots, 308 of
-    them fully literal).
+    `None`; `_constant_key_value` recurses through tuple and signed-numeric literals
+    so a fully-literal `{(1, 2): …}` is compared too (390 tuple-literal keys under
+    these roots, 308 of them fully literal).
 
     ⚠️ Still outside this population, stated so it is not mistaken for a total: a
-    SIGNED literal key (`{-1: 'a', -1: 'b'}`, `{+1: 'a', 1: 'b'}`) parses as
-    `UnaryOp(USub|UAdd, Constant)` rather than a `Constant`
-    (measured: zero such dict keys under the three roots today), and so does a tuple
-    containing one. `filename` is threaded into `ast.parse` so an unparseable module
-    names ITSELF instead of `<unknown>` — the same "a hole is a hole, not a zero" rule
-    this file's predicate-count test states.
+    COMPUTED key (`f"{x}"`, `SOME_NAME`) and any tuple containing one, and a key
+    built by an operator outside `USub`/`UAdd`. `filename` is threaded into
+    `ast.parse` so an unparseable module names ITSELF instead of `<unknown>` — the
+    same "a hole is a hole, not a zero" rule this file's predicate-count test states.
     """
     sites: list[tuple[int, int, str]] = []
     for node in ast.walk(ast.parse(source, filename=filename)):
@@ -8407,6 +8423,46 @@ def test_the_duplicate_key_detector_catches_a_duplicate():
     # …while a 1-tuple is NOT the bare key, and a non-literal element is skipped.
     assert _duplicate_constant_key_sites("D = {(1,): 'a', 1: 'b'}\n") == []
     assert _duplicate_constant_key_sites("D = {(K, 2): 'a', (K, 2): 'b'}\n") == []
+    # A SIGNED numeric key is still a key, and `ruff`'s `F601` flags all three of
+    # these shapes — so a guard that skipped them would be WEAKER than the lint it
+    # exists to backstop, on the one shape that has no other catcher when the
+    # survivor carries a noqa marker.
+    assert _duplicate_constant_key_sites("D = {-1: 'a', -1: 'b'}\n") == [(1, 1, "-1")]
+    assert _duplicate_constant_key_sites("D = {+1: 'a', 1: 'b'}\n") == [(1, 1, "1")]
+    assert _duplicate_constant_key_sites("D = {(-1, 2): 'a', (-1, 2): 'b'}\n") == [
+        (1, 1, "(-1, 2)")]
+    # …and the sign is compared, not stripped: `-1` and `1` are DIFFERENT keys.
+    assert _duplicate_constant_key_sites("D = {-1: 'a', 1: 'b'}\n") == []
+
+
+def _scan_declaration_roots(root: Path) -> tuple[list[str], dict[str, int]]:
+    """`(violation messages, modules read per root)` over `_DUP_KEY_ROOTS` under `root`.
+
+    Hoisted out of the test so the REPORTING path can be driven: on a real tree
+    `violations` is empty, so the message formatting, the `relative_to` naming and the
+    `"\n  ".join(...)` would otherwise be code no run ever executes. A guard whose
+    only exercised arm is the green one is not evidence the red one works.
+    """
+    violations: list[str] = []
+    per_root: dict[str, int] = {}
+    for name in _DUP_KEY_ROOTS:
+        scanned_here = 0
+        for path in sorted((root / name).rglob("*.py")):
+            rel = path.relative_to(root)
+            scanned_here += 1
+            try:
+                source = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError) as exc:  # a hole is a hole, not a zero
+                violations.append(f"{rel}: UNREADABLE ({exc.__class__.__name__}), not scanned")
+                continue
+            try:
+                for first, duplicate, key in _duplicate_constant_key_sites(source, str(rel)):
+                    violations.append(
+                        f"{rel}:{duplicate} re-declares key {key} (first at :{first})")
+            except SyntaxError as exc:  # name the file, never `<unknown>`
+                violations.append(f"{rel}: UNPARSEABLE ({exc.msg} at line {exc.lineno}), not scanned")
+        per_root[name] = scanned_here
+    return violations, per_root
 
 
 def test_no_module_declares_the_same_dict_key_twice():
@@ -8422,8 +8478,6 @@ def test_no_module_declares_the_same_dict_key_twice():
     see that constant: `battery/`, `graph-scripts/`, `docs/`, `eval/` and the smaller
     roots sit outside them.
     """
-    violations: list[str] = []
-    per_root: dict[str, int] = {}
     # ⛔ A root with no floor is a walk nothing checks: adding a fourth entry to
     # `_DUP_KEY_ROOTS` without adding a `_MIN_MODULES` floor would leave it counted
     # and unchecked, so it could yield zero and the guard would silently narrow —
@@ -8437,16 +8491,8 @@ def test_no_module_declares_the_same_dict_key_twice():
     # same derivation the module's other repo-root reads use
     # (`Path(probe.__file__).resolve().parent.parent`); `probe.REPO_ROOT` is that
     # same value, but several reads here already spell it out for the same reason.
-    root = Path(probe.__file__).resolve().parent.parent
-    for name in _DUP_KEY_ROOTS:
-        scanned_here = 0
-        for path in sorted((root / name).rglob("*.py")):
-            rel = path.relative_to(root)
-            scanned_here += 1
-            for first, duplicate, key in _duplicate_constant_key_sites(
-                    path.read_text(encoding="utf-8"), str(rel)):
-                violations.append(f"{rel}:{duplicate} re-declares key {key} (first at :{first})")
-        per_root[name] = scanned_here
+    violations, per_root = _scan_declaration_roots(
+        Path(probe.__file__).resolve().parent.parent)
     # ⛔ THE VIOLATION IS ASSERTED FIRST. A floor failure means the guard is
     # narrower than it claims, but a live duplicate in the same run is the finding
     # the reader actually needs, and asserting floors first would hide it.
@@ -8467,3 +8513,38 @@ def test_no_module_declares_the_same_dict_key_twice():
             f"its floor of {floor} — the root was renamed, removed, or its walk broke, "
             "so the guard is now narrower than it claims. Re-derive the floor (or fix "
             f"the root) rather than lowering it. Full counts: {per_root}")
+
+
+def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
+    """The scan's RED arm, driven — the reporting path no real tree exercises.
+
+    `test_no_module_declares_the_same_dict_key_twice` passes on every healthy tree
+    with `violations == []`, so its message formatting, its `relative_to` naming and
+    its `"\n  ".join(...)` never run. A guard whose only demonstrated arm is the green
+    one is not evidence the red one works, so this drives the same helper over a
+    planted tree and asserts the report names the file, the duplicate line and the
+    first line.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tools" / "clean.py").write_text("D = {'a': 1}\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "dup.py").write_text(
+        "DECLARATIONS = {\n"
+        "    'x::y': 1,\n"
+        "    'x::y': 2,\n"
+        "}\n", encoding="utf-8")
+    # A module that cannot be parsed must be NAMED, never skip silently to a green.
+    (tmp_path / "tests" / "broken.py").write_text("def (:\n", encoding="utf-8")
+
+    violations, per_root = _scan_declaration_roots(tmp_path)
+
+    assert per_root == {"tortoise": 1, "tools": 1, "tests": 1}, per_root
+    # The key is rendered with `repr`, so `1` and `'1'` stay distinguishable in the
+    # report — the whole reason that spelling was chosen over `str(value)`.
+    assert any(
+        v.startswith("tortoise/dup.py:3 re-declares key 'x::y' (first at :2)") for v in violations
+    ), violations
+    assert any(v.startswith("tests/broken.py: UNPARSEABLE") for v in violations), violations
+    # …and the clean module contributes nothing: the report is specific, not a roll-up.
+    assert not any("clean.py" in v for v in violations), violations
