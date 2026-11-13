@@ -1494,27 +1494,69 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
         "the alarm needs its own branch for a run that REACHED a verdict (exit 0) and then "
         "hit a runner fault, or that state stays unexplained"
     )
-    # ⛔ The BODY must be bound to its own PREDICATE — order-and-spelling-tolerant, because a
-    # literal pin cannot express it (#12363 round 12, cycle-2 findings, each measured green
-    # before this):
+    # ⛔ The BODY must be bound to its own PREDICATE, and each predicate to the variable the
+    # step DECLARES (#12363 round 12; cycle-2 and cycle-3 findings, each measured green
+    # before its fix):
     #   * `'= "0"'` is a SUBSTRING of `'!= "0"'`, so a spelling pin passed with the
     #     runner-fault predicate INVERTED — exit 1 and exit 2 then both entered the runner-
     #     fault branch and a REAL release finding was explained as "nothing is owed";
     #   * swapping the two branch BODIES (predicates and order untouched) kept every literal
     #     assertion true while the exit-0 branch printed "detector outage — do NOT cut a
-    #     release".
-    # So the headings must sit WHERE they belong: each inside its own branch.
-    runner_at = alarm_text.index("RUNNER fault")
-    outage_at = alarm_text.index("DETECTOR outage")
-    release_at = alarm_text.index("RELEASE finding")
-    zero_at = alarm_text.index('= "0" ]')
-    not_one_at = alarm_text.index('!= "1" ]')
-    assert '!= "0"' not in alarm_text, (
-        'the runner-fault predicate must be a POSITIVE `= "0"` — `!= "0"` inverts it, and '
-        "then every non-zero exit (a real release finding included) is explained as a runner "
-        "fault that owes nothing"
+    #     release";
+    #   * a POSITION-only pin accepted a branch testing a variable nothing sets
+    #     (`${CANARY_RC:-}`): dead code, 56 tests green, and every exit-0 runner fault fell
+    #     through to the detector-outage text. The variable is derived from the step's own
+    #     `env:` block now, so a consistent rename still passes and a wrong variable does not.
+    # The predicates are read as LINES, not as one spelling: `[ x = y ]`, `[[ x == y ]]` and
+    # the Yoda form `[ y = x ]` all parse the same way here.
+    env_key = next(
+        (
+            key
+            for key, value in (alarm.get("env") or {}).items()
+            if "needs.canary.outputs.exit_code" in str(value)
+        ),
+        None,
     )
-    assert zero_at < runner_at < not_one_at < outage_at < release_at, (
+    assert env_key, "the alarm step must take the canary's exit code in its `env:` block"
+    predicates = [
+        line.strip()
+        for line in alarm_text.splitlines()
+        if line.strip().startswith(("if [", "elif [", "if [[", "elif [["))
+    ]
+    assert len(predicates) == 2, (
+        f"the alarm must be one if/elif over two predicates, got {predicates!r} — a third test "
+        "changes which exit codes reach which explanation"
+    )
+    runner_pred, outage_pred = predicates
+    assert f"${{{env_key}" in runner_pred, (
+        f"the runner-fault predicate must test ${{{env_key}}} — the variable the step itself "
+        f"declares; testing anything else is dead code that never fires: {runner_pred!r}"
+    )
+    assert f"${{{env_key}" in outage_pred, (
+        f"the outage predicate must test ${{{env_key}}} — testing a variable nothing sets "
+        f"makes the branch unreachable: {outage_pred!r}"
+    )
+    assert '"0"' in runner_pred and "!" not in runner_pred, (
+        'the runner-fault branch must be a POSITIVE test for "0" — `!=` inverts it, and then '
+        "every non-zero exit (a real release finding included) is explained as a runner "
+        f"fault that owes nothing: {runner_pred!r}"
+    )
+    assert '"1"' in outage_pred and "!" in outage_pred, (
+        "the outage branch must test that the exit code is NOT 1, or an exit 2 / a cancelled "
+        f"canary reads as a release finding: {outage_pred!r}"
+    )
+
+    def heading_position(heading: str) -> int:
+        found = alarm_text.find(heading)
+        assert found != -1, f"the alarm no longer says {heading!r} — its branch structure is gone"
+        return found
+
+    runner_at = heading_position("RUNNER fault")
+    outage_at = heading_position("DETECTOR outage")
+    release_at = heading_position("RELEASE finding")
+    runner_pred_at = alarm_text.find(runner_pred)
+    outage_pred_at = alarm_text.find(outage_pred)
+    assert runner_pred_at < runner_at < outage_pred_at < outage_at < release_at, (
         "the three branch HEADINGS are not inside their own predicates: the RUNNER-fault text "
         "must sit between the `= 0` and `!= 1` tests, and DETECTOR outage after `!= 1` — "
         "swapping the branch BODIES kept every literal assertion green while an exit-0 "
@@ -1738,21 +1780,30 @@ def test_the_canary_cannot_be_SILENCED_without_reding_this_file():
     assert smoke_run.index("GITHUB_OUTPUT") < smoke_run.index('exit "$rc"'), (
         '`echo exit_code=… >> $GITHUB_OUTPUT` must come BEFORE `exit "$rc"`'
     )
-    # ⛔ The PRODUCER end of the chain the close gate now depends on: the `echo` must write the
-    # KEY the job output READS. `echo "rc=$rc" >> $GITHUB_OUTPUT` left the whole suite green —
-    # `exit_code` is then empty forever, so the close step never resolves the release-owed
-    # ledger, and every red files as a detector outage. Bind the two ends rather than spelling
-    # either one (#12363 round 12, cycle-2 finding: measured, 55 passed with the key renamed).
+    # ⛔ The PRODUCER end of the chain the close gate now depends on: ONE LIVE LINE must write
+    # the KEY the job output READS, to the output sink. Measured green before this pin's two
+    # fixes, each on its own (#12363 round 12, cycle-2 and cycle-3):
+    #   * `echo "rc=$rc" >> $GITHUB_OUTPUT` — the key renamed; and
+    #   * `# echo "exit_code=$rc" >> $GITHUB_OUTPUT` — the write COMMENTED OUT, which a plain
+    #     substring test cannot see because the text is still there.
+    # Both leave `exit_code` empty forever: nothing closes the release-owed ledger, and every
+    # red files as a detector outage. The line is filtered on being live, so a commented-out
+    # writer cannot satisfy it; the fragment is only the key + `$rc` + the sink, so `echo`,
+    # `printf` and a `tee` append all pass.
     output_key = (
         str(workflow["jobs"]["canary"]["outputs"]["exit_code"])
         .split("steps.canary.outputs.")[1]
         .strip(" }")
     )
-    assert f'echo "{output_key}=$rc"' in smoke_run, (
-        f"the canary step must write `{output_key}` to $GITHUB_OUTPUT: the job output reads "
-        f"`steps.canary.outputs.{output_key}`, so a renamed key leaves it permanently empty "
-        "— nothing then closes the release-owed ledger and every red reads as a detector "
-        "outage (#12363 round 12)"
+    live_lines = [line for line in smoke_run.splitlines() if not line.lstrip().startswith("#")]
+    assert any(
+        f"{output_key}=" in line and "$rc" in line and "GITHUB_OUTPUT" in line
+        for line in live_lines
+    ), (
+        f"no live line in the canary step writes `{output_key}=…$rc` to $GITHUB_OUTPUT: the "
+        f"job output reads `steps.canary.outputs.{output_key}`, so a renamed key (or a "
+        "commented-out write) leaves it permanently empty — nothing then closes the "
+        "release-owed ledger and every red reads as a detector outage (#12363 round 12)"
     )
 
 
