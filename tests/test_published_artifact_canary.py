@@ -546,7 +546,9 @@ def test_both_workflows_keep_the_transcript_and_budget_the_fetches():
     )
     canary_budget = canary_job.get("timeout-minutes")
     assert canary_budget, "the canary job declares no timeout-minutes"
-    nominal = 2 * num(canary_run, "--fetch-timeout", 60.0) + 3 * num(canary_run, "--timeout", 600.0)
+    # THREE fetches: engine, client, and the absence-confirmation probe after a failed
+    # install — the workflow's own arithmetic says so (#12363 round 7).
+    nominal = 3 * num(canary_run, "--fetch-timeout", 60.0) + 3 * num(canary_run, "--timeout", 600.0)
     assert nominal <= canary_budget * 60, (
         f"nominal worst case {nominal}s exceeds the canary job's {canary_budget * 60}s — "
         f"the job timeout would kill the run before the report and the transcript"
@@ -869,7 +871,7 @@ def test_wheel_mode_fail_names_a_build_defect_not_a_release():
     assert "needs a release" not in summary
 
 
-def test_an_EMPTY_wheel_argument_is_refused_not_downgraded_to_index_mode(monkeypatch):
+def test_an_EMPTY_wheel_argument_is_refused_not_downgraded_to_index_mode(monkeypatch, capsys):
     """`pwsh`/bash do not abort on a failing `$(...)` INSIDE an argument, so
     `--wheel ""` reached the tool and collapsed to index mode: the pre-publish gate
     silently tested the PREVIOUSLY PUBLISHED release and could exit 0 while a broken
@@ -882,6 +884,12 @@ def test_an_EMPTY_wheel_argument_is_refused_not_downgraded_to_index_mode(monkeyp
 
     monkeypatch.setattr(canary, "fetch_index", _boom)
     assert canary.main(["--wheel", ""]) == 2
+    # ⛔ The MESSAGE is what makes this discriminating: `Path("")` is `.`, so the
+    # `is_file()` check alone also exits 2 — the named regression ("falls back to index
+    # mode") cannot be observed from the exit code, and the test passed with the guard
+    # deleted (#12363 round 7).
+    stderr = capsys.readouterr().err
+    assert "empty path" in stderr and "refusing" in stderr, stderr
     assert not called, "--wheel '' fell through to the index instead of refusing"
 
 
@@ -1110,8 +1118,19 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
     )
     assert "DETECTOR outage" in str(alarm)
 
+    assert "steps.canary.outputs.exit_code" in str(
+        steps["File or refresh the alert issue"].get("env", {})
+    ), (
+        "EXIT_CODE is the ONLY carrier of severity into the script: without it every "
+        "exit-2 detector outage renders as 'it clears when a release lands'"
+    )
+    assert "cancelled" in str(steps["File or refresh the alert issue"].get("if", "")), (
+        "the alert must also fire when the canary step was CANCELLED (killed at its own "
+        "timeout-minutes) — that is the terminal state the always() upload exists for"
+    )
+
     for name, condition in (
-        ("File or refresh the alert issue", "failure()"),
+        ("File or refresh the alert issue", "cancelled()"),
         ("Close the alert issue on a green run", "success()"),
     ):
         step = steps[name]
@@ -1210,3 +1229,45 @@ def test_an_UNWRITABLE_or_UNREADABLE_report_is_an_exit_2_not_a_traceback(monkeyp
     # (b) the summary file cannot be appended to
     monkeypatch.setattr(canary, "fetch_index", offline)
     assert canary.main(["--json", "--summary-file", str(tmp_path / "nope" / "s.md")]) == 2
+
+
+def test_the_unexpected_failure_boundary_is_pinned(monkeypatch, capsys):
+    """Deleting the `try/except` around `_main` left every test green: the specific I/O
+    guards have their own tests, so nothing measured the BACKSTOP. Without it a later
+    unexpected exception is a traceback → exit 1 → "the artifact is broken, cut a
+    release" (#12363 round 7)."""
+
+    def boom(**kwargs):
+        raise RuntimeError("a bug nobody anticipated")
+
+    monkeypatch.setattr(
+        canary, "fetch_index", lambda package, timeout: (None, "x", canary.INDEX_UNREADABLE)
+    )
+    monkeypatch.setattr(canary, "build_report", boom)
+    assert canary.main(["--json"]) == 2
+    assert "a bug nobody anticipated" in capsys.readouterr().err
+
+
+def test_a_database_created_ANYWHERE_under_the_fresh_HOME_is_accepted(tmp_path):
+    """The default path is a second copy of `tortoise/config.py`'s decision. If a release
+    relocates it, a hardcoded expectation reds the canary forever and the summary says
+    "a release is owed" when the fix belongs in this tool (#12363 round 7)."""
+
+    class _Relocated(_Runner):
+        def __call__(self, cmd, **kwargs):
+            result = super().__call__(cmd, **kwargs)
+            if Path(cmd[0]).name == "tortoise":
+                store = Path(kwargs["env"]["HOME"]) / ".local" / "share" / "tortoise"
+                store.mkdir(parents=True, exist_ok=True)
+                (store / "graph.db").write_text("")
+            return result
+
+    arm, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Relocated({}, creates_db_for=None),
+    )
+    assert arm.status == canary.OK, arm.detail
+    assert "graph.db" in arm.detail

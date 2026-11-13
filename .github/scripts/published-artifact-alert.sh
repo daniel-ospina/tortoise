@@ -22,7 +22,12 @@
 #            Never fails a green run: nothing to resolve / no gh is a no-op.
 set -euo pipefail
 
-TITLE="release-artifact-canary: published PyPI artifact is red"
+# ⛔ ONE LEDGER PER SEVERITY. Both classes shared one dedupe title, so only the FIRST
+# occurrence carried a body and every later one arrived as a severity-free `Recurrence #N`
+# — the release-owed issue silently absorbed a detector outage, and the reader could not
+# tell which red they were looking at (#12363 round 7).
+TITLE_RELEASE="release-artifact-canary: published PyPI artifact is red"
+TITLE_OUTAGE="release-artifact-canary: could not evaluate the published artifact"
 
 # ⛔ The substrate path is spelled LITERALLY (no `$(dirname "$BASH_SOURCE")`, no variable):
 # every caller runs from the repository root — the workflow step by default, and the
@@ -49,11 +54,16 @@ open_issue() {
   }
   [ -n "${GITHUB_REPOSITORY:-}" ] || { die "GITHUB_REPOSITORY is not set" || return 1; }
 
-  local why
-  if [ "${EXIT_CODE:-}" = "2" ]; then
-    why="The detector could not evaluate the artifact (exit 2: the index was unreachable, or the install could not be judged either way). This is **not** evidence the artifact is broken — check the detector before anything else, and do NOT cut a release on this run."
-  else
+  # FAIL-SAFE: only an explicit 1 (the artifact is broken) gets the release body.
+  # Anything else — exit 2, unset (a cancelled step writes no output), a future code —
+  # is treated as "the canary could not answer", which never asks for an upload.
+  local title why
+  if [ "${EXIT_CODE:-}" = "1" ]; then
+    title="$TITLE_RELEASE"
     why="The **published** artifact fails the documented steps (\`pip install tortoise-graph\` then \`tortoise init\`, and \`pip install tortoise-client\` must resolve on the index). No change in this repository fixes it: it clears when a release lands (version bump → tag → \`publish-pypi.yml\`)."
+  else
+    title="$TITLE_OUTAGE"
+    why="The detector could not evaluate the artifact (exit ${EXIT_CODE:-none}: the index was unreachable, or the install could not be judged either way). This is **not** evidence the artifact is broken — check the detector before anything else, and do NOT cut a release on this run."
   fi
 
   # The TAIL is what carries the failure: the tool writes the venv/pip setup first and
@@ -80,7 +90,7 @@ open_issue() {
   } >"$body_file"
 
   local rc=0
-  af_file --title "$TITLE" --body-file "$body_file" --label bug || rc=$?
+  af_file --title "$title" --body-file "$body_file" --label bug || rc=$?
   rm -f "$body_file"
   return "$rc"
 }
@@ -92,8 +102,17 @@ close_issues() {
     echo "no alert plumbing in this environment — nothing to resolve"
     return 0
   fi
-  af_resolve --title "$TITLE" \
-    --why "Green: the published artifact now passes its documented first command."
+  local rc=0
+  af_resolve --title "$TITLE_RELEASE" \
+    --why "Green: the published artifact now passes its documented first command." || rc=$?
+  af_resolve --title "$TITLE_OUTAGE" \
+    --why "Green: the canary can evaluate the published artifact again." || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # A green run must not be reddened by bookkeeping: the READING is what this workflow
+    # reports, and the issue ledger is downstream of it (#12363 round 7).
+    echo "::warning::the alert ledger could not be resolved (exit $rc) — the run is still green"
+    return 0
+  fi
 }
 
 # Executed → dispatch. SOURCED → the caller owns the verbs (the harness redefines
