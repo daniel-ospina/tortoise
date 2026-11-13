@@ -131,7 +131,7 @@ def _cells(line: str) -> list[str]:
 
 
 def _plain(cell: str) -> str:
-    return cell.replace("**", "").replace("`", "").strip()
+    return cell.replace("*", "").replace("`", "").strip()
 
 
 def _table(text: str, *header_needles: str) -> list[list[str]]:
@@ -1208,7 +1208,7 @@ def test_artifact_carries_the_rule_as_the_harness_constant(
         # §4.1 is where the brief states the rule's clauses (#12349 round 19).
         # The threshold's own digits are its VALUES (derived from the rule), so a
         # falsified copy still matches the shape.
-        _only_claim(_scoped(brief_text, "4.1"), clause,
+        _only_claim(_scoped(brief_text, "4.1").replace("*", ""), clause,
                     f"§4.1's rule clause {clause!r}",
                     values=tuple(re.findall(r"\d+(?:\.\d+)?", clause)),
                     free=pivot)
@@ -1582,7 +1582,7 @@ def test_the_tie_rule_is_matched(tool_mod, artifact, brief_text) -> None:
         "declared residual for the recency half is now wrong")
     # ⛔ SHAPE-UNIQUE (#12349 round-24 reviewer, P2): `ascending` → `descending`
     # with the truth restated in §2 was green under the presence form.
-    _only_claim(_scoped(brief_text, "2"), "ascending id order",
+    _only_claim(_scoped(brief_text, "2").replace("*", ""), "ascending id order",
                 "§2's write-order claim", free=("ascending",))
 
 
@@ -1891,7 +1891,8 @@ def test_brief_fixture_table_is_the_artifact(artifact, brief: str) -> None:
     # summary was falsified — measured M-C1, green. And SHAPE-UNIQUE (#12349 round
     # 24): even §-scoped, a restatement inside §3.5 kept the falsified summary
     # green, so the numbers must appear exactly once.
-    _only_claim(_scoped(brief, "3.5"), sentence, "§3.5's fixture summary",
+    _only_claim(_scoped(brief, "3.5").replace("*", ""), sentence,
+                "§3.5's fixture summary",
                 free=("reachable", "shipped"),
                 values=(str(sh["reachable"]), str(n), str(fx["reachable"]),
                         str(tk["reachable"]), str(nv["reachable"])))
@@ -2125,7 +2126,11 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     # `_scoped` is heading-anchored on the RAW document and requires exactly one
     # heading; the census sentence is then located BY THE COUNT, not by a phrase
     # that a restatement can also carry.
-    section2 = _scoped(brief, "2")
+    # ⛔ Emphasis is NOT content: every scope a claim is matched against strips
+    # `*`, or bolding a word in a CORRECT document false-reds the pin
+    # (round-25 re-review, P3 — the over-block was still live at scopes the
+    # previous round did not reach).
+    section2 = _scoped(brief, "2").replace("*", "")
     sentences2 = re.split(r"(?<=\.)\s+", section2)
     # ⛔ UNIQUENESS IS ABOUT THE CLAIM'S SHAPE, NOT ABOUT THE TRUE TEXT
     # (#12349 round 17, P1). The previous cut counted occurrences of the TRUE
@@ -2230,7 +2235,7 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     on_collapsed = sum(1 for i in _gains if i in _deg_ids)
     _only_claim(section2, f"net +{net_rows} rows at k=3",
                 "§2's net row count", values=(str(net_rows),))
-    _only_claim(section2, f"**{on_collapsed}** sit on collapsed rows",
+    _only_claim(section2, f"{on_collapsed} sit on collapsed rows",
                 "§2's collapsed-row share", values=(str(on_collapsed),))
     # ⛔ The disclosure is DERIVED, not restated: the artifact's own ranks must
     # show the two Postgres arms agreeing on EVERY degenerate id, which is what
@@ -2293,7 +2298,7 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     # the CI row: §3.4 is "The mechanism — a tokenizer contract mismatch", and
     # this paragraph is §3.3 "Per class (recall@3 / recall@15)".
     section33 = _scoped(brief, "3.3")
-    plain33 = section33.replace("**", "")
+    plain33 = section33.replace("*", "")
     # ⛔ SHAPE-UNIQUE (#12349 round 24 reviewer, P2: these were the remaining
     # §-scoped PRESENCE pins, each measured GREEN when falsified in place with the
     # truth restated beside it in §3.3).
@@ -2370,7 +2375,7 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, population,
     assert (arm, base) == (round(pair["recall_at_3"], 4),
                            round(pair["recall_at_3_base"], 4))
 
-    text = _scoped(changelog, "#12298").replace("**", "")
+    text = _scoped(changelog, "#12298").replace("*", "")
     k5 = artifact["comparisons"]["falkordb_tfidf__vs__postgres_bm25/tokens"]["k5"]
     assert k5["only_b"] == 0 and k5["only_a"] > 0, (
         "the k=5 comparison no longer favours the shipped leg \u2014 the changelog's "
@@ -2582,7 +2587,7 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     assert round(path_delta, 1) == 26.7
     # ⛔ SHAPE-UNIQUE (#12349 round 24 reviewer, P2: a presence pin here was
     # measured GREEN when the prose was falsified and the truth restated in §4.3).
-    _only_claim(_scoped(brief_text, "4.3"),
+    _only_claim(_scoped(brief_text, "4.3").replace("*", ""),
                 f"share(path) × {path_delta:.1f}",
                 "§4.3's path term",
                 values=(f"{path_delta:.1f}",),
@@ -2634,7 +2639,9 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     total = definite + hashed + token_share
     assert round(total, 1) == 73.5
     assert round(100 - total, 1) == 26.5
-    _s43 = _scoped(brief_text, "4.3")
+    # ⛔ Emphasis is NOT content (#12349 round-25 re-review, P3): an un-stripped
+    # scope false-reds this claim when a word in a CORRECT document is bolded.
+    _s43 = _scoped(brief_text, "4.3").replace("*", "")
     # ⛔ SHAPE-UNIQUE (#12349 round 24): §4.3-scoped but still a PRESENCE pair, so
     # a falsified total with the true one restated inside §4.3 stayed green. ⛔ The
     # claim carries its own words — a bare `73.5 %` shape (`\d+\.\d+ %`) matches
@@ -2652,7 +2659,7 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
                 # ⛔ The ARITHMETIC is the claim's content (round-24 reviewer,
                 # cycle 9): `+` → `−` and `sum` → `average` both planted green.
                 free=("above|below", "+", "sum"))
-    _only_claim(_s43, f"i.e. **{100 - total:.1f} %**",
+    _only_claim(_s43, f"i.e. {100 - total:.1f} %",
                 "§4.3's published remainder",
                 values=(f"{100 - total:.1f}",))
     # ⛔ The PRODUCT is its own claim (#12349 review, P2): both factors were
@@ -2671,7 +2678,7 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     # share, and the cell is compared NUMERICALLY below.
     _only_claim(_s43,
                 f"The {token_share:.1f} % \"contains a code token\" share "
-                f"bounds **that one term**: `"
+                f"bounds that one term: `"
                 f"{token_share / 100:.2f} \u00d7 {snake_delta:.1f} \u2248 "
                 f"+{bound_pts:.1f} pts`",
                 "§4.3's single-term bound",
@@ -2701,7 +2708,7 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     assert path_delta > 0, (
         "§4.3 says a non-zero path share ADDS to the composite; the path delta "
         f"is now {path_delta:.1f} pts")
-    _only_claim(_scoped(brief_text, "4.3"),
+    _only_claim(_scoped(brief_text, "4.3").replace("*", ""),
                 "any non-zero path share adds on top of it.",
                 "§4.3's second-positive-term claim",
                 # ⛔ `adds` and `non-zero` are both pivots: `adds` → `costs` and
@@ -2723,8 +2730,8 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
     # satisfied by a copy of a bullet planted in §5 while §0's own bullet was
     # falsified — measured M-D1, green. §4's Result line gets its OWN scope, since
     # it is §4 that carries it (see the last assertion).
-    plain = _scoped(brief, "0").replace("**", "")
-    plain4 = _scoped(brief, "4").replace("**", "")
+    plain = _scoped(brief, "0").replace("*", "")
+    plain4 = _scoped(brief, "4").replace("*", "")
     cmp = artifact["comparisons"]
     k3 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
     k15 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k15"]
@@ -3460,7 +3467,7 @@ def test_brief_states_what_the_reuse_guards_actually_do(brief_text,
     population plus leftover rows) AND a disclosure of the case that is still
     accepted. Over-claiming and under-claiming are the same failure.
     """
-    flat = _scoped(brief_text, "2").replace("**", "")
+    flat = _scoped(brief_text, "2").replace("*", "")
     # ⛔ SHAPE-UNIQUE (#12349 round 24): these four phrases were §-scoped PRESENCE
     # checks, so each could be falsified in place with the true phrasing restated
     # beside it in §2 and every gate stayed green. Each carries its IDENTIFYING
@@ -3519,8 +3526,8 @@ def test_the_falsifier_predicate_is_stated_the_same_way_in_every_document(
              ("SEARCH-ARCHITECTURE-CHANGELOG.md", changelog, "#12298"),
              ("SEARCH-ARCHITECTURE.md", search_arch, "6.2"))
     for name, doc, section in where:
-        plain = " ".join(doc.replace("**", "").replace("*", "").split())
-        ruled = _scoped(doc, section).replace("**", "").replace("*", "")
+        plain = " ".join(doc.replace("*", "").replace("*", "").split())
+        ruled = _scoped(doc, section).replace("*", "").replace("*", "")
         assert re.search(r"not\s+met|not\s+triggered", ruled, re.I), (
             f"{name}: §{section} no longer states that the closure condition is "
             f"not met/triggered — that is the section a reader takes the C3 "
@@ -3568,7 +3575,7 @@ def test_brief_derived_prose_figures_are_the_artifact(
     # §0 states the same three bullets and IS pinned; §4.2 restates them in a
     # different format (`p = 0.34` at 2 dp, not `0.344` at 3) and nothing read
     # it. §4.1 says in terms: "the reason the narrower one decides is §4.2".
-    s42 = _scoped(brief, "4.2").replace("**", "")
+    s42 = _scoped(brief, "4.2").replace("*", "")
     assert dep["recall_at_3"] > dep["recall_at_3_base"], (
         "§4.2 says the deployable arm beats the current scorer; the artifact "
         f"now records {dep['recall_at_3']} vs {dep['recall_at_3_base']}")
@@ -3618,7 +3625,7 @@ def test_brief_derived_prose_figures_are_the_artifact(
     # `population.json` records every one of these; none was read.
     corpus = population["corpus"]["input"]
     _only_claim(
-        _scoped(brief, "2").replace("**", ""),
+        _scoped(brief, "2").replace("*", ""),
         f"{population['population']:,} names from this box's real capture "
         f"corpus (`{population['corpus']['dir']}`, {corpus['files']} files, "
         f"{corpus['lines']:,} lines, {corpus['parse_errors']} parse errors, "
@@ -3642,7 +3649,7 @@ def test_brief_derived_prose_figures_are_the_artifact(
         "§3.3 says the in-place fix beats the deployable arm on paths; the "
         f"artifact now records {in_path} vs {nat_path}")
     _only_claim(
-        _scoped(brief, "3.3").replace("**", ""),
+        _scoped(brief, "3.3").replace("*", ""),
         f"in-place fix beats the deployable BM25 option by {gap:.0f} points "
         f"({in_path:.4f} vs {nat_path:.4f})",
         "§3.3's path-gap sentence",
@@ -3672,7 +3679,7 @@ def test_brief_derived_prose_figures_are_the_artifact(
     # ── §3.4 — the whole-population empty-result count ──────────────────────
     rows_zero = artifact["arms"]["falkordb_tfidf"]["recall_by_k"]["3"]["rows_zero"]
     _only_claim(
-        _scoped(brief, "3.4").replace("**", ""),
+        _scoped(brief, "3.4").replace("*", ""),
         f"{rows_zero} of the {artifact['sample']} population queries return an "
         "empty result set at k=3",
         "§3.4's empty-result count",
@@ -3681,7 +3688,7 @@ def test_brief_derived_prose_figures_are_the_artifact(
     # ⛔ §3.4 also states the class's recall@3 (round-25 re-review, finding 2):
     # `0.20` → `0.21` planted GREEN. Same artifact quantity, 2 dp here.
     _only_claim(
-        _scoped(brief, "3.4").replace("**", ""),
+        _scoped(brief, "3.4").replace("*", ""),
         f"the identifier class's `recall@3` is {ident_shipped:.2f}",
         "§3.4's ident recall@3",
         values=(f"{ident_shipped:.2f}",))
@@ -3695,7 +3702,8 @@ def test_brief_derived_prose_figures_are_the_artifact(
         fixture_rows["abc_def"]["rank_wide"] is None, (
         "§3.5's mechanism sentence says the shipped leg never returns `abc_def`; "
         f"the artifact now records {fixture_rows.get('abc_def')}")
-    # ⛔ Emphasis is NOT content: every prose scope strips `*`, or bolding a word
+    # ⛔ Emphasis is NOT content: EVERY prose scope a claim is matched against
+    # strips `*` (and no claim literal carries `**`), or bolding a word
     # in a correct document false-reds the pin (round-25 re-review, P2 — the same
     # shape the previous round graded).
     _only_claim(
