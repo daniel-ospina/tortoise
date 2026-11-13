@@ -8003,13 +8003,15 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `185 passed, 1 skipped`
+    defect. Measured at `eee465029a`: the docker lane reads `185 passed, 1 skipped`
     (the skip is the `<3.12` re-derive; the three `main` reds this docstring used
     to record — `#12045`'s undeclared `tortoise.api::_emit` /
     `_verify_record_vector_width` writers — are cleared by `#12042`, landed as
     `b367c54214a2`) and the carve-out lane reads `184 passed, 2 skipped` (that
     skip plus `tests/_live_utils.py`'s live-graph fixture, which only a lane with
-    a `TORTOISE_DB_URI` satisfies). Both splits add to the `186` re-derived
+    a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
+    lane, which is the invariant that lasts; the two figures above are bound to the sha
+    for exactly that reason. Both splits add to the `186` re-derived
     below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
@@ -8499,6 +8501,36 @@ _DUP_KEY_ROOTS = ("tortoise", "tools", "tests")
 _MIN_MODULES = {"tortoise": 100, "tools": 50, "tests": 500}
 
 
+class _JoinedKey:
+    """An F-STRING dict key, compared by the source CPython will compile.
+
+    Two byte-identical f-string keys are ONE key at runtime however complex the
+    expression is (shown by `ruff`'s `F601`, measured: `{f"a": 1, f"a": 2}` and
+    `{f"{x}": 1, f"{x}": 2}`), and the placeholder-free form is constant-folded by
+    CPython, so it collides with itself for the same reason a `Constant` does.
+    `ast.unparse` normalises quoting, so `f"a"` and `f'a'` are one key here as they
+    are at runtime.
+
+    It is deliberately NOT equal to a plain `Constant`: `{f"a": 1, "a": 2}` IS one
+    key at runtime, but proving that needs evaluation — the guess this function
+    refuses — and `ruff` does not flag it either (measured), so matching the lint is
+    not a hole of the guard's own.
+    """
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __hash__(self) -> int:
+        return hash((_JoinedKey, self.text))
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _JoinedKey) and other.text == self.text
+
+    def __repr__(self) -> str:
+        return f"f-string key {self.text}"
+
+
 def _constant_key_value(node: ast.expr) -> tuple[bool, object]:
     """`(True, value)` when the key is a literal Python can hash — else `(False, None)`.
 
@@ -8516,9 +8548,20 @@ def _constant_key_value(node: ast.expr) -> tuple[bool, object]:
     `{+1: 'a', 1: 'b'}` is a real duplicate — Python collapses it to one key. A
     `Constant`-only reading would skip the class, and a skipped duplicate is one that
     no lane catches at all when the survivor carries a `noqa` marker.
+
+    An F-STRING key is read too (`_JoinedKey`): the same argument applies, and the
+    arm was MEASURED missing by a fresh review — the scan reported `[]` where
+    `ruff --select F601` reported a duplicate, i.e. a FALSE PASS inside the guard
+    whose whole justification is the `noqa`-suppressed survivor lint cannot see.
     """
     if isinstance(node, ast.Constant):
         return True, node.value
+    if isinstance(node, ast.JoinedStr):
+        # `ast.unparse` normalises quoting, so `f"a"` and `f'a'` are ONE key here as
+        # they are at runtime. A JoinedStr never equates to a plain `Constant` (see
+        # `_JoinedKey`) — comparing those needs evaluation, and `ruff` does not flag
+        # `{f"a": 1, "a": 2}` either (measured).
+        return True, _JoinedKey(ast.unparse(node))
     if isinstance(node, ast.Tuple):
         values = []
         for element in node.elts:
@@ -8549,16 +8592,22 @@ def _duplicate_constant_key_sites(
     guard's own first draft by a fresh review).
 
     Only LITERAL keys can be compared without evaluating anything: a computed key
-    (`f"{x}"`) is not a declaration this can read, and guessing would report a
-    duplicate that is not one. `**splat` in a literal parses as a `None` entry in
+    (`SOME_NAME`) is not a declaration this can read, and guessing would report a
+    duplicate that is not one. An F-STRING key is the one exception, and it is not a
+    guess: two byte-identical f-string sources are ONE key whatever the expression is
+    (`_JoinedKey`), which is also exactly what `ruff`'s `F601` reports. `**splat` in a
+    literal parses as a `None` entry in
     `node.keys`, not a Constant, so it is skipped rather than mistaken for the key
     `None`; `_constant_key_value` recurses through tuple and signed-numeric literals
     so a fully-literal `{(1, 2): …}` is compared too (390 tuple-literal keys under
     these roots, 308 of them fully literal).
 
     ⚠️ Still outside this population, stated so it is not mistaken for a total: a
-    COMPUTED key (`f"{x}"`, `SOME_NAME`) and any tuple containing one, and a key
-    built by an operator outside `USub`/`UAdd`. `filename` is threaded into
+    COMPUTED key (`SOME_NAME`), an f-string key compared against a DIFFERENT expression
+    or against a plain literal (`{f"a": 1, "a": 2}` is one key at runtime, but proving
+    it needs evaluation, and `ruff` does not flag it either — measured), any tuple
+    containing one, and a key built by an operator outside `USub`/`UAdd`. `filename` is
+    threaded into
     `ast.parse` so an unparseable module names ITSELF instead of `<unknown>` — the
     same "a hole is a hole, not a zero" rule this file's predicate-count test states.
     """
@@ -8630,6 +8679,23 @@ def test_the_duplicate_key_detector_catches_a_duplicate():
         (1, 1, "(-1, 2)")]
     # …and the sign is compared, not stripped: `-1` and `1` are DIFFERENT keys.
     assert _duplicate_constant_key_sites("D = {-1: 'a', 1: 'b'}\n") == []
+    # An F-STRING key is a gap a fresh review MEASURED in this guard: the scan returned
+    # `[]` where `ruff --select F601` reported a duplicate, so the guard was WEAKER than
+    # the lint it backstops — a false PASS on the one shape whose only other catcher can
+    # be a `noqa` marker on the survivor. Two byte-identical f-string sources are one
+    # key whatever the expression is, so comparing the compiled source is evidence, and
+    # `ast.unparse` normalises the quoting (`f"a"` and `f'a'` are one key, as at runtime).
+    assert _duplicate_constant_key_sites('D = {f"a": 1, f"a": 2}\n') == [
+        (1, 1, "f-string key f'a'")]
+    assert _duplicate_constant_key_sites('D = {f"{x}": 1, f"{x}": 2}\n') == [
+        (1, 1, "f-string key f'{x}'")]
+    assert _duplicate_constant_key_sites("D = {f\"a\": 1, f'a': 2}\n") == [
+        (1, 1, "f-string key f'a'")]
+    # …while a DIFFERENT expression is a different key, and an f-string never equates to
+    # a plain literal: both need evaluation to compare, which is the guess this refuses
+    # (`ruff` reports neither — measured, so this is not a hole of the guard's own).
+    assert _duplicate_constant_key_sites('D = {f"{x}": 1, f"{y}": 2}\n') == []
+    assert _duplicate_constant_key_sites('D = {f"a": 1, "a": 2}\n') == []
 
 
 def _duplicate_key_report(violations: list[str]) -> str:
