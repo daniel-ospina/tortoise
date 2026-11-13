@@ -465,8 +465,15 @@ def underscore_run_terms(text: str) -> list[str]:
     Two deliberate hardenings over the measurement arm, both declared rather
     than silent:
 
-    * no alphanumeric character in the run -> dropped (``___``); this one is
-      genuinely LOSSLESS — such a run can never be a term worth sending;
+    * no alphanumeric character in the run -> dropped (``___``), and it is
+      **LOSSY TOO** — corrected by measurement (#12360 review round 8): the
+      index DOES hold ``___`` (``queryNodes('Object','___')`` returns a record
+      named exactly that, as do ``____``/``_____``), so in a multi-token query
+      (``'foo ___'`` -> ``foo``) the alternative is dropped and that record
+      stops matching. What justifies the drop is SIGNAL, not safety: an
+      all-underscore run is punctuation, so keeping it spends OR budget on a
+      term nobody types as a search. A single-token ``___`` query is still
+      reachable through the degenerate literal;
     * ``len(run) > MAX_COMPOSITE_RUN_LEN`` -> dropped, and this one is **LOSSY**:
       the index holds composites far longer than that (:data:`MAX_COMPOSITE_RUN_LEN`
       records the probe), so a run above the bound is unretrievable by its own

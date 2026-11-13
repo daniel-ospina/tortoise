@@ -100,11 +100,11 @@ Three properties the port keeps:
   `'foo|bar|foo_'`), so such a query is not a control case — the pin only ever covered queries
   with no `_` in them.
 
-Four deviations from the measurement arm, and only ONE of them is lossless:
+Four deviations from the measurement arm, and **NONE of them is lossless** (round 8 measured the last one too):
 
 | deviation | lossless? |
 |---|---|
-| an alnum-free run (`___`) is dropped | yes — such a run can never be a term worth sending |
+| an alnum-free run (`___`) is dropped | **NO** — the index DOES hold `___` (measured), so a multi-token query loses that alternative; the drop is justified by SIGNAL (punctuation spends OR budget for nothing), not by safety. Corrected in round 8; the first cut called it lossless |
 | a run longer than `MAX_COMPOSITE_RUN_LEN` (128) is dropped | **NO** — measured: the index holds composites at 52, 61, 64 and 128 chars and holds nothing at 256/600 |
 | dedupe against terms already present | no (idempotent in practice) |
 | the `MAX_ALIASES_PER_POINT` (8) budget cap | **NO** — a query with nine distinct `_` runs keeps the first eight |

@@ -1457,6 +1457,20 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # over-claimed as a result.
     deferred = "_" in token and not any(
         not (ch.isalnum() or ch == "_") for ch in token)
+    # ⛔ …BUT NOT PAST THE COMPOSITE BOUND (#12360 review round 8, P3). Deferring
+    # EVERY `_`-only token accepted `'a'*129 + '_b'`: the composites are dropped
+    # above that bound, so the read sends the whole 131-char string as ONE escaped
+    # literal — and MEASURED on the lane, `queryNodes('Object', <129/131/200-char
+    # term>)` returns 0 rows while a 128-char term is returned, i.e. the index
+    # truncates. A probe that cannot match anything is a FALSE PASS: the guard
+    # would certify "the pre-fix prose is gone" over a still-present sentence.
+    from tortoise.sparse import MAX_COMPOSITE_RUN_LEN
+
+    if deferred and max((len(r) for r in runs), default=0) > MAX_COMPOSITE_RUN_LEN:
+        return (f"its `_` run is longer than {MAX_COMPOSITE_RUN_LEN} characters, "
+                f"the bound at which the read stops emitting the composite "
+                f"(#12360) — so the query is ONE literal term the index cannot "
+                f"hold and the probe would match NOTHING — pass a SHORTER token")
     if (single_run and token.lower() == runs[0]
             and token.lower() in SPARSE_STOPWORDS):
         return ("it is a search stopword; a probe must be a RARE token that "
@@ -1540,7 +1554,13 @@ def probe_phrase_rejection(phrase: str) -> str | None:
                 f"UNDER-match and a still-findable sentence would read as "
                 f"absent — pass the bare word, without punctuation")
     built = build_or_query(token)
-    if len(built.split("|")) != 1:
+    # ⚠️ CASED COMPARISON, because RediSearch LOWERCASES (#12360 review round 8,
+    # P3): ``build_or_query('A_B') == 'A_B|a_b'`` is TWO alternatives for ONE
+    # index term — MEASURED, ``queryNodes('Object','A_B')`` and ``…'a_b'`` both
+    # return the record named ``a_b`` — so a case-variant of the same term cannot
+    # over-match and refusing it was a false block with a false reason.
+    alternatives = {t.lower() for t in built.split("|")}
+    if len(alternatives) != 1:
         return (f"the read expands it into several terms ({built!r}) — either "
                 f"the identifier mechanism (a digit/dash run), the #12360 "
                 f"`_`-composite tail (`TORTOISE_UNDERSCORE_TERMS`), or the "

@@ -330,6 +330,17 @@ class TestPin:
             assert build_or_query(shape) == shape, shape
         for shape in ("zx-99", "friday,", "a-b"):
             assert probe_phrase_rejection(shape) is not None, shape
+        # a CASE-VARIANT of one index term is not an OR over-match (measured:
+        # RediSearch lowercases, and `queryNodes('A_B')` returns the record named
+        # `a_b`), so it must not be refused.
+        for shape in ("A_B", "X_AXIS", "A_1"):
+            assert probe_phrase_rejection(shape) is None, shape
+        # …and a run past the composite bound cannot be one term the index holds
+        # (measured: a 128-char term is returned, 129/131/200 are not), so it is
+        # refused rather than certified as a probe that matches nothing.
+        too_long = "a" * 129 + "_b"
+        refusal = probe_phrase_rejection(too_long)
+        assert refusal is not None and "128" in refusal, refusal
         # a `_` run that the read DOES expand is still refused — by the read's
         # own answer (`_café` -> `_café|_caf`), not by run count.
         refusal = probe_phrase_rejection("_café")
@@ -357,8 +368,14 @@ class TestRunTerms:
         assert underscore_run_terms(text) == want, text
 
     def test_underscore_only_runs_are_dropped(self):
-        # `___` can carry no index term; sending it unescaped is an unmeasured
-        # query shape for no possible match.
+        """LOSSY on purpose, and the reason is SIGNAL — not that it cannot match.
+
+        MEASURED (#12360 review round 8): the index holds `___` as a term, so a
+        multi-token query `'foo ___'` loses that alternative. The drop is still
+        right — an all-underscore run is punctuation, and spending OR budget on
+        it is what makes the tail's bound meaningless — but it is not the
+        "lossless" the first cut claimed.
+        """
         assert underscore_run_terms("___") == []
         assert underscore_run_terms("a ___ b") == []
 
@@ -533,17 +550,25 @@ class TestLiveReachability:
                 f"{build_or_query(name)!r} -> {ids!r}")
 
     def test_the_128_char_bound_is_live(self, proj, monkeypatch):
-        """The bound's UPPER end is a live fact, not a unit assertion.
+        """The bound's UPPER end is a live fact — and the earlier arm was vacuous.
 
-        ``test_length_bound`` is a pure unit test, so tightening
-        ``MAX_COMPOSITE_RUN_LEN`` back toward 48 would only red on the 61-char
-        arm. The index really does hold a 128-char composite (measured), so that
-        end is pinned against a real index here.
+        The first attempt used ``'a_' + 'b'*126``, which is a DEGENERATE token:
+        the read sends the escaped literal and finds the record whatever the
+        bound is (measured — patching the bound to 48 kept it green). This name
+        is 128 chars of SHORT segments joined by `_`, so the segments are terms
+        the index does NOT hold (the index holds the whole name as one term) and
+        the composite is the only thing that can find it. Lowering the bound
+        therefore reds here, which is what the docstring in ``sparse.py`` claims.
         """
         from tortoise.search_engine import run_fts_query
 
-        name = ("a_" + "b" * 126)
+        name = "ab_" * 42 + "ab"
         assert len(name) == 128
+        assert underscore_run_terms(name) == [name]
+        # the composite is ESSENTIAL: every plain segment is a term the index
+        # does not hold, because `_` is a word character to the index.
+        assert set(build_or_query(name).split("|")) - {name}, (
+            "expected plain segments in the union as well")
         proj._upsert_object({"id": "o-12360-128", "name": name,
                              "object_kind": "core:other"})
         self._wait_indexed(proj, 1)
@@ -553,7 +578,14 @@ class TestLiveReachability:
                                             limit=3)]
         assert "o-12360-128" in ids, (
             f"the index holds a 128-char composite but the read dropped it: "
-            f"{build_or_query(name)!r}")
+            f"{build_or_query(name)[:120]!r}")
+
+        monkeypatch.setenv(UNDERSCORE_ENV, "0")
+        off = [i for i, _s in run_fts_query(proj.g, name, entity_type="object",
+                                            limit=3)]
+        assert "o-12360-128" not in off, (
+            "the OFF arm found a 128-char composite by its segments — the "
+            f"fixture is not measuring the composite ({off!r})")
 
         over = name + "b"
         assert len(over) == 129
