@@ -1474,3 +1474,56 @@ def test_a_shadowed_shell_value_is_still_the_environment_s(_isolated, monkeypatc
 
     # The shell value is broken and the file's is not: the ENVIRONMENT owns it.
     assert payload.get("daemon_error_from_env") is True, payload
+
+
+def test_a_described_value_does_not_keep_a_delimited_credential():
+    """`head + "…"` kept a credential that sat before the `#`/`?`.
+
+    Measured on a `.env` holding `TORTOISE_DB_URI=bolt://uu:PwABCD#x@h/db`:
+    `config show` printed `Relative DB path 'bolt://uu:PwABCD…' rejected` — the
+    password's head, in the value the message exists to name (#12428 review).
+    """
+    from tortoise.__main__ import _redact_db_value
+
+    value = "bolt://uu:PwABCD#x@h/db"
+    out = _redact_db_value(f"Relative DB path '{value}' rejected", value)
+
+    assert "PwABCD" not in out, out
+    assert "bolt://uu:" in out, out
+
+
+def test_the_graph_health_row_keeps_a_path_and_cuts_a_credential():
+    """Two pins at once: a plain path stays legible, a credential fragment does not.
+
+    `Graph: health` quotes the resolver's own message, so it must use the
+    fragment redactor — `_scrub` would redact `relative.db` (two pinned
+    `test_doctor` tests enforce the other half) (#12428 review).
+    """
+    from tortoise.__main__ import _redact_credential_fragments
+
+    plain = "Relative DB path 'relative.db' rejected"
+    assert _redact_credential_fragments(plain, "relative.db") == plain
+
+    leaked = "Port could not be cast to integer value as 'PwABCD'"
+    assert "PwABCD" not in _redact_credential_fragments(
+        leaked, "docker://:PwABCD#x@h:6379/g")
+
+
+def test_a_differing_shell_value_is_not_credited_to_the_file():
+    """A shell value that DIFFERS is not "the one it selects".
+
+    Measured: `.env` `/tmp/from-file.db` with the shell exporting
+    `/tmp/from-shell.db` printed "the environment now sets TORTOISE_DB_URI — the
+    target the rows below grade (/tmp/from-shell.db) is the one it selects". The
+    file never took effect (#12428 review).
+    """
+    row = _rows_text({"read_by_this_command": True,
+                      "shadowed_graph_keys": ["TORTOISE_DB_URI"],
+                      "keys_in_effect": [],
+                      "file_graph_keys": ["TORTOISE_DB_URI"],
+                      "graph_keys": [],
+                      "differs": False,
+                      "cli_target": "/tmp/from-shell.db",
+                      "daemon_target": "/tmp/from-shell.db"})
+    assert "is the one it selects" not in row, row
+    assert "the environment already sets TORTOISE_DB_URI" in row, row

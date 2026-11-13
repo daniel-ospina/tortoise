@@ -3137,12 +3137,61 @@ def _redact_db_value(text: str, *values: object) -> str:
             if looks_like_uri_userinfo(head):
                 candidates.append((form, "<redacted: userinfo-shaped>"))
             elif head != form:
-                candidates.append((form, head + "…"))
+                # ⛔ `head + "…"` kept a credential that sat before the delimiter
+                # with no `@` left: `bolt://uu:PwABCD#x@h/db` printed
+                # `bolt://uu:PwABCD…` (#12428 review).
+                candidates.append((form,
+                                   _redact_credential_fragments(head, form) + "…"))
     # Longest search string first, so a padded form is consumed before the
     # stripped one can rewrite part of it.
     for form, replacement in sorted(candidates, key=lambda item: -len(item[0])):
         out = out.replace(form, replacement)
     return out
+
+
+def _env_db_target_value() -> str | None:
+    """The environment's own graph-target value, for a redactor that needs it."""
+    import os as _os
+
+    return (_os.environ.get("TORTOISE_DB_URI")
+            or _os.environ.get("TORTOISE_DB_PATH"))
+
+
+def _redact_credential_fragments(text: str, uri: str | None) -> str:
+    """Cut the CREDENTIAL fragments of ``uri`` out of ``text``, keep the rest.
+
+    A client that quotes the offending HEAD of a value (falkordb: "Port could not
+    be cast to integer value as 'PwABCD'") leaks the password's prefix WITHOUT
+    quoting the value, so :func:`_redact_db_value` — which matches the value —
+    cannot see it, and :func:`_scrub` — which removes the whole value — destroys
+    the path the message exists to print (`Relative DB path 'relative.db'
+    rejected`). This removes neither the message nor the value: only the
+    credential-shaped pieces of it (#12428 review).
+    """
+    from urllib.parse import unquote as _unquote
+
+    if not (isinstance(uri, str) and uri):
+        return text
+    fragments: set[str] = set()
+    tail = uri.split("://", 1)[-1]
+    head = tail.split("#", 1)[0].split("?", 1)[0]
+    if "@" in head:
+        userinfo = head.rsplit("@", 1)[0]
+        fragments.add(userinfo)
+        if ":" in userinfo:
+            fragments.add(userinfo.split(":", 1)[1])
+    # A delimiter-truncated credential keeps no `@`: `docker://:Pw#rest@h` -> `Pw`.
+    for form in (tail.split("#", 1)[0], tail.split("?", 1)[0]):
+        if "@" not in form and ":" in form:
+            fragment = form.split(":", 1)[1]
+            fragments.add(fragment)
+            fragments.add(_unquote(fragment))
+    # ⛔ A minimum length: a one-character password would otherwise rewrite every
+    # occurrence of that character in the message.
+    for fragment in sorted((f for f in fragments if len(f) >= 4),
+                           key=len, reverse=True):
+        text = text.replace(fragment, "<redacted>")
+    return text
 
 
 def _scrub_uri_error(text: str, uri: str | None) -> str:
@@ -4391,7 +4440,9 @@ def _cmd_config(args) -> int:
                         print("     report — the two ladders agree on this box)")
                 elif env_file.get("shadowed_graph_keys"):
                     _shadowed = _printable(', '.join(env_file['shadowed_graph_keys']))
-                    if env_file.get("read_by_this_command"):
+                    if (env_file.get("read_by_this_command")
+                            and all(key in (env_file.get("keys_in_effect") or ())
+                                    for key in env_file["shadowed_graph_keys"])):
                         print("  →  the same graph target as above: this process")
                         print("     applied this file, so the environment now sets "
                               f"{_shadowed}")
@@ -11326,6 +11377,12 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         "read_by_this_command": _dotenv_already_applied(),
         "read_by": ("the daemon (`tortoise serve`, the MCP server) — it loads "
                     "this file at import time"),
+        # ⛔ Keys whose value in this process IS the file's. A key the shell sets to
+        # something DIFFERENT is merely shadowed, and the rows must not credit the
+        # file with the target that value selects (#12428 review).
+        "keys_in_effect": sorted(
+            key for key in assignments
+            if os.environ.get(key) == assignments.get(key)),
         # NAMES only. The values are the user's credentials.
         "keys": sorted(assignments),
         "keys_already_set_in_the_environment": sorted(
@@ -11791,7 +11848,8 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                       f"below grade ({_printable(str(graded))})")
     elif env_file.get("shadowed_graph_keys"):
         _shadowed = _printable(', '.join(env_file['shadowed_graph_keys']))
-        if _applied:
+        if _applied and all(key in (env_file.get("keys_in_effect") or ())
+                            for key in env_file["shadowed_graph_keys"]):
             # The environment carries the key BECAUSE this process applied the
             # file, so "the file cannot change the target" denied the very
             # application the same row just reported (#12428 review).
@@ -14918,7 +14976,11 @@ def _cmd_doctor(args):
         # `_redact_db_value`'s docstring states, and two pinned tests enforce).
         # The CLIENT's echo is a different message and uses `_scrub_uri_error`
         # in the FalkorDB probe arms below.
-        results.append(("Graph: health", "❌", _mask_uri_userinfo(str(e))[:60]))
+        results.append(("Graph: health", "❌",
+                        _mask_uri_userinfo(
+                            _redact_credential_fragments(
+                                str(e),
+                                db or path or _env_db_target_value()))[:60]))
         target = None
 
     # 1.5 The OTHER reader of the same configuration (#12407) — the repo-root
