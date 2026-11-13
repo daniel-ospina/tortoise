@@ -1343,7 +1343,10 @@ def _workflow_paths(root: Path | None = None) -> list[Path]:
     written three times in this file. Repairing each site leaves the fourth to be written
     next week, so every scan derives from `_WORKFLOW_SUFFIXES` through this function, and
     `test_no_site_spells_the_workflow_glob_one_sidedly` reds if a one-extension glob
-    reappears — it grades what the PATTERN matches, not how it is spelled.
+    reappears. It grades two ways, because one is population-DEPENDENT: what the PATTERN
+    matches (so a glob this file does not spell literally still reds) AND, for a pattern
+    with a wildcard, whether it literally SPELLS one extension and not the other (so
+    `release*.yml` reds even though no workflow in today's tree starts with `release`).
 
     `root` exists so a pin can drive the REAL scan on a synthetic tree; it defaults to the
     repo's own directory at CALL time, so it follows `WORKFLOWS`.
@@ -3345,6 +3348,38 @@ def _glob_matches(pattern: str, names: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(name, segment) for name in names)
 
 
+def _spells_one_extension(pattern: str, ext: str) -> bool:
+    """A wildcarded pattern that literally spells `ext` and not the other extension.
+
+    POPULATION-INDEPENDENT ON PURPOSE, and the second half of the grade. Matching alone is not
+    enough: `WORKFLOWS.glob("release*.yml")` matches no workflow in this tree (41 files, none
+    starting `release`), so a match-only grade reads it as "not a workflow glob" and passes —
+    while it IS a fourth one-sided enumeration, and a workflow rename or removal can silently
+    disarm a site that reds today (measured, review round 7).
+
+    A wildcard is required. A pattern with none (`python-ci.yml`, a deliberate single-workflow
+    reference or a tuple of required filenames) enumerates nothing and is not graded — that is
+    the over-block review round 7 removed.
+    """
+    segment = pattern.rsplit("/", 1)[-1]
+    if not any(ch in segment for ch in "*?["):
+        return False
+    other = ".yaml" if ext == ".yml" else ".yml"
+    return ext in segment and other not in segment
+
+
+def _opens(pattern: str, names: tuple[str, ...], ext: str) -> bool:
+    """Can this pattern open `ext` workflows — by what it MATCHES, or by what it SPELLS?
+
+    Both arms are needed and neither subsumes the other. Matching is population-dependent (a
+    pattern whose stems the tree does not hold matches nothing), spelling only sees a LITERAL
+    extension (a computed one from an f-string fragment matches but spells nothing). The pin asks
+    this question in every grading site — receiver pairing included — so the two halves cannot
+    disagree about what a call opens.
+    """
+    return _glob_matches(pattern, names) or _spells_one_extension(pattern, ext)
+
+
 def _one_sided_workflow_pattern_constants(
     yml_names: tuple[str, ...], yaml_names: tuple[str, ...]
 ) -> list[str]:
@@ -3378,8 +3413,8 @@ def _one_sided_workflow_pattern_constants(
         ]
         if not patterns:
             continue
-        opens_yml = any(_glob_matches(pattern, yml_names) for pattern in patterns)
-        opens_yaml = any(_glob_matches(pattern, yaml_names) for pattern in patterns)
+        opens_yml = any(_opens(pattern, yml_names, ".yml") for pattern in patterns)
+        opens_yaml = any(_opens(pattern, yaml_names, ".yaml") for pattern in patterns)
         if opens_yml != opens_yaml:
             one_sided.append(f"{name} = {patterns!r}")
     return one_sided
@@ -3408,6 +3443,11 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         as the defect; keys pairing on the RECEIVER rather than the line, so two unrelated
         receivers on one line cannot silence each other and a both-extension pair split across
         lines is clean; and grades module-level pattern CONSTANTS, this file's own idiom.
+      * cut 5 grades TWO ARMS (`_opens`), because matching alone is population-DEPENDENT:
+        `glob("release*.yml")` matches no workflow in today's 41-file tree, so the match arm read
+        it as "not a workflow glob" and passed — a one-sided site that a rename could also
+        silently disarm. The spelling arm asks the same question without the tree: a wildcarded
+        pattern that literally names one extension and not the other is one-sided regardless.
 
     SCOPE, so a green run is not read as more than it is — what stays out of reach, declared
     rather than implied:
@@ -3456,6 +3496,7 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
     `.yaml` reds even when no site spells a glob.
     """
     source = Path(__file__).read_text()
+    calls = _glob_calls(source)
     #: NON-VACUITY ON THE ANALYZER, not just on the population. A pin whose READER has gone blind
     #: is indistinguishable from a clean tree — with `_glob_calls` short-circuited to `[]` and a
     #: real one-sided glob added, this test still passed (measured, review round 6). The two
@@ -3465,13 +3506,18 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         "`_glob_calls` no longer reports (line, receiver, method, literals) for a plain one-sided "
         "glob — the structural scan below would grade nothing and pass"
     )
-    assert any(literals for *_head, literals in _glob_calls(source)), (
-        "`_glob_calls` found no string literal anywhere in this module — the scan is blind, so "
-        "the green below would mean nothing"
+    #: NOT `any(literals …)` unconditionally: holding every pattern in a module constant and
+    #: calling `base.glob(pattern)` is a behaviour-preserving refactor that leaves this module with
+    #: no literal-carrying call at all, and the scan then has nothing to grade — which is not the
+    #: same as being BLIND, and reding it would block the very idiom the constant arm grades
+    #: (measured, review round 7). Blindness is what the shape assertion above pins.
+    assert not calls or any(literals for *_head, literals in calls), (
+        "this module calls glob/rglob but no call carries a literal or an f-string fragment — the "
+        "structural scan graded nothing. If the patterns are held in a constant on purpose, say "
+        "so in SCOPE rather than letting a silent pass stand in for it"
     )
     yml_names, yaml_names = _workflow_probe_names()
     assert yml_names, "the probe population is empty — this pin would grade nothing"
-    calls = _glob_calls(source)
     #: A receiver whose OTHER half globs the complementary extension is a PAIR, not a one-sided
     #: site. Built SYMMETRICALLY: the `.yml` half is excused by a `.yaml` call on the same
     #: receiver and the `.yaml` half by a `.yml` one. Excusing only the `.yml` half was measured —
@@ -3481,22 +3527,22 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         receiver
         for _line, receiver, _method, literals in calls
         if receiver
-        and any(_glob_matches(lit, yml_names) for lit in literals)
-        and not any(_glob_matches(lit, yaml_names) for lit in literals)
+        and any(_opens(lit, yml_names, ".yml") for lit in literals)
+        and not any(_opens(lit, yaml_names, ".yaml") for lit in literals)
     }
     receivers_with_yaml = {
         receiver
         for _line, receiver, _method, literals in calls
         if receiver
-        and any(_glob_matches(lit, yaml_names) for lit in literals)
-        and not any(_glob_matches(lit, yml_names) for lit in literals)
+        and any(_opens(lit, yaml_names, ".yaml") for lit in literals)
+        and not any(_opens(lit, yml_names, ".yml") for lit in literals)
     }
     one_sided: list[str] = []
     for line, receiver, method, literals in calls:
         if not literals:
             continue
-        opens_yml = any(_glob_matches(lit, yml_names) for lit in literals)
-        opens_yaml = any(_glob_matches(lit, yaml_names) for lit in literals)
+        opens_yml = any(_opens(lit, yml_names, ".yml") for lit in literals)
+        opens_yaml = any(_opens(lit, yaml_names, ".yaml") for lit in literals)
         if opens_yml == opens_yaml:
             continue
         if opens_yml and receiver in receivers_with_yaml:
