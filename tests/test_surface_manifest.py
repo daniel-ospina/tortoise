@@ -5445,7 +5445,9 @@ def test_the_SDK_archive_pair_is_ONE_record_not_two():
         },
     )
     assert problems == [], problems
-    assert "archived code" in accounting["backfill_sources"], accounting
+    # `accounting` is keyed `(symbol, surface-class)` — one entry per REMOVAL, so the printed
+    # audit cannot undercount a symbol removed from two surfaces (review of PR #12313).
+    assert "archived code" in accounting[("backfill_sources", "sdk")], accounting
 
     # The TOOL pair is still a contradiction: archived AND still served.
     problems, accounting = sm.removal_report(
@@ -5508,3 +5510,76 @@ def test_an_override_on_a_FIRST_cut_is_refused(monkeypatch, tmp_path, derived_ba
     rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
     assert rc == 0, capsys.readouterr().out
     assert path.exists()
+
+
+def test_an_override_cannot_waive_TWO_surfaces_at_once():
+    """ONE waiver is ONE removal. Keyed by symbol alone, one `--allow-removal x` waived a
+    dropped tool AND a dropped SDK method of the same name and printed a single `accounted`
+    entry for two removals — the audit line understated what the cut had removed.
+
+    Not reachable today (`tortoise_*` tool names vs bare method names), which is why it is a
+    test and not a red. The fix is a REFUSAL naming the disambiguating form, plus the
+    qualified form itself, and both arms are pinned here.
+    """
+    sm = _load_manifest_tool()
+    records = {"archived": set(), "forward": set(), "sdk_retired": set()}
+    prior = {("tortoise_x", "tool"), ("tortoise_x", "sdk")}
+
+    problems, accounting = sm.removal_report(prior, set(), records, allowed={"tortoise_x"})
+    assert len(problems) == 1, problems
+    assert "would waive 2 removals" in problems[0], problems
+    assert "tool:tortoise_x" in problems[0] and "sdk:tortoise_x" in problems[0], problems
+
+    # The qualified form waives ONE surface and leaves the other removal unrecorded — which
+    # is the point: the waiver may not silently cover the second one (non-vacuity: the
+    # qualified arm really does waive its own class, or this would pass for the wrong reason).
+    problems, accounting = sm.removal_report(prior, set(), records, allowed={"tool:tortoise_x"})
+    assert accounting == {("tortoise_x", "tool"): "`--allow-removal` (deliberate rename, stated in the PR)"}, accounting
+    assert len(problems) == 1 and "tortoise_x (sdk)" in problems[0], problems
+
+
+def test_an_override_for_an_ALREADY_recorded_symbol_is_a_false_record():
+    """An override for a symbol a REAL record already accounts for waives nothing — and
+    honouring it REPLACES that record in the cut log, printing "deliberate rename" for a
+    symbol that is frozen in the archive. Same false-record class as a reason with no symbol.
+    """
+    sm = _load_manifest_tool()
+    records = {
+        "archived": {("mcp-tool", "tortoise_x")},
+        "forward": set(),
+        "sdk_retired": set(),
+    }
+
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool")}, set(), records, allowed={"tortoise_x"}
+    )
+    assert len(problems) == 1, problems
+    assert "already accounted for by archive entry (mcp-tool)" in problems[0], problems
+    assert accounting == {}, accounting
+
+    # …and with NO override the same tree passes and prints the archive record (non-vacuity).
+    problems, accounting = sm.removal_report({("tortoise_x", "tool")}, set(), records)
+    assert problems == [], problems
+    assert accounting == {("tortoise_x", "tool"): "archive entry (mcp-tool)"}, accounting
+
+
+def test_a_NON_MAPPING_archive_entry_is_UNREADABLE_not_absent(tmp_path):
+    """A frozen entry the gate cannot read is unreadable EVIDENCE, not an absent entry.
+
+    Skipping it `continue`d, so a corrupt `archive/MANIFEST.json` graded as "nothing is
+    archived" and `cut` told the operator to archive a symbol that is already archived. The
+    row reader one function over was fixed to refuse for exactly this reason (round 4).
+    """
+    import json as _json
+
+    sm = _load_manifest_tool()
+    path = tmp_path / "MANIFEST.json"
+    path.write_text(_json.dumps({"entries": ["mcp-tool:tortoise_x"]}), encoding="utf-8")
+    with pytest.raises(sm.SurfaceEvidenceUnreadable):
+        sm.removal_records(path)
+
+    # non-vacuity: a well-formed entry list is still read.
+    path.write_text(
+        _json.dumps({"entries": [{"kind": "mcp-tool", "symbol": "tortoise_y"}]}), encoding="utf-8"
+    )
+    assert sm.removal_records(path)["archived"] == {("mcp-tool", "tortoise_y")}

@@ -2229,7 +2229,17 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
     archived: set[tuple[str, str]] = set()
     for entry in doc.get("entries") or []:
         if not isinstance(entry, dict):
-            continue
+            # A frozen entry the gate cannot read is UNREADABLE EVIDENCE, not an entry that
+            # is not there — the same asymmetry `surface_symbols` refuses one function over,
+            # fixed in the row reader by review round 4 of PR #12313 and left here. Skipping
+            # it can only LOSE records, so nothing passes wrongly; it sends the operator to
+            # archive a symbol that is already archived, and it hides a corrupt manifest.
+            raise SurfaceEvidenceUnreadable(
+                f"an `archive/MANIFEST.json` entry is not a mapping ({type(entry).__name__}: "
+                f"{entry!r:.60}) — the removal gate cannot read it, and grading an "
+                "unreadable entry as 'not archived' is how a frozen symbol is reported as "
+                "unrecorded"
+            )
         kind = str(entry.get("kind") or "")
         symbol = str(entry.get("symbol") or "")
         if kind and symbol:
@@ -2280,10 +2290,29 @@ def removal_report(
     `allowed` is the deliberate-rename escape hatch (`cut --allow-removal`), applied to a
     NAMED symbol only — there is no blanket flag, because a blanket flag is how a gate
     becomes decoration.
+
+    A waiver entry is either a BARE symbol or a SURFACE-QUALIFIED one (`tool:<symbol>` /
+    `sdk:<symbol>`). The qualification exists because `accounting` is keyed `(symbol,
+    surface-class)` — the same key the gate itself uses — so a bare symbol that would waive
+    a dropped TOOL and a dropped SDK METHOD of the same name at once is ambiguous and is
+    refused rather than counted as one record for two removals (review of PR #12313).
     """
-    allowed = set(allowed or ())
+    bare: set[str] = set()
+    qualified: dict[str, str] = {}
+    for entry in allowed or ():
+        text = str(entry)
+        head, sep, tail = text.partition(":")
+        if sep and head in ARCHIVE_KIND_BY_CLASS and tail:
+            qualified[tail] = head
+        else:
+            bare.add(text)
     problems: list[str] = []
-    accounting: dict[str, str] = {}
+    accounting: dict[tuple[str, str], str] = {}
+    # `{(symbol, class): …}` — ONE entry per REMOVAL, not per symbol. Keyed by symbol (as it
+    # was) two removals of the same name collapsed into one entry and the `accounted N
+    # removal(s)` line understated what the cut did; the printed record is the audit the
+    # #11609 ruling keeps, so it may not undercount.
+    waived: dict[str, list[str]] = {}
     for symbol, cls in sorted(prior):
         if (symbol, cls) in derived:
             continue
@@ -2312,16 +2341,40 @@ def removal_report(
                 "as retired/served is an inconsistency; pick ONE"
             )
             continue
-        if symbol in allowed:
-            accounting[symbol] = "`--allow-removal` (deliberate rename, stated in the PR)"
-            continue
         if found:
-            accounting[symbol] = found[0]
+            if symbol in bare or qualified.get(symbol) == cls:
+                # A record ALREADY accounts for this removal, so the waiver waives nothing —
+                # and honouring it would REPLACE that record in the printed log, telling the
+                # next reader to look for a rename that did not happen. Same false-record
+                # class as a reason with no symbol (refused in `cmd_cut`), and the same
+                # unused-permission argument as an override for a symbol this cut does not
+                # remove (review of PR #12313).
+                problems.append(
+                    f"{symbol} ({cls}) is already accounted for by {found[0]}, so "
+                    "`--allow-removal` waives nothing — an override that replaces a real "
+                    "record with a rename claim is a false record"
+                )
+                continue
+            accounting[(symbol, cls)] = found[0]
+            continue
+        if symbol in bare or qualified.get(symbol) == cls:
+            waived.setdefault(symbol, []).append(cls)
+            accounting[(symbol, cls)] = (
+                "`--allow-removal` (deliberate rename, stated in the PR)"
+            )
             continue
         problems.append(
             f"{symbol} ({cls}) was DROPPED with no record — it is gone from the "
             "declaration and from the archive both, so there is nothing left to read"
         )
+    for symbol, classes in sorted(waived.items()):
+        if len(classes) > 1:
+            problems.append(
+                f"one `--allow-removal {symbol}` would waive {len(classes)} removals "
+                f"({', '.join(classes)}) — a named waiver is ONE symbol on ONE surface, and "
+                "collapsing them into one record understates what this cut removed. Name "
+                f"the surface: `--allow-removal tool:{symbol}` / `sdk:{symbol}`"
+            )
     return problems, accounting
 
 
@@ -2390,7 +2443,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # EVERY cut, INCLUDING the symbol-vs-removal check below (which therefore refuses any
     # override on a first cut): "no prior document" is the one tree where a waiver cannot be
     # checked against a removal, which is exactly when it should be refused.
-    accounting: dict[str, str] = {}
+    accounting: dict[tuple[str, str], str] = {}
     allowed = [str(s) for s in (getattr(args, "allow_removal", None) or [])]
     reason = str(getattr(args, "allow_removal_reason", "") or "").strip()
     if allowed and not reason:
@@ -2417,7 +2470,10 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # record" would send the operator to archive a symbol instead of fixing the flag. On a
     # first cut `accounting` is empty, so every override is unexplained and refused — which
     # is the point: nothing was removed, so a waiver for it is a false record.
-    unexplained = sorted(set(allowed) - set(accounting))
+    # A waiver entry may be surface-qualified (`tool:<symbol>`), so compare on the SYMBOL
+    # each entry names: `accounting` is keyed `(symbol, class)`.
+    allowed_symbols = {e.partition(":")[2] if ":" in e else e for e in allowed}
+    unexplained = sorted(allowed_symbols - {symbol for (symbol, _cls) in accounting})
     if unexplained:
         print(f"::error::--allow-removal named symbol(s) this cut does not remove: "
               f"{', '.join(unexplained)}")
@@ -2476,10 +2532,20 @@ def cmd_cut(args: argparse.Namespace) -> int:
         )
     if accounting:
         # Named, not summarised: this is the record that a removal was accounted for, and a
-        # count alone cannot be checked against the archive afterwards.
+        # count alone cannot be checked against the archive afterwards. The surface class is
+        # printed ONLY where one symbol was removed from more than one surface, so the
+        # ordinary single-surface line keeps its `symbol: record` shape.
         print(f"  accounted {len(accounting)} removal(s):")
-        for symbol in sorted(accounting):
-            print(f"    {symbol}: {accounting[symbol]}")
+        by_symbol: dict[str, list[tuple[str, str]]] = {}
+        for (symbol, cls), label in accounting.items():
+            by_symbol.setdefault(symbol, []).append((cls, label))
+        for symbol in sorted(by_symbol):
+            entries = by_symbol[symbol]
+            if len(entries) == 1:
+                print(f"    {symbol}: {entries[0][1]}")
+            else:
+                for cls, label in sorted(entries):
+                    print(f"    {symbol} ({cls}): {label}")
     if allowed:
         print("  REMOVAL OVERRIDE (--allow-removal): "
               f"{', '.join(sorted(set(allowed)))}")
