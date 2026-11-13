@@ -97,6 +97,9 @@ import { DatabaseSync } from "node:sqlite";
 const tokenRoute = await import(CONSENT + "/token.ts");
 const startRoute = await import(CONSENT + "/start.ts");
 const attemptKeyHash = (await import(CONSENT + "/../../_shared/auth/consent-bridge.ts")).attemptKeyHash;
+// #10488: the key-fingerprint half. Imported from the SAME sibling directory the routes live in, so
+// what the pins exercise is the shipped handler, not a copy of it.
+const keyRoute = await import(CONSENT + "/key.ts");
 
 const NOW = Date.now();
 
@@ -364,6 +367,59 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     out.status = res.status;
     out.body = await res.json();
   }
+} else if (scenario === "consent_key") {
+  // #10488 — the fingerprint the Pages half PUBLISHES, read off the shipped route. The same secret is
+  // also handed to Python in the assertion, so "the two halves agree" is proved ACROSS the two
+  // languages rather than by two implementations that agree with themselves.
+  const cases = [];
+  // 1. CONFIGURED — the production shape.
+  const configured = env({});
+  {
+    const res = await keyRoute.onRequest({
+      request: new Request("https://app.premiselabs.co/api/consent/key", { method: "GET" }),
+      env: configured,
+    });
+    cases.push({ label: "configured", status: res.status, body: await res.json(),
+                 cacheControl: res.headers.get("Cache-Control"),
+                 contentType: res.headers.get("Content-Type"),
+                 allowOrigin: res.headers.get("Access-Control-Allow-Origin") });
+  }
+  // 2. UNPROVISIONED — absence, not a falsy value: the key must be absent, never "".
+  const unconfigured = env({});
+  delete unconfigured.CONSENT_TOKEN_SECRET;
+  {
+    const res = await keyRoute.onRequest({
+      request: new Request("https://app.premiselabs.co/api/consent/key", { method: "GET" }),
+      env: unconfigured,
+    });
+    cases.push({ label: "unconfigured", status: res.status, body: await res.json() });
+  }
+  // 3. A DIFFERENT key — the reading must MOVE, or a split would report agreement forever.
+  const other = env({ CONSENT_TOKEN_SECRET: "test-consent-secret-0123456789abcdeZ" });
+  {
+    const res = await keyRoute.onRequest({
+      request: new Request("https://app.premiselabs.co/api/consent/key", { method: "GET" }),
+      env: other,
+    });
+    cases.push({ label: "other_key", status: res.status, body: await res.json() });
+  }
+  // 4. Every non-GET verb is answered BY THIS ROUTE (405), never handed to the asset server — the
+  //    `next()` stand-in answers 418 and records whether it was reached.
+  for (const method of ["POST", "PUT", "DELETE", "OPTIONS"]) {
+    let nextCalled = false;
+    const res = await keyRoute.onRequest({
+      request: new Request("https://app.premiselabs.co/api/consent/key", { method }),
+      env: configured,
+      next: async () => { nextCalled = true; return new Response("NEXT", { status: 418 }); },
+    });
+    cases.push({ label: "method_" + method, status: res.status, body: await res.json(), nextCalled });
+  }
+  // 5. The route exports ONE handler and no verb handler: a `onRequestGet` beside `onRequest` would
+  //    make `onRequest` unreachable for every verb (the Pages routing rule `token.ts` documents).
+  out.exports = Object.keys(keyRoute).sort();
+  out.cases = cases;
+  out.status = cases[0].status;
+  out.body = cases[0].body;
 } else if (scenario.startsWith("start_")) {
   const sessions = scenario === "start_cold_browser" || scenario === "start_terminal_after_retry"
     ? [] : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)];
@@ -612,6 +668,7 @@ def _run(scenario: str, **opts) -> dict:
     _require_node()
     assert (CONSENT_DIR / "token.ts").is_file(), "the mint route is gone"
     assert (CONSENT_DIR / "start.ts").is_file(), "the start route is gone"
+    assert (CONSENT_DIR / "key.ts").is_file(), "the key-fingerprint route is gone"
     with tempfile.TemporaryDirectory(prefix="3524-bff-") as td:
         tdp = Path(td)
         (tdp / "hooks.mjs").write_text(_HOOKS_MJS)
@@ -2207,3 +2264,102 @@ def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -
         "`||newAttemptKey()` fallback the record must name it; if the fallback is "
         "removed, DELETE the sentence instead of leaving a stale claim."
     )
+
+
+# ── #10488: the key fingerprint, and why it must agree ACROSS the two languages ──
+
+def test_the_BFF_publishes_the_SAME_fingerprint_the_AS_computes() -> None:
+    """THE property behind #10488: one number, two languages, one meaning.
+
+    The defect was two deployments holding different `CONSENT_TOKEN_SECRET` values with nothing
+    comparing them. The fix makes each half publish `sha256(key)[:12]` and a third party compare the
+    two — which only works if the two halves derive it from the SAME BYTES. A Python side that
+    trimmed the value while TypeScript did not would publish two DIFFERENT numbers for one key,
+    i.e. a permanent false SPLIT; the inverse (both trimming) would publish the SAME number for two
+    values that HMAC different bytes, i.e. a false AGREE over a broken bridge.
+
+    So the same secret goes through the shipped TypeScript and the shipped Python, and the outputs
+    are compared against EACH OTHER — not against a constant each side could satisfy alone.
+    """
+    from tortoise.consent_token import consent_key_fingerprint
+
+    secret = "test-consent-secret-0123456789abcdef"
+    out = _run("consent_key")
+    assert out["status"] == 200, out
+    cases = {c["label"]: c for c in out["cases"]}
+
+    configured = cases["configured"]["body"]
+    assert configured["key_fingerprint"] == consent_key_fingerprint(secret), (
+        "the Pages half and the AS half derive different fingerprints from the SAME key: every "
+        "consent-key comparison would report a split that does not exist"
+    )
+    assert configured["configured"] is True and configured["reason"] is None, configured
+    # The SHAPE the checker refuses anything else from (`tools/consent_key_check.py`): 12 lowercase
+    # hex. A prefix of the key, a full digest or an uppercase value are all UNVERIFIABLE there.
+    assert re.fullmatch(r"[0-9a-f]{12}", configured["key_fingerprint"]), configured
+    # ⛔ THE FIELD NAMES ARE THE COMPARISON CONTRACT — the AS publishes the same three keys on
+    # `/health` under `consent_token_key` (`tortoise.consent_token.consent_token_key_health`), and a
+    # half that spelled them differently would compare as a split.
+    assert set(configured) == {"key_fingerprint", "configured", "reason"}, configured
+    from tortoise.consent_token import consent_token_key_health
+
+    assert set(configured) == set(consent_token_key_health()), configured
+
+
+def test_a_DIFFERENT_key_publishes_a_DIFFERENT_fingerprint() -> None:
+    """The reading must MOVE with the key, or a split would be invisible for ever."""
+    out = _run("consent_key")
+    cases = {c["label"]: c for c in out["cases"]}
+    assert (cases["configured"]["body"]["key_fingerprint"]
+            != cases["other_key"]["body"]["key_fingerprint"]), (
+        "two different keys published the same fingerprint — the drift this route exists to expose "
+        "would report agreement"
+    )
+
+
+def test_an_UNPROVISIONED_pages_deployment_publishes_null_and_a_code() -> None:
+    """Absence is `null` + `configured: false`, never a hash of nothing and never `""`.
+
+    A fingerprint of a key that cannot sign is a reading about nothing, and it would let an
+    unprovisioned deployment compare as EQUAL to a working one — the false agreement that would make
+    this signal useless in the direction that matters.
+    """
+    out = _run("consent_key")
+    cases = {c["label"]: c for c in out["cases"]}
+    body = cases["unconfigured"]["body"]
+    assert body == {"key_fingerprint": None, "configured": False, "reason": "not_set"}, body
+    assert cases["unconfigured"]["status"] == 200
+
+
+def test_the_key_route_is_not_CACHEABLE() -> None:
+    """⛔ THE LOAD-BEARING HEADER. Pages bakes env at deploy time.
+
+    Measured 2026-11-01: after the dashboard value was corrected, the already-deployed Function kept
+    signing with the OLD key until a new deployment existed. A cached fingerprint would therefore
+    keep reporting the PREVIOUS deployment's key — the exact condition this route exists to expose,
+    cached and re-served.
+    """
+    out = _run("consent_key")
+    cache = {c["label"]: c.get("cacheControl") for c in out["cases"]}
+    assert "no-store" in (cache["configured"] or ""), cache
+    # And it advertises no CORS: it is read by a server-side checker, not a browser, so an
+    # `Allow-Origin` here would be a credentialed-surface advertisement on a credential-free route.
+    assert {c["label"]: c.get("allowOrigin") for c in out["cases"]}["configured"] is None
+
+
+def test_the_key_route_answers_every_non_GET_verb_itself() -> None:
+    """405, not the platform's 404 — and never `next()` (the asset server).
+
+    Same Pages routing rule `token.ts` documents: exporting `onRequestGet` BESIDE `onRequest` makes
+    the `onRequest` arm unreachable for every verb. So the export set is pinned here, and the verb
+    arms are asserted to reach THIS handler.
+    """
+    out = _run("consent_key")
+    assert out["exports"] == ["onRequest"], out["exports"]
+    cases = {c["label"]: c for c in out["cases"]}
+    for label in ("method_POST", "method_PUT", "method_DELETE", "method_OPTIONS"):
+        assert cases[label]["status"] == 405, cases[label]
+        assert cases[label]["body"] == {"error": "method_not_allowed"}, cases[label]
+        assert cases[label]["nextCalled"] is False, (
+            f"{label} was handed to next() — the asset server's 404 is what this arm prevents"
+        )

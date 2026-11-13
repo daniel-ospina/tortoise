@@ -1,0 +1,206 @@
+# consent-key-drift (#10488) — do the two deployments that mint and verify consent
+# tokens hold the SAME `CONSENT_TOKEN_SECRET`?
+#
+# THE DEFECT THIS EXISTS FOR
+# -------------------------
+# The consent bridge has two halves that must share one signing key:
+#
+#   mint   → `app.premiselabs.co/api/consent/token`  (Cloudflare Pages Function, env typed
+#                                                     into the dashboard BY HAND)
+#   verify → `api.premiselabs.co/oauth/consent/preview` (Fly machine, secret staged by CI)
+#
+# Measured 2026-11-01: they held DIFFERENT values. The mint answered `200` with a well-formed
+# 680-byte JWT and the AS answered `401 {"error":"invalid_token","error_description":"Invalid
+# consent token: signature does not verify."}` — which reads like a CODE bug, so it cost a full
+# diagnosis cycle. Nothing was red: `deploy-hosted` green, `deploy-pages` green, mint 200, and the
+# only user-visible symptom was the consent page telling the visitor "Your approval expired before
+# it was issued", i.e. blaming the visitor's session. It also survived the obvious manual fix —
+# Pages BAKES ENV AT DEPLOY TIME, so a corrected dashboard value does not reach an
+# already-deployed Function until a new deployment exists.
+#
+# WHY A SCHEDULED POLL AND NOT A DEPLOY STEP (`deploy-pages.yml`)
+# --------------------------------------------------------------
+# Cloudflare's own GIT INTEGRATION builds Pages directly on push — measured: production
+# deployment 0ce4ee20, trigger `ad_hoc`, commit 7adf5cea, 02:53:41Z, created while the GitHub
+# `deploy-pages` run was still QUEUED. So a check placed only inside `deploy-pages.yml` misses the
+# DOMINANT build path, and a check placed only inside `deploy-hosted.yml` misses every Pages-side
+# change. This one is INDEPENDENT OF THE BUILD ENTIRELY: it reads the two LIVE deployments, so it
+# cannot be bypassed by whichever route produced them.
+#
+# The condition is a STEADY STATE (two deployments holding different keys), not an event — only a
+# poll sees it, and nothing fires when a value stays wrong. A dropped scheduled fire is not a loss:
+# the next tick repeats the reading (the same reason `deploy-staleness.yml` gives). Its own
+# concurrency group with `cancel-in-progress: false` means a run is never superseded mid-flight.
+#
+# IT CANNOT BLOCK A MERGE, AND THE ISSUE IS THE SIGNAL. A `schedule`-event run is a NON-CODE event
+# (the merge rail's `NON_CODE_EVENTS` set excludes `schedule`), so a red tick never gates a PR. The
+# monitor's output is the issue `.github/scripts/auto-file-issue.sh` files — ONE issue per streak,
+# with recurrences commented on it, closed when the reading recovers. That substrate is reused
+# deliberately: the #2706/#3907 lesson is that a title embedding a run id files a duplicate on every
+# tick, and a monitor that fires constantly is a monitor nobody reads.
+#
+# WHAT IT READS (no credential, no browser — `docs/engineering/auth/consent-identity-bridge.md` §2.5)
+#   GET {api}/health          → `.consent_token_key`   = {key_fingerprint, configured, reason}
+#   GET {app}/api/consent/key → the same three keys, as the body
+# `key_fingerprint` is `sha256(CONSENT_TOKEN_SECRET)[:12]` — a truncated hash, never the key. That
+# is the only way to answer this: Cloudflare Pages does not return a `secret_text` env var's VALUE
+# and Fly never returns a secret's, so `tools/check_pages_bindings.py` can prove the NAME exists on
+# both platforms and can never prove the two VALUES agree.
+#
+# THE FIX IS THREE STEPS when this fires, and the issue body carries them: set Fly, set Pages,
+# REDEPLOY Pages (§2.5 / `docs/infra-runbook.md`).
+name: consent-key-drift
+
+on:
+  schedule:
+    # Every 30 minutes, offset off the hour boundary (GitHub documents that scheduled events are
+    # delayed during high load, "especially at the start of each hour"). A rotation is a human
+    # action taking minutes, so 30-minute resolution is the useful bound; a dropped fire is not a
+    # loss — the next tick re-reads the same steady state.
+    - cron: '11,41 * * * *'
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: 'AS origin to read (default https://api.premiselabs.co)'
+        required: false
+        type: string
+      app_url:
+        description: 'session origin to read (default https://app.premiselabs.co)'
+        required: false
+        type: string
+
+# Never cancel a run: the whole point is a completed reading, and a cancelled tick measures nothing.
+concurrency:
+  group: consent-key-drift
+  cancel-in-progress: false
+
+# contents: read for actions/checkout; issues: write for the alert issue (the monitor's signal).
+# The repo's default token is restricted (#2140), so the scopes are granted explicitly — without
+# them the detector is deaf while looking green.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # The alert is filed by `.github/scripts/auto-file-issue.sh`, which calls `gh`. `runs-on:
+      # ubuntu-latest` is normally a hosted image WITH `gh`, but the fallback pool carries the same
+      # label on a bare runner whose service PATH is a minimal non-login one, where the call would
+      # die `exit 127` — reading as an instrument fault instead of a verdict. Provide the tool or
+      # fail NAMING it, before the check's own logic runs.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
+      # `tools/consent_key_check.py` is stdlib-only; this pin supplies the >=3.12 interpreter every
+      # tool in `tools/` requires (#5128).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compare the two halves' key fingerprints (#10488)
+        id: check
+        env:
+          API_URL: ${{ github.event.inputs.api_url || 'https://api.premiselabs.co' }}
+          APP_URL: ${{ github.event.inputs.app_url || 'https://app.premiselabs.co' }}
+        run: |
+          set +e
+          python3 tools/consent_key_check.py --api-url "$API_URL" --app-url "$APP_URL" \
+            --json > /tmp/consent-key.json 2>/tmp/consent-key.err
+          rc=$?
+          set -e
+          # ⛔ The exit code IS the verdict (0 AGREE · 1 MISMATCH/SPLIT · 2 OFF/UNVERIFIABLE), so it
+          # is passed through untouched: a step that swallowed it would be the false PASS this
+          # whole workflow exists to refuse. Both non-zero codes are RED — one is a measured
+          # disagreement, the other is no measurement, and the operator needs to know which (the
+          # alert body below branches on it). The VERDICT is extracted too, so the alert never
+          # asserts a disagreement that was not measured.
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          verdict=UNKNOWN
+          if command -v python3 >/dev/null 2>&1; then
+            verdict=$(python3 -c 'import json,sys;print(json.load(open("/tmp/consent-key.json")).get("verdict","UNKNOWN"))' 2>/dev/null || echo UNKNOWN)
+          fi
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          cat /tmp/consent-key.json
+          cat /tmp/consent-key.err >&2 || true
+          exit "$rc"
+
+      - name: Auto-file the drift (monitor signal — never blocks merges)
+        # `always()` so a RED reading still files: the reading is the artifact, and the auto-file step
+        # must run on the failing path it exists for. The GREEN path resolves a standing issue.
+        if: always()
+        env:
+          # Actions exposes the token only as a CONTEXT, never as an env var (#3092), and
+          # `auto-file-issue.sh` asserts the author from the write's own response (a PAT files as its
+          # owner and never dedupes — #3907). STEP-level only, so `actions/checkout` never sees it.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RC: ${{ steps.check.outputs.rc }}
+          VERDICT: ${{ steps.check.outputs.verdict }}
+        run: |
+          set -u
+          # ⛔ TWO STABLE TITLES, because these are TWO DIFFERENT FINDINGS and the title is also the
+          # dedupe key:
+          #   MISMATCH/SPLIT   → a MEASURED disagreement. Every consent grant is dead.
+          #   OFF/UNVERIFIABLE → NO measurement (or the arm is off on both halves). Nothing disagrees;
+          #                     something could not be seen, or a feature is disabled.
+          # Reusing the first title's prose for the second would have the alert assert "the two halves
+          # hold different keys" about a run that measured neither half (§2.5).
+          drift_title="CONSENT_TOKEN_SECRET: the consent bridge's two halves hold different keys (#10488)"
+          unknown_title="CONSENT_TOKEN_SECRET: the consent bridge's key could not be verified (#10488)"
+          # A GREEN reading resolves BOTH — whichever half of the ledger was standing.
+          if [ "${RC:-}" = "0" ]; then
+            bash .github/scripts/auto-file-issue.sh resolve --title "$drift_title" \
+              --why "the two live deployments published the same key fingerprint (AGREE)"
+            bash .github/scripts/auto-file-issue.sh resolve --title "$unknown_title" \
+              --why "the comparison now runs and both halves agree (AGREE)"
+            exit 0
+          fi
+          body="$(mktemp)"
+          {
+            echo '<!-- consent-key-drift-alert -->'
+            case "${VERDICT:-UNKNOWN}" in
+              MISMATCH|SPLIT)
+                title="$drift_title"
+                echo '## The consent bridge'"'"'s two halves hold DIFFERENT keys'
+                echo
+                echo 'Every consent grant is dead: the mint answers `200` with a well-formed JWT and the'
+                echo 'AS answers `401 {"error":"invalid_token","error_description":"Invalid consent token:'
+                echo 'signature does not verify."}`. The visitor sees *"Your approval expired before it was'
+                echo 'issued"*, which blames their session. Nothing else goes red (#10488).'
+                ;;
+              *)
+                title="$unknown_title"
+                echo '## The consent bridge'"'"'s key could NOT be verified'
+                echo
+                echo 'This is **not** a measured disagreement — nothing was compared. Either a half could'
+                echo 'not be read (a non-200, a timeout, a malformed field) or the arm is not configured on'
+                echo 'one/both halves, and an unreadable reading is never an agreement (§2.5). Check the'
+                echo 'reading below before treating this as a rotation.'
+                ;;
+            esac
+            echo
+            echo '### The reading (`tools/consent_key_check.py`, this run)'
+            echo
+            echo '```json'
+            cat /tmp/consent-key.json 2>/dev/null || echo '{"verdict": "UNVERIFIABLE"}'
+            echo '```'
+            echo
+            echo '### If it IS a key mismatch — THREE steps, because Pages bakes env at deploy time'
+            echo
+            echo '1. `fly secrets set CONSENT_TOKEN_SECRET=<value>` (or land the `deploy-hosted` run that'
+            echo '   stages it from the repo secret).'
+            echo '2. Set the SAME value on the `tortoise-dashboard` Cloudflare Pages project.'
+            echo '3. **REDEPLOY Pages.** A corrected dashboard value does not reach an already-deployed'
+            echo '   Function — measured 2026-11-01, and it is the step with no reminder.'
+            echo
+            echo 'Then re-run `uv run python tools/consent_key_check.py` and require `AGREE`.'
+            echo 'See `docs/engineering/auth/consent-identity-bridge.md` §2.5.'
+            echo
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > "$body"
+          bash .github/scripts/auto-file-issue.sh file --title "$title" --body-file "$body"

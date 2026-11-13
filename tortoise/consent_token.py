@@ -92,6 +92,23 @@ OPERATOR REQUIREMENT (§8) — the token arm is LIVE the moment these are set on
   * ``config/required-bindings.yml`` declares `CONSENT_TOKEN_SECRET` (and, as `recommended`,
     ``CONSENT_AS_ORIGIN`` / ``CONSENT_TOKEN_ISSUER``, since both have correct defaults) so the
     deploy preflight fails closed instead of shipping an unprovisioned mint.
+
+THE KEY HAS TWO HOMES, SO IT PUBLISHES ITS FINGERPRINT (§2.5, #10488)
+--------------------------------------------------------------------
+Fly's copy is managed (``deploy-hosted.yml`` stages it) and Pages' copy is TYPED BY HAND into a
+Cloudflare dashboard. On 2026-11-01 the two held DIFFERENT values: the mint answered ``200`` with a
+well-formed JWT and this verifier refused it ``401 signature does not verify`` — a configuration
+split reported as a token fault, with every deploy green and the only user-visible symptom blaming
+the visitor's session. Neither provider returns a secret's VALUE (Pages masks ``secret_text``; Fly
+never returns one), so "do the halves agree?" is unanswerable from the configuration side alone.
+
+``consent_key_fingerprint()`` / ``consent_token_key_health()`` publish ``sha256(key)[:12]`` here, and
+``functions/api/consent/key.ts`` publishes the same number from the Pages deployment; then
+``tools/consent_key_check.py`` compares them. The fingerprint is NOT the key, not a prefix of it, and
+not invertible, and it hands a guessing attacker nothing the live verifier does not already answer
+for them — the full argument, including why 12 hex and why no domain prefix, is on
+``CONSENT_KEY_FINGERPRINT_HEX_CHARS``. ⛔ ``kid`` is NOT in the comparison: one key is configured, so
+a ``kid`` comparison would be a second, always-equal field that reads like evidence.
 """
 
 from __future__ import annotations
@@ -186,6 +203,107 @@ _REUSED_KEY_ENVS = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY", "SUPABA
 #: in bytes, not characters: 20 multi-byte characters is a >32-byte key and must not be refused.
 _MIN_SECRET_BYTES = 32
 
+#: How much of ``sha256(key)`` this deployment PUBLISHES (§2.5, #10488).
+#:
+#: WHY A FINGERPRINT AT ALL. ``CONSENT_TOKEN_SECRET`` has two homes — a Fly secret staged by CI, and
+#: a Cloudflare Pages env var a human types into a dashboard — and on 2026-11-01 they held different
+#: values: the mint answered ``200`` with a well-formed JWT and the verifier refused it
+#: ``401 signature does not verify``. Every deploy was green and the only user-visible symptom
+#: blamed the visitor's session. Neither provider will hand the VALUE back (Pages masks
+#: ``secret_text``, Fly never returns a secret), so the two halves have to publish something they
+#: can derive from the key and a third party can compare. This is that something.
+#:
+#: WHY 12 HEX CHARACTERS (48 bits) IS THE RIGHT AMOUNT, not merely a small number:
+#:  * it is a TRUNCATED HASH, so it is not the key, not a prefix of the key, and not invertible;
+#:    the key is 32+ bytes of operator-chosen randomness (the `_MIN_SECRET_BYTES` floor), so a preimage
+#:    search is 2^256 and
+#:    48 published bits leave the key's space untouched for any guessing strategy. **A key an
+#:    attacker can ENUMERATE is already lost without this field** — the 32-byte floor
+#:    (`_MIN_SECRET_BYTES`, an implementation floor, NOT a §2.3 requirement — §8 records that) exists
+#:    for precisely the guessable-key case;
+#:  * it gives an attacker who GUESSES nothing they do not already have: the guess can be checked
+#:    against the live verifier in one request (``GET /oauth/consent/preview`` answers
+#:    ``signature does not verify``), so the fingerprint is a strictly worse oracle than the one
+#:    this deployment already exposes by design. That is the argument, not an assertion that
+#:    "hashes are safe";
+#:  * 48 bits makes a COLLISION between two independently generated keys ~2^-48 — and a collision
+#:    is the only way this signal can lie. A rotation that produced a colliding prefix would report
+#:    agreement on two different keys; at 12 hex that is a 1-in-281-trillion event per rotation, and
+#:    the cost of it is one turn of the very incident this field exists to make visible, not a
+#:    security loss. Growing it buys nothing and any long string invites "compare the whole thing";
+#:  * 12 is short enough to eyeball across two terminals, which is how an operator actually uses it.
+#:
+#: ⛔ NO DOMAIN PREFIX. ``sha256(b"consent-key:" + key)`` would be marginally tidier crypto and
+#: strictly worse here: the operator must be able to reproduce the number from the value they hold
+#: with the shell one-liner in §8 (``printf %s "$K" | sha256sum | cut -c1-12``), and a fingerprint a
+#: human cannot verify independently is one they must take on trust. Nothing in this protocol needs
+#: preimage resistance — only agreement — so the plain digest is the honest shape.
+CONSENT_KEY_FINGERPRINT_HEX_CHARS = 12
+
+#: The fingerprint's fixed shape. A checker that validates before it compares can then never echo an
+#: arbitrary string a misconfigured (or hostile) surface put in the field — see
+#: ``tools/consent_key_check.py``. ⛔ Lowercase only: both halves emit ``hexdigest()[:12]``, and a
+#: case-insensitive compare would hide a producer that started emitting something else.
+CONSENT_KEY_FINGERPRINT_RE = re.compile(rf"^[0-9a-f]{{{CONSENT_KEY_FINGERPRINT_HEX_CHARS}}}$")
+
+#: The PROVISIONING reason codes (§2.5) — a CLOSED set, deliberately free of numbers. ⛔ Five, not
+#: every value `/health` can publish: `hosted_api._consent_token_key_health()` adds `unreadable`
+#: (with `configured: null`) for the case where this resolver itself cannot run, which is "could not
+#: state", never a property of the key. The human
+#: message from `consent_token_secret_problem` names a BYTE LENGTH for a short key and the operator's
+#: own env for a reused one; publishing that on an unauthenticated surface would narrow the key space
+#: for exactly the guessable-key case the floor above exists to refuse. So the public surface gets the CLASS of
+#: the fault and nothing else, and the detail stays in the typed 503 a caller with the key sees.
+#:
+#: ⛔ A TUPLE OF CODES, not a code→message map. Two of the five messages embed something DYNAMIC
+#: (the reused env's name, the key's byte length), so a map could only ever hold dead copies that
+#: drift from what is actually emitted — and the closed set is a statement about the CODES anyway.
+_SECRET_PROBLEM_CODES = ("not_set", "padded", "reused_credential", "too_short", "not_utf8")
+
+
+def _secret_state() -> tuple[str, str] | None:
+    """``(code, message)`` for an unusable key, ``None`` when it can be used (§2.3).
+
+    ONE statement of the provisioning rule, so the 503's description and the ``/health`` block
+    (§2.5) can never disagree about whether this deployment has a working key — the divergence
+    #10447 spent a whole issue removing from ``/health`` and ``/v1/version``.
+    """
+    raw = os.environ.get(_SECRET_ENV, "")
+    if not raw:
+        return "not_set", f"{_SECRET_ENV} is not set"
+    # ⛔ BYTE-EXACT, never normalised. Step 3's minter is the BFF (TypeScript), and it reads
+    # `process.env.CONSENT_TOKEN_SECRET` verbatim — it does not strip. A padded value is the
+    # normal result of `fly secrets set CONSENT_TOKEN_SECRET < file`, of a pasted secret, or of a
+    # value round-tripped through a file, and silently stripping it here would make the two sides
+    # HMAC DIFFERENT keys: every redemption then answers `401 invalid_token: signature does not
+    # verify`, i.e. the whole step-4 flow is dead and the diagnosis blames the token rather than
+    # the key. Treating a padded value as unprovisioned costs one typed 503 at the first request
+    # and names the fix; changing the operator's value silently costs the feature.
+    if raw != raw.strip():
+        return ("padded",
+                f"{_SECRET_ENV} has leading or trailing whitespace — the minting side (the BFF, "
+                "§9 step 3) reads the value verbatim, so a padded value is a DIFFERENT HMAC key "
+                "and every redemption would answer `invalid_token`. Set it byte-exact")
+    secret = raw
+    for name in _REUSED_KEY_ENVS:
+        other = os.environ.get(name, "")
+        # Compared against BOTH spellings of the reused credential: an operator who padded the
+        # service-role key must not slip past the dedicated-secret rule by that accident.
+        if other and secret in (other, other.strip()):
+            return ("reused_credential",
+                    f"{_SECRET_ENV} is also {name} — §2.3 requires a DEDICATED secret, so the "
+                    "arm is treated as unprovisioned rather than trusting a reused key")
+    try:
+        length = len(secret.encode("utf-8"))
+    except UnicodeEncodeError:      # a lone surrogate in the env value: not a key we can sign with
+        return ("not_utf8",
+                f"{_SECRET_ENV} is not encodable as UTF-8, so it cannot be an HMAC key")
+    if length < _MIN_SECRET_BYTES:
+        return ("too_short",
+                f"{_SECRET_ENV} is {length} bytes — a key shorter than {_MIN_SECRET_BYTES} bytes "
+                "is guessable, so the arm is treated as unprovisioned")
+    return None
+
 
 def consent_token_secret_problem() -> str | None:
     """Why the arm is unavailable, or ``None`` when it can be used (§2.3).
@@ -201,37 +319,63 @@ def consent_token_secret_problem() -> str | None:
     wider credential silently becomes an assertion signing key. Refusing here costs one
     typed 503 and one restart with the right value; accepting it costs every account.
     """
-    raw = os.environ.get(_SECRET_ENV, "")
-    if not raw:
-        return f"{_SECRET_ENV} is not set"
-    # ⛔ BYTE-EXACT, never normalised. Step 3's minter is the BFF (TypeScript), and it reads
-    # `process.env.CONSENT_TOKEN_SECRET` verbatim — it does not strip. A padded value is the
-    # normal result of `fly secrets set CONSENT_TOKEN_SECRET < file`, of a pasted secret, or of a
-    # value round-tripped through a file, and silently stripping it here would make the two sides
-    # HMAC DIFFERENT keys: every redemption then answers `401 invalid_token: signature does not
-    # verify`, i.e. the whole step-4 flow is dead and the diagnosis blames the token rather than
-    # the key. Treating a padded value as unprovisioned costs one typed 503 at the first request
-    # and names the fix; changing the operator's value silently costs the feature.
-    if raw != raw.strip():
-        return (f"{_SECRET_ENV} has leading or trailing whitespace — the minting side (the BFF, "
-                "§9 step 3) reads the value verbatim, so a padded value is a DIFFERENT HMAC key "
-                "and every redemption would answer `invalid_token`. Set it byte-exact")
-    secret = raw
-    for name in _REUSED_KEY_ENVS:
-        other = os.environ.get(name, "")
-        # Compared against BOTH spellings of the reused credential: an operator who padded the
-        # service-role key must not slip past the dedicated-secret rule by that accident.
-        if other and secret in (other, other.strip()):
-            return (f"{_SECRET_ENV} is also {name} — §2.3 requires a DEDICATED secret, so the "
-                    "arm is treated as unprovisioned rather than trusting a reused key")
-    try:
-        length = len(secret.encode("utf-8"))
-    except UnicodeEncodeError:      # a lone surrogate in the env value: not a key we can sign with
-        return f"{_SECRET_ENV} is not encodable as UTF-8, so it cannot be an HMAC key"
-    if length < _MIN_SECRET_BYTES:
-        return (f"{_SECRET_ENV} is {length} bytes — a key shorter than {_MIN_SECRET_BYTES} bytes "
-                "is guessable, so the arm is treated as unprovisioned")
-    return None
+    state = _secret_state()
+    return None if state is None else state[1]
+
+
+def consent_token_secret_refusal_code() -> str | None:
+    """The CLASS of provisioning fault (§2.5), or ``None`` when the key is usable.
+
+    The code is a member of a closed set — ``not_set``, ``padded``, ``reused_credential``,
+    ``too_short``, ``not_utf8`` — and carries no number and no env value, which is what makes it
+    publishable on an UNAUTHENTICATED surface. `consent_token_secret_problem` is the human message
+    for a caller who already holds the key (the typed 503); this is the half that can be shown to
+    anyone.
+    """
+    state = _secret_state()
+    return None if state is None else state[0]
+
+
+def consent_key_fingerprint(key: str | None = None) -> str | None:
+    """The signing key's PUBLIC identity — the first 12 hex of ``sha256(key)`` (§2.5, #10488).
+
+    ``None`` when this deployment has no usable key: a fingerprint of a key that cannot sign is a
+    reading about nothing, and reporting one would let a deployment whose arm is UNPROVISIONED
+    compare as equal to one whose arm works. That case is reported as ``configured: false``
+    alongside it, so the two are never confused.
+
+    ⛔ The NEXT rotation's whole safety property lives in one sentence: this value MUST be derived
+    from the same BYTES the HMAC is computed over, and nothing else. ``key.encode()`` here is the
+    same expression `mint_consent_token` / `verify_consent_token` feed to ``hmac.new`` (byte-exact,
+    never stripped — see the whitespace arm of `_secret_state`), and `consent-bridge.ts` encodes
+    with the same ``TextEncoder``. Fingerprint a NORMALISED value and the field would report
+    agreement between two halves that sign different bytes — the exact silent split it exists to
+    expose, with a green light in front of it.
+
+    ``key`` is for tests and for callers that already hold a key; the default reads the deployment's
+    configured one.
+    """
+    raw = key if key is not None else consent_token_secret()
+    if raw is None:
+        return None
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:CONSENT_KEY_FINGERPRINT_HEX_CHARS]
+
+
+def consent_token_key_health() -> dict:
+    """The ``/health`` block that makes a key split one comparison away (§2.5, #10488).
+
+    ⛔ It is NOT folded into ``status``. An unprovisioned consent arm is a LEGITIMATE state on a
+    self-hosted install that never enables the bridge, and a process degraded for a configuration
+    choice would be restarted by Fly forever — the same rule `record`, `change_feed` and `build`
+    already follow. What this block answers is *which key does this deployment hold*, and the drift
+    it makes visible is a COMPARISON between two origins, which no single process can make.
+    """
+    code = consent_token_secret_refusal_code()
+    return {
+        "key_fingerprint": None if code else consent_key_fingerprint(),
+        "configured": code is None,
+        "reason": code,
+    }
 
 
 def consent_token_secret() -> str | None:

@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""Consent-key drift detector — do the two halves of the consent bridge hold the SAME key?
+
+WHY THIS EXISTS (#10488)
+------------------------
+``CONSENT_TOKEN_SECRET`` is ONE secret with TWO homes, and only one of them is managed:
+
+  | half   | origin                                  | who sets the value              |
+  |--------|-----------------------------------------|---------------------------------|
+  | mint   | ``app.premiselabs.co`` (Cloudflare Pages)| a human, in the CF dashboard    |
+  | verify | ``api.premiselabs.co`` (Fly machine)     | CI, from the GitHub repo secret |
+
+Measured 2026-11-01: they held DIFFERENT values. The mint answered ``200`` with a well-formed
+680-byte JWT (``aud=tortoise-consent``) and the AS answered::
+
+    401 {"error":"invalid_token",
+         "error_description":"Invalid consent token: signature does not verify."}
+
+``tortoise/consent_token.py`` emits ``signature does not verify`` ONLY on an HMAC mismatch, so the
+verifier was right both times: the two deployments simply held different keys. Nothing surfaced it —
+``deploy-hosted`` was green, ``deploy-pages`` was green, mint returned 200, and the only user-visible
+symptom was the consent page telling the visitor "Your approval expired before it was issued", which
+accuses the visitor's session rather than the configuration. It cost a full diagnosis cycle.
+
+⛔ WHY THE CONFIGURATION SIDE CANNOT ANSWER THIS. Cloudflare Pages does not return a ``secret_text``
+env var's VALUE, and Fly never returns a secret's — so ``tools/check_pages_bindings.py`` (the #3616
+gate) can prove the NAME exists on both platforms and can never prove the two VALUES agree. The
+question is only answerable from the running deployments, which is why each half publishes a
+truncated hash of the key it holds and this tool compares the two readings. One request each.
+
+THE CONTRACT
+------------
+  * AS half:    ``GET {api}/health`` → ``consent_token_key: {key_fingerprint, configured, reason}``
+  * Pages half: ``GET {app}/api/consent/key`` → the SAME three keys
+  * ``key_fingerprint`` is ``sha256(key)[:12]`` (``CONSENT_KEY_FINGERPRINT_HEX_CHARS``) — never the
+    key, never a prefix of it, never anything invertible.
+
+⛔ THIS TOOL NEVER HOLDS, READS, OR ACCEPTS A KEY, and has no flag that would let it. That is the
+strongest form of "no key material in the output": the only strings it can print are the two
+fingerprints the deployments published, and it validates even THOSE against a fixed shape before
+comparing them — so a half that returned a key, a prefix, or a whole hash in that field is reported
+as UNVERIFIABLE rather than echoed. Without that check this tool would be a disclosure amplifier: it
+copies whatever the remote says into a CI log and an issue body.
+
+VERDICTS (exit codes)
+---------------------
+  ``AGREE``          0  both halves publish a fingerprint and they are EQUAL.
+  ``MISMATCH``       1  both publish one and they DIFFER — the 2026-11-01 defect. Every consent
+                        grant is dead; the mint answers 200 and the AS answers 401.
+  ``SPLIT``          1  exactly one half is configured — one can sign, the other cannot. Also a
+                        split, and also fatal; it is named separately because the REMEDY differs.
+  ``OFF``            2  NEITHER half is configured. Consistent, and NOT agreement: a monitor that
+                        went green here would read "the consent bridge is fine" about a bridge that
+                        is not enabled. Exit 2 says "no drift verdict", which is the truth.
+  ``UNVERIFIABLE``   2  a half could not be read, answered non-200, or published a field that is not
+                        the contracted shape. ⛔ "I could not look" is never AGREE — the same
+                        fail-closed rule as ``check-deploy-staleness.sh``: a deaf checker is worse
+                        than no checker.
+
+⚠️ Both exit codes 1 and 2 are RED for a monitor. They differ in what they claim: 1 is a measured
+disagreement, 2 is no measurement. Do not collapse them — "cannot see" and "saw a split" need
+different responses, and only one of them needs somebody to touch a dashboard.
+
+USAGE
+-----
+    uv run python tools/consent_key_check.py                 # the two production origins
+    uv run python tools/consent_key_check.py --json          # for a workflow / an issue body
+    uv run python tools/consent_key_check.py --api-url http://127.0.0.1:8000 \\
+                                             --app-url https://preview.example       # a preview pair
+
+Wired into CI by ``.github/workflows/consent-key-drift.yml`` (scheduled, NOT per-deploy — a check
+placed only inside ``deploy-pages.yml`` would miss Cloudflare's own Git integration, which builds
+Pages directly on push and is the DOMINANT build path).
+"""
+
+from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first with an unrelated message.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/consent_key_check.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/consent_key_check.py`"
+    )
+
+import argparse
+import json
+import re
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+
+#: The default production pair. Two origins, one secret — the whole point.
+DEFAULT_API_URL = "https://api.premiselabs.co"
+DEFAULT_APP_URL = "https://app.premiselabs.co"
+#: Where each half publishes. Both are UNAUTHENTICATED on purpose: a checker that needed a session
+#: could not run from CI, which is where the next rotation must be caught.
+API_PATH = "/health"
+APP_PATH = "/api/consent/key"
+#: The field inside `{api}/health`, and the whole Pages body. Same name on both halves so the
+#: comparison is field-for-field rather than a mapping this tool maintains.
+PAYLOAD_FIELD = "consent_token_key"
+FINGERPRINT_FIELD = "key_fingerprint"
+CONFIGURED_FIELD = "configured"
+REASON_FIELD = "reason"
+
+#: ⛔ The SAME shape `tortoise/consent_token.py::CONSENT_KEY_FINGERPRINT_RE` and
+#: `consent-bridge.ts::consentKeyFingerprint` emit: 12 LOWERCASE hex. Anchored, so `"abc"`, a
+#: 40-hex prefix of a real key, an uppercase value, and the key itself all fail — and a failure is
+#: UNVERIFIABLE, never a comparison. Case-sensitivity is deliberate: a case-insensitive compare would
+#: hide a producer that started emitting something other than `hexdigest()[:12]`.
+FINGERPRINT_RE = re.compile(r"^[0-9a-f]{12}$")
+
+EXIT_AGREE = 0
+EXIT_DISAGREE = 1
+EXIT_NO_VERDICT = 2
+
+
+@dataclass(frozen=True)
+class Reading:
+    """One half's answer, already reduced to what this tool is allowed to print.
+
+    ⛔ `fingerprint` is `None` unless the remote's value matched `FINGERPRINT_RE` — an unvalidated
+    string never reaches the output. `problem` is a CODE describing why the half could not be read,
+    and it never embeds the offending value.
+    """
+
+    half: str
+    url: str
+    fingerprint: str | None = None
+    configured: bool | None = None
+    reason: str | None = None
+    problem: str | None = None
+
+    @property
+    def readable(self) -> bool:
+        return self.problem is None
+
+
+@dataclass
+class Verdict:
+    verdict: str
+    detail: str
+    exit_code: int
+    readings: list[Reading] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == EXIT_AGREE
+
+
+def parse_reading(half: str, url: str, payload: object) -> Reading:
+    """Validate one half's payload into a `Reading` — never echoing what it was given.
+
+    Every refusal is a `problem` CODE. The unvalidated value is deliberately NOT included: a
+    hostile or misconfigured deployment answering with the key (or its full hash) must not have that
+    value copied into a workflow log and, from there, into an issue body.
+    """
+    if not isinstance(payload, dict):
+        return Reading(half, url, problem="payload_not_an_object")
+    configured = payload.get(CONFIGURED_FIELD)
+    if not isinstance(configured, bool):
+        # `null`/absent is not `false`: "this deployment did not say" and "this deployment has no
+        # key" are different readings, and only the second one can be compared against the other
+        # half's silence.
+        return Reading(half, url, problem="configured_not_a_bool")
+    raw_reason = payload.get(REASON_FIELD)
+    reason = raw_reason if isinstance(raw_reason, str) and raw_reason else None
+    raw_fp = payload.get(FINGERPRINT_FIELD)
+    if configured:
+        if not isinstance(raw_fp, str) or not FINGERPRINT_RE.match(raw_fp):
+            # ⛔ THE DISCLOSURE GATE, and the one place a "helpful" implementation goes wrong: the
+            # obvious `f"bad fingerprint {raw_fp!r}"` would republish exactly what the shape check
+            # exists to contain.
+            return Reading(
+                half, url, configured=True, reason=reason,
+                problem=f"{FINGERPRINT_FIELD}_not_12_lowercase_hex",
+            )
+        return Reading(half, url, fingerprint=raw_fp, configured=True, reason=reason)
+    # A half that says it is NOT configured must not ALSO publish a fingerprint — that is a
+    # deployment contradicting itself, and comparing either field would be guessing which one it
+    # meant.
+    if raw_fp is not None:
+        return Reading(
+            half, url, configured=False, reason=reason,
+            problem="unconfigured_but_fingerprint_present",
+        )
+    return Reading(half, url, configured=False, reason=reason)
+
+
+def compare(api: Reading, app: Reading) -> Verdict:
+    """The one decision. Pure: no I/O, so the exit-code table is testable without a network."""
+    readings = [api, app]
+    unreadable = [r for r in readings if not r.readable]
+    if unreadable:
+        return Verdict(
+            "UNVERIFIABLE",
+            "could not read " + ", ".join(f"{r.half}({r.problem})" for r in unreadable),
+            EXIT_NO_VERDICT,
+            readings,
+        )
+    configured = {r.half: bool(r.configured) for r in readings}
+    if not any(configured.values()):
+        return Verdict(
+            "OFF",
+            "neither half is configured — consistent, but the consent bridge is DISABLED, so this is "
+            "no verdict on drift",
+            EXIT_NO_VERDICT,
+            readings,
+        )
+    if configured["api"] != configured["app"]:
+        live = [r.half for r in readings if r.configured]
+        dark = [r.half for r in readings if not r.configured]
+        return Verdict(
+            "SPLIT",
+            f"{'/'.join(live)} is configured and {'/'.join(dark)} is not — one half signs, the other "
+            "cannot verify",
+            EXIT_DISAGREE,
+            readings,
+        )
+    if api.fingerprint != app.fingerprint:
+        return Verdict(
+            "MISMATCH",
+            "both halves are configured and hold DIFFERENT keys — every minted consent token is "
+            "refused `401 signature does not verify`",
+            EXIT_DISAGREE,
+            readings,
+        )
+    return Verdict("AGREE", "both halves publish the same key fingerprint", EXIT_AGREE, readings)
+
+
+def _get_json(url: str, timeout: float) -> tuple[object | None, str | None]:
+    """`(payload, problem)`. Any transport/parse failure is a `problem` CODE, never an exception."""
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        return None, f"http_{exc.code}"
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None, "unreachable"
+    except Exception:                                   # pragma: no cover - defensive
+        return None, "transport_error"
+    if status != 200:
+        return None, f"http_{status}"
+    try:
+        return json.loads(body), None
+    except (ValueError, UnicodeDecodeError):
+        return None, "body_not_json"
+
+
+def read_api(api_url: str, timeout: float) -> Reading:
+    """The Fly half — `{api}/health` → `consent_token_key`."""
+    url = api_url.rstrip("/") + API_PATH
+    payload, problem = _get_json(url, timeout)
+    if problem:
+        return Reading("api", url, problem=problem)
+    block = payload.get(PAYLOAD_FIELD) if isinstance(payload, dict) else None
+    if not isinstance(block, dict):
+        # ⛔ A `/health` WITHOUT this block is not "an older deployment is fine": it is a deployment
+        # that cannot answer the question, which is the shape that made this drift invisible.
+        return Reading("api", url, problem=f"{PAYLOAD_FIELD}_absent")
+    return parse_reading("api", url, block)
+
+
+def read_app(app_url: str, timeout: float) -> Reading:
+    """The Pages half — `{app}/api/consent/key` is the payload itself."""
+    url = app_url.rstrip("/") + APP_PATH
+    payload, problem = _get_json(url, timeout)
+    if problem:
+        return Reading("app", url, problem=problem)
+    return parse_reading("app", url, payload)
+
+
+def _fix_hint(verdict: Verdict) -> str:
+    """What to DO — the rotation is three steps, and only the first is automated (§2.5)."""
+    if verdict.verdict in ("MISMATCH", "SPLIT"):
+        return (
+            "fix: a rotation is THREE steps, because Pages bakes env at deploy time — "
+            "(1) `fly secrets set CONSENT_TOKEN_SECRET=…` (or the deploy-hosted workflow), "
+            "(2) set the same value on the `tortoise-dashboard` Pages project, "
+            "(3) REDEPLOY Pages (a corrected value does NOT reach an already-deployed Function). "
+            "Correcting the dashboard alone leaves the deployed Function signing with the old key — "
+            "measured 2026-11-01."
+        )
+    if verdict.verdict == "OFF":
+        # ⛔ NO "see above" here: `render()` prints exactly ONE hint, and the three-step rotation is
+        # emitted only by the MISMATCH/SPLIT arm — so a cross-reference would dangle in this arm's own
+        # output. Name the doc instead, which is where the runbook actually lives.
+        return (
+            "fix: nothing is wrong with the CONFIGURATION — the bridge is simply not enabled on "
+            "either half, so there is no drift to fix. If it is meant to be live, the three-step "
+            "rotation (set Fly, set Pages, REDEPLOY Pages) is in "
+            "docs/engineering/auth/consent-identity-bridge.md §2.5."
+        )
+    return "fix: re-read both origins; a half that cannot be read is not a half that agrees."
+
+
+def render(verdict: Verdict) -> str:
+    lines = [f"CONSENT-KEY: {verdict.verdict}"]
+    for reading in verdict.readings:
+        if not reading.readable:
+            lines.append(f"  {reading.half:<4} {reading.url}  UNREADABLE ({reading.problem})")
+            continue
+        shown = reading.fingerprint if reading.fingerprint else "—"
+        lines.append(
+            f"  {reading.half:<4} {reading.url}  fingerprint={shown} "
+            f"configured={str(bool(reading.configured)).lower()}"
+            + (f" reason={reading.reason}" if reading.reason else "")
+        )
+    lines.append(f"  detail: {verdict.detail}")
+    if not verdict.ok:
+        lines.append(f"  {_fix_hint(verdict)}")
+    return "\n".join(lines)
+
+
+def as_json(verdict: Verdict) -> str:
+    return json.dumps(
+        {
+            "verdict": verdict.verdict,
+            "exit_code": verdict.exit_code,
+            "detail": verdict.detail,
+            "fix": None if verdict.ok else _fix_hint(verdict).removeprefix("fix: "),
+            "readings": [
+                {
+                    "half": r.half,
+                    "url": r.url,
+                    "fingerprint": r.fingerprint,
+                    "configured": r.configured,
+                    "reason": r.reason,
+                    "problem": r.problem,
+                }
+                for r in verdict.readings
+            ],
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Compare the consent bridge's key fingerprint on its two origins (#10488).",
+        epilog=(
+            "Exit codes: 0 AGREE · 1 MISMATCH/SPLIT (measured disagreement) · "
+            "2 OFF/UNVERIFIABLE (no verdict; both RED for a monitor)."
+        ),
+    )
+    parser.add_argument("--api-url", default=DEFAULT_API_URL, help=f"AS origin (default {DEFAULT_API_URL})")
+    parser.add_argument("--app-url", default=DEFAULT_APP_URL, help=f"session origin (default {DEFAULT_APP_URL})")
+    parser.add_argument("--timeout", type=float, default=15.0, help="per-request timeout in seconds (default 15)")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    args = parser.parse_args(argv)
+
+    verdict = compare(
+        read_api(args.api_url, args.timeout),
+        read_app(args.app_url, args.timeout),
+    )
+    print(as_json(verdict) if args.json else render(verdict))
+    return verdict.exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

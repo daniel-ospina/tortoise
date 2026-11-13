@@ -302,6 +302,116 @@ bridge does mean an AS-origin XSS now also reaches the session origin's BFF. **T
 recorded decision to keep the page on `api.*`, and it is why the CORS allowlist must be an exact origin
 match, not a suffix rule.**
 
+### 2.5 The key has TWO homes — the fingerprint contract (#10488)
+
+**The measured failure.** `CONSENT_TOKEN_SECRET` is one secret with two homes, and only one is managed:
+
+| half | origin | who sets the value |
+|---|---|---|
+| mint | `app.premiselabs.co` (Cloudflare Pages Function) | **a human, by hand, in the CF dashboard** |
+| verify | `api.premiselabs.co` (Fly machine) | **CI**, from the GitHub repo secret |
+
+On 2026-11-01 they held **different values**. The mint answered `200` with a well-formed 680-byte JWT
+(`aud=tortoise-consent`) and the AS answered
+`401 {"error":"invalid_token","error_description":"Invalid consent token: signature does not verify."}`.
+`tortoise/consent_token.py` emits `signature does not verify` **only** on an HMAC mismatch, so the verifier
+was right both times: the two deployments simply held different keys. It cost a full diagnosis cycle, and
+nothing anywhere was red — `deploy-hosted` and `deploy-pages` were both green, mint returned `200`, and the
+only user-visible symptom was the consent page saying *"Your approval expired before it was issued"*, which
+blames the visitor's session rather than the configuration.
+
+**Why the configuration side cannot answer it.** Cloudflare Pages does not return a `secret_text` env var's
+**value**, and Fly never returns a secret's. `tools/check_pages_bindings.py` (the #3616 gate) therefore proves
+the **name** exists on both platforms and can never prove the two **values** agree. The question is only
+answerable from the running deployments.
+
+**The contract.** Each half publishes a truncated hash of the key it holds, and one comparison answers
+whether they agree:
+
+| half | surface | field |
+|---|---|---|
+| AS | `GET {api}/health` → the `consent_token_key` block | `{key_fingerprint, configured, reason}` |
+| Pages | `GET {app}/api/consent/key` | the same three keys, as the whole body |
+
+`key_fingerprint` is **`sha256(key)[:12]`** — 12 lowercase hex — computed over the **same bytes the HMAC is
+computed over** (byte-exact, never trimmed; `consent_token.py::consent_key_fingerprint` and
+`consent-bridge.ts::consentKeyFingerprint` are the two statements of it). `configured: false` pairs with
+`key_fingerprint: null`, so an unprovisioned half can never compare as *equal* to a working one.
+
+**Why publishing it is safe — argued, not asserted:**
+
+- it is a truncated hash of a **≥32-byte operator-generated key** — the length floor is the code's
+(`tortoise/consent_token.py::_MIN_SECRET_BYTES`, enforced so the arm is treated as unprovisioned), which §8
+records as an implementation floor and **not** a §2.3 requirement — so it is not the key, not
+a prefix of the key, and not invertible: a preimage search is 2^256 and 48 published bits leave the key's
+space untouched for any guessing strategy. A key an attacker can *enumerate* is already lost without this
+field — that is precisely why the floor exists at all;
+- it gives a **guessing** attacker nothing new: a guess can already be checked against the live verifier in
+one request (`GET /oauth/consent/preview`, with the token in `X-Consent-Token`, answers `signature does not verify`), so the fingerprint is a
+strictly **weaker** oracle than a surface that exists on purpose;
+- at 12 hex the only way this signal can lie is a **collision** between two independently generated keys
+(~2^-48 per rotation), and its cost is one turn of the incident this field exists to make visible — not a
+security loss;
+- **no domain prefix** (`sha256("consent-key:" + key)`) on purpose: the operator must be able to reproduce
+the number from the value they hold with the one-liner in §8, and a fingerprint a human cannot verify
+independently is one they must take on trust. Nothing here needs preimage resistance — only agreement.
+
+**The comparison:** `tools/consent_key_check.py` reads both surfaces and prints/exit-codes one of five
+verdicts — `AGREE` (0), `MISMATCH` (1), `SPLIT` (1, exactly one half configured), `OFF` (2, neither
+configured: consistent but **not** agreement), `UNVERIFIABLE` (2, a half could not be read or published a
+malformed field). Both 1 and 2 are RED for a monitor; they differ in what they claim — a measured
+disagreement vs no measurement. The tool **never accepts, reads or prints a key** (it has no such flag and
+reads no env), and it validates even the fingerprints it receives against `^[0-9a-f]{12}$` before
+comparing — a half that answered with the key, a prefix, or a full digest is `UNVERIFIABLE` and the value is
+**not echoed** into a CI log or an issue body.
+
+**Where it runs, and why THAT place.** `.github/workflows/consent-key-drift.yml`, on a **schedule** (and
+`workflow_dispatch`), NOT from `deploy-pages.yml` and not per-PR:
+
+- Cloudflare's own **Git integration builds Pages directly on push** — measured: production deployment
+`0ce4ee20`, trigger `ad_hoc`, commit `7adf5cea`, 02:53:41Z, created while the GitHub `deploy-pages` run was
+still **queued**. A check placed only inside `.github/workflows/deploy-pages.yml` therefore misses the
+dominant build path, so the gate is independent of the build entirely;
+- the condition is a **steady state** (two deployments holding different keys), not an event: only a poll
+sees it, and nothing fires when a value stays wrong. A dropped scheduled fire is not a loss — the next tick
+repeats the reading (`check-deploy-staleness.sh`'s reason, one seam along);
+- a red cron run can never block a merge: a `schedule`-event run is a NON-CODE event, which the merge rail's
+`NON_CODE_EVENTS` set excludes from the merge decision. The monitor's signal is the issue
+`auto-file-issue.sh` files (one issue per streak, closed on recovery), not a gate on a PR.
+
+**A rotation is THREE steps, and only the first is automated.** Measured: after the dashboard value was
+corrected, the **already-deployed** Function kept signing with the **old** key until a new deployment
+existed — Pages bakes env at deploy time. So:
+
+1. `fly secrets set CONSENT_TOKEN_SECRET=…` (or land the deploy that stages it from the repo secret);
+2. set the same value on the `tortoise-dashboard` Pages project;
+3. **redeploy Pages** — correcting the dashboard value alone leaves the deployed Function on the old key.
+
+Then run `uv run python tools/consent_key_check.py` and require `AGREE`. Both fingerprints are printed, so
+the reading can be reconciled against a dashboard by eye.
+
+**What is still invisible after this lands (stated, not implied):**
+
+- **Who wins when they disagree at RUNTIME.** The fingerprints say the two deployments hold different keys;
+they do not say which one is *correct*. Today the answer is "the one the repo secret holds", because Fly's
+copy is CI-managed and Pages' is not — but that is a convention, not a checked invariant.
+- **The reason the Pages copy is wrong.** Nothing can read that value, so the field cannot distinguish
+"typed an old key" from "typed the right key and never redeployed" — step 3 of the runbook is a human
+convention. The fingerprint DOES pin the second case: the deployed Function's key is what it publishes.
+- **A drift that exists between the cron tick and the next rotation** is caught on the next tick (every 30
+minutes), not at the moment it is introduced.
+- **The Pages binding's TYPE.** `config/required-bindings.yml` declares `CONSENT_TOKEN_SECRET` as an
+`env_vars` binding; it does not require it to be a `secret_text`, which is the stronger classification for a
+signing key. Not changed here (it is a separate binding-hygiene decision, and #3616's gate checks presence,
+not type).
+
+**OPEN DECISION — should CI own the Pages value?** (issue option **A**: a `wrangler pages` call that writes
+the Pages env var from the repo secret, so a rotation touches GitHub only). It removes the hand step
+entirely, which is strictly better than detecting it late. It needs a **Cloudflare API token with
+`Pages:Edit` in CI** — a new credential, and the owner's explicit sign-off — so it is **NOT taken here**.
+The fingerprint contract composes with it: A removes the hand step, and this check proves A actually took
+effect. Filed as the open question rather than assumed.
+
 ## 3. The four properties (task 3) — confirmed anchors, and where each lives now
 
 `SCOPE.md` §4 W3 asked for the four line anchors to be **confirmed, not re-anchored**, because the
@@ -464,6 +574,17 @@ Authorize inert and offers the retry.
       provider sign-in no longer leaves the app origin (§6). Record the answer on #3524.
 - [ ] `CONSENT_TOKEN_SECRET` exists on **both** the `tortoise-dashboard` Pages project and the hosted API,
       and `config/required-bindings.yml` declares it (the deploy preflight then fails closed until it does).
+- [ ] **The two halves hold the SAME value (§2.5, #10488).** Run
+      `uv run python tools/consent_key_check.py` — it must print `CONSENT-KEY: AGREE` and exit 0. It reads
+      one number from each live deployment (`{api}/health` → `consent_token_key`, and
+      `{app}/api/consent/key`), so it needs no credential and no browser. Any other verdict is RED.
+      To check ONE half by hand against a value you hold, reproduce the fingerprint the same way both
+      halves compute it — `sha256` of the key's **bytes**, first 12 lowercase hex:
+      `printf %s "$CONSENT_TOKEN_SECRET" | sha256sum | cut -c1-12`. ⛔ Byte-exact: a value with a trailing
+      newline (the normal result of `fly secrets set … < file`) hashes DIFFERENTLY, which is the same
+      defect this field detects rather than a false alarm.
+- [ ] After changing the value on EITHER half, **redeploy Pages** — Pages bakes env at deploy time, so a
+      corrected dashboard value does not reach an already-deployed Function (§2.5, measured 2026-11-01).
 - [ ] `CONSENT_TOKEN_SECRET` is a **dedicated** value of **at least 32 UTF-8 bytes** (≈32
       characters for an ASCII key) — NOT the
       service-role key and NOT the anon key (§2.3). The length is an implementation floor, not a
