@@ -232,11 +232,13 @@ Otherwise it is a Tier E test, and it must **name the tier in its docstring** so
 ## Provenance of the numbers in this document
 
 **Read every `file:line` here as a STAMP, not as an address** — the **symbol** is authoritative. ⛔ **Two
-classes of number live in this file, and neither is "the" right one:** the rows re-pointed by a review
-resolve at the head their repair was measured at (and so at the current head), while the **stamp-bound**
-rows carry the head they were read at, `a577d0e25c`. `:82`'s `hosted_api.py:18494` and `:147`'s
-`hosted_api.py:18205` are the **same guard** (`if count + est > max_points`) read 289 commits apart — not a
-contradiction to fix. The full record, including why re-pointing rots, is `05-verify.md` D5.
+classes of `file:line` cite live in this file, and neither is "the" right one:** the rows whose cites were
+re-measured resolve at the head that measurement was taken at, while the **stamp-bound** rows carry the head
+they were read at, `a577d0e25c`. `:82`'s `hosted_api.py:18494` and `:147`'s `hosted_api.py:18205` are the
+**same guard** (`if count + est > max_points`) read at two heads hundreds of commits apart — not a
+contradiction to fix. (A *count* or a *duration* is a third class: those carry their own heads inline, §4's
+`900d4aafc6` and line 31's `durations_captured_at`, because a count is re-taken where a cite is not
+re-pointed.) The full record, including why re-pointing rots, is `05-verify.md` D5.
 
 ⛔ **Do not re-point in passing.** This note is a pointer to D5, not a second copy of it: a lane that
 "fixed" these two cites without reading D5 had to revert itself (`813e8d9297` → `8aeb35399c`). It sits at
