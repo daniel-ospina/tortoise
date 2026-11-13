@@ -275,10 +275,14 @@ def test_session_drain_names_the_unrecorded_count_and_the_session(tmp_path,
 
 
 def test_session_health_reports_the_unrecorded_count(tmp_path, capsys):
-    """MUTATIONS THAT RED THIS: keep the marker off the entry (health counts 0),
-    or fold the count into the PINNED health line (the cross-leg parity test
-    executes the real TypeScript against this module's line, so the pinned
-    spelling cannot grow a Python-only term)."""
+    """MUTATIONS THAT RED THIS: keep the marker off the entry (health counts 0 —
+    deletes the CAS stamp), or skip the stderr line. What it does NOT red is a
+    term folded into the PINNED stdout line: this row's absence check is a
+    cheap local guard, and the binding one is
+    `tests/test_capture_spool.py::test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state`,
+    which executes the shipped TypeScript against `capture_health_line(...).line`
+    and is what a Python-only term actually breaks (measured: folding
+    `, unrecorded {n}` in leaves THIS file green and reds that one)."""
     from tortoise import __main__ as main
 
     write_spool_entry(tmp_path, _snapshot())
@@ -290,7 +294,9 @@ def test_session_health_reports_the_unrecorded_count(tmp_path, capsys):
     # Python-only term in it (`capture: OK (0 queued)` / `INACTIVE (...)`
     # depending on the box's credential, neither of which may mention this).
     assert len([ln for ln in out.out.splitlines() if ln.strip()]) == 1, out.out
-    assert "UNRECORDED" not in out.out, out.out
+    # Case-insensitive on purpose: the spelling a Python-only term would take
+    # is lower-case, and an upper-case-only check would pass it (#12427).
+    assert "unrecorded" not in out.out.lower(), out.out
     assert "UNRECORDED" in out.err, out.err
     assert SESSION in out.err, out.err
 

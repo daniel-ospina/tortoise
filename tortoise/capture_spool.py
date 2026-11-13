@@ -2426,8 +2426,11 @@ def unrecorded_captures(root: Path) -> list[str] | None:
     a synthetic probe). ``None`` means the spool could not be LISTED — an
     unreadable directory is not an empty one.
 
-    Includes an entry stamped and then left unfiled by a compare-and-swap miss:
-    that session's outcome is just as unrecorded, and the next pass re-posts it.
+    Includes an entry that was stamped by an earlier pass and left unfiled since
+    (a replayed snapshot, or a later filing that did not carry it): that
+    session's outcome is just as unrecorded, and the next pass re-posts it. A
+    pass whose own compare-and-swap MISSES stamps nothing — see
+    :func:`_flush_one`, which states that rule where it is decided.
     """
     try:
         metas, discards = list_spool_metas(root, repair=False)
