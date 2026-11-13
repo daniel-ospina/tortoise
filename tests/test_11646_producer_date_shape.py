@@ -738,7 +738,8 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
 def _zone_child_env_base() -> dict[str, str]:
     """The zone child's environment: ``PATH``, the PARENT'S OWN import path, and nothing else.
 
-    ⛔ ``PYTHONPATH`` IS THE PARENT'S ``sys.path``, NOT the repo root alone (#12330).
+    ⛔ ``PYTHONPATH`` IS THE PARENT'S ``sys.path``, NOT the repo root alone (#11871/#11878
+    lineage; the failure below was measured on #12330's ``test (h)``).
     The repo root is not where the project's DEPENDENCIES live, and a scrubbed child that
     carries only the root can import ``tortoise`` and still fail on the first third-party
     import — measured on `test (h)` of tortoise run 43352300482 (jobs 131694957585 and
@@ -750,13 +751,15 @@ def _zone_child_env_base() -> dict[str, str]:
                     from pydantic import (
                 ModuleNotFoundError: No module named 'pydantic'
 
-    The PARENT already had ``pydantic`` LOADED at that moment — measured in a probe test at this
-    head: ``sys.modules`` holds ``pydantic`` and a full ``tortoise`` import chain, while
-    ``tortoise.commit_schema`` is NOT among them (this file never imports it; only the CHILD's
-    script does). ⛔ No module COUNT is quoted on purpose: the population moves with what has been
-    imported by the time you sample it (the suite's own baseline and this file's imports differ),
-    so a count here would be a number a later reader cannot re-derive — the two BOOLEANS above are
-    the stable part. So the package is installed and this very interpreter resolves it, and the
+    The PARENT's interpreter RESOLVES ``pydantic``: ``sys.executable -c "import pydantic"``
+    succeeds on that runner (2.13.4 on the box this was written on). ⛔ That is a statement about
+    RESOLUTION, and it is the only one this paragraph rests on. ``tortoise.commit_schema`` — the
+    module that imports ``pydantic`` — is NOT imported by this file (only by the CHILD's script),
+    so a ``sys.modules`` snapshot taken while these tests run is NOT stable evidence either way:
+    measured both ways at this head (one probe reported ``pydantic`` present, a narrower one did
+    not, and the population moves with what has already been imported by the time you sample it).
+    ⛔ Do not quote a ``sys.modules`` reading, or a module COUNT, here — a later reader cannot
+    re-derive either. So the package is installed and this very interpreter resolves it, and the
     child's failure is about the ENVIRONMENT it was handed — not about a package that is absent
     from the runner. ⛔ Do NOT read the parent's success as evidence ABOUT
     ``tortoise.commit_schema``: it says nothing about that module, only about resolution. (An
