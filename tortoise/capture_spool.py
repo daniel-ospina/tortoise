@@ -961,7 +961,9 @@ def _stem_set_stamp(stems: list[str]) -> str:
 
     The TS leg's ``stemSetStamp`` produces the SAME string, so the two legs —
     which share one spool root and one ledger — dedupe each other's records
-    rather than each writing its own.
+    rather than each writing its own. (Both sort the stem list — Python by code
+    point, JS by UTF-16 code unit — and the stems are `entry_key()` hex digests,
+    so the two orders cannot differ for any name the spool can hold.)
     """
     digest = hashlib.sha256("\n".join(stems).encode("utf-8")).hexdigest()[:16]
     return f"set:{digest}"
@@ -1526,7 +1528,10 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
                 # (the ENOENT race this very arm names, or real prune churn)
                 # would re-record BOTH directions on every alternation, forever.
                 # Keying on the set makes each distinct set its own pair: bounded
-                # by the 32-wide window, and each set is recorded once.
+                # by the 32-wide window — a set is recorded once while the number of
+                # DISTINCT unreadable sets seen inside that window stays <= 32; past
+                # that a cycling set is evicted and re-records, which costs one
+                # ledger line per scan and never correctness.
                 "session_id": f"unreadable:{stamp}",
                 "reason": DISCARD_META_UNREADABLE,
                 # RETAINED: every one of these metas AND its turn log stay on

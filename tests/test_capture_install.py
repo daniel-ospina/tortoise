@@ -4869,7 +4869,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: contract, so `tortoise-volunteer.ts` carries 21 too (its own digest lives in
 #: `_READ_SEAM_GENERATION_DIGESTS`).
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    21, "79de3acc5576499d35d7ed4024e710e15813874b17a5ed8dbbc3594c2912650a")
+    21, "351d9b3dc09823705a5c2a386271c80c5400e1adfa9fd3e07e2a333f20c41eda")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4881,7 +4881,7 @@ _GENERATION_DIGESTS = {
     # #11802: the drain stops destroying an unreadable spool entry. Both Pi
     # halves move together (one contract), so the READ seam gains its own 21
     # entry below.
-    21: "79de3acc5576499d35d7ed4024e710e15813874b17a5ed8dbbc3594c2912650a",
+    21: "351d9b3dc09823705a5c2a386271c80c5400e1adfa9fd3e07e2a333f20c41eda",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",

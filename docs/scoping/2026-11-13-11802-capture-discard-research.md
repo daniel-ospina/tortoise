@@ -11,7 +11,7 @@ created: 2026-11-13
 
 # Scoping — #11802: the drain destroys what it could not read
 
-**Lane:** `fix/11802-capture-discard` · **Worktree:** `.worktrees/fix-11802` · **Tier:**
+**Lane:** `fix/11802-capture-discard` · **Worktree:** `.worktrees/prd-12479` · **Tier:**
 standard+complex · **Domain:** Complicated (an established pattern applied one level up, not a new
 mechanism) · **Scope:** the tortoise-repo half only; the renderer/ownership half is
 agent-infra#3921.
@@ -19,8 +19,8 @@ agent-infra#3921.
 > **Why this doc exists.** The brief for this lane mandated research before code. This is that
 > research: what the repo already measured and holds, what the ontology says about what a spool
 > entry *is*, which deployed copy is being patched, and what the field converges on outside. Every
-> internal claim carries a `file:line`. Nothing here re-derives the causal chain the issue already
-> measured — it points at it.
+> internal claim carries an anchor — a symbol, or a base-pinned line where the exact bytes matter.
+> Nothing here re-derives the causal chain the issue already measured — it points at it.
 >
 > **Citations name SYMBOLS wherever they describe live code** (`list_spool_metas`, `recordSpoolMeta`, …):
 > the first draft transcribed `file:line` offsets against an older revision and only 2 of 11 still
@@ -91,11 +91,15 @@ ahead of both delivery classes**.
 > is still reachable by the ceiling and still permanently unfilable, which is what makes quarantine a
 > delayed delete. The order only changes *how long* the delay is.
 
-Confirmed in code: `tortoise/capture_spool.py`'s module docstring allows an `.orphan` to be reclaimed because it is
-"unreachable to every surface". The order is **filed entries → orphans → UNFILED, which are never
-evicted**: there is no unfiled eviction pass at all — the unfiled arm is a bare `continue`
-(`capture_spool.py` `_saturated_for_metas` and the unfiled bare `continue`; TS `pruneSpool`), guarded by *"an UNDELIVERED entry is the only copy of a
-conversation … the cap therefore stops here and the spool reports SATURATED instead"*. An earlier draft of
+Confirmed in code: `tortoise/capture_spool.py`'s module docstring allows an `.orphan` to be
+reclaimed because it is "unreachable to every surface" (`prune_spool`'s own comment repeats it). The
+order is **filed entries → orphans → UNFILED, which are never evicted**: there is no unfiled
+eviction pass at all. In Python the unfiled arm is a bare `if not _entry_is_filed(meta): continue`
+inside `prune_spool` (it is NOT in `_saturated_for_metas`, which is the ceiling predicate and
+contains no `continue` at all); in TS the leg never even enumerates them — `pruneSpool` iterates
+`ranked.filter(... entryFiled ...)`. The rule behind it is stated where the arm is: *"an UNDELIVERED
+entry is the only copy of a conversation … the cap therefore stops here and the spool reports
+SATURATED instead"*. An earlier draft of
 this document read the orphan pass as sitting *"between"* filed and unfiled and thereby implied a third
 pass that reaps unfiled work — corrected here, because that misreading is exactly the one this section
 exists to remove.
@@ -132,7 +136,7 @@ contradiction in favour of the position the read path already records.
 > **A refusal is a delay the operator can reverse (`--retry-terminal`), an unlink is a loss nobody
 > can.**
 
-and `tortoise/capture_spool.py` on `DISCARD_TRANSCRIPT_TORN`:
+and `DISCARD_TRANSCRIPT_TORN`'s comment in `tortoise/capture_spool.py`:
 
 > The entry is RECORDED and KEPT (marked terminal), NEVER unlinked: … a read/decode failure must
 > never delete user data (#7708 follow-up).
@@ -151,16 +155,18 @@ failure — on the transcript. The meta is the one sibling that never got the sa
 - **Precedent arms that keep + record**: `DISCARD_ENTRY_GROWTH_REFUSED` and `DISCARD_SPOOL_SATURATED`
   both write `retained: true` (`tortoise-capture.ts` the two `retained: true` arms), with the
   comment "a refused growth is a delay, not a loss".
-- **A `repair: false` reader** already skips corrupt entries without mutating
-  (`tortoise-capture.ts` `listSpoolEntries`'s retry comment).
+- **A `repair: false` reader** already skips corrupt entries without mutating — a bare
+  `if (!repair) continue;` inside `tortoise-capture.ts` `listSpoolEntries` (no comment there; the
+  TS *and* Python `repair=False` behaviour is documented on `list_spool_metas`).
 
 ### 2.4 Discard reasons are not a closed set at the server
 
-Only `tortoise/capture_spool.py`, `tortoise/__main__.py`, `tests/test_capture_spool.py` and
-`tests/test_capture_lane_3516.py` name the `DISCARD_*` values. (`tortoise/__main__.py` names exactly
-one — `DISCARD_SPOOL_SATURATED`, and filters on it; `tests/test_capture_lane_3516.py` names
-`DISCARD_HTTP_REJECTED`; `tests/test_3516_client_captured_at.py` names NONE, though the first draft
-listed it here.) (By contrast the *closed* sets
+The `DISCARD_*` values are named in both legs' modules (`tortoise/capture_spool.py`,
+`tortoise/pi-hooks/tortoise-capture.ts`), in their tests (`tests/test_capture_spool.py`,
+`tortoise/pi-hooks/tortoise-capture.test.ts`), and — on the hosted side — only in
+`tortoise/__main__.py`, which names exactly one (`DISCARD_SPOOL_SATURATED`) and additionally *filters*
+on it. `tests/test_capture_lane_3516.py` names `DISCARD_HTTP_REJECTED`; the first draft listed
+`tests/test_3516_client_captured_at.py` here, which names none. (By contrast the *closed* sets
 are `CAPTURE_LANES` and `CLIENT_CAPTURED_AT_SOURCES` (`tortoise/capture_spool.py`), which
 the server does validate.) So a new reason needs no server change — but it must be added to **both**
 legs, because the two legs drain one shared directory
@@ -194,7 +200,7 @@ Every number below is a `wc -lc` / `head -1` reading, not an inference:**
 
 | Copy | Path | Size / lines | Marker |
 |---|---|---|---|
-| Repo (canonical source) | `tortoise/pi-hooks/tortoise-capture.ts` | 206,167 B / 4,210 | `// tortoise-hook-version: 21` |
+| Repo (canonical source) | `tortoise/pi-hooks/tortoise-capture.ts` | 206,594 B / 4,216 | `// tortoise-hook-version: 21` |
 | Fleet deployed | `~/.pi/agent/extensions/tortoise-capture.ts` | 190,157 B / 3,935 | `// tortoise-hook-version: 18` |
 | Other repo | `agent-infra/extensions/tortoise-capture/index.ts` | 33,983 B / 827 | not the same artifact |
 
@@ -346,7 +352,7 @@ Checked against every recorded decision that reaches this work:
 
 | Decision | Reached by this fix? | Verdict |
 |---|---|---|
-| **#10175** — owner ruling 2026-10-27: the hosted capture cap is **HELD deliberately**; refusal is correct until the new extractor/storage architecture lands; carries an `OVERRIDES:` line. Must not touch the cap, prune the graph, or file the refusal as a defect. | **No.** The fix changes no ceiling (`SPOOL_MAX_ENTRIES`/`SPOOL_MAX_TOTAL_BYTES`/`MAX_ENTRY_BYTES` untouched), adds no eviction, prunes nothing. | **Not contradicted — and it is the same ruling.** A cap that REFUSES writes and KEEPS the backlog is exactly what #10175 holds; keeping an unreadable entry is *more* consistent with it than destroying one. **⚠️ CORRECTION (review cycle 1): the first version of this row claimed a retained unreadable entry "continues to occupy a count/byte slot". That is FALSE and was measured false.** Both legs compute count and bytes from PARSED metas (`capture_spool.py` `prune_spool`, which counts PARSED metas only; TS `pruneSpool`/`spoolSaturated`), so an unparsed meta and its live `.turns.jsonl` are counted by NEITHER the meta sum NOR `_orphan_paths` — a spool holding one unreadable entry measured 5,422 bytes on disk while `spool_saturated(…, max_total_bytes=1000)` returned `False`. This is a REAL residual of the retained path and is declared in §7; it is not fixed here — but NOT because #10175 holds against it (see §7: it does not); the reason is risk/scope. Filed as **tortoise#12483**. |
+| **#10175** — owner ruling 2026-10-27: the hosted capture cap is **HELD deliberately**; refusal is correct until the new extractor/storage architecture lands; carries an `OVERRIDES:` line. Must not touch the cap, prune the graph, or file the refusal as a defect. | **No.** The fix changes no ceiling (`SPOOL_MAX_ENTRIES`/`SPOOL_MAX_TOTAL_BYTES`/`SPOOL_MAX_ENTRY_BYTES` untouched), adds no eviction, prunes nothing. | **Not contradicted — and it is the same ruling.** A cap that REFUSES writes and KEEPS the backlog is exactly what #10175 holds; keeping an unreadable entry is *more* consistent with it than destroying one. **⚠️ CORRECTION (review cycle 1): the first version of this row claimed a retained unreadable entry "continues to occupy a count/byte slot". That is FALSE and was measured false.** Both legs compute count and bytes from PARSED metas (`capture_spool.py` `prune_spool`, which counts PARSED metas only; TS `pruneSpool`/`spoolSaturated`), so an unparsed meta and its live `.turns.jsonl` are counted by NEITHER the meta sum NOR `_orphan_paths` — a spool holding one unreadable entry measured 5,422 bytes on disk while `spool_saturated(…, max_total_bytes=1000)` returned `False`. This is a REAL residual of the retained path and is declared in §7; it is not fixed here — but NOT because #10175 holds against it (see §7: it does not); the reason is risk/scope. Filed as **tortoise#12483**. |
 | **#10977 comment `6781757043`** (2026-11-10) — one-belief-kind: a claim is a `:Point` with `pointKind: statement`; Object/Event/Subject/Source are different nodes on different layers, never a kind of claim; `decision` is an Event. | **No.** This fix writes no graph node and adds no kind. It reads the ontology only to locate what the spool entry *is*. §1 above obeys the ruling (a session is an `:Event` + `:Source`, not a claim). | **Not contradicted.** |
 
 No `OVERRIDES:` line is added by this lane, because nothing here departs from a default
@@ -371,9 +377,8 @@ Alternatives considered and **rejected**, with the reason:
 2. **Quarantine the meta as well as the transcript, and record it.** Rejected: §4.1 — quarantine
    requires a successful metadata read to identify the item; and per §1 the meta is the *only* copy of
    the session id, so removing it from the scan path guarantees the entry can never be filed. A
-   quarantined copy of the meta would be reaped too — and the quarantine happens at the END of the scan, so
-   the copy would survive exactly one drain and then be gone (`capture_spool.py` module docstring: an
-   `.orphan` is "unreachable to every surface").
+   quarantined copy of the meta would be reaped too — orphans go after the filed pass, and meta
+   quarantine is the shape this PR exists to stop (`capture_spool.py` `prune_spool`).
 3. **Add a dead-letter queue.** Rejected: the spool already **is** the retry queue with backoff
    (`next_attempt_at_ms`, `attempts`). A DLQ adds machinery and another unreachable surface, which is
    the very failure mode being fixed.
@@ -453,7 +458,9 @@ faithful mirror*, which is false on this axis; the comment now names the diverge
   real per-turn path; the N-wide window also crowded admission refusals out at N>32. **Cycle 2's fix,
   now in this change:** the arm records **ONE aggregate** for the whole unreadable SET, keyed on a
   digest of the **stem set alone** (`stemSetStamp` / `_stem_set_stamp` — byte-identical across the two
-  legs, so they dedupe each other's records), and consumes ONE refusal-window slot instead of N.
+  legs, so they dedupe each other's records: the stems are `entry_key()` hexdigests, so Python's
+  code-point sort and JS's UTF-16 sort cannot order them differently), and consumes ONE
+  refusal-window slot instead of N.
   Pinned in both legs **with a new readable meta written between every scan** — the mutation test now
   reds at `got 5` when the dir-stamp key is restored, which is precisely the cycle-2 measurement.
 - **(3) An inverted eviction-order claim.** Corrected in §1 above and in both code comments; the

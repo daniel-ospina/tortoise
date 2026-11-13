@@ -1601,8 +1601,11 @@ export function listSpoolEntries(
           // would remember just the newest set — and an alternating set (the
           // ENOENT race this very arm names, or real prune churn) would re-record
           // BOTH directions on every alternation, forever. Keying on the set
-          // makes each distinct set its own pair: bounded by the 32-wide window,
-          // and each set is recorded once.
+          // makes each distinct set its own pair: bounded by the 32-wide window —
+          // a set is recorded once while the number of DISTINCT unreadable sets
+          // seen inside that window stays <= 32; past that a cycling set is
+          // evicted and re-records, which costs one ledger line per scan and
+          // never correctness.
           session_id: `unreadable:${stamp}`,
           reason: DISCARD_META_UNREADABLE,
           // RETAINED: every one of these metas AND its turn log stay on disk,
@@ -1820,7 +1823,10 @@ function entriesDirStamp(dir: string): string {
  *  never wrote between scans.
  *
  *  Byte-identical to the Python leg's `_stem_set_stamp`, so the two legs — which
- *  share one spool root and one ledger — dedupe each other's records. */
+ *  share one spool root and one ledger — dedupe each other's records. (Both sort
+ *  the stem list — JS by UTF-16 code unit, Python by code point — and the stems
+ *  are `entryKey()` hex digests, so the two orders cannot differ for any name the
+ *  spool can hold.) */
 function stemSetStamp(stems: string[]): string {
   return `set:${createHash("sha256").update(stems.join("\n"), "utf8").digest("hex").slice(0, 16)}`;
 }
