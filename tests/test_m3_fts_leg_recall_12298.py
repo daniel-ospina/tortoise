@@ -463,7 +463,41 @@ def _scoped(brief: str, heading: str) -> str:
 # when matching `values`, so a caller keeps passing the magnitude it derives from
 # the artifact while the shape still matches (and therefore counts) a falsified
 # copy whose sign was flipped (#12349 round-24 reviewer, P2).
-_SIGNED_NUMBER = r"[-\u2212+]?\d+(?:\.\d+)?(?:e[-\u2212+]?\d+)?"
+_SIGNED_NUMBER = r"[-\u2212+]?\d+(?:\.\d+)*(?:e[-\u2212+]?\d+)?"
+
+# ⛔ THE WORDS THAT CAN INVERT A CLAIM (#12349 round-24 reviewer, cycle 5: five
+# consecutive cycles found one of these left unnamed, so the discipline becomes a
+# GATE like the numeric one). A claim's direction lives in its comparatives, its
+# polarities and its operators — a small, enumerable class — and a pivot left
+# literal is exactly what turns the pin back into a presence check. This is NOT a
+# stop-word list: a word is here only because a document could falsify the claim
+# by rewriting it.
+_DIRECTIONAL = frozenset({
+    "greater", "less", "strictly", "weakly", "ahead", "behind", "inside",
+    "outside", "adds", "removes", "identical", "identically", "differ",
+    "differs", "differently", "exact", "approximate", "reachable",
+    "unreachable", "refuses", "accepts", "asserted", "ignored", "ascending",
+    "descending", "zero", "non-zero", "nonzero", "not", "fail", "pass",
+    "significant", "recovered", "two-sided", "one-sided", "tie", "tied",
+    "==", "!=", ">=", "<=", "<", ">", "\u2192",
+})
+_WORD_OR_OPERATOR = re.compile(r"[A-Za-z][A-Za-z'\-]*|[<>=!]=?|\u2192")
+
+
+def _unnamed_words(true: str, free: tuple[str, ...]) -> list[str]:
+    """DIRECTIONAL words/operators in `true` that the caller did not name in `free`.
+
+    The mirror of `_unnamed_values`, and the answer to a class five review cycles
+    found by hand (#12349 round 24): a pivot left literal stays literal in the
+    shape, so a falsified copy no longer matches and the restated truth satisfies
+    the pin — the same silent degradation an unnamed number causes.
+    """
+    residual = true
+    for alt in sorted({a for entry in free for a in entry.split("|")},
+                      key=len, reverse=True):
+        residual = residual.replace(alt, " ")
+    return [tok for tok in _WORD_OR_OPERATOR.findall(residual)
+            if tok.lower() in _DIRECTIONAL]
 
 
 def _magnitude(token: str) -> str:
@@ -483,8 +517,9 @@ def _unnamed_values(true: str, values: tuple[str, ...],
     helper back into a presence pin without anybody noticing.
     """
     residual = true
-    for token in sorted(free, key=len, reverse=True):
-        residual = residual.replace(token, " ")
+    for alt in sorted({a for entry in free for a in entry.split("|")},
+                      key=len, reverse=True):
+        residual = residual.replace(alt, " ")
     named = {_magnitude(v) for v in values}
     out = []
     for match in re.finditer(_SIGNED_NUMBER, residual):
@@ -493,8 +528,19 @@ def _unnamed_values(true: str, values: tuple[str, ...],
             continue
         before = residual[match.start() - 1] if match.start() else ""
         after = residual[match.end()] if match.end() < len(residual) else ""
-        if before.isalnum() or before == "_" or after.isalnum() or after == "_":
-            continue  # part of an IDENTIFIER, not a value (`BM25`, `m3-000014`)
+        # ⛔ Letters AFTER the number are a unit glued to the value (`1.33pts`),
+        # not an identifier — exempting them was a bypass (#12349 round-24
+        # reviewer, cycle 5). Letters BEFORE it are an identifier only when they
+        # are two or more (`BM25`) or the token is a hyphenated id (`m3-000014`).
+        if after.isalnum() or after == "_":
+            out.append(token)
+            continue
+        if before.isdigit():
+            continue  # a numeric run split by `-` inside an id (`m3-000014`)
+        prefix = re.search(r"[A-Za-z_]+$", residual[:match.start()])
+        if prefix and (len(prefix.group(0)) >= 2
+                       or re.search(r"[A-Za-z][A-Za-z0-9]*-\d", residual)):
+            continue  # part of an IDENTIFIER (`BM25`, `m3-000014`)
         # ⛔ NO bare `=` here (#12349 round-24 reviewer, cycle 4): `p = 0.34` is
         # the form every p-value pin uses, so exempting `=` exempted the exact
         # values this gate exists to require. Only real LABELS are exempt.
@@ -545,7 +591,13 @@ def _shape(text: str, values: tuple[str, ...] = (),
     equivalent for a WORD — a single unnamed content word (`refuses` → `accepts`,
     `inside` → `outside`, `two-sided` → `one-sided`) degrades the pin to a
     presence check exactly as silently as an unnamed number did. So `free=` must
-    name every word the claim's direction turns on.
+    name every word the claim's direction turns on — and `_only_claim` now REFUSES
+    a claim that leaves a DIRECTIONAL word literal (`_DIRECTIONAL`), which is the
+    mirror of the numeric gate. A `free` entry may also be an ALTERNATION
+    (`"strictly|weakly"`): a slot is then matched by exactly those words instead
+    of `\\S+`, which is what keeps two ADJACENT free slots from collapsing into
+    `\\S+ \\S+` and matching the whole section (measured: `strictly greater` with
+    both words freed matched 145 pairs in §4.1).
 
     ⛔ A SIGN is part of the value, not part of the wording (#12349 round-24
     reviewer, P2): every caller passes the MAGNITUDE, so with an unsigned token a
@@ -554,20 +606,26 @@ def _shape(text: str, values: tuple[str, ...] = (),
     floor". So the numeric token is signed (`_SIGNED_NUMBER`) and matching is by
     magnitude (`_magnitude`), which puts the sign inside the wildcard.
     """
+    # Each `free` entry maps every one of its ALTERNATIVES to that entry's
+    # pattern; a plain entry is `\S+`, an alternation entry only its own words.
+    slot: dict[str, str] = {}
+    for entry in free:
+        pat = (r"(?:" + "|".join(re.escape(a) for a in entry.split("|")) + ")"
+               if "|" in entry else r"\S+")
+        for alt in entry.split("|"):
+            slot[alt] = pat
     pattern = "(" + "|".join(
-        [re.escape(f) for f in sorted(free, key=len, reverse=True)]
+        [re.escape(a) for a in sorted(slot, key=len, reverse=True)]
         + [_SIGNED_NUMBER]) + ")"
     out = []
     named = {_magnitude(v) for v in values}
     for part in re.split(pattern, text):
-        if part is None:
-            continue
-        if part in free:
+        if part in slot:
             # `\S+`, not `\w+`: the falsifiable content of a claim is not always a
             # word — `` `==`, not `>=` `` has operators as its content, and a
             # `\w+` wildcard there matched nothing at all (measured: the pin
             # reddened on the TRUE sentence).
-            out.append(r"\S+")
+            out.append(slot[part])
         elif _magnitude(part) in named:
             out.append(_SIGNED_NUMBER)
         else:
@@ -603,6 +661,15 @@ def _only_claim(scope: str, true: str, where: str,
         "copy no longer matches and the plant passes — the false-pass class "
         "three review cycles found (#12349 round 24). Pass it in `values=`, or "
         "in `free=` if it is a word/threshold rather than a number")
+    unnamed_words = _unnamed_words(true, free)
+    assert not unnamed_words, (
+        f"{where} pins a claim whose DIRECTION words are not all named: "
+        f"{unnamed_words!r} in {true!r}. A pivot left literal stays LITERAL in "
+        "the shape, so a falsified copy does not match and the restated truth "
+        "satisfies the pin — the same silent degradation an unnamed number "
+        "causes, and the class five review cycles found by hand (#12349 round "
+        "24). Add the word to `free=` (it becomes `\\S+`, which is the point: the "
+        "claim's CONTENT must not be literal, its identity must be)")
     found = re.findall(_shape(true, values, free), scope)
     assert found == [true], (
         f"{where} must state this claim EXACTLY ONCE and to the artifact's "
@@ -625,8 +692,9 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     """
     claim = "while at k=5 it is \u22120.67 pts (the shipped leg ahead 2\u20130)"
     values = ("0.67", "2", "0")
+    claim_free = ("ahead",)
     # 1. the true claim alone is accepted
-    _only_claim(claim, claim, "scope", values=values)
+    _only_claim(claim, claim, "scope", values=values, free=claim_free)
     # 2. a SECOND, DIFFERENT claim about another window is NOT a duplicate.
     #    ⛔ The sentence must share the claim's WORDING — otherwise it cannot
     #    collide under any digit policy and the case proves nothing (round-24
@@ -635,18 +703,19 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     #    NO-OP for the defect its docstring names).
     _only_claim(
         claim + " while at k=10 it is \u22120.67 pts (the shipped leg ahead 2\u20130).",
-        claim, "scope", values=values)
+        claim, "scope", values=values, free=claim_free)
     # 3. falsified in place -> red
     with pytest.raises(AssertionError):
         _only_claim(claim.replace("\u22120.67", "\u22120.99"), claim, "scope",
-                    values=values)
+                    values=values, free=claim_free)
     # 4. falsified + the truth restated beside it: the class this helper closes
     with pytest.raises(AssertionError):
         _only_claim(claim.replace("\u22120.67", "\u22120.99") + " " + claim,
-                    claim, "scope", values=values)
+                    claim, "scope", values=values, free=claim_free)
     # 5. deleted -> red
     with pytest.raises(AssertionError):
-        _only_claim("no claim here", claim, "scope", values=values)
+        _only_claim("no claim here", claim, "scope", values=values,
+                    free=claim_free)
     # 6. a WORD-only claim: its content word is wildcarded, so a one-token
     #    falsification (identical -> equal/differ, the shape a real edit takes) is
     #    caught even when the true sentence is restated beside it. ⛔ Declared
@@ -660,21 +729,22 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
                     "scope", free=("identical",))
     # 8. an OPERATOR claim's content is its operators
     ops = "`==`, not `>=`"
-    _only_claim(ops, ops, "scope", free=("==", ">="))
+    _only_claim(ops, ops, "scope", free=("==|>=", "not"))
     with pytest.raises(AssertionError):
-        _only_claim("`>=`, not `==` and " + ops, ops, "scope", free=("==", ">="))
+        _only_claim("`>=`, not `==` and " + ops, ops, "scope",
+                    free=("==|>=", "not"))
     # 9. ARTIFACT-TIME GATE: a value the caller forgot to name is REFUSED rather
     #    than silently degrading the pin back to a presence check — the false-pass
     #    shape three review cycles independently found (`1e-6` unnamed, `only_b`'s
     #    `0` unnamed, a sign outside `values`).
     with pytest.raises(AssertionError, match="values are not all named"):
-        _only_claim(claim, claim, "scope", values=("0.67",))
+        _only_claim(claim, claim, "scope", values=("0.67",), free=claim_free)
     # …and an EXPONENT is a value, not an identifier: `1e-6` unnamed is refused
     # (the gate's first cut skipped it as "adjacent to a letter", which is how a
     # threshold slipped through a cycle).
     with pytest.raises(AssertionError, match="values are not all named"):
-        _only_claim("p < 1e-6", "p < 1e-6", "scope", values=())
-    _only_claim("p < 1e-6", "p < 1e-6", "scope", free=("1e-6",))
+        _only_claim("p < 1e-6", "p < 1e-6", "scope", values=(), free=("<",))
+    _only_claim("p < 1e-6", "p < 1e-6", "scope", free=("1e-6", "<"))
     # 10. …and it must NOT fire on an IDENTIFIER's digits (`BM25`, `m3-000014`) or
     #     on a LABEL (`k=5`, `§4.1`, `#12298`, `recall@3`) — those identify the claim.
     _only_claim("BM25 buys +1.33 pts (p = 0.34) in m3-000014",
@@ -691,6 +761,20 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     # 12. a value named EXACTLY as written (with its sign) must be accepted — the
     #     gate normalises the token AND the entries.
     _only_claim("it is -1.33 pts", "it is -1.33 pts", "scope", values=("-1.33",))
+    # 13. the WORD half of the gate: a DIRECTIONAL word left literal is REFUSED,
+    #     because it degrades the pin exactly as an unnamed number does — the class
+    #     five review cycles found by hand (#12349 round 24).
+    with pytest.raises(AssertionError, match="DIRECTION words are not all named"):
+        _only_claim("the shipped leg ahead 2–0", "the shipped leg ahead 2–0",
+                    "scope", values=("2", "0"))
+    # 14. …and an ALTERNATION entry keeps two ADJACENT freed words precise instead
+    #     of collapsing them into `\S+ \S+` (which matched the whole section).
+    _only_claim("is strictly greater than", "is strictly greater than", "scope",
+                free=("strictly|weakly", "greater|less"))
+    with pytest.raises(AssertionError):
+        _only_claim("is weakly less than, and elsewhere is strictly greater than",
+                    "is strictly greater than", "scope",
+                    free=("strictly|weakly", "greater|less"))
 
 
 # ── 1. the defect claim, asserted against the shipped tokenizer ─────────────
@@ -965,9 +1049,13 @@ def test_artifact_carries_the_rule_as_the_harness_constant(
     # ⛔ Each clause names its PIVOT word, and only that: free-ing every word of a
     # two-word claim turns the shape into `\S+ \S+`, which matched every
     # two-word pair in §4.1 (measured: 145 matches).
-    for clause, pivot in (("strictly greater", ("greater",)),
-                          ("exact two-sided McNemar", ("exact", "two-sided")),
-                          (threshold, ())):
+    # ⛔ ALTERNATIONS, not `\S+` slots: two adjacent freed words would collapse
+    # into `\S+ \S+` and match the whole section (measured: 145 matches).
+    for clause, pivot in (("strictly greater", ("strictly|weakly",
+                                                "greater|less")),
+                          ("exact two-sided McNemar", ("exact|approximate",
+                                                       "two-sided|one-sided")),
+                          (threshold, ("<|>",))):
         assert clause in artifact["decision_rule"], clause
         # §4.1 is where the brief states the rule's clauses (#12349 round 19).
         # The threshold's own digits are its VALUES (derived from the rule), so a
@@ -1551,6 +1639,7 @@ def test_brief_fixture_table_is_the_artifact(artifact, brief: str) -> None:
     # 24): even §-scoped, a restatement inside §3.5 kept the falsified summary
     # green, so the numbers must appear exactly once.
     _only_claim(_scoped(brief, "3.5"), sentence, "§3.5's fixture summary",
+                free=("reachable",),
                 values=(str(sh["reachable"]), str(n), str(fx["reachable"]),
                         str(tk["reachable"]), str(nv["reachable"])))
 
@@ -1869,7 +1958,7 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     triple = (f"{subset['recall_at_3_base']:.4f} → {subset['recall_at_3']:.4f}, "
               f"+{subset['delta_pts']:.2f} pts, "
               f"p = {subset['mcnemar_p_two_sided']:.3f}")
-    _only_claim(section2, triple, "§2's tokens-controlled triple",
+    _only_claim(section2, triple, "§2's tokens-controlled triple", free=("\u2192",),
                 values=(f"{subset['recall_at_3_base']:.4f}",
                         f"{subset['recall_at_3']:.4f}",
                         f"{subset['delta_pts']:.2f}",
@@ -1966,6 +2055,7 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
             f"+{(sn_fx - sn_sh) / len(snake) * 100:.1f} pts")
     _only_claim(plain33, want,
                 "§3.3's `snake_case` decomposition (re-derived from the ranks)",
+                free=("\u2192",),
                 values=(str(len(snake)), str(sn_sh),
                         f"{sn_sh / len(snake):.3f}", str(sn_fx),
                         f"{sn_fx / len(snake):.3f}",
@@ -2031,6 +2121,7 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, population,
                 f"terms {reach['postgres_bm25/tokens']} of {n}, BM25 with its own "
                 f"analyser {reach['postgres_bm25/native']} of {n}.")
     _only_claim(text, sentence, "the changelog's `#8933` fixture counts",
+                free=("reachable",),
                 values=(str(reach["falkordb_tfidf"]), str(n),
                         str(reach["falkordb_tfidf__tokens_fixed"]),
                         str(reach["postgres_bm25/tokens"]),
@@ -2297,9 +2388,10 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     _only_claim(_scoped(brief_text, "4.3"),
                 "any non-zero path share adds on top of it.",
                 "§4.3's second-positive-term claim",
-                # ⛔ `adds` is the pivot: `adds` → `costs` planted green without
-                # it (round-24 reviewer, P2).
-                free=("adds",))
+                # ⛔ `adds` and `non-zero` are both pivots: `adds` → `costs` and
+                # `non-zero` → `zero` each planted green (round-24 reviewer,
+                # cycles 2 and 5).
+                free=("non-zero", "adds"))
 
 
 def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> None:
@@ -2365,7 +2457,8 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         # removed. `"0"` wildcards the `–0` token only; `−0.67` is one signed
         # token whose magnitude is already named, and `k=5` stays literal.
         values=(f"{abs(k5['delta_pts']):.2f}", str(k5["only_a"]),
-                str(k5["only_b"])))
+                str(k5["only_b"])),
+        free=("ahead",))
 
     # §0's Reading-1 figure — the falsifier's own numbers, quoted verbatim by
     # every downstream reader, and unpinned until round 24 (ONE edit was green).
@@ -2384,7 +2477,9 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         "§0's Reading-1 falsifier figure",
         values=(f"{dep['recall_at_3']:.4f}", f"{dep['recall_at_3_base']:.4f}",
                 f"{dep['delta_pts']:.2f}"),
-        free=("1e-6",))
+        # ⛔ `1e-6` is the threshold and `<` is its COMPARISON (round-24 reviewer,
+        # cycle 5: `p > 1e-6` with the truth restated was green).
+        free=("1e-6", "<"))
 
     shipped = artifact["arms"]["falkordb_tfidf"]["ranks"]
     tokens = artifact["arms"]["postgres_bm25/tokens"]["ranks"]
@@ -2405,10 +2500,10 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         "§0's window-vs-order bullet",
         values=(str(len(both)), str(len(moved)), f"{mean_sh:.3f}",
                 f"{mean_tk:.3f}", str(max(moved.values()))),
-        # ⛔ `inside` is the claim's direction: `find INSIDE k=15` → `outside`
-        # inverts it, and a one-word rewrite with the truth restated was green
-        # (round-24 reviewer, cycle 4).
-        free=("inside",))
+        # ⛔ `inside` is the claim's direction (`inside` → `outside`) and
+        # `differently` is its point (`rank differently` → `identically`) —
+        # both planted green when left literal (round-24 reviewer, cycles 4-5).
+        free=("inside", "differently"))
 
     _only_claim(
         plain,
@@ -2421,7 +2516,7 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         # ⛔ Same shape as the scorer bullet's ZERO: when the count is 0 the claim
         # says `zero`, so the word is the value (round-24 reviewer, P2). `inside`
         # is the recovery's DIRECTION (`inside` → `outside` inverts it).
-        free=("zero", "inside") if inplace["only_a"] == 0 else ("inside",))
+        free=("recovered", "inside") + (("zero",) if inplace["only_a"] == 0 else ()))
 
     # §4's verdict line restates the same two deltas; it is the sentence a reader
     # quotes as the RESULT, so it is pinned with them rather than left as prose.
@@ -2473,7 +2568,7 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
     _only_claim(
         text, f"by ~{round(k3['delta_pts'])} point (not significant)",
         "the status note's '~N point (not significant)'",
-        values=(str(round(k3["delta_pts"])),), free=("not",))
+        values=(str(round(k3["delta_pts"])),), free=("not", "significant"))
     # ⛔ `free` covers a word SUBSTITUTED; it cannot see one DELETED, and `not` is
     # the word whose deletion INVERTS this claim while leaving it grammatical
     # (round-24 reviewer, cycle 3: `(not significant)` → `(significant)` with the
@@ -2938,7 +3033,7 @@ def test_brief_states_what_the_reuse_guards_actually_do(brief_text,
                 "the population",
                 "§2's count guard", free=("asserted",))
     _only_claim(flat, "`==`, not `>=`", "§2's index-wait equality",
-                free=("==", ">="))
+                free=("==|>=", "not"))
     _only_claim(flat, "a graph already holding exactly the same 300 names and "
                 "nothing else is still accepted",
                 "§2's accepted-reuse disclosure",
