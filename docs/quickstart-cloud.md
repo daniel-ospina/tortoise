@@ -177,7 +177,12 @@ every hosted command fails. With **no** credential configured it prints one
 `ℹ️` line (`self-hosted only`) and makes no request at all; `--offline` skips the two
 requests and says `not probed`, which is the answer for a proxy or an air-gapped
 runner. A `403`/`GRAPH_SCOPED_TEAM_SURFACE` refusal is reported as information, not a
-failure — the key is valid, its scope is narrower by design.
+failure — the key is valid, its scope is narrower by design — and a `503`/`429` from
+`/v1/team` is reported as a *service* refusal (capacity or rate limit) that leaves the key
+unproven rather than wrong, so a capacity blip does not red a healthy setup. When the
+identity comes from the checkout-local `./.tortoise` that `init --api-key` wrote, both rows
+say so: that is still the credential every command run in that directory would use, and the
+report names the file rather than implying it is your global one.
 
 Everyday commands:
 

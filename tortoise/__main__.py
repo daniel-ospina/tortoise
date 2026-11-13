@@ -12980,28 +12980,28 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                         "validity were NOT tested"))
         return
 
-    # ⛔ THE PROBE MUST NOT OBEY A CHECKOUT. `<cwd>/.tortoise` is repo-controlled
-    # (this module's transmitting surfaces exclude it for exactly that reason —
-    # `_resolve_transmit_config` / `global_only=True`, D1b/D1.2), and `doctor` is
-    # a routine verb people run in freshly cloned trees. Dialling a host that a
-    # checkout names is a silent beacon, and a host that answers
-    # `200 {"org_id": …}` makes this report certify an environment the checkout
-    # chose. The credential is still REPORTED (that is what `config show` is for);
-    # it is simply not exercised.
-    _cwd_store: Path | None = None
+    # ⛔ THE PROBE DOES OBEY THE LADDER — INCLUDING `<cwd>/.tortoise` — AND THAT IS
+    # DELIBERATE. The first version of this change refused to dial a
+    # checkout-supplied credential (the transmitting surfaces exclude that
+    # candidate, D1b/D1.2, so a repo can name a host = a beacon). But
+    # `tortoise init --api-key` — the DOCUMENTED hosted setup — writes `./.tortoise`
+    # and `docs/quickstart-cloud.md` tells the user to run the CLI from that same
+    # directory, so skipping it left the most common hosted layout with a `⚠️`
+    # "not probed" and exit 0 on a REVOKED key: #11912's own target broken again,
+    # on the documented path (fresh review round 4). A diagnostic's job is to
+    # report what THIS shell would actually use, so the store is dialled and its
+    # PROVENANCE is disclosed instead of the verdict being withheld.
+    _cwd_provenance = False
     try:
-        _cwd_store = Path.cwd() / ".tortoise"
+        _cwd_store: Path | None = Path.cwd() / ".tortoise"
     except OSError:
         _cwd_store = None
     if winner_path is not None and _cwd_store is not None and _same_path(winner_path, _cwd_store):
-        results.append(("Hosted", "⚠️",
-                        f"{_printable(_mask_display_target(api_url or ''))} — not "
-                        f"probed: the credential came from "
-                        f"{_printable(str(_cwd_store))}, a file this checkout "
-                        "controls (a diagnostic must not send a request to a "
-                        "host a repo names). Run `doctor` from another "
-                        "directory, or `tortoise config show` to inspect it"))
-        return
+        _cwd_provenance = True
+    _provenance_note = (
+        " (the credential is the checkout-local `./.tortoise` — a file this directory"
+        " controls, and the identity every command run HERE would use)"
+        if _cwd_provenance else "")
 
     # ── the reachability read (no credential in the request) ──
     # `_printable` is not cosmetic here: `api_url` is store-supplied (a
@@ -13149,7 +13149,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                         f"{base} refused the stored key. Re-mint it: `tortoise "
                         "signup` (new team) or `tortoise recover` (same team, "
                         "needs your st_ recovery token); `tortoise config show` "
-                        "names which store won"))
+                        f"names which store won{_provenance_note}"))
         return
 
     error_code = None
@@ -13183,7 +13183,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         # user to re-mint a working key.
         results.append(("Hosted", "ℹ️",
                         f"{health_part}; /v1/team 403 {error_code} — "
-                        f"{_ORG_INFO_REMEDIES[error_code]}"))
+                        f"{_ORG_INFO_REMEDIES[error_code]}{_provenance_note}"))
         return
 
     if isinstance(team_code, int) and 200 <= team_code < 300:
@@ -13239,14 +13239,32 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             health_note = " — " + "; ".join(health_notes)
         results.append(("Hosted", icon,
                         f"{base} — {health_part}; /v1/team accepted{extra}"
-                        f"{health_note}"))
+                        f"{health_note}{_provenance_note}"))
+        return
+
+    # A service-side refusal is NOT a credential verdict. `/v1/team` runs a
+    # usage count, which answers `503 graph_unavailable` on a saturated graph
+    # pool and `429` when the rate limit bites — the same transients `_cmd_init`
+    # retries instead of failing. A `❌` here (with a remedy pointing at the
+    # user's own config) reds `doctor` — and any CI/agent gating on its exit
+    # code — during a deploy or capacity blip, for a healthy key (fresh review
+    # round 4).
+    if isinstance(team_code, int) and (team_code in (408, 429) or 500 <= team_code < 600):
+        results.append(("Hosted", "⚠️",
+                        f"{health_part}; /v1/team answered {team_code} — the "
+                        "SERVICE refused this request, so the key stays UNPROVEN "
+                        "rather than wrong (capacity, rate limit or a restart). "
+                        f"Re-run shortly; `tortoise team info` reports the same "
+                        f"state. {_printable(body[:400]) if body else ''}"
+                        f"{_provenance_note}"))
         return
 
     code_display = team_code if team_code is not None else "no status"
     results.append(("Hosted", "❌",
                     f"{health_part}; /v1/team → API error {code_display}: "
                     f"{_printable(body[:2000]) if body else '(empty body)'}. "
-                    f"`tortoise config show` reports what this machine knows"))
+                    f"`tortoise config show` reports what this machine knows"
+                    f"{_provenance_note}"))
 
 
 def _cmd_doctor(args):

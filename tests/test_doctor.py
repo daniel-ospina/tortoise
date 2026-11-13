@@ -784,22 +784,31 @@ class TestDoctorHostedCredential:
         assert hosted is not None and "⚠️" in hosted, out[-1200:]
         assert "All checks passing" not in out, out[-1200:]
 
-    def test_a_checkout_supplied_credential_is_never_dialled(
+    def test_a_checkout_local_credential_is_probed_and_its_provenance_disclosed(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
-        """`doctor` must not obey `<cwd>/.tortoise` — a repo-controlled host.
+        """`./.tortoise` IS dialled — and the row says the credential is repo-local.
 
-        The transmitting surfaces exclude that candidate on purpose (D1b/D1.2):
-        a freshly cloned tree can name any host, so dialling it is a silent
-        beacon and a `200 {"org_id": …}` from it would forge a Hosted verdict in
-        the report agents use to judge the environment (fresh review round 3).
+        `tortoise init --api-key` writes `./.tortoise` and the hosted quickstart
+        tells the user to run the CLI from that directory, so skipping it left the
+        DOCUMENTED hosted layout with a warning and exit 0 on a revoked key — the
+        pre-#11912 defect back on the most common path (fresh review round 4). The
+        beacon/provenance concern is answered by disclosure instead: the verdict is
+        kept, and the reader is told which file supplied the identity.
         """
         import json as _json
         from pathlib import Path as _Path
 
         (_Path.cwd() / ".tortoise").write_text(_json.dumps(
             {"api_key": _FAKE_HOSTED_KEY, "api_url": "https://repo.example.test"}))
-        calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
-            f"a checkout-named host must not be dialled — requested {url}"))
+        seen: list[str] = []
+
+        def handler(url, req):
+            seen.append(url)
+            return (_FakeResponse(200, b'{"status":"ok"}')
+                    if url.endswith("/health") else
+                    _FakeResponse(200, b'{"org_id":"org-cwd"}'))
+
+        _stub_hosted(monkeypatch, handler)
         db_path = str(tmp_path / "cwd-store.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _seed_db(db_path, "doctor cwd store seed")
@@ -807,10 +816,74 @@ class TestDoctorHostedCredential:
         _run_doctor([])
         out = capsys.readouterr().out
 
-        assert calls == []
+        assert seen, "a checkout-local credential is the one this shell would use"
         hosted = _row(out, "Hosted")
-        assert hosted is not None and "not probed" in hosted, out[-1200:]
-        assert ".tortoise" in hosted, hosted
+        assert hosted is not None and "✅" in hosted, out[-1200:]
+        assert "checkout-local" in hosted, hosted
+        assert "accepted" in hosted, hosted
+
+    def test_a_checkout_local_credential_still_fails_when_the_key_is_revoked(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The documented layout must still red on a revoked key (`./.tortoise`)."""
+        import json as _json
+        from pathlib import Path as _Path
+        from urllib.error import HTTPError
+
+        (_Path.cwd() / ".tortoise").write_text(_json.dumps(
+            {"api_key": _FAKE_HOSTED_KEY, "api_url": "https://repo.example.test"}))
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise HTTPError(url, 401, "Unauthorized", {},
+                            __import__("io").BytesIO(b'{"detail":"Invalid API key"}'))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "cwd-revoked.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor cwd revoked seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "❌" in hosted, out[-1200:]
+        assert "401" in hosted, hosted
+        assert rc == 1
+
+    def test_a_transient_service_refusal_is_not_a_broken_credential(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """`503 graph_unavailable` is a SERVICE refusal, not a bad key.
+
+        `/v1/team` runs a usage count, so it answers 503 on a saturated pool and
+        429 under rate limiting — the same transients `_cmd_init` retries. A `❌`
+        (with a remedy aimed at the user's config) reds `doctor`, and anything
+        gating on its exit code, during a capacity blip (fresh review round 4).
+        """
+        from urllib.error import HTTPError
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise HTTPError(url, 503, "Service Unavailable", {},
+                            __import__("io").BytesIO(
+                                b'{"detail":{"error_code":"graph_unavailable"}}'))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "transient.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor transient seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "⚠️" in hosted and "❌" not in hosted, hosted
+        assert "503" in hosted and "UNPROVEN" in hosted, hosted
+        assert rc in (0, 1)
 
     def test_reply_bodies_are_read_with_a_bound(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
