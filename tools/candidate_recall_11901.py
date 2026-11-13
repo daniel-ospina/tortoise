@@ -359,10 +359,18 @@ def _fold_punct(text: str) -> str:
 
 def _git_head() -> str | None:
     """The commit the measurement ran on — an artifact with no head cannot be
-    reproduced against a tree."""
+    reproduced against a tree.
+
+    ⛔ ``cwd`` is pinned to THIS repo: a bare ``git rev-parse HEAD`` answers for
+    the process's working directory, so a run started from another checkout (or
+    any directory inside a different repo — ``tortoise`` is importable as an
+    installed package) would write THAT repo's sha into ``code_head``, and the
+    artifact would claim a provenance the measurement never had.
+    """
     try:
         out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                             text=True, timeout=10)
+                             text=True, timeout=10,
+                             cwd=Path(__file__).resolve().parent.parent)
         return (out.stdout.strip() or None) if out.returncode == 0 else None
     except Exception:
         return None
@@ -716,6 +724,17 @@ def run(args: argparse.Namespace) -> int:
                 # change what the blocker proposes.
                 blocked_ids = set(index.candidates(surface, label="Object"))
                 in_mk_block = row["id"] in blocked_ids
+                #: ⛔ THE DENOMINATOR IS NOT THE ONE `reduction_ratio` USES, and that
+                #: is a DECLARED difference rather than an accident: the index always
+                #: self-hits (a member blocks on its own keys), so this count
+                #: INCLUDES the mention itself while `_mk_pairs` below excludes it
+                #: (`if _cid != _row["id"]`). It is kept because the artifact of
+                #: record was measured with it and the bias is CONSERVATIVE — it
+                #: inflates the blocker's own cost by one per mention, which is the
+                #: direction that cannot flatter the change under test. Read
+                #: `candidates_mean_per_mention` / `candidates_max` as
+                #: "candidates INCLUDING the mention itself"; nothing else in the
+                #: artifact uses that denominator.
                 mk_len = len(blocked_ids)
                 for k in KS:
                     var[k]["pairs"] += 1

@@ -23,7 +23,7 @@ the shipped rung that replaced it:
   ⛔ The folded rung is now reached from that path: `_find_existing_entity`
   delegates to ``_find_by_folded_key`` (``extractor_v2.py:5823``), which binds on
   :func:`tortoise.entity_blocking.key_of` equality.
-* ``entity_resolver.entity_candidates`` (``entity_resolver.py:379``) blocked on
+* ``entity_resolver.entity_candidates`` (``entity_resolver.py:383``) blocked on
   ONE key — ``block_key`` = the first :data:`entity_resolver.MIN_BLOCK_CHARS`
   folded characters — so a transposition or a word-order change
   (``the project alpha`` vs ``alpha project``) landed in two blocks and the pair
@@ -67,12 +67,24 @@ Zep/Graphiti (`graphiti_core/utils/maintenance/dedup_helpers.py`, read at
    only key EQUALITY attaches (:func:`attach_matches`), which is why no second
    similarity constant appears here (`#2730` refused one; the semantic rung
    reuses ``embeddings.DEFAULT_THRESHOLD``).
-3. **A non-injective key never attaches alone.** A path basename
+3. **A non-injective key never attaches alone — and the FOLD is exempt, by
+   declaration.** A path basename
    (``lib/config.py``) is carried by every file of that name, so it is marked
    :data:`AMBIGUOUS_KEYS` and attaches **only when exactly one live candidate
    carries it AND the population is known complete** — the same "bare-form
    fallback ONLY when unambiguous" discipline ``_find_existing_entity`` already
-   applies to kinds. ⚠️ **No production caller passes ``complete=True`` today**:
+   applies to kinds. ⛔ **The ``E`` fold is non-injective too, and it DOES attach
+   alone**, which is a ``#12047`` property this module inherits rather than
+   creates: :func:`key_of` collapses punctuation, so ``C++``, ``C#`` and ``C``
+   all fold to ``c`` (likewise ``.NET``/``NET``, ``50%``/``50``), and a capture
+   window holding exactly one of them binds the other —
+   ``_find_existing_entity([{id:o1, name:"C#"}], "C++")`` returns ``o1`` by the
+   ``folded`` rung. Only ONE collider need be present, so the basename arm's
+   "exactly one carries it" test cannot see it. That is a DECLARED RESIDUAL, the
+   third beside ``space-to-hyphen`` and ``basename-only``: the dedupe scan reports
+   such a pair as ``exact``/``auto_mergeable`` so a reviewer meets it there, and
+   the fold is not tightened here (it is the stored ``canonical_name`` key, and a
+   tightening is a decision with its own measured cost). ⚠️ **No production caller passes ``complete=True`` today**:
    the only non-test caller is ``extractor_v2._find_by_folded_key``, whose
    population is a capped capture window, so a basename never decides there and
    the rule is currently held for a complete-population caller. ⚠️ A bare ``#`` reference is NOT in this class:

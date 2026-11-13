@@ -464,3 +464,35 @@ def test_the_scan_reports_its_largest_block_and_caps_NOTHING(monkeypatch):
     assert stats["max_block_size"] == n      # reported, not capped
     assert not stats.get("oversized_skipped"), (
         "the SCAN indexed a block as oversized — the cap belongs to the query path")
+
+
+def test_the_fold_collision_is_a_declared_residual_not_a_regression():
+    """Pins the THIRD declared residual: `E` is non-injective and attaches alone.
+
+    ⛔ This test asserts the behaviour this PR *declares*, not behaviour it
+    introduced: `key_of` collapses punctuation, so `C++`, `C#` and `C` share one
+    folded key and a capture window holding exactly ONE collider binds the other
+    through the `folded` rung. The basename arm cannot see it (only one collider
+    need be present), so it is a residual of the fold — a `#12047` property the
+    dedupe scan reports as `exact`/`auto_mergeable` — and the module docstring's
+    invariant 3 names it as such (beside `space-to-hyphen` and `basename-only`).
+
+    Pinned from BOTH directions on purpose: if the fold is ever tightened, this
+    reds and the docstring's residual list must be updated in the same commit —
+    whereas a silent tightening would leave the docstring claiming a cost the code
+    no longer pays.
+    """
+    from tortoise.extractor_v2 import _find_existing_entity
+
+    keys = {name: key_of(name) for name in ("C++", "C#", "C", ".NET", "NET")}
+    assert keys["C++"] == keys["C#"] == keys["C"], (
+        f"the fold no longer collides on these: {keys} — the declared residual in "
+        "entity_blocking.py invariant 3 is now stale")
+    assert keys[".NET"] == keys["NET"]
+
+    existing = [{"id": "obj-csharp", "name": "C#", "kind": "core:other"}]
+    node, method = _find_existing_entity(existing, "C++", "core:other")
+    assert (node["id"], method) == ("obj-csharp", "folded"), (
+        f"`C++` no longer binds a lone `C#` candidate (got {(node['id'], method)!r}) — if "
+        "that is deliberate, remove the residual from invariant 3 instead of "
+        "leaving it declared")
