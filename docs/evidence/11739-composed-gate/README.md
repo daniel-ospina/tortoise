@@ -207,11 +207,14 @@ definition — in-toto's Statement itself has no build-definition field):
 Neither is a head sha — the repo squash-merges, so a head sha is unverifiable when someone re-runs
 the probe to check it (the same binding the #11838 census uses). `_provenance()` in each probe is
 the ONE producer of its block: a fresh run calls it, and `--attest` calls it on an existing artifact.
-`--attest` fails closed on five shapes, each exit `2`, under four markers: an unreadable or
-unparseable artifact (`ATTEST-UNREADABLE`); a missing measurement — no gate verdicts, no
-`verdict.gates` block (so a deleted flag cannot be blessed), or no row source to record
-(`ATTEST-REFUSED`, which both probes print for all three); `all_pass` disagreeing with the three
-gate flags (`ATTEST-INCONSISTENT`); and an unwritable target (`PROBE-WRITE`). It exists
+`--attest` fails closed, exit `2`, under four markers — and the ARM SURFACE differs per probe,
+because the two artifacts answer different questions. `composed_gate.py` refuses an unreadable or
+unparseable artifact (`ATTEST-UNREADABLE`); no gate verdicts, no `verdict.gates` block (so a deleted
+flag cannot be blessed) or no `source` to record as `rows_source` (`ATTEST-REFUSED`); `all_pass`
+disagreeing with the three gate flags (`ATTEST-INCONSISTENT`); and an unwritable target
+(`PROBE-WRITE`). `quote_identity.py` refuses an unreadable artifact (`ATTEST-UNREADABLE`); no
+root-cause measurement or no `provenance.rows_source` (`ATTEST-REFUSED`); and an unwritable target
+(`PROBE-WRITE`) — it carries no verdict block, so it has no inconsistent-verdict arm. It exists
 because a fresh run is ~16 minutes of
 encoding while the binding is a pure function of the probe's bytes and the artifact's own payload;
 it rewrites ONLY `provenance`, so it cannot move a number. What a re-run reproduces is the

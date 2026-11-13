@@ -179,7 +179,7 @@ def test_artifact_evidence_is_the_evidence_that_was_attested(name: str):
     """FAILS IF a number, a count or a verdict inside either artifact is hand-edited.
 
     `provenance.payload_sha256` is written by the probe (`_provenance()`), over every field
-    except `provenance` itself. Recomputing it from the committed bytes is what makes
+    except `provenance` itself. Recomputing it from the committed file's parsed fields (plus its `rows_source`) is what makes
     "the artifact is dated evidence and is never hand-edited" a machine-checked claim rather
     than a sentence in the README: an edit that leaves `probe_sha256` intact (which is EVERY
     edit to the numbers) still moves this digest.
