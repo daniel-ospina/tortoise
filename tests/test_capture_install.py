@@ -4697,7 +4697,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 20}
+                             "pi": 21}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4800,12 +4800,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 20`` from
+    Mutation: delete ``// tortoise-hook-version: 21`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 20
+    assert hook_install.read_hook_version(_PI_SRC) == 21
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4856,7 +4856,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: trace survives past the session's next `turn_end` (BEHAVIOUR moved, so the
 #: generation moved with it).
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    20, "bf1a5b39a0b1433aa6b7e3e9a2231aed974e56f2133cb8f321cdb4de2a00ce9a")
+    21, "e974052ab651bc859501285a5208deff1da5fd34c4875e8a2a06a7a5f39df25b")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4865,6 +4865,10 @@ _PINNED_PI_SEAM_INSTALL_CONTRACT = (
 #: seen.  A new byte set therefore needs a NEW generation and a NEW entry here;
 #: an existing entry is never rewritten.
 _GENERATION_DIGESTS = {
+    # #11802: the drain stops destroying an unreadable spool entry. Both Pi
+    # halves move together (one contract), so the READ seam gains its own 21
+    # entry below.
+    21: "e974052ab651bc859501285a5208deff1da5fd34c4875e8a2a06a7a5f39df25b",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
@@ -4992,6 +4996,7 @@ _GENERATION_DIGESTS = {
 #: rule as its sibling: a byte set needs a NEW generation and a NEW entry, and an
 #: existing entry is never rewritten.
 _READ_SEAM_GENERATION_DIGESTS = {
+    21: "c168bb64a7ae7ba837f9c1627b869d356bb88ba573d11412fc243d11ed3066a7",
     # Generation 18: the read seam ships in the wheel at the generation that
     # grades the pair as one seam.  Nothing has shipped, so this entry is CREATED
     # here rather than rewritten.
@@ -5030,7 +5035,7 @@ _READ_SEAM_GENERATION_DIGESTS = {
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    20, "5737edf7c3e0beaf444f260225897ac508f6dd1424089db16db8ec2af9894190")
+    21, "c168bb64a7ae7ba837f9c1627b869d356bb88ba573d11412fc243d11ed3066a7")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

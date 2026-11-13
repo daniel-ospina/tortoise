@@ -1,4 +1,4 @@
-// tortoise-hook-version: 20
+// tortoise-hook-version: 21
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -40,6 +40,19 @@
 // shipped bytes move. `session verify`'s "it captures with older logic"
 // wording is imprecise for this one generation; the classification and the
 // repair it prompts are right.
+//
+// Generation 21 (#11802): the capture drain stops DESTROYING a spool entry it
+// could not read. Reading and parsing were one `catch`, so a `PermissionError`
+// at `open` was recorded as "meta is not valid JSON" — a claim about bytes the
+// process never opened — and the transcript was quarantined while the meta (the
+// only copy of the session id, the capture instant and the retry state) was
+// unlinked. 1,356 of 3,384 lost sessions were this class. A read refusal is now
+// `meta_unreadable`, RETAINED and retryable with both files left in place; only
+// a real parse failure keeps the quarantine path. A behavioural edit, so the
+// generation moves with it: a generation-20 install must read as STALE
+// ("reinstall"), never as `modified-artifact` ("local edit"). Both halves of the
+// Pi seam move together — `contract_version_for("pi")` grades them as ONE
+// contract.
 //
 // Generation 19 (#11662): the MARKER moves onto bytes that already shipped —
 // the same shape as generation 4. #11636 edited this artifact and left the
@@ -1563,14 +1576,28 @@ export function listSpoolEntries(
   //  - ONE aggregate consumes ONE slot of the (32-wide) refusal window, not N,
   //    so unreadable entries cannot crowd the admission refusals out of it and
   //    defeat `refusedAtCurrentState`'s fast path.
+  //
+  //  ⚠️ The trade, stated: the record names a COUNT and one example path, not one
+  //  record per entry, so an operator holding only `discarded.jsonl` cannot
+  //  enumerate all of them from the ledger — they read the count here and list
+  //  `entries/` for the rest. Boundedness is worth that; an unbounded per-entry
+  //  ledger is not an audit trail, it is a second problem.
   if (unreadable.length) {
     const stems = unreadable.map((u) => u.stem).sort();
+    const stamp = stemSetStamp(stems);
     const example = unreadable[0]!.message;
     discards.push(
       recordRefusal(
         dir,
         {
-          session_id: "unreadable",
+          // The digest is IN the pair key, not only in the stamp. Only ONE
+          // observation is remembered per (session_id, reason), so a fixed id
+          // would remember just the newest set — and an alternating set (the
+          // ENOENT race this very arm names, or real prune churn) would re-record
+          // BOTH directions on every alternation, forever. Keying on the set
+          // makes each distinct set its own pair: bounded by the 32-wide window,
+          // and each set is recorded once.
+          session_id: `unreadable:${stamp}`,
           reason: DISCARD_META_UNREADABLE,
           // RETAINED: every one of these metas AND its turn log stay on disk,
           // unquarantined and un-unlinked, so the next drain retries. Never a
@@ -1583,7 +1610,7 @@ export function listSpoolEntries(
             " — left in place and retryable; the bytes were never seen, so these" +
             " are NOT corrupt entries",
         },
-        { stamp: stemSetStamp(stems) },
+        { stamp },
       ),
     );
   }
@@ -1760,18 +1787,6 @@ function readRefusalStamps(dir: string): RefusalStamp[] {
  * dropped from the ledger — the one surface a refusal has.
  *
  * Fails toward RECORDING, exactly like the Python leg. */
-/** A stable dedupe stamp for a SET of names (#11802).
- *
- *  `entriesDirStamp` exists to answer "is this refusal verdict still true?", so
- *  it deliberately includes `entries/` mtime — which ANY write to the directory
- *  moves. That is right for an admission refusal and wrong for a set of
- *  unreadable files: a turn writes a new (readable) meta, the mtime moves, and a
- *  dir-stamp key therefore suppresses nothing on exactly the per-turn path the
- *  dedupe is for. This stamp changes only when the SET changes. */
-function stemSetStamp(stems: string[]): string {
-  return `set:${createHash("sha256").update(stems.join("\n"), "utf8").digest("hex").slice(0, 16)}`;
-}
-
 function entriesDirStamp(dir: string): string {
   try {
     const names = readdirSync(entriesDir(dir))
@@ -1783,6 +1798,25 @@ function entriesDirStamp(dir: string): string {
   } catch {
     return "unreadable";
   }
+}
+
+/** A stable dedupe stamp for a SET of names (#11802).
+ *
+ *  `entriesDirStamp` above exists to answer "is this refusal verdict still true?",
+ *  so it deliberately includes `entries/` mtime — which ANY write to the
+ *  directory moves. That is right for an admission refusal and wrong for a set of
+ *  unreadable files: a turn writes a new (readable) meta, the mtime moves, and a
+ *  dir-stamp key therefore suppresses nothing on exactly the per-turn path the
+ *  dedupe is for. This stamp changes only when the SET changes.
+ *
+ *  ⛔ Do NOT "restore" the mtime term here. It was the cycle-1 bug: the key
+ *  looked right and suppressed nothing in production, while passing a test that
+ *  never wrote between scans.
+ *
+ *  Byte-identical to the Python leg's `_stem_set_stamp`, so the two legs — which
+ *  share one spool root and one ledger — dedupe each other's records. */
+function stemSetStamp(stems: string[]): string {
+  return `set:${createHash("sha256").update(stems.join("\n"), "utf8").digest("hex").slice(0, 16)}`;
 }
 
 /** The ceilings a refusal was measured against, as ONE string.

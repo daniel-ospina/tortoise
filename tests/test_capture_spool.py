@@ -2371,6 +2371,46 @@ def test_a_repeatedly_unreadable_meta_records_ONCE_not_once_per_turn(tmp_path):
             meta_path.chmod(0o600)
 
 
+def test_an_ALTERNATING_unreadable_set_does_not_re_record_forever(tmp_path):
+    """Each distinct unreadable SET is recorded ONCE, even when the set alternates.
+
+    Only one observation is remembered per (session_id, reason), so a FIXED
+    aggregate id would remember just the newest set — and an alternating set
+    (the ENOENT race this arm names, or real prune churn) would re-record both
+    directions on every alternation, without bound. The set digest is therefore
+    part of the pair key (review cycle 3).
+
+    MUTATION THAT REDS THIS: use a constant `session_id: "unreadable"` → the
+    line count grows by one on every alternation.
+    """
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    first = entries / "a.meta.json"
+    second = entries / "b.meta.json"
+    for p in (first, second):
+        p.write_text(json.dumps({"version": 1, "session_id": p.stem}), encoding="utf-8")
+        p.chmod(0o000)
+    hidden = second
+    try:
+        from tortoise.capture_spool import list_spool_metas, read_discards
+        for turn in range(10):
+            # alternate the SET: b invisible on even turns, present on odd ones
+            if turn % 2 == 0:
+                if hidden.exists():
+                    hidden.rename(tmp_path / "parked.b")
+            else:
+                if (tmp_path / "parked.b").exists():
+                    (tmp_path / "parked.b").rename(hidden)
+            list_spool_metas(tmp_path)
+        lines = [l for l in read_discards(tmp_path) if l.get("reason") == "meta_unreadable"]
+        assert len(lines) == 2, (
+            f"one line per DISTINCT set (2), not one per alternation — got {len(lines)}")
+    finally:
+        for p in (first, hidden):
+            if p.exists():
+                p.chmod(0o600)
+
+
 def test_a_spool_directory_that_cannot_be_created_is_discarded_with_a_reason(tmp_path):
     """The spool path's parent is a regular FILE, so `mkdir` raises ENOTDIR.
 

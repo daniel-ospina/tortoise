@@ -1497,13 +1497,27 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
     #  - ONE aggregate consumes ONE slot of the (32-wide) refusal window, not N,
     #    so unreadable entries cannot crowd the admission refusals out of it and
     #    defeat `_refused_at_current_state`'s fast path.
+    #
+    # ⚠️ The trade, stated: the record names a COUNT and one example path, not one
+    # record per entry, so an operator holding only `discarded.jsonl` cannot
+    # enumerate all of them from the ledger — they read the count here and list
+    # `entries/` for the rest. Boundedness is worth that; an unbounded per-entry
+    # ledger is not an audit trail, it is a second problem.
     if unreadable:
         stems = sorted(stem for stem, _msg in unreadable)
+        stamp = _stem_set_stamp(stems)
         _stem, example = unreadable[0]
         discards.append(_record_refusal(
             root,
             {
-                "session_id": "unreadable",
+                # The digest is IN the pair key, not only in the stamp. Only ONE
+                # observation is remembered per (session_id, reason), so a fixed
+                # id would remember just the newest set — and an alternating set
+                # (the ENOENT race this very arm names, or real prune churn)
+                # would re-record BOTH directions on every alternation, forever.
+                # Keying on the set makes each distinct set its own pair: bounded
+                # by the 32-wide window, and each set is recorded once.
+                "session_id": f"unreadable:{stamp}",
                 "reason": DISCARD_META_UNREADABLE,
                 # RETAINED: every one of these metas AND its turn log stay on
                 # disk, unquarantined and un-unlinked, so the next drain retries.
@@ -1515,7 +1529,7 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
                            " — left in place and retryable; the bytes were never"
                            " seen, so these are NOT corrupt entries"),
             },
-            stamp=_stem_set_stamp(stems),
+            stamp=stamp,
         ))
     return metas, discards
 
