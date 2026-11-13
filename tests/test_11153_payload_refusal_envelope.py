@@ -393,8 +393,16 @@ def test_every_wait_bound_prose_arm_is_a_designed_refusal():
 
 
 def test_every_designed_prose_refusal_is_classified_not_a_crash(monkeypatch):
-    """The sentinel list must cover EVERY designed prose refusal this surface ships
-    (review round 9, measured).
+    """The sentinel list must cover every designed prose refusal this surface ships
+    **THAT CARRIES A STABLE LEAD** (review round 9, measured).
+
+    ⛔ Not literally every one: `mcp_auth.REFUSAL_PROSE_MESSAGES`'s ⛔ SCOPE note names
+    ONE arm that is OUT by design — `_take_graph_argument`'s "`<tool>` does not take a
+    `graph` argument", a USAGE error whose message begins with the tool NAME, so there
+    is no prefix to key on. It stays crash-class, and the CLI still surfaces its text
+    through `describe_failure`. Read the module note before concluding the registry is
+    complete, or a future arm will be left out on the assumption that this docstring
+    already covers it.
 
     Two shipped refusals were prose with no entry — the graph-lookup MARGIN arm and
     the sensitive-op rate-limit (429) — so `refusal_message` bucketed them as CRASHES:
