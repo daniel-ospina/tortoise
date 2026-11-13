@@ -3889,9 +3889,9 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: ⛔ RE-ANCHOR AND RE-RUN: the arms below stop at the FIRST stale citation, so the one the CI log
 #: names is only the head of a queue. A head that corrected exactly that one passed its own check and
 #: still reds on the next entry — measured 2026-11-13, when `#12257`'s 25-line insert into
-#: `surface-guard` shifted every citation above it at once (the aggregate's `needs:` moved with them).
-#: Every citation whose target sits ABOVE the insert moved; the ones below it did not. Re-derive each
-#: from the workflow, never offset the old number by the insert's size.
+#: `surface-guard` shifted every citation BELOW it at once (the aggregate's `needs:` moved with them).
+#: Every citation whose target sits AT OR BELOW the insert moved DOWN by 25; the ones above it did
+#: not. Re-derive each from the workflow, never offset the old number by the insert's size.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("python-ci.yml:4751", ("pip install -e '.[test,postgres]'",)),
     ("python-ci.yml:2949-2954", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),

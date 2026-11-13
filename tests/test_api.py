@@ -550,7 +550,14 @@ def test_add_operator_rejects_non_string_op_type():
         try:
             api.add_operator(bad, ["a"], prov)
             assert False, f"should have raised ValueError for {bad!r}"  # noqa: B011
-        except ValueError as e:
+        except (ValueError, TypeError) as e:
+            # ⛔ TypeError is caught only to RE-LABEL it: without the isinstance
+            # half of the guard, `add_operator` proceeds far enough to JSON-
+            # serialize the value, so the regression surfaces as
+            # "Object of type X is not JSON serializable" — a diagnostic that
+            # blames serialization for a missing type refusal (#12240 review).
+            assert isinstance(e, ValueError), (
+                f"expected ValueError for {bad!r}, got {type(e).__name__}: {e}")
             msg = str(e)
             # Pinning the whole sentence would be the same trap one level down:
             # a good-faith rewording that keeps the claim ("must be one of
@@ -568,7 +575,15 @@ def test_add_operator_rejects_non_string_op_type():
             # (measured: both still passed the bare-substring form with the
             # clause gone, so half this assertion rested on the echo).
             claim = msg.replace(repr(bad), "")
-            assert re.search(r"\bNAND\b", claim) and re.search(r"\bIMPL\b", claim), (
+            # IGNORECASE is load-bearing, not cosmetic: `75c04668c7` folded case
+            # here on review because a good-faith reword to `nand or impl` was
+            # redding the pin — the same decay class #12240 exists to end. It is
+            # also SAFE for the two mutations this pin must still catch:
+            # `\bIMPL\b` does not match `implementation` (no boundary after
+            # `IMPL`) and a message that dropped the names matches neither.
+            assert re.search(r"\bNAND\b", claim, re.IGNORECASE) and re.search(
+                r"\bIMPL\b", claim, re.IGNORECASE
+            ), (
                 "the refusal must name the mechanisms this door DOES accept — "
                 "a bare 'unknown gate' text reads as a typo rather than as "
                 f"this door's limit (#12067): {msg!r}")
