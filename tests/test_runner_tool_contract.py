@@ -1710,9 +1710,10 @@ def _comment_cut(line: str) -> int:
         i += 1
     return n
 
-#: The message command must be the FIRST WORD OF THE RAW LINE — i.e. in command
-#: position, not brought into command position by `_blank_quoted` deleting a quoted word
-#: that bash would have EXECUTED (`"bash" "tools/h.sh" echo`).
+#: The message command must be in COMMAND POSITION of the RAW LINE — the first word, or
+#: after only the prefix `_CMD_POSITION_PREFIX` allows (a statement/loop keyword, `{`, or
+#: `run:`) — and specifically NOT brought into command position by `_blank_quoted` deleting a
+#: quoted word that bash would have EXECUTED (`"bash" "tools/h.sh" echo`).
 _MESSAGE_WORD = re.compile(
     _CMD_POSITION_PREFIX + r"(?:" + "|".join(_MESSAGE_CMDS) + r")\b"
 )
