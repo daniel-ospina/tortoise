@@ -3538,9 +3538,11 @@ def _is_safe_root_file(path: str) -> bool:
 # creation. So: on a clone whose boundary sits at or above the creation, a local
 # reading is evidence about your clone's boundary, NOT about creation — the
 # failing probe above is the artifact signal, so `git fetch --unshallow` and
-# re-read. On a complete clone the reading does settle it (this one returns `79c3d9dbe`,
-# exactly what the API says). Either way the server is the answer to quote — never
-# write either set of local outputs into this comment as that answer.
+# re-read. On a complete clone the reading does settle it: it names the same
+# commit the API names as `79c3d9dbe` — but `%h` prints an ABBREVIATION whose
+# length follows `core.abbrev` (unset here, so one character longer), so compare
+# the COMMIT, never the string. Either way the server is the answer to quote —
+# never write either set of local outputs into this comment as that answer.
 #
 # The other wrong reading: `#12313` did not create the file (it appended the
 # reader — the original error). Re-derive before re-admitting the entry; do not
