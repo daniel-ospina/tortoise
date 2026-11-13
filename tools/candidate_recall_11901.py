@@ -408,11 +408,15 @@ def _fold_punct(text: str) -> str:
 #   * ⛔ THE PREMISE IS FALSE, and this is the finding that outlives the lane.
 #     The gate assumes a bare definite description's query degenerates to its
 #     bare content word and returns a near-synonymous cluster. It does not:
-#     `sparse.build_or_query` builds the OR-union only when TWO OR MORE tokens
-#     survive stopword removal, and a single surviving token takes the RAW-LITERAL
-#     fallback (`sparse.py:590`) — so `the fix` is queried as `the fix`, which
-#     RediSearch evaluates as an implicit AND over both terms (`sparse.py:12`).
-#     The article is not a wasted term, it is half of the conjunction.
+#     for a name carrying NO identifier span, `sparse.build_or_query` builds the
+#     OR-union only when TWO OR MORE tokens survive stopword removal, and a
+#     single surviving token takes the RAW-LITERAL fallback (`sparse.py:590`); a
+#     name WITH an identifier span is the exception (`ERR-4032` keeps the OR
+#     path through its aliases even with one plain token, `sparse.py:570-588`),
+#     and none of these names is one — so `the fix` is queried as `the fix`,
+#     which RediSearch evaluates as an implicit AND over both terms
+#     (`sparse.py:12`). The article is not a wasted term, it is half of the
+#     conjunction.
 #   * the SHIPPED-shaped predicate gates **86 names of 300**, and **86 of 86 are
 #     reachable by the leg at k=15** (74 already at k=3) — so the gate removes a
 #     CORRECT candidate for almost every name it touches;
@@ -509,14 +513,14 @@ def _signal_tokens(name: str) -> list[str]:
 
     ⛔ It is the SPLIT rule that is shared with the leg (lowercase,
     non-alphanumeric runs), NOT the surviving-token set: `tokenize_sparse_query`
-    additionally drops every token shorter than 2 characters and — at
-    `build_or_query`'s default `keep_numeric=False`, which is what the capture
-    path passes — every all-digit token, then appends identifier aliases
-    (`sparse.py:410-430`). So `_signal_tokens("#2258") == ["2258"]` while the leg
-    tokenises `2258` to `[]` and takes the escaped raw literal: the "token" this
-    function returns does not exist as one. Nothing measured changes (the 15
-    ident names are gated by BOTH predicates — `gate_gated_names` records them
-    as the `both` set — so no share moves), but this is not a fidelity
+    additionally drops every token shorter than 2 characters (`:429-430`) and —
+    at `build_or_query`'s default `keep_numeric=False`, which is what the
+    capture path passes — every all-digit token (`:431-432`), then appends
+    identifier aliases (`:441-447`). So `_signal_tokens("#2258") == ["2258"]`
+    while the leg tokenises `2258` to `[]` and takes the escaped raw literal: the
+    "token" this function returns does not exist as one. Nothing measured changes
+    (the 15 ident names are gated by BOTH predicates — `gate_gated_names` records
+    them as the `both` set — so no share moves), but this is not a fidelity
     guarantee and must not be quoted as one.
     """
     from tortoise.sparse import SPARSE_STOPWORDS
@@ -974,10 +978,10 @@ def run(args: argparse.Namespace) -> int:
             lambda: {str(k): {"pairs": 0, "in_window": 0, "attached": 0,
                               "attached_folded": 0} for k in KS})
         #: #12294, variant arm: what the gate removes from the pair population.
-        #: ``suppressed_pairs`` counts every k-window a gated mention would have
-        #: had (the denominator is the arm's own pair count at that k, so the
-        #: share is readable); ``would_attach_before`` is the number that decides
-        #: the issue — a gated pair that phase 1 CAN bind today becomes a
+        #: ``gated_pairs`` counts the gated MENTIONS in this arm, at
+        #: ``_GATE_KS[0]`` only (the denominator is ``pairs`` at the SAME window,
+        #: so the share is readable); ``would_attach_before`` is the number that
+        #: decides the issue — a gated pair that phase 1 CAN bind today becomes a
         #: guaranteed duplicate once its query is not issued.
         #: ``pairs``, ``gated_pairs``, ``in_window_before`` and
         #: ``would_attach_before`` are all counted at ONE window (``_GATE_KS[0]``)

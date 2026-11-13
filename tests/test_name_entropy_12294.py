@@ -168,7 +168,10 @@ def test_the_premise_is_false_for_our_query_builder(name):
     judgement:
       * `_signal_tokens` keeps one token, so the gate refuses the name;
       * `build_or_query` only builds the `|`-union when TWO OR MORE tokens
-        survive; with one survivor it returns the RAW query (`sparse.py:590`);
+        survive; with one survivor it returns the RAW query (`sparse.py:590`) —
+        scoped to a name with NO identifier span, which is every definite
+        description (an identifier span such as `ERR-4032` keeps the OR path
+        through its aliases even with one plain token, `sparse.py:570-588`);
       * RediSearch evaluates space-separated terms as implicit AND
         (`sparse.py:12`), so the leg searches BOTH terms — and finds the
         node. Measured: 86 of 86 gated names in-window at k=15 (74 at k=3).

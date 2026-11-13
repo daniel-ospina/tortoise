@@ -1024,6 +1024,28 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
            + [{"cls": "ident", "name": f"#{2258 + i}"} for i in range(9)]
            + [{"cls": "path", "name": f"src/mod{i}.py"} for i in range(9)])
     names = [r["name"] for r in pop]
+    # The row set is chosen so BOTH directions of `pooled_gate` are exercised:
+    # every query returns its OWN name's row (so `gated_and_missed` stays 0), and
+    # every query ALSO returns `#2258`'s row — so a gated name whose query is
+    # never issued is still RESCUED when a KEPT name's query returns it. Without
+    # that asymmetry `rescued == gated` and `lost == 0` for every cell, and
+    # swapping the two increments — which inverts "6 of 86 rescued" into "80 of
+    # 86", i.e. the falsifier into an endorsement of the gate — left this test
+    # green (measured).
+    from tortoise.extractor_v2 import _sanitise_query_text
+
+    row_by_name = {n: {"id": f"obj-11901{i:06d}", "content": n,
+                       "point_kind": "core:other"}
+                   for i, n in enumerate(names)}
+    by_query = {_sanitise_query_text(n): n for n in names}
+
+    def _rows(query):
+        own = row_by_name.get(by_query.get(query, ""))
+        rows = [own] if own is not None else []
+        if row_by_name["#2258"] not in rows:
+            rows.append(row_by_name["#2258"])
+        return rows
+
     rc, out = _drive(
         tool_mod, monkeypatch, tmp_path,
         # `the item0` is gated by `shipped` only (`item0` — 5 chars, 1 token);
@@ -1031,9 +1053,7 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
         # found-branches are left at their zero defaults.
         stored_names=names, pop=pop,
         trace_maker=lambda: {"leg": "vector", "ran": True, "degraded": False},
-        rows_maker=lambda _q: [
-            {"id": f"obj-11901{i:06d}", "content": n,
-             "point_kind": "core:other"} for i, n in enumerate(names)],
+        rows_maker=_rows,
         argv=["--population", "27", "--sample", "27", "--captures", "2",
               "--out", str(tmp_path / "artifact.json")])
     assert rc == 0, f"a healthy driven run did not succeed (rc={rc})"
@@ -1062,6 +1082,14 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
         # never "unreachable at any k" — the falsifier's headline cannot invert
         assert g["gated_and_missed"] == 0, p
         for k, cell in arms["pooled_gate"][p].items():
+            # EXACT, not a sum: this fixture can rescue exactly ONE gated name
+            # (`#2258` — every kept name's query returns its row; no other gated
+            # name's row is ever returned by a kept query). A sum-only assertion
+            # let a SWAP of the two increments pass, and that swap turns "6 of 86
+            # rescued" into "80 of 86" — the falsifier into an endorsement of the
+            # gate (measured: green before this assertion existed).
+            assert cell["rescued_by_union"] == 1, (p, k, cell)
+            assert cell["lost"] == cell["gated"] - 1, (p, k, cell)
             assert cell["rescued_by_union"] + cell["lost"] == cell["gated"] > 0, (p, k)
 
 
