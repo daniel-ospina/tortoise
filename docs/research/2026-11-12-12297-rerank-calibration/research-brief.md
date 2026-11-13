@@ -126,13 +126,16 @@ cut**.
 
 > **The bound is width-dependent, and an earlier version of this paragraph said
 > otherwise.** It cited `miss_past_k = 0` as the ceiling proof and called the
-> `miss_absent_at_max_k` rows unreachable "at every pool width". Both are wrong in
-> the same direction: `miss_past_k` at k=P is **0 by construction** (a response
-> has at most P rows, so "its rank is past P" cannot occur) — it is a property of
-> the counter, not a measurement of the legs; and the pool-40 arm reaches
-> **300/300**, so those rows are reachable. The ceiling is `in_window(P)` and it
-> moves with the width; the only width-independent non-ceiling is
-> `miss_absent_at_max_k`, which no reranker can reach.
+> `miss_absent_at_max_k` rows unreachable "at every pool width". Both are wrong, and
+> in the same direction: `miss_past_k` at k=P is **0 by construction** (a response
+> has at most P rows, so "its rank is past P" cannot occur) — a property of the
+> counter, not a measurement of the legs; and the pool-40 arm of **this same run**
+> reaches **300/300**, so those 23 rows are reachable at a modestly wider pool.
+> `miss_absent_at_max_k` therefore means "absent within arm 1's **maximum** window
+> (15)", **not** "absent at every width" — it is width-dependent too. The ceiling is
+> `in_window(P)` and it moves with the width; this run measures no width-independent
+> bound at all, which is the honest statement and the reason the widths are quoted
+> as a pair.
 
 **Surface variants** (a capture saying an existing node a different, real way —
 article-drop / hyphen↔space / basename; 426 pairs):
@@ -169,8 +172,10 @@ So the correct reading is:
   surface-variant mentions, with **zero** regressions on the exact arm. Fusion
   alone was leaving **56 of 300** golds below the cut.
 - ✅ **IT DOES NOT WIDEN THE WINDOW**, and cannot: it reorders what the legs
-  returned. The 23 names the legs never return at pool 15 are still never
-  returned — `miss_absent_at_max_k` is untouched by construction.
+  returned. At **pool 15** the 23 names the legs never return stay unreturned —
+  untouched by construction. ⛔ Scoped deliberately: at **pool 40** this same run
+  returns all 23, so what is "unreachable" here is unreachable *at that width*, not
+  in principle, and the width is the only thing that changes it.
 - ⚠️ **IT IS NOT EVIDENCE THAT ms-marco TRANSFERS SEMANTICALLY TO ENTITY
   NAMES.** The task it is actually winning is *name matching*, which needs no
   domain knowledge and therefore transfers trivially. A pure token-overlap
@@ -224,13 +229,20 @@ User search scored **31,511 pairs in 2,685.6 s** — **85.2 ms/pair**, i.e.
 **≈ 3.4 s added per query** at pool 40. That is ~16× the noun path's
 5.179 ms/pair, and the cause is **passage length, not load or model**: the noun
 path's candidate text is a 2–4-word **name**, while here it is a 120–900-char
-**turn**. Measured directly on this box at loadavg 2.7, same model, same pinned
-thread:
+**turn**. Both quantities come from the TWO COMMITTED ARTIFACTS, so each number has
+a run behind it and they are directly comparable in provenance if not in load:
 
-| candidate text | ms/pair |
-|---|---|
-| name-length (~4 words) | **7.5** |
-| passage-length (~150 words) | **62.9** |
+| candidate text | ms/pair | artifact |
+|---|---|---|
+| name-length (~4 words) | **5.179** | `measurement-noun-path.json` → `arms.rerank.latency` |
+| passage-length (~150 words) | **85.227** | `measurement-user-search.json` → `latency` |
+
+⛔ **The 16× gap is real; the absolute figures are not load-matched.** The user-search
+run recorded `loadavg_1m = 14.0` and the noun-path run did not record one, so read
+the RATIO as the finding and neither figure as a clean-box latency. (An earlier
+draft of this section quoted 7.5 / 62.9 ms from a one-off micro-benchmark at loadavg
+2.7 that was never committed as an artifact — a number this document's own rule
+says it may not carry. Removed rather than defended.)
 
 ⛔ **That table is an AD-HOC observation, not a recorded run** — the same status §6
 gives the 6.4 s model load: it is not in any committed artifact, and it was taken

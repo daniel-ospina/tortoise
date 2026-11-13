@@ -41606,12 +41606,21 @@ class TortoiseSDK:
                 # Only ids that came back are scored; the rest ride with the
                 # unscored tail, keeping their relative retrieval order, and
                 # the disclosed ``unscored`` count counts them.
+                # ⛔ MEMBERSHIP IS NOT ENOUGH — the text must be NON-EMPTY. The
+                # read maps a null/absent property to ``""`` (``str(row[1] or
+                # "")``), so a row that IS returned can still arrive with no text
+                # (a stubbed Source with no title; any row whose property is null)
+                # and a membership test would score it on ``""`` — the very
+                # inversion this filter exists to remove. Truthiness, not
+                # presence, is the test.
+                _scored_ids = [pid for pid in _pool_ids
+                               if (_pool_texts.get(pid) or "").strip()]
                 _scored_rows = [{"id": pid, "content": _pool_texts[pid]}
-                                for pid in _pool_ids if pid in _pool_texts]
+                                for pid in _scored_ids]
                 _scored_n = len(_scored_rows)
                 _rows = _scored_rows + [
                     {"id": pid, "content": ""}
-                    for pid in _pool_ids if pid not in _pool_texts
+                    for pid in _pool_ids if pid not in set(_scored_ids)
                 ]
                 # ⛔ THE UNSCORED TAIL RIDES ALONG. Handing ``rerank_pool`` only
                 # the scored head made its ``unscored`` count structurally ZERO

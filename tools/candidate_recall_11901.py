@@ -510,12 +510,13 @@ def _rerank_arm(
         "ceiling_note": (
             "a reranker only reorders rows the legs already returned, so its "
             "ceiling is the number of golds the legs put INSIDE the scored "
-            "window at that width (in_window(P), width dependent: 277/300 at a "
-            "15-window, 300/300 at 40). miss_past_k at k=P is 0 BY "
-            "CONSTRUCTION — every response has at most P rows, so 'the rank is "
-            "past P' cannot occur — and is therefore not the ceiling; the "
-            "width-independent non-ceiling is miss_absent_at_max_k (golds no "
-            "leg returned at ANY width), which no reranker can reach"),
+            "window at that width — in_window(P), WIDTH DEPENDENT: 277/300 at a "
+            "15-window, 300/300 at 40. miss_past_k at k=P is 0 BY CONSTRUCTION "
+            "(a response has at most P rows, so 'the rank is past P' cannot "
+            "occur) and is not the ceiling; miss_absent_at_max_k is not a "
+            "width-independent bound either — it counts golds absent within arm "
+            "1's MAXIMUM window (15), and the pool-40 arm of this same run "
+            "returns every one of them, which is why 40 reaches 300/300"),
     }
     pairs_scored = 0
     score_s = 0.0
@@ -977,16 +978,21 @@ def run(args: argparse.Namespace) -> int:
         # ── ARM 4 (#12297): the cross-encoder rerank over the SAME candidates.
         #
         # ⛔ A reranker REORDERS what retrieval returned; it cannot surface a row
-        # the leg never produced. So this arm's ceiling is arm 1's `miss_past_k`
-        # — the rows inside a 15-window that fell past the `limit=3` cut — and
-        # never `miss_absent_at_max_k` (the rows absent at every width this run
-        # measured; their count is this artifact's own `arms.exact[k]` field, so
-        # it is deliberately NOT restated as a literal here — an earlier draft
-        # said 81, which was the previous 219/300 run's number, not this one's).
-        # That bound is stated here rather
-        # than left for a reader to infer, because a rerank arm that reports a
-        # recall figure without it invites the reading "the reranker fixed
-        # recall", which is the one thing it cannot do (issue #12297).
+        # the leg never produced. So this arm's ceiling is `in_window(P)` — the
+        # golds the legs put INSIDE the scored window at that width — which is
+        # WIDTH DEPENDENT (277/300 at a 15-window, 300/300 at 40).
+        #
+        # ⛔ `miss_past_k` is NOT that ceiling, and this comment used to say it
+        # was: at k=P it is 0 BY CONSTRUCTION (a response has at most P rows, so
+        # "its rank is past P" cannot occur), so it measures the counter, not the
+        # legs. `miss_absent_at_max_k` is not a width-independent bound either —
+        # it is "absent within arm 1's maximum window (15)", and the pool-40 arm
+        # returns every one of those golds. The count is the artifact's own
+        # field, deliberately not restated as a literal here (an earlier draft
+        # said 81, which was a previous run's number). The bound is stated rather
+        # than left to inference because a rerank arm reporting a recall figure
+        # without it invites "the reranker fixed recall", which is the one thing
+        # it cannot do (issue #12297).
         #
         # The measurement is per-mention and PAIRED against the unreranked order
         # of the SAME rows, so `gained` / `lost` are counterfactual on one pool

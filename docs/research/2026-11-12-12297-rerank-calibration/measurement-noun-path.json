@@ -1080,7 +1080,7 @@
     }
    },
    "applied": true,
-   "ceiling_note": "a reranker only reorders rows the legs already returned, so its ceiling is the number of golds the legs put INSIDE the scored window at that width (in_window(P), width dependent: 277/300 at a 15-window, 300/300 at 40). miss_past_k at k=P is 0 BY CONSTRUCTION \u2014 every response has at most P rows, so 'the rank is past P' cannot occur \u2014 and is therefore not the ceiling; the width-independent non-ceiling is miss_absent_at_max_k (golds no leg returned at ANY width), which no reranker can reach",
+   "ceiling_note": "a reranker only reorders rows the legs already returned, so its ceiling is the number of golds the legs put INSIDE the scored window at that width \u2014 in_window(P), WIDTH DEPENDENT: 277/300 at a 15-window, 300/300 at 40. miss_past_k at k=P is 0 BY CONSTRUCTION (a response has at most P rows, so 'the rank is past P' cannot occur) and is not the ceiling; miss_absent_at_max_k is not a width-independent bound either \u2014 it counts golds absent within arm 1's MAXIMUM window (15), and the pool-40 arm of this same run returns every one of them, which is why 40 reaches 300/300",
    "latency": {
     "device": "cpu (this box has no GPU)",
     "ms_per_pair": 5.179,

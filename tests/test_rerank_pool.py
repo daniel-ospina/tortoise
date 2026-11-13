@@ -542,21 +542,22 @@ def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
 
     This is the test that pins the placement BEHAVIOURALLY — a rerank placed after
     ``result_ids = result_ids[:limit]`` can only reorder what already survived,
-    which is not what "rerank the fused candidate list" means. Every other test in
-    this file reads at ``limit >= pool``, where there is NO cut and the placement
-    is unobservable, so a relocation leaves their assertions green.
-
-    ⛔ Not "the only test that fails" on a relocation: moving the block below the
-    cut also breaks ``test_the_rerank_runs_before_the_valid_time_demotion``,
-    because the cut sits below step 5e — measured, 2 failed.
+    which is not what "rerank the fused candidate list" means — and it is the one
+    that fails for that reason rather than for a textual order check. Every other
+    test in this file reads at ``limit >= pool``, where there is NO cut and the
+    placement is unobservable, so a relocation leaves them (and their assertions)
+    green. ⛔ Not "the only failing test": a post-cut relocation also breaks
+    ``test_the_rerank_runs_before_the_valid_time_demotion``, because the cut sits
+    below step 5e — measured, 2 failed on the relocation.
 
     ⛔ ``pool_size`` is NOT load-bearing, and an earlier draft of this docstring
     claimed it was: the legs are asked for ``resolve_pool_size(limit * 2)``, whose
     floor is ``DEFAULT_POOL_SIZE = 120``, so a ``limit=2`` read already retrieves
     more rows than the cut and the marker is in the pool either way (measured
-    identical: ``scored=6``, marker promoted, with and without the kwarg). It is
+    identical: ``scored=6``, marker promoted, with and without this kwarg). It is
     passed to keep the intent legible; the PREMISE assertion below is what
-    guarantees the cut is the thing under test.
+    actually guarantees the cut is the thing under test, and it is asserted rather
+    than assumed.
     """
     nonce = uuid.uuid4().hex[:8]
     q = f"zebrafish {nonce}"
@@ -591,3 +592,42 @@ def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
         "the rerank did not promote the marker into the cut — either it ran "
         "AFTER `result_ids[:limit]` (where it can only reorder what already "
         f"survived) or it did not run at all (on={on})")
+
+
+def test_a_row_returned_with_NO_TEXT_is_not_scored(sdk, monkeypatch):
+    """#12297 — presence in the read is not text; an EMPTY row must go unscored.
+
+    The pool read maps a null/absent property to ``""`` (``str(row[1] or "")``),
+    so a row that IS returned can still arrive with nothing to score — a stubbed
+    ``:Source`` with no title, any row whose text property is null. A membership
+    test (``pid in _pool_texts``) scored those rows on ``""``, and an empty
+    passage OUTRANKS an unrelated real one, so the row was PROMOTED on no
+    evidence. This test seeds the exact shape and asserts the disclosure says so:
+    the empty row is counted unscored, not scored.
+    """
+    nonce = uuid.uuid4().hex[:8]
+    q = f"zebra {nonce}"
+    for i in range(4):
+        sdk.create_point(kind="statement", content=f"{q} real passage {i}",
+                         entity_type="point")
+    blank = sdk.create_point(kind="statement", content="", entity_type="point")
+    blank_id = blank["id"] if isinstance(blank, dict) else blank.id
+
+    real_read = sdk_mod._fetch_rerank_pool_texts
+
+    def _with_a_blank(
+        graph, entity_type, graph_label, id_field, ids,
+    ):
+        out = real_read(graph, entity_type, graph_label, id_field, ids)
+        if blank_id in ids:
+            out[blank_id] = ""          # what the read itself produces
+        return out
+
+    monkeypatch.setattr(sdk_mod, "_fetch_rerank_pool_texts", _with_a_blank)
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    _inject(rerank.FakeScorer(), monkeypatch)
+    trace: list[dict] = []
+    sdk.tortoise_fts_query(q, entity_type="point", limit=4, leg_trace=trace)
+    entry = _rerank_entries(trace)[0]
+    assert entry[rerank.RERANK_UNSCORED_KEY] >= 1, entry
+    assert entry[rerank.RERANK_SCORED_KEY] <= 4, entry
