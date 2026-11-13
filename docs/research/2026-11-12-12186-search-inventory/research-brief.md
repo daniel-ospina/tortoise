@@ -7,8 +7,8 @@ agent-memory systems actually do, and what does the epic not see?
 > **This file is round 1 (§0–§6).** Round 2 appends **§7** (PR `#12270`). Round 3 lives in its own file,
 > **`round-3-verification.md`**, because it *re-tests* rounds 1–2 rather than extending them: it re-measures every
 > falsification against the tree at `f33f5e2c3215`, and it found a defect no inventory contains —
-> **D-1: every *identity* reader honours a completed merge and no *retrieval* reader knows it happened, so the
-> retired carrier stays in the search results alongside its survivor.** Round 3 does **not** reverse round 2's
+> **D-1: four of the five *identity* reads honour a completed merge — and no *retrieval* reader knows it happened,
+> so the retired carrier stays in the search results alongside its survivor.** Round 3 does **not** reverse round 2's
 > conclusion that a `resolved_from` redirect is a merge under another label; it strengthens it (the redirect gives
 > up the link band's semantics *and* fails to deduplicate retrieval).
 > **Read round 3 alongside this file, not instead of it.**

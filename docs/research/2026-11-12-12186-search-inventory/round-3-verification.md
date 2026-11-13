@@ -212,7 +212,7 @@ for ranking results"*. **The option surface the page actually names is five thin
 `CALL db.idx.fulltext.queryNodes('Label', 'search term')` — a bare string, no options map.
 
 **(b) Our index is created with no `OPTIONS` block.** `_create_fulltext_index` (`projection/__init__.py:20755`)
-tries two forms (`:20783-20786`): `CREATE FULLTEXT INDEX FOR (n:{label}) ON ({fields_expr})`, then
+tries two forms (`:20785-20788`): `CREATE FULLTEXT INDEX FOR (n:{label}) ON ({fields_expr})`, then
 `CALL db.idx.fulltext.createNodeIndex('{label}', {...})`. Neither carries `OPTIONS`. The declared entity index
 fields are `("Subject", ["name"])` and `("Object", ["name"])` (`projection/__init__.py:6819`, `:6823`) — the
 detail that makes §8.2's D-1 bite.
@@ -282,7 +282,7 @@ fixture"*. Given (d), **a distributions-only M3 under-reads and a rank-only M3 o
 5. **The `#8933` identifier fixture** — unchanged, and it is a **correctness** gate, not a quality one:
    `to_tsvector` cannot reproduce `ERR-4032 → err4032` **plus** the adjacency phrase.
 6. **A stated tie rule.** Both scorers must be read through the same `recency_tie_clause`
-   (`search_engine.py:2992`), or the comparison is measuring tie order.
+   (`search_engine.py:2993`), or the comparison is measuring tie order.
 
 **Contradiction test:** no recorded decision is reversed. V1 gates the **index location**; M3 *is* V1's own named
 measurement (`SEARCH-ARCHITECTURE.md:268`, `:517`) and is pre-authorised inside `#12186`. Requirements 3–4 narrow
@@ -427,7 +427,7 @@ The chain, all at `f33f5e2c3215`:
   magnitude is unmeasured** — it needs the census in §8.7 item 1.
 
 **This is the `#12120` root at a site no issue names.** It is the same reader/writer disagreement the repo's own
-comment rails against — `entity_identity.py:356-360`: *"ONE implementation, because the create path and the read
+comment rails against — `entity_identity.py:360-361`: *"ONE implementation, because the create path and the read
 path must not disagree about who holds a name (review F2)"*.
 
 **Attribution, per the discipline that a peer filing is a process defect.** `#12244` covers the same root at the
@@ -460,7 +460,7 @@ substrates it would consume** and **a one-line applicability verdict**.
 | **three candidate sources, unioned** | identity-property lookup (`_collect_identity_property_candidate_nodes`), exact-normalised name (`_collect_exact_name_candidate_nodes`), semantic cosine (`:622-623`) |
 | **thresholds** | `NODE_DEDUP_CANDIDATE_LIMIT = 15` (`:67`), `NODE_DEDUP_COSINE_MIN_SCORE = 0.6` (`:68`); fuzzy Jaccard `0.9`, 32 perms, band 4 (`dedup_helpers.py:34-36`); entropy `>= 1.5` (`:31`) over names ≥ 6 chars **or** ≥ 2 tokens (`:80-86`) |
 | **band count** | **four rungs, in order**, per node: identity-props → exact-normalised → MinHash/LSH fuzzy → LLM. First rung that answers ends the question; ambiguity at rung 2 does **not** fall to rung 3, it falls to the LLM (`dedup_helpers.py:344-349`) |
-| **prompt shape** | `prompts/dedupe_nodes.py` — system: *"NEVER fabricate entity names or mark distinct entities as duplicates"*; user blocks `<PREVIOUS MESSAGES>`, `<CURRENT MESSAGE>`, `<ENTITIES>`, `<EXISTING ENTITIES>`, each JSON. Output model `NodeResolutions{entity_resolutions:[NodeDuplicate{id, name, duplicate_candidate_id}]}`, **`-1` = new** (`:34-44`). Exact-count contract: *"Your response MUST include EXACTLY N resolutions with IDs 0 through N−1"* (`:154` — the `Task:` header above it is `:152-153`; `:146-152` is the duplicate-criteria block, a different instruction) |
+| **prompt shape** | `prompts/dedupe_nodes.py` — system: *"NEVER fabricate entity names or mark distinct entities as duplicates"*; user blocks `<PREVIOUS MESSAGES>`, `<CURRENT MESSAGE>`, `<ENTITIES>`, `<EXISTING ENTITIES>`, each JSON. Output model `NodeResolutions{entity_resolutions:[NodeDuplicate{id, name, duplicate_candidate_id}]}`, **`-1` = new** (`:26-39`). Exact-count contract: *"Your response MUST include EXACTLY N resolutions with IDs 0 through N−1"* (`:154` — the `Task:` header above it is `:152-153`; `:146-152` is the duplicate-criteria block, a different instruction) |
 | **what the adjudicator can SEE** | `existing_nodes_context` (`node_operations.py:703-712`) = `{**candidate.attributes, candidate_id, name, entity_types, summary[:120]}`. **No neighbours, no degree, no edges. Zero topology.** |
 | **batching** | `MAX_NODES = 30` (`:66`); dedupe output capped `min(max_tokens or 16384, 16384)` (`:736`) |
 | **model routing** | `ModelSize.small` for attribute extraction (`:1064`) and summaries (`:1243`); the **dedupe verdict call passes no `model_size`** (`:737-745`) → default model. ⚠️ **This is Graphiti's own model-size router, not Jev** — Jev is ours (TypeSafe). ⛔ **Correction to this lane's first draft: it called the wrong phrase "Jev routing" and attributed it to round 2 — and "Jev" appears in neither round.** Measured: `grep -c "Jev" research-brief.md` is **0** at this head **and** **0** on `origin/research/12186-round2-depth`, and `git grep` finds no `Jev` in `research-brief.md` on either branch — the only `Jev` under this directory is the sentence you are reading. The phrase is this lane's own; the substantive correction stands — the dedupe verdict call passes no `model_size` (`:737-745`), so it takes the default model. |
@@ -553,9 +553,9 @@ position, which M-11 did not have.
 | element | code |
 |---|---|
 | **there is no retrieval step** | `observational-memory.ts` is 4,723 lines; the **only** occurrence of `embed`/`cosine`/`similarity`/`vector` in it is `:620` — `this.retrievalSearch = typeof config.retrieval === 'object' && Boolean(config.retrieval.vector)`, a passthrough to a *separate optional* tool, not OM's own |
-| **what it does instead** | an Observer and a Reflector maintain **one `activeObservations` string** plus a **timestamp cursor** `record.lastObservedAt`; the actor sees observations at the start of the window and live messages at the end (`ARCHITECTURE.md:16-40`) |
+| **what it does instead** | an Observer and a Reflector maintain **one `activeObservations` string** plus a **timestamp cursor** `record.lastObservedAt`; the actor sees observations at the start of the window and live messages at the end (`ARCHITECTURE.md:10-40` — Observer/Reflector defined at `:10-11`, the record fields at `:22-24`) |
 | **the only identifier structure** | **anchors** — `[O1]`, `[O1-N2]` line ids in the observation log (`anchor-ids.ts:1-12`). Addressability of *observation lines*, not entity identity |
-| **activation** | a prefix operation — `swapBufferedToActive` takes `chunks.slice(0, n)` and moves the cursor to the last activated chunk's `lastObservedAt` (`ARCHITECTURE.md:76-82`) |
+| **activation** | a prefix operation — `swapBufferedToActive` takes `chunks.slice(0, n)` and moves the cursor to the last activated chunk's `lastObservedAt` (`ARCHITECTURE.md:33-37` — `:76-82` is the activation *steps list*, which names `swapBufferedToActive` at `:80` but neither the slice nor the cursor move) |
 | **time-scoped read** | `getObservationsAsOf(activeObservations, asOf)` splits the log on `--- message boundary (<iso8601>) ---` markers and keeps chunks whose boundary date ≤ `asOf` (`observation-utils.ts:1-40`) |
 
 **Our substrates: none of the entity ones.** No `name`, no vector, no edge.
@@ -571,7 +571,7 @@ keeping"*). **Adopting it would reverse none of the records named at the end of 
 1. **"no ranking at all" → "no similarity-based retrieval step".** The evidence — that the only
    `embed`/`cosine`/`similarity`/`vector` occurrence in 4,723 lines is `:620` — **cannot** establish "no ranking":
    a recency or position ordering contains none of those tokens, and OM's own activation *is* a recency ordering
-   (`chunks.slice(0, n)` + a `lastObservedAt` cursor, `ARCHITECTURE.md:76-82`). The supportable claim is the
+   (`chunks.slice(0, n)` + a `lastObservedAt` cursor, `ARCHITECTURE.md:37`). The supportable claim is the
    narrower one: **the identity/candidate-generation problem never arises, because OM never asks a query.**
 2. **"the strongest no-retrieval result on the benchmark" is not a claim this round established.** The figures
    (84.23–94.87 % on `longmemeval_s`) are **inherited from round 1's §5.1**, which read them from
@@ -692,7 +692,8 @@ fix on the merge, not a change to what is stored.
    `getzep/graphiti@main`, `vectorize-io/hindsight@main`, `mem0ai/mem0@main`, `mastra-ai/mastra/main`. This
    document's own rule (`:27`) is that a pin must name its head; these do not, **and the cost is already realised
    for one of them**: at `vectorize-io/hindsight@main` today, `hindsight_api/engine/search/fusion.py`,
-   `…/link_expansion.py`, `…/reranking.py` and `…/db/ops_postgresql.py` all return **404** (`hindsight-api/` now
+   `hindsight_api/engine/memories/pg/link_expansion.py`, `engine/search/reranking.py` and
+   `engine/db/ops_postgresql.py` all return **404** (`hindsight-api/` now
    holds only `README.md` and `pyproject.toml`), so **M-12's sole source (`fusion.py:112-176`) and §8.1.5's SQL
    (`ops_postgresql.py:1069-1109`) cannot be re-derived from `main`** — they are recorded as read on 2026-11-12,
    and a later lane must either locate the commit or re-read the moved tree. The other three still resolve and
