@@ -2255,6 +2255,28 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
             )
         kind = str(entry.get("kind") or "")
         symbol = str(entry.get("symbol") or "")
+        # ⛔ KIND + SYMBOL ALONE IS NOT A RECORD. `archive_symbol` always writes `batch`,
+        # `reason` and `file`, and `archive_surface.file_violations` reds a row without them
+        # ("manifest row carries no `file`") - so a hand-typed row of just kind+symbol was a
+        # record `cut` accepted and `check` refused, and the cheapest way to clear that red
+        # BEFORE the deleted code can be frozen is to delete the row: then prior == derived and
+        # no gate can see the removal again, which is the #12237 loss reached THROUGH this gate
+        # (review of PR #12313).
+        for field in ("batch", "reason", "file"):
+            if not isinstance(entry.get(field), str) or not entry[field].strip():
+                raise SurfaceEvidenceUnreadable(
+                    f"an `archive/MANIFEST.json` entry ({kind}:{symbol}) carries no `{field}` "
+                    "- `archive_surface.py check` reds a row without it, so it is not a record "
+                    "this gate may accept: a hand-typed row would let `cut` forget the symbol, "
+                    "and the cheapest way to clear the red afterwards is deleting the row"
+                )
+        frozen = Path(str(entry["file"]))
+        if not (frozen if frozen.is_absolute() else ROOT / frozen).is_file():
+            raise SurfaceEvidenceUnreadable(
+                f"an `archive/MANIFEST.json` entry ({kind}:{symbol}) names `{entry['file']}`, "
+                "which is not in this checkout - an entry whose frozen code is missing is not a "
+                "record that the code was kept, and `archive_surface.py check` reds it too"
+            )
         if not kind or not symbol:
             # A mapping that names no symbol is the same defect one branch over: skipping it
             # grades "unreadable" as "not archived", so `cut` tells the operator to archive
@@ -2320,13 +2342,34 @@ def waiver_matches(entry: str, symbol: str, cls: str) -> bool:
     return want_symbol == symbol and (want_cls is None or want_cls == cls)
 
 
+class RemovalProblem(str):
+    """A refusal line that also carries WHICH class of problem it is.
+
+    `cmd_cut` printed ONE header for every problem - "cut would drop N surface row(s) with no
+    usable record", the three archive routes, and the `--allow-removal` remedy - but
+    `removal_report` also produces problems that are NOT "no record": a redundant override on
+    a symbol that IS recorded, an ambiguous bare waiver, and a contradiction. So a refusal told
+    the operator to add a record to a row that had one, and for the ambiguity it prescribed the
+    very flag that had just been refused ("logged below", on a cut that returns 1 and logs
+    nothing below). A `str` subclass keeps every existing message match - `in`, `problems[0]`,
+    equality - working while the caller branches on `.kind` (review of PR #12313).
+    """
+
+    kind: str
+
+    def __new__(cls, kind: str, message: str) -> RemovalProblem:
+        obj = super().__new__(cls, message)
+        obj.kind = kind
+        return obj
+
+
 def removal_report(
     prior: set[tuple[str, str]],
     derived: set[tuple[str, str]],
     records: dict,
     *,
     allowed: set[str] | None = None,
-) -> tuple[list[str], dict[tuple[str, str], str]]:
+) -> tuple[list[RemovalProblem], dict[tuple[str, str], str]]:
     """`(problems, accounting)` for the symbols that disappeared from the surface.
 
     A symbol present in `prior` and absent from `derived` is a REMOVAL. It is accounted for
@@ -2377,7 +2420,7 @@ def removal_report(
     def _waived_by_qualified(symbol: str, cls: str) -> bool:
         """Does a waiver that NAMES this surface cover it?"""
         return any(c == cls and s == symbol for c, s in entries)
-    problems: list[str] = []
+    problems: list[RemovalProblem] = []
     accounting: dict[tuple[str, str], str] = {}
     # `{(symbol, class): …}` — ONE entry per REMOVAL, not per symbol. Keyed by symbol (as it
     # was) two removals of the same name collapsed into one entry and the `accounted N
@@ -2407,12 +2450,13 @@ def removal_report(
             # cheapest way to clear that red without knowing the map requirement is to
             # DELETE the frozen entry: the loss this archive exists to prevent. Measured on
             # both sides (review of PR #12313).
-            problems.append(
+            problems.append(RemovalProblem(
+                "no-record",
                 f"{symbol} (sdk) is archived but absent from RETIRED_SDK_METHODS / "
                 "REMOVED_SDK_METHODS — `archive_surface.py check` reds that shape, so the "
                 "freeze alone is not the record: record the departure too (for an SDK method "
                 "the freeze and the map entry are ONE record)"
-            )
+            ))
             continue
         elif archived:
             found.append(f"archive entry ({kind})")
@@ -2425,22 +2469,24 @@ def removal_report(
             # — or claiming the symbol has "no record" — sends the operator to a red whose
             # cheapest clearing is deleting the frozen code. (review of PR #12313)
             if archived:
-                problems.append(
+                problems.append(RemovalProblem(
+                    "contradiction",
                     f"{symbol} (tool) is accounted by 2 records (archive entry ({kind}), "
                     "RETIRED_USE_INSTEAD) — and the archive one is a CONTRADICTION: "
                     "`archive_surface.py check` reads the raw forward map and reds archiving "
                     "a forward entry (\"a forward entry is STILL SERVED … must not be "
                     "archived\"). Delete the stale forward key, or restore the tool; do not "
                     "archive it"
-                )
+                ))
             else:
-                problems.append(
+                problems.append(RemovalProblem(
+                    "contradiction",
                     f"{symbol} (tool) is still a `RETIRED_USE_INSTEAD` entry whose tool "
                     "declaration is gone: it serves nothing (which is why the surface lost "
                     "it), and `archive_surface.py check` refuses to archive a name that is "
                     "in that map at all. Delete the stale forward key, or restore the tool — "
                     "the archive route is not available for it"
-                )
+                ))
             continue
         if found:
             if _waived(symbol, cls):
@@ -2450,11 +2496,12 @@ def removal_report(
                 # class as a reason with no symbol (refused in `cmd_cut`), and the same
                 # unused-permission argument as an override for a symbol this cut does not
                 # remove (review of PR #12313).
-                problems.append(
+                problems.append(RemovalProblem(
+                    "redundant-override",
                     f"{symbol} ({cls}) is already accounted for by {found[0]}, so "
                     "`--allow-removal` waives nothing — an override that replaces a real "
                     "record with a rename claim is a false record"
-                )
+                ))
                 continue
             accounting[(symbol, cls)] = found[0]
             continue
@@ -2472,18 +2519,20 @@ def removal_report(
                 "`--allow-removal` (deliberate rename, stated in the PR)"
             )
             continue
-        problems.append(
+        problems.append(RemovalProblem(
+            "no-record",
             f"{symbol} ({cls}) was DROPPED with no record — it is gone from the "
             "declaration and from the archive both, so there is nothing left to read"
-        )
+        ))
     for symbol, classes in sorted(waived.items()):
         if len(classes) > 1:
-            problems.append(
+            problems.append(RemovalProblem(
+                "ambiguous-waiver",
                 f"one `--allow-removal {symbol}` would waive {len(classes)} removals "
                 f"({', '.join(classes)}) — a named waiver is ONE symbol on ONE surface, and "
                 "collapsing them into one record understates what this cut removed. Name "
                 f"the surface: `--allow-removal tool:{symbol}` / `sdk:{symbol}`"
-            )
+            ))
     return problems, accounting
 
 
@@ -2604,18 +2653,37 @@ def cmd_cut(args: argparse.Namespace) -> int:
               "else later.")
         return 1
     if problems:
-        print(f"::error::cut would drop {len(problems)} surface row(s) with no usable record")
-        print("REFUSED a removal must leave a record — the #11609 owner ruling archives "
-              "removed code so a mistake can be inspected later, and a re-cut cannot "
-              "tell an archived removal from a silent deletion:")
+        # ⛔ ONE HEADER FOR EVERY PROBLEM CLASS MADE THE REFUSAL CONTRADICT ITS OWN LINES.
+        # `removal_report` also produces problems that are NOT "no record" — a redundant
+        # override on a symbol that IS recorded, an ambiguous bare waiver, a contradiction —
+        # and this block told the operator the row had no record and to add one, or (for the
+        # ambiguity) prescribed the exact flag that had just been refused. "logged below" was
+        # false too: a refused cut writes nothing below. So the record-remedy block is printed
+        # only when a `no-record` problem is present; otherwise each line's own instruction is
+        # the whole refusal (review of PR #12313).
+        missing = [p for p in problems if getattr(p, "kind", "no-record") == "no-record"]
+        if missing:
+            print(
+                f"::error::cut would drop {len(missing)} surface row(s) with no usable record"
+            )
+            print("REFUSED a removal must leave a record — the #11609 owner ruling archives "
+                  "removed code so a mistake can be inspected later, and a re-cut cannot "
+                  "tell an archived removal from a silent deletion:")
+            for problem in problems:
+                print(f"  {problem}")
+            print("  Account for each symbol by exactly one of:")
+            for way in REMOVAL_WAYS:
+                print(f"    - {way}")
+            print("  A genuine RENAME (the old name is gone by design) passes "
+                  "`--allow-removal <symbol> --allow-removal-reason <why>`; it is logged "
+                  "in the cut output and belongs in the PR body.")
+            return 1
+        print(f"::error::cut refused this removal: {len(problems)} problem(s) with the "
+              "records supplied")
+        print("REFUSED the records for these removals do not hold — each line names what is "
+              "wrong and what to do instead:")
         for problem in problems:
             print(f"  {problem}")
-        print("  Account for each symbol by exactly one of:")
-        for way in REMOVAL_WAYS:
-            print(f"    - {way}")
-        print("  A genuine RENAME (the old name is gone by design) passes "
-              "`--allow-removal <symbol> --allow-removal-reason <why>`; it is logged "
-              "below and belongs in the PR body.")
         return 1
 
     # An ABSENT retired half and an EMPTY one are the same absence in two spellings — the

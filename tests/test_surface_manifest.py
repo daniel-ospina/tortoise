@@ -5623,9 +5623,14 @@ def test_a_NON_MAPPING_archive_entry_is_UNREADABLE_not_absent(tmp_path):
         sm.removal_records(path)
 
     # non-vacuity: a well-formed entry list is still read.
-    path.write_text(
-        _json.dumps({"entries": [{"kind": "mcp-tool", "symbol": "tortoise_y"}]}), encoding="utf-8"
-    )
+    full = {
+        "kind": "mcp-tool",
+        "symbol": "tortoise_y",
+        "batch": "test-batch",
+        "reason": "test fixture",
+        "file": "archive/MANIFEST.json",
+    }
+    path.write_text(_json.dumps({"entries": [full]}), encoding="utf-8")
     assert sm.removal_records(path)["archived"] == {("mcp-tool", "tortoise_y")}
 
 
@@ -5671,6 +5676,15 @@ def test_an_override_for_a_recorded_symbol_reports_the_RECORD_not_an_unused_over
     assert rc == 1, out
     assert "does not remove" not in out, out
     assert "already accounted for by archive entry (mcp-tool)" in out, out
+    # ⛔ AND THE HEADER MUST MATCH THE PROBLEM. This is not a "no record" refusal — the row
+    # HAS one — but `cmd_cut` printed one header for every class: "cut would drop N surface
+    # row(s) with no usable record", the three archive routes, and "passes --allow-removal"
+    # (the flag that was just refused, as if the refusal had not happened). So the operator was
+    # told to add a record to a recorded row, and the printed remedies contradicted the line
+    # directly above them (review of PR #12313).
+    assert "no usable record" not in out, out
+    assert "Account for each symbol by exactly one of" not in out, out
+    assert "cut refused this removal" in out, out
     assert path.read_text(encoding="utf-8") == before
 
     # non-vacuity: the same tree with NO override passes and names the record.
@@ -5678,6 +5692,132 @@ def test_an_override_for_a_recorded_symbol_reports_the_RECORD_not_an_unused_over
     out = capsys.readouterr().out
     assert rc == 0, out
     assert f"{symbol}: archive entry (mcp-tool)" in out, out
+
+
+def test_the_no_record_header_and_remedies_still_print_for_a_no_record_refusal(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The other half of the header split: a real "no record" refusal keeps both blocks.
+
+    The header is now class-driven, so the guard against a false *absence* of the remedy is
+    as necessary as the guard against printing it wrongly — otherwise "print the routes"
+    could pass while the routes never render for the one class they exist for.
+    """
+    sm = _load_manifest_tool()
+    symbol = "tortoise_vanished_probe"
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": symbol}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": set(), "forward": set(), "forward_raw": set(), "sdk_retired": set()},
+    )
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"{symbol} (tool) was DROPPED with no record" in out, out
+    assert "cut would drop 1 surface row(s) with no usable record" in out, out
+    assert "Account for each symbol by exactly one of" in out, out
+    assert "--allow-removal <symbol> --allow-removal-reason" in out, out
+    # The word "below" was false: a refused cut writes no log below the refusal.
+    assert "below" not in out, out
+
+
+def test_an_archive_entry_without_its_FIELDS_is_not_a_RECORD(tmp_path):
+    """`kind` + `symbol` alone is a row `archive_surface.py check` REDS, so it is no record.
+
+    `archive_symbol` always writes `batch`, `reason` and `file`, and `file_violations` reds a
+    row without them. Reading only `kind`/`symbol` made a hand-typed row a record `cut`
+    accepted while `check` refused it — and the cheapest way to clear that red, before the
+    already-deleted code can be frozen, is deleting the row: then prior == derived and no gate
+    can ever see the removal again, i.e. the #12237 loss reached THROUGH this gate (review of
+    PR #12313).
+    """
+    import json as _json
+
+    sm = _load_manifest_tool()
+    path = tmp_path / "MANIFEST.json"
+
+    for missing in ("batch", "reason", "file"):
+        entry = {
+            "kind": "mcp-tool",
+            "symbol": "tortoise_forgotten",
+            "batch": "b",
+            "reason": "r",
+            "file": "archive/MANIFEST.json",
+        }
+        del entry[missing]
+        path.write_text(_json.dumps({"entries": [entry]}), encoding="utf-8")
+        with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+            sm.removal_records(path)
+        assert missing in str(excinfo.value), str(excinfo.value)
+
+    # …and it is NOT accepted as a record for a removal either (the consequence that matters).
+    with pytest.raises(sm.SurfaceEvidenceUnreadable):
+        sm.removal_records(path)
+
+    # non-vacuity: the same entry WITH its fields is a record and waives the removal.
+    path.write_text(
+        _json.dumps(
+            {
+                "entries": [
+                    {
+                        "kind": "mcp-tool",
+                        "symbol": "tortoise_forgotten",
+                        "batch": "b",
+                        "reason": "r",
+                        "file": "archive/MANIFEST.json",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    records = sm.removal_records(path)
+    assert records["archived"] == {("mcp-tool", "tortoise_forgotten")}, records
+    problems, accounting = sm.removal_report(
+        {("tortoise_forgotten", "tool")}, set(), records
+    )
+    assert problems == [], problems
+    assert accounting == {("tortoise_forgotten", "tool"): "archive entry (mcp-tool)"}, accounting
+
+
+def test_an_archive_entry_whose_FROZEN_FILE_is_gone_is_not_a_RECORD(tmp_path):
+    """An entry pointing at a file this checkout does not have cannot be a freeze.
+
+    Same class and same consequence as the field check above — an entry whose frozen code is
+    missing is a claim, not a record, and `archive_surface.py check` reds it.
+    """
+    import json as _json
+
+    sm = _load_manifest_tool()
+    path = tmp_path / "MANIFEST.json"
+    path.write_text(
+        _json.dumps(
+            {
+                "entries": [
+                    {
+                        "kind": "mcp-tool",
+                        "symbol": "tortoise_forgotten",
+                        "batch": "b",
+                        "reason": "r",
+                        "file": "archive/modules/never-frozen/Tool.py",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm.removal_records(path)
+    assert "never-frozen" in str(excinfo.value), str(excinfo.value)
+
+    # non-vacuity: the REAL committed manifest resolves its files and still reads.
+    assert sm.removal_records()["archived"], "the committed archive read as empty"
 
 
 def test_ONE_waiver_grammar_is_shared_by_both_callers():
