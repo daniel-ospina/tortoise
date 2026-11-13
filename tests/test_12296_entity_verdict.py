@@ -515,7 +515,7 @@ class TestHardVetoes:
         AS a resolution (`entity_resolver.py:611`) — so this spelling's membership
         is RECORDED, not inferred, and no group-level comparison is being skipped.
         Refusing it is not merely conservative: an ENTITY hold is not carried
-        forward (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch, `extractor_v2.py:12267`)), so the mention is dropped on
+        forward (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch of `execute_embed`)), so the mention is dropped on
         every run for the lifetime of the merge.
         """
         mention = {"name": "the team", "kind": "k"}

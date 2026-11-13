@@ -3353,7 +3353,8 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     # (`extract_session_v2`, `commit_session`) hold no `try`, so it would abort a
     # capture. But `degraded` is the wrong grade for it — `degraded` means the
     # search never got through its FIRST query and therefore carries ZERO priors
-    # (`:3172-3176`, `failure_policy.py`), and `_render_search_results` acts on
+    # (the first-query handler below, graded by `failure_policy.lookup_state`),
+    # and `_render_search_results` acts on
     # that by withholding every prior and telling the gap reviewer the lookup did
     # not run. Here the queries RAN and their point/event priors are real, so the
     # honest grade is PARTIAL (#5095 §4.4 G3): keep the rows the fold did resolve,
