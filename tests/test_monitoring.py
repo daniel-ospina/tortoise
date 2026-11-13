@@ -5163,6 +5163,58 @@ def test_event_retention_interval_validation(monkeypatch):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+class TestRefusalThresholdEnv:
+    """The env knobs are USER INPUT read on the liveness path — never a raise."""
+
+    def test_an_infinite_threshold_does_not_escape_the_resolver(self, monkeypatch):
+        """``inf`` is the intuitive way to write "no limit" and it used to raise
+        ``OverflowError`` out of a resolver that promises it never raises —
+        which the listener then reported as a permanent 503 on a HEALTHY box
+        (measured on this branch before this test existed)."""
+        for var in ("TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES",
+                    "TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS"):
+            monkeypatch.setenv(var, "inf")
+            window = monitoring.wait_bound_breach_window()
+            assert window["error"] is None, window
+            assert window["refusing"] is False
+        assert monitoring.wait_bound_health_min_breaches() == (
+            monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES)
+        assert monitoring.wait_bound_health_min_buckets() == (
+            monitoring.WAIT_BOUND_HEALTH_MIN_BUCKETS)
+
+    def test_a_huge_finite_threshold_cannot_silently_disable_the_term(self, monkeypatch):
+        """``1e6`` reads as "effectively off" and would make the term inert while
+        appearing to protect the deployment — the same failure in slower form."""
+        monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS", "1e6")
+        now = time.monotonic()
+        for i in range(12):
+            monitoring.record_wait_bound_breach_recent(
+                monitoring.WAIT_BOUND_SURFACE_REST, at=now - i * 10.0)
+        window = monitoring.wait_bound_breach_window()
+        # clamped to the strictest form rather than read as "off"
+        assert window["min_buckets"] == window["buckets_total"] == 12
+        assert window["refusing"] is True
+        # and one bucket short of every bucket is NOT a red on the density arm
+        monitoring.reset_wait_bound_breach_window()
+        for i in range(11):
+            monitoring.record_wait_bound_breach_recent(
+                monitoring.WAIT_BOUND_SURFACE_REST, at=now - i * 10.0)
+        relaxed = monitoring.wait_bound_breach_window()
+        assert relaxed["buckets"] == 11
+        assert relaxed["refusing"] is True, "the 11-breach burst still trips"
+
+    def test_zero_disables_the_term_and_says_so(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS", "0")
+        monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES", "0")
+        now = time.monotonic()
+        for i in range(12):
+            monitoring.record_wait_bound_breach_recent(
+                monitoring.WAIT_BOUND_SURFACE_REST, at=now - i * 10.0)
+        window = monitoring.wait_bound_breach_window()
+        assert window["refusing"] is False
+        assert window["min_buckets"] == 0 and window["min_breaches"] == 0
+
+
 class TestLoopBlockEvidence:
     """The wedge must leave an artifact the NEXT lane can read.
 
@@ -5351,6 +5403,56 @@ class TestWaitBoundBreachWindow:
         assert counts["total"] >= 1
         assert counts["by_surface"]["rest"] >= 1
         assert monitoring.wait_bound_breach_window()["total"] >= 1
+
+    def test_a_SPORADIC_tail_never_reaches_the_density_threshold(self):
+        """The false-red this term must never produce.
+
+        The transport bound is breached BY DESIGN for ~2.1% of calls. Those
+        breaches land one per 10 s bucket at most, so a whole window of them
+        reaches a handful of buckets — below the threshold — while a failing
+        plane fills 12 of 12. Calibrating on a COUNT instead made the verdict
+        depend on traffic volume: the same incident measured 3.5/min and 17/min
+        in two traces, so a count threshold tuned to one is blind to the other.
+        """
+        now = time.monotonic()
+        # A realistic 2.1% tail over a busy minute: three refusals spread across
+        # three buckets out of twelve (a 5-calls-per-bucket rate gives ~0.1
+        # breaches per bucket, so a whole window holds a couple).
+        for i in (2, 7, 11):
+            monitoring.record_wait_bound_breach_recent(
+                monitoring.WAIT_BOUND_SURFACE_REST, at=now - i * 10.0 - 1.0)
+        window = monitoring.wait_bound_breach_window()
+        assert window["buckets"] == 3, window
+        assert window["buckets_total"] == 12
+        assert window["total"] == 3, "the count alone says nothing"
+        assert window["refusing"] is False, (
+            "a sporadic tail is the bound working as designed, not a failure")
+
+    def test_a_SUSTAINED_refusal_stream_is_the_verdict(self):
+        """#12477's measured shape: breaches in essentially every bucket.
+
+        Both incident traces (70 in ~20 min, 57 in ~3.4 min) fill the window;
+        the density test must fire on BOTH — that is the whole point of not
+        calibrating on a count.
+        """
+        now = time.monotonic()
+        for i in range(12):
+            monitoring.record_wait_bound_breach_recent(
+                monitoring.WAIT_BOUND_SURFACE_REST, at=now - i * 10.0)
+        window = monitoring.wait_bound_breach_window()
+        assert window["buckets"] == 12
+        assert window["refusing"] is True
+
+    def test_one_bucket_with_a_burst_is_also_the_verdict(self):
+        """A plane refusing 10 requests inside ten seconds is failing, however
+        narrow the window it spans."""
+        now = time.monotonic()
+        for _ in range(monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES):
+            monitoring.record_wait_bound_breach_recent(
+                monitoring.WAIT_BOUND_SURFACE_MCP, at=now - 1.0)
+        window = monitoring.wait_bound_breach_window()
+        assert window["buckets"] == 1
+        assert window["refusing"] is True
 
     def test_a_stream_of_refusals_is_the_verdict_and_one_is_not(self):
         """A designed long call is not a red; a STREAM of refusals is."""

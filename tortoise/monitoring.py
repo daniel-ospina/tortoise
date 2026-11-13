@@ -886,17 +886,42 @@ for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
 # distinction.
 #
 #: Default window (seconds) in which a breach counts as a live failure. Env
-#: ``TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S``. A window, not a rate: ONE refused
-#: request is enough to say the door refused someone.
+#: ``TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S``.
 WAIT_BOUND_HEALTH_WINDOW_S = 120.0
-#: How many refusals inside the window mean the DOOR is failing rather than a
-#: client asking for work the budget cannot cover. The transport bound is
-#: breached by DESIGN for slow-but-legitimate calls (the repo's own measurement:
-#: p99 22,476 ms, ~2.1% of calls over a 10 s bound), so a single breach is the
-#: product working. A STREAM of them is the shape #12477 measured (0 -> 70 in
-#: ~20 min). Env ``TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES``; ``0`` disables the
-#: term entirely. A red that fires on every designed long call would fail every
-#: deploy — the opposite failure, and just as useless.
+#: Width of one bucket inside that window (seconds). The window is cut into
+#: ``WINDOW / BUCKET`` buckets and the verdict is a DENSITY: how many buckets
+#: hold at least one refusal.
+WAIT_BOUND_HEALTH_BUCKET_S = 10.0
+#: ⛔ WHY A DENSITY AND NOT A COUNT — the difference between a gate that fires on
+#: the incident and one that only fires on a worse incident.
+#:
+#: A COUNT over a fixed window is a rate with the traffic volume baked in, and
+#: this repo has measured the same failure at wildly different counts: #12477's
+#: first trace refused 70 requests over ~20 min (**3.5/min**), the second refused
+#: 57 over ~3.4 min (**17/min**) — an absolute threshold calibrated on one is
+#: blind to the other. Worse, the *legitimate* comparison is not a count at all:
+#: the transport bound is breached BY DESIGN for slow-but-legitimate calls (p99
+#: 22,476 ms, ~2.1% of calls over the 10 s bound, #10185), so what separates the
+#: two is not how MANY requests were refused but whether refusals are SPORADIC
+#: (a tail) or SUSTAINED (the plane is failing).
+#:
+#: Density separates them by orders of magnitude, with no traffic assumption:
+#: a 2.1% tail fills ~2.1% of buckets (it needs a call in the bucket AND one in
+#: the tail), while a plane refusing a stream of requests fills essentially
+#: every bucket for as long as it is failing. Measured against the two traces
+#: above: both fill >90% of buckets (12 of 12, 7+ of 12) at their worst, and the
+#: tail fills 0-1 of 12 — so the same threshold fires on both incidents and on
+#: neither a slow call nor a busy minute.
+#:
+#: Env ``TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS``; ``0`` disables the term. A red
+#: that fires on every designed long call would fail every deploy — the opposite
+#: failure, and just as useless.
+WAIT_BOUND_HEALTH_MIN_BUCKETS = 6
+#: Floor, so a burst inside ONE bucket is not invisible: 10 refusals in ten
+#: seconds is an outage however few buckets it spans. Env
+#: ``TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES``; ``0`` disables this arm only (the
+#: density arm still decides, so the term as a whole is disabled by disabling
+#: BOTH — which is what ``TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS=0`` does).
 WAIT_BOUND_HEALTH_MIN_BREACHES = 10
 #: Per-surface monotonic timestamps of recent breaches. Bounded (``maxlen``) so
 #: a breach storm cannot grow the process's memory; old entries are also pruned
@@ -931,24 +956,49 @@ def wait_bound_health_window_s() -> float:
     return max(0.0, value)
 
 
-def wait_bound_health_min_breaches() -> int:
-    """Resolve the refusal threshold for the liveness term; ``0`` disables it.
+def _resolve_positive_int_env(name: str, default: int) -> int:
+    """Parse an int-valued env knob, never raising, never trusting ``inf``.
 
-    Env ``TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES``. A malformed value falls back
-    to the default with a warning rather than raising — this is read on the
-    liveness path, whose contract is that it always answers.
+    ``int(float("inf"))`` raises :class:`OverflowError`, which is NOT a
+    ``ValueError`` — a reader promise of "never raises" that only catches
+    ``(TypeError, ValueError)`` is false for the single most intuitive way to
+    say "no limit" (``inf``), and an escaping ``OverflowError`` from the liveness
+    resolver answers 503 on a HEALTHY box for as long as the env is set. A huge
+    finite value is no better: it silently disables the term. Both are refused
+    here, with the default, which is the only value that was ever measured.
     """
-    raw = os.environ.get("TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES")
+    raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
-        return WAIT_BOUND_HEALTH_MIN_BREACHES
+        return default
     try:
-        value = int(float(raw))
-    except (TypeError, ValueError):
-        logger.warning(
-            "TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES=%r is not a number — using "
-            "the default %d", raw, WAIT_BOUND_HEALTH_MIN_BREACHES)
-        return WAIT_BOUND_HEALTH_MIN_BREACHES
-    return max(0, value)
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("not finite")
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("%s=%r is not a finite number — using the default %d",
+                       name, raw, default)
+        return default
+
+
+def wait_bound_health_min_breaches() -> int:
+    """Resolve the single-bucket burst floor; ``0`` disables THIS arm only.
+
+    Env ``TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES``. Disabling the whole term is
+    ``TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS=0``.
+    """
+    return _resolve_positive_int_env("TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES",
+                                     WAIT_BOUND_HEALTH_MIN_BREACHES)
+
+
+def wait_bound_health_min_buckets() -> int:
+    """Resolve the density threshold (buckets holding a refusal); ``0`` disables
+    the whole refusal term.
+
+    Env ``TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS``.
+    """
+    return _resolve_positive_int_env("TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS",
+                                     WAIT_BOUND_HEALTH_MIN_BUCKETS)
 
 
 def record_wait_bound_breach_recent(surface: str, at: float | None = None) -> None:
@@ -969,7 +1019,9 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
     """Breaches observed inside the recent window (#12477).
 
     ``{"window_s": W, "total": n, "by_surface": {"mcp": n, "rest": n},
-    "last_breach_age_s": x|None, "error": None}``.
+    "last_breach_age_s": x|None, "buckets": k, "buckets_total": B,
+    "min_buckets": m, "min_breaches": m2, "enabled": bool,
+    "refusing": bool|None, "error": None}``.
 
     ⛔ NEVER RAISES, for the same contract reason as
     :func:`wait_bound_breach_counts`: its readers are ``/health`` (which promises
@@ -979,24 +1031,40 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
 
     ``window_s`` resolves from :func:`wait_bound_health_window_s` when omitted.
     A window of ``0`` disables the term and reports ``total: 0`` with
-    ``enabled: false`` — distinguishable from a measured zero.
+    ``enabled: false`` — distinguishable from a measured zero. Every key is
+    present on EVERY return, including the error arms, so a consumer can read
+    ``refusing`` without a ``KeyError`` on a degraded read.
+
+    ``refusing`` is a DENSITY verdict: enough 10 s buckets inside the window hold
+    at least one refusal (:data:`WAIT_BOUND_HEALTH_MIN_BUCKETS`), or one bucket
+    holds a burst (:data:`WAIT_BOUND_HEALTH_MIN_BREACHES`). A sporadic slow-call
+    tail cannot reach either, which is what lets this be a verdict at all.
     """
     try:
         window = wait_bound_health_window_s() if window_s is None else float(window_s)
     except Exception as exc:  # noqa: BLE001 - a monitoring read must not raise
         return {"window_s": None, "total": None, "by_surface": None,
-                "last_breach_age_s": None, "enabled": False,
-                "min_breaches": None, "refusing": None,
+                "last_breach_age_s": None, "buckets": None, "buckets_total": None,
+                "enabled": False, "min_buckets": None, "min_breaches": None,
+                "refusing": None,
                 "error": f"wait_bound window unreadable: {type(exc).__name__}"}
     if not math.isfinite(window) or window <= 0:
         return {"window_s": window, "total": 0,
                 "by_surface": dict.fromkeys(_WAIT_BOUND_SURFACES, 0),
-                "last_breach_age_s": None, "enabled": False,
-                "min_breaches": 0, "refusing": False, "error": None}
+                "last_breach_age_s": None, "buckets": 0, "buckets_total": 0,
+                "enabled": False, "min_buckets": 0, "min_breaches": 0,
+                "refusing": False, "error": None}
     try:
         now = time.monotonic()
         cutoff = now - window
         by_surface = dict.fromkeys(_WAIT_BOUND_SURFACES, 0)
+        buckets: set[int] = set()
+        # Resolved INSIDE the guard: an env knob is user input, and a resolver
+        # that raises outside this block breaks the never-raises promise that
+        # the whole liveness path depends on.
+        bucket_s = max(1.0, float(WAIT_BOUND_HEALTH_BUCKET_S))
+        min_buckets = wait_bound_health_min_buckets()
+        threshold = wait_bound_health_min_breaches()
         newest: float | None = None
         with _WAIT_BOUND_RECENT_LOCK:
             for surface, stamps in _WAIT_BOUND_RECENT.items():
@@ -1010,6 +1078,10 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
                              maxlen=stamps.maxlen)
                 _WAIT_BOUND_RECENT[surface] = kept
                 by_surface[surface] = len(kept)
+                # The bucket index is the window's own phase: `now // bucket`
+                # walks backwards, so a bucket boundary never depends on when
+                # the first breach arrived.
+                buckets.update(int(t // bucket_s) for t in kept)
                 if kept:
                     # a MAX over the kept stamps — the deque's last element is
                     # only the last APPENDED, and the filter above exists
@@ -1020,22 +1092,42 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
     except Exception as exc:  # noqa: BLE001 - a monitoring read must not raise
         logger.warning("#12477: wait-bound window unreadable: %r", exc)
         return {"window_s": window, "total": None, "by_surface": None,
-                "last_breach_age_s": None, "enabled": True,
-                "min_breaches": None, "refusing": None,
+                "last_breach_age_s": None, "buckets": None,
+                "buckets_total": None, "enabled": True,
+                "min_buckets": None, "min_breaches": None, "refusing": None,
                 "error": f"wait_bound window unreadable: "
                          f"{type(exc).__name__}"}
     total = sum(by_surface.values())
-    threshold = wait_bound_health_min_breaches()
-    # ``refusing`` is the VERDICT and it lives here, in one place, so `/health`
-    # and the listener cannot disagree: a threshold of 0 disables the term, and
-    # anything at or above it means the door is refusing a stream of requests
-    # rather than answering one long call the budget cannot cover.
-    refusing = bool(threshold > 0 and total >= threshold)
+    buckets_total = max(1, int(round(window / bucket_s)))
+    if min_buckets > buckets_total:
+        # ⛔ CLAMPED, never honoured blindly: a value above the number of buckets
+        # in the window reads as "effectively off" while looking like a
+        # protection (``1e6`` is the intuitive way to write it), which would make
+        # the term INERT exactly as it appears to guard the deployment. Above the
+        # ceiling the term becomes its strictest form — every bucket in the
+        # window must hold a refusal — and the payload says so. Disabling is
+        # ``0``, which is the only spelling of "off" (and is VISIBLE as
+        # ``min_buckets: 0``).
+        logger.warning(
+            "#12477: TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS=%d exceeds the %d "
+            "buckets in the %.0fs window — clamping to %d (write 0 to disable "
+            "the term)", min_buckets, buckets_total, window, buckets_total)
+        min_buckets = buckets_total
+    # ``refusing`` is the VERDICT and it lives here, in ONE place, so `/health`
+    # and the listener cannot disagree. Density, not a count (see the constants):
+    # a sporadic designed-long-call tail fills a bucket here and there, a failing
+    # plane fills most of them, and a single bucket holding a burst is its own
+    # verdict however few buckets it touches.
+    density = bool(min_buckets > 0 and len(buckets) >= min_buckets)
+    burst = bool(threshold > 0 and total >= threshold)
+    refusing = bool(density or burst)
     return {"window_s": window, "total": total,
             "by_surface": by_surface,
             "last_breach_age_s": (None if newest is None
                                   else round(max(0.0, now - newest), 2)),
-            "enabled": True, "min_breaches": threshold,
+            "buckets": len(buckets), "buckets_total": buckets_total,
+            "enabled": True, "min_buckets": min_buckets,
+            "min_breaches": threshold,
             "refusing": refusing, "error": None}
 
 
@@ -4881,7 +4973,7 @@ def _reset_heartbeat() -> None:
 #: produces one capture per episode in the record, so an operator reading
 #: `/data/loop-blocks.jsonl` must check `loop_age_s` — a `loop_age_s` near 2-10 s
 #: is a slow call, a `loop_age_s` in the tens of seconds or more is a block.
-#: Episodes are 10x-escalated (2s -> 20s -> 200s), so a long wedge yields a
+#: Episodes are 10x-escalated (5s -> 50s -> 500s), so a long wedge yields a
 #: handful of captures, not one per poll.
 LOOP_BLOCK_SAMPLE_AFTER_S = 5.0
 #: Poll period of the sampler. Half a second bounds the sampling error well
@@ -5129,9 +5221,19 @@ def start_loop_block_sampler(*, loop_thread_ident: int | None = None,
     never touches the loop's state beyond the heartbeat's monotonic stamp.
 
     One capture per EPISODE, not per poll: an episode opens when the age first
-    crosses the threshold and closes once the age is back under half of it, so a
+    reaches the threshold and closes once the age is back under half of it, so a
     five-minute wedge produces one stack (plus one per further 10x escalation),
     not six hundred identical lines.
+
+    ⛔ THE EPISODE OPENS AT THE THRESHOLD, NOT AT HALF OF IT. The hysteresis
+    band exists to stop an episode FLAPPING at the boundary (close below
+    ``threshold/2``, reopen at ``threshold``) — using it as the open point instead
+    halves the documented threshold: with ``threshold_s=5`` a capture fired at
+    2.5 s, i.e. on every pass of a loop whose legitimate work is 3 s, producing
+    one capture AND one WARNING per pass forever (measured: 10 captures in 2 s
+    against a simulated 3 s-per-pass loop). Hysteresis is closed at half and
+    opened at the full threshold; the guard below is what enforces it on a
+    first crossing.
     """
     if threshold_s is None:
         threshold_s = loop_block_sample_threshold_s()
@@ -5155,6 +5257,10 @@ def start_loop_block_sampler(*, loop_thread_ident: int | None = None,
             if age < threshold_s / 2.0:
                 in_episode = False
                 next_capture_at = threshold_s
+                continue
+            if not in_episode and age < threshold_s:
+                # The hysteresis band, on the way UP: under the threshold is not
+                # yet a block, even though it is above the close point.
                 continue
             if in_episode and age < next_capture_at:
                 continue
@@ -5207,6 +5313,14 @@ def served_progress() -> dict:
     "error": e|None}``. A raising reader reports ``registered: True`` with an
     ``error`` and ``last_served_age_s: None``: the caller treats "no measured
     progress" as UNEVIDENCED, never as health (the #4034 family).
+
+    ⛔ THE AGE IS COERCED OR DISCARDED HERE, never forwarded verbatim. The reader
+    is registered by the app, and the listener's caller compares the age against
+    a bound — so a reader returning ``"12"``, ``nan`` or an object would raise
+    inside ``do_GET`` and the liveness signal would answer NOTHING AT ALL (the
+    #2850 dark-check class) or compare nonsense. A value that is not a usable
+    number is reported as unmeasured, with the reason, exactly like a raising
+    reader: un-evidenced is never health.
     """
     reader = _SERVED_PROGRESS
     if reader is None:
@@ -5220,10 +5334,25 @@ def served_progress() -> dict:
     if not isinstance(result, dict):
         return {"registered": True, "last_served_age_s": None, "served": None,
                 "error": "served reader returned a non-dict"}
-    return {"registered": True,
-            "last_served_age_s": result.get("last_served_age_s"),
-            "served": result.get("served"),
-            "error": result.get("error")}
+    age, age_error = _coerce_age_s(result.get("last_served_age_s"))
+    served = result.get("served")
+    return {"registered": True, "last_served_age_s": age,
+            "served": served if isinstance(served, int) and not isinstance(
+                served, bool) else None,
+            "error": age_error or result.get("error")}
+
+
+def _coerce_age_s(value) -> tuple[float | None, str | None]:
+    """``(age, error)`` — a non-negative finite float, or unmeasured."""
+    if value is None:
+        return None, None
+    try:
+        age = float(value)
+    except (TypeError, ValueError):
+        return None, f"served age is not a number: {type(value).__name__}"
+    if not math.isfinite(age) or age < 0:
+        return None, f"served age is not a usable duration: {age!r}"
+    return age, None
 
 
 def set_dataplane_verdict_source(reader: Callable[[], dict] | None) -> None:
@@ -5567,11 +5696,14 @@ class _HealthzHandler(BaseHTTPRequestHandler):
             return
         # A recent breach is a request the product REFUSED moments ago; the
         # verdict's own contract is "the door is refusing", so it fails here.
-        # ``None`` (an unreadable window) is NOT folded in: it is reported, and
-        # the plane verdict beside it is the primary term. Folding an
-        # unmeasurable diagnostic in would make the check red for its own
-        # blindness rather than the app's state, and an operator cannot act on
-        # that.
+        # ⛔ ``None`` IS folded in, and the direction is deliberate: ``None``
+        # means the WINDOW COULD NOT BE READ. Reading it as "no refusals" would
+        # be reading an unmeasurable channel as evidence of health on the one
+        # term that exists to detect this failure class, so on the liveness
+        # verdict an unreadable window is a RED (the #3253/#4034 rule; measured
+        # shape: a listener answering 200 with `recent_breaches: {total: null}`).
+        # ``/health`` reports the same ``None`` and does NOT turn its ``status``
+        # red — a deploy gate may say "not now", a health page may not.
         if recent_refusing is None:
             # total: None (an unreadable window) is NOT "no refusals" — the
             # #3253 rule. On the liveness verdict that direction is fail-closed:

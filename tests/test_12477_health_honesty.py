@@ -214,6 +214,7 @@ def test_health_reports_the_refusal_window_without_touching_status():
     present. The verdict lives on the liveness listener, which is allowed to say
     "not now" where `/health` is not.
     """
+    clean = asyncio.run(hosted_api.health())
     for _ in range(monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES):
         monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_REST)
     body = asyncio.run(hosted_api.health())
@@ -221,6 +222,16 @@ def test_health_reports_the_refusal_window_without_touching_status():
     assert refusals["total"] >= monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES
     assert refusals["by_surface"]["rest"] >= 1
     assert refusals["refusing"] is True
+    # ⛔ THE DECISION, PINNED: `status` is IDENTICAL before and after the window
+    # goes red. Round 1's P0 (folding `refusing` into `status`) was re-introduced
+    # on purpose and the tests that name the property stayed green, because the
+    # only one that caught it did so through counter leakage from another file.
+    # Comparing against the same box, un-breached, holds regardless of whether
+    # this harness can reach `status: "ok"` at all (it cannot without a graph).
+    assert body["status"] == clean["status"], (
+        "a refusal window is reported, never folded into `status` "
+        "(#10185/#10620); the verdict lives on the 9090 listener")
+    assert "degraded_reasons" not in body
     # Its OWN key: `degraded_reasons` belongs to `record` (a documented
     # six-value vocabulary), and two schemas under one name is how a consumer
     # reads the wrong one.

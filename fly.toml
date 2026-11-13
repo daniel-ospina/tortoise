@@ -161,12 +161,16 @@ kill_timeout = 30
 #       is too OLD to vouch for anything (the refresher runs on the loop, so a
 #       wedge produces this within the probe's 30 s stale window), or it has
 #       never produced a result at all past that window;
-#   (c) `requests-refused` — the transport wait bound refused at least
-#       `TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES` (10) requests inside the last
-#       120 s (`TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S`). A THRESHOLD, not "any
-#       breach": the bound is breached BY DESIGN for slow-but-legitimate calls
-#       (~2.1% of them), so a single one is the product working — a red on it
-#       would fail every deploy.
+#   (c) `requests-refused` — the transport wait bound refused requests DENSELY
+#       inside the last 120 s (`TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S`, cut into
+#       10 s buckets): at least `TORTOISE_WAIT_BOUND_HEALTH_MIN_BUCKETS` (6 of
+#       12) buckets hold a refusal, or one bucket holds
+#       `TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES` (10). A DENSITY, not a count:
+#       the bound is breached BY DESIGN for slow-but-legitimate calls (~2.1% of
+#       them, a sporadic tail that fills a bucket here and there), while a
+#       failing plane fills essentially every bucket — so the same threshold
+#       fires on both measured traces (3.5 refusals/min and 17/min) and on
+#       neither a slow call nor a busy minute.
 # `workload_idle` and `loop_stale` stay in the payload as DIAGNOSTICS. A red here
 # is what a wedged or refusing deployment is supposed to look like.
 #

@@ -7288,7 +7288,10 @@ async def health():
     try:
         breaches = _monitoring.wait_bound_breach_counts()
     except Exception as exc:  # a monitoring read must never 5xx
-        breaches = {"total": None, "by_surface": None, "recent": None,
+        # SAME KEYS as the success arm — an error shape that carries a key the
+        # success shape does not is how a consumer binds to a field that only
+        # exists on the bad path (and here it would be the REMOVED `recent`).
+        breaches = {"total": None, "by_surface": None,
                     "error": f"wait_bound_breaches unreadable: {type(exc).__name__}"}
     # ── #12477: a REFUSED request is a failure observable NOW ─────────────
     # The cumulative counter above is deliberately not folded into `status`
