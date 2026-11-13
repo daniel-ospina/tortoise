@@ -5,7 +5,8 @@ The defect this file exists to keep closed
 ------------------------------------------
 **D-1** (`#12186` comment `6839898289`, same root as `#12244`). `apply_entity_merge`
 is non-destructive: the retired carrier keeps its `name` and gains `resolved_from`,
-and it writes **no** `status` (`entity_resolver.py:797-805`). `:Object` is
+and it writes **no** `status` (`entity_resolver.apply_entity_merge`'s candidate
+props). `:Object` is
 full-text indexed on `name` alone and the FTS leg filters `status` only
 (`search_engine.py:2973-2997`) — so a name search returns the survivor AND the
 carrier, and the capture path's candidate set never consulted the resolver. A
@@ -194,6 +195,14 @@ class TestThePriorSetNeverCarriesARetiredNode:
         assert [r["id"] for r in search["entities"]] == ["obj-good"], search
         assert "prior-set fold" in (search["reason"] or "")
         assert _failure_policy.lookup_state(search) == _failure_policy.LOOKUP_PARTIAL
+        # The counters must stay consistent (`ran + failed <= derived`), or the S4
+        # note blames the query BUDGET in a run where every query ran.
+        cov = search["query_coverage"]
+        for leg in ("object", "event", "point"):
+            assert cov["ran"].get(leg, 0) + cov["failed"].get(leg, 0) <= \
+                cov["derived"].get(leg, 0), cov
+        # …and the impaired ENTITY leg is the one the note names.
+        assert "object" in _failure_policy._short_legs(search), cov
         # An entity candidate's fixpoint was NOT established, so its own query
         # must not read as "ran and matched nothing": found None, never false.
         assert v2._candidate_covered(search, "object", "the ledger") is False
@@ -243,6 +252,37 @@ class TestThePriorSetNeverCarriesARetiredNode:
                 sdk, [{"id": "obj-orphan", "name": "the team", "kind": ""}],
                 {"obj-orphan": "Object"})
 
+    def test_a_re_mention_of_the_merged_variant_resolves_through_the_alias(
+            self, sdk_factory, monkeypatch):
+        """The fold must keep the SPELLING, not only the id.
+
+        Replacing the carrier's row with the survivor's `name` alone deletes the
+        carrier's spelling from the candidate set, so a mention spelled the way
+        the merged variant was spelled found nothing in phase 1 — a measured
+        ABSENCE (`found: False · no match — created`), the one state §4.4 I1 makes
+        license a CREATE. The folded row carries the survivor's aliases (which is
+        where `apply_entity_merge` wrote that spelling), so phase 1 answers it
+        deterministically, with mode `alias`.
+        """
+        sdk = sdk_factory()
+        _merged_pair(sdk)                       # "the team" -> "Acme Holdings"
+        monkeypatch.setattr(v2, "_is_searchable_backend",
+                            lambda mode, sdk=None: True)
+        monkeypatch.setattr(
+            v2, "_fts_rows",
+            lambda *a, **kw: [{"id": "obj-carrier", "name": "the team",
+                               "kind": "core:plan"}])
+        search = v2.search_graph(sdk, {"entities": [{"name": "the team"}]},
+                                 "the story", max_queries=1, limit=3)
+        assert [r["id"] for r in search["entities"]] == ["obj-survivor"], search
+        assert "team" in search["entities"][0]["aliases"], search["entities"]
+        res = v2.resolve_entities(
+            [{"name": "the team", "kind": "core:plan"}], search)
+        assert res["map"]["the team"]["id"] == "obj-survivor", res
+        assert res["records"][0]["mode"] == "alias", res["records"]
+        assert res["records"][0]["band"] == verdict.BAND_MERGE
+        assert res["new"] == [], res
+
     def test_search_graph_folds_the_set_it_returns(self, sdk_factory, monkeypatch):
         """The wiring, not only the helper: S3's OWN return carries the survivor."""
         sdk = sdk_factory()
@@ -267,7 +307,7 @@ class TestTheBandVocabulary:
         assert "link" not in verdict.BANDS
         # The pointer exists (`aliases[]` on the survivor) but a pointer is not a
         # verdict, and writing `dedup_reviewed='link'` dequeues the row from
-        # content review (`sdk.py:24256-24257`) — so it is deliberately absent.
+        # content review (`sdk.py:24507`) — so it is deliberately absent.
         assert not any(b == "link" for b in verdict.BANDS)
 
     def test_a_clean_pair_is_a_merge(self):
@@ -361,6 +401,23 @@ class TestHardVetoes:
                              {"name": "2026 report", "kind": "k"})[
                                  "vetoes"] == []
 
+    def test_a_year_quarter_compound_is_a_DATE_not_an_identifier(self):
+        """`2026-Q3` is one token and it is a date.
+
+        `date_tokens` already computed the right `year_quarter` pair while the
+        identifier scanner claimed it, so the band was right and the recorded
+        REASON named a rule that had not fired.
+        """
+        for a, b in (("2026-Q3 report", "2026-Q4 report"),
+                     ("Q3-2026 report", "Q4-2026 report")):
+            out = verdict.judge({"name": a, "kind": "k"},
+                                {"name": b, "kind": "k"})
+            assert out["vetoes"] == [verdict.VETO_DATE_CONFLICT], (a, b, out)
+        # A different SPELLING of the same quarter contradicts nothing.
+        assert verdict.judge({"name": "Q3-2026 plan", "kind": "k"},
+                             {"name": "Q3 2026 plan", "kind": "k"})[
+                                 "vetoes"] == []
+
     def test_graph_facts_are_their_own_vetoes(self):
         mention = {"name": "the team", "kind": "k"}
         cand = {"name": "Acme Holdings", "kind": "k"}
@@ -403,18 +460,13 @@ class TestHardVetoes:
 
 
 class TestClosureReverification:
-    """M-4: `A matches B` + `B matches C` is not a verdict on `A`/`C`."""
+    """M-4: `A matches B` + `B matches C` is not a verdict on `A`/`C`.
 
-    def test_a_retired_survivor_is_refused(self):
-        assert verdict.closure_vetoes("a", "b", [("b", "c")]) == [
-            verdict.VETO_TARGET_RETIRED]
-
-    def test_a_candidate_carrying_dependents_is_refused(self):
-        assert verdict.closure_vetoes("a", "b", [("d", "a")]) == [
-            verdict.VETO_GROUP_JOIN]
-
-    def test_a_pair_with_no_history_is_allowed(self):
-        assert verdict.closure_vetoes("a", "b", [("x", "y")]) == []
+    The VETO itself lives in `hard_vetoes` (`target_retired` / `group_join` over
+    `facts`), which is the one implementation on the path; a second, mention-blind
+    copy (`closure_vetoes`) was deleted rather than left as a divergent twin. What
+    remains here is the measurement helper the invariant is checked with.
+    """
 
     def test_chain_length_is_cycle_guarded(self):
         assert verdict.chain_length("a", [("a", "b"), ("b", "c")]) == 2

@@ -3006,11 +3006,16 @@ _PRIOR_HOP_BOUND = 8
 
 
 def _entity_facts(graph, label: str, ids: list[str]) -> dict[str, tuple]:
-    """``{id: (resolved_from, name, kind)}`` for the ``ids`` present on ``label``.
+    """``{id: (resolved_from, name, kind, aliases)}`` for the ``ids`` on ``label``.
 
     LABEL-SCOPED on purpose — the rule ``entity_resolver`` states for its own
     reads: an unlabelled ``MATCH (n) WHERE n.id = $id`` full-scans every label in
     the graph, and ``id`` is a natural key on exactly two of them.
+
+    ``aliases`` is the survivor's folded spellings: a folded row carries them so a
+    mention spelled the way the CARRIER was spelled still resolves (see
+    ``_find_existing_entity``) — otherwise the fold replaces the carrier's id and
+    loses its spelling, and a re-mention reads as a measured ABSENCE.
     """
     if label not in ("Object", "Subject"):
         raise ValueError(f"not an identity label: {label!r}")
@@ -3019,9 +3024,9 @@ def _entity_facts(graph, label: str, ids: list[str]) -> dict[str, tuple]:
     kind_prop = "objectKind" if label == "Object" else "subjectKind"
     rows = graph.query(
         f"MATCH (n:{label}) WHERE n.id IN $ids "
-        f"RETURN n.id, n.resolved_from, n.name, n.{kind_prop}",
+        f"RETURN n.id, n.resolved_from, n.name, n.{kind_prop}, n.aliases",
         params={"ids": list(ids)}).result_set
-    return {str(r[0]): (r[1], r[2], r[3]) for r in rows
+    return {str(r[0]): (r[1], r[2], r[3], r[4]) for r in rows
             if r and r[0] is not None and str(r[0])}
 
 
@@ -3103,7 +3108,7 @@ def _current_entity_priors(sdk, rows: list[dict],
     # ordinary graph (no chains) costs exactly ONE read per label.
     for _ in range(_PRIOR_HOP_BOUND):
         pending: dict[str, list[str]] = {}
-        for (label, _nid), (resolved, _n, _k) in facts.items():
+        for (label, _nid), (resolved, _n, _k, _a) in facts.items():
             if resolved and (label, str(resolved)) not in facts:
                 pending.setdefault(label, []).append(str(resolved))
         if not pending:
@@ -3164,8 +3169,25 @@ def _current_entity_priors(sdk, rows: list[dict],
             # measured absence and licenses a duplicate (#11653).
             out.append(row)
             continue
+        # ⛔ The folded row carries the SPELLINGS, not only the id. Replacing the
+        # carrier's row with the survivor's `name` alone silently deletes the
+        # carrier's spelling from the candidate set, and every name-keyed consumer
+        # (`_find_existing_entity`) then answers "no such entity" for a mention
+        # spelled exactly the way the merged variant was spelled — which is a
+        # measured ABSENCE (`found: False · no match — created`), the one state
+        # §4.4 I1 makes license a CREATE. The aliases are the survivor's own plus
+        # the spelling that matched the carrier, so the mention resolves to the
+        # survivor deterministically instead of depending on a phase-2 model.
+        row_name = str(row.get("name") or "")
+        aliases: list[str] = []
+        for source in (row_name, *(fact[3] if isinstance(fact[3], (list, tuple, set))
+                                  else ())):
+            folded_alias = normalize_entity_name(source) if source else ""
+            if folded_alias and folded_alias not in aliases:
+                aliases.append(folded_alias)
         out.append({"id": current, "name": str(fact[1]),
-                    "kind": "" if fact[2] is None else str(fact[2])})
+                    "kind": "" if fact[2] is None else str(fact[2]),
+                    "aliases": aliases})
     return out
 
 
@@ -3314,6 +3336,14 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                   f"row ({type(e).__name__}: {e}) — refusing pre-hop rows")
         for _leg in ("object", "subject"):
             if _leg in coverage["failed"]:
+                # The counters must stay consistent: `ran` says the leg's queries
+                # completed, and a leg cannot both complete and be impaired. Bump
+                # BOTH sides so `ran + failed <= derived` holds and
+                # `failure_policy._short_legs` (which tests `ran < derived`) NAMES
+                # the entity legs in the S4 note — otherwise the note blames the
+                # query budget in a run where every query ran.
+                if coverage["ran"].get(_leg):
+                    coverage["ran"][_leg] = max(0, coverage["ran"][_leg] - 1)
                 coverage["failed"][_leg] += 1
         # An entity candidate whose fixpoint was not established has NO resolved
         # identity, so its own query must not read as "ran and matched nothing":
@@ -5991,20 +6021,52 @@ def _index_search(search: dict) -> dict:
 def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[dict | None, str]:
     """(existing, mode) — exact kind match first (namespace-preserved, case-
     folded); bare-form fallback ONLY when unambiguous; 'ambiguous' when
-    multiple namespaces collide on the bare form (never guess which one)."""
+    multiple namespaces collide on the bare form (never guess which one).
+
+    ⛔ A row also answers to its `aliases` (#12296 D-1): S3's prior set folds a
+    merge-retired carrier onto its survivor, and the survivor's `aliases[]` hold
+    the folded spellings the merge retired — so a mention spelled the way the
+    merged VARIANT was spelled must resolve here, deterministically, or it reads
+    downstream as a measured absence (`found: False · no match — created`), the
+    one state that licenses a CREATE. Aliases are compared with the tree's own
+    `normalize_entity_name` fold, which is what `apply_entity_merge` wrote them
+    with; the mode is reported as ``alias`` so a record never claims an exact
+    name match that did not happen.
+    """
     norm_name = _norm(name)
+    alias_name = normalize_entity_name(name)
     kind_folded = str(kind).strip().lower()
+
+    def _mention_hit(e: dict) -> bool:
+        if _norm(e.get("name", "")) == norm_name:
+            return True
+        aliases = e.get("aliases")
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        if not isinstance(aliases, (list, tuple, set)):
+            return False
+        return alias_name in {str(a) for a in aliases if a is not None}
+
+    def _mode_for(e: dict, kind_mode: str) -> str:
+        # The NAME dimension decides `alias`: a spelling only the alias list holds
+        # is not an exact name match, and a record must not claim one that did not
+        # happen. The KIND dimension keeps its own word (`exact` name+kind, `bare`
+        # namespace-folded kind) so no existing reader sees its values change.
+        if _norm(e.get("name", "")) != norm_name:
+            return "alias"
+        return "exact" if kind_mode == "exact" else "bare"
+
     exact = [e for e in entities
-             if _norm(e.get("name", "")) == norm_name
+             if _mention_hit(e)
              and str(e.get("kind", "")).strip().lower() == kind_folded]
     if exact:
-        return exact[0], "exact"
+        return exact[0], _mode_for(exact[0], "exact")
     bare = _norm_kind(kind)
     matches = [e for e in entities
-               if _norm(e.get("name", "")) == norm_name
+               if _mention_hit(e)
                and _norm_kind(e.get("kind", "")) == bare]
     if len(matches) == 1:
-        return matches[0], "bare"
+        return matches[0], _mode_for(matches[0], "bare")
     if len(matches) > 1:
         return None, "ambiguous"
     return None, "none"

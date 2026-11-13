@@ -20,7 +20,8 @@ Three bands, and only three::
 ⛔ **`link` is NOT a band, and this is a deliberate record-shape decision
 (issue #12296 scope 1).** Round 3 (`12186` comment `6839898289`, Half-A.1) found
 exactly one non-retiring pointer in the tree — `aliases[]` on the SURVIVOR
-(`entity_resolver.py:784`, `:792`), which leaves the other node live,
+(``entity_resolver.apply_entity_merge`` → `sdk.update_entity(survivor_id,
+                     aliases=...)`), which leaves the other node live,
 search-visible and still a dedup candidate (`_ENTITY_READ` filters on
 `resolved_from`, `entity_resolver.py:207`). Two reasons it is not shipped as a
 verdict value here:
@@ -31,9 +32,9 @@ verdict value here:
   able to say *"these two are probably one thing, and here is why"*; an alias
   cannot.
 * **⛔ writing `dedup_reviewed='link'` is worse than inert — it silently
-  DEQUEUES.** The write is one call (`sdk.py:51584` → `SET n += $props`), but
-  the content review queue filters `dedup_reviewed IS NULL`
-  (`sdk.py:24256-24257`), so ANY non-NULL value removes the row from review with
+  DEQUEUES.** The write is one call (`sdk.update_entity` → `_update_entity`'s
+  `SET n += $props`), but the content review queue filters `dedup_reviewed IS
+  NULL` (`sdk.py:24507`), so ANY non-NULL value removes the row from review with
   no verdict applied. A band that wrote `'link'` today would delete a review
   nobody counts.
 
@@ -135,10 +136,12 @@ reported. Two closure vetoes make that hazard decidable at the verdict:
     rather than queued.
 
 ⚠️ **The guard's other half is positive, and it lives in the merge verb.**
-`entity_resolver.apply_entity_merge` hops the survivor to its fixpoint before
-writing, so no merge can ever CREATE a chain of length >= 2. With that, "no
-`resolved_from` chain longer than 1" is an invariant rather than a hope, and
-`dependents >= 1` is a reliable reading of "this target is a group".
+`entity_resolver.apply_entity_merge` closes BOTH legs: the survivor is hopped to
+its fixpoint before writing, an already-retired candidate is refused, the
+candidate's dependents are re-pointed at the final survivor, and its aliases are
+unioned into the survivor's. With that, "no `resolved_from` chain this verb
+creates longer than 1" is an invariant rather than a hope, and `dependents >= 1`
+is a reliable reading of "this target is a group".
 
 Contradiction test
 ------------------
@@ -218,11 +221,27 @@ _HASH_ID = re.compile(r"#(\d{2,})")
 #: `_TOKEN` or a hash id, in name order — the one scanner both `identifier_tokens`
 #: and `skeleton` use, so the two cannot disagree about what a token is.
 _TOKEN_OR_HASH = re.compile(r"#\d{2,}|[A-Za-z0-9][A-Za-z0-9._\-/]*")
-#: A `YYYY-MM` (or `YYYY/MM`) month reference. Excluded from identifiers (it is
-#: temporal, not an identifier) and compared by `date_tokens`, so
-#: `2026-11 report` / `2026-12 report` reports `date_conflict` — the rule that
-#: actually fired — instead of `identifier_conflict`.
-_YEAR_MONTH_RAW = re.compile(r"^(?:1[89]\d\d|2\d\d\d)[-/](?:0[1-9]|1[0-2])$")
+#: A `YYYY-MM` (or `YYYY/MM`) month reference, and the `YYYY-Qn` / `Qn-YYYY`
+#: compounds. Excluded from identifiers (they are temporal) and compared by
+#: `date_tokens`, so `2026-11 report` / `2026-12 report` reports `date_conflict` —
+#: the rule that actually fired — instead of `identifier_conflict`.
+_YEAR_MONTH_RAW = re.compile(r"^(?:1[89]\d\d|2\d\d\d)[-/](?:0[1-9]|1[0-2]|q[1-4])$")
+#: The quarter-first spelling of the same compound (`Q3-2026`).
+_QUARTER_YEAR_RAW = re.compile(r"^q[1-4][-/](?:1[89]\d\d|2\d\d\d)$")
+
+
+def _temporal_compound(tok: str) -> bool:
+    """Is ``tok`` a date written as one hyphenated compound?
+
+    One predicate for both halves — `identifier_tokens` must not call it an
+    identifier and `skeleton(replace_dates=True)` must abstract it — so the two
+    rules cannot disagree about the same spelling and report an `identifier`
+    conflict for a date that contradicts. Case-folded here because the callers
+    pass the RAW token (`2026-Q3`) while the patterns are written lowercase.
+    """
+    folded = str(tok or "").casefold()
+    return bool(_YEAR_MONTH_RAW.match(folded)
+                or _QUARTER_YEAR_RAW.match(folded))
 _YEAR = re.compile(r"\b(1[89]\d\d|2\d\d\d)\b")
 _QUARTER = re.compile(r"\bq([1-4])\b")
 #: Tokens that LOOK identifier-shaped (letter+digit) but are temporal, so they
@@ -279,7 +298,7 @@ def identifier_tokens(name: str) -> set[str]:
         has_sep = any(ch in tok for ch in "-_./")
         if not (has_alpha or has_sep):
             continue
-        if _YEAR_MONTH_RAW.match(tok):
+        if _temporal_compound(tok):
             continue
         folded = _SEPARATORS.sub("", tok.casefold())
         if not folded or _TEMPORAL_TOKENS.match(folded):
@@ -316,6 +335,12 @@ def date_tokens(name: str) -> dict[str, set[str]]:
                    if _YEAR_MONTH_RAW.match(tok)}
     if year_months:
         out["year_month"] = {tok.replace("/", "-") for tok in year_months}
+    quarter_years = {tok for tok in _TOKEN.findall(str(name or ""))
+                     if _QUARTER_YEAR_RAW.match(tok)}
+    if quarter_years:
+        out["year_quarter"] = out.get("year_quarter", set()) | {
+            "-".join(reversed(tok.replace("/", "-").split("-")))
+            for tok in quarter_years}
     if years and quarters:
         out["year_quarter"] = {f"{y}-{q}" for y in years for q in quarters}
     return out
@@ -353,7 +378,7 @@ def skeleton(
             out.append("<id>")
         elif replace_dates and (_TEMPORAL_TOKENS.match(folded)
                                or folded in _MONTHS
-                               or _YEAR_MONTH_RAW.match(tok)):
+                               or _temporal_compound(tok)):
             out.append("<date>")
         else:
             out.append(folded)
@@ -522,30 +547,3 @@ def chain_length(node_id: str, edges) -> int:
         seen.add(nxt)
 
 
-def dependents_of(node_id: str, edges) -> set[str]:
-    """The ids whose `resolved_from` names ``node_id`` — its merge group."""
-    return {str(a) for a, b in edges if str(b) == str(node_id)}
-
-
-def closure_vetoes(candidate_id: str, survivor_id: str, edges) -> list[str]:
-    """M-4 re-verification for ONE proposed merge, over the current edge set.
-
-    Refuses to create a chain or to silently absorb a group:
-
-    * ``target_retired`` — the SURVIVOR is itself retired. Merging onto it would
-      write ``candidate -> survivor -> fixpoint``: a chain, and a second hop the
-      reviewer never saw. (`apply_entity_merge` also hops the survivor to its
-      fixpoint, so this refusal exists for callers that construct the pair
-      themselves.)
-    * ``group_join`` — the CANDIDATE is a survivor of an earlier merge, so it
-      carries dependents. Retiring it drags those dependents across a boundary
-      their own pairwise verdict never covered: ``A matches B`` plus ``B matches
-      C`` is not a verdict on ``A``/``C``.
-    """
-    pairs = [(str(a), str(b)) for a, b in edges]
-    got: list[str] = []
-    if chain_length(survivor_id, pairs) >= 1:
-        got.append(VETO_TARGET_RETIRED)
-    if dependents_of(candidate_id, pairs):
-        got.append(VETO_GROUP_JOIN)
-    return [code for code in VETO_CODES if code in got]

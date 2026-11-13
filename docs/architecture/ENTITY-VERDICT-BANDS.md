@@ -38,26 +38,35 @@ names a file, not a blog.
 
 | hop | code | what it means |
 |---|---|---|
-| the merge writes no `status` | `entity_resolver.py:797-805` — the candidate's only props are `resolved_from`, `dedup_reviewed='merge'`, `reviewed` | the retired carrier stays a live node |
-| the carrier keeps its `name` | `entity_resolver.py:778-796` — the SURVIVOR gains `aliases[]`; nothing rewrites the carrier's `name` | both rows carry the same spelling |
+| the merge writes no `status` | `entity_resolver.apply_entity_merge` — the candidate's only props are `resolved_from`, `dedup_reviewed='merge'`, `reviewed` (~`:909-913`) | the retired carrier stays a live node |
+| the carrier keeps its `name` | `entity_resolver.apply_entity_merge` — the SURVIVOR gains `aliases[]` (~`:890-901`); nothing rewrites the carrier's `name` | both rows carry the same spelling |
 | the FTS index is `name`-only | `projection/__init__.py:6819` (`:Subject`), `:6823` (`:Object`) | a name query matches both |
 | the retrieval filter is `status`-only | `search_engine.py:2973-2997` (`_STATUS_FILTERED_LABELS`, `:148`) — `resolved_from` count in `search_engine.py`, `ranking.py`, `session_link.py`, `assembly.py`: **0** | the carrier is search-visible and ranked |
 | the capture path never consulted the resolver | `extractor_v2` S3 → `_fts_rows` → `sdk.tortoise_fts_query(..., include_terminal=True)` | and it opts *back into* the wider status view |
-| the tie rule | rows land in **id-keyed dicts**, order DISCARDED (`extractor_v2.py:2913-2914`) | carrier and survivor **tie** on the name-only index |
+| the tie rule | rows land in **id-keyed dicts**, order DISCARDED — `search_graph`'s accumulator, `extractor_v2.py:3289` (the comment in `_fts_rows` says the same) | carrier and survivor **tie** on the name-only index |
 
 ⇒ A mention could bind to **the node the merge retired**, and `resolve_entities`
 would report it as a resolution.
 
 **The guard, and what it tests** (`extractor_v2._current_entity_priors`): after
 the S3 union, every entity prior row is tested for `resolved_from` and **replaced
-by its fixpoint** — the survivor's id, name and kind — so the verdict table holds
-one candidate per ENTITY.
+by its fixpoint** — the survivor's id, name and kind, **plus the spellings it
+answers to** (`aliases[]`, so the spelling that matched the carrier still resolves
+here; a row without them turns a re-mention of a merged variant into a measured
+absence, `found: False · no match — created`) — so the verdict table holds one
+candidate per ENTITY.
 
-Three properties are load-bearing and each is pinned by a test:
+Four properties are load-bearing and each is pinned by a test:
 
 * **Replacement, not deletion.** Dropping the row would turn a merged mention into
   a measured absence, and §4.4 I1 makes measured absence the one state that
   licenses a CREATE — the guard would trade a wrong binding for a duplicate.
+* **Replacement carries the spelling, not only the id.** `_find_existing_entity`
+  matches `name` first and now the row's `aliases[]` too (mode `alias`, compared
+  with the tree's own `normalize_entity_name` fold) — otherwise a mention spelled
+  the way the merged variant was spelled finds nothing in phase 1 and is recorded
+  as a measured absence, which is the same defect one field over. Pinned by
+  `test_a_re_mention_of_the_merged_variant_resolves_through_the_alias`.
 * **The survivor is not status-filtered.** This leg deliberately includes terminal
   entities (`#3301`); a merge-retired carrier is a different question from a
   terminal incarnation, and a guard that conflated them would silently drop the
@@ -71,8 +80,10 @@ Three properties are load-bearing and each is pinned by a test:
   first query and `_render_search_results` acts on it by withholding every prior
   and telling the gap reviewer the lookup did not run, whereas here the queries
   ran and their point/event priors are real. So the fold failure keeps every row
-  it did resolve, records the entity legs as failed (`coverage["failed"]`), sets
-  a reason naming the fold, and drops the entity legs from `query_results.ran` so
+  it did resolve, impairs the entity legs in the counters (one `ran` down and one
+  `failed` up, so `ran + failed <= derived` still holds and the S4 note NAMES the
+  impaired leg instead of blaming the query budget), sets a reason naming the
+  fold, and drops the entity legs from `query_results.ran` so
   an entity candidate whose fixpoint was not established is recorded
   `found: None`, never `found: false`. Pinned by
   `test_a_fold_failure_is_PARTIAL_and_keeps_the_rows_it_did_resolve`. The only
@@ -105,17 +116,18 @@ its acceptance does not reach them.
 
 ⛔ **`link` is not a band.** Round 3 (`#12186` comment `6839898289`, Half-A.1)
 found exactly one non-retiring pointer — `aliases[]` on the SURVIVOR
-(`entity_resolver.py:784`, `:792`), read back at `:611` and
-`entity_identity.py:843` — which leaves the other node live, search-visible and
+(`entity_resolver.apply_entity_merge`'s alias write, read back by
+`resolve_entity_id`'s `$k IN n.aliases` and by `entity_identity`) — which leaves
+the other node live, search-visible and
 still a dedup candidate. Two reasons it is not a verdict value here:
 
 1. **A pointer is not a verdict.** `aliases[]` records *addressability* ("this
    spelling names that entity"). It carries no evidence, no score and no inverse:
    from an alias you cannot recover the variant that produced it.
 2. ⛔ **Writing `dedup_reviewed='link'` is worse than inert — it silently
-   DEQUEUES.** The write is one call (`sdk.py:51584` → `SET n += $props`), but the
-   content review queue filters `dedup_reviewed IS NULL`
-   (`sdk.py:24256-24257`), so any non-NULL value removes the row from review with
+   DEQUEUES.** The write is one call (`sdk.update_entity` → `_update_entity`'s `SET n
+   += $props`), but the content review queue filters `dedup_reviewed IS NULL`
+   (`sdk.py:24507`), so any non-NULL value removes the row from review with
    **no verdict applied**. A `link` band that shipped only its writer would delete
    a review nobody counts.
 
@@ -197,9 +209,13 @@ In this tree the chain is a `resolved_from` path, and `follow_resolved_from`
 follows to a **fixpoint** (`entity_resolver.py:556-577`) — so a chain is silently
 collapsed rather than reported, and nothing bounds it.
 
-* **Negative half, at the verdict** (`entity_verdict.closure_vetoes`): a target
-  that is itself retired, or a candidate that carries dependents, is refused →
-  `review`.
+* **Negative half, at the verdict** (`entity_verdict.hard_vetoes` over the facts
+  `extractor_v2._entity_verdict_facts` reads — the ONE implementation on the
+  path): a candidate that carries `resolved_from` (`target_retired`) or that is
+  itself a merge survivor (`group_join`) is refused → `review`. A second,
+  mention-blind `closure_vetoes` helper was deleted rather than left as a
+  divergent twin: it could not see the mention, so it could not honour the alias
+  escape, and wiring it in would have refused exactly the case that escape fixes.
 * **Positive half, at the merge verb** (`entity_resolver.apply_entity_merge`), and it
   takes BOTH legs. The survivor is hopped to its fixpoint before writing **and**
   the candidate side is closed: a candidate that is already retired is refused

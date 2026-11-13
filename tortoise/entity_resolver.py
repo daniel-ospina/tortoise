@@ -913,14 +913,20 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     }
     if not candidate_canonical:
         _candidate_props["canonical_name"] = folded
-    # Path-shortening, read BEFORE the write below changes what `resolved_from`
-    # answers: every node the candidate stands for is re-pointed at the final
-    # survivor, so the closure stays one hop deep (M-4's positive half, candidate
-    # side) and `dependents >= 1` stays a reliable reading of "this is a group".
+    # ⛔ Path-shortening runs BEFORE the candidate is retired, and the order is
+    # load-bearing: `update_entity` is a heavy call (per-node sanitize + money/
+    # value probes + its own reads), so a transient failure mid-loop is realistic.
+    # Re-pointing FIRST leaves an intermediate that is harmless and idempotent on
+    # a retry (dependents pointing at a live survivor); the reverse order leaves
+    # the candidate already retired while its dependents still point at it — the
+    # 2-hop chain this function exists to make impossible — and reports a landed
+    # merge as failed. The wording is exact about what is guaranteed: no chain
+    # THIS verb creates exceeds one hop (a pre-existing legacy chain is left to
+    # the fold's bounded walk, which grades cannot-answer).
     dependents = _dependents_of(graph, candidate_id)
-    sdk.update_entity(candidate_id, **_candidate_props)
     for dependent_id in dependents:
         sdk.update_entity(dependent_id, resolved_from=survivor_id)
+    sdk.update_entity(candidate_id, **_candidate_props)
     out = {"survivor_id": survivor_id, "candidate_id": candidate_id,
            "aliases": alias_list, "method": method,
            "similarity": round(float(similarity), 4)}
