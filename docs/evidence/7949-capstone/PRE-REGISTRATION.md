@@ -2803,7 +2803,8 @@ to answer.
   edit to this file, and the bundle README's present-tense digest with it.
 - ⛔ **Superseded for THIS tree by §10.33 — on the `#548` blank-`pointKind` window only.** Every
   other number this entry re-derived is still the live one; the window this tree carries is
-  `projection/__init__.py:14272-14274`, not the `:14265-14267` §10.29 measured.
+  `projection/__init__.py:14272-14274`, not the `:14265-14267` asserted in §10.27's supersede
+  statements.
 - **This entry was LIVE for the merged tree at the head it shipped at** — it now has a successor, so
   the supersede marker above is the record of what moved.
 
@@ -2814,9 +2815,10 @@ to answer.
 > entry supersedes them on the `#548` blank-`pointKind` window and on nothing else — every other
 > number §10.29 owns is §10.32's.
 >
-> ⛔ **And it supersedes §10.32 on that ONE window**, which is why §10.32 now carries a supersede
-> marker in its closing bullet: §10.32's live-for-the-merged-tree claim was true of the head it
-> shipped at, and its own numbers are untouched here.
+> ⛔ **And it supersedes §10.32 on that ONE window**, which is why §10.32 carries a supersede
+> marker in the second-to-last of its closing bullets (the last one records that it now has a
+> successor): §10.32's live-for-the-merged-tree claim was true of the head it shipped at, and its
+> own numbers are untouched here.
 
 - **Why it exists.** The `#12304` cite sweep found `probes/capstone_measure.py:3317` citing
   `tortoise/projection/__init__.py:14265-14267`, which carries `"inputs": inputs}` — seven lines
@@ -2828,10 +2830,18 @@ to answer.
   `tortoise/projection/__init__.py:14272-14274` — `14272` is
   `# Ensure pointKind is present (operators often lack it)`, `14273` is
   `if "pointKind" not in clean:` and `14274` is `clean["pointKind"] = ""`, the same three-line
-  window §10.25–§10.29 tracked under the earlier numbers.
+  window §10.25 (`14225`), §10.26 (`14245`) and §10.27 (`14248-14250`) each measured for their own
+  head.
+- **What `14265-14267` is, precisely, since this entry names it.** It is not a window this entry
+  measured, and not one it can vouch for. Every place this record ASSERTS it as a window is inside
+  §10.27 — its opening callout (`:2530`) and its closing supersede bullet (`:2555`) — and both
+  attribute it to §10.29, whose own body carries neither the number nor a `pointKind` mention. The
+  only other mentions are §10.32's inheritance of that attribution and this entry's own discussion
+  of it. So it reaches §10.32 as a broadcast attribution, not as a measurement this record can
+  re-derive; that is why this entry records the three lines above instead of carrying the number
+  forward again.
 - **Verified by content, not arithmetic.** The window is confirmed by the anchor's own three lines
-  (comment, guard, assignment); it is not `14265` plus the `+7` the merged tree happens to carry, and
-  `14265` is recorded here as the value §10.29 measured for an earlier head, not as a live one.
+  (comment, guard, assignment); it is not `14265` plus the `+7` the merged tree happens to carry.
 - **What moved: one citation, and nothing that is a protocol value.** No metric, denominator,
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4 denominator
   are the ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for
