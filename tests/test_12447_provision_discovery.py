@@ -235,13 +235,45 @@ class TestTheListingDoorTeachesTheSameWay:
                        headers={"Authorization": f"Bearer {token}"})
             detail = _detail(r)
             assert detail["error_code"] == "GRAPH_LISTING_VIA_SESSION", detail
-            # The remedy is the truthful one: no key-driven listing exists, so
-            # the graph id comes from the provisioning 201 — named here.
+            # The remedy must name what EXISTS. A first draft said no key-driven
+            # route returns a graph id; `GET /v1/team/keys` does (and the SDK's
+            # `list_memory_graphs` lists the account's graphs), so this pins the
+            # truthful remedy rather than the convenient one.
             assert ORG_ENDPOINT in detail["message"], detail
-            assert "graph id" in detail["message"], detail
-            # …and it says what the account surface DOES answer, so the reader
-            # is not left guessing where the limits live.
-            assert "/v1/team" in detail["message"], detail
+            assert "/v1/team/keys" in detail["message"], detail
+            assert "list_memory_graphs" in detail["message"], detail
+            assert "no key-driven listing route" not in detail["message"], detail
+        finally:
+            gen.close()
+
+    def test_an_account_key_recovers_graph_ids_through_the_keys_surface(
+            self, tmp_path):
+        """The refusal tells the builder graph ids ARE reachable with a key.
+        That claim is only worth making if it EXECUTES — so run it: provision
+        two graphs, then recover both ids from `GET /v1/team/keys` with the
+        account's full-access key (`_require_keys_manage` passes
+        `legacy_full_access`)."""
+        gen = _setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            account_key = _mint_caller_key(sdk, tid, scopes=None)  # legacy shape
+            provisioned = []
+            for name in ("eu-list-1", "eu-list-2"):
+                r = tc.post(f"/v1/organizations/{tid}/graphs",
+                            json={"name": name},
+                            headers={"Authorization":
+                                     f"Bearer {account_key['api_key']}"})
+                assert r.status_code == 201, r.text
+                provisioned.append(r.json()["graph"]["id"])
+            r = tc.get("/v1/team/keys",
+                       headers={"Authorization":
+                                f"Bearer {account_key['api_key']}"})
+            assert r.status_code == 200, r.text
+            # The shape is `{"keys": [...]}` (not a bare list) — read it as the
+            # API returns it, so the test pins the real contract.
+            rows = r.json()["keys"]
+            recovered = {row.get("graph_id") for row in rows}
+            assert set(provisioned) <= recovered, (provisioned, recovered)
         finally:
             gen.close()
 

@@ -26517,21 +26517,29 @@ async def get_current_user_graph_listing(request: Request) -> dict:
     `POST /v1/graphs` → 401, `GET /v1/graphs` → 401, `GET /v1/team` → an
     actionable 403. Teaching only the first would leave a builder who has just
     provisioned successfully unable to ENUMERATE their graphs, answered by the
-    identical "your key is bad" message. There is no key-driven listing route
-    today (the account surface `GET /v1/team` reports limits, not graph ids), so
-    the remedy this door teaches is the true one: the graph id lives in the
-    provisioning 201, which is also the only place the graph's key is returned.
+    identical "your key is bad" message.
+
+    ⛔ The remedy must name what actually EXISTS, and a first draft of this
+    message did not: it said no key-driven route returns a graph id. That is
+    false — `GET /v1/team/keys` returns each key's `graph_id`
+    (`list_api_keys`, via `_require_keys_manage`, which passes the account's
+    legacy full-access key or any key holding `keys:manage`), and the public SDK
+    method `list_memory_graphs` lists the account's graphs. There is no key-driven
+    GRAPH-LISTING route (this endpoint's own shape), which is a different and
+    much narrower fact. A refusal that overstates the gap sends a builder to
+    rebuild graphs they could have enumerated.
     """
     if _api_key_bearer(request):
         raise _provision_refusal(
             "GRAPH_LISTING_VIA_SESSION",
             "This endpoint lists an account's graphs from a signed-in session, "
-            "and there is no key-driven listing route today: an API key cannot "
-            "enumerate graphs. Keep the graph id from the provisioning 201 — "
-            f"{_PROVISION_ENDPOINT} returns it together with the graph's key "
-            "(revealed once), which is the only call that returns either. "
-            "`GET /v1/team` with an account-level key reports the account's "
-            "limits (max_graphs, max_api_keys), not its graph list.")
+            "so an API key cannot call it. The graph ids are still reachable "
+            "with a key: GET /v1/team/keys returns each key's graph_id (it "
+            "needs the account's full-access key, or a key holding "
+            "keys:manage), and the SDK's list_memory_graphs lists the "
+            "account's graphs. Keep the graph id from the provisioning 201 "
+            f"({_PROVISION_ENDPOINT}) as well — that call returns it together "
+            "with the graph's key, which is revealed once and never again.")
     return await _session_user_with_overrides(request)
 
 

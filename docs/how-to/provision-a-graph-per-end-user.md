@@ -20,12 +20,14 @@ reaches *only their* graph and **cannot** create more.
 invisible: the obvious request failed with a message that named neither the right
 endpoint nor the missing scope.
 
-> **Canonical terms** (`docs/ONTOLOGY.md` §1.1 for **organisation account**, and
-> `docs/registry-graph-schema.md` for the account layer it owns): an
-> **organisation account** is the billing and plan boundary; it owns many
-> **memory graphs**; a **credential** (API key) authenticates to an account or to
-> one graph. The mid tier is called **Builder** in the product and `pro` in the
-> API (#12444) — they are the same plan.
+> **Canonical terms.** **Organisation account** is defined in
+> `docs/ONTOLOGY.md` §5 (Core Kind Vocabulary, the account-layer note) and, with
+> the tenancy vocabulary this guide uses — **memory graph**, **credential** — in
+> `docs/registry-graph-schema.md` ("Definitions — account layer vs in-graph
+> Subjects"). An **organisation account** is the billing and plan boundary; it
+> owns many **memory graphs**; a **credential** (API key) authenticates to an
+> account or to one graph. The mid tier is called **Builder** in the product and
+> `pro` in the API (#12444) — they are the same plan.
 
 ---
 
@@ -120,10 +122,15 @@ The `201` body:
 
 `key_plaintext` is shown **once** — nothing retrieves it again (the store holds
 only a salted hash). Persist it into your own secret store before dropping the
-response — and persist `graph.id` with it: there is **no key-driven listing
-route** today, so the 201 is the only call that returns a graph's id (the
-session-only `GET /v1/graphs` answers an API key with
-`403 GRAPH_LISTING_VIA_SESSION`, which says exactly this).
+response.
+
+Persist `graph.id` too. There is no key-driven **graph-listing** route —
+`GET /v1/graphs` is session-only and answers an API key with
+`403 GRAPH_LISTING_VIA_SESSION` — but the id is not lost if you miss it: keep it
+from this 201, or recover it later from **`GET /v1/team/keys`** (each row carries
+its key's `graph_id`; it needs the account's full-access key, or a key holding
+`keys:manage`) or, from the SDK, `list_memory_graphs`. `GET /v1/team` with a key
+reports limits (`max_graphs`, `max_api_keys`), not graph ids.
 
 **Do not call `POST /v1/graphs` for this.** That endpoint is the *dashboard's*
 session-authenticated alias for the same service. With an API key it answers
@@ -190,9 +197,13 @@ curl -s -X DELETE "https://app.premiselabs.co/v1/graphs/$GRAPH_ID?org_id=$ORG_ID
   -H "Authorization: Bearer $TORTOISE_API_KEY"   # needs graphs:delete (owner-class)
 ```
 
-This is a **soft delete** — a tombstone, not an erasure — but read the two
+This is a **soft delete** — a tombstone, not an erasure — but read the three
 caveats before you build a churn story on it:
 
+- **The window is 7 days** (`retention.RESTORE_WINDOW_DAYS`). Restore works inside
+  it; after it the purge physically erases the tombstone and the graph's namespace,
+  and nothing is recoverable. A "restore when the customer comes back" flow built
+  on a longer horizon silently finds nothing.
 - **Restore is not callable with your API key.**
   `POST /v1/graphs/trash/{graph_id}/restore` is a *session + owner/admin*
   surface, so it is a dashboard/operator step, not something your server can do
@@ -200,15 +211,14 @@ caveats before you build a churn story on it:
 - **A restored graph has no live keys.** The delete revoked every key bound to
   the graph and restore does not resurrect them — re-mint and re-deliver to the
   end user (step 2). The data itself is intact (the graph's namespace is
-  gid-keyed and untouched by the tombstone), restore re-occupies the quota slot,
-  and it is refused once the grace window has passed (the tombstone is then
-  purgeable and nothing is restorable).
+  gid-keyed and untouched by the tombstone) and restore re-occupies the quota
+  slot.
 
 The delete itself revokes every key bound to the graph, drops its ACL user, frees
-the quota slot and the graph name, and deletes nothing irreversibly.
-`graphs:delete` is **not** in the child policy, so a minted key can never do this
-— deletion is an account-level operation, which is the same one-level-deep rule
-seen from the other side.
+the quota slot and the graph name, and physically deletes no data inside the
+window. `graphs:delete` is **not** in the child policy, so a minted key can never
+do this — deletion is an account-level operation, which is the same
+one-level-deep rule seen from the other side.
 
 ---
 
@@ -217,20 +227,27 @@ seen from the other side.
 **The four credential-scope refusals** are `403` with
 `detail: {"error_code", "message"}` — the shape `GRAPH_SCOPED_TEAM_SURFACE` set
 for credential-scope refusals (#2114). The plan/quota gates below them keep
-their pre-existing shape: a **string** `detail`, plus their own header
-(`X-Upgrade-CTA` / `X-Graph-Quota`). Do not write a client that assumes
-`detail.error_code` exists on every error.
+their pre-existing shape: a **string** `detail`, plus a header where one exists
+(`X-Upgrade-CTA` on the 402, `X-Graph-Quota` on the graph-quota 409 — the
+key-cap 409 carries the string detail and no header at all). Do not write a
+client that assumes `detail.error_code` exists on every error.
 
 | `error_code` | You did | Remedy |
 |---|---|---|
 | `PROVISION_VIA_ORG_ENDPOINT` | called `POST /v1/graphs` with an API key (the session alias) | call `POST /v1/organizations/{org_id}/graphs`, §2 |
 | `PROVISION_REQUIRES_ORG_KEY` | called the provisioning door with a **minted** key | provision from the account-level key; §4 |
 | `PROVISION_SCOPE_REQUIRED` | called it with an account key that lacks `graphs:create` | mint/grab a key carrying `graphs:create`, §1 |
-| `GRAPH_LISTING_VIA_SESSION` | called `GET /v1/graphs` with an API key | nothing to call — keep `graph.id` from the 201, §2 |
+| `GRAPH_LISTING_VIA_SESSION` | called `GET /v1/graphs` with an API key | keep `graph.id` from the 201, or recover it from `GET /v1/team/keys`, §2 |
 | `GRAPH_SCOPED_TEAM_SURFACE` | a minted key touching a team/account surface | expected — the key is graph-scoped, §3 |
 | `402` + `X-Upgrade-CTA: pro` | the account is `free`/`anon` | upgrade to Builder (`pro`), §1 |
 | `409` + `X-Graph-Quota: n/max` | the graph quota is full | `solo` holds 1 custom graph; upgrade, or delete a graph |
 | `409` "API key limit reached" | the **key** cap is full | delete an end-user's graph (frees its key), or upgrade |
+
+`GET /v1/team/keys` deserves one line of its own, because it is how a builder
+recovers graph ids and rotates credentials with a key on the server: it needs the
+account's full-access key or a key carrying `keys:manage`, and each row carries
+`graph_id`, `scopes`, `delegation_depth`, `enabled` and `expires_at` — no
+plaintext, ever.
 
 ---
 
