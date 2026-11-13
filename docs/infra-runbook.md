@@ -3393,10 +3393,11 @@ not block on) sends the reader to the
 there, and the alert deliberately does not re-run the gate — while a report that exists but
 yields no text (empty, nothing left by the squeeze and its fallback, or one it could not read
 through — a directory, or a path that could not be re-read) sends them to the
-**run link**. In the states where the tail could be READ, a report **larger than the cap** is named by its real
-size, with the statement that only its last 6000 bytes were read, so a blank or undecodable
+**run link**. In the two states that carry **no** excerpt, a report **larger than the cap** is named by
+its real size, with the statement that only its last 6000 bytes were read, so a blank or undecodable
 tail is never mistaken for a blank report (a path that cannot be read at all yields no size to
-name, and the sentence says that instead). It never claims an excerpt it is not showing, never guesses the cause when two states are
+name, and the sentence says that instead). A report that **is** carried states only that it was
+truncated to its last 6000 bytes — the excerpt is there to read, so the size adds nothing. It never claims an excerpt it is not showing, never guesses the cause when two states are
 indistinguishable from there, and the section intro no longer promises a "verbatim" report it
 may not be carrying (#12200): on-call reads the body, so a false claim there costs the reader
 the trip they were trying to avoid.
