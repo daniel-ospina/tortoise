@@ -28,6 +28,7 @@ parser change cannot satisfy one by breaking the other.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from datetime import UTC, date, datetime, timedelta
@@ -734,6 +735,50 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
         assert calendar_datetime(unreadable_tail) is None, unreadable_tail
 
 
+def _zone_child_env_base() -> dict[str, str]:
+    """The zone child's environment: ``PATH``, the PARENT'S OWN import path, and nothing else.
+
+    ⛔ ``PYTHONPATH`` IS THE PARENT'S ``sys.path``, NOT the repo root alone (#12330).
+    The repo root is not where the project's DEPENDENCIES live, and a scrubbed child that
+    carries only the root can import ``tortoise`` and still fail on the first third-party
+    import — measured on `test (h)` of tortoise run 43352300482 (jobs 131694957585 and
+    131651680296, both attempts, identical):
+
+        stderr: Traceback (most recent call last):
+                  File "<string>", line 2, in <module>
+                  File ".../tortoise/commit_schema.py", line 47, in <module>
+                    from pydantic import (
+                ModuleNotFoundError: No module named 'pydantic'
+
+    The PARENT was importing ``pydantic`` fine at the same moment (it is a module-scope
+    import of ``tortoise.commit_schema``, which this test file already imports at the top),
+    so the interpreter the child was handed resolves the package and a bare env does not.
+    That is what #11871/#11878 could not name — they established only that the red was
+    undiagnosable because ``check=True`` discarded the child's stderr, and the stderr this
+    helper now carries is what named it.
+
+    Why NOT assert the deps are on a bare env's path: that holds only for the install shapes
+    where ``sys.executable``'s own prefix carries them (a plain venv, a system install). It
+    does NOT hold for a user-site install, for a runner whose project deps sit in a
+    ``uv sync`` environment, or for any shape where the parent's packages are reachable
+    through ``sys.path`` contributions the child's env does not reconstruct. A test whose
+    verdict is "can a bare interpreter import the project" reds on the runner class rather
+    than on the behaviour it exists to pin (a zone's calendar verdict).
+
+    ``TZ`` is NOT here: it is the one thing that must vary per child, and it is set by
+    ``_run_zone_child`` on top of this base, so the isolation this helper's subprocess
+    shape buys is unchanged — each child still reads exactly one zone and leaks nothing.
+    """
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    # Preserve the parent's ORDER (it is the resolution order) and drop duplicates; a
+    # pre-existing root entry would otherwise be searched twice.
+    paths = list(dict.fromkeys([repo_root, *[p for p in sys.path if p]]))
+    return {
+        "PATH": str(Path(sys.executable).parent),
+        "PYTHONPATH": os.pathsep.join(paths),
+    }
+
+
 def _run_zone_child(script: str, env_base: dict[str, str], zone: str) -> list[str]:
     """Run ``script`` in a child under ``zone``; return its output lines.
 
@@ -859,8 +904,7 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
         "print((k('2023/03/12 (Sun) 02:50')[1] - k('2023/03/12 (Sun) 03:10')[1],\n"
         "       k('2023/03/12 (Sun) 03:50')[1] - k('2023/03/12 (Sun) 02:50')[1]))\n"
     )
-    env_base = {"PATH": str(Path(sys.executable).parent), "PYTHONPATH": str(
-        Path(__file__).resolve().parent.parent)}
+    env_base = _zone_child_env_base()
     observed = {}
     for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles",
                  "Africa/Johannesburg"):
@@ -1012,12 +1056,7 @@ def test_a_failing_zone_child_names_its_stderr_not_just_its_argv():
         "sys.exit(1)\n"
     )
     with pytest.raises(AssertionError) as excinfo:
-        _run_zone_child(
-            broken,
-            {"PATH": str(Path(sys.executable).parent),
-             "PYTHONPATH": str(Path(__file__).resolve().parent.parent)},
-            "UTC",
-        )
+        _run_zone_child(broken, _zone_child_env_base(), "UTC")
     message = str(excinfo.value)
     assert "child exited 1" in message, message
     # ⛔ Cut pytest's appendix off FIRST. pytest appends its assertion-rewrite
