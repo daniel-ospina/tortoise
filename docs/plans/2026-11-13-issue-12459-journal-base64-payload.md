@@ -347,19 +347,24 @@ and decodes silently to fewer bytes. Let `m` be the number of **quanta** (4-char
 case (1,524 B = **381 whole floats**), so a reader checking only `len(decoded) % 4` **accepts a silently
 truncated vector**. Only the declared count refuses it. (This is the fail-open direction on the durability
 artifact: a short vector replayed into the graph is a wrong graph with no error anywhere.) `validate=True`
-is still mandatory — the default `False` discards characters outside the alphabet instead of refusing. The
-probe asserts both halves: every multiple-of-4 cut decodes silently, and `−16` is the only one of them whose
-decoded length passes a `%4` check.
+is still mandatory — the default `False` **discards** characters outside the alphabet instead of refusing, so
+an **insertion** into the body is count-clean and decodes to the *right* vector *silently* (measured: 4
+inserted `*` → default `b64decode` gives 1,536 B, count-clean, bit-identical; `validate=True` raises). That is
+why the probe has **two** character cases, not one: a *replacement* is caught by the count, and only an
+*insertion* is caught by `validate`. The probe asserts both halves: every multiple-of-4 cut decodes silently,
+and — *of the cuts measured (−1…−20)* — `−16` is the only one whose decoded length passes a `%4` check
+(`−32` would also pass: `m = 8`, 1,512 B = 378 floats; it is outside the sweep).
 
-The reader's **five** refusals, all measured in the probe:
+The reader's **six** refusals, all measured in the probe:
 
 ```
 == the reader refuses (each raises, none decodes silently short)
-  truncated body, padding intact             REFUSED (ValueError, decoded 1,533 B)
+  last quantum replaced + one dropped (1,533 B) REFUSED (ValueError, decoded 1,533 B)
   one element short, count unchanged         REFUSED (ValueError, decoded 1,532 B)
   packed f64 under a declared f32            REFUSED (ValueError, decoded 3,072 B)
   unknown version                            REFUSED (ValueError, decoded 1,536 B)
-  non-base64 character in body               REFUSED (Error)
+  non-base64 character REPLACING alphabet chars REFUSED (Error)
+  non-base64 chars INSERTED (count-clean, validate-only) REFUSED (Error)
 ```
 
 ### 2.3 What "lossless for the float32 the model emitted" means, precisely — measured
@@ -390,12 +395,13 @@ PASS vacuously): True`) and, beside it, the **negative control** that proves the
 vacuous: a **1-ULP perturbation** of one element flips it to `False`. The bits are the property because the
 bits are what the graph stores.
 
-⚠️ **And each of the three links is computed against something outside the frame**, which an earlier draft
-got wrong: `decoded f32 == producer f32` (against the producer's vector, not against the frame's own input),
-`P0 text→f32 == producer f32`, and frame-invertibility. The first draft's third link was
-`pack_f32(narrow(x)) == pack_f32(x)` — an **identity** (packing as `f32` rounds whether or not you round
+**Two of the three links face the producer, and the third is the frame's own round-trip.** Precisely:
+`decoded f32 == producer f32` and `P0 text→f32 == producer f32` are computed against something **outside**
+the frame; frame-invertibility (`decoded == the frame's input`) is *implied* by those two by transitivity and
+adds no discriminating power — it is reported because it is the property a reader would name, not because it
+is an independent test. An earlier draft's third link was worse than implied: it was
+`pack_f32(narrow(x)) == pack_f32(x)`, an **identity** (packing as `f32` rounds whether or not you round
 first), true for 384 random floats with no journal at all, so the `assert` built on it could never fail.
-It is now two named links plus a negative control.
 
 That 9 significant digits suffice for float32 is float32's own structure (24-bit significand ⇒ 9 decimal
 digits round-trip; 8 do not always). Checked rather than cited, on 2,000,000 random float32 values:
@@ -638,8 +644,9 @@ Named here so the implementation cannot choose a weaker one:
 ### 3.3 The failure this section exists to prevent
 
 `rebuild_all` and `consistency.recover_from_log` are the two consumers that can be wrong
-**catastrophically rather than visibly** — both wipe and replay (their own docstrings say "Rebuild = wipe +
-full replay" / "wipe + full replay"), so a wrong decode is silent rather than a visible read error. A reader that skipped a frame-bearing record would rebuild a graph **missing vectors** and
+**catastrophically rather than visibly** — both wipe and replay (`recover_from_log`'s docstring says "wipe +
+full replay"; `rebuild_all`'s says "this wipes the whole graph before replaying"), so a wrong decode is
+silent rather than a visible read error. A reader that skipped a frame-bearing record would rebuild a graph **missing vectors** and
 report success; a reader that decoded wrongly would rebuild **different vectors** and report success. Both
 are silent. That is why the review of this note and of the implementation must be on the **rebuild** path
 and not the append path — the issue says so, and it is right.
@@ -782,12 +789,19 @@ The frame was chosen so that this question has a cheap answer, which is the stro
 | the **encode** is wrong (pack) | a wrong pack puts wrong bytes **in the journal**, so a rebuild replays them faithfully and wrongly. A pack that violates the frame's own length (packed `<d` under a declared `f32`, or 383 elements under a count of 384) is **refused** by the count — measured: 3,072 B and 1,532 B decoded against a declared 1,536 B. A pack that is self-consistent but wrong (element order, a transposition) decodes **silently**, and the replay writes the wrong vector with no error — §3.3's failure exactly. | **the vector as written**, in the silent case: the journal is the record of record, so it can never supply the correct value again. ⚠️ **But the window is not zero** — the graph is written from the *same in-memory payload* (`projection/entities.py:2976`, `vecf32($embedding)`), so while a wrong pack has corrupted only the journal bytes the live graph still holds the correct vector: **dump the graph's vectors before the next `rebuild_all`** and they are recoverable; after a rebuild the wrong bytes are replayed and it is permanent. The rest of the record always rebuilds. |
 | the format is wrong (base64 turns out to be the wrong choice) | **dual reader**: both shapes stay readable indefinitely, because dispatch is per record and needs no state. The writer reverts to JSON text; journals that already carry frames keep replaying. | **nothing** — no record is rewritten, so no migration is needed in either direction |
 | the frame is withdrawn entirely | a reader that stops decoding still has to keep understanding frames for as long as any frame-bearing journal exists. That reader is a **permanent** obligation of the format. | a second reader path, forever |
+| ⛔ **a BUILD rollback** — the previous image is redeployed over a journal that already carries frames | **nothing automatic, and the failure is silent.** A pre-P2 build hands the frame *string* to the fold: `_writable_journalled_vector` returns `None` for anything that is not a list/tuple (`projection/entities.py:896`), and `owns_embedding = "embedding" in p` is **True**, so the `elif not op and owns_embedding` arm takes neither the write nor the recompute — and the width warning at `:2896` only fires when `journalled is not None`. So **every framed vector is dropped with no log line and the rebuild reports success**, which is §3.3's stated failure exactly. The P2 **reader must be forward-ported before any rollback** — a binary rollback is not a rollback. ⚠️ This is also the bound on §2.1's "a mis-ordered pipeline is loud": `_drop_journalled_embedding` warns on the **write** seam; the **rebuild** path degrades silently. | **the vectors in the rebuilt graph** — the journal still holds them, so a forward-ported reader recovers them, but the graph built by the rolled-back image does not have them and nothing said so |
 | base64 makes the log un-inspectable in an incident | a decode helper (`tools/journal_decode.py`-shaped) restores human readability on demand; it is a **tool**, not a format change | **human greppability of the vector** — you can no longer read, diff or hand-edit a vector in the log by eye. This is a real, permanent loss and the main non-byte cost of P2. |
 | a tear's surviving vector is no longer directly readable | nothing to recover: the record was never half-applied | **hand-recoverability of the vector's bytes as-is**: the values survive as a decodable **prefix**, but only after a human trims the body to a 4-char boundary — the shape of hand-recovery changes, not its existence (§2.6) |
 
 **What is permanently lost if the format ships and then is withdrawn:** the simplicity of a single-shape
 journal — every frame-bearing journal is thereafter a second code path that must keep a reader. That cost is
 **incurred by shipping at all**, not by withdrawing, and it is the reason §7 exists.
+
+⚠️ **And "no migration is needed in either direction" is a statement about the FORMAT, not about a BUILD.**
+The dual reader makes the *data* rollback-free; it does not make the *deployment* rollback-free, because a
+pre-P2 image cannot read a frame and does not say so (row 5 above). The safe rollback order is: ship the
+reader everywhere first, then the writer — i.e. the usual expand/contract — and until the last pre-P2 build is
+gone, a rollback is a **data-loss operation**, not a revert.
 
 ---
 

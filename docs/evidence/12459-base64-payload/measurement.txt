@@ -50,11 +50,12 @@
       the frame is chosen for bit-exactness and one reader, not for bytes.
 
 == the reader refuses (each raises, none decodes silently short)
-  truncated body, padding intact             REFUSED (ValueError, decoded 1,533 B)
+  last quantum replaced + one dropped (1,533 B) REFUSED (ValueError, decoded 1,533 B)
   one element short, count unchanged         REFUSED (ValueError, decoded 1,532 B)
   packed f64 under a declared f32            REFUSED (ValueError, decoded 3,072 B)
   unknown version                            REFUSED (ValueError, decoded 1,536 B)
-  non-base64 character in body               REFUSED (Error)
+  non-base64 character REPLACING alphabet chars REFUSED (Error)
+  non-base64 chars INSERTED (count-clean, validate-only) REFUSED (Error)
 
 == silent truncation: which cuts a LENGTH-ONLY check would accept
    cut   chars%4   decoded    floats   len%4==0   count check (declared n)

@@ -79,11 +79,12 @@ of framing (14 B prefix + 2 B of JSON quotes) = **2,064 B**.
 
 | corruption | verdict |
 |---|---|
-| truncated body, padding intact | refused (1,533 B decoded) |
+| last quantum replaced + one dropped (a 1,536 B payload carries **no** `=` padding — 512 exact quanta) | refused (1,533 B decoded) |
 | one element short, count unchanged | refused (1,532 B) |
 | **packed `f64` under a declared `f32`** | refused (3,072 B decoded against a declared 1,536 B) |
 | unknown frame version | refused |
-| non-base64 character in body | refused (`validate=True`) |
+| non-base64 character **replacing** alphabet chars | refused — by the **count**, not `validate=True`: replacing 8 chars breaks quantum alignment |
+| non-base64 chars **inserted** (count-clean) | refused, by `validate=True` only — the default `False` discards them and decodes to the *correct* vector silently |
 
 The **element count is load-bearing**, measured: `b64decode` *refuses* a cut that is not a multiple of 4
 characters, so the hazard is the **quantum-aligned** cut — 4 base64 chars are 3 whole bytes, so a body
@@ -100,8 +101,11 @@ env -u TORTOISE_DB_URI uv run python \
     docs/evidence/12459-base64-payload/probes/p2_base64_probe.py
 ```
 
-`measurement.txt` is one run's verbatim output. Exit 0 = measured; the probe asserts every equivalence
-it prints and returns non-zero if one fails.
+`measurement.txt` is one run's verbatim output. Exit 0 = measured. The probe **asserts** the three decode links (two of them
+producer-facing, plus the frame round-trip), the `f64` round-trip and its off-grid fixture, the five refusals,
+the sweep's cut set, the declared-count vacuity guard, and **both** vacuity controls for the bit assertion (the
+float64 arm passing and the 1-ULP perturbation flipping) — a printed control is not a control, which is how a
+tautological link survived a round. The remaining lines are printed evidence.
 
 ## External research
 

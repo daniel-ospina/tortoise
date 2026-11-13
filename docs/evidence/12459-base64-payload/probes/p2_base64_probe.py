@@ -356,13 +356,27 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
     # float64 — so it passes on any correct encode, on a degenerate vector, and on
     # a vector that was narrowed and re-widened. Measured, not assumed:
     producer = [float(x) for x in vec]
+    f64_vacuous = [float(np.float64(v)) for v in producer] == producer
     print("  float64-value equality decoded==producer (would PASS vacuously):",
-          [float(np.float64(v)) for v in producer] == producer)
-    # …and the bits assertion CAN fail — a negative control, so it is not vacuous:
+          f64_vacuous)
+    # …and the bits assertion CAN fail — a negative control, so it is not vacuous.
+    # Both are ASSERTED: a control that is only printed reports a vacuous control
+    # as a pass (that is how round 14's tautology survived). The expectation is
+    # inverted on purpose — a False control means the control is broken.
     perturbed = list(producer)
     perturbed[0] = float(np.nextafter(np.float32(perturbed[0]), np.float32(1e9)))
+    control_flips = as_f32_bits(perturbed) == as_f32_bits(producer)
     print("  the same assertion on a 1-ULP perturbation (must be False):",
-          as_f32_bits(perturbed) == as_f32_bits(producer))
+          control_flips)
+    if not f64_vacuous:
+        print("  ⛔ the float64-value arm is NOT vacuous on this vector — the "
+              "note's claim that it passes vacuously is now false and must be "
+              "re-stated, not silently kept")
+        return 1
+    if control_flips:
+        print("  ⛔ the 1-ULP negative control did not flip — the bits "
+              "assertion is vacuous and the control is broken")
+        return 1
 
     # ── the f64 population: NOT narrowed ────────────────────────────────
     print("\n== the caller-owned / preserved population (#5004 round-7)")
@@ -431,14 +445,24 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
     print("\n== the reader refuses (each raises, none decodes silently short)")
     body = frame("f32", 4, vec).rsplit(":", 1)[1]
     cases = {
-        "truncated body, padding intact":
+        # ⚠️ Not "padding intact": a 1,536 B payload is 512 exact quanta, so the
+        # body carries NO '=' padding at all. This fixture replaces the last
+        # quantum and drops one, which is the same shape as the -4 sweep row.
+        "last quantum replaced + one dropped (1,533 B)":
             f"b64:1:f32:{len(vec)}:{body[:-8] + 'AAAA'}",
         "one element short, count unchanged":
             f"b64:1:f32:{len(vec)}:{base64.b64encode(struct.pack('<383f', *vec[:383])).decode()}",
         "packed f64 under a declared f32":
             f"b64:1:f32:{len(vec)}:{base64.b64encode(struct.pack(f'<{len(vec)}d', *vec)).decode()}",
         "unknown version": f"b64:2:f32:{len(vec)}:{body}",
-        "non-base64 character in body": f"b64:1:f32:{len(vec)}:{'*' * 8 + body[8:]}",
+        "non-base64 character REPLACING alphabet chars":
+            f"b64:1:f32:{len(vec)}:{'*' * 8 + body[8:]}",
+        # ⛔ The case above is refused by the COUNT, not by `validate=True`: it
+        # replaces 8 alphabet chars, so the body is no longer quantum-aligned and
+        # the decoded length is wrong. The shape ONLY `validate=True` catches is
+        # an INSERTION — still 1,536 B decoded, hence count-clean:
+        "non-base64 chars INSERTED (count-clean, validate-only)":
+            f"b64:1:f32:{len(vec)}:{body[:8] + '****' + body[8:]}",
     }
     for label, text in cases.items():
         try:
@@ -492,8 +516,9 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
               f"decode silently (4 base64 chars = 3 whole bytes)")
         return 1
     if accepted_by_length_only != [16]:
-        print(f"  ⛔ unexpected sweep result {accepted_by_length_only} — only -16 "
-              f"leaves a decoded length that is a multiple of the 4-byte element")
+        print(f"  ⛔ unexpected sweep result {accepted_by_length_only} — of the "
+              f"cuts MEASURED (-1..-20) only -16 leaves a decoded length that is a "
+              f"multiple of the 4-byte element (-32 would too: m=8, 1,512 B=378f)")
         return 1
     if len(vec) * 4 != len(base64.b64decode(body, validate=True)):
         print("  ⛔ the declared count does not match the intact body — the "
