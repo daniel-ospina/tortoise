@@ -5311,7 +5311,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `core` registration at 7507 (9987 + 39 = 10026 on its own merged tree)
         # and the #12108 block that landed on `main` at `ea2c41a696`
         # (7535 there, 7574 here)
-        # (9987 + 32 = 10019 there) — so THIS tree reads 9987 + 39 + 32 = 10058.
+        # (9987 + 32 = 10019 there) — so THAT merge tree read 9987 + 39 + 32 = 10058.
+        # ⛔ `main` advanced AGAIN after that merge (`7d49270e56` -> `87c07462a8`) and
+        # moved the entry by +2, so 10058 is a HISTORICAL value, not this tree's:
+        # `a53ba8cf53` (#12406) registered `test_cli_setup.py` at 1039 and
+        # `73c479ce40` (#12408) registered
+        # `test_12364_mcp_list_return_annotations.py` at 2237 — both ONE-line
+        # insertions above the entry, both positions read on THIS merged tree.
         # ⛔ The `9951` this comment used to defend was never a value on
         # `main`: it was 9943 + the 8 lines #12060 was predicted to add, and two
         # other registrations landed first, so the prediction described no
@@ -5333,10 +5339,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # OWN branch tree — 7535 once landed, 7574 here — the +1
         # it also adds sitting below the entry). At THIS merge both landing
         # blocks sit above the entry — this branch's 39-line `core` block at
-        # 7507 and #12108's 32-line one at 7574 — so it reads
-        # 9987 + 39 + 32 = 10058, `carve_out:` opens 9932 and `uri_requiring:`
-        # 10263, so 10058 is inside the section. The identical text also sits at
-        # 6103 and 8573, which is what the 5th element exists to refuse; the
+        # 7507 and #12108's 32-line one at 7574 — and `main`'s +2 advance after
+        # that merge adds two more of the same kind (the last two rows of the
+        # table below), so it reads 9987 + 32 + 2 + 39 = 10060,
+        # `carve_out:` opens 9934 and `uri_requiring:` 10265, so 10060 is inside
+        # the section. The identical text also sits at
+        # 6105 and 8575, which is what the 5th element exists to refuse; the
         # pair shows the two cases over `9828250732`'s 6082 / 8459. Each
         # insertion below is attributed to the LANDING COMMIT that made it
         # (measured with `git diff -U0 <a> <b> -- config/ci-surfaces.yml`), and
@@ -5348,6 +5356,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   +1  @9150  `f1f74135a15b`           → BELOW both twins; it moves neither
         #  +32  @7535  #12108's block (`ea2c41a696`) → above the entry and the sdk twin
         #  +39  @7507  this branch's `core` block     → above the entry and the sdk twin
+        #   +1  @1039  `a53ba8cf53` (#12406, `test_cli_setup.py`) → above the entry,
+        #              BOTH twins and `core:`
+        #   +1  @2237  `73c479ce40` (#12408, `test_12364_mcp_list_return_annotations.py`)
+        #              → above the entry and BOTH twins; BELOW `core:` (2236)
         # ⚠️ Both `f1f74135a15b` rows are read at the main tip `abf186f1109a`, which
         # carries them but made NEITHER: `git show --stat abf186f1109a --
         # config/ci-surfaces.yml` is empty, and `f1f74135a15b` is the only commit in
@@ -5357,9 +5369,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ⛔ So the FIRST twin reads 6103 = 6082 + 8 + 13 (only the two insertions
         # above 6103 are above it, which is why the two twins do not move
         # together), and the sdk twin reads 8573 = 8459 + 8 + 6 + 16 + 13 + 32 + 39.
+        # Both are +2 at THIS merge — 6105 and 8575 — because both of `main`'s two
+        # new registrations sit above them.
         # ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8339) of `surfaces:`, so the resolver's
-        # nearest-column-zero-key rule reports the PARENT: a cite onto 8573 refuses
+        # (`core:` 2236, `sdk:` 8341) of `surfaces:`, so the resolver's
+        # nearest-column-zero-key rule reports the PARENT: a cite onto 8575 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
@@ -5408,17 +5422,24 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # the `main` tip `abf186f1109a` (+14: a 13-line `surfaces:` block at
             # 2237 plus a 1-line `tier1:` one at 9150), 9988 at this branch alone,
             # 10026 on this branch's own merged tree (+39), 10019 on `main` after
-            # #12108 landed (+32), and 10058 here (+39 and +32).
+            # #12108 landed (+32), 10058 on the merge of `7d49270e56` (+39 and
+            # +32), and 10060 here — the SAME merge tree, +2, because `main` then
+            # added two one-line registrations above the entry (`a53ba8cf53`
+            # #12406 at 1039 and `73c479ce40` #12408 at 2237, both read on THIS
+            # tree). This is the fifth re-derivation, and the reason is unchanged:
+            # the number is owned by a tool, so every landing above it re-stales it.
             # ⛔ `9951` is in that history only because this row printed it — it
             # was a predicted merge-tree value (9943 + 8), never a line any commit
             # on `main` carried. The deltas are just where the registrations
             # landed: this branch's 39-line `core` block at 7507 and #12108's
             # 32-line block at 7574, both above the entry, while this branch's
             # 1-line `durations:` addition at 10363 falls below it. A row sitting
-            # BELOW every insertion moves by the whole +71. The `core:` sub-key
-            # reads 2235 on every tree (no insertion above it); `sdk:` moves +30
-            # then +13 then +32 to 8300, then +39 to 8339.
-            ("10058", "- test_pack_logic_writeprobe_11083.py"),
+            # BELOW every insertion moves by the whole +73. The `core:` sub-key
+            # reads 2236 here (2235 before `main`'s +1 at 1039) — it is the ONE
+            # sub-key the @2237 registration cannot move, because that insertion
+            # sits BELOW the key; `sdk:` moves +30 then +13 then +32 to 8300, then
+            # +39 to 8339, then +2 to 8341.
+            ("10060", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
