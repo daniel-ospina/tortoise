@@ -731,6 +731,34 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
         f"dependency fix has disabled the arm it narrowed (got {respelled_arm.status}: "
         f"{respelled_arm.detail})"
     )
+    # ⛔ AND A SIBLING'S ABSENCE IS NOT THIS PACKAGE'S ABSENCE EITHER. The attribution is an
+    # EQUALITY on the PEP 503-normalised name, and this case is what makes that boundary
+    # load-bearing rather than incidental: `tortoise-graph-extra` CONTAINS
+    # `tortoise-graph`, so a regression to a prefix/substring matcher accepts it and orders
+    # an irreversible release for a defect that release cannot fix. Measured: with
+    # `== wanted` relaxed to `.startswith(wanted)` all other cases stay green and only this
+    # one reds, which is the whole reason it is here (`falkordblite` above binds no name
+    # matcher at all, so it cannot pin the equal-vs-prefix boundary).
+    sibling_marks = (
+        "ERROR: Could not find a version that satisfies the requirement "
+        "tortoise-graph-extra==1.0 (from versions: none)\n"
+        "ERROR: No matching distribution found for tortoise-graph-extra==1.0"
+    )
+    sibling_arm = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner({"pip": _completed(["pip", "install"], 1, "", sibling_marks)}),
+        absent_probe=lambda package: canary.INDEX_OK,
+    )[0]
+    assert sibling_arm.status == canary.UNKNOWN, (
+        f"`tortoise-graph-extra` is a DIFFERENT distribution whose name merely contains "
+        f"this one — its absence must not order a release (got {sibling_arm.status}: "
+        f"{sibling_arm.detail}); a prefix/substring matcher here re-opens the exact "
+        f"mis-order this arm was narrowed to close"
+    )
+    assert "users cannot even install" not in sibling_arm.detail, sibling_arm.detail
     # and a failure pip does not attribute to a missing distribution is never a FAIL
     arm = canary.install_and_run(
         package="tortoise-graph",
