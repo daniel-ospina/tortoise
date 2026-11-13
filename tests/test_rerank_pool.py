@@ -677,7 +677,8 @@ def test_a_pool_with_no_usable_text_makes_no_scorer_call(sdk, monkeypatch):
     """A pool whose every row came back textless must not COST a model call.
 
     The trace is already honest without this (the ``not _scored_rows`` arm reports
-    ``pool_text_read_failed``), so the guard this pins is about work, not wording:
+    ``pool_text_empty`` — the read SUCCEEDED, there was simply nothing usable in
+    it), so the guard this pins is about work, not wording:
     without it the read still calls ``rerank_pool(pool=0)``, ``_clamp_int`` turns
     the zero into the default width of 40, and the model is loaded, locked and run
     over twenty empty passages for a result that cannot differ. Reverting the guard
@@ -707,7 +708,13 @@ def test_a_pool_with_no_usable_text_makes_no_scorer_call(sdk, monkeypatch):
     assert calls == [], f"the scorer ran on a textless pool: {calls}"
     entry = _rerank_entries(trace)[0]
     assert entry["ran"] is False
-    assert entry["reason"] == "pool_text_read_failed", entry
+    # The REASON is ``pool_text_empty``, not ``pool_text_read_failed``: the read
+    # succeeded and returned every id, so blaming it would send a reader to the
+    # graph when the data is the problem. Pinned here as well as in
+    # ``test_an_ALL_empty_pool_says_nothing_scorable`` because this test is the
+    # one that runs the shape, and a wrong reason is invisible to a call-count
+    # assertion.
+    assert entry["reason"] == "pool_text_empty", entry
 
 
 def test_a_row_returned_with_NO_TEXT_is_not_scored(sdk, monkeypatch):
