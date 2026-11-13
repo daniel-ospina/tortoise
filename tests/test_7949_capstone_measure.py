@@ -5368,8 +5368,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # `10005`/`10019` pair that replaced it described a side branch's
             # OWN tree and its MERGE tree respectively — `10005` = 9973 + that
             # branch's 32 lines alone, `10019` = the same + the 14 `main`
-            # already carried. `10005` was never a value on `main` — its line
-            # 10005 is a comment, with the writeprobe entry at 10021 — and the
+            # already carried. `10005` was never a value on `main`: at `main`
+            # `87c07462` line 10005 is a comment, with the writeprobe entry at
+            # 10021 (earlier `main` commits put a `durations:` row there, so this
+            # is anchored to that tip, not to every `main`) — and the
             # remote no longer publishes the branch that carried it, so that
             # commit's objects survive only in a checkout that fetched it while
             # the branch existed (`git ls-remote origin
