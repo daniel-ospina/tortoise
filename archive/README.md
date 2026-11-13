@@ -4,7 +4,7 @@
 it was a mistake — read back. It is not a "maybe later" holding area, and nothing here is a
 candidate for restoration without a **new** surface decision.
 
-Owner ruling, 2026-11-17 (comment [`6831894340`](https://github.com/daniel-ospina/tortoise/issues/11609#issuecomment-6831894340)):
+Owner ruling, 2026-11-12 (comment [`6831894340`](https://github.com/daniel-ospina/tortoise/issues/11609#issuecomment-6831894340)):
 
 > **"there is no per-tool destination. We simply end with the target ones and nothing more.
 > Anything outside the target gets removed — archived code, so not available; we archive it in

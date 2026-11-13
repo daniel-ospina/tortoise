@@ -4,12 +4,21 @@
 #11609 batch 1 ARCHIVED (no destination in the approved surface) — and it has no
 other door: it is not a `TortoiseSDK` method, no CLI verb calls it, no REST route
 calls it, and outside `tests/` its only importer is the archived handler. Do not
-describe it as "still live for SDK/CLI callers": it is not, and the follow-up
-question — archive the engine too, or re-open a door — is open, not answered.
+describe it as "still live for SDK/CLI callers": it is not. The follow-up —
+archive the engine too, or re-open a door — is OPEN and owner-gated, filed as #12480.
 
-What keeps this module in the product is its HELPERS, which live code imports:
-`mean_grounding` / `grounding_snapshot` (`mining.py`), `_LLM_PROVIDERS`
-(`hosted_api.py`) and `_bfs_select_operators` (`dream.py` cites and mirrors it).
+What keeps this module in the product is its HELPERS, which live code imports —
+and THIS LIST IS THE DEPENDENCY MAP, so keep it exhaustive:
+
+- `_bfs_select_operators` — `tortoise/sdk.py` (`TortoiseSDK._select_subgraph`, whose
+  `compute_confidence` is the public caller: the SDK is a module consumer even
+  though it is not a door), `tortoise/dream.py`, and the `graph-scripts/`
+  diagnostics (`graph-diagnostics.py`, `parity_sample.py`, `dream-scale-bench.py`)
+- `mean_grounding`, `grounding_snapshot` — `tortoise/mining.py`
+- `_LLM_PROVIDERS` — `tortoise/hosted_api.py`
+
+Any lane that considers archiving or moving this module must re-derive that list
+first: an omission here is how `compute_confidence` breaks.
 Template Cypher + LLM for intent classification and result synthesis.
 No LLM-Cypher generation (rejected: 61% accuracy, 40% silent errors).
 """

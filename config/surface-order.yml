@@ -126,7 +126,7 @@ family_rank:
 # #11609 batch 1 (the four `REMOVED`-with-no-destination tools): `tortoise_analyze`,
 # `tortoise_backfill_v25`, `tortoise_packs_list` and `tortoise_pack_install` left the
 # ADVERTISED set, 72 -> 68. They are ARCHIVED, not retired-forward (owner ruling
-# 2026-11-17, comment 6831894340: anything outside the approved 27 is removed and its code
+# 2026-11-12, comment 6831894340: anything outside the approved 27 is removed and its code
 # kept only in `archive/`), so no shim serves them and the SERVED set drops by the same
 # four. Each removal moves exactly one keyword: create 15->14 (`pack_install`), list
 # 8->7 (`packs_list`), find 5->4 (`analyze`), operate 5->4 (`backfill_v25`); fetch /

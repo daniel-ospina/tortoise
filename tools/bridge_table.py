@@ -312,13 +312,15 @@ REMOVALS: dict[str, str] = {
 #: to validate — and kept because the reason a name left the surface is what a future
 #: "why can't I call X?" has to find (same form as `REMOVED_IN_PHASE_3_2`).
 #: Each is ARCHIVED: `archive/mcp-tools/b1-removed-no-destination/<tool>.py` holds the
-#: verbatim `ToolDefinition` + handler (owner ruling 2026-11-17, #11609 comment
+#: verbatim `ToolDefinition` + handler (owner ruling 2026-11-12, #11609 comment
 #: 6831894340 — outside the approved 27 is removed, not mapped).
 REMOVED_IN_BATCH_1: dict[str, str] = {
     "tortoise_analyze": (
         "canonical-mcp-tools.md §Removed entirely — spends LLM tokens at read "
         "time; read-time LLM is not offered (write-time LLM cost is ours). "
-        "ARCHIVED in #11609 batch 1; `tortoise/analyze.py` stays (non-MCP callers)"
+        "ARCHIVED in #11609 batch 1; `tortoise/analyze.py` stays only for its "
+        "helpers (sdk/dream/mining/graph-scripts) — `analyze()` itself has no "
+        "live door (#12480)"
     ),
     "tortoise_backfill_v25": (
         "canonical-mcp-tools.md §Removed entirely — a one-shot migration to "

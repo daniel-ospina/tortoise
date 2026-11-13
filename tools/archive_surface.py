@@ -7,7 +7,7 @@ THE RULE THIS IMPLEMENTS
                           recoverable and inspectable (kept in the repo, NOT importable
                           FROM THE SHIPPED PACKAGE, NOT exposed)
 
-Owner ruling, 2026-11-17 verbatim in substance (comment `6831894340` on #11609):
+Owner ruling, 2026-11-12 verbatim in substance (comment `6831894340` on #11609):
 *"we simply ended with the target ones and nothing more. anything outside the target gets
 removed (archived code so not available, we archive it in case we made a mistake and want
 to check what we had but ultimately outside the product because we don't want it)."*
