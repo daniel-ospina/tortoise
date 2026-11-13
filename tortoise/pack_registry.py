@@ -3407,7 +3407,9 @@ class PackRegistry:
                 # iterable` out of `_validate`, rendered by `load_all` as
                 # `✗ acme: 'int' object is not iterable` — no field, no index.
                 # And `or []` conflated FALSY with ABSENT exactly as the
-                # `rule` arm above does: `fromKinds: 0` / `false` / `{}`
+                # `rule` arm above ONCE did (round 16 fixed it there; that arm
+                # now refuses a falsy id by name):
+                # `fromKinds: 0` / `false` / `{}`
                 # loaded `✓ Clean` as NIL mode, and a scalar `'widget'` was
                 # char-split into six one-letter "kinds".
                 _fk_list = c.get("fromKinds")

@@ -420,6 +420,29 @@ class TestNeverRefuses:
             _log.removeHandler(_handler)
             _log.setLevel(_prev)
         assert kept == ("subject",)
+        # the KIND scope drops just as loudly — it has no widening default, so a
+        # fully-dropped list lands on `()` = NIL mode, a scope nobody asked for
+        kinds_records = []
+        _handler2 = _Grab()
+        _handler2.emit = lambda r: kinds_records.append(r.getMessage())
+        _log.addHandler(_handler2)
+        _log.setLevel(logging.WARNING)
+        try:
+            k_kept = kg.pack_guards(
+                "acme", [entry(fromKinds=["widget", 1])])[0].from_kinds
+            k_nil = kg.pack_guards("acme", [entry(fromKinds=[1])])[0].from_kinds
+        finally:
+            _log.removeHandler(_handler2)
+            _log.setLevel(_prev)
+        assert k_kept == ("acme:widget",)
+        assert k_nil == ()
+        assert any("dropped a non-string or blank from fromKinds" in m
+                   for m in kinds_records), kinds_records
+        assert any("NIL mode" in m for m in kinds_records), kinds_records
+        # …and it names the scope the guard IS held to, QUALIFIED as the compile
+        # step stores it — not the manifest's spelling, and not `()`
+        assert any("held to ('acme:widget',)" in m for m in kinds_records), \
+            kinds_records
         assert any("dropped a non-string from fromLayers" in m for m in records), records
         # the message must state the scope the guard IS held to, not the
         # pre-widened one (an all-non-string list widens to both layers)

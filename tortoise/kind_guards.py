@@ -1214,9 +1214,7 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 # from `kind_forms` — it does NOT add a bare alias of its own,
                 # which would match a write that declared no namespace and
                 # overrule an explicit declaration with a guess.
-                from_kinds=tuple(_qualify(str(k).strip(), namespace)
-                                 for k in from_kinds
-                                 if isinstance(k, str) and str(k).strip()),
+                from_kinds=_kept_kinds(namespace, from_kinds),
                 from_layers=_kept_layers(from_layers),
                 link_predicate=(str(c["linkPredicate"])
                                 if c.get("linkPredicate") else None),
@@ -1227,6 +1225,28 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 declaring_pack=namespace,
             ))
     return tuple(out)
+
+
+def _kept_kinds(namespace: str, kinds) -> tuple[str, ...]:
+    """The kind scope a guard will be held to, logged if it shrank.
+
+    The same single owner the layer scope got (round-20 review P3, measured):
+    the `isinstance`/`strip` filter is right — a blank or non-string can never
+    match a declared kind — but it was SILENT, and `fromKinds` has no widening
+    default, so `fromKinds: [1]` compiled to `()` and `()` is the NIL mode: the
+    guard fired on writes that declared NO kind, a scope the author never asked
+    for, with nothing said anywhere. `()` itself stays legal — it IS the
+    documented NIL mode — only the DROP is reported.
+    """
+    kept = tuple(_qualify(str(k).strip(), namespace) for k in kinds
+                 if isinstance(k, str) and str(k).strip())
+    if len(kept) != len(tuple(kinds)):
+        _logger.warning(
+            "kind_guards: dropped a non-string or blank from fromKinds %r — the "
+            "guard is held to %r%s", tuple(kinds), kept,
+            " (NIL mode: it fires only where a write declares no kind)"
+            if not kept else "")
+    return kept
 
 
 def _kept_layers(layers) -> tuple[str, ...]:
