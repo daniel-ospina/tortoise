@@ -45,6 +45,7 @@ import types
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tools.ci_selection import (  # the manifest's strict reader
     DuplicateManifestKeyError,
@@ -4670,50 +4671,63 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
     return failures
 
 
-#: A LINE CITE bound to the tool-maintained manifest, in any order or spelling:
-#: ``ci-surfaces.yml:9973``, `` `ci-surfaces.yml`, `:9987` ``, `` at :9987 ``,
-#: `` — `:9987` ``, `` at 9987 `` (no colon), `` line `9987` ``, `` :9,987 ``,
-#: `` the entry sits at `:9973`, see `config/ci-surfaces.yml` `` (number BEFORE the
-#: filename — the order a first cut of this matcher missed), and `` the entry is on
-#: line 9973 ``.
+#: A LINE CITE bound to the tool-maintained manifest. The supported spellings, and
+#: they are exhaustive on purpose (the docstring of a guard should not promise more
+#: than the guard does): ``ci-surfaces.yml:9973``, `` `ci-surfaces.yml`, `:9987` ``,
+#: `` at :9987 ``, `` — `:9987` ``, `` at 9987 `` / `` — 9987 `` (no colon),
+#: `` line `9987` `` / `` row 9987 `` / `` (entry 9987) ``, `` :9,987 ``,
+#: `` ci-surfaces.yml#L9987 `` / `` L9987 `` / `` L. 9987 `` (the GitHub-anchor and
+#: `L`-prefix forms), `` the entry sits at `:9973`, see `config/ci-surfaces.yml` ``
+#: (number BEFORE the filename — the order a first cut missed), and a cite split
+#: across a line WRAP.
 #:
-#: ⛔ IT MATCHES A CITE SHAPE, NOT "A DIGIT NEAR THE FILENAME". A first cut used
-#: ``ci-surfaces.yml`` + any 3+ digit run within 30 characters and REDed healthy
-#: prose — an issue reference (``#12250``), a duration (``166.0``), a date
-#: (``2026-11-09``), a test name (``test_x_11083.py``), another file's cite
-#: (``tools/ci_selection.py:4140``) — i.e. exactly the false-red class this PR
-#: exists to remove. Two rules do the work, and neither is a lookahead on the
-#: prose: (a) a SEPARATOR — `:`, an em dash, or the words `at`/`on`/`line` — must
-#: sit immediately beside the number, so `` `slow_files:` row, measured 2026-11-09 ``
-#: is not a manifest cite; (b) the number token is a whole INTEGER — it may carry a
-#: thousands separator, and it may not be a decimal (``158.0``), a date fragment
-#: (``2026-11``), a clock time, or a continuation of a longer run, and it may not be
-#: glued to a word character or a `#`. The optional `` ` ``/`` * `` wrappers are the
-#: doc's house style for a number, and the GAP allows a line WRAP (``\n``) because
-#: this document wraps prose — but never a table pipe, and never another
-#: `something.ext` token, so `` … `config/ci-surfaces.yml` and
-#: `tools/ci_selection.py:4140` `` is a cite of a DIFFERENT file, not of this one.
-#: Every one of those shapes is pinned by the two matcher tests below.
-_NUM = r"(?:(?<![\w#])(?:\d{1,3}(?:,\d{3})+|\d{3,}))(?![\d])(?!\.\d)(?!-\d)(?!:\d)"
+#: ⛔ IT MATCHES A CITE SHAPE, NOT "A DIGIT NEAR THE FILENAME". Two earlier cuts are
+#: recorded here because each failed in the opposite direction. The first matched
+#: ``ci-surfaces.yml`` + any 3+ digit run within 30 characters and REDed an issue
+#: reference (``#12250``), a duration (``166.0``), a date (``2026-11-09``), a test
+#: name (``test_x_11083.py``) and another file's cite
+#: (``tools/ci_selection.py:4140``). The second narrowed to ``:``/``line`` only and
+#: let ``at 9987``, `` — 9987 ``, `` :9,987 `` and a wrapped cite through. Three
+#: rules close both, and none of them is a lookahead on the prose:
+#:
+#:   1. a SEPARATOR must sit immediately beside the number (``:``, ``#L``, ``—``,
+#:      ``L``, or the words ``at``/``on``/``line``/``row``/``entry``), so
+#:      `` `slow_files:` row, measured 2026-11-09 `` is not a manifest cite;
+#:   2. the number is a whole INTEGER — a thousands separator is allowed; a decimal
+#:      (``158.0``), a date fragment (``2026-11``), a clock time, or a fragment of a
+#:      longer run is not, and a LEADING number may not be glued to a word character
+#:      or a `#`;
+#:   3. a number followed by a UNIT is a COUNT, not a cite — ``row: 166 s``,
+#:      ``on 1450 files``, ``— 155 lines`` and ``60 entries`` are all correct prose.
+#:
+#: The optional `` ` ``/`` * `` wrappers are the document's house style for a
+#: number, and the GAP allows a line WRAP (``\n``) because this document wraps
+#: prose — but never a table pipe, and never another `something.ext` token, so
+#: `` … `config/ci-surfaces.yml` and `tools/ci_selection.py:4140` `` is a cite of a
+#: DIFFERENT file, not of this one. Every shape above is pinned by the two matcher
+#: tests below.
+_UNIT = r"(?!\s*(?:s|sec|secs|seconds|ms|files|lines|rows|cases|bytes|entries|points|%)\b)"
+_NUM = rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT}(?![\d])(?!\.\d)(?!-\d)(?!:\d)"
+_LEADING_NUM = rf"(?<![\w#]){_NUM}"
 _WRAP = r"[`*]*"
-_SEP = r"(?::|—|\b(?:at|on|line)\b)"
+_SEP = r"(?::|#L|—|\bL\.?|\b(?:at|on|line|row|entry)\b)"
 _GAP = r"(?:(?!\.\w)[^|]){0,160}?"
 
 #: A bare line cite with NO filename binding — the form this module documents as
 #: invisible to every sweep. Applied to the ONE sentence the claim lives on, where
 #: any number in cite position is a finding whether or not it names the file; it is
 #: therefore LOOSE on purpose (it also matches a file-bound ``:NNNN``, because the
-#: lookbehind sits on the DIGITS, and the character before them is the separator).
-#: It is not a duplicate of the doc-wide arm, which is the other way round: STRICT
-#: about being bound to the manifest, but read over the whole document. A bare
-#: `` :NNNN `` is caught on that sentence by this arm and nowhere else, and a
-#: manifest-bound cite anywhere else in the document is caught by the arm above.
+#: separator sits immediately before the digits). It is not a duplicate of the
+#: doc-wide arm, which is the other way round: STRICT about being bound to the
+#: manifest, but read over the whole document. A bare `` :NNNN `` is caught on that
+#: sentence by this arm and nowhere else; a manifest-bound cite anywhere else in the
+#: document is caught by the arm above.
 _LINE_CITE = re.compile(rf"{_SEP}\s*{_WRAP}{_NUM}{_WRAP}")
 
 _MANIFEST_CITE = re.compile(
     rf"ci-surfaces\.yml{_GAP}{_SEP}\s*{_WRAP}{_NUM}{_WRAP}"
     rf"|{_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}ci-surfaces\.yml"
-    rf"|{_WRAP}{_NUM}{_WRAP}\s*{_SEP}{_GAP}ci-surfaces\.yml"
+    rf"|{_WRAP}{_LEADING_NUM}{_WRAP}\s*{_SEP}{_GAP}ci-surfaces\.yml"
 )
 
 
@@ -4754,6 +4768,18 @@ def _parse_manifest(lines: list[str], failures: list[str]) -> dict | None:
             f"is `merge=union` (`.gitattributes`), and a plain YAML load would keep "
             f"only the LAST block, so this pin refuses to read a collapsed view of a "
             f"file whose shadowed copy could be the one holding the entry")
+        return None
+    except yaml.YAMLError as exc:
+        # ANY other malformed-manifest state — a stray column-0 `- x.py` spliced
+        # into an INDENTED surface block is the union-merge artefact seen in
+        # practice — is a finding like the duplicate key above, not a crash. Left
+        # uncaught it aborts the test with a traceback and the document-side answers
+        # (does the sentence name the entry) are never computed, which is the one
+        # thing `_ManifestShapeError`'s docstring exists to prevent.
+        failures.append(
+            f"config/ci-surfaces.yml is not parseable as YAML ({type(exc).__name__}: "
+            f"{exc}) — this pin cannot read a block it cannot parse, and an "
+            f"unparseable manifest is a real defect in a file a tool rewrites")
         return None
 
 
@@ -4827,9 +4853,12 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
     not "unify" these three readers.
 
     The hand scan it replaces also could not see an INDENTED entry: this very
-    test file is registered that way under `core:` (`config/ci-surfaces.yml:6103`)
-    and `sdk:` (`:8502`), and a scan that misses those cannot honestly claim a
-    section "holds none".
+    test file is registered that way under the `core:` and `sdk:` mirrors of
+    `surfaces:` — the same filename indented, which a scan that only looks at
+    column 0 cannot see — and a scan that misses those cannot honestly claim a
+    section "holds none". (Those mirrors are inside a block `register_tests` DOES
+    write, so their line numbers move on the next registration; naming them by
+    block is the same rule this paragraph applies to the `carve_out:` claim.)
 
     This is the bundle's own D5 policy applied to the one cite a tool owns: the
     symbol/block is authoritative, the line number is a convenience.
@@ -5486,15 +5515,28 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # whole `carve_out:` block holds 60 entries by design and asserting `== 1`
     # over it would be my error, not the document's.
     #
-    # ⚠️ THE CLASSIFIER IS A HEURISTIC, and that residual is stated rather than
+    # ⚠️ THE CLASSIFIER IS A SUBSTRING RULE, and that residual is stated rather than
     # hidden: a capstone file whose NAME carries none of these markers and which
-    # lands in `uri_requiring:`/`slow_files:` would not be seen. The block
-    # membership itself is exact (YAML, not a hand scan); it is what counts as a
-    # "capstone file" that is a substring rule. Widening it would start refusing
-    # unrelated files, so the marker set is named here for a reader to extend.
+    # lands in `uri_requiring:`/`slow_files:` would not be seen. It is tied to the
+    # DOCUMENT's definition (`03-test-design.md`'s four `durations:` globs) and must
+    # be moved with it; the block membership itself is exact (YAML, not a hand scan).
     block_failures: list[str] = []
     ci_lines = sources["ci_surfaces"]
-    capstone = ("7949", "capstone", "pack_logic", "writeprobe")
+    # ⚠️ THE CLASSIFIER MUST MATCH THE DOCUMENT'S OWN DEFINITION, or the pin holds a
+    # weaker claim than the sentence it guards. The row above this one in
+    # `03-test-design.md` defines the capstone-adjacent set as the `durations:` rows
+    # matching `*capstone*` / `*7949*` / `*v4_declared*` / `*graph_census*`, and its
+    # sixteen-name table includes `test_v4_declared_mechanisms.py` and
+    # `test_graph_census_8882.py` — neither carrying any of the four markers this
+    # tuple used to hold, so adding either to `carve_out:` (or leaking it into
+    # `slow_files:`) left "holds **one**" / "hold none" false with the pin GREEN.
+    # A review reproduced exactly that. The two extra markers are the document's own
+    # globs, and they are the whole set the document names: four globs, four-name
+    # expansion, no fifth. Widening PAST them would start refusing unrelated files,
+    # which is a false block rather than coverage — so the tuple is pinned to the
+    # document, and the residual it still leaves is stated below.
+    capstone = ("7949", "capstone", "pack_logic", "writeprobe",
+                "v4_declared", "graph_census")
     ENTRY = "test_pack_logic_writeprobe_11083.py"
 
     # ⛔ PARSED ONCE. The manifest is ~1.3 MB and one strict parse is ~0.8 s on a
@@ -5672,6 +5714,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     "`config/ci-surfaces.yml` weights the row at 4.1",
     "`config/ci-surfaces.yml` has 1,320,023 bytes of rows",
     "`config/ci-surfaces.yml`'s rows (see `tools/ci_selection.py:4140`) are frozen",
+    # ⛔ …and the INTEGER-count set, which is what the SECOND cut still got wrong: a
+    # bare 3+ digit integer behind `:`, `—` or `at` is a count or a duration as
+    # often as it is a line number, and only the decimal guard kept `166.0` out.
+    # These four were reproduced RED against that cut, with the message accusing the
+    # author of a line-number cite. The `_UNIT` guard is what makes them green.
+    "`config/ci-surfaces.yml`'s `durations:` row: 166 s",
+    "the whole `config/ci-surfaces.yml` on 1450 files",
+    "`config/ci-surfaces.yml` — 155 lines of rows",
+    "`config/ci-surfaces.yml` costs — 166 s",
+    "`config/ci-surfaces.yml` lists 60 entries in `carve_out:`",
+    "`config/ci-surfaces.yml` is 1319360 bytes",
+    "x11083, see `config/ci-surfaces.yml`",
 ])
 def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     """A legit reference near the filename is not a line cite — do not red it."""
@@ -5684,7 +5738,9 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
 @pytest.mark.parametrize("prose", [
     # …and the forms it MUST catch. ⚠️ Five of these were caught by the matcher this
     # PR replaced and NOT by its first replacement — a narrowing that would have
-    # re-opened the rot in the doc's own house style, where a number is backticked.
+    # re-opened the rot in the doc's own house style, where a number is backticked —
+    # and the two `L`-prefixed forms were missed by BOTH, which is a green pin over
+    # a cite a reader can still follow.
     "(`config/ci-surfaces.yml:9973`)",
     "(`config/ci-surfaces.yml`, `:9987`)",
     "`config/ci-surfaces.yml` at :9987",
@@ -5694,6 +5750,11 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     "`config/ci-surfaces.yml` line `9987`",
     "`config/ci-surfaces.yml` line **9987**",
     "`config/ci-surfaces.yml` :9,987",
+    "`config/ci-surfaces.yml#L9987`",
+    "`config/ci-surfaces.yml` L9987",
+    "`config/ci-surfaces.yml` L. 9987",
+    "`config/ci-surfaces.yml` row 9987",
+    "`config/ci-surfaces.yml` (entry 9987)",
     "the entry sits at `:9973`, see `config/ci-surfaces.yml`",
     "see `config/ci-surfaces.yml` in its carve-out block; the entry is on line 9973",
     # a line WRAP between the filename and the number: this document wraps prose
