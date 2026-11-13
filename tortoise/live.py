@@ -614,6 +614,10 @@ KIND_PROPERTIES = ("pointKind", "objectKind", "subjectKind", "eventKind")
 def kind_expression(alias: str) -> str:
     """Cypher expression: ``alias``'s KIND, whatever property its layer uses.
 
+    ⚠️ "Its layer" means one of the four EPISTEMIC labels — see
+    :data:`KIND_PROPERTIES` for the scope and for what a ``:Document``/
+    ``:Source`` kind would answer (``''``).
+
     Use for any read that COMPARES or PARSES a node's kind across labels; the
     absent case coalesces to ``''`` (never NULL) so a caller's ``== "option"``
     arm is false rather than unanswerable, which is what every existing reader
