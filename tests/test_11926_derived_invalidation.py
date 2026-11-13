@@ -2129,12 +2129,16 @@ def test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_
         "retirement left")
 
 
-#: Up to three words of inserted text between two anchors of one denial.
-#: A family stated as a LITERAL SUBSTRING is defeated by one word inserted INSIDE
-#: the phrase — round 31 found four survivors that way ("nothing EVER repairs",
-#: "cannot EVER be repaired", "never EVER a finding again"), all of which said the
-#: falsehood with no qualifier. Anchors, not substrings; a bounded gap, not `.*`.
-_GAP = r"(?:\s+\w+){0,3}\s+"
+#: The only inserted words a denial can absorb and still say the same thing:
+#: adverbs and adjectives ("nothing EVER repairs", "no automatic SELF-repair path",
+#: "no automatic, SINGLE path", "never, EVER a finding again"). A literal substring
+#: is defeated by one of these (round 31); an unbounded gap is not the answer either
+#: — a wide `\w+` gap turns TRUE prose into a false positive, because flattening the
+#: punctuation makes "(or holding nothing) is reconciled" read as "nothing is
+#: reconciled" (round 32, measured). So: anchors, a FILLER-bounded gap, never `.*`.
+_FILLER = (r"(?:ever|else|other|single|self|automatic|really|anymore|subsequent|"
+           r"further|later|longer|merely|actually|truly|again)")
+_GAP = rf"(?:\s+{_FILLER}){{0,3}}\s+"
 
 
 def _family(*anchors: str) -> re.Pattern[str]:
@@ -2151,7 +2155,8 @@ _REPAIR_DENIALS = (
     _family(r"no", r"(?:later|subsequent|further)", r"(?:pass|sweep|scan|revisit\w*)"),
     _family(r"nothing", r"(?:else\s+)?(?:repairs?|fixes?|clears?|reconciles?|remediates?)"),
     _family(r"never", r"(?:a\s+)?finding", r"again"),
-    _family(r"unrepairable"),
+    # One token or two, hyphen or space: `un-repairable` is the same denial.
+    re.compile(r"un[\s-]?repairable"),
     _family(r"cannot", r"be", r"repaired"),
     _family(r"no", r"repair", r"(?:route|path|possible)"),
 )
@@ -2180,9 +2185,15 @@ def _assert_repair_denials_are_qualified(text: str, site: str) -> None:
     """
     low = " ".join(text.lower().split())
     sentences = re.split(r"(?<=[.!?])\s+", low)
-    for pattern in _REPAIR_DENIALS:
-        for sentence in sentences:
-            m = pattern.search(sentence)
+    for sentence in sentences:
+        # Match on a punctuation-FLATTENED copy: the gap is `\w`-only, so inserted
+        # punctuation breaks an anchor without changing the claim — round 32 walked
+        # through it with "never, EVER a finding again", "no automatic self-REPAIR
+        # path" and "un-repairable", all green. The QUALIFIER test still reads the
+        # raw sentence, so flattening cannot manufacture a qualifier.
+        flat = re.sub(r"[^\w\s]", " ", sentence)
+        for pattern in _REPAIR_DENIALS:
+            m = pattern.search(flat)
             if m is None:
                 continue
             assert any(q in sentence for q in _REPAIR_QUALIFIERS), (
@@ -2210,11 +2221,21 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
     freezing every sentence verbatim — which would false-block benign rewording by
     the other writer on this branch. Stated rather than hidden.
 
-    WHAT IS NOT RESIDUAL: an inserted word INSIDE the family phrase. Round 31
-    broke the substring form this way ("nothing EVER repairs", "cannot EVER be
-    repaired", "never EVER a finding again" — four survivors, all saying the
-    falsehood with no qualifier); `_REPAIR_DENIALS` is now built by `_family` as
-    anchor sequences with a bounded gap, and all four are killed.
+    WHAT IS NOT RESIDUAL: material inserted INSIDE the family phrase — the two
+    rounds that found it, and what closes each:
+
+    * round 31, an inserted WORD ("nothing EVER repairs", "cannot EVER be
+      repaired", "never EVER a finding again") — the families were literal
+      substrings, so `_family` now builds them as anchor SEQUENCES with a gap;
+    * round 32, inserted PUNCTUATION ("never, EVER a finding again", "no automatic
+      self-repair path", "un-repairable") — the gap is `\w`-only, so the sentence
+      is matched on a punctuation-flattened copy while the qualifier test still
+      reads the raw sentence.
+
+    The gap is bounded to FILLER words on purpose: an unbounded gap plus flattening
+    makes TRUE prose read as a denial — "a cache holding a word this engine wrote
+    (or holding nothing) is reconciled" becomes "nothing is reconciled" (measured,
+    round 32). So the net absorbs an adverb or adjective, never a new predicate.
     """
     import tortoise.derived_invalidation as di
 
