@@ -4779,8 +4779,8 @@ _POSITION_TAIL = (r"(?:into|down|deep|below|above|from\s+the\s+top|"
                   r"in(?=[.,;:!?)\]]|$)|"
                   r"of\s+the\s+(?:manifest|file))")
 #: Used where a POSITION must be refused: everything is a unit except `lines`/`rows`.
-_UNIT_NO_POSITION = rf"(?!\s*(?:(?:{_UNIT_WORDS})\b|%))"
-_UNIT = rf"(?!\s*(?:(?:{_UNIT_WORDS}|{_UNIT_POSITION_WORDS})\b|%))"
+_UNIT_NO_POSITION = rf"(?!\s*-?\s*(?:(?:{_UNIT_WORDS})\b|%))"
+_UNIT = rf"(?!\s*-?\s*(?:(?:{_UNIT_WORDS}|{_UNIT_POSITION_WORDS})\b|%))"
 #: ⛔ NO THIRD VARIANT AND NO POSITIONAL-TAIL ALLOW-LIST — see
 #: `_bare_number_hits_neighbour`. An allow-list of tails fails in the DANGEROUS
 #: direction (a tail it omits ACCEPTS a false position), which is why it is gone
@@ -5277,28 +5277,22 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
     shadowed block happened to agree. Refusing is the correct behaviour HERE. Do
     not "unify" these three readers.
 
-    The hand scan it replaces also could not see an INDENTED entry: this very
-    test file is registered that way under `surfaces:`, which is a mapping of
-    eight indented surface blocks, and it is in the `core` block (`898` entries)
-    AND in the `sdk` block (`128` entries) — measured at this head with
-    `parse_manifest_text` (`m["surfaces"]["sdk"]`, index 30). ⛔ NO LINE NUMBER IS
-    PRINTED HERE, and an earlier revision of this paragraph did print one as the
-    block's opening position. That number was wrong when it was written, AND it is
-    the wrong KIND of number even when right: a two-space-indented surface block is
-    exactly what `register_tests` splices into, so its opening position moves on the
-    next registration above it — MEASURED: across the forty most recent commits
-    that touch `config/ci-surfaces.yml`, this block's opening line moved twelve
-    times (nine distinct positions). The block and the entry are the address; the
-    digits are not.
-    ⚠️ An earlier revision of this paragraph said "`core` holds it, `sdk` does
-    not — that mirror holds 128 entries and none of them is this file", which
-    the tree refutes: `sdk` IS the 128-entry mirror and it DOES hold the file.
-    The fact the paragraph needs is the one that survived the correction — the
-    registration is INDENTED, so a scan that only reads column 0 cannot see it —
-    and a scan that misses those cannot honestly claim a section "holds none".
-    (Those mirrors are inside a block `register_tests` DOES
-    write, so their line numbers move on the next registration; naming them by
-    block is the same rule this paragraph applies to the `carve_out:` claim.)
+    The hand scan it replaces also could not see an INDENTED entry. Measured at this
+    head with `parse_manifest_text`: THIS module (`test_7949_capstone_measure.py`) is
+    registered indented in `core` (898 entries) and is NOT in `sdk` (128 entries);
+    the ENTRY (`test_pack_logic_writeprobe_11083.py`) is registered indented in BOTH
+    (`core` index 653, `sdk` index 30, raw line `config/ci-surfaces.yml:8536` in the
+    block opened at `8302`). ⚠️ THAT DISTINCTION IS THE WHOLE POINT AND AN EARLIER
+    REVISION LOST IT: the paragraph conflated the two files and then added a
+    `⚠️ CORRECTED` marker asserting the tree refuted "sdk does not hold it" — which
+    is TRUE of this module and FALSE of the entry. A marker that declares a correct
+    statement refuted steers the reader to the falsehood, which is the failure mode
+    the marker exists to prevent. The fact the paragraph needs is the one that holds
+    either way: the registration is INDENTED, so a scan that only reads column 0
+    cannot see it, and a scan that misses those cannot honestly claim a section
+    "holds none". (Both mirrors are inside a block `register_tests` DOES write, so
+    their line numbers move on the next registration; naming them by block is the
+    same rule this paragraph applies to the `carve_out:` claim.)
 
     This is the bundle's own D5 policy applied to the one cite a tool owns: the
     symbol/block is authoritative, the line number is a convenience.
@@ -5310,7 +5304,12 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
     failure list: asserting here would abort the test and hide the document-side
     diagnostics that a reader needs in the same run.
     """
-    entries = manifest.get(section) if isinstance(manifest, dict) else None
+    # `manifest` is a MAPPING by construction (`_parse_manifest` returns `dict |
+    # None` and its caller returns early on `None`), so there is no second
+    # `isinstance` here: a branch that cannot be taken is the inert-guard class
+    # this PR deletes elsewhere, and if it WERE taken it would report a
+    # non-mapping manifest as an ABSENT section — the wrong cause.
+    entries = manifest.get(section)
     if entries is None:
         return None
     if not isinstance(entries, list):
@@ -6226,11 +6225,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # …and the same claim the other way round, which is correct prose:
             # "`uri_requiring:` holds none, as does `slow_files:`".
             r"|`uri_requiring:`\s*holds? none\s*,?\s*as does\s*`slow_files:`)"
-            # AND THE CLAUSE MUST NOT BE EXTENDED BY AN EXCEPTION. A clause break is
-            # not a licence: an `except`/`but`/`though`/`second`/`two` inside the same
-            # clause turns the claim inside out while the positive form still matches.
-            r"(?![^.;|]*\b(?:except|but|though|although|save|other\s+than|"
-            r"second|third|two|three|also)\b)")
+            # ⛔ THE CLAUSE MUST END THERE — a POSITIVE lookahead for the sentence's
+            # own terminator, not a deny-list of connectives. The deny-list shipped a
+            # round and four tails walked past it, each turning the claim inside out
+            # while the positive form still matched (all measured GREEN):
+            #
+            #     … hold none, apart from one in `slow_files:`.
+            #     … hold none, and one more.
+            #     … hold none once the new capstone file is registered in `slow_files:`
+            #     … hold none, bar one `slow_files:` entry
+            #
+            # This is the same lesson `_ONE_ENTRY` learned for the tail after the
+            # entry name: a deny-list is provably insufficient for an open class, and
+            # the safe default is "nothing follows". The row's own sentence ends the
+            # cell with ` |`, and a sentence in prose ends with `.` or `;`.
+            r"(?=\s*(?:[.;]|\||$))")
         if not re.search(_HOLD_NONE, doc_hits[0]):
             block_failures.append(
                 "03-test-design.md's `carve_out:` sentence does not state, POSITIVELY, "
