@@ -738,6 +738,15 @@ def _only_claim(scope: str, true: str, where: str,
         # ⛔ For an ALTERNATION, at least ONE arm must occur: `free=("find|miss",)`
         # is inert on prose that says `found`, and an inert declaration is the
         # same false pass as a missing one (round-24 reviewer, cycle 9).
+        # ⛔ An alternation whose arms are ALL THE SAME word is a plain entry
+        # wearing an alternation's clothes — it emits `(?:word)`, a LITERAL, so it
+        # passes every check while wildcarding nothing (round-24 reviewer,
+        # cycle 11: `free=("recovered|recovered",)` silently disabled a pin).
+        if "|" in entry and len(set(entry.split("|"))) == 1:
+            raise AssertionError(
+                f"{where} declares `free={entry!r}` whose arms are all identical "
+                "— write the plain entry instead: an alternation of one distinct "
+                "arm is a LITERAL in the shape, i.e. an inert declaration")
         if "|" in entry and not any(
                 re.search(r"(?<![A-Za-z0-9_])" + re.escape(arm)
                           + r"(?![A-Za-z0-9_])", true, re.I)
@@ -2594,7 +2603,10 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     hashed = _num(table[1][1])
     assert (round(definite, 1), round(hashed, 1)) == (62.3, 2.2)
     token_share = 9.0
-    assert f"{token_share:.1f} %" in table[2][1], table[2][1]
+    assert round(_num(table[2][1]), 1) == round(token_share, 1), (
+        f"§4.3's code-token share cell says {table[2][1]!r}; the bound below it "
+        f"is derived from {token_share:.1f} % — a SUBSTRING check passes on "
+        "`19.0 %`, so the cell is compared as a number")
     assert "NOT RECORDED" in table[2][1]
     total = definite + hashed + token_share
     assert round(total, 1) == 73.5
@@ -2629,13 +2641,19 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     # ⛔ The FRAME is the identity (round-24 reviewer, cycle 10): with only the
     # three numbers and both operators wildcarded the shape was `N × N ≈ +N pts`,
     # so a second TRUE arithmetic sentence in §4.3 false-redded it.
+    # ⛔ The SHARE is the claim's subject and was pinned nowhere that can fail
+    # (round-24 reviewer, cycle 11): the prose copy sat outside this claim and the
+    # table cell was checked by SUBSTRING (`"9.0 %" in "19.0 %"` is True), so
+    # `9.0 %` → `19.0 %` was green in both places. The claim now starts at the
+    # share, and the cell is compared NUMERICALLY below.
     _only_claim(_s43,
+                f"The {token_share:.1f} % \"contains a code token\" share "
                 f"bounds **that one term**: `"
                 f"{token_share / 100:.2f} \u00d7 {snake_delta:.1f} \u2248 "
                 f"+{bound_pts:.1f} pts`",
                 "§4.3's single-term bound",
-                values=(f"{token_share / 100:.2f}", f"{snake_delta:.1f}",
-                        f"{bound_pts:.1f}"),
+                values=(f"{token_share:.1f}", f"{token_share / 100:.2f}",
+                        f"{snake_delta:.1f}", f"{bound_pts:.1f}"),
                 # ⛔ `×` and `≈` are DIRECTIONAL operators: left literal, a
                 # rewrite from a product to a sum stops matching and a planted
                 # true copy satisfies the pin. Wildcarding them is the declared
@@ -2809,7 +2827,12 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         # ⛔ Same shape as the scorer bullet's ZERO: when the count is 0 the claim
         # says `zero`, so the word is the value (round-24 reviewer, P2). `inside`
         # is the recovery's DIRECTION (`inside` → `outside` inverts it).
-        free=("recovered|recovered", "inside", "same|different")
+        # ⛔ A PLAIN `recovered` (`[^\s*]+`), not an alternation: an alternation
+        # whose arms are all the same word emits `(?:recovered)` — a LITERAL — so
+        # the declaration passes every gate while wildcarding nothing
+        # (#12349 round-24 reviewer, cycle 11: my own "recovered|recovered"
+        # silently disabled this pin).
+        free=("recovered", "inside", "same")
         + (("zero",) if inplace["only_a"] == 0 else ()))
 
     # §4's verdict line restates the same two deltas; it is the sentence a reader
@@ -3434,7 +3457,7 @@ def test_brief_states_what_the_reuse_guards_actually_do(brief_text,
                 "nothing else is still accepted",
                 "§2's accepted-reuse disclosure",
                 values=(str(len(population["names"])),),
-                free=("accepted", "nothing", "still|never", "same|different"))
+                free=("accepted", "nothing", "still|never", "same"))
     assert "with the SAME population is ACCEPTED" not in flat
     assert "numDocuments >= n" not in flat, (
         "§2 still says the wait accepts an at-least-full index — it requires "
