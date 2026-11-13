@@ -851,33 +851,25 @@ def invalidate(
         # and the second vanish window below — go through `_reconcile_or_report`,
         # so an absent `cache` key can never be read as "clean".
         #
-        # ⛔ THE GOAL ID COMES FROM THE CLAIM, AND THE CLAIM WINS — in EVERY arm
-        # that HAS a claim: the already-terminal, vanish-before-retirement and
-        # success arms read `claim.get("goalId")`, and of the TWO post-exception
-        # arms `claim.get("goalId")` again when the re-read came back `MISSING`
-        # (`after` is the sentinel there, which has no `.get`) but
-        # `after.get("goalId")` when the re-read is a dict — falling back to the
-        # caller's id only for a claim that names none. ⚠️ THIS arm is the
-        # exception: `claim is MISSING`, so there is no claim to read and it keeps
-        # the caller's id alone. The claim's `goalId` says
-        # WHOSE displayed word names this claim, which is the state being
-        # repaired; a caller's id that diverges names a goal that is not the one
-        # showing the stale word. Passing only `invalidation.goal_id` made a
-        # caller that omits it (a supported shape —
-        # `tests/test_11926_derived_invalidation.py:489`) reconcile
-        # nothing at all, reported as `checked: False` over a claim that DOES
-        # name one, so the dependent state went unreconciled AND the summary read
-        # clean: neither `counts.failed` nor `counts.gone` moves for a skipped
-        # check. ⚠️ THIS arm is the one with no claim, so it keeps the caller's id
-        # alone (stated again above, because the paragraph's rule is claim-first).
+        # ⛔ THIS ARM IS THE ONE WITH NO CLAIM, SO IT HAS ONLY THE CALLER'S ID.
+        # Every other arm sources the goal from the claim it read — claim-first,
+        # stated once in `_reconcile_or_report`'s docstring. A claim-sourced id is
+        # UNREACHABLE here BY CONSTRUCTION, because `_read_claim` folded to
+        # `MISSING`. So `invalidation.goal_id` is all there is, and a caller that
+        # omits it (a supported shape —
+        # `tests/test_11926_derived_invalidation.py:489`) reconciles nothing.
+        # That is correct for THIS arm rather than a defect: there is no claim
+        # whose `goalId` could have named the goal instead.
+        # ⚠️ The reconcile still RUNS, so the record still says what it did —
+        # `cache` carries `checked: False` WITH its reason instead of the key
+        # being absent, which is what keeps an absent `cache` readable as "no
+        # reconcile was attempted" on every other shape.
         # ⛔ AND THE RECORD NAMES THE GOAL IT RECONCILED, so the repair route the
         # `reconcile_goal_state_cache` docstring documents ("call this again with
         # the goal's id") is walkable from the record alone (#12315 review cycle
-        # 16). The success arm always reported it; the four already-retired arms
-        # did not, which is what makes a `cache.error` there unrepairable for a
-        # DIRECT `invalidate()` caller — it has no `report["stale"]` to join
-        # against, and on the vanish arm the claim is gone, so the id cannot be
-        # re-read from the graph either.
+        # 16): a DIRECT `invalidate()` caller has no `report["stale"]` to join
+        # against, and on this arm the claim is gone, so the id cannot be re-read
+        # from the graph either.
         return {"invalidated": False, "judgementId": judgement_id,
                 "alreadyRetired": True, "status": None, "found": False,
                 "reason": invalidation.reason,
