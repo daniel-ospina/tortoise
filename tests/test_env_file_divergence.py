@@ -1922,3 +1922,87 @@ def test_the_legacy_trio_is_named_as_the_cause_and_the_remedy_matches():
                             "cli_target": "docker://:***@127.0.0.1:16379/tortoise",
                             "daemon_target": "/tmp/from-file.db"})
     assert "the legacy FALKORDB_* trio outranks" in unapplied, unapplied
+def test_the_mixed_shadowed_row_names_each_half_by_its_origin(
+        capsys, _isolated, monkeypatch):
+    """Shell exports one ladder key, the `.env` supplies the OTHER — post-apply.
+
+    MEASURED (round 9): with `TORTOISE_DB_URI` exported by the shell and
+    `TORTOISE_DB_PATH` in the `.env`, the row said
+
+        the environment already sets TORTOISE_DB_URI, TORTOISE_DB_PATH, and the
+        daemon only fills keys that are ABSENT …
+
+    while `TORTOISE_DB_PATH` was NOT set by the environment — `load_dotenv` wrote
+    it, and the same row's tail reported the application. The all-file case was
+    guarded; the MIXED case was not, because the guard tested
+    `keys_in_effect` for the WHOLE set instead of each key's recorded origin.
+
+    The split must key on the `APPLIED` record (path-scoped), not on value
+    equality: a shell that happens to export the file's exact value makes
+    `keys_in_effect` true while the file wrote nothing — which is why an earlier
+    attempt at this fix reddened
+    `test_config_show_names_the_shadowed_key_as_the_reason` (#12428 review).
+    """
+    target = _isolated.parent / "shared.db"
+    monkeypatch.setenv("TORTOISE_DB_URI", str(target))   # the shell's, scheme-less
+    _write_env(_isolated, f"TORTOISE_DB_PATH={target}\n")
+    dotenv_file.load_dotenv()                            # what `doctor`'s import does
+
+    payload = _show_json(capsys)["env_file"]
+
+    assert payload["shadowed_graph_keys"] == ["TORTOISE_DB_URI"], payload
+    assert payload["applied_graph_keys"] == ["TORTOISE_DB_PATH"], payload
+
+    out = _show_text(capsys)
+    # The false claim the fix removes: the file's own key, credited to the shell.
+    assert "already sets TORTOISE_DB_URI, TORTOISE_DB_PATH" not in out, out
+    # …and each half is now named with the side that supplied it.
+    assert "already sets TORTOISE_DB_URI" in out, out
+    assert "now sets TORTOISE_DB_PATH" in out, out
+
+
+def test_the_mixed_shadowed_doctor_row_names_each_half_by_its_origin():
+    """The `doctor` row is a SECOND surface over the same payload (#12428).
+
+    `_dotenv_rows` and `_cmd_config` render the same dict, so a split fixed in
+    one and computed in the other is how the two screens start disagreeing —
+    the discipline `_dotenv_divergence`'s docstring already states.
+    """
+    row = _rows_text({"read_by_this_command": True,
+                      "keys": ["TORTOISE_DB_PATH"],
+                      "file_graph_keys": ["TORTOISE_DB_PATH"],
+                      "shadowed_graph_keys": ["TORTOISE_DB_URI"],
+                      "applied_graph_keys": ["TORTOISE_DB_PATH"],
+                      "keys_in_effect": ["TORTOISE_DB_PATH"],
+                      "graph_keys": [],
+                      "differs": False,
+                      "cli_target": "/tmp/shared.db",
+                      "daemon_target": "/tmp/shared.db"})
+
+    assert "already sets TORTOISE_DB_URI, TORTOISE_DB_PATH" not in row, row
+    assert "now sets TORTOISE_DB_PATH" in row, row
+    assert "already sets TORTOISE_DB_URI" in row, row
+
+
+def test_a_mixed_shadowed_set_credits_the_FILE_when_its_key_is_the_top_rung(
+        capsys, _isolated, monkeypatch):
+    """The other ordering: the file supplies the HIGHER ladder key.
+
+    Shell exports `TORTOISE_DB_PATH`; the `.env` supplies `TORTOISE_DB_URI`,
+    which the daemon's ladder ranks FIRST — so the file DOES decide the target,
+    and the row must say so. Without this case the mixed branch would only ever
+    be exercised in the direction where the shell wins, i.e. the direction whose
+    sentence happens to read like the old one (#12428 review round 9).
+    """
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/from-shell.db")
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+    dotenv_file.load_dotenv()
+
+    payload = _show_json(capsys)["env_file"]
+    assert payload["shadowed_graph_keys"] == ["TORTOISE_DB_PATH"], payload
+    assert payload["applied_graph_keys"] == ["TORTOISE_DB_URI"], payload
+
+    out = " ".join(_show_text(capsys).split())
+    assert "ranks above the environment's own TORTOISE_DB_PATH" in out, out
+    assert "is the one this file selects" in out, out
+    assert "cannot change the target here" not in out, out

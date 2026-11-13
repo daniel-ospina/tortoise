@@ -4501,10 +4501,12 @@ def _cmd_config(args) -> int:
                     # nothing and the sentence below credited it with the
                     # agreement (#12428 review: "the file's TORTOISE_DB_PATH
                     # resolves to it for the daemon too" — it never ran).
+                    _carried = (env_file.get("env_graph_keys")
+                                or [*(env_file.get("shadowed_graph_keys") or ()),
+                                    *(env_file.get("applied_graph_keys") or ())])
                     _deciding = next(
                         (key for key in _DB_LADDER_KEYS
-                         if key in env_file["graph_keys"]
-                         or key in env_file.get("shadowed_graph_keys") or ()),
+                         if key in env_file["graph_keys"] or key in _carried),
                         None)
                     if _deciding and _deciding not in env_file["graph_keys"]:
                         print("  →  the same graph target as above: the ENVIRONMENT's")
@@ -4517,18 +4519,48 @@ def _cmd_config(args) -> int:
                               f"{_printable(', '.join(env_file['graph_keys']))}")
                         print("     resolves to it for the daemon too (no difference to")
                         print("     report — the two ladders agree on this box)")
-                elif env_file.get("shadowed_graph_keys"):
-                    _shadowed = _printable(', '.join(env_file['shadowed_graph_keys']))
-                    if (env_file.get("read_by_this_command")
-                            and all(key in (env_file.get("keys_in_effect") or ())
-                                    for key in env_file["shadowed_graph_keys"])):
+                elif env_file.get("shadowed_graph_keys") or env_file.get("applied_graph_keys"):
+                    # ⛔ TWO origins, and each half names only what it can prove.
+                    # `shadowed_graph_keys` is what the USER's environment
+                    # supplied; `applied_graph_keys` is what THIS process wrote
+                    # from the file at import. Reporting the union as "the
+                    # environment already sets …" credited the shell with the
+                    # file's key in the MIXED state — the row said the file could
+                    # not change the target while its own tail said the file had
+                    # been applied (#12428 review round 9).
+                    _from_env = _printable(
+                        ', '.join(env_file.get("shadowed_graph_keys") or ()))
+                    _from_file = _printable(
+                        ', '.join(env_file.get("applied_graph_keys") or ()))
+                    if _from_file and not _from_env:
                         print("  →  the same graph target as above: this process")
                         print("     applied this file, so the environment now sets "
-                              f"{_shadowed}")
+                              f"{_from_file}")
                         print("     — the target above is the one it selects")
+                    elif _from_file and _from_env:
+                        # The MIXED state. WHICH key decides is an ordering fact,
+                        # so ask the ladder rather than assume either side.
+                        _top = next(key for key in _DB_LADDER_KEYS
+                                    if key in env_file["applied_graph_keys"]
+                                    or key in env_file["shadowed_graph_keys"])
+                        if _top in env_file["applied_graph_keys"]:
+                            print("  →  the same graph target as above: this process")
+                            print("     applied this file, so the environment now sets "
+                                  f"{_from_file},")
+                            print("     which the daemon ranks above the environment's")
+                            print(f"     own {_from_env} — the target above is the")
+                            print("     one this file selects")
+                        else:
+                            print("  →  the same graph target as above: this process")
+                            print("     applied this file, so the environment now sets "
+                                  f"{_from_file} —")
+                            print(f"     but the environment already sets {_from_env},")
+                            print("     which the daemon's ladder ranks FIRST, and the")
+                            print("     daemon only fills keys that are ABSENT — so the")
+                            print("     file's key cannot change the target here")
                     else:
                         print("  →  the same graph target as above: the environment")
-                        print(f"     already sets {_shadowed},")
+                        print(f"     already sets {_from_env},")
                         print("     and the daemon only fills keys that are ABSENT — so the")
                         print("     file cannot change the target here")
                 elif env_file["keys"]:
@@ -11500,7 +11532,11 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         "file_graph_keys": [],
         # Present in EVERY payload, including the `absent` and error states: a
         # `--json` consumer must not have to guess whether a key exists.
+        # `env_graph_keys` is EVERY ladder key the environment carries (the other
+        # two are its split by origin — see the computation below).
+        "env_graph_keys": [],
         "shadowed_graph_keys": [],
+        "applied_graph_keys": [],
         "daemon_rung": None,
         "cli_target": None,
         "daemon_target": None,
@@ -11555,17 +11591,29 @@ def _dotenv_divergence(graded_target: str | None = None, *,
     # clause, which describes the file, not the fill.
     payload["file_graph_keys"] = [
         key for key in _DB_LADDER_KEYS if key in assignments]
-    # Ladder keys the ENVIRONMENT already carries — the only keys that can
-    # explain a graph agreement. A provider key in the file explains nothing
-    # about the graph, so it must never be the stated reason.
+    # Ladder keys the environment CARRIES — the only keys that can explain a
+    # graph agreement. A provider key in the file explains nothing about the
+    # graph, so it must never be the stated reason.
     # ⛔ NON-BLANK values only: the daemon's ladder SKIPS an explicitly-empty
     # `TORTOISE_DB_URI` (`if uri:`), and `dotenv_file`'s own docstring makes
     # "explicitly set — even to the empty string" a first-class state. Counting
     # a blank key named it as the reason the two targets agree, while the file's
     # `TORTOISE_DB_PATH` was the key that actually decided (#12428 review).
+    _env_ladder = [key for key in _DB_LADDER_KEYS
+                   if (os.environ.get(key) or "").strip()]
+    payload["env_graph_keys"] = _env_ladder
+    # ⛔ WHO put each key in the environment is a RECORDED fact (`APPLIED`, which
+    # is path-scoped), not value coincidence. A caller that split on
+    # `keys_in_effect` instead reported a shell export whose value happens to
+    # equal the file's as the file's — and, in the MIXED state (the shell exports
+    # one ladder key, the `.env` supplies the other), reported the FILE's key as
+    # "the environment already sets", in the same sentence that reported the
+    # application (#12428 review round 9). `env_graph_keys` keeps the union for
+    # the deciding-rung question; these two carry the split.
+    payload["applied_graph_keys"] = [
+        key for key in _env_ladder if _db_value_source(key) == "file"]
     payload["shadowed_graph_keys"] = [
-        key for key in _DB_LADDER_KEYS
-        if (os.environ.get(key) or "").strip()]
+        key for key in _env_ladder if _db_value_source(key) != "file"]
     # ⛔ A key can be PRESENT and still select nothing: the daemon's ladder skips
     # an empty value (`if uri:`), so a blank export — or a blank line in the file —
     # is the whole reason there is no store. Published WITH its origin, because a
@@ -12015,10 +12063,12 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     # the file's key — both credited the file with selecting a target it never
     # touched (#12428 review).
     if env_file.get("graph_keys"):
+        _carried = (env_file.get("env_graph_keys")
+                    or [*(env_file.get("shadowed_graph_keys") or ()),
+                        *(env_file.get("applied_graph_keys") or ())])
         _deciding = next(
             (key for key in _DB_LADDER_KEYS
-             if key in env_file["graph_keys"]
-             or key in (env_file.get("shadowed_graph_keys") or ())),
+             if key in env_file["graph_keys"] or key in _carried),
             None)
         if _deciding and _deciding not in env_file["graph_keys"]:
             detail = (f"{path} sets "
@@ -12031,23 +12081,47 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                       f"{_printable(', '.join(env_file['graph_keys']))} — "
                       f"{_read_clause}; it selects the same graph target the rows "
                       f"below grade ({_printable(str(graded))})")
-    elif env_file.get("shadowed_graph_keys"):
-        _shadowed = _printable(', '.join(env_file['shadowed_graph_keys']))
-        if _applied and all(key in (env_file.get("keys_in_effect") or ())
-                            for key in env_file["shadowed_graph_keys"]):
+    elif env_file.get("shadowed_graph_keys") or env_file.get("applied_graph_keys"):
+        # ⛔ The SAME per-key origin split `config show` renders: one payload, two
+        # surfaces, so the two screens cannot disagree about who set a key
+        # (#12428 review round 9).
+        _from_env = _printable(
+            ', '.join(env_file.get("shadowed_graph_keys") or ()))
+        _from_file = _printable(
+            ', '.join(env_file.get("applied_graph_keys") or ()))
+        _sets = (f"{path} sets "
+                 f"{_printable(', '.join(env_file['keys']) or 'nothing')} — "
+                 f"{_read_clause}")
+        if _from_file and not _from_env:
             # The environment carries the key BECAUSE this process applied the
             # file, so "the file cannot change the target" denied the very
             # application the same row just reported (#12428 review).
-            detail = (f"{path} sets "
-                      f"{_printable(', '.join(env_file['keys']) or 'nothing')} — "
-                      f"{_read_clause}; this process applied it at import, so the "
-                      f"environment now sets {_shadowed} — the target the rows "
+            detail = (f"{_sets}; this process applied it at import, so the "
+                      f"environment now sets {_from_file} — the target the rows "
                       f"below grade ({_printable(str(graded))}) is the one it selects")
+        elif _from_file and _from_env:
+            # MIXED: the shell supplied one ladder key and the file the other.
+            # Whichever the ladder ranks FIRST decides, so name it rather than
+            # assume either side.
+            _top = next(key for key in _DB_LADDER_KEYS
+                        if key in env_file["applied_graph_keys"]
+                        or key in env_file["shadowed_graph_keys"])
+            if _top in env_file["applied_graph_keys"]:
+                detail = (f"{_sets}; this process applied it at import, so the "
+                          f"environment now sets {_from_file}, which the daemon "
+                          f"ranks above the environment's own {_from_env} — the "
+                          f"target the rows below grade "
+                          f"({_printable(str(graded))}) is the one this file selects")
+            else:
+                detail = (f"{_sets}; this process applied it at import, so the "
+                          f"environment now sets {_from_file} — but the environment "
+                          f"already sets {_from_env}, which the daemon's ladder "
+                          f"ranks FIRST, and the daemon only fills keys that are "
+                          f"ABSENT — so the file's key cannot change the target "
+                          f"the rows below grade ({_printable(str(graded))})")
         else:
-            detail = (f"{path} sets "
-                      f"{_printable(', '.join(env_file['keys']) or 'nothing')} — "
-                      f"{_read_clause}; the environment already sets "
-                      f"{_shadowed}, and "
+            detail = (f"{_sets}; the environment already sets "
+                      f"{_from_env}, and "
                       "the daemon only fills keys that are ABSENT — so the file cannot "
                       f"change the target the rows below grade ({_printable(str(graded))})")
     else:
