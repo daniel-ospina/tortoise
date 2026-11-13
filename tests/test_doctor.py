@@ -1295,8 +1295,9 @@ class TestDoctorHostedCredential:
         # round 19). This credential is STORE-sourced, and `_resolve_config_path`
         # takes a file-sourced key's URL from the same file or the built-in
         # default (#2369 D1.1) — so naming `TORTOISE_API_URL` here aimed the user
-        # at a knob that cannot change the result. Measured under the exact
-        # regression (remedy made unconditional for both sources): 197 passed.
+        # at a knob that cannot change the result. Measured under that exact
+        # regression (remedy made unconditional for both sources): 1 failed, 130
+        # passed — `test_transport_failure_scrubs_a_url_password`.
         assert "TORTOISE_API_URL" not in hosted, hosted
         assert "config show" in hosted, hosted
         # EXACTLY ONE `Hosted` row (fresh review at `77c1f364b6`): `_row()` returns
@@ -1839,6 +1840,13 @@ class TestDoctorHostedCredential:
             hosted = _row(out, "Hosted")
             assert hosted is not None and "❌" in hosted, (body, out[-1200:])
             assert "no team identity" in hosted, hosted
+            # ⛔ The remedy names the knob that can move THIS endpoint (fresh
+            # review round 19). This credential is STORE-sourced, so
+            # `TORTOISE_API_URL` is inert — `_resolve_config_path` takes a
+            # file-sourced key's URL from that file or the built-in default — and
+            # naming it sent the user at a knob that cannot change the result.
+            assert "TORTOISE_API_URL" not in hosted, hosted
+            assert "config show" in hosted, hosted
             assert rc == 1
 
     def test_offline_never_prints_all_checks_passing(
@@ -2828,7 +2836,7 @@ class TestDoctorHostedCredential:
         # loop head and never reaches the EOF branch — round 25), so the sleep
         # happens INSIDE the second read.
         class _EofLate(_Chunked):
-            def __init__(self, status, body, declared=None, delay=0.05):
+            def __init__(self, status, body, declared=None, delay=0.30):
                 super().__init__(status, body)
                 self._declared = declared
                 self._delay = delay
@@ -2849,15 +2857,34 @@ class TestDoctorHostedCredential:
 
         eof_late = _EofLate(200, b"hi")
         _d_late, cut_late = _doctor_read_capped(eof_late, 4096,
-                                                _time.monotonic() + 0.01)
+                                                _time.monotonic() + 0.25)
         assert cut_late is True, "EOF after our own interrupt is not completeness"
 
         # ...but a DECLARED length fully satisfied still proves completeness, even
         # when the deadline has passed by the time the EOF lands (round 17).
         done = _EofLate(200, b"hi", declared=0)
         _d_done, cut_done = _doctor_read_capped(done, 4096,
-                                                _time.monotonic() + 0.01)
+                                                _time.monotonic() + 0.25)
         assert cut_done is False, "a satisfied declared length is complete"
+
+        # (b3) the same rule on the ONE-BYTE CAP PROBE: an empty probe at a spent
+        # deadline may be our own watchdog's shutdown, so it is a CUT (round 24;
+        # unpinned until round 26). The deadline is ahead at entry and passes
+        # INSIDE the probe read, which is the only way to reach that branch.
+        class _CapProbeLate(_Chunked):
+            def __init__(self, status, body):
+                super().__init__(status, body)
+
+            def read(self, n=None):
+                if n == 1:  # the probe
+                    _time.sleep(0.30)
+                    return b""
+                return self._buf.read(n)
+
+        cap_late = _CapProbeLate(200, b"y" * 16)
+        _d_cap, cut_cap = _doctor_read_capped(cap_late, 16,
+                                              _time.monotonic() + 0.25)
+        assert cut_cap is True, "an empty probe at a spent deadline is a cut"
 
         # (c) the probe is ONE byte — its wait and allocation must not scale with
         # the cap (fresh review round 23).
@@ -2880,12 +2907,30 @@ class TestDoctorHostedCredential:
         # (e) a probe that RAISES PROPAGATES (a read error is its own verdict),
         # it is not laundered into "cut".
         class _RaisingProbe(_Chunked):
-            def read(self, n=None):
-                raise http.client.IncompleteRead(b"y", 10)
+            """Raises ONLY at the cap-exit's one-byte completeness probe.
 
+            ⛔ The first version raised on every read, so the probe was never
+            reached (`read1(4096)` blew up first) and the assertion pinned
+            nothing: restoring `try: probe = reader(1) / except Exception: return
+            …, True` left the whole suite green (fresh review round 19). The
+            recorded sizes prove the reader got as far as the probe.
+            """
+
+            def __init__(self, status: int, body: bytes):
+                super().__init__(status, body)
+                self.chunk_reads: list[int] = []
+
+            def read(self, n=None):
+                if n == 1:
+                    raise http.client.IncompleteRead(b"y", 10)
+                self.chunk_reads.append(n)
+                return super().read(n)
+
+        body = _RaisingProbe(200, b"y" * (4096 + 10))
         with pytest.raises(http.client.IncompleteRead):
-            _doctor_read_capped(_RaisingProbe(200, b"y" * (4096 + 10)), 4096,
-                                _time.monotonic() + 5)
+            _doctor_read_capped(body, 4096, _time.monotonic() + 5)
+        # It reached the cap exit's probe (one full chunk, then `n == 1`).
+        assert body.chunk_reads and body.chunk_reads[0] == 4096, body.chunk_reads
 
     def test_a_cut_403_body_is_unproven_not_a_red_refusal(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):

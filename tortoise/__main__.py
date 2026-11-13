@@ -13121,12 +13121,13 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
         # review round 23).
         probe = reader(1)
         # An interrupted probe returns `b""` for the same reason a completed body
-        # does, so the FLAG decides (round 19/24): the clock is a proxy for it and
-        # leaves the window between the timer firing and the next `monotonic()`
-        # read — which is exactly the window the round-24 defect was measured in.
-        # A "cut" claim is the safe one; "complete" is the one that puts a
-        # fragment in front of the verdict.
-        return b"".join(chunks), bool(probe) or interrupted
+        # does, so BOTH signals are consulted: the FLAG (the reader knows it shut
+        # the socket down — round 19/24) and the CLOCK (a probe that came back
+        # after the deadline with nothing declared cannot prove completeness, and
+        # a double with no socket never sets the flag). A "cut" claim is the safe
+        # one; "complete" is the one that puts a fragment in front of the verdict.
+        return (b"".join(chunks),
+                bool(probe) or interrupted or time.monotonic() >= deadline)
     finally:
         if watchdog is not None:
             watchdog.cancel()
@@ -13855,6 +13856,10 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                             f"({_printable(body[:160]) if body else '(empty body)'}) "
                             "— a proxy or captive portal answering for the "
                             "endpoint also returns 200, so the key is NOT proven. "
+                            # ⛔ The SAME inert-knob split as the transport rows
+                            # (fresh review round 19): for a STORE-sourced key
+                            # `TORTOISE_API_URL` cannot move the endpoint, so this
+                            # row sent the user at a knob that does nothing.
                             f"{_endpoint_remedy}"))
             return
         org = None
