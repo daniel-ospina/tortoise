@@ -24,7 +24,10 @@
 #
 # WHY IT CANNOT BE STARVED INTO SILENCE (the load-bearing property, #10109):
 #   1. its OWN `schedule` + `workflow_dispatch` — no `push: main`, so no merge creates or
-#      cancels its run and it never queues behind the CI backlog;
+#      cancels its run. (It is NOT exempt from the runner pool: `ubuntu-latest` is the same
+#      label ci.yml uses, so a saturated pool delays the tick. A delayed run is not a lost
+#      run — the artifact is in a steady state, so the next tick reads the same thing — but
+#      do not restate this as "never queues behind the CI backlog".);
 #   2. its OWN concurrency group with `cancel-in-progress: false`, so a run is never
 #      superseded mid-flight;
 #   3. it detects a STEADY STATE (the published artifact stays broken until someone

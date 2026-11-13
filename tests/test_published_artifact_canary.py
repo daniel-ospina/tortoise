@@ -1262,10 +1262,12 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
     produces is a red nobody opens, which is the 97-day-invisible class it exists to end
     (#12363 round 5).
 
-    ⛔ The report runs in its OWN job. `if: failure()` is JOB-scoped, and a job killed at
-    its own `timeout-minutes` runs NONE of its remaining steps — `always()` included — so
-    every in-job gate left the alert silent in exactly the terminal state the `always()`
-    transcript upload exists for (#12363 round 8).
+    ⛔ The report runs in its OWN job, because `if: failure()` is JOB-scoped and cannot
+    express a cancelled or timed-out terminal state, and because a gate that reports on a
+    job should not live inside the job it reports on. (Do NOT justify this with "a job
+    killed at `timeout-minutes` runs no remaining step" — that claim was retracted in round
+    9: the server re-evaluates unfinished steps' `if` conditions on cancellation, so an
+    in-job `always()` step does get a chance inside the grace window.)
     """
     import yaml
 
@@ -1575,3 +1577,72 @@ def test_a_FOREIGN_database_under_HOME_does_not_count_as_initialised(tmp_path):
     )
     assert arm.status == canary.FAIL, arm.detail
     assert "created no database" in arm.detail
+
+
+def test_the_transcript_RELAY_is_one_agreement_across_four_sites():
+    """The tail reaches the issue only if FOUR separately-edited strings agree: the canary
+    step's `--transcript-dir`, the upload `path`, the upload `name` == the download `name`,
+    and the download `path` == the directory the alert script reads. Nothing else in this
+    suite touches the workflow-side half — the shell harness writes the log ITSELF, so it can
+    only test the script's side — and round 10 measured three mutations of these strings
+    leaving the suite green while every filed issue silently degraded to
+    "(no transcript reached this job)" (#12363 round 10, P2). One test, so the four sites
+    cannot drift apart without a red.
+    """
+    import re
+
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "release-artifact-canary.yml").read_text()
+    )
+    canary_steps = workflow["jobs"]["canary"]["steps"]
+    report_steps = workflow["jobs"]["report"]["steps"]
+
+    def step_named(steps, name):
+        for step in steps:
+            if step.get("name") == name:
+                return step
+        raise AssertionError(f"no step named {name!r}")
+
+    upload = next(s for s in canary_steps if "upload-artifact" in str(s.get("uses")))
+    download = next(s for s in report_steps if "download-artifact" in str(s.get("uses")))
+
+    upload_path = str(upload["with"]["path"]).rstrip("/")
+    download_path = str(download["with"]["path"]).rstrip("/")
+    assert upload["with"]["name"] == download["with"]["name"], (
+        f"the upload names the artifact {upload['with']['name']!r} and the download asks for "
+        f"{download['with']['name']!r} — the transcript never reaches the alert"
+    )
+    assert upload_path == download_path, (
+        f"the upload stores {upload_path!r} and the download extracts to {download_path!r}; "
+        f"the alert reads one fixed directory, so these must be the same path"
+    )
+
+    # The canary must WRITE into that same directory, and the tool owns the FILENAME.
+    transcript_dir = re.search(
+        r"--transcript-dir\s+\"?\$\{?RUNNER_TEMP\}?/([\w.-]+)",
+        str(
+            step_named(
+                canary_steps, "Smoke the published artifact (documented first command, clean HOME)"
+            )["run"]
+        ),
+    )
+    assert transcript_dir, 'the canary step does not pass --transcript-dir "$RUNNER_TEMP/<dir>"'
+    assert transcript_dir.group(1) == upload_path.rsplit("/", 1)[-1], (
+        f"the canary writes to $RUNNER_TEMP/{transcript_dir.group(1)} but the artifact captures "
+        f"{upload_path!r} — the upload would store an empty directory"
+    )
+
+    # The alert script's hardcoded read path must match the directory AND the tool's filename.
+    tool_src = (REPO_ROOT / "tools" / "published_artifact_canary.py").read_text()
+    filename = re.search(r'"([\w.-]+\.log)"', tool_src)
+    assert filename, "the tool no longer names its transcript file"
+    alert_src = (REPO_ROOT / ".github" / "scripts" / "published-artifact-alert.sh").read_text()
+    alert_log = re.search(r'local log="\$\{RUNNER_TEMP:-/tmp\}/([^"]+)"', alert_src)
+    assert alert_log, "the alert script no longer reads a RUNNER_TEMP transcript"
+    assert alert_log.group(1) == f"{transcript_dir.group(1)}/{filename.group(1)}", (
+        f"the alert reads {alert_log.group(1)!r} but the canary writes "
+        f"{transcript_dir.group(1)}/{filename.group(1)} — every filed issue would say "
+        f'"no transcript", which is the state round 6\'s incremental log exists to prevent'
+    )
