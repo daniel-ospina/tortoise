@@ -1167,7 +1167,7 @@ curl -s https://api.premiselabs.co/health | python3 -m json.tool | sed -n '/"con
 | field | what it tells you |
 |---|---|
 | `key_fingerprint` | `sha256(key)[:12]` of the key **this half holds** — 12 lowercase hex, or `null` when it holds none. Both halves publish it, so two equal strings are the only evidence of agreement. Reproduce it yourself: `printf %s "$CONSENT_TOKEN_SECRET" \| sha256sum \| cut -c1-12` |
-| `configured` | `true` / `false` / **`null`**. `false` = no usable key. ⛔ `null` = **the half could not tell you** (its resolver could not run) — never read it as `false`: "did not say" and "has no key" are different readings, and only the second may be compared against the other half's silence |
+| `configured` | `true` / `false` / **`null`**. `false` = no usable key. ⛔ `null` = **the half could not tell you** (its resolver could not run, and it pairs with `reason: unreadable`) — never read it as `false`: "did not say" and "has no key" are different readings, and only the second may be compared against the other half's silence |
 | `reason` | a **CLOSED SET** of codes, never a message: `not_set` (absent/empty), `padded` (survived with surrounding whitespace), `reused_credential` (equals another credential this deployment holds — §2.3 bans it), `too_short` (under the 32-byte floor), `not_utf8`, `unreadable` (paired with `configured: null`). The Pages half publishes only `not_set`. ⛔ An **unknown** code is `UNVERIFIABLE`, not new information — the checker refuses anything outside the set so a value is never echoed into a log or an issue body |
 
 ⚠️ **`consent_token_key` deliberately does NOT fold into `status`** — same reasoning as `build` above: a split
@@ -1175,6 +1175,10 @@ key is a deployment-identity problem, not a liveness problem, and degrading `sta
 restart a healthy process. Its consumer is `.github/workflows/consent-key-drift.yml` (every 30 minutes,
 auto-files one issue per streak); to silence it use `gh workflow disable consent-key-drift` — **no PR and no
 file edit**, because a `schedule` only fires from the default branch.
+
+⚠️ **The value must be RANDOM, not merely long.** The 32-byte floor is a LENGTH heuristic — a
+`passwordpassword…` clears it — and publishing 48 bits of the digest turns the rate-limited, logged online
+check into an unlimited offline one. Generate one: `python3 -c 'import secrets;print(secrets.token_urlsafe(48))'`.
 
 ⛔ **The operator misread this section exists to prevent — two of them.** (1) **`MISMATCH` during a rotation
 is the rotation.** Pages bakes env at deploy time, so between "set the value" and "redeploy Pages" the check

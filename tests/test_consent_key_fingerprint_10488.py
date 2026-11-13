@@ -397,6 +397,26 @@ def test_the_SPEC_section_2_5_still_states_the_contract_the_code_implements() ->
         assert verdict in section, f"§2.5 no longer names the {verdict} verdict"
         assert code in section, f"§2.5 no longer states the exit code for {verdict}"
     # The operator-reproducible one-liner the "no domain prefix" argument rests on (§8).
+    # ⛔ THE SHAPE IS STATED WITH THE SAME ANCHOR THE CODE USES. The delta moved both regexes to `\Z`
+    # and left §2.5 quoting `^[0-9a-f]{12}$` — the spelling the same commit calls a defect, in the
+    # section every other file cites as the sync target. Pinned as a PAIR (the right form present, the
+    # retracted one absent) because "contains 0-9a-f" would pass on either.
+    assert "`[0-9a-f]{12}\\Z`" in section, "§2.5 no longer states the `\\Z`-anchored fingerprint shape"
+    assert "^[0-9a-f]{12}$" not in section, (
+        "§2.5 is quoting the `$`-anchored shape again — `$` accepts a trailing newline, which is the "
+        "bug this change fixed in the code"
+    )
+    # The rotation's step 1 must be a RUNNABLE invocation (`gh secret set <NAME> --body <value>`; the
+    # `NAME=VALUE` form is `fly`'s, and `gh` reads the positional as the NAME) AND must generate a
+    # random value, because §8's precondition is a random key and the doc claims step 1 is where that
+    # comes from.
+    assert "gh secret set CONSENT_TOKEN_SECRET --body" in section, (
+        "§2.5's rotation is not a runnable `gh` invocation (or lost `--body`)"
+    )
+    assert "token_urlsafe(48)" in section, (
+        "§2.5's step 1 no longer generates a RANDOM value, so an operator can complete the documented "
+        "rotation with a hand-typed guessable key and still satisfy every check in this document"
+    )
     assert "sha256sum" in doc and "cut -c1-12" in doc, (
         "the reproduce one-liner is gone from §8 — the argument for publishing a plain sha256 prefix "
         "rests on an operator being able to verify the number themselves"

@@ -337,8 +337,8 @@ The AS side is an **added block on an existing endpoint** (the convention the `b
 §"Which build is serving"), and it is deliberately **not** folded into `/health`'s `status`: a split must not
 make a healthy API look unhealthy, and a deployment-identity problem is not a liveness problem. The Pages
 side **is a new route**, because every session-free surface this project already had is unusable for it:
-`/api/session` answers `401` without a cookie **by design** (§8.2 — it is the session's single source of
-truth, and a 200 with no session would break that contract), and `/api/consent/token` is the very endpoint
+`/api/session` answers `401 not_signed_in` without a cookie **by design** (its own module contract: it is the
+session's single source of truth, and a 200 with no session would break that), and `/api/consent/token` is the very endpoint
 the defect is *about* — a `POST` behind the exact-origin allowlist and a `__Host-session` cookie, so a
 checker could never read a fingerprint off it without a browser. So the route adds **one** entry to the
 unauthenticated surface set, and it is `GET`-only, `no-store`, CORS-free (its only consumer is a
@@ -368,7 +368,11 @@ of six codes**, deliberately free of numbers, lengths, env names and key materia
 The AS publishes the first five (`consent_token.py::_SECRET_PROBLEM_CODES`) or `unreadable`
 (`hosted_api.py`); the Pages half publishes only `not_set`, because the short/reused/encoding rules are the
 AS's and a half that claimed a code it never computed would be a second opinion about a value it cannot
-see. A consumer must treat an **unknown** code in this field as `UNVERIFIABLE` rather than as new
+see. ⛔ **The set bounds the 200 PAYLOAD.** A non-200 body is refused before it is parsed (the checker reports
+`http_<status>`), so the Pages route's `503 {"error": "unavailable", "reason": "fingerprint_failed"}` is
+outside the contract by construction and is not a seventh code. And a `configured: null` + `unreadable`
+pair is read by `tools/consent_key_check.py` as `unreadable` — the same word the doc uses — rather than as a
+shape fault, so an operator whose AS resolver is broken sees the cause the table names. A consumer must treat an **unknown** code in this field as `UNVERIFIABLE` rather than as new
 information — `tools/consent_key_check.py` does exactly that (its `REASON_CODES` is the same closed set, and
 anything else is refused so the value is never echoed into a log or an issue body). The consumer-facing
 table lives in `docs/infra-runbook.md` §4.4.
@@ -403,9 +407,12 @@ verdicts — `AGREE` (0), `MISMATCH` (1), `SPLIT` (1, exactly one half configure
 configured: consistent but **not** agreement), `UNVERIFIABLE` (2, a half could not be read or published a
 malformed field). Both 1 and 2 are RED for a monitor; they differ in what they claim — a measured
 disagreement vs no measurement. The tool **never accepts, reads or prints a key** (it has no such flag and
-reads no env), and it validates even the fingerprints it receives against `^[0-9a-f]{12}$` before
-comparing — a half that answered with the key, a prefix, or a full digest is `UNVERIFIABLE` and the value is
-**not echoed** into a CI log or an issue body.
+reads no env), and it validates every remote-supplied string before comparing: `key_fingerprint` against
+`[0-9a-f]{12}\Z` matched with `.match()` — ⛔ `\Z`, not `$`, because Python's `$` also matches immediately
+before a TRAILING NEWLINE, so a producer that appended one would pass the shape gate, print a broken line and
+compare as `MISMATCH` (telling an operator to rotate a key that is not wrong) — and `reason` against the
+closed set below. A half that answered with the key, a prefix, or a full digest is `UNVERIFIABLE` and the
+value is **not echoed** into a CI log or an issue body.
 
 **Where it runs, and why THAT place.** `.github/workflows/consent-key-drift.yml`, on a **schedule** (and
 `workflow_dispatch`), NOT from `deploy-pages.yml` and not per-PR:
@@ -431,7 +438,11 @@ deleted file takes the whole monitor with it. The same verb is documented for `a
 value was corrected, the **already-deployed** Function kept signing with the **old** key until a new
 deployment existed — Pages bakes env at deploy time. So:
 
-1. **Rotate the GitHub repo secret** — `gh secret set CONSENT_TOKEN_SECRET=…` — then land (or
+1. **Generate and rotate the GitHub repo secret** — the repo secret is the durable source, and a fresh
+   RANDOM value is what §8's precondition requires:
+   `NEW=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')`, then
+   `gh secret set CONSENT_TOKEN_SECRET --body "$NEW"` (⛔ `--body`, not `NAME=VALUE` — that form is
+   `fly`'s, and `gh` reads the single positional as the secret's NAME) — then land (or
    `workflow_dispatch`) the `deploy-hosted` run so Fly picks it up.
    ⛔ **The repo secret is the source of truth, and `fly secrets set` ALONE IS NOT A ROTATION.**
    `.github/scripts/fly-managed-secrets.txt` declares `CONSENT_TOKEN_SECRET gh-secret:CONSENT_TOKEN_SECRET`

@@ -426,8 +426,18 @@ def test_the_workflow_files_the_drift_ON_A_FAILING_READING() -> None:
     assert len(filing) == 1, "exactly one auto-file step"
     condition = filing[0]["if"]
     assert "always()" in condition, f"the filing step must survive a failing check step, got {condition!r}"
-    assert "steps.check.outcome != 'skipped'" in condition, (
-        f"a skipped check step must NOT file a fabricated reading, got {condition!r}"
+    # ⛔ THREE EXCLUSIONS, each closing a different fabricated reading (asserted as SEMANTICS, not as
+    # one spelling, so a stricter-but-equivalent rewrite does not false-block):
+    #   skipped   → checkout / setup-python / the tool contract never ran: no reading exists
+    #   cancelled  → a cancel landing INSIDE the compare step leaves the JSON empty, and `always()`
+    #                is what runs a step on a cancelled run; `cancelled` is NOT `skipped`, so the
+    #                skipped clause alone does not cover it (measured against `steps.<id>.outcome`'s
+    #                value set: success|failure|cancelled|skipped)
+    assert "steps.check.outcome != 'skipped'" in condition or (
+        "steps.check.outcome == 'failure' or steps.check.outcome == 'success'" in condition
+    ), f"a skipped check step must NOT file a fabricated reading, got {condition!r}"
+    assert "!cancelled()" in condition or "steps.check.outcome != 'cancelled'" in condition, (
+        f"a CANCELLED check step must not file an empty reading as one it took, got {condition!r}"
     )
 
 
@@ -444,6 +454,20 @@ def test_the_two_dedupe_TITLES_are_stable_constants() -> None:
     assert drift in body, "the drift title changed — that abandons the standing issue"
     assert unknown in body, "the unknown title changed — that abandons the standing issue"
     assert drift != unknown, "two findings must not share one dedupe key"
+    # ⛔ PRESENCE IS NOT THE CONTRACT — the BINDING is. Two titles present and different can still be
+    # SWAPPED between the verdict arms, and that mutation was measured GREEN against a presence-only
+    # pin: a MEASURED mismatch would then file (and be resolved by the next AGREE) under the
+    # "could not be verified" ledger, i.e. the alert asserting the wrong finding while its heading —
+    # produced by the VERDICT case, not by `title` — still looks right in the log.
+    assert "drift_title=" in body and "unknown_title=" in body
+    measured_arm = body.split("MISMATCH|SPLIT)", 1)[1].split("*)", 1)[0]
+    assert 'title="$drift_title"' in measured_arm, (
+        "the MEASURED-disagreement arm no longer files under the drift title (or the titles are swapped)"
+    )
+    unmeasured_arm = body.split("*)", 1)[1] if body.count("*)") > 1 else body.split("MISMATCH|SPLIT)", 1)[1].split("*)", 1)[1]
+    assert 'title="$unknown_title"' in unmeasured_arm, (
+        "the no-measurement arm no longer files under the unknown title (or the titles are swapped)"
+    )
 
 
 def test_the_workflow_steps_are_all_syntactically_valid_shell() -> None:
@@ -464,3 +488,71 @@ def test_the_workflow_asks_for_the_tools_the_ALERT_NEEDS() -> None:
     assert len(contract) == 1
     run = contract[0]["run"]
     assert "ensure gh jq" in run, f"the tool contract supplies only gh: {run!r}"
+
+
+def test_the_alert_itself_carries_the_CORRECTED_rotation_order() -> None:
+    """The issue body is the THIRD statement of the rotation, and the one an operator reads first.
+
+    §2.5 and `docs/infra-runbook.md` §4.4 were both corrected by review: `fly secrets set` first is
+    reverted by the next `deploy-hosted` run (`.github/scripts/fly-managed-secrets.txt` declares the name
+    as `gh-secret:`), so the durable rotation starts from the GitHub repo secret. On the
+    rotating-the-key path this body is what the operator has in front of them, so it is pinned with the
+    runbook rather than trusted to stay in step.
+    """
+    body = "\n".join(s.get("run") or "" for s in _steps())
+    assert "gh secret set CONSENT_TOKEN_SECRET" in body, (
+        "the alert no longer names the durable source (the GitHub repo secret) as step 1"
+    )
+    assert "REVERT" in body, (
+        "the alert no longer warns that a hand-set Fly value is reverted by the next deploy"
+    )
+    assert "fly secrets set" in body, (
+        "the alert no longer even mentions the Fly command it is warning about — the warning is then "
+        "unintelligible to the operator who was about to run it"
+    )
+    # And the rotation window, in the same terms §2.5 and §4.4 use.
+    assert "BETWEEN STEP 1 AND STEP 3" in body and "not a second regression" in body
+
+
+def test_the_shape_gate_is_tied_to_the_published_constant() -> None:
+    """The tool's `12` is a HAND-COPY, and nothing in the module can tie it to the constant.
+
+    `tools/consent_key_check.py` is stdlib-only ON PURPOSE — it must run with no project install and no
+    `uv sync`, which is why it does not import `tortoise` — so `FINGERPRINT_RE`'s hex length is a literal
+    while `tortoise/consent_token.py::CONSENT_KEY_FINGERPRINT_HEX_CHARS` derives it. Moving the constant
+    alone (say 12 → 16) would leave this gate refusing every half's correct value: a permanent
+    `UNVERIFIABLE` on a healthy deployment. Fail-CLOSED, so not a safety hole — but a monitor that can
+    never say AGREE again is a monitor that gets disabled, which is the outcome this whole check exists
+    to avoid. So the tie is this test: the pattern accepts exactly as many hex characters as the
+    constant says, and refuses one more.
+    """
+    from tortoise import consent_token
+
+    n = consent_token.CONSENT_KEY_FINGERPRINT_HEX_CHARS
+    assert CKC.FINGERPRINT_RE.match("a" * n), "the gate refuses the length the constant publishes"
+    assert not CKC.FINGERPRINT_RE.match("a" * (n + 1)), "the gate accepts LONGER than the constant"
+    assert not CKC.FINGERPRINT_RE.match("a" * (n - 1)), "the gate accepts SHORTER than the constant"
+    # …and the two patterns themselves must agree on that shape, since a value travels from one to the
+    # other (`consent_token` publishes, this tool validates).
+    assert bool(consent_token.CONSENT_KEY_FINGERPRINT_RE.match("a" * n)) is bool(
+        CKC.FINGERPRINT_RE.match("a" * n)
+    )
+
+
+def test_a_half_that_could_not_resolve_its_key_reports_UNREADABLE(monkeypatch, capsys) -> None:
+    """The THIRD `configured` state has its own reading, and an earlier cut lost it.
+
+    `tortoise/hosted_api.py::_consent_token_key_health` publishes `{key_fingerprint: null,
+    configured: null, reason: "unreadable"}` when the AS's resolver itself cannot run. The gate used to
+    refuse that as `configured_not_a_bool` — same verdict (UNVERIFIABLE, exit 2, never AGREE) but the
+    printed cause blamed the payload's TYPE while §2.5 and `docs/infra-runbook.md` §4.4 documented
+    `unreadable`. An operator whose resolver is broken should read the cause the table names.
+    """
+    _serve(monkeypatch, {CKC.PAYLOAD_FIELD: {CKC.FINGERPRINT_FIELD: None,
+                                             CKC.CONFIGURED_FIELD: None,
+                                             CKC.REASON_FIELD: "unreadable"}},
+           _pages(_fp(_KEY_A)))
+    assert CKC.main([]) == 2          # still RED: "could not state" is never agreement
+    out = capsys.readouterr().out
+    assert "UNREADABLE (unreadable)" in out, out
+    assert "configured_not_a_bool" not in out

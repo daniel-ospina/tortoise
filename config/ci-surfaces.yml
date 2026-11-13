@@ -9379,7 +9379,7 @@ tier1:
 # the only diff that can break it. Measured before this entry:
 # `select(['docs/infra-runbook.md'])` -> `surfaces=[]`, this file NOT selected; selected once it is
 # in. It is its OWN file, not a test inside the fingerprint suite, because tier1 runs on EVERY PR:
-# one table does not justify pulling fourteen unrelated tests into the always-run smoke.
+# one table does not justify pulling a whole 12-test suite into the always-run smoke.
 # Hermetic (one file read, no graph, no DB) — tier1 is the correct lane. Pinned by
 # tests/test_ci_selection.py::test_the_consent_key_runbook_pin_runs_on_a_runbook_only_diff.
 - test_consent_key_runbook_10488.py

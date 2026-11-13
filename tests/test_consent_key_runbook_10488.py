@@ -46,12 +46,21 @@ def test_the_OPERATOR_table_still_matches_the_published_contract() -> None:
         assert field in section, f"§4.4 no longer documents `{field}`"
     for code in ("not_set", "padded", "reused_credential", "too_short", "not_utf8", "unreadable"):
         assert code in section, f"§4.4 no longer documents the `{code}` reason code"
-    # ⛔ The two misreads, which are the whole point of restating the contract for an operator:
-    # `null` is not `false`, and a rotation window legitimately reads MISMATCH.
-    assert "`null`" in section, "§4.4 no longer warns that `configured: null` is not `false`"
-    assert "MISMATCH" in section and "rotation" in section, (
-        "§4.4 no longer says a rotation window reads MISMATCH — the misread that sends an operator "
+    # ⛔ The two misreads, which are the whole point of restating the contract for an operator. Pinned
+    # as the DISAMBIGUATING CLAUSE, not the noun: a rewrite of "`null` means the half has no key" keeps
+    # every token and inverts the warning, and that mutation was measured GREEN against a
+    # noun-only pin. So each assertion binds the corrective half of its own sentence.
+    assert "never read it as `false`" in section, (
+        "§4.4 no longer says `configured: null` must NOT be read as `false` — its opposite passes any "
+        "pin that only looks for `null`"
+    )
+    assert "MISMATCH" in section and "is the rotation" in section, (
+        "§4.4 no longer says a rotation window IS the rotation — the misread that sends an operator "
         "into re-rotating a key that is fine"
+    )
+    assert "RANDOM" in section or "random" in section, (
+        "§4.4 no longer carries §8's precondition — the operator-facing table is where a hand-typed "
+        "guessable key gets caught"
     )
     assert "reverts a hand-set Fly value" in section or "silently reverts" in section, (
         "§4.4 no longer warns that `fly secrets set` alone is reverted by the next deploy"

@@ -23,9 +23,9 @@
  * `GET {api}/health` → `consent_token_key`; the comparison is `tools/consent_key_check.py`.
  *
  * ⛔ WHY A NEW ROUTE AND NOT AN EXISTING ONE. Every other session-free surface in this project is
- * already taken and none of them can carry this: `/api/session` answers `401` without a cookie by
- * design (§8.2 — it is the session's single source of truth, and a 200 without a session would break
- * that contract), and `/api/consent/token` is what the defect is ABOUT — a `POST` behind the
+ * already taken and none of them can carry this: `/api/session` answers `401 not_signed_in` without a
+ * cookie by design (its own module contract — it is the session's single source of truth, and a 200
+ * with no session would break that), and `/api/consent/token` is what the defect is ABOUT — a `POST` behind the
  * exact-origin allowlist and a `__Host-session` cookie, so a checker could never read a fingerprint
  * off it without a browser. A separate read-only `GET` is the smallest surface that answers
  * "which key does this deployment hold" to an unauthenticated caller.
@@ -34,13 +34,17 @@
  * ----------------------------------------------
  * The value is `sha256(CONSENT_TOKEN_SECRET)[:12]` — 48 bits of a hash of a ≥32-byte, operator-set
  * key. It is not the key, not a prefix of the key, and not invertible. It hands a guessing attacker
- * NOTHING they do not already have: any guess can already be checked against the live verifier in
- * ONE request (`GET /oauth/consent/preview`, with the token in `X-Consent-Token`, answers
- * `signature does not verify`), so this field is
- * a strictly weaker oracle than a surface that exists on purpose. A key an attacker can ENUMERATE is
- * already lost without this route — the 32-byte floor on the AS (`_MIN_SECRET_BYTES`, an
- * IMPLEMENTATION floor, not a §2.3 requirement) refuses a value that short for exactly that reason. The full argument (why 12 hex, why no domain prefix, why a collision at 2^-48 is
- * acceptable) is on `CONSENT_KEY_FINGERPRINT_HEX_CHARS`.
+ * no new CAPABILITY to guess — any guess can already be checked against the live verifier in ONE
+ * request (`GET /oauth/consent/preview`, with the token in `X-Consent-Token`, answers
+ * `signature does not verify`). ⛔ BUT THE TWO ORACLES ARE NOT EQUALLY EXPENSIVE, and an earlier cut
+ * of this comment claimed they were: the live one is rate-limited and logged, while 48 published
+ * bits let the same guess be checked OFFLINE in microseconds. So the safety argument has a
+ * PRECONDITION — the key is RANDOM, not merely ≥32 bytes — and the 32-byte floor on the AS
+ * (`_MIN_SECRET_BYTES`, an IMPLEMENTATION floor, not a §2.3 requirement) says itself that it cannot
+ * establish it. For a key that is already guessable this route makes an existing forgery CHEAP
+ * rather than SLOW; it does not make a forgery possible. The full argument (why 12 hex, why no
+ * domain prefix, why a collision at 2^-48 is acceptable) is on `CONSENT_KEY_FINGERPRINT_HEX_CHARS`,
+ * and the operator-facing precondition is §8 of `docs/engineering/auth/consent-identity-bridge.md`.
  *
  * ⛔ Public and session-free ON PURPOSE, and therefore also CORS-free: it is read by a server-side
  * checker, not by a browser, so it advertises no `Access-Control-Allow-Origin`. Do not add one —

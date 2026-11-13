@@ -120,6 +120,13 @@ REASON_FIELD = "reason"
 #: `"<12 hex>\n"` would pass this gate — printing a broken line and then comparing as MISMATCH,
 #: which tells an operator to rotate a key that is not wrong. Measured on the `$` version.
 FINGERPRINT_RE = re.compile(r"[0-9a-f]{12}\Z")
+#: ⛔ THE `12` ABOVE IS A HAND-COPY of `tortoise.consent_token.CONSENT_KEY_FINGERPRINT_HEX_CHARS`, and
+#: nothing in the module can tie the two (this tool is stdlib-only by design — it must run with no
+#: project install, which is why it does not import `tortoise`). So the tie is a TEST:
+#: `test_the_shape_gate_is_tied_to_the_published_constant` asserts this pattern accepts exactly as
+#: many hex characters as the constant says and refuses one more, so a change to either alone reds.
+#: Without it, moving the constant to 16 would leave this gate refusing every correct value — a false
+#: RED for ever (fail-closed, but permanently wrong).
 
 #: The `reason` vocabulary, as a CLOSED set — the FOURTH disclosure gate, and the one an earlier cut
 #: of this file missed while claiming (§ "THE CONTRACT" above) that the fingerprints were the only
@@ -199,6 +206,14 @@ def parse_reading(half: str, url: str, payload: object) -> Reading:
     if not isinstance(payload, dict):
         return Reading(half, url, problem="payload_not_an_object")
     configured = payload.get(CONFIGURED_FIELD)
+    if configured is None and payload.get(REASON_FIELD) == "unreadable":
+        # ⛔ THE THIRD STATE HAS ITS OWN READING, and an earlier cut lost it: `hosted_api.py` publishes
+        # `{key_fingerprint: None, configured: null, reason: "unreadable"}` when the AS's resolver
+        # itself cannot run, and this gate refused it as a shape fault first — so an operator whose AS
+        # resolver was broken read `configured_not_a_bool` while §2.5 and the runbook documented
+        # `unreadable`. Same verdict (UNVERIFIABLE, exit 2 — never AGREE), but the printed cause now
+        # names what actually happened instead of blaming the payload's type.
+        return Reading(half, url, configured=None, reason="unreadable", problem="unreadable")
     if not isinstance(configured, bool):
         # `null`/absent is not `false`: "this deployment did not say" and "this deployment has no
         # key" are different readings, and only the second one can be compared against the other

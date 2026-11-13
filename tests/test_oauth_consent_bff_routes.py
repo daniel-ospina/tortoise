@@ -2330,25 +2330,19 @@ def test_the_mint_route_and_the_fingerprint_route_read_the_key_from_the_SAME_acc
     def code_lines(source: str) -> list[str]:
         """Every line that is CODE, so a comment explaining the rule cannot satisfy or break it.
 
-        Crude on purpose (a `//` or block-comment line), and named so its limit is visible: a TRAILING
-        `//` comment on a real statement is not stripped, which can only make this test stricter.
+        ⛔ STRIP THE COMMENTS, do not CLASSIFY LINES — and this was a review finding, not a style
+        preference. A line-classifier that treats any line STARTING with `/*` as the start of a block
+        swallows the rest of the file when the block OPENS AND CLOSES on that line:
+
+            /* prettier-ignore */ const secret = env.CONSENT_TOKEN_SECRET;
+
+        Measured against the first version of this helper: `consentSecret(` still found, the direct read
+        NOT found, i.e. the pin reported CLEAN over exactly the defect it exists to prevent. A regex
+        strip has no such hole, and a same-line block is the commonest form of a lint-suppression
+        comment.
         """
-        stripped = []
-        in_block = False
-        for line in source.splitlines():
-            bare = line.strip()
-            if in_block:
-                if bare.endswith("*/") or bare.startswith("*"):
-                    in_block = not bare.endswith("*/")
-                    continue
-                continue
-            if bare.startswith("/*"):
-                in_block = not bare.endswith("*/")
-                continue
-            if bare.startswith(("//", "*")):
-                continue
-            stripped.append(line)
-        return stripped
+        uncommented = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+        return [ln for ln in uncommented.splitlines() if not ln.strip().startswith("//")]
 
     for name, source in (("token.ts", mint), ("key.ts", publish)):
         code = "\n".join(code_lines(source))
@@ -2359,6 +2353,18 @@ def test_the_mint_route_and_the_fingerprint_route_read_the_key_from_the_SAME_acc
         )
     bridge = (functions / "_shared/auth/consent-bridge.ts").read_text(encoding="utf-8")
     assert "export function consentSecret(" in bridge, "the shared accessor is gone"
+
+    # ⛔ AND THE CLAIM IS PINNED, because it drifted once already. Three files stated that publishing 48
+    # bits is a "strictly worse oracle" than the live verifier; the correction landed in two of them and
+    # this route's header — the file a future editor of the Pages half reads FIRST — kept the retracted
+    # sentence while pointing at the constant that now says the opposite. The honest form is: the same
+    # guess could already be tested online, rate-limited and logged; the fingerprint makes it cheap and
+    # offline, so the argument's precondition is a RANDOM key.
+    for name, source in (("key.ts", publish), ("consent-bridge.ts", bridge)):
+        assert "strictly worse oracle" not in source and "strictly weaker oracle" not in source, (
+            f"{name} still states the retracted 'strictly worse oracle' claim — the argument's "
+            "precondition is a random key, and the two oracles are NOT equally expensive"
+        )
 
 
 def test_a_DIFFERENT_key_publishes_a_DIFFERENT_fingerprint() -> None:

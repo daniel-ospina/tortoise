@@ -785,7 +785,7 @@ def test_the_record_schema_placement_pins_run_on_a_doc_only_diff():
     assert runbook_readers == {
         # #10488: the consent-key OPERATOR table (§4.4) — registered in `tier1` for the same reason
         # as the rest of this set, and in its own file so the always-run smoke gains one pin rather
-        # than fourteen.
+        # than a whole suite.
         "test_consent_key_runbook_10488.py",
         "test_deploy_workflow.py",
         "test_durability_posture.py",
