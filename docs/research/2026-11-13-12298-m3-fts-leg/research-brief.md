@@ -186,11 +186,16 @@ fairer one — so the break is disclosed instead.
 straight after the writes can see a **partially built** index and book a present name as a miss — an
 artefact in the direction that flatters the wrong arm. The harness **waits** until `numDocuments`
 reaches the population size **exactly** (`==`, not `>=` — an over-count means the graph is not the one
-this run wrote) and **refuses** on timeout; it also **refuses a reused graph** outright, twice over:
-`o.name` is an ON CREATE write (`#8919`), so a second run against the same graph would measure the
-previous population, and the graph's total `:Object` count is asserted against the population so a
-graph carrying a previous arm's `m3fx-*` fixture rows (which `STARTS WITH 'm3-'` does not match) is
-refused too rather than silently measured as 305 documents against 300.
+this run wrote) and **refuses** on timeout; it also **refuses a graph whose population differs, or that population
+plus leftover rows**, twice over: `o.name` is an ON CREATE write (`#8919`), so a second run against the
+same graph would measure the previous population, and the graph's total `:Object` count is asserted
+against the population so a graph carrying a previous arm's `m3fx-*` fixture rows (which
+`STARTS WITH 'm3-'` does not match) is refused rather than silently measured as 305 documents against
+300. ⚠️ **The case neither guard refuses, stated so the claim above is not read as more than it is:** a
+graph already holding exactly the same 300 names and nothing else is still accepted — and that one is
+harmless, because the population, the ids and therefore the measurement are identical (re-upserting
+the same names is a no-op on `o.name`). What the guards exist to stop is a graph carrying a DIFFERENT
+population or extra rows.
 (b) **Re-upserting into a live graph is not free** — before the wait and run-scoped graphs existed, two
 runs differed by 2 names (0.7133 vs 0.7067, an uncommitted pre-run observation). With both, two
 independent runs return **identical** numbers, and the second one is committed as

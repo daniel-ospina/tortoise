@@ -271,7 +271,7 @@ fixture. Moving it opportunistically would trade a known cost win for a measured
 opposite of the ordering in §5.
 
 > **STATUS — M3 is measured (2026-11-13, `#12298`).** The qualifiers above are resolved **in the respect
-> M3 was chartered to answer — recall@k on the FTS leg in isolation — and on that question this
+> this measurement answers — recall@k on the FTS leg in isolation — and on that question this
 > decision is unchanged**: a BM25-capable Postgres option was measured against the shipped leg on one
 > paired population, and moving the index earns no recall return. With the query terms held constant
 > the swap moves recall@3 by ~1 point (not significant), by **zero** at k=15, and is **−0.67 pts at

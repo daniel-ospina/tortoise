@@ -481,11 +481,13 @@ _HEADLINE_ROWS: tuple[tuple[str, tuple[str, str] | None], ...] = (
 
 
 def _signed(cell: str) -> float:
-    """The first SIGNED number in a cell (`+1.33 pts` -> 1.33, `-0.67` -> -0.67).
+    """The first SIGNED number in a cell, U+2212 included (`−0.67` -> -0.67).
 
-    ⛔ ``_num`` strips the sign, so it cannot police a Δ column: `+1.33` and
-    `-1.33` would compare equal. The Δ column is exactly where a sign error is
-    the defect, so this reads the sign deliberately.
+    ⛔ ``_num`` is ``re.search(r"-?\\d+...")``, so it keeps an ASCII minus but NOT
+    the typographic U+2212: ``_num("−0.67")`` is ``0.67``, which lets a prose
+    sign flip compare EQUAL to its own correct positive value. The brief's prose
+    uses U+2212 (its §0 and §3.2 bodies state `−0.67 pts`) while its tables use
+    ASCII, so the Δ column needs the reader that understands both.
     """
     m = re.search(r"[-+\u2212]?\d+(?:\.\d+)?", _plain(cell))
     assert m, f"no number in the cell {cell!r}"
@@ -1149,12 +1151,17 @@ def test_the_degraded_leg_refusal_is_WIRED_at_every_shipped_leg_call(tool_mod) -
     legs = [c for c in _calls(sweep, "run_fts_query") if not _is_warmup(c)]
     assert legs, "the shipped leg must be called from the sweep"
     refusals = _calls(sweep, "_refuse_degraded_legs")
-    assert len(refusals) >= len(legs), (
-        f"{len(legs)} `run_fts_query` call(s) but only {len(refusals)} "
-        "`_refuse_degraded_legs` call(s) — an unguarded shipped-leg call books a "
-        "degraded read as a measurement")
-    traces = {}
-    for call in legs:
+    # ⛔ TWO DIRECTIONS, not a count (#12349 review cycle 8). A global
+    # `len(refusals) >= len(legs)` is satisfied by duplicating ONE loop's
+    # refusal, and that was measured: deleting the sweep's refusal in
+    # `arm_falkordb` and duplicating the fixture loop's left 1,200 sweep reads
+    # (300 names x 4 k) unguarded with the count check GREEN. So the contract is
+    # asserted per measured call: every measured call owns at least one refusal
+    # before the NEXT measured call; that refusal reads the same trace NAME the
+    # call wrote; and it sits in the same innermost loop body (a hoisted refusal
+    # runs once per row and leaves every k but the last unguarded).
+    legs_sorted = sorted(legs, key=lambda c: c.lineno)
+    for i, call in enumerate(legs_sorted):
         kw = {k.arg: k.value for k in call.keywords}
         assert "leg_trace" in kw, (
             "a `run_fts_query` call does not pass `leg_trace=` — the trace stays "
@@ -1162,46 +1169,27 @@ def test_the_degraded_leg_refusal_is_WIRED_at_every_shipped_leg_call(tool_mod) -
         assert isinstance(kw["leg_trace"], ast.Name), (
             "`leg_trace=` must be a named list the refusal can also read, not an "
             "inline expression")
-        traces[call.lineno] = kw["leg_trace"].id
-    # ⛔ Identity, not a count (#12349 review cycle 5/6): passing `leg_trace=trace`
-    # and then refusing on a DIFFERENT list leaves the refusal reading an empty
-    # trace. Each refusal's first argument must be the same NAME the nearest
-    # preceding measured call handed to `leg_trace=`.
-    for refusal in refusals:
-        first = refusal.args[0] if refusal.args else None
-        assert isinstance(first, ast.Name), (
-            f"`_refuse_degraded_legs` at line {refusal.lineno} must be handed a "
-            "named trace, not an expression")
-        prior = [ln for ln in traces if ln < refusal.lineno]
-        assert prior, (
-            f"`_refuse_degraded_legs` at line {refusal.lineno} has no measured "
-            "`run_fts_query` call before it")
-        owner = max(prior)
-        want = traces[owner]
-        # ⛔ The refusal must sit in the SAME innermost loop as the measured call
-        # it guards. That is what makes it run once per measured read; a refusal
-        # hoisted one scope out runs once per ROW and silently leaves every k but
-        # the last unguarded.
-        # NEAREST preceding call with that trace name — both loops use a local
-        # called `trace`, so the name alone does not disambiguate them.
-        leg_call = max((c for c in legs
-                        if any(k.arg == "leg_trace" and k.value.id == want
-                               for k in c.keywords) and c.lineno < refusal.lineno),
-                       key=lambda c: c.lineno)
-        assert _innermost_loop(refusal, sweep) is _innermost_loop(leg_call, sweep), (
-            f"`_refuse_degraded_legs` at line {refusal.lineno} is in a different "
-            f"loop body from the `run_fts_query` call at line {leg_call.lineno} "
-            "it guards — it has been hoisted out, so the reads in between are "
-            "unguarded while this pin reports OK")
-        assert first.id == want, (
-            f"`_refuse_degraded_legs` at line {refusal.lineno} refuses on "
-            f"{first.id!r} but the leg wrote its trace to {want!r} — the refusal "
-            "would read an empty list and pass every degraded read")
-    # The fixture loop is the second published verdict that rests on this leg.
-    assert len(refusals) >= len(legs), (
-        "both the recall sweep AND the #8933 fixture loop must guard the shipped "
-        "leg: an unguarded fixture read publishes a degraded read as "
-        "`rank=None`, i.e. a capability FAIL")
+        name = kw["leg_trace"].id
+        nxt = (legs_sorted[i + 1].lineno if i + 1 < len(legs_sorted)
+               else float("inf"))
+        owned = [r for r in refusals if call.lineno < r.lineno < nxt]
+        assert owned, (
+            f"the measured `run_fts_query` call at line {call.lineno} has no "
+            f"`_refuse_degraded_legs` call before the next measured call at line "
+            f"{nxt} — every read it makes is unguarded, and a degraded read books "
+            f"as a measurement")
+        for refusal in owned:
+            first = refusal.args[0] if refusal.args else None
+            assert isinstance(first, ast.Name) and first.id == name, (
+                f"`_refuse_degraded_legs` at line {refusal.lineno} must read the "
+                f"trace the leg wrote ({name!r}); it reads "
+                f"{getattr(first, 'id', first)!r} — a refusal inspecting an empty "
+                "or stale list passes every degraded read")
+            assert _innermost_loop(refusal, sweep) is _innermost_loop(call, sweep), (
+                f"`_refuse_degraded_legs` at line {refusal.lineno} is in a "
+                f"different loop body from the `run_fts_query` call at line "
+                f"{call.lineno} it guards — it has been hoisted out, so the reads "
+                "in between are unguarded while this pin reports OK")
 
 
 def test_a_degraded_shipped_leg_is_a_REFUSAL_not_a_miss(tool_mod) -> None:
@@ -1426,6 +1414,24 @@ def test_the_index_wait_requires_exactly_the_expected_count(tool_mod) -> None:
         "artifacts' `measurement_notes` before changing this")
 
 
+def test_the_reuse_count_guard_is_wired(tool_mod) -> None:
+    """`arm_falkordb` must assert the graph's total `:Object` count.
+
+    ⛔ The brief claims this guard (§2) and a brief-pin asserts the CLAIM, not the
+    CODE: deleting the count assertion from the harness left every test in this
+    file green while the brief went on claiming a guard that no longer existed
+    (#12349 review cycle 8). Pinned structurally, the same way the index-wait
+    operator above is.
+    """
+    src = inspect.getsource(tool_mod.arm_falkordb)
+    assert "MATCH (o:Object) RETURN count(o)" in src, (
+        "the total-:Object count query is gone — the stale-name check cannot see "
+        "a previous arm's `m3fx-*` fixture rows (`STARTS WITH 'm3-'` misses "
+        "them), so a reused graph is accepted and swept as 305 against 300")
+    assert "!= len(rows)" in src, (
+        "the total count is queried but never compared against the population")
+
+
 def test_brief_states_what_the_reuse_guards_actually_do(brief_text) -> None:
     """§2's reuse claim must match the guards — and now it can claim more.
 
@@ -1440,18 +1446,21 @@ def test_brief_states_what_the_reuse_guards_actually_do(brief_text) -> None:
     brief that under-claims is as wrong as one that over-claims.
     """
     flat = " ".join(brief_text.replace("**", "").split())
-    assert "refuses a reused graph outright" in flat, (
-        "§2 must state the reuse refusal — the harness now refuses it twice "
-        "over (`==` index wait + total `:Object` count)")
+    assert "refuses a graph whose population differs, or that population plus leftover rows" in flat, (
+        "§2 must state exactly what the reuse guards refuse — the harness refuses "
+        "a DIFFERENT population (`==` index wait + total `:Object` count), not "
+        "any reuse")
     assert "count is asserted against the population" in flat, (
         "§2 must name the count guard, which is what catches a previous arm's "
         "`m3fx-*` fixture rows (`STARTS WITH 'm3-'` does not match them)")
     assert "`==`, not `>=`" in flat, (
         "§2 must name the equality, which is what stops an over-full index "
         "from being accepted silently")
-    assert "with the SAME population is ACCEPTED" not in flat, (
-        "§2 still states the case the guards do NOT cover — that case is now "
-        "refused, so the sentence is stale")
+    assert "is still accepted" in flat, (
+        "§2 must disclose the one reuse case neither guard refuses (a graph with "
+        "exactly the same 300 names) and why it is harmless — an undisclosed "
+        "gap is how the previous over-claim got written")
+    assert "with the SAME population is ACCEPTED" not in flat
     assert "numDocuments >= n" not in flat, (
         "§2 still says the wait accepts an at-least-full index — it requires "
         "equality now")
