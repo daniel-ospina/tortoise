@@ -216,6 +216,22 @@ surfaces:
   # ran" from a duplicate row. The shallow fold that merged `#10694` twice produced a
   # duplicate row of this shape.
   - test_cli_config_show.py
+  # #12407/#12428 (main-side drift unblock): `tortoise config show` and `tortoise
+  # doctor` DISCLOSE a repo-root `.env` that the daemon reads and the CLI does not.
+  # `tortoise/__main__.py` is an EXACT `api` SOURCE_PATTERNS match that REPLACES the
+  # `core` fallback, so an `__main__.py`-only diff never reaches `core` — the same
+  # shape, and the same reason, as the #10694 `test_cli_config_show.py` rows directly
+  # above. The file landed on `main` at `9fd4acddba10` with NO manifest row, so
+  # `manifest-integrity` (a required `python-ci-gate.needs` leg) reds `manifest
+  # drift: ['test_env_file_divergence.py']` on `main` ITSELF and therefore on every
+  # PR's merge ref — measured at `4bf1d782ad0f`: `tools/ci_selection.py --integrity`
+  # -> exit 1. That is #11978's class (the gate completes AFTER the merge), not a
+  # defect this PR introduced.
+  # ⛔ This is the `api` registration. The file is ALSO registered in `core`, once,
+  # for the `config.py` / `dotenv_file.py` selection argument — cross-surface (dual)
+  # registration is deliberate. A SECOND row in EITHER surface is what
+  # `--integrity` reds.
+  - test_env_file_divergence.py
   - test_9583_openapi_read_only_claim.py
   # #4282: the `api` arm of the #4860 key-limit failover guard. The file drives the
   # hosted write door (`POST /v1/sessions` -> `hosted_api._capture_session_impl` ->
@@ -5856,6 +5872,15 @@ surfaces:
   # the `record_backup.py` dual registration. `api` keeps the classification
   # (first-match order), so `classify_test_file` still answers "api".
   - test_cli_config_show.py
+  # #12407/#12428 (dual registration, `api` + here — the same placement argument as
+  # the #10655 `test_cli_config_show.py` row directly above): the disclosure pins
+  # read `tortoise/config.py` and `tortoise/dotenv_file.py`, and NEITHER matches a
+  # SOURCE_PATTERNS row, so both fall through to `core`. With the file registered on
+  # `api` alone, a `config.py`- or `dotenv_file.py`-only diff would select `core` and
+  # run none of them (measured: `--changed-files tortoise/dotenv_file.py` ->
+  # surfaces ['core']) — the #1349/#2938 silent-drop class. `api` keeps the
+  # classification (first-match order), so `classify_test_file` still answers "api".
+  - test_env_file_divergence.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
   - test_graph_delete_guard.py       # #2961: race-safe GRAPH.DELETE guard + poisoned-AOF detection (hermetic, no DB)
