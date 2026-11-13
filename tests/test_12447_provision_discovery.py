@@ -241,7 +241,11 @@ class TestTheListingDoorTeachesTheSameWay:
             # truthful remedy rather than the convenient one.
             assert ORG_ENDPOINT in detail["message"], detail
             assert "/v1/team/keys" in detail["message"], detail
-            assert "list_memory_graphs" in detail["message"], detail
+            assert "tortoise_list_graphs" in detail["message"], detail
+            # `list_memory_graphs` is a CONTROL-PLANE SDK call (no hosted
+            # credential, no HTTP transport) — citing it here would send a
+            # hosted builder to a call that answers `[]`.
+            assert "list_memory_graphs" not in detail["message"], detail
             assert "no key-driven listing route" not in detail["message"], detail
         finally:
             gen.close()

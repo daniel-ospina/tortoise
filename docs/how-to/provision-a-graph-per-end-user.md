@@ -124,13 +124,14 @@ The `201` body:
 only a salted hash). Persist it into your own secret store before dropping the
 response.
 
-Persist `graph.id` too. There is no key-driven **graph-listing** route —
+Persist `graph.id` too. There is no key-driven **REST** graph-listing route —
 `GET /v1/graphs` is session-only and answers an API key with
 `403 GRAPH_LISTING_VIA_SESSION` — but the id is not lost if you miss it: keep it
 from this 201, or recover it later from **`GET /v1/team/keys`** (each row carries
 its key's `graph_id`; it needs the account's full-access key, or a key holding
-`keys:manage`) or, from the SDK, `list_memory_graphs`. `GET /v1/team` with a key
-reports limits (`max_graphs`, `max_api_keys`), not graph ids.
+`keys:manage`) or from the MCP tool **`tortoise_list_graphs`**, which answers a
+key-driven HTTP MCP caller with the calling account's graph names. `GET /v1/team`
+with a key reports limits (`max_graphs`, `max_api_keys`), not graph ids.
 
 **Do not call `POST /v1/graphs` for this.** That endpoint is the *dashboard's*
 session-authenticated alias for the same service. With an API key it answers
@@ -173,9 +174,11 @@ scope by default" — *cannot hold it*. Three independent locks:
 2. **Database CHECK** — `chk_minted_key_no_escalation` refuses a `delegation_depth = 0`
    row carrying an escalation scope, so a mint that bypassed the app still cannot
    be stored.
-3. **The door** — `create_org_graph` refuses any `deleg = 0` caller before the body
-   runs (`403 PROVISION_REQUIRES_ORG_KEY`), which is why the rule holds even for a
-   row written straight into the control plane by something else.
+3. **The door** — `create_org_graph` refuses any `deleg = 0` caller in its first
+   checks, before any read or write (`403 PROVISION_REQUIRES_ORG_KEY`), which is
+   why the rule holds even for a row written straight into the control plane by
+   something else. A `deleg = 0` key with **no** data scope never reaches that arm
+   at all — the auth dependency refuses it earlier as `KEY_NOT_USER_MINTED`.
 
 **This matters because it is what makes the model safe to hand out.** Your
 end-user's credential is a *capability*, not a *delegate*: if their process is
@@ -201,9 +204,11 @@ This is a **soft delete** — a tombstone, not an erasure — but read the three
 caveats before you build a churn story on it:
 
 - **The window is 7 days** (`retention.RESTORE_WINDOW_DAYS`). Restore works inside
-  it; after it the purge physically erases the tombstone and the graph's namespace,
-  and nothing is recoverable. A "restore when the customer comes back" flow built
-  on a longer horizon silently finds nothing.
+  it; after it the purge erases the graph's data and every backup artifact, and
+  nothing is recoverable. The control-plane **tombstone row is kept** (audit) and
+  stamped as purged — so the graph's *name* can still be seen while its data is
+  gone. A "restore when the customer comes back" flow built on a longer horizon
+  silently finds nothing.
 - **Restore is not callable with your API key.**
   `POST /v1/graphs/trash/{graph_id}/restore` is a *session + owner/admin*
   surface, so it is a dashboard/operator step, not something your server can do
@@ -224,11 +229,13 @@ one-level-deep rule seen from the other side.
 
 ## 6. Refusals, and what each one means
 
-**The four credential-scope refusals** are `403` with
-`detail: {"error_code", "message"}` — the shape `GRAPH_SCOPED_TEAM_SURFACE` set
-for credential-scope refusals (#2114). The plan/quota gates below them keep
-their pre-existing shape: a **string** `detail`, plus a header where one exists
-(`X-Upgrade-CTA` on the 402, `X-Graph-Quota` on the graph-quota 409 — the
+**The credential-scope refusals** are `403` with
+`detail: {"error_code", "message"}` — four added by #12447
+(`PROVISION_VIA_ORG_ENDPOINT`, `PROVISION_REQUIRES_ORG_KEY`,
+`PROVISION_SCOPE_REQUIRED`, `GRAPH_LISTING_VIA_SESSION`) plus the one they are
+modelled on, `GRAPH_SCOPED_TEAM_SURFACE` (#2114). The plan/quota gates below them
+keep their pre-existing shape: a **string** `detail`, plus a header where one
+exists (`X-Upgrade-CTA` on the 402, `X-Graph-Quota` on the graph-quota 409 — the
 key-cap 409 carries the string detail and no header at all). Do not write a
 client that assumes `detail.error_code` exists on every error.
 
@@ -237,7 +244,7 @@ client that assumes `detail.error_code` exists on every error.
 | `PROVISION_VIA_ORG_ENDPOINT` | called `POST /v1/graphs` with an API key (the session alias) | call `POST /v1/organizations/{org_id}/graphs`, §2 |
 | `PROVISION_REQUIRES_ORG_KEY` | called the provisioning door with a **minted** key | provision from the account-level key; §4 |
 | `PROVISION_SCOPE_REQUIRED` | called it with an account key that lacks `graphs:create` | mint/grab a key carrying `graphs:create`, §1 |
-| `GRAPH_LISTING_VIA_SESSION` | called `GET /v1/graphs` with an API key | keep `graph.id` from the 201, or recover it from `GET /v1/team/keys`, §2 |
+| `GRAPH_LISTING_VIA_SESSION` | called `GET /v1/graphs` with an API key | keep `graph.id` from the 201, or recover it from `GET /v1/team/keys` / the MCP tool `tortoise_list_graphs`, §2 |
 | `GRAPH_SCOPED_TEAM_SURFACE` | a minted key touching a team/account surface | expected — the key is graph-scoped, §3 |
 | `402` + `X-Upgrade-CTA: pro` | the account is `free`/`anon` | upgrade to Builder (`pro`), §1 |
 | `409` + `X-Graph-Quota: n/max` | the graph quota is full | `solo` holds 1 custom graph; upgrade, or delete a graph |

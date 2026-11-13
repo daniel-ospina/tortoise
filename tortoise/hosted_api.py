@@ -26449,8 +26449,11 @@ def _provision_refusal(error_code: str, message: str) -> HTTPException:
     message below spells both out verbatim from ``_PROVISION_ENDPOINT`` /
     ``_PROVISION_SCOPE``: the teaching text and the route cannot drift apart.
 
-    Always 403: the caller is authenticated, and the refusal is about what this
-    credential may do — never a 401, which would read as "your key is bad"."""
+    Always 403, and deliberately the SAME 403 for a valid key and a garbage
+    `tt_` string: the refusal is about the DOOR, never about whether the
+    credential exists, so it can never become an existence oracle. (A 401 here
+    would both read as "your key is bad" — the #12447 defect — and distinguish
+    a real key from an invented one.)"""
     return HTTPException(status_code=403,
                          detail={"error_code": error_code,
                                  "message": message})
@@ -26523,23 +26526,25 @@ async def get_current_user_graph_listing(request: Request) -> dict:
     message did not: it said no key-driven route returns a graph id. That is
     false — `GET /v1/team/keys` returns each key's `graph_id`
     (`list_api_keys`, via `_require_keys_manage`, which passes the account's
-    legacy full-access key or any key holding `keys:manage`), and the public SDK
-    method `list_memory_graphs` lists the account's graphs. There is no key-driven
-    GRAPH-LISTING route (this endpoint's own shape), which is a different and
-    much narrower fact. A refusal that overstates the gap sends a builder to
-    rebuild graphs they could have enumerated.
+    legacy full-access key or any key holding `keys:manage`), and the MCP tool
+    `tortoise_list_graphs` answers an HTTP MCP caller with the calling org's own
+    graph names (`mcp_server.tortoise_list_graphs`, #9340). What does NOT exist
+    is a key-driven **REST** graph listing — this endpoint's own shape — which
+    is a much narrower fact. A refusal that overstates the gap sends a builder
+    to rebuild graphs they could have enumerated.
     """
     if _api_key_bearer(request):
         raise _provision_refusal(
             "GRAPH_LISTING_VIA_SESSION",
-            "This endpoint lists an account's graphs from a signed-in session, "
-            "so an API key cannot call it. The graph ids are still reachable "
-            "with a key: GET /v1/team/keys returns each key's graph_id (it "
-            "needs the account's full-access key, or a key holding "
-            "keys:manage), and the SDK's list_memory_graphs lists the "
-            "account's graphs. Keep the graph id from the provisioning 201 "
-            f"({_PROVISION_ENDPOINT}) as well — that call returns it together "
-            "with the graph's key, which is revealed once and never again.")
+            "This REST endpoint lists an account's graphs from a signed-in "
+            "session, so an API key cannot call it. The graph ids are still "
+            "reachable with a key: GET /v1/team/keys returns each key's "
+            "graph_id (it needs the account's full-access key, or a key "
+            "holding keys:manage), and the MCP tool tortoise_list_graphs "
+            "lists the calling account's graph names. Keep the graph id from "
+            f"the provisioning 201 ({_PROVISION_ENDPOINT}) as well — that "
+            "call returns it together with the graph's key, which is revealed "
+            "once and never again.")
     return await _session_user_with_overrides(request)
 
 
@@ -26547,13 +26552,20 @@ async def get_current_user_graph_listing(request: Request) -> dict:
 async def create_org_graph(org_id: str, body: dict,
                             key_ctx: dict = Depends(get_current_org_gated)):  # noqa: B008
     """C2 (#2111) — key-driven provisioning (epic W1). Auth: a key with the
-    graphs:create scope. One-level-deep by construction: a MINTED key
-    (deleg=0) can never hold graphs:create (child policy + DB CHECK) and
-    is rejected at the get_current_org_gated dependency FIRST
-    (KEY_NOT_USER_MINTED — E2E-4-negative) before this body runs; the
-    inline deleg check below is retained defense-in-depth (reactivates at
-    C5's data flip when gated deps route deleg=0 keys) plus the legacy
-    key_id=None guard.
+    graphs:create scope.
+
+    ⚠️ One-level-deep is enforced HERE, at the top of this handler, and the
+    earlier claim that `get_current_org_gated` refuses a minted key FIRST is
+    stale since C5 (#2114) shipped: that dependency refuses a `deleg=0` key only
+    when it holds NO data scope (`get_current_org_gated`'s dormancy arm), and
+    every provisioned key carries one (`_mint_graph_key` defaults to
+    `graphs:read`). So the provisioned-key path reaches this body and is refused
+    by the `delegation_depth == 0` arm below with `PROVISION_REQUIRES_ORG_KEY` —
+    a live refusal, NOT inert defense-in-depth. A `deleg=0` key with no data
+    scope is refused earlier by the dependency as `KEY_NOT_USER_MINTED`. The
+    child policy (`_MINTABLE_SCOPES`) and the DB CHECK
+    (`chk_minted_key_no_escalation`) are what make "minted keys cannot hold
+    graphs:create" true at the mint; this arm is what refuses them at the door.
 
     #12447: the two refusals below are the ONE door's teaching surface — they
     name the endpoint and the scope the caller is missing, in the same
