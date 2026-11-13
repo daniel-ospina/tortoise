@@ -5441,12 +5441,18 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     role at a different head, not a second head for this pair. `:9906`, which an earlier
     revision of this docstring attributed to `9f4c0bde5a`, is the document's cite at an
     EARLIER head and is not the value at `c7499ac7a7`.)
-    ⛔ The rule is NOT "a bare number is not a cite". A headed history value is legal
-    whether it is dressed or not; the LIVE value is refused in every CITE form, bare
-    included — it is the one claim in the row that today's tree re-stales on somebody
-    else's merge, so printing it makes the document false without anyone editing the
-    document. Headings are what make a HISTORY value checkable; they do not make the
-    live one safe. One form is deliberately NOT a cite: `#<N>` is an ISSUE reference
+    ⛔ The rule is NOT "a bare number is not a cite". This helper refuses (a) the LIVE
+    value in ANY cite form, bare included — it is the one claim in the row that today's
+    tree re-stales on somebody else's merge, so printing it makes the document false
+    without anyone editing the document — and (b) the FILE-QUALIFIED form
+    (`config/ci-surfaces.yml:<N>`) whatever number it carries, which is the `stale` arm
+    below: that shape IS the retired claim, so a headed history value dressed in it is
+    still the row teaching a reader to write a line cite (measured — `:9917` → `:9933`
+    at `c7499ac7a7`, the pair `05-verify.md`'s D5 row legitimately records, is refused
+    HERE). Bare headed history values (`9943 … 9987`) stay legal: headings are what make
+    a HISTORY value checkable; they do not make the live one safe, and they do not
+    re-qualify a value this row no longer qualifies.
+    One form is deliberately NOT a cite: `#<N>` is an ISSUE reference
     (measured — `#10076` is a real issue while the entry sat on 10076, so refusing it
     blocked a correct document), and it is the one exclusion this rule allows.
 
