@@ -216,12 +216,23 @@ def test_the_wire_spelling_is_defined_once_and_the_cli_does_not_retype_it():
     printing the honest sentence (its literals agree with each other) while
     `_flush_one` / `session_events_drain` stopped counting and stopped stamping
     the durable marker, so the capture's only surviving trace disappears with
-    every test still green (measured: the sibling tests below fake the 2xx body
-    with the same literals, so they cannot see it).
+    every test still green.
 
-    Discriminating by construction: reverting any of the three sites to a
-    literal reds the first assertion, and it reds for the reason the state is
-    defined once rather than for its wording.
+    ⛔ The sibling tests in this file do NOT fake the body — they patch
+    `urlopen`/`session_detail` and then drive the real `_session_post` →
+    `_refused` producer (`_run_capture`, above) — so they DO exercise the
+    producer/consumer pair. They stayed green over the literals for the duller
+    reason that the literals EQUALLED the constants, which is exactly why a
+    spelling test is needed on top: a divergence is what they cannot see, and
+    only while it is a divergence.
+
+    Discriminating by construction, and the pin is STRUCTURAL rather than a
+    text scan, because the VALUE spelling (`"unknown"`) legitimately occurs
+    elsewhere in `__main__` (six unrelated sites), so a blanket scan for it
+    would be a false blocker. Each of the three sites is instead pinned to the
+    shared constant, so reverting ANY of them to a literal — key OR value —
+    reds one of the assertions below for the reason the state is defined once
+    rather than for its wording.
     """
     src = Path(main.__file__).read_text(encoding="utf-8")
     assert '"extraction_outcome"' not in src and "'extraction_outcome'" not in src, (
@@ -229,6 +240,21 @@ def test_the_wire_spelling_is_defined_once_and_the_cli_does_not_retype_it():
         "defined once in `capture_spool.UNRECORDED_OUTCOME_KEY` and read back via "
         "`outcome_unrecorded`, so a second spelling here can drift from the "
         "consumer while every behavioural test stays green")
+    # The producer: the ONE line that writes the wire body must take its key AND
+    # its value from the shared constants. Pinned as a requirement on that line
+    # rather than as the whole line's text, so re-indenting cannot break it —
+    # while a reversion of either half reds it.
+    _producer = [line for line in src.splitlines()
+                 if "body[" in line and "UNRECORDED_OUTCOME_KEY" in line]
+    assert len(_producer) == 1 and "UNRECORDED_OUTCOME_VALUE" in _producer[0], (
+        "the producer no longer writes BOTH halves of the #12362 wire pair from "
+        "`capture_spool` — reverting either the key or the VALUE to a literal "
+        "re-creates the second definition this test exists to forbid")
+    # The two reader arms, one line each: the predicate, never a literal.
+    assert "if outcome_unrecorded(body):" in src, (
+        "the CLI's first reader arm no longer asks `capture_spool.outcome_unrecorded`")
+    assert "elif not outcome_unrecorded(body):" in src, (
+        "the CLI's fall-through arm no longer asks `capture_spool.outcome_unrecorded`")
     # …and the round trip the coupled spelling buys: what the producer writes is
     # exactly what the consumer recognises.
     from tortoise import capture_spool
