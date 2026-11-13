@@ -1,12 +1,19 @@
 """The repo-root ``.env`` reader — ONE parser, and the ONE path it is read from.
 
 WHY THIS MODULE EXISTS (#12407). The documented configure step is
-``cp .env.example .env``. Exactly one entry point read that file: the MCP
-daemon, via an import-time side effect in :mod:`tortoise.mcp_server`. Every CLI
-verb resolved its graph target from ``os.environ`` alone, so on the documented
-setup the same file selected a store for the daemon and was silently ignored by
-``tortoise doctor`` — which then printed ``Graph: health ✅`` about a DIFFERENT
-database than the one the daemon served.
+``cp .env.example .env``. For the GRAPH TARGET, exactly one entry point read that
+file: the MCP daemon, via an import-time side effect in
+:mod:`tortoise.mcp_server`. Every CLI verb resolved its graph target from
+``os.environ`` alone, so on the documented setup the same file selected a store
+for the daemon and was silently ignored by ``tortoise doctor`` — which then
+printed ``Graph: health ✅`` about a DIFFERENT database than the one the daemon
+served.
+
+"The only reader" is about the graph target, deliberately: one other module,
+:mod:`tortoise.s2_decision_seam`, reads the repo-root ``.env`` for a provider
+credential with its own small parser. It resolves no store and is not part of
+this divergence — but it is a second reader of the FILE, so the claim below is
+scoped rather than absolute.
 
 The fix direction #12407 settled on is *disclose, do not widen*: the CLI still
 does not load the file, and ``config show`` / ``doctor`` now REPORT it. That

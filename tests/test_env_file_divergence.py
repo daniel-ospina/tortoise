@@ -1173,3 +1173,103 @@ def test_the_previous_test_leaked_nothing_into_the_environment(_isolated):
     assert _LEAK_PROBE not in os.environ, (
         "a `.env` applied by one test leaked its key into the next one"
     )
+
+
+def test_doctor_blames_the_pre_application_target_not_the_ladders():
+    """The DOCUMENTED setup: resolution happens BEFORE the mid-run import fills.
+
+    Measured before the fix, on the real CLI: no `TORTOISE_DB_URI` in the shell
+    and a `.env` that sets one. Step 1 resolved the embedded default, §5.5's
+    import then applied the file, and the row said "both read the SAME
+    environment now, so the difference comes from the two LADDERS ranking its
+    keys differently" — while both ladders resolved the file's target. It named
+    a ladder bug that does not exist, and never said "re-run" (#12428 review).
+
+    Pinned as a RENDERER test on purpose: inside pytest the daemon loader's own
+    guard skips the load (`_load_dotenv` is inert under the suite), so the
+    mid-run-application state cannot be produced end-to-end here — the branch
+    is the artifact, and this is its input.
+    """
+    from tortoise.__main__ import _dotenv_rows
+
+    payload = {
+        "path": "/repo/.env",
+        "missing": False,
+        "differs": True,
+        "read_by_this_command": True,
+        "applied_when_graded": False,
+        "graded_explicit": False,
+        "graded_unresolved": False,
+        "cli_error": None,
+        "daemon_rung": "uri",
+        "daemon_target": "/tmp/from-file.db",
+        "cli_target": "/tmp/embedded-default.db",
+        "difference_is_masked": None,
+        "keys": ["TORTOISE_DB_URI"],
+        "file_graph_keys": ["TORTOISE_DB_URI"],
+        "graph_keys": [],
+        "shadowed_graph_keys": [],
+        "keys_already_set_in_the_environment": [],
+        "unread_env_files": [],
+    }
+    rows = _dotenv_rows(payload)
+    row = " ".join(str(detail) for _check, _status, detail in rows)
+
+    assert "two LADDERS ranking its keys differently" not in row, row
+    assert "resolved the store above BEFORE that import applied the file" in row, row
+    assert "a re-run grades the daemon's" in row, row
+
+
+def test_a_provider_only_file_is_not_credited_with_the_difference(capsys, _isolated,
+                                                                 monkeypatch):
+    """No graph key in the file means the file cannot cause the divergence.
+
+    Measured before the fix: a `.env` holding only `DEEPSEEK_API_KEY`, with the
+    ENVIRONMENT setting both `TORTOISE_DB_URI` and `TORTOISE_DB_PATH`, printed
+    "the daemon loads that file at import, so it serves a DIFFERENT graph … this
+    command resolved from the environment only" — the file was irrelevant
+    (#12428 review).
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "/tmp/daemon-side.db")
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/cli-side.db")
+    _write_env(_isolated, "DEEPSEEK_API_KEY=sk-not-a-real-key\n")
+
+    out = _show_text(capsys)
+
+    assert "this file sets no graph key, so it does not cause this" in out, out
+    assert "the daemon loads that file at import" not in out, out
+
+
+def test_an_applied_file_is_credited_with_the_key_it_filled(capsys, _isolated):
+    """Applied + shadowed: the environment carries the key BECAUSE of the file.
+
+    Measured before the fix: `config show` printed "the environment already sets
+    TORTOISE_DB_URI … the file cannot change the target here" in the same breath
+    as "its values ARE in this process now" — the target above WAS the file's
+    value (#12428 review).
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    _write_env(_isolated, "TORTOISE_DB_URI=/tmp/from-file.db\n")
+    _load_dotenv(str(_isolated))
+    assert os.environ["TORTOISE_DB_URI"] == "/tmp/from-file.db"
+
+    out = _show_text(capsys)
+
+    assert "applied this file, so the environment now sets TORTOISE_DB_URI" in out, out
+    assert "the file cannot change the target here" not in out, out
+
+
+def test_the_only_reader_claim_is_scoped_to_the_graph_target():
+    """"Exactly one entry point read that file" is false without the scope.
+
+    `tortoise/s2_decision_seam.py` reads the repo-root `.env` for a provider
+    credential with its own parser, so the absolute claim was falsified by this
+    repo's own code (#12428 review). The scope is the graph target, and the seam
+    is named.
+    """
+    from tortoise import dotenv_file
+
+    doc = " ".join((dotenv_file.__doc__ or "").split())
+    assert "For the GRAPH TARGET, exactly one entry point read that file" in doc, doc
+    assert "s2_decision_seam" in doc, doc

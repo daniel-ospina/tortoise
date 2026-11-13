@@ -3928,7 +3928,9 @@ def _cmd_config(args) -> int:
     payload["graph_store"] = graph_store
 
     # ── the OTHER reader of the SAME config: the daemon's `.env` (#12407) ──
-    # `tortoise.mcp_server` loads `<repo>/.env` at import; no CLI verb does. So
+    # `tortoise.mcp_server` loads `<repo>/.env` at import; no CLI verb does — for
+    # its GRAPH TARGET (`s2_decision_seam` reads the same file key-only, for a
+    # provider credential, and resolves no store). So
     # the documented `cp .env.example .env` step configured the daemon and not
     # the command the user runs to CHECK the setup — and this verb reported
     # "nothing is configured" about a target the very same file had selected.
@@ -4289,6 +4291,16 @@ def _cmd_config(args) -> int:
                         print("  ⚠️  both entry points read the SAME environment here, so")
                         print("      they differ only through the two LADDERS ranking")
                         print("      its keys differently")
+                    elif not env_file.get("graph_keys"):
+                        # ⛔ With NO graph key in the file, the file cannot be the
+                        # cause: the difference is the two ladders ranking the
+                        # ENVIRONMENT's keys differently, which the daemon's own
+                        # table documents. Crediting the file here would hide that
+                        # (#12428 review).
+                        print("  ⚠️  this file sets no graph key, so it does not cause this:")
+                        print("      the daemon and this command rank the ENVIRONMENT's")
+                        print("      TORTOISE_DB_URI / TORTOISE_DB_PATH differently, and the")
+                        print("      two targets above are that difference")
                     else:
                         print("  ⚠️  the daemon loads that file at import, so it serves a")
                         print("      DIFFERENT graph than the target above — this command")
@@ -4340,12 +4352,17 @@ def _cmd_config(args) -> int:
                         print("     resolves to it for the daemon too (no difference to")
                         print("     report — the two ladders agree on this box)")
                 elif env_file.get("shadowed_graph_keys"):
-                    print("  →  the same graph target as above: the environment")
-                    print("     already sets "
-                          f"{_printable(', '.join(env_file['shadowed_graph_keys']))}"
-                          ",")
-                    print("     and the daemon only fills keys that are ABSENT — so the")
-                    print("     file cannot change the target here")
+                    _shadowed = _printable(', '.join(env_file['shadowed_graph_keys']))
+                    if env_file.get("read_by_this_command"):
+                        print("  →  the same graph target as above: this process")
+                        print("     applied this file, so the environment now sets "
+                              f"{_shadowed}")
+                        print("     — the target above is the one it selects")
+                    else:
+                        print("  →  the same graph target as above: the environment")
+                        print(f"     already sets {_shadowed},")
+                        print("     and the daemon only fills keys that are ABSENT — so the")
+                        print("     file cannot change the target here")
                 elif env_file["keys"]:
                     print("  →  no graph key in this file, so the target above is the")
                     print("     daemon's too — the daemon reads it for the other keys")
@@ -4359,7 +4376,8 @@ def _cmd_config(args) -> int:
         print(f"  sets          {_printable(', '.join(_other['keys']))}")
         print("  ⚠️  the daemon reads "
               f"{_printable(env_file['path'])} — not this file — and no CLI")
-        print("      verb reads any .env, so nothing above came from it")
+        print("      verb reads any .env for its graph target, so nothing above")
+        print("      came from it")
     print()
     print("Harness credential — a DIFFERENT store; the CLI never reads it")
     print(f"  {_printable(harness['path'])}")
@@ -11184,9 +11202,30 @@ def _dotenv_unread_candidates(daemon_path: str) -> list[str]:
     return [str(cwd_env)] if cwd_env.is_file() else []
 
 
+def _dotenv_already_applied() -> bool:
+    """Has THIS process applied the daemon's `.env` yet? (Recorded in `LOADED_PATHS`)
+
+    Extracted from `_dotenv_divergence` because `doctor` must ask it TWICE: once
+    BEFORE it resolves the store it grades, and once when it prints. A `doctor`
+    run applies the file mid-run (a later check imports the daemon module), so a
+    target resolved BEFORE that point is the PRE-application one — and the row
+    must say so rather than blame the two ladders, which agree on this box
+    (#12428 review).
+    """
+    from tortoise import dotenv_file as _dotenv_file
+
+    try:
+        path = _dotenv_file.dotenv_path()
+    except OSError:
+        return False
+    return any(_same_path(Path(loaded), Path(path))
+               for loaded in sorted(_dotenv_file.LOADED_PATHS))
+
+
 def _dotenv_divergence(graded_target: str | None = None, *,
                        graded_unresolved: bool = False,
-                       graded_explicit: bool = False) -> dict:
+                       graded_explicit: bool = False,
+                       applied_when_graded: bool = True) -> dict:
     """What the repo-root `.env` changes — and what it cannot (#12407).
 
     THE GAP THIS CLOSES. `tortoise.mcp_server` reads `<repo>/.env` at import,
@@ -11246,9 +11285,7 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         # never applied (measured — that inference made this field `True` in the
         # suite, #12428 review round 1). `LOADED_PATHS` records what actually
         # happened.
-        "read_by_this_command": any(
-            _same_path(Path(loaded), Path(path))
-            for loaded in sorted(_dotenv_file.LOADED_PATHS)),
+        "read_by_this_command": _dotenv_already_applied(),
         "read_by": ("the daemon (`tortoise serve`, the MCP server) — it loads "
                     "this file at import time"),
         # NAMES only. The values are the user's credentials.
@@ -11264,6 +11301,11 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         "cli_target": None,
         "daemon_target": None,
         "differs": False,
+        # Whether the file was applied BEFORE the graded target was resolved.
+        # Distinct from `read_by_this_command`: that one only says the file is in
+        # this process NOW, which a mid-run import makes true of a target
+        # resolved BEFORE it (#12428 review).
+        "applied_when_graded": bool(applied_when_graded),
         # TRUE when the caller graded an EXPLICIT target (`doctor --db`/`--path`)
         # rather than one resolved from the environment. The printing arms need it
         # to explain a divergence correctly: with an explicit target the
@@ -11598,6 +11640,15 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
             if env_file.get("graded_explicit"):
                 detail += (" (this run graded its OWN explicit target, so the "
                            "difference is that target, not this file)")
+            elif not env_file.get("applied_when_graded", True):
+                # ⛔ The DOCUMENTED setup: no `TORTOISE_DB_URI` in the shell, so
+                # Step 1 resolved the canonical embedded default, and §5.5's later
+                # import then applied the file. Both ladders now resolve the
+                # file's URI — they agree — so the ladders explanation is false
+                # and the actionable sentence is "re-run" (#12428 review).
+                detail += (" (this run resolved the store above BEFORE that import "
+                           "applied the file, so a re-run grades the daemon's — "
+                           "the two ladders agree on this box)")
             else:
                 detail += (" (both read the SAME environment now, so the difference "
                            "comes from the two LADDERS ranking its keys differently)")
@@ -11628,12 +11679,23 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                       f"{_read_clause}; it selects the same graph target the rows "
                       f"below grade ({_printable(str(graded))})")
     elif env_file.get("shadowed_graph_keys"):
-        detail = (f"{path} sets "
-                  f"{_printable(', '.join(env_file['keys']) or 'nothing')} — "
-                  f"{_read_clause}; the environment already sets "
-                  f"{_printable(', '.join(env_file['shadowed_graph_keys']))}, and "
-                  "the daemon only fills keys that are ABSENT — so the file cannot "
-                  f"change the target the rows below grade ({_printable(str(graded))})")
+        _shadowed = _printable(', '.join(env_file['shadowed_graph_keys']))
+        if _applied:
+            # The environment carries the key BECAUSE this process applied the
+            # file, so "the file cannot change the target" denied the very
+            # application the same row just reported (#12428 review).
+            detail = (f"{path} sets "
+                      f"{_printable(', '.join(env_file['keys']) or 'nothing')} — "
+                      f"{_read_clause}; this process applied it at import, so the "
+                      f"environment now sets {_shadowed} — the target the rows "
+                      f"below grade ({_printable(str(graded))}) is the one it selects")
+        else:
+            detail = (f"{path} sets "
+                      f"{_printable(', '.join(env_file['keys']) or 'nothing')} — "
+                      f"{_read_clause}; the environment already sets "
+                      f"{_shadowed}, and "
+                      "the daemon only fills keys that are ABSENT — so the file cannot "
+                      f"change the target the rows below grade ({_printable(str(graded))})")
     else:
         detail = (f"{path} sets "
                   f"{_printable(', '.join(env_file['keys']) or 'nothing')} — "
@@ -14724,6 +14786,12 @@ def _cmd_doctor(args):
     from tortoise.config import is_db_uri
     db = getattr(args, "db", None)
     path = getattr(args, "path", None)
+    # ⛔ Whether the file was ALREADY applied when the target below is resolved.
+    # `read_by_this_command` cannot answer that after the fact: a later check
+    # (§5.5) applies the file, so the flag turns True for a target resolved
+    # BEFORE it — and the row then blamed "the two LADDERS ranking its keys
+    # differently" while both ladders resolved the same store (#12428 review).
+    _applied_when_graded = _dotenv_already_applied()
     try:
         target = db if (db and is_db_uri(db)) else _resolve_db_target(db or path)
     except ValueError as e:
@@ -14736,7 +14804,9 @@ def _cmd_doctor(args):
         target = None
 
     # 1.5 The OTHER reader of the same configuration (#12407) — the repo-root
-    # `.env` the daemon applies at import and no CLI verb reads. This slot is
+    # `.env` the daemon applies at import and no CLI verb reads FOR ITS GRAPH
+    # TARGET (`s2_decision_seam._api_key` does read the same file, key-only, for
+    # a provider credential — it resolves no store). This slot is
     # RESERVED here, right after the dependency rows and before the graph rows,
     # but FILLED at the end of the function.
     #
@@ -15382,6 +15452,7 @@ def _cmd_doctor(args):
     results[_dotenv_slot:_dotenv_slot] = _dotenv_rows(
         _dotenv_divergence(graded_target=target,
                            graded_explicit=bool(db or path),
+                           applied_when_graded=_applied_when_graded,
                            # ⛔ `target is None` — NOT "a --db was given". The
                            # environment's own failure to resolve is the same
                            # state for the ROWS (they grade nothing), and keying
