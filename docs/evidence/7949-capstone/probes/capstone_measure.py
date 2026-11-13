@@ -70,7 +70,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:14640-14646`` and
 ``result["vet"]`` at ``:14650-14654``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:18770``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:18785``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -278,7 +278,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:3032-3057``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:19168`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:19183`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -2889,7 +2889,7 @@ def _a1_object_edges(projection) -> dict:
          "edges": int(row[3] or 0)}
         for row in projection.g.query(
             # ⛔ `objectKind`, NOT `kind`: the writer stamps `o.objectKind=coalesce($ok,'other')`
-            # (tortoise/projection/entities.py:5069) and the pack declares `fromKind`/`toKind`
+            # (tortoise/projection/entities.py:5086) and the pack declares `fromKind`/`toKind`
             # (packs/dev/manifest.yaml:144-149). Reading `a.kind` returned NULL on every real graph
             # — the "by endpoint kind" half reported as measured while measuring nothing (#10982
             # review, finding 3).
@@ -3170,7 +3170,7 @@ def _a4_layer_counts(projection, label: str, kind_prop: str) -> dict[str, int]:
     an `:Object` is a thing and an `:Event` is an event, by label.
 
     ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
-    (`projection/entities.py:3088`), so an explicit `false` is a CLAIM — `IS NULL` dropped it from
+    (`projection/entities.py:3105`), so an explicit `false` is a CLAIM — `IS NULL` dropped it from
     the denominator while the capture count reported it as a turn row it is not. The same predicate
     the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1138`, which tests
     `is_episodic` ALONE and would count an operator Point as a claim (#10982 review round 2).
@@ -3316,7 +3316,7 @@ def _a4_pointkind(projection) -> dict:
     a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
     with no kind — `tortoise/projection/__init__.py:14265-14267`, `# Ensure pointKind is present
     (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
-    `projection/entities.py:2950`, which leaves the property ABSENT instead) is ABSENT, not typed;
+    `projection/entities.py:2967`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
     not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
     and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2592`)
