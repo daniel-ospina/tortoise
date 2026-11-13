@@ -137,10 +137,10 @@ _POINT_EMBEDDING_TEXT_EXPR = (
 
 LABEL_CONFIG: dict[str, dict[str, str]] = {
     # #12489 / #4194: a Point's vector must describe the text the node HOLDS as
-    # its embedding input. Bare ``content`` here was the one writer in the tree
-    # that did not apply the rule the read/replay side has applied since #8488
-    # (``projection/entities.py``: ``p.get("embeddingText") or p.get("content")``):
-    # on an armed graph this sweep CLEAR-THEN-SET the composed vector from the
+    # its embedding input. This sweep did not apply the rule the read/replay side
+    # applies when it reads that text back (``projection/entities.py``:
+    # ``p.get("embeddingText") or p.get("content")``, #8488) — it read bare
+    # ``content``: on an armed graph it CLEAR-THEN-SET the composed vector from the
     # paraphrase and left ``embeddingText`` describing a text the vector no
     # longer is — while the completeness marker counted the row ``updated``.
     # ``text_prop`` stays ``content`` as the declared fallback the docstring
