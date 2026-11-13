@@ -2172,10 +2172,11 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # and then `continue`s with NO `skipped` entry
             # (`by_name = [r for r in rows if r[1] == ref]; len(by_name) > 1`) — the
             # `_skip` below is THIS branch's #5365 fix, not parity, and `main` never
-            # emits the string "ambiguous object name" at all (its only `ambiguous …`
-            # reasons are `ambiguous object id`, `ambiguous subject id` and
-            # `ambiguous subject name`; the Object twin's missing `_skip` is exactly
-            # the gap #5365 names — review round 29).
+            # emits the string "ambiguous object name" at all — its only two
+            # `ambiguous …` skip reasons are `ambiguous subject id` and `ambiguous
+            # subject name` (main's Object duplicate-id arm records `duplicate-id` and
+            # `continue`s with no `_skip` either; the Object twin's missing `_skip` is
+            # exactly the gap #5365 names — review round 30).
             # `test_an_id_less_holder_is_not_a_gone_entity` already pins that rule
             # on the sibling arm — so the `_name_is_one_entity` test decides the
             # shape HERE too, rather than gating only the silent-dedup `continue`.

@@ -21860,16 +21860,17 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # `ambiguous-entity-name` — NON-exempt — for a write where nothing was
     # folded, while the replay pass resolves the SAME reference exemptly
     # (`projection/entities.py` `_fold_object_status`, and its about-name
-    # resolution at `context="status fold about"` — cited at the SYMBOL and the
-    # string, not the line. ⛔ The three line numbers this note first carried were
-    # EXACT when written (`_fold_object_status` at `:5783`, `context="status fold
-    # about"` at `:5892`, `context="EventRecorded.object"` at `:6295` at
-    # `57982a098c`) and went ~17 lines stale on a LATER forward merge from `main`
-    # (review round 27) — which is precisely why a line number is the one citation
-    # a later edit always rots, and why they are gone rather than corrected. The
-    # EXPLICIT-object site it must not be confused with is the one carrying
-    # `context="EventRecorded.object"`, NOT this about-edge name: review round 17), i.e. one
-    # reference with two dispositions, the live/replay parity break R8 forbids.
+    # resolution at `context="status fold about"`) — i.e. one reference with two
+    # dispositions, the live/replay parity break R8 forbids. The EXPLICIT-object
+    # site it must not be confused with is the one carrying
+    # `context="EventRecorded.object"`, NOT this about-edge name (review round 17).
+    # ⛔ Those three sites are cited by SYMBOL and by STRING, never by line, after a
+    # measured post-mortem (review round 27): the line numbers this note first
+    # carried were EXACT when written (`_fold_object_status` `:5783`,
+    # `context="status fold about"` `:5892`, `context="EventRecorded.object"` `:6295`
+    # at `57982a098c`) and went ~17 lines stale on a LATER forward merge from `main`
+    # — uniformly `+17`, at `:5800` / `:5909` / `:6312` today. That is precisely why
+    # they were dropped rather than corrected.
     for _eid, _name, _exact_only in _deferred_about_objects:
         # #12120 review: strip ONCE, here. Both sibling sites strip before they
         # compare (`sdk.py` `_n = name.strip()`, `near_dup_merge.py` the same),
