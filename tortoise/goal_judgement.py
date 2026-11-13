@@ -873,10 +873,12 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
 #: ``GRAPH.CONFIG GET RESULTSET_SIZE`` → ``-1``, and a 20 000-row ``UNWIND``
 #: returns all 20 000 rows, while the same query on an image-default container
 #: stops at 10 000). The local dev ``apps/graph-viz/docker-compose.yml:20`` pins
-#: 10000 explicitly; the HOSTED deployment passes no pin of its own (``fly.toml``
-#: builds ``TORTOISE_DB_URI`` from ``FALKORDB_CLOUD_URI``) and its effective
-#: value is NOT measured here. This constant sits ten times under the smallest
-#: of those, so it is safe under all of them. ⛔ ONE unbounded
+#: 10000 explicitly; the HOSTED deployment passes no pin of its own — the server
+#: there is FalkorDB Cloud, reached through the ``FALKORDB_CLOUD_URI`` secret that
+#: ``entrypoint.sh`` resolves into ``TORTOISE_DB_URI`` (``fly.toml`` leaves that
+#: key empty on purpose) — and its effective value is NOT measured here. This
+#: constant sits ten times under the 10000 that both MEASURED servers apply
+#: (1000 vs 10000). ⛔ ONE unbounded
 #: query is truncated BY THE SERVER in store order
 #: and says nothing about it — #4515's silent-truncation class (an UNPAGED read
 #: over ``RESULTSET_SIZE`` backs up silently partial and verifies GREEN), whose
@@ -1039,7 +1041,7 @@ def latest_readings(
       touches EVERY node in the graph, not only the ``:Event`` label.
 
     So every page scans the whole ``:Event`` label, and the guard scans either
-    that label or the entire node set: the cost below is per PAGE, not per
+    that label or the entire node set: the cost above is per PAGE, not per
     page-worth-of-rows, and an ``event_kind=None`` caller pays the worst arm.
     Fixing that needs an anchored pattern (or an index the schema cannot express
     for an unlabelled ``(o)``) and is filed as **#12351**; the correctness fix in
