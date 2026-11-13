@@ -890,7 +890,8 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     root = _pl.Path(__file__).resolve().parent.parent
     for rel in ("battery/runner/setup.py", "tools/why_layer_rate.py",
                 "tools/longmem_eval/retrieve.py", "tools/fusion_formula_ab.py",
-                "tools/ask_pool_admission_probe.py"):
+                "tools/ask_pool_admission_probe.py",
+                "benchmarks/run_report.py", "benchmarks/load_test.py"):
         src = (root / rel).read_text()
         assert "_rerank_candidates=False" in src, (
             f"{rel} reads the rerankable page without opting out — with the "

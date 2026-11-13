@@ -285,8 +285,10 @@ point, and EVERY caller of this read is on it:
 | the capture-time noun prior (`extractor_v2._fts_rows`, `limit=3`) | yes — §3/§6 |
 | the **ask lane** (`tortoise/ask_lane.py` reaches the same read with the default `order_by="relevance"`, no recency, a non-empty question) | **no** — and its candidate text is captured TURNS, i.e. the passage-length class priced at 85.227 ms/pair, so arming the gate there costs the same ≈3.4 s/query it costs user search |
 
-Every other caller of this read **opts out** via `_rerank_candidates=False`, in two
-classes. **Order re-owners**: `_review_pool`, `suggest_entry_points`,
+Every caller that must not have its page re-picked **opts out** via
+`_rerank_candidates=False`, in three classes — and two product reads deliberately do
+NOT, because the re-pick is the lever: `hosted_api`'s search route and
+`selfhost_api`'s search. **Order re-owners**: `_review_pool`, `suggest_entry_points`,
 `issue_insight`, `recall_state`, `recall_gaps`, `_resolve_subgraph_seed` sort the
 whole pool downstream, and `search_sessions` re-sorts its pool by the PRE-rerank
 `rrf` score before slicing — so a pre-cut reorder could only move which ids survive
@@ -294,15 +296,25 @@ whole pool downstream, and `search_sessions` re-sorts its pool by the PRE-rerank
 change the page and it pays a model load for nothing) — an unmeasured composition
 change in every case. The eval / A-B harnesses
 (`tools/longmem_eval/retrieve.py`, `tools/fusion_formula_ab.py`,
-`tools/ask_pool_admission_probe.py`) pin it for arm comparability, exactly as they
-pin `_valid_time_rerank`. **Membership probes**: `battery/runner/setup.py`'s
+`tools/ask_pool_admission_probe.py`) and the benchmark harnesses
+(`benchmarks/run_report.py`, `benchmarks/load_test.py`) pin it for comparability
+against RECORDED numbers, exactly as the first three pin `_valid_time_rerank`. **Membership probes**: `battery/runner/setup.py`'s
 seed-manifest guard (`limit=20`) and `tools/why_layer_rate.py`'s support-entry
 lookup (`limit=25`) ask "is this row in the returned page", read a page smaller than
 the pool width, and would turn a re-picked page into a false `ConfigError` / a false
 FAIL. Each skip is disclosed as `order_owned_downstream` **when the caller passes a
 leg trace** — most of these call sites pass none, because there is no sink to pass, so
 their skip is silent by construction rather than unrecorded. The capture prior is the
-deliberate exception: it keeps the rerank, under its own `OVERRIDES:` record.
+deliberate exception on the write path: it keeps the rerank, under its own
+`OVERRIDES:` record.
+
+⛔ And the composition change is **bounded by arithmetic, not by the sweep**: the
+rerank permutes only the scored head, so a caller reading `limit >= _scored_n` gets
+the same page whatever the rerank does — which is why the public reads at
+`limit >= 50` are safe today. That bound moves with `TORTOISE_FUSED_RERANK_POOL`,
+the knob this PR wires end to end; raise it above a caller's `limit` and that
+caller's page composition starts moving. The opt-out list above is what keeps that
+from being silent.
 
 Default-off does not bound the blast radius of turning it on; it only means nothing
 changes until someone turns it on for all three — one of which this calibration does
