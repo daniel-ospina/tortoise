@@ -926,9 +926,10 @@ def latest_readings(
     """Up to ``limit`` readings recorded about ``indicator_id``, newest first.
 
     ⛔ ``limit`` IS A CAP, NOT A COURTESY (#11823 / #12322). It is applied to the
-    ORDERED list, so the rows returned are the ``limit`` most recent readings —
-    but a caller reading a bare list still cannot tell that the bound was hit.
-    A caller that needs the whole history must pass a bound it knows exceeds it;
+    ORDERED list, so it keeps at most the ``limit`` most recent readings that
+    survive ``since`` — AT MOST, not exactly: a declared boundary can leave fewer,
+    and a caller reading a bare list cannot tell whether the bound was hit.
+    A caller that needs every reading must pass a bound it knows exceeds it;
     the return shape carries no room for a ``truncated`` answer. A NEGATIVE bound
     is refused rather than sliced: ``out[:-1]`` would silently drop the OLDEST
     reading while reading as "everything", the same class of silent bound this
@@ -961,11 +962,22 @@ def latest_readings(
     vocabulary for a machine reading is a downstream wave (#11081), and this
     module must not become the thing that decides it.
 
-    The read is scoped to ONE indicator's ``aboutObject`` events — a bounded
-    subgraph, never a full-graph scan — and it is fetched by KEYSET PAGES on
-    ``id(e)`` (see :data:`_READINGS_PAGE_SIZE`) rather than in one query, so a
-    server-side result-set cap cannot silently truncate it in store order
-    (#4233; the page-size PRECONDITION is stated at the constant). Ordering
+    ⛔ THE RESULT IS ONE INDICATOR'S READINGS; THE PLAN IS NOT ANCHORED ON IT. The
+    query is ``MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator``, and
+    ``(o)`` carries no label, so ``o.id`` cannot be index-anchored: MEASURED on
+    the lane with ``GRAPH.EXPLAIN``, BOTH the page query and the ``count(e)``
+    guard start with ``Node By Label Scan | (e:Event)`` (the page arm at
+    ``Node By Label and ID Scan``) and only then filter ``o.id``. Every page, and
+    the guard, therefore touches the graph's whole ``:Event`` label — so this read
+    is NOT a bounded subgraph in plan terms, and the cost below is per PAGE, not
+    per page-worth-of-rows. Fixing that needs an anchored pattern (or an index the
+    schema cannot express for an unlabelled ``(o)``) and is filed as **#12351**;
+    the correctness fix in this function does not depend on it.
+
+    The rows are fetched by KEYSET PAGES on ``id(e)`` (see
+    :data:`_READINGS_PAGE_SIZE`) rather than in one query, so a server-side
+    result-set cap cannot silently truncate the set in store order (#4233; the
+    page-size PRECONDITION is stated at the constant). Ordering
     happens in Python because no Cypher-computable instant key exists in this
     codebase today (measured: no ``startedAtEpoch``/``startedAtMs`` property, and
     no ``toInteger(substring(…))`` date arithmetic anywhere under ``tortoise/``),
@@ -1090,12 +1102,14 @@ def latest_readings(
         # rather than answer from the part that arrived.
         raise RuntimeError(
             f"latest_readings read {len(rows)} of {expected} rows for indicator "
-            f"{indicator_id!r} — a page came back short of {batch}, which a "
-            "server-side RESULTSET_SIZE below _READINGS_PAGE_SIZE causes (or a "
-            "concurrent delete landed mid-read). The missing rows are the most "
-            "recently CREATED (pages ascend by id, not by instant), so an answer "
-            "would be computed from an incomplete set; lower "
-            "_READINGS_PAGE_SIZE below the server's cap."
+            f"{indicator_id!r} — a page came back short of {batch}. TWO causes, "
+            "with different remedies: a server-side RESULTSET_SIZE pinned below "
+            "_READINGS_PAGE_SIZE (lower the constant below the cap) or a "
+            "concurrent delete of a reading that landed mid-read (re-run; no "
+            "setting can prevent it). The rows a truncated tail costs are the most "
+            "recently CREATED, and a deleted row is wherever it was, so the loss "
+            "is arbitrary by instant either way: an answer would be computed from "
+            "an incomplete set, which is why this refuses rather than returns."
         )
     out: list[Reading] = []
     for row in rows:

@@ -217,7 +217,9 @@ def test_the_read_pages_rather_than_relying_on_one_result_set(sdk, monkeypatch):
     seeding a thousand events.
 
     TWO assertions, because either alone is weak: (1) the FULL read returns all 5
-    rows, which reds a single-page loop; (2) a ``limit=2`` read on the SECOND
+    rows, which reds a read that stops after ONE page at this page size (a single
+    unbounded query would also return all 5 — which is what assertion (3) exists
+    for); (2) a ``limit=2`` read on the SECOND
     indicator (``mixed``, offset spellings) returns the two INSTANT-newest values,
     which are also the two lexically SMALLEST ("2026-11-12T00:20:00-12:00" and
     "…T00:30:00-12:00" = 12:20Z / 12:30Z). That reds a restore of the pre-fix
@@ -528,7 +530,13 @@ def test_the_docstring_discloses_the_cap_and_claims_no_complete_set():
             "the readings recorded about",
             "every reading recorded about",
             "all readings recorded about",
+            "all of the readings about",
             "complete set of readings",
+            # MEASURED gaps (cycle 7): these three wordings survived the four
+            # literals above when appended as a later paragraph.
+            "full history",
+            "whole history",
+            "entire history",
         )
         if p in low
     ]
