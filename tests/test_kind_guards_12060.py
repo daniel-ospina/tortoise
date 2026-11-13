@@ -367,8 +367,7 @@ class TestNeverRefuses:
           * `'widget'` became six one-letter kinds and `'subject'` seven
             one-letter layers, so the guard was DEAD while loading `✓ Clean`;
           * `0`/`false`/`{}` were read as ABSENT by `or`, i.e. NIL mode silently —
-            the falsy-vs-absent conflation the same round fixed 16 lines above
-            for `rule`.
+            the falsy-vs-absent conflation the same round fixed for `rule` above.
         """
         import tortoise.kind_guards as kg
 
@@ -378,12 +377,54 @@ class TestNeverRefuses:
                  "redirect": "core:WorkItem", "fallback": "core:WorkItem",
                  "reason": "r", **extra}]}
 
-        for bad_scope in ({}, "", 0, False, 7, "widget"):
-            # no raise, and no confusion: a scope that is not a list is SKIPPED
+        # a TRUTHY non-list can never be a scope: skipped, never raised on
+        for bad_scope in ({}, 7, "widget"):
             assert kg.pack_guards("acme", [entry(fromKinds=bad_scope)]) == ()
             assert kg.pack_guards("acme", [entry(fromLayers=bad_scope)]) == ()
-        # an empty list stays a legal (absent) scope
+        # a FALSY NON-CONTAINER (`""`, `0`, `False`) is malformed, not empty:
+        # skipped in both keys, and never raised on
+        for bad_scope in ("", 0, False):
+            assert kg.pack_guards("acme", [entry(fromKinds=bad_scope)]) == ()
+            assert kg.pack_guards("acme", [entry(fromLayers=bad_scope)]) == ()
+        # `fromKinds: []` stays a legal scope — there `()` IS the documented NIL
+        # mode, so widening it here would silently change what the guard covers.
         assert len(kg.pack_guards("acme", [entry(fromKinds=[])])) == 1
+        assert kg.pack_guards("acme", [entry(fromKinds=[])])[0].from_kinds == ()
+        # ⛔ `fromLayers: []` is NOT the same thing (round-19 review P2,
+        # measured): it matched no layer, so it compiled a guard that could never
+        # fire while BOTH gates called it clean. Empty means both layers.
+        assert kg.pack_guards(
+            "acme", [entry(fromLayers=[])])[0].from_layers == ("subject", "object")
+        # …and a non-string member is dropped LOUDLY, not silently, naming the
+        # scope the guard is actually held to (round-20 review: this warning was
+        # unpinned, so reverting it to silence left the suite green)
+        import logging
+
+        records = []
+
+        class _Grab(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        _log = logging.getLogger("tortoise.kind_guards")
+        _handler = _Grab()
+        _log.addHandler(_handler)
+        _prev = _log.level
+        _log.setLevel(logging.WARNING)
+        try:
+            kept = kg.pack_guards(
+                "acme", [entry(fromLayers=["subject", 1])])[0].from_layers
+            all_bad = kg.pack_guards(
+                "acme", [entry(fromLayers=[1, 2])])[0].from_layers
+        finally:
+            _log.removeHandler(_handler)
+            _log.setLevel(_prev)
+        assert kept == ("subject",)
+        assert any("dropped a non-string from fromLayers" in m for m in records), records
+        # the message must state the scope the guard IS held to, not the
+        # pre-widened one (an all-non-string list widens to both layers)
+        assert all_bad == ("subject", "object")
+        assert any("held to ('subject', 'object')" in m for m in records), records
 
         # a falsy predicate is no longer rewritten into the default
         assert kg.pack_guards("acme", [entry(when="")]) == ()
@@ -2532,6 +2573,11 @@ depends_on: []
         assert "rule" not in errors(guard("my-rule"))
         # valid scope containers stay accepted — these are shape guards only
         assert "fromLayers" not in errors(guardfield("fromLayers", "[subject]"))
+        assert "fromLayers" not in errors(guardfield("fromLayers", "null"))
+        # ⛔ an EMPTY layer scope is a DEAD guard, refused by name — while
+        # `fromKinds: []` stays legal (NIL mode is a real scope there)
+        assert "can never match" in errors(guardfield("fromLayers", "[]"))
+        assert "fromKinds" not in errors(guardfield("fromKinds", "[]"))
         assert "fromKinds" not in errors(guardfield("fromKinds", "[widget]"))
 
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):

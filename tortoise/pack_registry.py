@@ -3406,8 +3406,8 @@ class PackRegistry:
                 # `fromKinds: 7` raised `TypeError: 'int' object is not
                 # iterable` out of `_validate`, rendered by `load_all` as
                 # `✗ acme: 'int' object is not iterable` — no field, no index.
-                # And `or []` conflated FALSY with ABSENT exactly as `rule` did
-                # four hundred lines below: `fromKinds: 0` / `false` / `{}`
+                # And `or []` conflated FALSY with ABSENT exactly as the
+                # `rule` arm above does: `fromKinds: 0` / `false` / `{}`
                 # loaded `✓ Clean` as NIL mode, and a scalar `'widget'` was
                 # char-split into six one-letter "kinds".
                 _fk_list = c.get("fromKinds")
@@ -3521,6 +3521,17 @@ class PackRegistry:
                         f"{cw}.fromLayers: must be a list — got "
                         f"{type(_fl_list).__name__}")
                     _fl_list = []
+                elif isinstance(_fl_list, list) and not _fl_list:
+                    # ⛔ AN EMPTY SCOPE IS A DEAD GUARD (round-19 review P2,
+                    # measured): `fromLayers: []` matched no layer, so
+                    # `from_layers=()` compiled a confusion that could never
+                    # fire — and BOTH gates called it `✓ Clean`. `fromKinds: []`
+                    # is different and stays legal: there `()` is the documented
+                    # NIL mode, a real scope.
+                    errors.append(
+                        f"{cw}.fromLayers: must name at least one entity layer "
+                        f"— an empty list can never match, so the guard would be "
+                        f"dead; omit the key to guard both layers")
                 for fl in _fl_list or []:
                     if fl not in ("subject", "object"):
                         errors.append(

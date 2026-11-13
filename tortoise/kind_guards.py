@@ -1146,11 +1146,12 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                     "unsupported predicate/pattern — skipped", namespace, i, j)
                 continue
             # ⛔ THE CONTAINER, at the RUNTIME reader too (round-18 review P2,
-            # measured). `_validate` refusing these shapes closes the manifest
-            # path, but `pack_guards` takes a dict from the Python API, and here
-            # the shape was worse than a refused install:
+            # measured). `_validate_guards` already refused these shapes on the
+            # MANIFEST path, so this is not an install hole — it is the Python
+            # API, the one route into this function that never sees a manifest.
+            # There the shape was worse than a refused install:
             #   `fromKinds: 7`      -> `TypeError: 'int' object is not iterable`
-            #                          out of the WRITE DOOR, which this
+            #                          raised OUT OF `pack_guards`, which this
             #                          function's contract forbids (#1934);
             #   `fromKinds: 'widget'` -> six one-letter kinds, guard DEAD;
             #   `fromLayers: 'subject'` -> seven one-letter layers, layer gate
@@ -1168,12 +1169,21 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 continue
             from_layers = c.get("fromLayers")
             if from_layers is None:
+                # ⛔ `[]` MATCHES NO LAYER (round-19 review P2, measured): the
+                # install gate refuses it, but the Python API reaches here, and
+                # `from_layers=()` compiled a guard that could never fire while
+                # every gate called it clean. Empty means "every layer", the
+                # meaning an author reads into an omitted key — `fromKinds` is
+                # different and stays empty: there `()` is the documented NIL
+                # mode, a real scope, so it must NOT be widened here.
                 from_layers = ("subject", "object")
             elif not isinstance(from_layers, list):
                 _logger.warning(
                     "kind_guards: %s guards[%d].onConfusion[%d].fromLayers is "
                     "not a list — skipped", namespace, i, j)
                 continue
+            # (`[]` needs no arm here: `_kept_layers` widens an emptied scope,
+            # below — one owner, so the two cannot disagree.)
             out.append(Confusion(
                 rule=str(rule),
                 when=str(when),
@@ -1207,8 +1217,7 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 from_kinds=tuple(_qualify(str(k).strip(), namespace)
                                  for k in from_kinds
                                  if isinstance(k, str) and str(k).strip()),
-                from_layers=tuple(str(layer).lower() for layer in from_layers
-                                  if isinstance(layer, str)),
+                from_layers=_kept_layers(from_layers),
                 link_predicate=(str(c["linkPredicate"])
                                 if c.get("linkPredicate") else None),
                 guarded_kind=(_qualify(str(entry["kind"]).strip(), namespace)
@@ -1218,6 +1227,25 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 declaring_pack=namespace,
             ))
     return tuple(out)
+
+
+def _kept_layers(layers) -> tuple[str, ...]:
+    """The layer scope a guard will actually be held to, logged if it shrank.
+
+    The `isinstance` filter below is right (a non-string can never match a
+    layer) but SILENT, so `fromLayers: [subject, 1]` narrowed the scope and left
+    no trace — the same "declaration that lies" shape as an unqualified kind.
+    """
+    kept = tuple(str(layer).lower() for layer in layers
+                 if isinstance(layer, str))
+    if len(kept) != len(tuple(layers)):
+        # ⛔ LOG THE WIDENED SCOPE (round-20 review P3, measured): logging
+        # `kept` before the widening below told an all-non-string scope it was
+        # held to `()` while the guard actually covered both layers.
+        _logger.warning(
+            "kind_guards: dropped a non-string from fromLayers %r — the guard "
+            "is held to %r", tuple(layers), kept or ("subject", "object"))
+    return kept or ("subject", "object")
 
 
 def _qualify(kind: str, namespace: str) -> str:
