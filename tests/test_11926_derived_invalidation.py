@@ -354,8 +354,8 @@ def test_the_LEGACY_outdated_FLAG_retires_an_input(sdk):
     same way).
 
     The claim's own lane already honours the flag (`derived_invalidation.invalidate`
-    -> ``claim.get("outdated") is True``); the two lanes must not disagree about
-    what "dead" means.
+    reads ``claim.get("outdated")`` by ``bool()``, the same spelling as this arm);
+    the two lanes must not disagree about what "dead" means.
     """
     i, t, g = _world(sdk, tag="legacy-outdated-flag")
     made = _judge(sdk, i, t, g)
