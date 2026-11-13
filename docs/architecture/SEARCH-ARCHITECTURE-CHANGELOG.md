@@ -99,7 +99,7 @@ return, which is what §6.2's deferral exists to establish.
 step 3 is a recorded owner instruction to proceed into SPLADE without re-litigation, and the literal
 falsifier it states is *not* met — a deployable BM25-in-Postgres does beat the current scorer. The
 measurement is evidence that C3's **premise** (a ranking limit in the text index) is falsified, and the
-brief records that as a recommendation; the ruling on C3 stays on `#12298`, where the owner can take it.
+brief records that as a recommendation; the ruling on C3 stays in the OPEN homes — epic `#12186` and the pre-registration issue `#12192` — where the owner can take it. ⛔ NOT on `#12298`: that issue is **CLOSED** (`COMPLETED`, 2026-11-13T05:21:53Z) on the reading *"M3 FAILS"*, which this measurement contradicts (its own falsifier sentence IS satisfied, by the deployable arm).
 A lane may no more decline pre-authorised scope on its own reading than it may adopt something over a
 decision.
 

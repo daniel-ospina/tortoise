@@ -278,7 +278,11 @@ opposite of the ordering in §5.
 > actual defect is a **tokenizer contract**, not a scorer or a ranking baseline, and it is filed as
 > `#12350`. Numbers, method and the artifacts: `docs/research/2026-11-13-12298-m3-fts-leg/`; the
 > changelog entry records what changed and what did not. ⛔ **This note does not decide `C3` (SPLADE)**
-> — that pre-authorisation is ruled on `#12298`, and the measurement is the evidence before it.
+> — that pre-authorisation is ruled in the OPEN homes `#12186` / `#12192`, and the measurement is the
+> evidence before it. ⛔ `#12298`, which this note cites as the source of the measurement, is
+> **CLOSED** (`COMPLETED`, 2026-11-13T05:21:53Z) on the reading *"M3 FAILS"* — a reading this
+> measurement contradicts, because the issue's own falsifier sentence is satisfied by the
+> deployable arm. Correcting that closure is the owner's; it is not a lane's.
 
 ### 6.3 EP state — the carve-out stands, and the fix is not to store it
 
