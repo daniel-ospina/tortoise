@@ -421,15 +421,23 @@ def entity_candidates(graph, *, limit: int | None = 50,
                 "/".join(sorted({e["label"] for e in entities})),
                 _stats["blocks"])
         by_id = {str(ent["id"]): ent for ent in entities}
-        #: Pairs already emitted. A union of keys puts one PAIR in several blocks
-        #: (up to ~12: ``E``, ``B``, ``P``, one ``T`` per token, 8 ``S`` bands),
-        #: and a pair's row is identical in every one of them — `fuzzy_sim`,
-        #: `sem_sim`, `kind_mismatch` and the survivor/candidate assignment are pure
-        #: functions of the pair — so the dedupe changes no output. It is checked
-        #: at the TOP of the pair loop, before the vector lookup, the length prune
-        #: and ``similarity``: a dedupe placed after them skips only the append,
-        #: and the repeated comparison it was added to avoid still happens (a pair
-        #: in 6 blocks measured 6 ``similarity`` calls — #12295 round-2 B4).
+        #: Pairs already compared. A union of keys puts one PAIR in several blocks
+        #: (up to ~12: ``E``, ``B``, ``P``, one ``T`` per token, 8 ``S`` bands), and
+        #: a pair's ROW is identical in every one of them — `fuzzy_sim`, `sem_sim`,
+        #: `kind_mismatch` and the survivor/candidate assignment are pure functions
+        #: of the pair. So the row is unchanged; the SET of rows is not quite, and
+        #: the difference is deliberate: ``settled`` is per block, so a pair emitted
+        #: in one block no longer re-populates a later block's ``settled``, and a
+        #: candidate that is an exact twin of two carriers can surface as
+        #: ``ambiguous``/``tied_with`` where the old order hid it (measured 2 in 500
+        #: random populations, only those fields move). That is fail-CLOSED —
+        #: ``approve_merge`` refuses an ``ambiguous`` row rather than merging it —
+        #: and a reviewer fuzzed the rows against ``main`` finding none dropped.
+        #: ⛔ The dedupe is checked at the TOP of the pair loop, before the vector
+        #: lookup, the length prune and ``similarity``: a dedupe placed after them
+        #: skips only the append, and the repeated comparison it was added to avoid
+        #: still happens (a pair in 6 blocks measured 6 ``similarity`` calls, and a
+        #: never-emitted transposition 3 — #12295 round-2 B4).
         emitted: set[tuple[str, str]] = set()
 
         sem: dict = {}

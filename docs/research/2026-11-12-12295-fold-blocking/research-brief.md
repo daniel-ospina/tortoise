@@ -4,7 +4,8 @@
 **Harness:** `tools/candidate_recall_11901.py` (**reused, not rebuilt** — the tool and its pinned
 test landed with `#12159`) · **Run:** `--population 1000 --sample 300 --captures 20`, elapsed
 390.6 s, graph `recall11901_1794532634_746264`, population digest `03785295abd20d9a`,
-measured at code head `e9a572d4b4` — the commit this brief and the artifact ship with.
+measured at code head `e9a572d4b4` — the commit whose code these numbers describe (an ancestor
+of this branch's head; the commits after it touch only this brief and the artifact).
 
 **Search rung, stated because it was taken twice and failed twice.**
 `mcp__seo-intelligence__perplexity_search` → `Unknown MCP server 'seo-intelligence'` (rung 1
@@ -34,7 +35,7 @@ as of `#12047`. What did not exist, and is what this lane adds:
 
 | gap | site | measured consequence |
 |---|---|---|
-| the capture prior compares `_norm` only — whitespace + lowercase, byte-identical to Zep's `_normalize_string_exact` | `extractor_v2.py:5769` | **0 of 422** variant pairs attach at any `k`, both modes |
+| the capture prior compared `_norm` only — whitespace + lowercase, byte-identical to Zep's `_normalize_string_exact` | `extractor_v2._norm` at `:4232`, the historical arm in `_find_existing_entity` (`:5769` now carries the folded rung this lane added at `:5813`) | **0 of 422** variant pairs attach at any `k`, both modes — the before-half of every rate in §3 |
 | the dedupe scan blocks on ONE key — `folded[:3]` | `entity_resolver.py:394` | a transposition (`the project alpha` / `alpha project`) is never compared, at any similarity |
 
 External confirmation at source (rung 3): Zep's `_normalize_string_exact` is *"Lowercase text and
