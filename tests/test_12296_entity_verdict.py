@@ -942,11 +942,11 @@ class TestTheResolverBands:
                            "suppressed": False, "name": "Acme Holdings",
                            "aliases": ["team"]}}
         derived = v2._verdict_facts(facts, "obj-0", "Acme Holdings")
-        # The own-name half stands `group_join` down; it is NOT an alias record,
-        # so the three SPELLING vetoes keep running (the separate
-        # `alias_recorded` fact; see the same-spelling/different-kind case below).
-        assert derived["mention_is_alias"] is True, derived
-        assert derived["alias_recorded"] is False, derived
+        # The own-name fact stands `group_join` down; it is NOT an alias record,
+        # so the three SPELLING vetoes keep running (see the
+        # same-spelling/different-kind case below).
+        assert derived["mention_is_own_name"] is True, derived
+        assert derived["mention_is_alias"] is False, derived
         for kind in ("", "other"):
             res = v2.resolve_entities(
                 [{"name": "Acme Holdings", "kind": kind}],
@@ -1057,8 +1057,19 @@ class TestTheResolverBands:
                            "suppressed": False, "name": "Acme",
                            "aliases": []}}
         derived = v2._verdict_facts(facts, "obj-0", "Acme")
-        assert derived["alias_recorded"] is False, derived
-        assert derived["mention_is_alias"] is True, derived
+        assert derived["mention_is_own_name"] is True, derived
+        assert derived["mention_is_alias"] is False, derived
+        # The facts map is load-bearing: with `facts={}` the judge sees no alias
+        # fact at all and vetoes either way, so a version of this test that passed
+        # `facts={}` passed against the bug. And the veto layer itself must agree:
+        assert verdict.hard_vetoes(
+            {"name": "Acme", "kind": "core:plan"},
+            {"name": "Acme", "kind": "core:org"},
+            {"mention_is_own_name": True}) == [verdict.VETO_KIND_CONFLICT]
+        assert verdict.hard_vetoes(
+            {"name": "Acme", "kind": "core:plan"},
+            {"name": "Acme", "kind": "core:org"},
+            {"mention_is_alias": True}) == []
         monkeypatch.setattr(
             v2, "_complete",
             lambda *a, **kw: '{"resolutions": [{"name": "Acme", '
@@ -1170,15 +1181,14 @@ class TestTheResolverBands:
         pair = ({"name": "the team", "kind": "core:plan"},
                 {"name": "Acme Holdings", "kind": "core:org"})
         assert verdict.hard_vetoes(*pair, {}) == [verdict.VETO_KIND_CONFLICT]
-        assert verdict.hard_vetoes(*pair, {"alias_recorded": True}) == []
-        # ⛔ …and the escape is keyed on the ALIAS fact, not on
-        # `mention_is_alias`, which also covers a same-spelling pair: a mention
+        assert verdict.hard_vetoes(*pair, {"mention_is_alias": True}) == []
+        # ⛔ …and the escape is the ALIAS RECORD, not the own-name fact: a mention
         # spelled exactly like a DIFFERENT-kind candidate must keep its veto, or the
         # model's proposal to bind a `plan` "Acme" onto an `org` "Acme" merges with
         # no hold and no record (round-4 review — this was a real regression).
         same = ({"name": "Acme", "kind": "core:plan"},
                 {"name": "Acme", "kind": "core:org"})
-        assert verdict.hard_vetoes(*same, {"mention_is_alias": True}) == [
+        assert verdict.hard_vetoes(*same, {"mention_is_own_name": True}) == [
             verdict.VETO_KIND_CONFLICT]
 
     def test_a_same_spelling_different_kind_proposal_is_still_held(
@@ -1186,27 +1196,26 @@ class TestTheResolverBands:
         """The model proposes an `org` "Acme" for a `plan` "Acme": HELD, not merged.
 
         The two facts are separate on purpose (round-4 review).
-        `_verdict_facts` sets `mention_is_alias` from the candidate's OWN name as
-        well as its `aliases[]` — needed by `group_join`'s escape — and keying the
-        SPELLING escape on it made `kind_conflict` silent for exactly the pair the
-        doc calls two entities: `resolve_entities` mapped a plan "Acme" onto an org
-        "Acme" with `band: merge`, `held: []`, and no refusal recorded.
-        `alias_recorded` is the `aliases[]`-only fact, so phase 2 keeps the veto.
+        `_verdict_facts` sets `mention_is_own_name` for the candidate's OWN name,
+        and folding that into the ALIAS record made `kind_conflict` silent for
+        exactly the pair the doc calls two entities: `resolve_entities` mapped a
+        plan "Acme" onto an org "Acme" with `band: merge`, `held: []`, and no
+        refusal recorded. `mention_is_alias` is `aliases[]`-only, so phase 2 keeps
+        the veto.
         """
         monkeypatch.setattr(
             v2, "_complete",
             lambda *a, **kw: '{"resolutions": [{"name": "Acme", '
                              '"resolves_to": "obj-org"}], "new": []}')
-        # The facts map is load-bearing here: it is what makes `_verdict_facts`
-        # set `mention_is_alias` (the candidate's OWN name matches the mention), so
-        # this test is discriminating — without the split it merges. With no facts
-        # at all the judge sees no alias fact and vetoes either way, which is why
-        # the first version of this test passed against the bug.
+        # The facts map is load-bearing here: with no facts at all the judge sees no
+        # alias fact and vetoes either way, which is why the first version of this
+        # test passed against the bug.
         facts = {"obj-org": {"retired": False, "dependents": 0,
                              "suppressed": False, "name": "Acme",
                              "aliases": []}}
-        assert v2._verdict_facts(facts, "obj-org", "Acme")["mention_is_alias"]
-        assert not v2._verdict_facts(facts, "obj-org", "Acme")["alias_recorded"]
+        derived = v2._verdict_facts(facts, "obj-org", "Acme")
+        assert derived["mention_is_own_name"] is True, derived
+        assert derived["mention_is_alias"] is False, derived
         res = v2.resolve_entities(
             [{"name": "Acme", "kind": "core:plan"}],
             {"entities": [{"id": "obj-org", "name": "Acme",
@@ -1224,7 +1233,7 @@ class TestTheResolverBands:
         every folded prior row carried its OWN folded name as an alias. Phase 1's
         kind-agnostic alias rung then matched a mention spelled exactly like a
         DIFFERENT-kind row, reported `mode: "alias"`, and phase 1 passed
-        `alias_recorded=True` — so `kind_conflict` stood down on a "recorded alias"
+        `mention_is_alias=True` — so `kind_conflict` stood down on a "recorded alias"
         that was nothing but the row's own name: a `plan` "Acme" bound to an `org`
         "Acme" with `band: merge`, `held: []` and no refusal. This test goes
         through `_absorb_spellings` on purpose: a HAND-BUILT row without the

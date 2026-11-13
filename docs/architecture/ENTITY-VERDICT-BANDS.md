@@ -209,9 +209,10 @@ the variant's spelling is lost on every run. It also made
 exists exactly because "the kind spelled on the retired variant need not match the
 survivor's" — and it is what turned a merged `billing v2 ledger` /
 `billing v3 ledger` pair into a permanent `identifier_conflict` hold. ⛔ The
-escape is the RECORD, not an amnesty for mismatched kinds, and it is keyed on the
-separate `facts["alias_recorded"]` fact — `aliases[]` ONLY, never
-`mention_is_alias`, which also covers the candidate's OWN name. A same spelling
+escape is the RECORD, not an amnesty for mismatched kinds, and it is keyed on
+`facts["mention_is_alias"]` — **`aliases[]` ONLY**, never the candidate's OWN name
+(the separate `facts["mention_is_own_name"]`, which stands `group_join` down and
+nothing else). A same spelling
 under a different kind is still `kind_conflict`: the model's proposal to bind a
 `plan` "Acme" onto an `org` "Acme" is HELD, with the refusal recorded, because no
 merge ever recorded that the two spellings are one entity. ⛔ **Phase 1 reaches
@@ -223,7 +224,7 @@ escape stood `kind_conflict` down for exactly this pair (`band: merge`,
 `held: []`, no refusal). A CARRIER's name still folds in — that is the rung's
 purpose — but the row's own name does not. Pinned by
 `test_a_folded_row_does_not_alias_itself`,
-`test_a_same_spelling_different_kind_proposal_is_still_held`,
+`test_same_spelling_with_a_different_kind_is_still_a_kind_conflict`,
 `test_a_re_mention_of_a_folded_alias_outranks_an_identifier_veto` and the
 controls in `test_a_name_match_beats_an_alias_match_and_two_aliases_are_ambiguous`.
 
