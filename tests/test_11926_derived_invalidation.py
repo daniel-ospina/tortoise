@@ -568,6 +568,41 @@ def test_the_success_arm_reconciles_the_goal_the_CLAIM_names(sdk):
         f"{sdk.get_entity(g['id']).get('goalState')!r}")
 
 
+def test_the_CLAIMS_goal_wins_when_the_caller_names_a_DIFFERENT_one(sdk):
+    """Precedence, pinned where the two readings DIVERGE (#12315 review cycle 13).
+
+    The rule is deliberate: the claim's own `goalId` says whose displayed word
+    names this claim, so that is the state to repair; a caller's id that diverges
+    names a goal that is not the one showing the stale word. Before this test the
+    suite never built the divergent case, so inverting the precedence left every
+    test green while three arms leaned on it — the `[pin-defensive-claim]` shape:
+    the case where the readings differ is the case that has to be built.
+
+    `reconcile_goal_state_cache` RE-DERIVES from the goal's live claims rather
+    than clearing blindly, so the caller's goal here is not merely skipped, it is
+    correctly left `met`: its own claim is live and still met.
+    """
+    i1, t1, g1 = _world(sdk, tag="precedence-claim")
+    made = _judge(sdk, i1, t1, g1)
+    i2, t2, g2 = _world(sdk, tag="precedence-caller")
+    _judge(sdk, i2, t2, g2)
+    assert sdk.get_entity(g1["id"])["goalState"] == "met"
+    assert sdk.get_entity(g2["id"])["goalState"] == "met"
+    sdk.update_entity(t1["id"], threshold=8.0)  # g1's claim goes stale, still live
+    finding = Invalidation(judgement_id=made["point_id"], reason="target-revised",
+                           detail="threshold moved", goal_id=g2["id"])
+    result = invalidate(sdk, finding)
+    assert result["invalidated"] is True, result
+    # the CLAIM's goal, not the caller's — in the record and in the repair
+    assert result["goalId"] == g1["id"], result
+    assert sdk.get_entity(g1["id"]).get("goalState") is None, (
+        "the claim's own goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g1['id']).get('goalState')!r}")
+    assert sdk.get_entity(g2["id"])["goalState"] == "met", (
+        "the caller's unrelated goal was reconciled: "
+        f"{sdk.get_entity(g2['id']).get('goalState')!r}")
+
+
 # ── 4b. an UNNAMED scope is undecidable, never a retirement ──────────────
 
 @pytest.mark.parametrize("missing, word", [
@@ -1270,8 +1305,11 @@ def test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket(sdk, monkeypat
     # `accounted >= stale` line is ARITHMETICALLY FORCED true, so no mutant can
     # red it — a dead assertion that would read as coverage. The rule is pinned
     # where it can actually fail: `test_a_failed_cache_write_counts_as_a_FAILED_sweep`
-    # (one finding counted in `retired` AND `failed`) and the goal-gone test
-    # (`retired` 1 AND `gone` 1); it is documented on `invalidate_stale`.
+    # (one finding counted in `retired` AND `failed`) and
+    # `test_a_GOAL_that_no_longer_EXISTS_is_reported_gone_not_cleared`
+    # (`retired` 1 AND `gone` 1 — NOT the absent-claim goal-gone test below, whose
+    # counts are `retired` 0 AND `gone` 1, i.e. the opposite pair); it is
+    # documented on `invalidate_stale`.
     #
     # ⛔ AND THE GOAL'S CACHE IS RECONCILED, not just the bucket (#12336). The
     # cached word named the claim that vanished, and nothing after this sweep
@@ -1364,9 +1402,9 @@ def test_the_POST_EXCEPTION_terminal_arm_reconciles_too(sdk, monkeypatch):
 
     monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
     # ⛔ NO `goal_id` HERE, ON PURPOSE (#12315 review cycle 12): passing it makes
-    # `invalidation.goal_id or after["goalId"]` short-circuit, so the claim-sourced
-    # fallback this arm exists to provide was evaluated by NO test — reverting it
-    # to `invalidation.goal_id` alone left all 364 green.
+    # the claim-sourced read short-circuit, so the fallback this arm exists to
+    # provide was evaluated by NO test — reverting it to `invalidation.goal_id`
+    # alone left the suite green at the commit before this pin.
     report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
                                           reason="target-revised", detail="…"))
     assert report["alreadyRetired"] is True, report
