@@ -2537,10 +2537,12 @@ def removal_report(
                     f"{symbol} (sdk) is in RETIRED_SDK_METHODS / REMOVED_SDK_METHODS but its "
                     "code is NOT archived — the map records the DEPARTURE, it does not keep "
                     "the code, and the #11609 ruling keeps removed code so a mistake can be "
-                    "inspected later. FREEZE IT FIRST: `uv run python "
+                    "inspected later. FREEZE IT: restore the method into `tortoise/sdk.py` "
+                    "from the commit you are removing it at FIRST (it is already gone from the "
+                    "working tree, and `archive` reads it from there), then `uv run python "
                     f"tools/archive_surface.py archive sdk-method {symbol} --batch <slug> "
-                    "--reason <text>` (the freeze and the map entry are ONE record, and this "
-                    "cut requires BOTH halves)"
+                    "--reason <text>`, then re-delete it (the freeze and the map entry are ONE "
+                    "record, and this cut requires BOTH halves)"
                 ))
                 continue
             found.append("RETIRED_SDK_METHODS/REMOVED_SDK_METHODS + archived code")
@@ -2623,6 +2625,33 @@ def removal_report(
             accounting[(symbol, cls)] = found[0]
             continue
         if _waived(symbol, cls):
+            if cls == "sdk" and symbol not in records.get("sdk_retired", ()):
+                # ⛔ A WAIVER IS NOT A DEPARTURE RECORD FOR AN SDK METHOD. This arm accepted
+                # `--allow-removal` as the WHOLE record for a method that was neither frozen
+                # nor in the map, so the old name vanished with nothing that fails closed: a
+                # caller got a bare `AttributeError` instead of the recorded departure, and the
+                # only trace was a stdout line (`cmd_cut` persists nothing about removals) —
+                # while `SDK_PAIR_RULE`, `CONTRIBUTING.md` and `archive/README.md` all state
+                # that a rename's record IS the map entry plus the override, and the owner's
+                # rename gates (`tests/test_sdk_retirement.py`) read only the map, so they never
+                # saw it. The map entry costs one line and is what the recorded rename
+                # procedure writes anyway (review of PR #12313, round 17).
+                # Count the bare entry against the ambiguity counter BEFORE refusing: without
+                # this, an unrecorded SDK removal `continue`s before `waived` is updated, so the
+                # two-surface ambiguity below could never fire (a guard that cannot fire is not
+                # a guard) and the operator saw one problem where the invocation has two.
+                if _waived_by_bare(symbol) and not _waived_by_qualified(symbol, cls):
+                    waived.setdefault(symbol, []).append(cls)
+                problems.append(RemovalProblem(
+                    "no-record",
+                    f"{symbol} (sdk) has no departure record: `--allow-removal` states the "
+                    "rename but a caller of the old name needs the fail-closed `AttributeError` "
+                    "the map raises. Add the old name to `RETIRED_SDK_METHODS` / "
+                    "`REMOVED_SDK_METHODS` in `tortoise/sdk_retired.py` FIRST (that also runs "
+                    "the owner's approved-rename gates), then pass the same override — the "
+                    "map entry plus the override IS the record"
+                ))
+                continue
             if _waived_by_bare(symbol) and not _waived_by_qualified(symbol, cls):
                 # ONLY a bare waiver can be ambiguous — and only for the classes it is the
                 # sole authority over. `--allow-removal x --allow-removal sdk:x` names the

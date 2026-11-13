@@ -5234,6 +5234,66 @@ def test_cut_REFUSES_a_dropped_sdk_method_recorded_in_the_MAP_but_NOT_archived(
     assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
 
 
+def test_an_SDK_rename_with_NO_map_entry_is_refused_so_the_CALLER_fails_closed(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """`--allow-removal` alone is not a departure record for an SDK method.
+
+    This arm accepted the override as the WHOLE record for a method that was neither frozen nor
+    in the map, so the old name vanished with nothing that fails closed: a caller got a bare
+    `AttributeError` instead of the recorded departure, the only trace was a stdout line (`cut`
+    persists nothing about removals), and the owner's approved-rename gates read only the map,
+    so they never saw it — while `SDK_PAIR_RULE` and both docs state that a rename's record IS
+    the map entry plus the override (review of PR #12313, round 17).
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:backfill_sources", "method": "backfill_sources"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": set(), "forward_raw": set(), "sdk_retired": set()},
+    )
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["sdk:backfill_sources"],
+            allow_removal_reason="renamed to annotate_ask_matches",
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 1, f"a waiver alone recorded an SDK rename with no departure record:\n{out}"
+    assert "has no departure record" in out, out
+    assert "sdk_retired.py" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+    # Non-vacuity: WITH the map entry the same override is the record and the cut passes.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": set(), "forward_raw": set(), "sdk_retired": {"backfill_sources"}},
+    )
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["sdk:backfill_sources"],
+            allow_removal_reason="renamed to annotate_ask_matches",
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "RETIRED_SDK_METHODS" in out and "--allow-removal" in out, out
+
+
 def test_the_MAP_HALF_has_a_printed_route_it_can_actually_use(
     monkeypatch, tmp_path, derived_baseline, capsys
 ):
@@ -5726,9 +5786,13 @@ def test_an_override_cannot_waive_TWO_surfaces_at_once():
     prior = {("tortoise_x", "tool"), ("tortoise_x", "sdk")}
 
     problems, accounting = sm.removal_report(prior, set(), records, allowed={"tortoise_x"})
-    assert len(problems) == 1, problems
-    assert "would waive 2 removals" in problems[0], problems
-    assert "tool:tortoise_x" in problems[0] and "sdk:tortoise_x" in problems[0], problems
+    # The SDK row is ALSO refused its departure record (an SDK rename carries the map entry),
+    # so the ambiguity that this test is about is one of two problems.
+    kinds = [p.kind for p in problems]
+    assert kinds == ["no-record", "ambiguous-waiver"], problems
+    ambiguous = problems[1]
+    assert "would waive 2 removals" in ambiguous, ambiguous
+    assert "tool:tortoise_x" in ambiguous and "sdk:tortoise_x" in ambiguous, ambiguous
 
     # The qualified form waives ONE surface and leaves the other removal unrecorded — which
     # is the point: the waiver may not silently cover the second one (non-vacuity: the
@@ -5741,8 +5805,12 @@ def test_an_override_cannot_waive_TWO_surfaces_at_once():
     # with two records. Keyed by symbol the two qualified entries collapsed into one class and
     # this legitimate case was refused as "dropped with no record" — the refusal recommending
     # a path the tool could not execute (review of PR #12313, round 9).
+    # (…with the SDK departure record in the map, which every SDK rename carries.)
     problems, accounting = sm.removal_report(
-        prior, set(), records, allowed={"tool:tortoise_x", "sdk:tortoise_x"}
+        prior,
+        set(),
+        {"archived": set(), "forward_raw": set(), "sdk_retired": {"tortoise_x"}},
+        allowed={"tool:tortoise_x", "sdk:tortoise_x"},
     )
     assert problems == [], problems
     assert sorted(accounting) == [("tortoise_x", "sdk"), ("tortoise_x", "tool")], accounting
@@ -6236,7 +6304,10 @@ def test_a_BARE_waiver_is_not_a_redundant_override_for_the_OTHER_surfaces_record
     problems, accounting = sm.removal_report(
         {("tortoise_x", "tool"), ("tortoise_x", "sdk")}, set(), empty, allowed={"tortoise_x"}
     )
-    assert [p.kind for p in problems] == ["ambiguous-waiver"], problems
+    # The SDK row is refused its departure record as well (an SDK rename must carry the map
+    # entry), so the ambiguity is the SECOND problem — the invariant under test is that neither
+    # leaves a record in `accounting`.
+    assert [p.kind for p in problems] == ["no-record", "ambiguous-waiver"], problems
     assert accounting == {}, accounting
 
     # Non-vacuity: a QUALIFIED waiver on the recorded class IS the false record, and is refused
@@ -6353,7 +6424,10 @@ def test_a_bare_waiver_beside_a_QUALIFIED_one_is_not_the_two_surface_ambiguity()
     sole authority is the bare entry counts toward the ambiguity.
     """
     sm = _load_manifest_tool()
-    records = {"archived": set(), "forward_raw": set(), "sdk_retired": set()}
+    # The SDK rename carries its departure record, as every SDK rename must: `--allow-removal`
+    # alone is refused for an SDK method (a caller of the old name needs the map's fail-closed
+    # `AttributeError`), so the legitimate two-surface command names the map as well.
+    records = {"archived": set(), "forward_raw": set(), "sdk_retired": {"x"}}
     problems, accounting = sm.removal_report(
         {("x", "tool"), ("x", "sdk")}, set(), records, allowed={"x", "sdk:x"}
     )
@@ -6361,6 +6435,14 @@ def test_a_bare_waiver_beside_a_QUALIFIED_one_is_not_the_two_surface_ambiguity()
     assert set(accounting) == {("x", "tool"), ("x", "sdk")}, accounting
 
     # …and a BARE waiver alone is still the ambiguity (non-vacuity: the refusal still fires
-    # for the command that really does collapse two removals into one record).
-    problems, _ = sm.removal_report({("x", "tool"), ("x", "sdk")}, set(), records, allowed={"x"})
-    assert len(problems) == 1 and "would waive 2 removals" in problems[0], problems
+    # for the command that really does collapse two removals into one record). With no map
+    # entry the SDK row is ALSO refused its departure record, so both refusals stand.
+    problems, _ = sm.removal_report(
+        {("x", "tool"), ("x", "sdk")},
+        set(),
+        {"archived": set(), "forward_raw": set(), "sdk_retired": set()},
+        allowed={"x"},
+    )
+    kinds = [p.kind for p in problems]
+    assert kinds == ["no-record", "ambiguous-waiver"], problems
+    assert "would waive 2 removals" in problems[1], problems
