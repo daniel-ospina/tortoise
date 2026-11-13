@@ -5387,6 +5387,64 @@ _pending_wait_bound_telemetry: set = set()
 #: the latency this unit exists to bound.
 
 
+#: #12477 review round 4: routes whose refusal is NOT evidence, split in two.
+#:
+#: The refusal SHARE needs a denominator of traffic that is *supposed* to be
+#: answered inside the transport bound. Two classes of request are not, and both
+#: were measured corrupting the verdict in opposite directions before this
+#: partition existed:
+#:
+#:   * CONTROL-plane polls (`/health`, `/liveness`, `/metrics`, …). These are the
+#:     INSTRUMENT's own traffic, and a dashboard or operator can drive far more of
+#:     them than data requests. Measured end-to-end: 12 served `/health` polls +
+#:     10 refused `POST /v1/search` gave `share 0.455 -> 200` while EVERY data
+#:     request was refused — a fail-open, in the exact class this issue is about.
+#:   * DOCUMENTED LONG routes (`/v1/organizations/{id}/import` at 64 MiB,
+#:     `/v1/sessions/commit` at 8 MiB, `/v1/packs/manifests`). Their handlers
+#:     deliberately await a whole restore/commit, so exceeding a 10 s bound is
+#:     normal and the bound's own refusal is the product working. Measured: five
+#:     legitimate imports + five other requests in a window gave `share 0.5 -> 503`,
+#:     i.e. a healthy deployment failing its own deploy gate.
+#:
+#: So the term is computed ONLY from requests that are neither. Everything else
+#: is stamped — an allowlist would UNDERCOUNT the denominator on a route it does
+#: not know, and an undercount inflates the share, which is the fail-closed
+#: direction for a false red but the wrong one here: a gate that reds a healthy
+#: deploy for an admin route it has never heard of is the failure this repo has
+#: recorded twice. These two lists are the ones that can be enumerated exactly.
+_WAIT_BOUND_CONTROL_PREFIXES = (
+    "/health", "/liveness", "/livez", "/readyz", "/healthz", "/metrics",
+    "/v1/version", "/v1/build", "/v1/status", "/openapi.json", "/docs",
+    "/redoc", "/favicon.ico",
+)
+#: Compiled at import: the refusal path is on every request, so the test has to
+#: be cheap. These are the SAME shapes `_APP_BODY_CAP_EXEMPT_REGEXES` names one
+#: screen below, which is where the "this route is deliberately slow/large"
+#: knowledge already lives.
+_WAIT_BOUND_LONG_ROUTES = (
+    re.compile(r"^/v1/organizations/[^/]+/import/?$"),
+    re.compile(r"^/v1/sessions/commit/?$"),
+    re.compile(r"^/v1/packs/manifests/?$"),
+    re.compile(r"^/webhooks/stripe/?$"),
+)
+
+
+def _wait_bound_traffic_class(route_path: str) -> str:
+    """``"control"``, ``"long"`` or ``"data"`` — what a refusal here MEANS.
+
+    ``data`` is the only class whose refusal is evidence that the plane is
+    failing, so it is the only class in the refusal share's numerator or
+    denominator (#12477 review round 4).
+    """
+    path = route_path or ""
+    if path.startswith(_WAIT_BOUND_CONTROL_PREFIXES):
+        return "control"
+    for pattern in _WAIT_BOUND_LONG_ROUTES:
+        if pattern.search(path):
+            return "long"
+    return "data"
+
+
 def _is_jsonrpc_surface(route_path: str) -> bool:
     """True for the mounted MCP app's route path: `/mcp` and every `/mcp/…`
     subpath (the app is mounted there). This agrees with the path canonicalizer
@@ -5629,11 +5687,18 @@ class WaitBoundMiddleware:
         # the same seam that decides the refusal, so numerator and denominator
         # describe the same population: exempt routes returned above and are
         # never counted on either side.
+        # ⛔ ONLY `data` TRAFFIC IS IN THE SHARE'S DENOMINATOR (round 4): the
+        # instrument's own polls and the documented long routes are not traffic
+        # whose refusal says the plane is failing — see
+        # `_wait_bound_traffic_class` for what each class did to the verdict
+        # when it was counted.
+        traffic_class = _wait_bound_traffic_class(route_path)
         try:
-            _monitoring.record_wait_bound_attempt(
-                _monitoring.WAIT_BOUND_SURFACE_MCP
-                if _is_jsonrpc_surface(route_path)
-                else _monitoring.WAIT_BOUND_SURFACE_REST)
+            if traffic_class == "data":
+                _monitoring.record_wait_bound_attempt(
+                    _monitoring.WAIT_BOUND_SURFACE_MCP
+                    if _is_jsonrpc_surface(route_path)
+                    else _monitoring.WAIT_BOUND_SURFACE_REST)
         except Exception:  # measurement must never be a new failure mode
             _logger.debug("wait-bound attempt count failed", exc_info=True)
         # #3834 F1: stamp the TRANSPORT arrival so the MCP dispatch seam —
@@ -5782,10 +5847,16 @@ class WaitBoundMiddleware:
             state[_WAIT_BOUND_COUNTED_STATE] = True
         if counted_now:
             try:
+                # The CUMMULATIVE counter always counts (it is a lifetime
+                # observation, and `/metrics` republishes it); the WINDOW — the
+                # only thing a verdict is derived from — counts `data` traffic
+                # alone, so its numerator and denominator describe one
+                # population.
                 _monitoring.record_wait_bound_breach(
                     _monitoring.WAIT_BOUND_SURFACE_MCP
                     if _is_jsonrpc_surface(route_path)
-                    else _monitoring.WAIT_BOUND_SURFACE_REST)
+                    else _monitoring.WAIT_BOUND_SURFACE_REST,
+                    windowed=(traffic_class == "data"))
             except Exception:
                 _logger.debug("wait-bound count failed", exc_info=True)
         # ⛔ THE COUNT IS EXACTLY-ONCE; THIS EMIT IS NOT, IN THE REVERSE ORDER.
@@ -7330,11 +7401,14 @@ async def health():
     try:
         refusals = _monitoring.wait_bound_breach_window()
     except Exception as exc:  # a monitoring read must never 5xx
-        # the resolver never raises by contract; this arm exists so an
-        # unreadable channel reports `refusing: null` (NOT DECIDED) rather than
-        # a number nobody measured.
-        refusals = {"error": f"unreadable: {type(exc).__name__}",
-                    "refusing": None}
+        # ⛔ THE FULL SHAPE, from the resolver's own error constructor. Twice
+        # measured wrong: an ad-hoc `{"error", "refusing"}` dict is 2 of 13 keys,
+        # so a dashboard reading `refusals["share"]`/`["attempts"]` — both
+        # documented as present on EVERY return — gets a `KeyError` on exactly the
+        # degraded path where it is looking for an answer. This is the rule the
+        # neighbouring `wait_bound_breaches` arm states five lines above.
+        refusals = _monitoring._wait_bound_error(
+            f"wait_bound window unreadable: {type(exc).__name__}", window=None)
     try:
         loop_blocks = loop_block_report()
     except Exception:  # a monitoring read must never 5xx

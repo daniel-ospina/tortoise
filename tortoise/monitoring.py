@@ -2020,7 +2020,7 @@ def record_non_journal_skip_counts() -> dict[str, int]:
     return _collect_by_label(RECORD_NON_JOURNAL_SKIP_COUNT, "reason")
 
 
-def record_wait_bound_breach(surface: str) -> None:
+def record_wait_bound_breach(surface: str, *, windowed: bool = True) -> None:
     """Count one request the transport wait bound REFUSED (#10602).
 
     ``surface`` is one of :data:`WAIT_BOUND_SURFACE_MCP` /
@@ -2029,6 +2029,17 @@ def record_wait_bound_breach(surface: str) -> None:
     best-effort and may be dropped by the telemetry pool's bounded backlog, and
     a breach counter that goes quiet precisely during a breach storm would be
     the opposite of what it is for.
+
+    ``windowed=False`` counts the refusal in this CUMULATIVE counter and keeps it
+    out of the recent window. That is not a detail: the window is the only thing
+    a verdict is derived from, and the share it computes is ``windowed refusals /
+    attempts``, so a refusal on traffic whose refusal is not evidence (the
+    instrument's own polls, a documented long upload route) must not enter the
+    window while still being observed. #12477 review round 4 — measured in both
+    directions: 12 served `/health` polls beside 10 refused data requests read
+    ``share 0.455 -> 200`` (fail-open, over a refusing plane), and five
+    legitimate imports beside five other requests read ``share 1.0 -> 503`` (a
+    healthy deployment failing its own deploy gate).
 
     An unrecognised surface raises ``ValueError`` rather than minting a new
     label. The label set is what makes the import-time child initialisation
@@ -2052,9 +2063,13 @@ def record_wait_bound_breach(surface: str) -> None:
     # #12477: the same breach, stamped so a LIVENESS check can tell "refused a
     # moment ago" from "refused an hour ago". One write, one decision — the
     # window is fed HERE rather than at the call sites, so a detector can never
-    # count a breach without stamping it. Wrapped because the surrounding call
+    # count a breach without stamping it — unless it explicitly asks for an
+    # observation-only count (`windowed=False`: the cumulative counter records
+    # it, the verdict does not see it). Wrapped because the surrounding call
     # sites catch around the counter, and a stamp failure must not replace the
     # refusal the caller is already composing.
+    if not windowed:
+        return
     try:
         record_wait_bound_breach_recent(surface)
     except Exception:  # noqa: BLE001 - observation must never replace the refusal

@@ -171,7 +171,14 @@ kill_timeout = 30
 #       polls at 300 calls/min). The ratio is the only form that is ~2.1% at
 #       every volume while a failing plane refuses most of what it is offered.
 #       The attempts denominator is stamped at the transport seam itself, so
-#       numerator and denominator describe the same population.
+#       numerator and denominator describe the same population. That population
+#       EXCLUDES two traffic classes whose refusal is not evidence (measured, both
+#       directions): the instrument's own polls (`/health`, `/liveness`,
+#       `/metrics` — 12 served polls beside 10 refused data requests read
+#       share 0.455 -> 200, a fail-open) and documented long routes
+#       (`/v1/organizations/{id}/import`, `/v1/sessions/commit`,
+#       `/v1/packs/manifests`, `/webhooks/stripe` — 5 imports beside 5 requests
+#       read share 1.0 -> 503, a healthy deploy failing its own gate).
 # `workload_idle` and `loop_stale` stay in the payload as DIAGNOSTICS. A red here
 # is what a wedged or refusing deployment is supposed to look like.
 #

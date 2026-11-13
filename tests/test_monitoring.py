@@ -3304,6 +3304,30 @@ class TestHealthzListener:
         assert payload["dataplane"]["state"] == "failed"
         assert "reader died" in (payload["dataplane"]["error"] or "")
 
+    def test_an_UNREADABLE_window_is_fail_closed_and_still_answers(self):
+        """A channel the instrument cannot read is not evidence of health.
+
+        Round 4's mutation check: flipping this arm to `refusing = False`
+        (fail-open) left the whole suite green, so the recorded #3253/#4034
+        decision had no gate. Two directions are asserted here — the verdict is
+        RED, and the listener still ANSWERS (a raise inside `do_GET` is the
+        dark-check class).
+        """
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        original = monitoring.wait_bound_breach_window
+        try:
+            monitoring.wait_bound_breach_window = lambda *_a, **_k: (
+                monitoring._wait_bound_error("simulated unreadable", window=120.0))
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.wait_bound_breach_window = original
+        assert status == 503, body
+        payload = json.loads(body)
+        assert "requests-refused" in payload["reasons"]
+        assert payload["recent_breaches"]["error"] == "simulated unreadable"
+        assert payload["recent_breaches"]["refusing"] is None
+
     def test_a_request_refused_inside_the_window_reports_503(self):
         """#12477: a REFUSED request is the door failing, not background noise.
 
