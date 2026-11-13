@@ -261,6 +261,37 @@ def test_the_pool_key_is_the_CONFIGURED_width_even_on_a_narrow_read(
     assert entry[rerank.RERANK_SCORED_KEY] == candidates, entry
 
 
+def test_the_pool_key_on_the_SKIP_arms_is_the_resolver_and_not_the_constant(
+        sdk, monkeypatch):
+    """Every rerank ENTRY reports the resolved width — including the ones that
+    skipped.
+
+    ⛔ Three documents say so (``RERANK_POOL_KEY``'s docstring, the brief's §5,
+    ``.env.example``), and all three arms could be replaced by a literal with the
+    whole file green (measured: ``fused_rerank_pool_width()`` → ``40`` at the
+    three skip sites left 62 passing). The applied arm has its own pin; this is
+    the other two shapes — the caller's opt-out, and a non-relevance order.
+    """
+    _seed(sdk, 4)
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    monkeypatch.setenv(rerank.FUSED_RERANK_POOL_ENV, "7")
+    _inject(rerank.FakeScorer(), monkeypatch)
+
+    opt_out: list[dict] = []
+    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
+                           _rerank_candidates=False, leg_trace=opt_out)
+    skipped = _rerank_entries(opt_out)[0]
+    assert skipped["ran"] is False, skipped
+    assert skipped[rerank.RERANK_POOL_KEY] == 7, skipped
+
+    ordered: list[dict] = []
+    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
+                           order_by="confidence", leg_trace=ordered)
+    by_order = _rerank_entries(ordered)[0]
+    assert by_order["reason"] == "order_by_not_relevance", by_order
+    assert by_order[rerank.RERANK_POOL_KEY] == 7, by_order
+
+
 def test_the_SCORER_is_handed_the_knob_width_and_not_the_constant(
         sdk, monkeypatch):
     """A knob ABOVE the default must actually raise what gets SCORED.
@@ -1375,10 +1406,10 @@ def test_a_pool_with_no_usable_text_makes_no_scorer_call(sdk, monkeypatch):
 
     The trace is already honest without this (the ``not _scored_rows`` arm reports
     ``pool_text_empty`` — the read SUCCEEDED, there was simply nothing usable in
-    it), so the guard this pins is about work, not wording:
-    without it the read still calls ``rerank_pool(pool=0)``, ``_clamp_int`` turns
-    the zero into the default width of 40, and the model is loaded, locked and run
-    over twenty empty passages for a result that cannot differ.
+    it), so the guard this pins is about work, not wording: without it the read
+    reaches ``rerank_pool`` with the RESOLVED width, which LOADS the cross-encoder
+    and takes its lock (~6.4 s cold, brief section 6) before returning
+    ``no_scorable_text`` — so the lock is the entire cost, and nothing is scored.
 
     ⛔ OBSERVE THE **LOAD**, NOT THE SCORE. Reverting the guard to ``if True:``
     leaves every other test in this file green, and the first version of THIS test

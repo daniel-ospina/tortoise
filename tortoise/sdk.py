@@ -40358,11 +40358,11 @@ class TortoiseSDK:
         #     ``w6c``/``w7a`` the gold row's POSITION, for ``5534`` an id-set delta,
         #     for ``4107`` the gold turn's fused rank and rendered block — and
         #     ``docs/evidence``'s cost probes. They pin it for comparability
-        #     against RECORDED numbers — and ⛔ only the
-        #     first three of those also pin ``_valid_time_rerank``, so that
-        #     comparison holds for the ``tools/`` harnesses and not for the
-        #     ``docs/`` and ``benchmarks/`` halves: the harm here is a baseline that
-        #     silently stops being the baseline, not a moved page.
+        #     against RECORDED numbers — and ⛔ only the first three of those also
+        #     pin ``_valid_time_rerank``, so that comparison holds for the
+        #     ``tools/`` harnesses and not for the ``docs/`` and ``benchmarks/``
+        #     halves: the harm here is a baseline that silently stops being the
+        #     baseline, not a moved page.
         #   * MEMBERSHIP PROBES that read a page SMALLER than the pool width and ask
         #     "is this row in it" — ``battery/runner/setup.py``'s seed-manifest
         #     guard (a false ``ConfigError`` reading "stale PRE-FIX graph"),
@@ -42120,11 +42120,14 @@ class TortoiseSDK:
                 # arm below (it overwrites ``_rr_stats``, so the trace is honest
                 # whether or not this guard exists — measured, reverting this to
                 # ``if True:`` leaves the trace IDENTICAL). What only this guard
-                # prevents is the WORK: ``rerank_pool`` resolves ``pool`` through
-                # ``_clamp_int``, whose ``< 1`` rule turns a ZERO into the DEFAULT
-                # width (40), so a read that returned rows but no USABLE text
-                # (every property null) would load the model, lock it, and score
-                # twenty empty passages — for a result that cannot differ.
+                # prevents is the WORK: a read that returned rows but no USABLE
+                # text (every property null) would reach ``rerank_pool``, LOAD the
+                # cross-encoder and take its lock (~6.4 s cold, brief section 6)
+                # for a result that cannot differ — the function then returns
+                # ``no_scorable_text`` before ``score()``, so the lock is the whole
+                # cost and nothing is scored. ⛔ Not a zero ``pool`` and not a
+                # batch of empty passages: the caller passes the RESOLVED width
+                # (``_pool_n``), and a textless row is never scored at all.
                 # ``test_a_pool_with_no_usable_text_makes_no_scorer_call`` pins it.
                 if _scored_rows:
                     # ⛔ ONE PASS, O(candidates). The shape this replaces rebuilt a
