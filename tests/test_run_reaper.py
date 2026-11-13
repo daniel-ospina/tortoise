@@ -938,8 +938,8 @@ class RunReaperTestCase(unittest.TestCase):
                          "a shard with no measured start was cancelled on a step stamp")
         self.assertIsNone(row["shard_elapsed_s"])
 
-    def test_a_NON_STRING_runner_name_does_not_claim_a_job(self):
-        """T5, review cycle 2: the permitting-direction flip is closed.
+    def test_a_DEGRADED_runner_name_does_not_claim_a_job(self):
+        """T5, review cycles 2 and 4: the permitting-direction flip is closed.
 
         `not job.get("runner_name")` is only a truthiness test, so a DEGRADED payload
         (`runner_name` as a dict / list / number) read as "a runner claimed this job"
@@ -948,9 +948,15 @@ class RunReaperTestCase(unittest.TestCase):
         run on a queue wait. That is the exact P0 this change exists to prevent,
         re-entered through the other field. `read_jobs` keeps dict rows without
         validating inner fields, so it is reachable from a real payload.
+
+        ⛔ CYCLE 2 CLOSED THREE OF THE FOUR DECLARED SHAPES AND MISSED WHITESPACE
+        (cycle 4, F1): the arm was `isinstance(runner, str) and runner`, so `" "`,
+        `"\t"` and `"\n "` — strings, and truthy — STILL read as a claim and handed
+        out the queue stamp measured below. Every row in the tuple is a shape that
+        reds without its arm, and the whitespace rows red without `.strip()`.
         """
         mod = _load_tool_module()
-        for bad in ({"name": "runner"}, ["runner"], 7, True):
+        for bad in ({"name": "runner"}, ["runner"], 7, True, " ", "\t", "\n ", "   "):
             probe = {"name": "test (g)", "status": "queued", "runner_name": bad,
                      "started_at": iso(NOW - 7200), "completed_at": None, "steps": []}
             self.assertIsNone(

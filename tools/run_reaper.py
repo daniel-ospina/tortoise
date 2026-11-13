@@ -525,9 +525,21 @@ def job_work_start(job: dict) -> float | None:
     # such flips this predicate in the PERMITTING direction, because an unclaimed
     # `queued` job would then hand its queue stamp out as a work clock (review cycle
     # 2, T5). Both arms fail to None, the non-cancelling answer.
+    #
+    # ⛔ AND A WHITESPACE `runner_name` IS NOT A CLAIM (rev12421 review cycle 4, F1).
+    # `isinstance(runner, str) and runner` is a TRUTHINESS test, so `" "`, `"\t"` and
+    # `"\n "` passed this gate and an UNCLAIMED `queued` job handed its queue stamp
+    # out as a work clock — measured on this head: `runner_name=" "` with
+    # `started_at` 7200 s old returned that stamp, the shard escaped `unstarted`, the
+    # bound became derivable, and the run was cancelled on a queue wait. That is the
+    # exact P0 this change exists to remove, re-entered through the other field, and
+    # the cycle-2 pin did not cover it (its rows were dict/list/int/bool only, so the
+    # suite stayed green over a live permitting path). `.strip()` closes it; the
+    # residual is stated rather than hidden — any NON-BLANK string is still taken as
+    # a claim, because a runner name is opaque text this module has no allow-list for.
     if not isinstance(status, str) or (
             status not in BEGUN_JOB_STATUSES
-            and not (isinstance(runner, str) and runner)):
+            and not (isinstance(runner, str) and runner.strip())):
         return None
     claim = _parse_ts(job.get("started_at"))
     if claim is None:
@@ -599,22 +611,35 @@ def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
             # was judged against a clock that included its whole queue wait — the P0
             # this guard exists to stop. A job that has not begun now stays
             # CLOCKLESS, which routes it to `unstarted` and makes the bound
-            # UNDERIVABLE. The direction is fail-closed in BOTH arms: this change can
-            # only ever produce a LATER-or-equal clock than main's direct `started_at`
-            # read (never an earlier one), and a clock it cannot measure routes to
-            # `unstarted` instead of to a fabricated one — so it is monotonically
-            # NON-CANCELLING, i.e. "strictly fewer cancels, never more".
+            # UNDERIVABLE. `job_work_start` is monotonically non-cancelling PER JOB:
+            # its every exit yields `None` (no clock, so the bound is underivable) or a
+            # clock LATER-or-equal main's direct `started_at` read — never an earlier
+            # one — so on one job's own row this change can only remove cancels.
             #
-            # ⛔ AN INTERMEDIATE HEAD OF THIS PR DID CARRY A PERMITTING BRANCH, and
-            # this paragraph used to cite it as one that still exists. A CLAIMED
-            # `in_progress` job carrying `steps` but no readable `started_at` was
-            # clocked from `min(steps)` — the floor's own input with the floor
+            # ⛔ THAT IS A STATEMENT ABOUT ONE JOB, NOT ABOUT A SHARD, and the
+            # difference is not academic (rev12421 review cycle 4, F2). `rec` is keyed
+            # by `norm_job_name`, which collapses a two-parameter matrix name, so two
+            # legs share one record and `rec["started_at"] = ts` below only writes
+            # when a clock came back. A leg this change makes CLOCKLESS therefore no
+            # longer overwrites a sibling's clock, while main's direct read always did
+            # — so on a colliding pair the shard can be judged on the EARLIER of the
+            # two, which is a cancel main would not make. That collision is
+            # pre-existing (last-write-wins, order-dependent, in both directions) and
+            # no workflow in this repo names a two-parameter matrix job, so it is not
+            # reachable today; fixing it means deciding deliberately how two legs' work
+            # clocks compose, which adds a cancel path and is filed rather than folded
+            # in (#12449).
+            #
+            # ⛔ AND AN INTERMEDIATE HEAD OF THIS PR CARRIED A SECOND PERMITTING
+            # BRANCH, which this paragraph used to cite as one that still exists. A
+            # CLAIMED `in_progress` job carrying `steps` but no readable `started_at`
+            # was clocked from `min(steps)` — the floor's own input with the floor
             # bypassed — so a retained step from a PREVIOUS attempt could cancel a
             # shard claimed seconds ago. rev12421 review cycle 1 F1 removed it:
             # `job_work_start` now returns `None` before it reads any step, and the
-            # shape is pinned by test case (d). If you are reading this looking for
-            # the permitting path, there is none left here — the clock is
-            # `max(claim, min(steps))` and `claim` is required before it is computed.
+            # shape is pinned by test case (d). Within one job's row there is no
+            # permitting path left here — the clock is `max(claim, min(steps))` and
+            # `claim` is required before it is computed.
             ts = job_work_start(job)
             if ts is not None:
                 rec["started_at"] = ts

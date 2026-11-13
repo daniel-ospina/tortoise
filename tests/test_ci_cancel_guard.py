@@ -995,6 +995,29 @@ def test_a_non_object_job_status_is_fail_closed(fixture):
     assert fixture.cancelled() == []
 
 
+@pytest.mark.parametrize("bad", [None, ["queued"], {"s": "queued"}, 7, True])
+def test_the_STARTED_predicate_is_TOTAL_for_an_unreadable_status(bad):
+    """rev12421 review cycle 4, F3: the non-string arm is load-bearing and was unpinned.
+
+    `job_has_started`'s docstring calls its `not isinstance(status, str) -> True` arm
+    load-bearing ("a second caller would inherit that as an aborted pass" — a
+    `TypeError` out of a PURE predicate, not a refusal). But `decide()` raises
+    `Unreadable` on a non-string status BEFORE any job reaches this predicate, and no
+    test called the predicate directly — so DELETING the arm left the whole suite
+    green, and the arm's contract was promised by prose alone. Pinned here on the
+    predicate itself, which is where that contract lives; the CLI path above stays
+    as it is, because it is a different guarantee (refuse the run, not total-ise the
+    row).
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("ccg_under_test", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.job_has_started(
+        {"name": "x", "status": bad, "runner_name": "", "completed_at": None}) is True
+
+
 def test_a_unicode_digit_run_id_is_a_usage_error(fixture):
     r = guard(fixture, "\u00b2")
     assert r.returncode == 64
