@@ -1144,18 +1144,23 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # ("no confidence was ever carried through this edge"), and only this
             # helper failed to consult the flag every other consequence helper reads
             # (#12210 review, P2).
+            # ⛔ SELF-CONTAINED SUBJECT: this sentence is spliced after clauses about a
+            # DESTINATION ("…the next link is operator-shaped, so …", "a carry onto the
+            # dead name itself changes nothing: …"), so it must name its own cause and
+            # subject rather than relying on the splice — otherwise it asserted the
+            # NEXT link's shape as the reason the SUPERSEDED endpoint was refused, and
+            # repeated a clause the ``detail`` already stated (#12210 review, P3).
             if s["sup_refused"]:
                 # ⛔ ``sup_flag_shaped`` implies this on BOTH lanes (``_4b_state``:
                 # the operator lane's ``sup_refused`` IS the flag test, and the direct
                 # lane's is the flag OR an ``op_type``), so naming it beside the flag
                 # is a conjunction that can never change the branch — and it read as
                 # if the lanes needed separate treatment (#12210 review, P3).
-                return ("EP's direct-edge arm refuses the superseded endpoint itself "
-                        "(it is operator-shaped), so no confidence was EVER carried "
-                        "through this edge — measured ``confidences {}`` and "
-                        "``skipped_factors None`` before the supersession — and an "
-                        "edge written onto a live claim successor is what would "
-                        "establish one; a carry onto the dead name changes nothing")
+                return ("no confidence was EVER carried through this edge, because "
+                        "EP's direct-edge arm refuses the superseded endpoint itself "
+                        "(it is operator-shaped) — measured ``confidences {}`` and "
+                        "``skipped_factors None`` before the supersession — so an edge "
+                        "onto a live claim successor is what would establish one")
             # ⛔ Every caller is an "EP will not read it" arm (an operator-shaped or
             # dead successor — a neutral edge returns at the rung above and never
             # reaches this one), so the honest sentence is that the belief this edge
@@ -1663,7 +1668,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                    f"this edge is {_quoted(s['direction'])} (neutral), so no "
                    "confidence transfers through it by design")
             disposal = (
-                f"{why} — the disposition here is DROP, or `pend` (the non-voting "
+                f"{why} — the disposition "
+                f"{'for the edge AS NAMED' if neither_drops else 'here'} is DROP, "
+                "or `pend` (the non-voting "
                 "placeholder) if the claim may still be revisited, and no door "
                 "implements `pend` today. ⛔ A refutation that STILL APPLIES is "
                 "kept, not dropped: carry it where EP can actually read it (a "
@@ -1722,9 +1729,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # contradicted the ``_shape_too`` clause appended right after it in the
             # same string (#12210 review, P2).
             _draft_mech = (
-                "the same edge write builds the factor after the promotion "
-                "(this row's figure is in the finding's detail) and, before it, "
-                "EP strips that input and re-scores over whatever remains "
+                "the same edge write is ADMITTED after the promotion and, before "
+                "it, EP strips that input and re-scores over whatever remains "
                 "(the arity ladder stated above)"
                 if s["is_operator"] else
                 "``confidences {}`` while it is a draft and while the endpoint still "
@@ -2231,7 +2237,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"targets. No SDK door rewires an operator's inputs" + tail)
         return prefix + (
             f"Re-point this {s['edge_type']} input from {q} to {dest}: an "
-            f"explicit edge write against the successor's ID "
+            f"explicit edge write against "
+            f"{'a CLAIM successor' if refused else 'the successor'}'s ID "
             f"that PRESERVES the edge idx (the slot EP reads), then delete the "
             f"edge into {q}. A successor that ALREADY carries an equivalent input "
             f"needs only that delete. No SDK door rewires an operator's inputs"

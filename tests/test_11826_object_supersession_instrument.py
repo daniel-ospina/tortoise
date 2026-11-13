@@ -2752,7 +2752,10 @@ def test_a_terminal_successor_does_not_get_the_carry_disposition(sdk):
     # ``is_operator NULL``, no ``op_type``). And the disposition is CARRY onto the
     # node that holds the claim — NOT DROP, which would discard a belief that a carry
     # measurably restores (#12210 review, P2).
-    assert "operator-shaped" not in fix.split("ONTO")[0], (
+    # ⛔ Split on a DELIBERATE marker: the only "ONTO" in the string was inside
+    # "ONTOLOGY" in the triage lead, so the scope was an accident waiting to change
+    # (#12210 review, P3).
+    assert "operator-shaped" not in fix.split("⛔ Dispose of this")[0], (
         "a terminal successor is not operator-shaped: " + fix)
     assert "CARRY the IMPL" in fix, (
         "the belief is restorable by carrying onto the live carrier: " + fix)
@@ -3074,8 +3077,15 @@ def test_a_neither_arm_row_with_a_TERMINAL_successor_keeps_DROP(sdk):
                  if i.node_id == v1["id"])
     fix = issue.fix
     assert "EP builds NO factor in either arm" in fix, fix
-    assert "the disposition here is DROP" in fix, fix
-    assert "ONCE PROMOTED" not in fix, fix
+    # ⛔ "AS NAMED", not "here": this row's fix DOES order a move onto a CLAIM
+    # successor, so the disposition has to be scoped to the successor the string
+    # withdraws — the same wording the shape-refused arm already carries (#12210
+    # review, P3).
+    assert "the disposition for the edge AS NAMED is DROP" in fix, fix
+    assert "NOT the one it names ('PolicyV2')" in fix, fix
+    # ⛔ NOT "ONCE PROMOTED": that phrase lives on the DRAFT arm only, which cannot be
+    # reached by an archived successor, so asserting its absence pinned nothing.
+    assert "for the edge AS NAMED is DROP" in fix, fix
 
 
 def test_a_draft_successor_carrying_the_legacy_outdated_flag_is_not_promoted(sdk):
@@ -3569,3 +3579,56 @@ def test_one_row_quotes_one_measurement_for_one_operation(sdk):
     assert len(figures) <= 1, (
         "one operation, one measured figure — got " + repr(figures) + " in: "
         + issue.detail + " / " + issue.fix)
+
+
+def test_a_withdrawn_operator_successor_is_not_the_write_target(sdk):
+    """`dest` withdraws a successor EP cannot read; the call must not name it back.
+
+    The default operator arm said "an explicit edge write against **the successor's ID**"
+    while `dest` in the same sentence said "a CLAIM successor — NOT the one it names
+    ('PolicyV2')" — the repair named onto the node the string refuses, which leaves
+    `confidences {}` and a quiet re-audit. The sibling arms already gate this noun on
+    `refused` (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "NOT the one it names ('PolicyV2')" in fix, fix
+    assert "against the successor's ID" not in fix, (
+        "the withdrawn successor is not the write target: " + fix)
+    assert "against a CLAIM successor's ID" in fix, fix
+
+
+def test_the_next_hop_consequence_is_about_the_next_hop(sdk):
+    """`_dropped_input` is called from hop 2 too; its subject must follow the call site.
+
+    With a shaped SUPERSEDED endpoint and a successor whose own successor is
+    operator-shaped, the hop-2 clause read "…which is OPERATOR-SHAPED … so EP's
+    direct-edge arm refuses the superseded endpoint itself…": the consequence of the
+    NEXT link's shape was stated about the wrong node (and repeated the detail's earlier
+    clause). `hop=2` keeps `_dropped_input` on the destination it is describing
+    (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    _obj(sdk, "PolicyV3", is_operator=True)
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.op_type = 'IMPL'", {"i": v1["id"]})
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "which is OPERATOR-SHAPED" in fix, fix
+    # ⛔ The consequence clause is spliced after "…the next link is operator-shaped,
+    # so …", so it must be self-contained: it names its OWN cause (the superseded
+    # endpoint's shape) instead of inheriting the next link's.
+    assert "no confidence was EVER carried through this edge, because EP's " \
+           "direct-edge arm refuses the superseded endpoint itself" in fix, fix
