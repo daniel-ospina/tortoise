@@ -1631,6 +1631,18 @@ def test_the_rerank_ARM_is_handed_the_resolved_model(tool_mod, monkeypatch):
     names = {n.func.id for n in calls if isinstance(n.func, ast.Name)}
     assert "build_rerank_arm" in names, (
         "the --rerank branch no longer goes through the seam")
+    # ⛔ …and the branch must still be `args.rerank`: `ast.walk` sees nodes in
+    # branches that are dead at runtime, so `if args.rerank and False:` kept this
+    # green while a --rerank run would emit an artifact with no `arms.rerank` at
+    # all (measured) — the cross-encoder column §8's control comparison rests on.
+    guards = [n for n in ast.walk(tree)
+              if isinstance(n, ast.If)
+              and any(isinstance(x, ast.Call) and isinstance(x.func, ast.Name)
+                      and x.func.id == "build_rerank_arm"
+                      for x in ast.walk(n))]
+    assert guards, "the seam is not behind any guard"
+    assert ast.unparse(guards[0].test) == "args.rerank", (
+        f"the --rerank branch is guarded by {ast.unparse(guards[0].test)!r}")
     # ⛔ The LEXICAL arms legitimately call `_rerank_arm` directly, and they DO
     # pass a `model` kwarg — but it is a label (`lexical:difflib`), not a
     # cross-encoder id. What distinguishes them structurally is that they supply

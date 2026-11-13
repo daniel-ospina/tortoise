@@ -15,9 +15,7 @@ query set actually is**, because every figure in that doc is a property of it.
 """
 from __future__ import annotations
 
-import ast
 import importlib.util
-import inspect
 import json
 import re
 import sys
@@ -195,6 +193,163 @@ def test_the_briefs_cost_table_is_the_artifacts_and_names_the_admitted_range():
         f"{cal.MIN_WORDS} — the cell must state the harvest's own floor: {cell}")
 
 
+# ── 7. the RUN, driven end to end over fakes ───────────────────────────────
+#
+# ⛔ Every claim this file made about `run`'s WIRING was, for three review rounds,
+# a substring search over `inspect.getsource(cal.run)` — and each version was
+# satisfied by the wrong thing: a docstring naming the identifiers, a `return 3`
+# belonging to a LATER refusal, or a statement that existed but could never fire
+# (all measured). A drive is the only pin that has no such neighbour: it asserts
+# the EXIT CODE and the ARTIFACT, which is what the operator gets.
+
+PASSAGE_TEXT = (
+    "The lane could not deliver because the credential it resolved was read-only "
+    "for the repository, so every push was refused at the remote and the work "
+    "stayed parked in the worktree. The remedy is to prove the write capability "
+    "before the first hour of work rather than at the end of it, because a lane "
+    "that discovers this late has already spent its budget and cannot deliver "
+    "anything at all. This branch measured the same failure twice more, which is "
+    "why the rule now lives in the instruction file rather than in a comment.")
+
+
+class _FakeGraph:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def query(self, cypher, params=None):
+        # the two reads `run` makes before the loop: the stored-id check and the
+        # cache-warming read. Both want a one-column result.
+        rows = ([[r[0]] for r in self._rows]
+                if "STARTS WITH" in cypher or "RETURN n.id" in cypher
+                else self._rows)
+
+        class _R:
+            result_set = rows
+        return _R()
+
+
+class _FakeProj:
+    def __init__(self, rows):
+        self.g = _FakeGraph(rows)
+
+
+class _FakeSDK:
+    """Reads return the harvested ids in fused order; writes are recorded."""
+
+    def __init__(self, *a, **kw):
+        self.rows = [["rp-12297000000", "first"], ["rp-12297000001", "second"]]
+
+    def _get_proj(self):
+        return _FakeProj(self.rows)
+
+    def tortoise_fts_query(self, query, **kw):
+        return [{"id": r[0]} for r in self.rows]
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def drive(monkeypatch, tmp_path, capsys):
+    """Run the harness with a fake store and a stubbed scorer.
+
+    Returns ``(exit_code, artifact_or_None, stderr)``. ``stats_for`` decides what
+    the timed call reports, so a degrade / read-side skip / healthy pass is one
+    line in the test instead of a monkeypatched source string.
+    """
+    from tortoise import rerank as rr
+    from tortoise import sdk as sdk_mod
+
+    def _go(*, stats_for=None, model=lambda: "cross-encoder/from-the-knob",
+            **over):
+        calls: list[dict] = []
+
+        def _pool(query, rows, **kw):
+            calls.append(kw)
+            stats = stats_for(len(calls)) if stats_for else {
+                "applied": True, "scored": len(rows)}
+            return rows, dict(stats)
+
+        monkeypatch.setattr(rr, "rerank_pool", _pool)
+        monkeypatch.setattr(rr, "get_scorer", lambda m: (object(), "ok"))
+        monkeypatch.setattr(rr, "fused_rerank_model", model)
+        monkeypatch.setattr(rr, "rerank_pool_enabled", lambda: False)
+        monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+        monkeypatch.setattr(cal, "harvest_passages",
+                            lambda *a, **k: [{"id": "x", "content": PASSAGE_TEXT}])
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/x")
+        out = tmp_path / "artifact.json"
+        code = cal.run(_run_ns(threads=0, out=str(out), **over))
+        art = json.loads(out.read_text()) if out.exists() else None
+        return code, art, capsys.readouterr().err, calls
+
+    return _go
+
+
+def test_a_healthy_run_records_the_resolved_model_and_no_skips(drive):
+    """Exit 0, the artifact names the model the resolver returned, and the
+    applied/skipped fields are the arms' own tally."""
+    code, art, err, calls = drive()
+    assert code == 0, err
+    assert art is not None, "a clean run must emit its artifact"
+    assert art["config"]["model"] == "cross-encoder/from-the-knob", art["config"]
+    assert art["config"]["rerank_applied_on_every_query"] is True
+    assert art["config"]["rerank_skipped_read"] == 0
+    assert art["latency"]["pairs_scored"] > 0
+    # the timed call was handed that SAME id — the binding, not a neighbour of it
+    assert calls and all(c["model"] == "cross-encoder/from-the-knob"
+                         for c in calls), calls
+
+
+def test_a_degraded_query_END_THE_RUN_and_leaves_no_artifact(drive):
+    """The refusal must FIRE: exit 3 and nothing written.
+
+    ⛔ Measured against the previous pins — deleting the `return 3` from the
+    refusal arm, or its whole `if`, left every test green while the artifact went
+    on to report a gained/lost 0 that is indistinguishable from a real zero.
+    """
+    # ⛔ ONLY THE FIRST query degrades: with every query degraded, the
+    # ``pairs_scored == 0`` refusal produces exit 3 as well and this test would
+    # pass with the degrade refusal reduced to a print (measured — it did). The
+    # second query scoring means the ONLY thing that can stop the run is the
+    # refusal under test.
+    code, art, err, _ = drive(
+        stats_for=lambda n: ({"applied": False, "degrade_reason": "non-finite "
+                              "scores", "scored": 0} if n == 1 else
+                             {"applied": True, "scored": 2}))
+    assert code == 3, (code, err)
+    assert art is None, "a refused run must not leave an artifact behind"
+    assert "REFUSED" in err and "non-finite scores" in err, err
+
+
+def test_a_READ_side_skip_is_counted_and_disclosed_in_the_artifact(drive):
+    """A tolerated skip must still show up, and every other query must score.
+
+    Two queries (prefix + midspan); the first is skipped for a read-side reason.
+    The run completes, the artifact says the rerank did NOT apply everywhere, and
+    the skip is counted — the pair the old literal got wrong.
+    """
+    code, art, err, _ = drive(
+        stats_for=lambda n: ({"applied": False, "degrade_reason": "empty_pool",
+                              "scored": 0} if n == 1 else
+                             {"applied": True, "scored": 2}))
+    assert code == 0, err
+    assert art["config"]["rerank_skipped_read"] == 1, art["config"]
+    assert art["config"]["rerank_applied_on_every_query"] is False
+    assert sum(b["rerank_skipped_read"] for b in art["arms"].values()) == 1
+
+
+def test_a_run_that_scores_NOTHING_refuses(drive):
+    """No scored pair means no latency: refuse rather than publish a null."""
+    code, art, err, _ = drive(
+        stats_for=lambda n: {"applied": False, "degrade_reason": "empty_pool",
+                             "scored": 0})
+    assert code == 3, (code, err)
+    assert art is None
+    assert "no pair was ever scored" in err, err
+
+
+
 # ── 6. the run refuses a baseline that is not the fused order ──────────────
 
 def _run_ns(**over):
@@ -241,23 +396,12 @@ def test_the_run_measures_the_model_the_PRODUCT_would_load(monkeypatch):
     assert seen.get("model") == "cross-encoder/pinned-by-args", seen
     assert seen.get("enabled") is True and seen.get("pool") == cal.POOL, seen
 
-    # …and `run` must hand BOTH calls the same NAME, read from the AST so a
-    # comment, a docstring or a string literal cannot satisfy it.
-    tree = ast.parse(inspect.getsource(cal.run).lstrip())
-    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
-
-    def _kw(call, name):
-        return next((k.value for k in call.keywords if k.arg == name), None)
-
-    loader = [c for c in calls
-              if isinstance(c.func, ast.Name) and c.func.id == "get_scorer"]
-    timed = [c for c in calls
-             if isinstance(c.func, ast.Name) and c.func.id == "score_pool"]
-    assert loader and timed, "the run must load and time through these calls"
-    assert isinstance(loader[0].args[0], ast.Name) and \
-        loader[0].args[0].id == "model", ast.dump(loader[0])
-    handed = _kw(timed[0], "model")
-    assert isinstance(handed, ast.Name) and handed.id == "model", ast.dump(timed[0])
+    # ⛔ The BINDING (`model = resolve_arm_model(args)`) is NOT asserted here: an
+    # AST check of the two call nodes stays green over a literal assignment to
+    # `model` (measured), and a source grep is satisfied by this very docstring.
+    # It is pinned where neither can fake it — the end-to-end drive in §7 asserts
+    # that BOTH the artifact's `config.model` and the id handed to the timed call
+    # are the resolver's value.
 
 
 def test_a_degraded_arm_is_refused_and_says_so():
@@ -314,39 +458,6 @@ def test_a_degraded_arm_is_refused_and_says_so():
     # …and a degrade with no reason at all is still refused, naming that.
     bare = cal.rerank_degrade_refusal({"applied": False})
     assert bare is not None and "no reason given" in bare, bare
-
-
-def test_the_applied_invariant_is_DERIVED_from_the_skips():
-    """`rerank_applied_on_every_query` must be computed, not asserted.
-
-    ⛔ Tolerating a read-side skip made the old literal false BY CONSTRUCTION: a
-    finished run can count `rerank_skipped_read > 0` beside
-    `rerank_applied_on_every_query: True` in the same artifact, and a run that
-    skipped EVERY query would still have claimed the reranker ran on all of
-    them. The report now derives both fields from the arms.
-    """
-    import inspect
-    src = inspect.getsource(cal.run)
-    assert '"rerank_applied_on_every_query": _skipped == 0' in src, (
-        "the invariant must be derived from the skip tally")
-    assert '_skipped = sum(b["rerank_skipped_read"] for b in arms.values())' in src
-    # …and a run that scored nothing must refuse rather than emit null latency.
-    assert "if not pairs_scored:" in src, (
-        "a run with no scored pair has no latency to report — it must refuse")
-    taper = src[src.index("if not pairs_scored:"):]
-    assert "return 3" in taper, (
-        "the no-pairs refusal must END the run, not warn")
-
-
-def test_the_run_refuses_on_the_degrade_it_detects():
-    """The loop must actually CALL the refusal — the helper returning a string
-    is worth nothing if `run` prints it and keeps measuring."""
-    import inspect
-    src = inspect.getsource(cal.run)
-    assert "_refusal = rerank_degrade_refusal(stats)" in src, (
-        "the arm no longer consults the degrade refusal")
-    assert "return 3" in src[src.index("_refusal = rerank_degrade_refusal"):], (
-        "the degrade refusal must END the run, not warn")
 
 
 def test_an_armed_read_gate_refuses_the_run(monkeypatch, capsys):
