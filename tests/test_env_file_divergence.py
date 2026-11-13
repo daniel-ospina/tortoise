@@ -482,6 +482,64 @@ def test_a_cwd_env_file_no_entry_point_reads_is_reported(capsys, _isolated, tmp_
     assert "NO Tortoise entry point" in out, out
 
 
+def test_an_unreadable_cwd_env_file_is_reported_not_dropped(
+        capsys, _isolated, tmp_path, monkeypatch):
+    """An unreadable `.env` in cwd is "cannot tell", never "nothing to report".
+
+    `chmod 000` makes the parse return nothing, and the cwd scan appended an entry
+    only when the parse returned something — so the file disappeared from the
+    report entirely. The daemon's own arm takes the opposite posture for the file
+    IT reads ("exists but cannot be read — this command cannot tell"); that rule
+    is not a property of one path, so it applies one level out too (#12441 item
+    3). The distinguishing state is READABILITY, not the key count: an EMPTY
+    readable `.env` configures nothing and is still correctly silent.
+    """
+    cwd_env = _write_env(tmp_path / ".env", f"TORTOISE_DB_URI={DOCKER_URI}\n")
+    cwd_env.chmod(0o000)
+    if os.access(cwd_env, os.R_OK):
+        # Root ignores mode 000 — the product is right and this host cannot
+        # express the state. Same skip, same reason, as the daemon-file case.
+        pytest.skip("running as a uid that ignores mode 000 — cannot create the state")
+    monkeypatch.setattr(main, "_dotenv_unread_candidates",
+                        lambda daemon_path: [str(cwd_env)])
+
+    payload = _show_json(capsys)
+    unread = payload["env_file"]["unread_env_files"]
+
+    assert [entry["path"] for entry in unread] == [str(cwd_env)], (
+        json.dumps(unread, indent=2)
+    )
+    assert unread[0]["state"] == "unreadable", json.dumps(unread, indent=2)
+    # Nothing is known about a file that could not be read — asserted so the
+    # renderer cannot be handed an empty key list it then reports as "sets …".
+    assert unread[0]["keys"] == []
+
+    assert _run(("doctor",)) == 0
+    out = capsys.readouterr().out
+    assert str(cwd_env) in out, out
+    assert "cannot be read" in out, out
+    # ⛔ The row must not claim the file "sets" a value: that is the state it
+    # could not observe.
+    assert f"sets {DOCKER_URI}" not in out, out
+
+
+def test_an_empty_readable_cwd_env_file_stays_silent(capsys, _isolated, tmp_path,
+                                                     monkeypatch):
+    """The counterpart above must not turn "nothing configured" into a warning.
+
+    An empty `.env` is readable and sets nothing, so there is nothing being
+    ignored — the report stays silent. Without this pin, "always emit an entry"
+    would warn on every project that has merely touched the file.
+    """
+    cwd_env = _write_env(tmp_path / ".env", "# nothing configured yet\n")
+    monkeypatch.setattr(main, "_dotenv_unread_candidates",
+                        lambda daemon_path: [str(cwd_env)])
+
+    payload = _show_json(capsys)
+
+    assert payload["env_file"]["unread_env_files"] == []
+
+
 def test_the_unread_scan_ignores_the_daemons_own_file(tmp_path, monkeypatch):
     """The cwd scan must not report the daemon's file as "read by nobody".
 
@@ -920,6 +978,36 @@ def test_the_sets_clause_describes_the_FILE_not_what_is_left_to_fill(
     out = _show_text(capsys)
     assert "sets TORTOISE_DB_URI" in out, out
     assert "no graph key" not in out, out
+
+
+def test_doctor_differs_row_describes_the_FILE_not_what_is_left_to_fill(
+        capsys, _isolated, monkeypatch):
+    """The DOCTOR diverging row must read `file_graph_keys`, not `graph_keys`.
+
+    The same state as the `config show` pin above, on the OTHER renderer: a
+    mid-run application empties `graph_keys` (nothing is left to fill) while the
+    file plainly sets one graph key, so a row built from `graph_keys` states
+    "sets no graph key" about a file whose only graph key it is (#12441 item 2).
+    Reverting the doctor arm to `graph_keys` left the whole suite green before
+    this case existed — that arm had no test that could see it.
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/cli-side.db")
+    _write_env(_isolated, "TORTOISE_DB_URI=/tmp/daemon-side.db\n")
+    _load_dotenv(str(_isolated))          # as any earlier import would
+
+    env_file = _show_json(capsys)["env_file"]
+    # The state this row is written for, asserted rather than assumed: the fill is
+    # empty, the file is not.
+    assert env_file["differs"] is True, json.dumps(env_file, indent=2)
+    assert env_file["graph_keys"] == [], json.dumps(env_file, indent=2)
+    assert env_file["file_graph_keys"] == ["TORTOISE_DB_URI"]
+
+    assert _run(("doctor",)) in (0, 1)
+    out = capsys.readouterr().out
+    assert "sets TORTOISE_DB_URI" in out, out
+    assert "sets no graph key" not in out, out
 
 
 def test_config_show_does_not_deny_reading_a_file_it_just_applied(capsys, _isolated):
