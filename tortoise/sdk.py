@@ -33251,7 +33251,7 @@ class TortoiseSDK:
                 query_text, entity_type="point", limit=200,
                 _record_reads=False,  # #7983: a review pool, not a caller read
                 # #8487 (review round 6, P2): this pool is consumed as a
-                # MEMBERSHIP filter — both ``review_add`` (orders the
+                # MEMBERSHIP filter — both ``_review_add`` (orders the
                 # suggestions by SIMILARITY itself) and ``review_prune``
                 # discard the read order — so the only thing the valid-time
                 # selection could still do here is move which ids survive the
@@ -40347,7 +40347,7 @@ class TortoiseSDK:
         #     its own sort discards). A pre-cut reorder moves which ids survive
         #     ``limit`` and their own sort then hides it.
         #   * CONSUMED AS A SET, never as a page — ``_review_pool`` (a
-        #     ``{pid: …}`` membership map; ``review_add`` orders its own picks) and
+        #     ``{pid: …}`` membership map; ``_review_add`` orders its own picks) and
         #     ``_resolve_subgraph_seed`` (an expansion START set). ⛔ Neither keeps
         #     an order, which is what ``_valid_time_rerank``'s docstring says about
         #     them: do not file them as order re-owners.
