@@ -1318,6 +1318,46 @@ def _textual_jobs(text: str) -> list[tuple[str, list[str], list[str]]]:
     return out
 
 
+#: The suffixes GitHub Actions will RUN as a workflow. BOTH, not a convention: GitHub
+#: documents `.github/workflows/<name>.yml` **or** `.yaml` — verbatim, *"Workflow files use
+#: YAML syntax, and must have either a .yml or .yaml file extension"*
+#: (workflow-syntax reference) — and a workflow in either extension triggers on every event
+#: like any other. Until #12238 this module globbed
+#: `*.yml` alone at every enumeration site, so a `.yaml` workflow was never OPENED by any
+#: scan here — `_jobs` was never called on it, its jobs could not appear in
+#: `test_every_pool_eligible_gh_job_is_declared`'s output, and nothing in the suite said
+#: a file had been skipped. That is the same silent skip in the same fail-open direction
+#: the rest of this file exists to close. Latent rather than live (measured: no `.yaml`
+#: workflow is in the tree), and a tuple rather than two globs so a reader adds in ONE
+#: place.
+_WORKFLOW_SUFFIXES = (".yml", ".yaml")
+
+
+def _workflow_paths(root: Path | None = None) -> list[Path]:
+    """Every workflow file GitHub will run — the ONE enumeration site (#12238).
+
+    Why centralised: the narrow glob looked CORRECT at each site, which is why it was
+    written three times in this file. Repairing each site leaves the fourth to be written
+    next week, so every scan derives from `_WORKFLOW_SUFFIXES` through this function, and
+    `test_no_site_re_spells_the_workflow_glob_narrowly` reds if a literal narrow glob
+    reappears.
+
+    `root` exists so a pin can drive the REAL scan on a synthetic tree; it defaults to the
+    repo's own directory at CALL time, so it follows `WORKFLOWS`.
+
+    WHAT THIS CANNOT SEE, stated rather than left to be assumed: GitHub's documented
+    storage location is the `.github/workflows` DIRECTORY (*"You must store workflow files in
+    the .github/workflows directory of your repository"*), so the population this enumerator
+    must cover is that directory's own files — it reads direct children and does not descend
+    into a subdirectory, which the docs do not name as a workflow location. And only these
+    two suffixes exist, so a workflow this enumerator misses does not exist. Whether an
+    ENUMERATED workflow actually runs is a different question, answered by
+    `KNOWN_DISABLED_WORKFLOWS` and its own pin.
+    """
+    base = WORKFLOWS if root is None else root
+    return sorted({path for suffix in _WORKFLOW_SUFFIXES for path in base.glob(f"*{suffix}")})
+
+
 def _jobs(path: Path) -> list[tuple[str, list[str]]]:
     """(job name, its lines) for every job in a workflow file.
 
@@ -1898,7 +1938,7 @@ def _undeclared_gh_jobs(
     catch.
     """
     undeclared: list[str] = []
-    for path in sorted(workflows.glob("*.yml")):
+    for path in _workflow_paths(workflows):
         for job, body in _jobs(path):
             text = "\n".join(body)
             if not _poolable_label(text):
@@ -2071,7 +2111,7 @@ def test_the_job_splitter_returns_exactly_the_jobs_yaml_declares(tmp_path):
     cannot pass by agreeing with `_jobs`' own mistakes.
     """
     wrong = []
-    for path in sorted(WORKFLOWS.glob("*.yml")):
+    for path in _workflow_paths():
         declared = set((yaml.safe_load(path.read_text()) or {}).get("jobs") or {})
         split = [name for name, _ in _jobs(path)]
         if set(split) != declared or len(split) != len(declared):
@@ -3126,7 +3166,7 @@ def test_an_expression_valued_runs_on_keeps_its_job_in_the_scan():
     """
     seen = {
         (path.name, job)
-        for path in sorted(WORKFLOWS.glob("*.yml"))
+        for path in _workflow_paths()
         for job, body in _jobs(path)
         if _poolable_label("\n".join(body))
     }
@@ -3136,4 +3176,82 @@ def test_an_expression_valued_runs_on_keeps_its_job_in_the_scan():
         "text cannot resolve to a label — the scan must fail CLOSED on it (assume the "
         "job can reach the pool), because a silent skip removes the job from "
         "`test_every_pool_eligible_gh_job_is_declared`'s surface entirely (#9018)"
+    )
+
+
+def test_a_dot_yaml_workflow_is_scanned_like_a_dot_yml_one(tmp_path):
+    """#12238: GitHub RUNS `*.yaml`, so a scan that globs `*.yml` is silently blind to it.
+
+    ⛔ THE DEFECT IS THE SILENCE, NOT THE COUNT. Every enumeration site in this module
+    globbed `*.yml`, so a `.yaml` workflow was never opened: `_jobs` never saw it, the
+    coverage scan could not name its jobs, and nothing in the output said a file had been
+    skipped — this suite stayed GREEN while a `gh`-using pool job in that file would die
+    `line 2: gh: command not found` / exit 127, the exact red-that-reads-as-a-harness-defect
+    this module exists to prevent (#9018). Latent rather than live: no `.yaml` workflow is
+    in the tree today (measured: 41 workflow files, all `.yml`).
+
+    So the pin is the DISCLOSURE — one synthetic workflow, the scan's own entry point, and
+    the assertion that the hazard is REPORTED — driven twice with the EXTENSION as the only
+    variable. A pin on the enumerator's length would stay green under a scan that never
+    consumed it, which is the half-fix this issue is written against.
+    """
+    body = (
+        "name: synth\n"
+        "on: push\n"
+        "jobs:\n"
+        "  yaml-only:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: gh pr view 1 --json number\n"
+    )
+    scripts = _gh_executing_scripts()
+
+    (tmp_path / "synthetic.yml").write_text(body)
+    assert _undeclared_gh_jobs(tmp_path, scripts, set(), set()) == ["synthetic.yml::yaml-only"]
+
+    # The extension is the ONLY difference between this call and the one above.
+    (tmp_path / "synthetic.yml").unlink()
+    (tmp_path / "synthetic.yaml").write_text(body)
+    assert _undeclared_gh_jobs(tmp_path, scripts, set(), set()) == ["synthetic.yaml::yaml-only"], (
+        "a `*.yaml` workflow is invisible to the scan. GitHub runs both extensions, so a "
+        "`gh`-using pool job in a `.yaml` workflow joins the #9018 gap with this suite "
+        "GREEN and nothing naming the file (#12238)"
+    )
+
+
+def test_the_enumerator_returns_every_workflow_file_github_would_run():
+    """An INDEPENDENT read of the directory, not a second call to the same glob.
+
+    Compared against `iterdir()` filtered by suffix, so a typo or a dropped entry in
+    `_WORKFLOW_SUFFIXES` cannot pass by agreeing with itself — the same reason
+    `test_the_job_splitter_returns_exactly_the_jobs_yaml_declares` compares `_jobs`
+    against `yaml.safe_load` rather than against a hand-written expectation.
+    """
+    on_disk = {
+        p.name for p in WORKFLOWS.iterdir() if p.is_file() and p.suffix in _WORKFLOW_SUFFIXES
+    }
+    assert {p.name for p in _workflow_paths()} == on_disk, (
+        "`_workflow_paths()` does not return every workflow file in `.github/workflows` — "
+        "a workflow it omits is never opened by any scan in this module (#12238)"
+    )
+
+
+def test_no_site_re_spells_the_workflow_glob_narrowly():
+    """#12238: repairing the three live sites would leave the fourth to be written next week.
+
+    STRUCTURAL on purpose. The narrow glob looked right at every one of its three sites, so
+    a reader adding a fourth scan has no signal that `*.yaml` is missing. This pin gives them
+    one: the one-extension glob spelling may not appear anywhere in this module — the
+    enumeration derives from `_WORKFLOW_SUFFIXES` through `_workflow_paths()`. (That is also
+    why this docstring does not spell it: the pin reads THIS file's source, so prose counts.)
+    """
+    source = Path(__file__).read_text()
+    narrow = re.findall(r"glob\(\s*[\"']\*\.yml[\"']\s*\)", source)
+    assert not narrow, (
+        f"this module spells the workflow glob narrowly at {len(narrow)} site(s): `*.yml` "
+        "omits the `*.yaml` extension, which GitHub also RUNS — a workflow in it is then "
+        "invisible to every scan here (#12238). Use `_workflow_paths()`."
+    )
+    assert _WORKFLOW_SUFFIXES == (".yml", ".yaml"), (
+        "`_WORKFLOW_SUFFIXES` no longer matches the set of extensions GitHub Actions runs"
     )
