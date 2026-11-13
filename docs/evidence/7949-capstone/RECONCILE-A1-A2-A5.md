@@ -790,12 +790,17 @@ tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete 
 uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time gate (exit 0 = clear)
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # 13 lines on this
                                                           # merge — DM5 at `:1695` names
-                                                          # `pack_hierarchy.py`, `declared_hierarchy` and
-                                                          # `tests/test_pack_hierarchy_11001.py`; it was
-                                                          # empty when this record was written
-# ⛔ So the registry DOES declare the hierarchies surface — what it does NOT register is a
-# PRODUCER of `hasPart` edges on the capture path, which is the claim A1 actually makes. The
-# producer claim is the call-shaped grep above, still empty.
+                                                          # `pack_hierarchy.py`, `relation_write.py`,
+                                                          # `declared_hierarchy`, `apply_relation_edges`
+                                                          # and `tests/test_pack_hierarchy_11001.py`; it
+                                                          # was empty when this record was written
+# ⛔ So the registry DOES declare the hierarchies surface **and** registers its producer: DM5's
+# `code:` is `tortoise/pack_hierarchy.py` + `tortoise/relation_write.py`, its `symbols:` include
+# `apply_relation_edges`, and its note says that symbol is "the PRODUCTION consumer, called from
+# `sdk.py`'s capture commit path on `out["relations"]`" (`config/v4-mechanisms.yml:1700-1701,`
+# `:1709, :1722-1724`). ⛔ Do NOT re-argue A1 from "nothing production calls the planner" — §0's
+# fifth-landing amendment already retired that basis. A1's remaining basis is the one §0 states:
+# *the writer landed, the corpus was not re-measured* (and no rollup query exists, §1).
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
 sed -n '19452p' tortoise/sdk.py                             # the call (`references`'s writer)

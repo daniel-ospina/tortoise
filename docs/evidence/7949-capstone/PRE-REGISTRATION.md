@@ -2696,10 +2696,12 @@ to answer.
 ### 10.30 — the §11/§9 cite block re-derived on `main` after the post-§10.29 merge wave (2026-11-13, `#12266`)
 
 > ⛔ **Superseded for the merged tree by §10.31.** §10.30 measured `main` at `5bacb44e0b`; `#12492`
-> then inserted a net `+3` inside `tortoise/sdk.py` above every carrier below, so the lines this entry
-> opens are no longer the lines this tree carries. Nothing below is corrected in place — those numbers
-> are a faithful record of the head this entry names. §10.31 owns the live values (the `sdk.py`
-> carriers AND the `#548` window).
+> then inserted a net `+3` inside `tortoise/sdk.py` above every `sdk.py` carrier below, so the
+> `sdk.py` lines this entry opens are no longer the lines this tree carries. Nothing below is corrected
+> in place — those numbers are a faithful record of the head this entry names. §10.31 owns the live
+> `sdk.py` values and the `#548` window; the `tortoise/extractor_v2.py` values this entry opens did
+> **not** move (`git diff --numstat 5bacb44e0b HEAD -- tortoise/extractor_v2.py` is empty) and still
+> open on the content they claim, as §10.31 re-measures.
 
 > **A successor entry, not an edit to §10.29.** §10.29 recorded the branch's own delta against the
 > base it names, and that record stays true to that head. `main` has since advanced: `#12348`

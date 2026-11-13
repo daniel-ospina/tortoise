@@ -5990,7 +5990,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # reuse: `:938` was `clearTimeout(timer);` and `:948` was
         # `cfg: CaptureConfig,`, i.e. the pair was WRONG, not shifted (the file did
         # not move in this wave at all). A reader who takes an offset from it
-        # re-derives `948` → `957` and lands outside both functions.
+        # re-derives `948` → `957`, which lands on `postCapture`'s parameter list
+        # (`payload: Record<string, unknown>,`) instead of its `def`, so the row
+        # reds on content rather than silently resolving.
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("955", "export function postCapture("),
             ("947", "export function postInstallProbe("),
