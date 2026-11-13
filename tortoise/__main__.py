@@ -12898,7 +12898,9 @@ _DOCTOR_BODY_CAP = 65536
 #: both, on both reply types (`HTTPResponse` and the `HTTPError` whose `fp` is
 #: one). ⛔ What the budget is still NOT: an interrupt for DNS resolution, which
 #: runs before any socket timeout is applied — that is the 105 s margin the
-#: constant block above sizes an outer watchdog at. Why the budget exists at all:
+#: constant block above REQUIRES OF an outer watchdog (nothing in this tree wraps
+#: the verb with one; the sentence states what a caller must allow, not what exists).
+#: Why the budget exists at all:
 #: without it a spent socket bound was invisible and `min()` had nothing to
 #: subtract from, so `doctor` (and `onboard`'s last step) could chain four slow
 #: legs on exactly the network `--offline` exists for.
