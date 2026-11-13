@@ -1028,6 +1028,42 @@ def test_the_gate_steps_cannot_be_DEFUSED_into_a_green_job():
     assert len(preupload) == 1, "the pre-upload gate step is missing"
     undefused(preupload[0], "publish-pypi build / the pre-upload gate")
 
+    # ⛔ EVERY GATE step of `build` is a gate on the artifact `publish` uploads, so none of them
+    # may carry the two defusers (#12422 review cycle 6, P2, MEASURED). Hand-listing one gate
+    # left the other two free: `continue-on-error: true` on `Smoke-test the wheel in a clean
+    # venv` (`:55`, the #1929 pack-catalog smoke) and on `sdist presence check (#1929)`
+    # (`:130`) each left `78 passed`, exit 0 — the wheel/sdist still uploads, so a one-line
+    # “don't let this block the release” reads green over a wheel missing its pack catalog.
+    #
+    # ⛔ THE CLASS IS "A STEP THAT CAN FAIL THE JOB AND MUST", not "a step". The EVIDENCE
+    # uploads legitimately carry `if: always()` (a cancelled job runs no other step, so the
+    # transcript would be lost) — measured, and that is why a blanket sweep over every step
+    # red a CORRECT workflow on the first cut. So: every `run:` step (the bash gates), plus
+    # the `dist` artifact the publishing job reads, which is asserted separately above.
+    def gates(steps: list[dict]) -> list[dict]:
+        return [
+            step
+            for step in steps
+            if "run" in step
+            or (
+                str(step.get("uses", "")).startswith("actions/upload-artifact")
+                and str((step.get("with") or {}).get("name", "")).startswith("dist")
+            )
+        ]
+
+    for step in gates(build_steps):
+        undefused(step, f"publish-pypi build / the `{step.get('name') or step.get('uses')}` step")
+
+    # …and the client build job is the same one-way door: `publish-client` runs on `needs:`
+    # alone, so its acceptance gate must not be swallowable either.
+    client_steps = yaml.safe_load((workflows / "publish-pypi.yml").read_text())["jobs"][
+        "build-client"
+    ]["steps"]
+    for step in gates(client_steps):
+        undefused(
+            step, f"publish-pypi build-client / the `{step.get('name') or step.get('uses')}` step"
+        )
+
     canary_steps = yaml.safe_load((workflows / "release-artifact-canary.yml").read_text())["jobs"][
         "canary"
     ]["steps"]
@@ -1186,6 +1222,63 @@ def test_the_publish_time_smoke_resolves_EXACTLY_ONE_wheel_before_it_runs():
         "`--wheel` takes an inline `$(...)` substitution: an empty `dist/*.whl` glob collapses "
         "it to an empty argument and the smoke tests a DIFFERENT release than the one uploaded"
     )
+
+
+def test_the_pre_upload_gate_step_EXITS_with_the_tool_VERDICT(tmp_path):
+    """The step's exit must BE the tool's verdict — not a shell spelling of it (#12422 review cycle 6, P1).
+
+    `undefused()` forbids the two workflow KEYS, and that is not the same property. The run
+    block's last command is the tool invocation, so appending `|| true` — the idiomatic
+    "don't let the smoke block the release" edit, and byte-for-byte the same outcome as
+    `continue-on-error: true` — turns a FAIL verdict into exit 0. MEASURED: with `|| true`
+    appended, the whole suite stayed green (`78 passed`, exit 0); `build` greens, the `dist`
+    upload and `publish` (both pinned by the cycle-5 commit) then run, and an uninstallable
+    wheel is uploaded irreversibly.
+
+    ⛔ EXECUTED, not grepped — and it closes `|| true`, `; true`, a trailing `exit 0` and
+    `set +e` in ONE row, instead of enumerating shell spellings a future edit can always
+    avoid. Same technique as `test_an_INTERPRETER_level_failure_…` next door: the step's own
+    `run:` block, a stub interpreter, and the observed exit code.
+    """
+    import subprocess
+
+    import yaml
+
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "publish-pypi.yml").read_text())
+    run = next(
+        step["run"]
+        for step in workflow["jobs"]["build"]["steps"]
+        if "published_artifact_canary.py" in str(step.get("run") or "")
+    )
+
+    def execute(tool_exit: int) -> int:
+        bindir = tmp_path / f"bin{tool_exit}"
+        bindir.mkdir(exist_ok=True)
+        stub = bindir / "python"
+        # The step shells out to `python tools/…`; the stub IS that command, so its exit is
+        # exactly the tool's verdict — whatever the block does with it afterwards.
+        stub.write_text(f"#!/bin/sh\nexit {tool_exit}\n")
+        stub.chmod(0o755)
+        cwd = tmp_path / f"cwd{tool_exit}"
+        (cwd / "dist").mkdir(parents=True)
+        (cwd / "dist" / "pkg-0.1-py3-none-any.whl").write_bytes(b"")
+        env = {
+            **os.environ,
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(tmp_path / "runner"),
+            "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
+        }
+        return subprocess.run(
+            ["bash", "-c", run], cwd=str(cwd), env=env, capture_output=True, text=True
+        ).returncode
+
+    assert execute(0) == 0, "a PASSING wheel failed the pre-upload step (a false block)"
+    assert execute(1) != 0, (
+        "the pre-upload step exited 0 on a FAIL verdict — `build` greens, `publish` runs, and "
+        "an uninstallable wheel is uploaded irreversibly. A shell-level swallow (`|| true`, "
+        "`; true`, a trailing `exit 0`) is enough; the workflow KEY assertions cannot see it"
+    )
+    assert execute(2) != 0, "the pre-upload step swallowed a detector-fault exit 2"
 
 
 def test_the_wheel_arity_guard_REFUSES_zero_and_two_wheels_by_RUNNING_it(tmp_path):
