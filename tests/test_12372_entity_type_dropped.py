@@ -333,11 +333,13 @@ def test_the_tag_arm_still_works_without_an_entity_type(stub_factory) -> None:
 
 
 def test_every_refused_type_has_a_remedy(stub_factory) -> None:
-    """`_ENTITY_TYPE_REMEDY[...]` is indexed, so every served type MUST be there.
+    """Every refused type must carry its OWN remedy, not the generic fallback.
 
-    A vocabulary addition that forgets its remedy would turn a refusal into a
-    bare KeyError inside the tool body. Fails on `missing == set()`; the fixture
-    reaches it because the vocabulary is read from its owner, not re-typed here.
+    The handler reads `_ENTITY_TYPE_REMEDY.get(...)` with a fallback, so a
+    missing entry is a structured refusal, never a `KeyError` (pinned by
+    `test_a_vocabulary_member_with_no_remedy_refuses_instead_of_raising`).
+    What this test protects is SPECIFICITY: a fallback for every type would
+    answer the call and tell the caller nothing. Fails on `missing == set()`.
     """
     from tortoise.mcp_server import _ENTITY_TYPE_REMEDY
     from tortoise.security import VALID_ENTITY_TYPES
@@ -505,4 +507,112 @@ def test_a_vocabulary_member_with_no_remedy_refuses_instead_of_raising(
     )
     assert "No bulk enumeration" in result["error"], (
         f"the fallback remedy was not used: {result['error']!r}"
+    )
+
+
+# ── review round 3: the two regressions that passed all 35 tests ─────────────
+
+
+@pytest.mark.parametrize("arm", ["structural", "text"])
+def test_empty_string_means_point_too(stub_factory, arm) -> None:
+    """`entity_type=""` is the same caller intent as `None` — on BOTH arms.
+
+    Mutating `(None, "")` back to `is None` passed all 35 earlier tests: only
+    `None` was covered, so `""` could silently revert to a vocabulary refusal
+    while the docstring promises one meaning for a missing key. Fails on the
+    served rows; the fixture holds 5 Points.
+    """
+    from tortoise.mcp_server import tortoise_query
+    stub_factory(point_population=5, n_tag_points=5)
+
+    if arm == "structural":
+        out = tortoise_query(entity_type="", offset=0, limit=2)
+        assert isinstance(out, dict) and out.get("total") == 5, (
+            f"entity_type='' must be served as point: {out!r}"
+        )
+    else:
+        out = tortoise_query(text="promotion", entity_type="", limit=1)
+        assert isinstance(out, list) and out == [{"id": "op0", "is_operator": True}], (
+            f"entity_type='' must be served as point on the text arm: {out!r}"
+        )
+
+
+def test_tag_takes_precedence_over_text_so_it_must_still_refuse(stub_factory) -> None:
+    """`tag=` + `text=` + a non-point type served the TAGGED POINTS.
+
+    Mutating the guard's `tag is not None or` clause away passed all 35 earlier
+    tests: no test combined tag, text and a non-point type, and tag mode takes
+    precedence over text — so that combination reached `query_points_by_tag` and
+    answered Points. Fails on `stub.calls == []` and on the refusal.
+    """
+    from tortoise.mcp_server import tortoise_query
+    stub = stub_factory()
+
+    result = tortoise_query(tag="topic:x", text="anything", entity_type="object",
+                            offset=0, limit=2)
+
+    assert _is_refusal(result), (
+        f"tag+text+entity_type='object' served the tagged Points: {result!r}"
+    )
+    assert stub.calls == [], f"the tag arm read before refusing: {stub.calls}"
+
+
+def test_a_whitespace_only_text_refuses_where_the_legs_would_answer_empty(
+        stub_factory) -> None:
+    """A blank `text` takes the fts arm, whose legs test `query.strip()`.
+
+    With no `kind` the structural leg then has NO conditions and answers `[]`
+    (`reason="empty_results"`) — an empty result indistinguishable from a
+    complete one, on the arm the guard otherwise leaves open. Fails on
+    `is_refusal(result)`; the fixture reaches it because `"  "` is truthy, so a
+    guard testing only `not text` lets it through.
+    """
+    from tortoise.mcp_server import tortoise_query
+    stub = stub_factory()
+
+    result = tortoise_query(text="  ", entity_type="event", limit=5)
+
+    assert _is_refusal(result), (
+        f"a blank text answered [] for a non-point type: {result!r}"
+    )
+    assert stub.calls == [], "the blank-text arm read before refusing"
+
+
+def test_a_blank_text_with_a_kind_still_serves(stub_factory) -> None:
+    """The false block to avoid: `text=" "` + `kind=` + `entity_type=` DOES work.
+
+    The fts arm honours `entity_type` and the kind clause gives the structural
+    leg its condition, so refusing this would be over-blocking a working call.
+    Fails on the forwarded kwargs reaching the fts leg.
+    """
+    from tortoise.mcp_server import tortoise_query
+    stub = stub_factory()
+
+    out = tortoise_query(text="  ", kind="AgentSession", entity_type="event", limit=1)
+
+    assert isinstance(out, list), f"a working combination was refused: {out!r}"
+    assert stub.calls[-1][0] == "tortoise_fts_query"
+    assert stub.calls[-1][3].get("entity_type") == "event"
+
+
+@pytest.mark.parametrize("entity_type", ["document", "object", "subject"])
+def test_a_non_enumerable_remedy_states_its_bound_and_the_real_size_source(
+        entity_type) -> None:
+    """These three have no bulk listing, so the remedy must say so USEFULLY.
+
+    An answer that slices at `limit` (default 10) with no total is the same
+    false PASS as a limit-less `operator` search, and `kind=...` alone is the
+    caller inventing the filter that makes the leg fire at all. So each entry
+    must name the bound it hits (`limit=`) and where the layer's SIZE is read
+    (`graph_overview(section='status')`), not merely "no bulk enumeration".
+    Fails on both substrings; the fixture reaches them because the message
+    embeds the remedy verbatim.
+    """
+    message = _message_for(entity_type)
+
+    assert "limit=10000" in message, (
+        f"the {entity_type!r} remedy has no bound: {message!r}"
+    )
+    assert "graph_overview(section='status')" in message, (
+        f"the {entity_type!r} remedy names no source for the layer's size: {message!r}"
     )

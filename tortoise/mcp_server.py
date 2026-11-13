@@ -3760,16 +3760,17 @@ def _public_filters(filters: Any) -> dict:
 
 
 #: #12372 — where to enumerate each entity type, once `tortoise_query`'s
-#: structural/tag arms have refused it. Every entry names a call that answers
-#: WITHOUT the caller having to invent a `kind` or a `query`, because
-#: `run_structural_query` returns an empty list whenever it has no conditions
+#: structural/tag arms have refused it. EVERY entry either completes in one
+#: call, or states the bound it hits and where the layer's SIZE comes from —
+#: because a remedy that answers `[]` (no conditions) or a `limit`-truncated
+#: bare list is the same false PASS this guard removes, one level down:
+#: `run_structural_query` returns `[]` when it has no conditions
 #: (`tortoise/search_engine.py`, the `if not conditions` gate records
-#: `reason="empty_results"` and returns `[]`) — so advice of the shape
-#: `tortoise_search(entity_type="event")` would hand the caller "no rows" and
-#: "no conditions" as the same answer: the very false PASS this guard exists to
-#: remove, one level down. `operator` is the one type whose bare search DOES
-#: list its layer (the structural leg appends `n.is_operator = true`), which is
-#: why the generic advice looked plausible when this was written.
+#: `reason="empty_results"`), and `tortoise_search` slices at `limit`
+#: (default 10) with no total in the response. `operator` is the one type whose
+#: bare search lists its layer (the leg appends `n.is_operator = true`), and
+#: even that needs `limit` raised — which is why the generic advice looked
+#: plausible when this was written.
 _ENTITY_TYPE_REMEDY: dict[str, str] = {
     "operator": (
         "Enumerate it with tortoise_search(entity_type='operator', "
@@ -3784,16 +3785,22 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
     "source": (
         "Enumerate it with tortoise_list_sources()."),
     "document": (
-        "No bulk enumeration exists: tortoise_search(entity_type="
-        "'document', kind=...) enumerates only the document kinds you name."),
+        "No bulk listing: tortoise_search(entity_type='document', "
+        "kind=<documentKind>, limit=10000) answers ONE kind at a time and "
+        "slices at `limit` (default 10, no total), and the layer's size is "
+        "counts.Document in tortoise_graph_overview(section='status')."),
     "object": (
-        "No bulk enumeration exists on any surface yet (#12378): "
-        "tortoise_search(entity_type='object', kind=...) enumerates only the "
-        "kinds you name."),
+        "No bulk listing — and none is planned (#12378 keeps these as counts): "
+        "tortoise_search(entity_type='object', kind=<objectKind>, "
+        "limit=10000) answers ONE kind at a time and slices at `limit` "
+        "(default 10, no total); the layer's size is counts.Object in "
+        "tortoise_graph_overview(section='status')."),
     "subject": (
-        "No bulk enumeration exists on any surface yet (#12378): "
-        "tortoise_search(entity_type='subject', kind=...) enumerates only the "
-        "kinds you name."),
+        "No bulk listing — and none is planned (#12378 keeps these as counts): "
+        "tortoise_search(entity_type='subject', kind=<subjectKind>, "
+        "limit=10000) answers ONE kind at a time and slices at `limit` "
+        "(default 10, no total); the layer's size is counts.Subject in "
+        "tortoise_graph_overview(section='status')."),
 }
 
 #: #12372 — the remedy for a vocabulary member that arrives without an entry: a
@@ -3917,7 +3924,8 @@ def tortoise_query(kind: str | None = None,
         validate_entity_type(entity_type)
     except ValueError as exc:
         return _SafeError({"error": str(exc)})
-    if entity_type != "point" and (tag is not None or not text):
+    if entity_type != "point" and (
+            tag is not None or not text or (kind is None and not text.strip())):
         return _SafeError({"error": (
             f"entity_type={entity_type!r} is not served on this path: "
             f"tortoise_query's structural and tag arms read the Point label "
