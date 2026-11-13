@@ -106,21 +106,16 @@ Four properties are load-bearing and each is pinned by a test:
   the withheld-hold tests (consumer: `…is_held_rather_than_read_as_absent`,
   `…is_held_even_when_the_resolver_raises`). The only client skipped is one with
   no projection at all (a test double: no `resolved_from` state to withhold).
-  other arm of the same `except` is narrower, and is stated rather than implied:
-  a read that fails BEFORE any hop resolves** (a query error, not a per-row
-  unresolvable) **has no `folded` rows to carry, so `entities` comes back EMPTY**
-  — `search_graph` withholds every entity prior, `extract_session_v2` therefore
-  skips D3 for that run entirely (the pre-`#12296` behaviour: no resolution, plus
-  this reason and the impaired-leg counters), and no pre-hop row is emitted by
-  either arm. The only
-  client skipped is one with no projection at all (a test double: no
-  `resolved_from` state exists to withhold).
+
 * **A withheld spelling is HELD, never absent — on both arms.** The fold's
   refusal is per-ROW, and a row it withheld is unreadable, not missing: reading it
   as measured absence is the one state §4.4 I1 makes license a CREATE, so the
-  machinery names it end to end. `_PriorFoldUnresolvable` carries
-  `unresolved_names`; `search_graph` publishes them as **`entities_unresolved`** on
-  its PARTIAL exit (the key is absent when nothing was withheld); the orchestrator
+  machinery names it end to end. TWO producers publish **`entities_unresolved`**
+  on `search_graph`'s PARTIAL exit (the key is absent when nothing was withheld):
+  the fold's PER-ROW refusal, where `_PriorFoldUnresolvable` carries
+  `unresolved_names`; and a read that failed BEFORE any hop resolved
+  (`_entity_facts` raising), which carries no per-row payload and therefore names
+  **every** prior row — the same disposition applied whole-arm. The orchestrator
   keeps the D3 pass alive when the fold withheld EVERY row and appends each named
   spelling to `resolution_held`. It does so on the resolver's FAILURE arm as well
   as its success arm — a raising `resolve_entities` is exactly when the create
