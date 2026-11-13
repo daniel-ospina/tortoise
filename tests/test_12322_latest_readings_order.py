@@ -459,13 +459,76 @@ def test_since_excludes_by_instant_on_the_correctly_ordered_list(sdk):
 def test_the_docstring_discloses_the_cap_and_claims_no_complete_set():
     """``limit`` binds this read and a list cannot report that it was hit, so
     the docstring must SAY so — the same disclosure ``live_judgements`` carries
-    ("⛔ ``limit`` IS A CAP, NOT A COURTESY"). The removed sentence *"The
-    readings recorded about ``indicator_id``, newest first."* claimed the
-    complete set over ``limit=100``.
+    ("⛔ ``limit`` IS A CAP, NOT A COURTESY").
+
+    ⛔ EACH ASSERTION IS TIED TO THE SENTENCE THAT CARRIES ITS CLAIM, because a
+    membership check over the WHOLE doc is satisfied by unrelated prose: at
+    ``00d1ef7e16`` both of the mutations below passed this test.
+
+    * deleting the whole ``limit IS A CAP`` paragraph stayed green — ``"cap"``
+      was matched by a *different* paragraph ("a server-side result-set **cap**
+      cannot silently truncate it in store order");
+    * rewording the opening back to a complete-set claim ("Every reading
+      recorded about ``indicator_id``…") stayed green — the check matched ONE
+      historical literal, so any other wording of the same overclaim was
+      invisible.
+
+    So the two disclosures are asserted by their OWN literals, and the
+    no-complete-set rule is enforced from BOTH sides — a denylist on the
+    summary line and a denylist over the whole doc — because each side alone was
+    measured to miss the other's mutant:
+
+    * an opening-only rule (this test's previous shape) stayed green on
+      *"Up to all readings recorded about ``indicator_id`` (``limit`` caps the
+      list), newest first."* and on the historical sentence pasted back as a
+      LATER paragraph;
+    * a bounding-phrase ALLOWLIST over-fitted — it red-flagged the honest
+      *"The ``limit`` most recent readings about…"* and *"No more than
+      ``limit``…"*;
+    * ``doc.split(". ")[0]`` used prose punctuation to find the summary, so an
+      abbreviation truncated "the opening" (it is now the first LINE).
+
+    ⚠️ Disclosed over-block: the doc-wide list bans *"the readings recorded
+    about"*, so a future paragraph opening *"The readings recorded about an
+    indicator are ordered…"* would red this test for a non-defect. That is the
+    accepted direction — a false green here re-opens #11823, a false red is one
+    line for the next editor — and it is why the failure message names the
+    phrase it found.
     """
-    doc = " ".join((latest_readings.__doc__ or "").lower().split())
-    assert "limit" in doc, "the docstring must name the bound it applies"
-    assert "cap" in doc, "the bound must be disclosed as a CAP, not a courtesy"
-    assert "the readings recorded about" not in doc, (
-        "the removed sentence claimed a COMPLETE set over a bounded read"
+    raw = latest_readings.__doc__ or ""
+    low = " ".join(raw.split()).lower()
+    assert "is a cap, not a courtesy" in low, (
+        "the docstring must disclose ``limit`` as a CAP in that sentence — a "
+        "bare occurrence of the word 'cap' elsewhere in the doc is not the "
+        "disclosure (#11823)"
+    )
+    assert "does not bound the fetch" in low, (
+        "the docstring must disclose that ``limit`` bounds the ANSWER and not "
+        "the FETCH — that is the half a caller reasons about cost from"
+    )
+    # The summary LINE, not a prose-delimited fragment: the sentence a caller
+    # reads as the contract is the first line of the docstring.
+    opening = raw.strip().splitlines()[0].lower()
+    assert "limit" in opening, (
+        "the summary line is what a caller reads as the contract, so it must "
+        "name the bound"
+    )
+    overclaim = [w for w in ("every", "all ", "complete", "entire") if w in opening]
+    assert not overclaim, (
+        f"the summary line claims a COMPLETE set over a bounded read "
+        f"({overclaim}) — #12322 exists because that claim was made and is false"
+    )
+    pasted = [
+        p
+        for p in (
+            "the readings recorded about",
+            "every reading recorded about",
+            "all readings recorded about",
+            "complete set of readings",
+        )
+        if p in low
+    ]
+    assert not pasted, (
+        f"a COMPLETE-set claim reappeared in the docstring ({pasted}); the "
+        "summary rule alone cannot see a claim pasted into a later paragraph"
     )
