@@ -97,7 +97,7 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
 | Call site / consumer | What it does there |
 |---|---|
 | `tools/curate_graph.py::MCPReader.read_events` | **new**: reconciles, refuses, maps rows to `C.Row(node_type="event")` |
-| `tools/curate_graph.py::MCPReader._get_entities` | **new**: the routed call (`type="events"`, `limit=EVENT_READ_CEILING`, `graph`), with the graph-refusal fallback every other read has |
+| `tools/curate_graph.py::MCPReader._get_entities` | **new**: the routed call (`type="events"`, `limit` = `counts.Event + 1` **uncapped** (see step 1) or `EVENT_READ_CEILING` on the unreported arm; `graph`), with the graph-refusal fallback every other read has |
 | `tools/curate_graph.py::cmd_inventory` | reads the layer, feeds `C.build_plan`, emits `events_read` / `events_total_reported` / `events_reconciled` |
 | `tools/curate_graph.py::cmd_plan` | same, plus a **fresh** status read immediately before the Event read (narrows the count-vs-rows window to two requests) |
 | `tools/curate_graph.py::_disarmed_artifact` | new `events` tri-state kwarg; `events_*` present on **every** disarmed arm (`None` = no completed read) |

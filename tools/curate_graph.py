@@ -662,16 +662,18 @@ class MCPReader:
                 "truncated, and this read has no offset walk to continue from; refusing "
                 "a partial episodic layer")
         if reported is not None and len(raw) != reported:
-            # ⛔ A layer that GREW between the count and this read is a CORRECT read being
-            # refused, and on this tenant it grows whenever sessions are indexed
-            # (`counts.Event` is fed by `index_sessions`). Re-read the count ONCE: two
-            # surfaces agreeing on the NEWER number accepts the read; still disagreeing is
-            # a refusal. This closes the false block without loosening the guard — the
-            # growth direction can only ever be resolved upward, against a fresh count.
-            fresh = _node_count(self.counts(), "Event") if len(raw) > reported else None
+            # ⛔ BOTH directions are re-counted, not only growth. A layer that GREW or
+            # SHRANK between the count and this read is a CORRECT read being refused, and
+            # both are reachable on a live graph: `counts.Event` is fed by
+            # `index_sessions`, and `:Event` nodes are deleted by the hosted entity-delete
+            # path. The resolution is identical in either direction — a fresh count that
+            # equals the rows read proves this read is the whole layer as it now is — so
+            # re-counting only the growth side left the mirror-image false block in place
+            # (PR-review cycle 2).
+            fresh = _node_count(self.counts(), "Event")
             if fresh is not None and fresh == len(raw):
                 self._note(
-                    "the Event layer GREW between the status count and this read "
+                    "the Event layer CHANGED between the status count and this read "
                     f"({reported} -> {len(raw)} rows); the count was re-read and now "
                     "agrees with the rows, so this is a complete read of the newer layer")
                 reported = fresh
@@ -680,12 +682,12 @@ class MCPReader:
                     f"the Event layer read {len(raw)} rows but counts.Event reports {reported} "
                     "— refusing a layer two surfaces disagree about. Both count `:Event` with "
                     "the same predicate, so the difference is one of: a genuinely partial / "
-                    "clamped read; another writer's Event created between the status read and "
-                    "this read (the count is re-read immediately before this call to keep "
-                    "that window to two requests, and a GROWTH direction is re-counted a "
-                    f"second time before refusing — the re-read reported {fresh!r}, not "
-                    f"{len(raw)}); or an Event deleted in that window, which makes "
-                    "`read < reported`")
+                    "clamped read; another writer's Event created — or one deleted — "
+                    "between the status read and this read (the count is re-read "
+                    "immediately before this call to keep that window to two requests, and "
+                    "a DISAGREEMENT is re-counted a second time before refusing — the "
+                    f"re-read reported {fresh!r}, not {len(raw)}); or a `counts` section "
+                    "that is itself stale, or scoped to a different graph")
         empty_text = 0
         out: list[C.Row] = []
         for r in raw:

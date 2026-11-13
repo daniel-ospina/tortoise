@@ -4393,21 +4393,45 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     # the doc's stated enumerable population must equal the sum of the class table, and
     # reading the Event layer moved it by 4,670. Assert the SUM, not a number copied by
     # hand, so a future layer that is read without updating this line reds here.
-    # ⛔ Parse the class table's own figures and check the doc's stated population against
-    # their sum — NOT against a hand-copied literal tuple, which stayed green when a table
-    # figure changed (round-4 review). Each figure must appear in the table row for its
-    # class, and the population line must equal their sum.
-    table = {"points": "15,842", "sources": "1,578",
-             "operators": "3,727", "events": "4,670"}
-    for cls, figure in table.items():
-        assert figure in doc, f"the doc no longer states {figure} for {cls}"
-    total = sum(int(v.replace(",", "")) for v in table.values())
-    assert f"{total:,}" in doc, (
-        f"the doc's enumerable population must be {total:,} "
-        "(points+sources+operators+events) now that the Event layer is read")
-    # The old population must be gone as a POPULATION claim (it may not linger as "21,147").
-    assert "= 21,147" not in doc and "is 21,147." not in doc, (
-        "the doc still states 21,147 as the enumerable population")
+    # ⛔ PARSE the class table's row for each class and check the doc's stated population
+    # against their sum. A dict of literals with substring checks stayed GREEN when the
+    # Event ROW was changed to 4,671 while the population/dispositions lines still said
+    # 4,670/25,817 — i.e. it could not see the self-contradiction it was written for
+    # (PR-review cycle 2), because every literal it looked for also occurs elsewhere.
+    import re as _re
+
+    # ⛔ Parse the POPULATION LINE as a sum of its class addends and check the arithmetic.
+    # Adding up the class-table ROWS instead double-counts: the Point row states 19,595,
+    # which already includes the 3,727 operators (the row says so). And a dict of literals
+    # with substring checks stayed GREEN when the Event ROW was changed to 4,671 while the
+    # population line still said 4,670 — it could not see the self-contradiction it was
+    # written for, because every literal it looked for also occurs elsewhere.
+    flat = _re.sub(r"\s+", " ", doc)
+    m = _re.search(
+        r"\*\*([\d,]+) points \+ ([\d,]+) sources \+ ([\d,]+) operators \+ ([\d,]+) "
+        r"events = ([\d,]+)\*\*", flat)
+    assert m, "the doc no longer states the enumerable population as a sum of its classes"
+    pts, srcs, ops, evts, total = (int(g.replace(",", "")) for g in m.groups())
+    assert pts + srcs + ops + evts == total, (pts, srcs, ops, evts, total)
+    # The Event class-table ROW must agree with the population's events addend — the exact
+    # check that catches the round-3 defect (a row updated without the population line).
+    row = _re.search(r"^\| \*\*Event\*\* \| \*\*([\d,]+)\*\*", doc, _re.M)
+    assert row, "the class table has no Event row"
+    assert int(row.group(1).replace(",", "")) == evts, (
+        f"the Event row states {row.group(1)} but the population line counts {evts:,}")
+    # ...and the dispositions line must add up to the same population.
+    assert f"127 carry · 5 not-carried · {total - 132:,} undecidable" in flat, (
+        "the dispositions line does not add up to the population")
+    # ⛔ The PLAN's wiring row must not prescribe the clamp the code was fixed to remove:
+    # it said `limit=EVENT_READ_CEILING` while the code sends `reported + 1`, i.e. the plan
+    # documented the fail-open (PR-review cycle 2), and nothing pinned it.
+    plan = (_pathlib.Path(__file__).resolve().parent.parent / "docs" / "plans"
+            / "2026-11-13-issue-12378-event-layer-read.md").read_text(encoding="utf-8")
+    assert "limit=EVENT_READ_CEILING" not in plan, (
+        "the plan's wiring row still prescribes the clamped limit the code removed")
+    assert "min(reported + 1" not in plan.split("NOT capped")[0], (
+        "the plan still describes the clamped request as the implementation")
+
     # ...and the row records the change rather than dropping the subject.
     assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (
         "the Event row must say it IS enumerated now, and cite #12378")
@@ -4499,7 +4523,7 @@ def test_a_layer_that_grew_with_an_agreeing_recount_is_accepted_not_refused():
     reader = mod.MCPReader(call, None)
     out, reported = reader.read_events({"counts": {"Event": 3}})
     assert len(out) == 4 and reported == 4, (len(out), reported)
-    assert "GREW" in (reader.note or ""), reader.note
+    assert "CHANGED" in (reader.note or ""), reader.note
 
 
 def test_a_completed_event_read_survives_a_graphs_failure_on_both_disarmed_arms(
@@ -4542,3 +4566,30 @@ def test_a_completed_event_read_survives_a_graphs_failure_on_both_disarmed_arms(
         assert payload["events_read"] == 3, (shape, payload.get("events_read"))
         assert payload["events_total_reported"] == 3, (shape, payload)
         assert payload["events_reconciled"] is True, (shape, payload)
+
+
+def test_a_layer_that_shrank_with_an_agreeing_recount_is_accepted_not_refused():
+    """The MIRROR of the growth case: a delete between count and read is a correct read.
+
+    The re-count was applied only when `read > reported`, so a `:Event` deleted by the
+    hosted entity-delete path in the two-request window made a COMPLETE read refuse —
+    the same false block in the other direction (PR-review cycle 2). The request was
+    `reported + 1`, so a response shorter than the count cannot be truncated: the rows
+    ARE the newer layer, and a fresh count that equals them proves it.
+    """
+    mod = _tool_module()
+    rows = [{"id": "ev-1", "eventKind": "meeting", "name": "a"},
+            {"id": "ev-2", "eventKind": "meeting", "name": "b"}]
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return {"result": rows[:args["limit"]]}
+        if args.get("section") == "status":
+            return {"counts": {"Event": 2}}       # the newer, lower count
+        return {"result": []}
+
+    reader = mod.MCPReader(call, None)
+    out, reported = reader.read_events({"counts": {"Event": 5}})   # stale, higher count
+    assert len(out) == 2 and reported == 2, (len(out), reported)
+    assert "CHANGED" in (reader.note or ""), reader.note
