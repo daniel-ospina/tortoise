@@ -4778,7 +4778,14 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     # mechanical — no rewording can move it — and it is the thing every sentence above is
     # trying to describe, so it is asserted directly, in BOTH directions: the shipped
     # assignment present, and the superseded bound-plus-one absent.
-    assert "limit_sent = EVENT_READ_CEILING\n" in source_text, (
+    # ⚠️ The presence side pins the ASSIGNMENT, not the line's termination (PR-review cycle
+    # 8): `"limit_sent = EVENT_READ_CEILING\n"` redded a MEANING-PRESERVING edit — appending
+    # `# the declared response bound` to that line — while its own message accused the code
+    # of not sizing the request to the bound (measured: 1 failed). That is the same
+    # brittleness this block removed one assertion earlier, and it is the shape that gets a
+    # pin deleted rather than honoured. The regex allows a trailing comment and nothing else.
+    assert _re.search(r"^\s*limit_sent = EVENT_READ_CEILING\s*(?:#.*)?$", source_text,
+                      _re.M), (
         "curate_graph.py does not size the Event request to the bound")
     assert "limit_sent = EVENT_READ_CEILING + 1" not in source_text, (
         "curate_graph.py still sizes the Event request one ABOVE the bound, which the "
