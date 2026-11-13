@@ -5366,8 +5366,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # only because an earlier revision printed it: a predicted merge-tree
             # value (9943 + 8) no commit on `main` ever carried, and the
             # `10005`/`10019` pair that replaced it described a retired branch's
-            # merge tree whose 32-line block has since landed on `main` itself
-            # (`ea2c41a696`). The deltas are where the registrations landed:
+            # OWN tree and its MERGE tree respectively — `10005` = 9973 + that
+            # branch's 32 lines alone, `10019` = the same + the 14 `main`
+            # already carried. Neither is reachable today: the branch head that
+            # read 10005 is gone from the object DB, and its 32-line block has
+            # since landed on `main` itself (`ea2c41a696`), which is what makes
+            # 10019 a real value again one landing later. The deltas are where
+            # the registrations landed:
             # `main`'s +14 sits at 2237 + 9150 (only the 2237 one is above the
             # twins; both are above the entry), its +32 at 7535 and its two +1s
             # at 1039 and 2237 — all above the entry, so the entry moves by the
