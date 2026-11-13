@@ -5368,12 +5368,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # `10005`/`10019` pair that replaced it described a side branch's
             # OWN tree and its MERGE tree respectively — `10005` = 9973 + that
             # branch's 32 lines alone, `10019` = the same + the 14 `main`
-            # already carried. The branch's own tree still resolves — `10005` is
-            # line 10005 of `c1f69adff0:config/ci-surfaces.yml`, and that commit is
-            # reachable from `origin/fix/11825-replace-prim` (it is NOT gone from
-            # the object DB: a remote-tracking ref here proves the object is
-            # present, and `git for-each-ref --contains c1f69adff0` is the check
-            # that answers it) — and its 32-line block has
+            # already carried. No ref in THIS checkout still reaches either head
+            # that read 10005 — the branch that carried it is deleted on the
+            # remote and its objects are absent here (`git cat-file -e` exits
+            # 128) — so `10005` is stated as that branch's own arithmetic
+            # (9973 + 32), not as a line a reader can go and look at; its
+            # 32-line block has
             # since landed on `main` itself (`ea2c41a696`), which is what makes
             # 10019 a real value again one landing later. The deltas are where
             # the registrations landed:
