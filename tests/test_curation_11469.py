@@ -4812,14 +4812,18 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     assert not _prescribes(
         "The superseded row sized the request to `counts.Event + 1`."), (
         "recorded history must stay writable")
-    # ⚠️ KNOWN GAP, pinned so it cannot pass for safety: with no `.,;:` between a history
-    # marker and a live prescription, they share one unit and the marker exempts it. If this
-    # assertion ever starts failing, the detector got STRONGER — update the note it pins
-    # rather than deleting the case.
-    assert not _prescribes(
+    # ✅ FORMER KNOWN GAP, now CLOSED (review cycle 11). It read: "with no `.,;:` between a
+    # history marker and a live prescription, they share one unit and the marker exempts
+    # it", and it was pinned as `assert not _prescribes(...)` with the instruction "if this
+    # ever starts failing, the detector got STRONGER — update the note it pins". The
+    # exemption is now on the SIZING PHRASE BEING PAST-FORM rather than on any history word
+    # in the clause, so `used to size` no longer excuses the live `sizes its request to`
+    # that follows it in the same unit. Updated rather than deleted, per that instruction.
+    assert _prescribes(
         "Earlier revisions used to size the read to `counts.Event + 1` and the read sizes "
         "its request to `counts.Event + 1` today."), (
-        "the no-punctuation mixed shape is now flagged: strengthen the note in _prescribes")
+        "the no-punctuation mixed shape regressed: a history word is exempting the live "
+        "prescription that shares its clause")
     # ⛔ ...and the other direction of the same trap: a history WORD is not a history
     # STATEMENT. `Cycle 3` says where the number came from; it does not withdraw it.
     # Measured GREEN before this case was added (review cycle 10).
