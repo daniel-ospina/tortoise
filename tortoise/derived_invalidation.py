@@ -729,17 +729,16 @@ def _reconcile_or_report(sdk: Any, goal_id: str | None) -> dict:
     Every ``alreadyRetired`` answer owes the goal's ``goalState`` cache a
     reconcile (#12336): the retirement is a no-op there, but the WORD a goal
     displays can still name a claim that vanished (#12315's arm) or was retired by
-    another route — and no AUTOMATIC path repairs it once the goal holds no other
-    live claim: :func:`invalidate_stale` scans LIVE claims, so a goal whose last
-    claim is gone is never a finding again, while a stale finding on ANOTHER of the
-    goal's claims DOES reconcile the word on its way past (step 4). ⚠️ "No automatic
-    path" is not "no repair":
-    :func:`reconcile_goal_state_cache` is public and idempotent, and calling it
-    again with the goal's id IS the repair route — named in the success arm's own
-    comment (step 4 below) and in that function's docstring, never in a "failure
-    message", because a cache failure is REPORTED as a dict and not raised.
-    Measured before this existed: ``goalState`` stayed ``met`` after the claim was
-    deleted, through both the sweep and this door.
+    another route. No CLAIM-side pass repairs it once the goal holds no other live
+    claim: :func:`invalidate_stale` scans LIVE claims, so a goal whose last claim is
+    gone is never a finding again, while a stale finding on ANOTHER of the goal's
+    claims DOES reconcile the word on its way past (step 4). The repair therefore
+    starts from the GOAL: :func:`reconcile_goal_states` sweeps goals and routes each
+    stale word through the public, idempotent :func:`reconcile_goal_state_cache` —
+    which a caller can also call directly for one goal, and which never reports a
+    failure by RAISING (a cache failure comes back as a dict).
+    Measured before either existed: ``goalState`` stayed ``met`` after the claim was
+    deleted, through both the claim sweep and this door.
 
     Reported, never raised, for the same reason the success arm reports its
     reconcile failure: the retirement outcome is already the idempotent one, and a
@@ -800,10 +799,11 @@ def invalidate(
        goal's claims going stale later DOES repair it automatically — that
        finding's own step-4 reconcile re-derives the word from whatever still
        stands — but a goal whose LAST claim is gone is never a finding again, so
-       on that shape the repair route that needs no NEW INPUT is the manual,
-       public, idempotent :func:`reconcile_goal_state_cache` (a later
-       ``judge_and_record`` THAT REACHES A DECIDED STATE also rewrites the word —
-       but it mints a new claim, so it is not a repair of this one, and an
+       no claim-side pass can reach that shape: the repair starts from the GOAL,
+       through :func:`reconcile_goal_states` (the goal sweep, #12336) or by calling
+       the public, idempotent :func:`reconcile_goal_state_cache` for one goal (a
+       later ``judge_and_record`` THAT REACHES A DECIDED STATE also rewrites the
+       word — but it mints a new claim, so it is not a repair of this one, and an
        ``unknown`` judgement writes nothing at all). ``found`` says which shape it was —
        ``False`` when there is
        NO CLAIM NOW (it was absent, or it was read at the top and then vanished
@@ -852,11 +852,12 @@ def invalidate(
         # ⛔ AND THE GOAL'S CACHE IS STILL OWED ITS RECONCILE (#12336). The
         # retirement did not happen, but the WORD the goal displays may still name
         # this claim — the vanish-mid-sweep race is exactly the shape where it
-        # does, because the claim WAS live when the scan read it. No automatic
-        # path repairs it later ONCE THE GOAL HOLDS NO OTHER LIVE CLAIM; a stale
-        # finding on another of its claims reconciles the word too. And
-        # `invalidate_stale` scans LIVE claims, so a goal whose last claim is gone
-        # is never a finding again (measured: `goalState` stayed
+        # does, because the claim WAS live when the scan read it. No CLAIM-side
+        # pass repairs it later ONCE THE GOAL HOLDS NO OTHER LIVE CLAIM; a stale
+        # finding on another of its claims reconciles the word too, and the
+        # GOAL-side sweep `reconcile_goal_states` is what closes the last-claim
+        # shape. `invalidate_stale` scans LIVE claims, so a goal whose last claim
+        # is gone is never a finding again (measured: `goalState` stayed
         # `met` after the claim was deleted, through both the sweep and this
         # door). So the idempotent reading is reported AND the dependent state is
         # reconciled — otherwise `alreadyRetired: True` would assert a clean no-op
@@ -1012,11 +1013,12 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     * a goal retired by its ``status`` (``archived``) whose cache said ``met``
       kept ``met`` forever, because the reason was ``goal-retired`` and that arm
       reconciled nothing — the issue's headline surviving one of its own three
-      inputs, with no later pass revisiting that goal once its LAST live claim is
-      gone (the archived sweep retires them together, and while a live claim does
+      inputs, with no CLAIM-side pass revisiting that goal once its LAST live claim
+      is gone (the archived sweep retires them together, and while a live claim does
       remain, its own stale finding reconciles the word — so the shape that could
-      recur here is the last-claim one); the manual route for it is the public,
-      idempotent :func:`reconcile_goal_state_cache`);
+      recur here is the last-claim one); that shape is what
+      :func:`reconcile_goal_states` sweeps for, and this function is the per-goal
+      door it routes through);
     * a ``blocked`` goal lost the word when a ``target-revised`` retirement
       cleared the cache under it.
 

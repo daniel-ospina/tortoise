@@ -2170,7 +2170,9 @@ _REPAIR_QUALIFIERS = (
     "whose last claim is gone",
     "while a live claim",
     "while another live claim",
-    'is not "no repair"',  # the rhetorical form, which QUOTES the absolute
+    # Naming the goal sweep is the strongest admissible qualifier: a denial next to
+    # `reconcile_goal_states` tells the reader where the automatic repair IS.
+    "reconcile_goal_states",
 )
 
 
@@ -2259,30 +2261,45 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
     assert "claims going stale later does repair" in door, (
         "the `alreadyRetired` note must say WHICH shape repairs itself")
     assert "a goal whose last claim is gone is never a finding again" in door, (
-        "and which shape does not")
-    assert "needs no new input" in door, (
-        "the manual route must be scoped to 'no new input': a re-judge that reaches "
-        "a decided state also writes the word, so naming it as THE route "
-        "over-claims in the other direction")
+        "and which shape cannot")
+    assert "no claim-side pass can reach that shape" in door, (
+        "and that no CLAIM-side pass reaches it — the claim that replaced the "
+        "false 'no automatic path', which main's goal sweep (#12336) made wrong: "
+        "the sweep IS the automatic path")
+    assert "the repair starts from the goal" in door, (
+        "the note must name WHERE the repair starts, not only what fails")
     assert "that reaches a decided state" in door, (
         "and the re-judge route must stay scoped to a DECIDED state: `unknown` "
         "writes nothing (`_write_goal_state_cache` skips a None)")
-    assert "no automatic path" not in door, (
-        "the door note states the QUALIFIED form; an absolute may not return here")
-    assert "no automatic path repairs it once the goal holds no other live claim" in helper
-    assert "no later pass revisiting that goal once its last live claim is gone" in cache_doc, (
+    for site, text in (("invalidate.__doc__", door),
+                       ("_reconcile_or_report.__doc__", helper),
+                       ("reconcile_goal_state_cache.__doc__", cache_doc),
+                       ("invalidate (source + comments)", norm)):
+        assert "no automatic path" not in text, (
+            f"{site}: 'no automatic path' is FALSE on the merged tree — "
+            ":func:`reconcile_goal_states` is exactly that path (#12336)")
+    assert "no claim-side pass repairs it once the goal holds no other live claim" in helper
+    assert ":func:`reconcile_goal_states`" in helper, (
+        "the helper must NAME the goal sweep; a denial that names no repair route "
+        "is precisely the false absolute")
+    assert "no claim-side pass revisiting that goal once its last live claim is gone" in cache_doc, (
         "the archived-goal bullet must say WHY the last-claim shape cannot recur here")
     assert "archived sweep retires them together" in cache_doc
-    assert ("no automatic path repairs it later once the goal holds no other live "
+    assert ":func:`reconcile_goal_states`" in cache_doc
+    assert ("no claim-side pass repairs it later once the goal holds no other live "
             "claim") in norm, (
         "the absent-arm COMMENT must keep the qualifier IN the sentence")
+    assert "reconcile_goal_states" in norm, (
+        "and must name the sweep that closes the shape")
     for marker in _TRUE_NON_DENIALS:
         assert any(marker in t for t in (door, helper, cache_doc, norm)), (
             f"stale exemption {marker!r} — it no longer appears at any site, so it "
             "excuses nothing; delete it rather than leaving a blind spot")
-    assert norm.count("no automatic path") == 1, (
-        "EXACTLY ONE 'no automatic path' may stand in `invalidate`; the adjacency "
-        "assertion above cannot see a second one planted in another comment")
+    assert norm.count("no claim-side pass") == 2, (
+        "EXACTLY TWO 'no claim-side pass' statements may stand in `invalidate` — the "
+        "docstring's ('can reach that shape') and the absent-arm comment's "
+        "('repairs it later ONCE …'); the adjacency assertion above cannot see a "
+        "third one planted in another comment, so the count is the guard")
 
     # ---- the grid: every family, at every site -------------------------------
     for site, text in (
