@@ -5385,30 +5385,37 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # tests/test_7949_capstone_measure.py); do git show
             # $c:tests/test_7949_capstone_measure.py | rg -o '"[0-9]{4}", "-
             # test_pack_logic_writeprobe_11083.py"'; done | sort -u`, measured at
-            # `abf186f1109`); the ENTRY line has been `9987` since
-            # `f1f74135a15b`, and `#12342` landed `9987` as the ROW value too, so
-            # no number this row prints is absent from `main`. The COUNT is
-            # deliberately not the claim: the recipe below walks whatever branch
-            # you RUN IT ON, so it prints the values THAT branch carries and can
-            # make no main/branch distinction for you. Reproduce it, one value per
-            # commit, with
+            # `origin/main` `d571adef87` — the recipe walks whatever branch you RUN
+            # IT ON, so it prints TEN values at `abf186f1109` and ELEVEN here, and
+            # can make no main/branch distinction for you); the ENTRY line has been
+            # `9987` since `f1f74135a15b`, and `#12342` (`d571adef87`) landed
+            # `9987` as the ROW value too, so no number this row prints is absent
+            # from `main` any more. The COUNT is deliberately not the claim.
+            # Reproduce it, one value per commit, with
             #   for c in $(git log --reverse --format=%h -- tests/test_7949_capstone_measure.py); do
             #     git show $c:tests/test_7949_capstone_measure.py \
             #       | rg -o '"[0-9]{4}", "- test_pack_logic_writeprobe_11083.py"'; done | sort -u
             # Every repair of the pin itself that has LANDED on `main` — a commit
             # whose row value was PRESENT at its parent, DISAGREED with the entry's
-            # line THERE, and AGREED at itself:
-            # `a7139b663d25` -> 9714, `eb27f96d3ecd` -> 9906, `63f725cca168` -> 9933,
-            # `23f80aef6a55` -> 9934, `e59e60769287` -> 9973
+            # line THERE, and AGREED at itself — SIX of them, measured at
+            # `origin/main` `d571adef87`:
+            # `a7139b663d` -> 9714, `eb27f96d3e` -> 9906, `63f725cca1` -> 9933,
+            # `23f80aef6a` -> 9934, `e59e607692` -> 9973, `d571adef87` -> 9987.
+            # (`d571adef87` is #12342, which moved the row `9973` -> `9987`; an
+            # enumeration written before it landed reads FIVE, which is how a prose
+            # count goes stale — the PREDICATE, never the count, is the claim.)
             # (`git show <c>:tests/… | rg -o '"[0-9]{4}", "- test_pack_logic_writeprobe_11083.py"'`
             # reproduces each — a pattern that omits the `"[0-9]{4}", ` part
             # prints only the filename and no number; the repair PROOF is against
-            # the PARENT, `<c>^`, whose row disagreed with the entry). ⛔ BOTH
-            # clauses are load-bearing: `174af52d20` (this PR's own commit — wrong
-            # at its parent, right at itself) and `3557a476e1` (the row's FIRST
-            # appearance, whose parent carries no row at all) each satisfy a looser
-            # "parent disagreed" reading, so a predicate omitting PRESENT or LANDED
-            # enumerates SEVEN, not five. The enumeration is also
+            # the PARENT, `<c>^`, whose row disagreed with the entry). ⛔ ALL THREE
+            # clauses are load-bearing, and each has a commit that breaks its
+            # omission: omit LANDED and this PR's own `174af52d20` joins (the same
+            # shape as `d571adef87`, on a branch instead of on `main`); omit
+            # PRESENT and `3557a476e1`, the row's FIRST appearance, joins (its
+            # parent carries NO row at all); omit AGREED-at-self and `cd22562c24`
+            # joins (`9934` -> `9951` while the entry moved `9965` -> `9973`, so its
+            # row was stale at BOTH ends — a commit that MOVES the entry is not a
+            # repair of it). The enumeration is also
             # posted on #9158, the tracker entry for the class. The
             # mover here is `f1f74135a15b` (#12302): +14 lines into
             # `config/ci-surfaces.yml` above the entry, of which TWELVE are prose
