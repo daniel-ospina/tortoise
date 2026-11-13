@@ -2168,8 +2168,10 @@ NOT_A_REMOVAL_ROUTE = (
     "A `RETIRED_USE_INSTEAD` entry is NOT a route here: with the declaration still live the "
     "symbol is RETIRED, not removed (it is still served, and the `retired:` half of the "
     "baseline is compared); with the declaration gone the map key dangles and the cut refuses "
-    "it as a contradiction. Restore the declaration if you want a retirement, archive the code "
-    "if you want a removal."
+    "it as a contradiction. In that dangling state NEITHER route above works as written — "
+    "`archive_symbol` reads the declaration and refuses without one, and `check` refuses to "
+    "archive a name that is in that map — so restore the declaration from git FIRST, then "
+    "either keep it (a retirement) or freeze the code and delete it (a removal)."
 )
 
 
@@ -2521,7 +2523,11 @@ def removal_report(
             # DELETE the frozen entry: the loss this archive exists to prevent. Measured on
             # both sides (review of PR #12313).
             problems.append(RemovalProblem(
-                "no-record",
+                # NOT "no-record": the row HAS a record — it is missing its OTHER half — and
+                # counting it as a plain drop printed "cut would drop 1 surface row(s) with no
+                # usable record" over a row the very next line says is archived
+                # (review of PR #12313, round 12).
+                "incomplete-record",
                 f"{symbol} (sdk) is archived but absent from RETIRED_SDK_METHODS / "
                 "REMOVED_SDK_METHODS — `archive_surface.py check` reds that shape, so the "
                 "freeze alone is not the record: record the departure too (for an SDK method "
@@ -2622,6 +2628,12 @@ def removal_report(
             accounting.pop((symbol, cls), None)
     for symbol, classes in sorted(waived.items()):
         if len(classes) > 1:
+            # The same invariant the redundant-override arm enforces: a caller reading
+            # `accounting` must not see a record the cut REFUSED. The ambiguity counts every
+            # class the bare entry waives, so all of them come out (review of PR #12313,
+            # round 12).
+            for cls in classes:
+                accounting.pop((symbol, cls), None)
             problems.append(RemovalProblem(
                 "ambiguous-waiver",
                 f"one `--allow-removal {symbol}` would waive {len(classes)} removals "
@@ -2768,25 +2780,39 @@ def cmd_cut(args: argparse.Namespace) -> int:
         # false too: a refused cut writes nothing below. So the record-remedy block is printed
         # only when a `no-record` problem is present; otherwise each line's own instruction is
         # the whole refusal (review of PR #12313).
-        missing = [p for p in problems if getattr(p, "kind", "no-record") == "no-record"]
-        if missing:
+        # ROWS THAT NEED A RECORD, whatever half they are missing: a plain drop, and a
+        # half-record (an SDK method whose freeze or map entry is absent). Both are "no USABLE
+        # record", which is what the header says, so both belong under it — typing the
+        # half-record apart was only half the round-12 fix: the heading below also named one
+        # of the two shapes, so a mixed refusal still described a row as something it was not
+        # (review of PR #12313).
+        recordable = [
+            p for p in problems if getattr(p, "kind", "no-record") in ("no-record", "incomplete-record")
+        ]
+        if recordable:
             print(
-                f"::error::cut would drop {len(missing)} surface row(s) with no usable record"
+                f"::error::cut would drop {len(recordable)} surface row(s) with no usable record"
             )
             print("REFUSED a removal must leave a record — the #11609 owner ruling archives "
                   "removed code so a mistake can be inspected later, and a re-cut cannot "
                   "tell an archived removal from a silent deletion:")
             for problem in problems:
                 print(f"  {problem}")
-            print("  Account for each row reported above as 'DROPPED with no record' this "
-                  "way:")
+            # NEUTRAL WORDING ON PURPOSE: the rows above may be plain drops OR half-records,
+            # so a heading that names one of them mis-describes the other.
+            print("  Account for each row above by exactly one of:")
             for way in REMOVAL_WAYS:
                 print(f"    - {way}")
             print(f"  {SDK_PAIR_RULE}")
             print(f"  {NOT_A_REMOVAL_ROUTE}")
-            print("  A genuine RENAME (the old name is gone by design) passes "
-                  "`--allow-removal <symbol> --allow-removal-reason <why>`; it is logged "
-                  "in the cut output and belongs in the PR body.")
+            # ⛔ ONLY WHERE IT CAN CLEAR. `--allow-removal` is consulted on the no-record
+            # path; a contradiction row is `continue`d before the waiver is read, so printing
+            # the rename remedy under a mixed refusal prescribed a flag that changes nothing
+            # for the row it appears to address (review of PR #12313, round 12).
+            if all(p.kind == "no-record" for p in problems):
+                print("  A genuine RENAME (the old name is gone by design) passes "
+                      "`--allow-removal <symbol> --allow-removal-reason <why>`; it is logged "
+                      "in the cut output and belongs in the PR body.")
             return 1
         print(f"::error::cut refused this removal: {len(problems)} problem(s)")
         print("REFUSED — each line names what is wrong, and the record it names is the "

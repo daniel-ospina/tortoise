@@ -508,6 +508,9 @@ def _load_guard():
     return mod
 
 
+REMOVAL_WAYS_HEAD = "Account for each row above by exactly one of:"
+
+
 def _load_manifest_tool():
     """Import tools/surface_manifest.py (hyphenated filename) as a module."""
     import importlib.util
@@ -5748,7 +5751,9 @@ def test_an_override_for_a_recorded_symbol_reports_the_RECORD_not_an_unused_over
     # told to add a record to a recorded row, and the printed remedies contradicted the line
     # directly above them (review of PR #12313).
     assert "no usable record" not in out, out
-    assert "Account for each symbol by exactly one of" not in out, out
+    # The REAL heading the tool prints (it used to read "Account for each symbol …", a string
+    # no code emits, so the assertion could not fail — review of PR #12313, round 12).
+    assert REMOVAL_WAYS_HEAD not in out, out
     assert "cut refused this removal" in out, out
     assert path.read_text(encoding="utf-8") == before
 
@@ -5786,7 +5791,7 @@ def test_the_no_record_header_and_remedies_still_print_for_a_no_record_refusal(
     assert rc == 1, out
     assert f"{symbol} (tool) was DROPPED with no record" in out, out
     assert "cut would drop 1 surface row(s) with no usable record" in out, out
-    assert "Account for each row reported above as 'DROPPED with no record'" in out, out
+    assert REMOVAL_WAYS_HEAD in out, out
     assert "--allow-removal <symbol> --allow-removal-reason" in out, out
     # ⛔ AND THE ROUTE LIST MUST NOT OFFER A DEAD END. `RETIRED_USE_INSTEAD` cannot account for
     # a removal — a key with the declaration still live is a RETIREMENT (still served, so not a
@@ -5796,8 +5801,73 @@ def test_the_no_record_header_and_remedies_still_print_for_a_no_record_refusal(
     # (review of PR #12313, round 9).
     assert "- `RETIRED_USE_INSTEAD`" not in out, out
     assert "A `RETIRED_USE_INSTEAD` entry is NOT a route here" in out, out
-    # The word "below" was false: a refused cut writes no log below the refusal.
-    assert "below" not in out, out
+    # The claim was false: a refused cut writes no log below the refusal.
+    assert "logged below" not in out, out
+
+
+def test_each_refusal_BLOCK_is_scoped_to_the_PROBLEM_CLASSES_it_can_clear(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The header, the routes and the rename remedy are per-class, not per-refusal.
+
+    Three rounds have each made one of these blocks print over a row it cannot help:
+    "no usable record" over a row that HAS a record (round 12: the SDK half-record, typed
+    `no-record`), "Account for each row reported above as 'DROPPED with no record'" over rows
+    that are not reported that way, and the `--allow-removal` rename remedy (which only the
+    no-record path consults) under a mixed refusal carrying a contradiction. The kinds are
+    what `cmd_cut` branches on, so this drives the three mixtures through the real `cmd_cut`.
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": set(), "forward_raw": set(), "sdk_retired": set()},
+    )
+
+    def _run(problems):
+        monkeypatch.setattr(sm, "removal_report", lambda *a, **k: (problems, {}))
+        rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+        out = capsys.readouterr().out
+        assert rc == 1, out
+        return out
+
+    renamed = "--allow-removal <symbol> --allow-removal-reason"
+
+    # A plain drop: every block applies.
+    out = _run([sm.RemovalProblem("no-record", "x was DROPPED with no record")])
+    assert "no usable record" in out and REMOVAL_WAYS_HEAD in out, out
+    assert renamed in out, out
+
+    # A record that exists but is missing its other half IS a row under the header (it needs a
+    # route — the missing half), but the rename remedy cannot supply it, so that one line must
+    # not print. This is the shape round 12 found mis-typed as a plain drop.
+    out = _run([sm.RemovalProblem("incomplete-record", "x (sdk) is archived but absent")])
+    assert "no usable record" in out and REMOVAL_WAYS_HEAD in out, out
+    assert renamed not in out, out
+
+    # A problem that needs NO record at all (a contradiction settled before any waiver is read)
+    # gets the class-neutral refusal: no header, no routes, no rename.
+    out = _run([sm.RemovalProblem("contradiction", "y is accounted by 2 records")])
+    assert "no usable record" not in out, out
+    assert REMOVAL_WAYS_HEAD not in out, out
+    assert renamed not in out, out
+    assert "cut refused this removal" in out, out
+
+    # Mixed: the routes DO apply (one row really has no record) but the rename remedy does not
+    # apply to the contradiction row, which `removal_report` settles before reading a waiver.
+    out = _run(
+        [
+            sm.RemovalProblem("no-record", "x was DROPPED with no record"),
+            sm.RemovalProblem("contradiction", "y is accounted by 2 records"),
+        ]
+    )
+    assert "no usable record" in out and REMOVAL_WAYS_HEAD in out, out
+    assert renamed not in out, out
 
 
 def test_an_archive_entry_without_its_FIELDS_is_not_a_RECORD(tmp_path):
@@ -6065,6 +6135,15 @@ def test_a_BARE_waiver_is_not_a_redundant_override_for_the_OTHER_surfaces_record
     assert problems == [], problems
     assert accounting[("x", "sdk")].startswith("RETIRED_SDK_METHODS"), accounting
     assert "--allow-removal" in accounting[("x", "tool")], accounting
+
+    # The two-surface AMBIGUITY must not leave the records it refused in `accounting` either —
+    # the same invariant the redundant-override arm enforces (review of PR #12313, round 12).
+    empty = {"archived": set(), "forward_raw": set(), "sdk_retired": set()}
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool"), ("tortoise_x", "sdk")}, set(), empty, allowed={"tortoise_x"}
+    )
+    assert [p.kind for p in problems] == ["ambiguous-waiver"], problems
+    assert accounting == {}, accounting
 
     # Non-vacuity: a QUALIFIED waiver on the recorded class IS the false record, and is refused
     # — and the tool removal it no longer covers is then the plain no-record case.
