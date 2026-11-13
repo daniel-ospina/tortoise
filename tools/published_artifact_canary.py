@@ -134,7 +134,13 @@ def _install_failure_is_absence(stderr: str, wheel: Path | None = None) -> bool:
       pip naming the wheel it could not install, and nothing else counts. A dependency
       fetch that failed is the network's problem, not the built wheel's.
     * INDEX mode is settled by the caller re-reading the index (``index_absence_probe``)
-      — an independent confirmation, not the same connection's opinion (#12363 round 4).
+      and routing on its THREE answers — see that function's contract (#12363 rounds 4
+      and 11). ⛔ It is NOT "an independent confirmation, not the same connection's
+      opinion": `_main` only reaches this arm after a SUCCESSFUL read of the very URL
+      the probe re-reads, so the probe shares the caller's view of the index. What it
+      buys is a SECOND look at the index (did the project vanish, or does it still
+      answer?), not a different vantage point — and reading it as independence is how
+      the round-11 dead arm got written.
     """
     text = (stderr or "").lower()
     if wheel is not None:
@@ -143,11 +149,29 @@ def _install_failure_is_absence(stderr: str, wheel: Path | None = None) -> bool:
 
 
 def index_absence_probe(package: str, timeout: float = 30.0) -> str:
-    """Re-read the index after pip failed: did the PROJECT itself disappear?
+    """Re-read the index after pip failed, and report WHAT THE INDEX SAYS NOW.
 
-    Returns one of INDEX_ABSENT / INDEX_UNREADABLE. Only INDEX_ABSENT justifies a FAIL:
-    anything else means the detector could not get an answer, which is UNKNOWN — a
-    non-zero exit that never tells a human to cut a release.
+    Returns ``fetch_index``'s state: INDEX_OK, INDEX_ABSENT (a real 404/410) or
+    INDEX_UNREADABLE (no answer obtained). ⛔ THREE values, and the CALLER routes all
+    three — this docstring used to say "Returns one of INDEX_ABSENT / INDEX_UNREADABLE.
+    Only INDEX_ABSENT justifies a FAIL: anything else means the detector could not get
+    an answer, which is UNKNOWN", and BOTH halves of that were wrong in the code's own
+    terms: the function returns INDEX_OK on success, and a FAIL is owed for ABSENT **and**
+    for OK (#12363 round 11).
+
+    Why OK is a FAIL: `_main` only reaches the pip arm after a SUCCESSFUL fetch of this
+    same URL, so a probe that answers OK is the ordinary case — the index is reachable
+    and still serves the project, and pip cannot resolve the exact version. That is a
+    finding about the ARTIFACT (no files uploaded for ``info.version``, every file
+    yanked, a wheel pip rejects), not about the detector. Routing OK to UNKNOWN is what
+    made the caller's FAIL arm unreachable and reported "do NOT cut a release" for an
+    uninstallable release. UNKNOWN is reserved for the one state that genuinely has no
+    answer: INDEX_UNREADABLE.
+
+    ⛔ Do NOT "restore" a `state != INDEX_ABSENT -> UNKNOWN` test here or at the caller:
+    that is the defect, not the protection. The round-3 protection it was meant to give —
+    pip prints its absence vocabulary for an UNREACHABLE index too — is preserved by
+    keeping UNREADABLE (and only UNREADABLE) on the UNKNOWN path.
     """
     _doc, _reason, state = fetch_index(package, timeout)
     return state

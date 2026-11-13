@@ -641,15 +641,21 @@ def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
     workflows = REPO_ROOT / ".github" / "workflows"
 
     def normalised(value: str) -> str:
-        """Both runner-temp spellings collapsed to one token, quotes stripped."""
+        """Runner-temp spellings collapsed to ONE token, quotes and trailing slash stripped.
+
+        The WHOLE path is compared, not its last component (#12363 round 12). An earlier
+        cut of this pin compared only `basename()` and was blind to the LOCATION axis:
+        `--transcript-dir "$RUNNER_TEMP/logs/canary"` against an upload path of
+        `${{ runner.temp }}/canary/` compares `canary == canary` and passes, while the
+        upload matches no file — measured, and the docstring above claimed the PATH was
+        pinned, which was false for three of the five sites.
+        """
         text = str(value).strip().strip('"')
         for spelling in ("${{ runner.temp }}", "${RUNNER_TEMP:-/tmp}", "$RUNNER_TEMP"):
             text = text.replace(spelling, "TEMP")
-        return text
-
-    def last_segment(value: str) -> str:
-        """The final path component, with either runner-temp spelling normalised away."""
-        return normalised(value).rstrip("/").rsplit("/", 1)[-1]
+        # Collapse `a//b` and a trailing slash so a cosmetic difference is not a red.
+        parts = [part for part in text.split("/") if part not in ("", ".")]
+        return "/".join(parts)
 
     def paired(wf_file: str, job_name: str, artifact_name: str) -> str:
         job = yaml.safe_load((workflows / wf_file).read_text())["jobs"][job_name]
@@ -659,7 +665,7 @@ def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
         assert len(invocations) == 1, (wf_file, job_name, "expected exactly one canary call")
         found = re.search(r'--transcript-dir\s+"?([^\s"]+)"?', invocations[0])
         assert found, (wf_file, job_name, "the canary call passes no --transcript-dir")
-        written = last_segment(found.group(1))
+        written = normalised(found.group(1))
 
         uploads = [
             s
@@ -673,7 +679,7 @@ def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
             f"expected exactly one transcript upload named {artifact_name!r} (found "
             f"{[s.get('with', {}).get('name') for s in steps if s.get('uses', '').startswith('actions/upload-artifact')]})",
         )
-        collected = last_segment(uploads[0]["with"]["path"])
+        collected = normalised(uploads[0]["with"]["path"])
         assert written == collected, (
             f"{wf_file}/{job_name}: the tool writes the transcript to `{written}` but the "
             f"upload collects `{collected}` — `if-no-files-found: warn` keeps this job GREEN "
@@ -699,7 +705,7 @@ def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
     assert downloads[0]["with"]["name"] == "published-artifact-canary-log", (
         "the report job asks for an artifact name no upload declares"
     )
-    assert last_segment(downloads[0]["with"]["path"]) == canary_dir, (
+    assert normalised(downloads[0]["with"]["path"]) == canary_dir, (
         "the report job unpacks the transcript into a different directory than the canary's "
         "upload path, so `download-artifact` succeeds and the alert still finds nothing"
     )
@@ -707,10 +713,9 @@ def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
     alert = (REPO_ROOT / ".github" / "scripts" / "published-artifact-alert.sh").read_text()
     log_ref = re.search(r'^\s*local log="([^"]+)"', alert, re.MULTILINE)
     assert log_ref, "the alert script no longer names a transcript path to TAIL"
-    alert_path = normalised(log_ref.group(1)).rstrip("/")
+    alert_path = normalised(log_ref.group(1))
     assert "/" in alert_path, ("the alert's log path carries no directory", log_ref.group(1))
-    alert_dir = alert_path.rsplit("/", 1)[0].rsplit("/", 1)[-1]
-    alert_base = alert_path.rsplit("/", 1)[-1]
+    alert_dir, _, alert_base = alert_path.rpartition("/")
     assert alert_dir == canary_dir, (
         f"the alert reads `{alert_dir}` but the canary uploads `{canary_dir}` — the body's "
         f"TAIL would be unreachable and every issue would degrade to \"(no transcript …)\""
@@ -1448,6 +1453,28 @@ def test_the_canary_cannot_be_SILENCED_without_reding_this_file():
     assert "published_artifact_canary.py" in str(smoke.get("run")), (
         "the `canary` step id must be the step that runs the tool: the alert steps key "
         "on `steps.canary.outputs.exit_code`"
+    )
+    # ⛔ THE STEP MUST PROPAGATE THE TOOL'S EXIT STATUS (#12363 round 12). The tool is
+    # invoked as `… || rc=$?`, so on a FAIL the NEXT command decides the step's status. If
+    # the trailing `exit "$rc"` is dropped, the step's last command is the
+    # `echo … >> $GITHUB_OUTPUT` redirect, the step exits 0, the `canary` JOB reports
+    # SUCCESS — and then `File or refresh the alert issue` (`needs.canary.result !=
+    # 'success'`) is SKIPPED while `Close the alert issue on a green run` (`result ==
+    # 'success'`) RUNS: the release-owed ledger is resolved by a run whose own step
+    # summary says FAIL. Measured: deleting the line left this whole suite green.
+    smoke_run = str(smoke.get("run"))
+    assert '|| rc=$?' in smoke_run, (
+        "the canary call must capture the tool's exit status (the `|| rc=$?` idiom)"
+    )
+    assert 'exit "$rc"' in smoke_run, (
+        "the canary step must END with `exit \"$rc\"` — without it the step exits 0 whatever "
+        "the tool said, the job reports success, and the alert CLOSES the ledger on a FAIL"
+    )
+    # ORDER: the output must be published BEFORE the exit, or the redirect never runs and
+    # `steps.canary.outputs.exit_code` is empty (which the report job reads as "detector
+    # outage" for every severity, including a real release finding).
+    assert smoke_run.index("GITHUB_OUTPUT") < smoke_run.index('exit "$rc"'), (
+        "`echo exit_code=… >> $GITHUB_OUTPUT` must come BEFORE `exit \"$rc\"`"
     )
 
 
