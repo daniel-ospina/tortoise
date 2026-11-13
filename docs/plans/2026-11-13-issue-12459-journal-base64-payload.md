@@ -210,8 +210,8 @@ The framing is 16 B on a 2,064 B field: **0.8 %**. That is the whole overhead of
 ### 1.4 ⛔ The headline "~4.1×" is a **pre-P0 → P2** figure, not the step this note decides
 
 #11821 and #12459 both say **~4.1×**. That is `8,414 / 2,048 = 4.11` — pre-P0 decimal text against the
-**bare base64**. **P0 already took the first 1.79× of it.** The step that is actually still on the table,
-and the only one a decision here can spend, is:
+**bare base64**. **P0 already took the first 1.79× of it.** The **leg** still on the table is P0 → P2 (the
+alphabet inside it is a *second*, smaller choice — §2.5.1 measures `b85` at 2.03× on the record):
 
 ```
 vector payload   4,689 → 2,064 B   = 2.27×
@@ -382,8 +382,10 @@ does not mean**: the committed corpus carries exactly **one** `embedding`, a **2
 — so the five rows are five records sharing one vector, not five corpus vectors, and §2.5 says the same
 ("the vector the probe injects; no corpus record carries it"). The five rows are still the right check
 because the property is **element-wise and therefore vector-independent**: each of the 384 floats must
-survive pack → base64 → unpack. It is **not** float64-value equality with P0's text, and a test that
-asserted that would fail on every element by design.
+survive pack → base64 → unpack. It is **not** float64-value equality with P0's text: such a test
+would fail on **384 of the probe's 384 elements** (a deliberately off-grid vector) and would **pass
+vacuously** on a degenerate one — all zeros and small integers are exactly representable — which is exactly
+why the assertion is on the float32 **bits**.
 
 That 9 significant digits suffice for float32 is float32's own structure (24-bit significand ⇒ 9 decimal
 digits round-trip; 8 do not always). Checked rather than cited, on 2,000,000 random float32 values:
@@ -413,6 +415,27 @@ The duplication is deliberate: it costs **4 B of the 16 B frame** (the `f32:` wi
 already implied by `embedding_width`) and it removes the only way the width can be wrong at rebuild
 time without anything noticing. Where a checked duplicate and a single source of truth conflict, the
 unrecoverable direction wins.
+
+#### 2.4.1 The writer side of that rule — a width-less vector is never framed
+
+The cross-check above is a **reader** rule, and it has a writer-side precondition the note must state or the
+two rules combine into a defect: `embedding` present with **no** `embedding_width` is a **supported** shape,
+not legacy. The seam is *guarded at the call site* — `#5148`, an unimportable `tortoise.embeddings` must not
+fail a write — so such a capture journals the vector with no width declaration, and
+`record_projection.py` says so verbatim: *"a capture whose seam was unimportable journals the vector with no
+width — exactly the pre-#11821 shape, which this set must keep accepting"* (6 tests in
+`tests/test_write_path_unreachable_seam_5148.py`).
+
+**So the encoder frames only what declares a width**: it takes the token from `embedding_width` and nothing
+else, and a marker-less vector is written as a plain JSON list — the shape the reader already accepts on the
+pre-P0 path. Two ways to get this wrong, both fatal in exactly the way §3 exists to prevent:
+
+- **frame it anyway** → `read_all` refuses a record that `append` accepted: a supported write becomes
+  unreplayable, which is §3's stated worst defect;
+- **default the token** → a marker-less **caller-owned** `f64` vector gets framed `f32` and is **narrowed**,
+  which §4.4 says would be a reopen.
+
+Pin 8 in §3.2 is the round trip that catches both.
 
 ### 2.5 The log line stays newline-delimited and parseable — and why not raw bytes
 
@@ -457,16 +480,19 @@ An earlier draft said base64 is the *only* framing that keeps the line a JSON ob
 **2.03×** on the record and **2.42×** on the vector instead of 1.94×/2.27×. So the choice is a **recorded
 trade, not an optimum**, and this note does not claim otherwise:
 
-- **base64 wins on ubiquity and hand-inspectability.** RFC 4648, in every language's standard library,
-  and `echo '<b64>' | base64 -d | xxd` lets a human read a vector out of a journal during an incident.
+- **base64 wins on ubiquity and hand-inspectability.** RFC 4648, in **most** languages' standard
+  libraries (Python, Java, Go, C#'s `System.Convert`, Node's `Buffer` — but **not** Rust's or C's, which is
+  the same reason b85's support is thin), and `echo '<b64>' | base64 -d | xxd` lets a human read a vector
+  out of a journal during an incident.
   b85 has a Python stdlib decoder and much less support elsewhere; z85 has none in Python's stdlib (the
   probe implements it) and its alphabet is a ZeroMQ spec (RFC 32), not an IETF one.
 - **a85 is refused outright**: its alphabet contains the quote and the backslash, so it needs JSON escaping
   and would break the one-write-no-escaping property §2.5 exists to keep — and its real JSON field is
   **1,970 B**, not the 1,936 its body length suggests, which is why the table's field column charges the
   escaped length (measured: `needs JSON escaping = True`).
-- **hex is refused on size**: +100 % overhead, 3,088 B — still 1.52× better than P0, but it gives back a
-  third of the win for no property base64 lacks.
+- **hex is refused on size**: +100 % overhead, 3,088 B — still **1.52× better than P0 on the field** (and
+  1.42× on the record, since the 734 B of non-vector bytes do not move), but it **gives back 39 %** of the
+  win for no property base64 lacks.
 
 If a later lane wants the extra 128 B/record, **b85 is the drop-in** — same frame, same count, same width
 tag, `base64.b85encode`/`b85decode` — and the format version is what makes that a v2 rather than a break.
@@ -527,7 +553,9 @@ the frame, one place to get it wrong — the same reason P0 put the width decisi
 `read_all`: `log.py`'s seal/tail detection, `subject_binding`'s key scan, and `MentionScan`
 (`log.py:1243`, used by `EventLog.mention_lines` and `sdk._journal_presence_state`). All three read
 `type`/id-shaped keys and **never** `embedding` — measured at this head: `embedding` appears as a **code**
-token on **no line** of `log.py` or `subject_binding.py` (tokenised, comments excluded; `log.py`'s eight
+token on **no line** of `log.py` or `subject_binding.py` (tokenised, comments excluded, and **both** token
+classes counted — a `NAME` and a `STRING`, because a JSON access like `rec["embedding"]` is a string token
+and a NAME-only scan would miss it; `log.py`'s eight
 mentions are all comment prose), and `_apply_journal_presence` — the parser behind `MentionScan` — and
 `_journal_presence_state` contain none. So an undecoded frame cannot reach them. That is a property to
 keep, not an accident to assume: the implementation's tests must red if any of them starts reading a
@@ -579,6 +607,18 @@ Named here so the implementation cannot choose a weaker one:
   7. **`append` decodes nothing**: a decoded record re-appended writes a **frame** (the encoder is at the
      write boundary, not on the in-memory record), so re-stamping a read record cannot flip its width —
      the #11835 F2 class of defect, one layer out.
+  8. **a width-less vector is never framed, and still replays.** `embedding` present with **no**
+     `embedding_width` is a **supported** shape, not a legacy one: the seam is *guarded at the call site*
+     (`#5148` — an unimportable seam must not fail a write), so a capture whose seam did not run journals
+     the vector with no width declaration, and `record_projection.py`'s comment on
+     `TURNS_SNAPSHOT_OPTIONAL_KEYS` says so ("exactly the pre-#11821 shape, which this set must keep
+     accepting"; pinned by `tests/test_write_path_unreachable_seam_5148.py`, 6 tests). So the encoder takes
+     its width token **from `embedding_width` and nothing else** — a marker-less vector is written as a
+     plain JSON list, never a frame — and the test must prove the round trip: append → `read_all` →
+     `rebuild_all` succeeds, unframed. ⛔ Without that rule the note's own reader rule (§2.4's *frame with
+     no marker → refuse*) turns a **supported write into an unreplayable record** (§3's stated worst
+     defect), and the alternative — defaulting the token — would frame a caller-owned `f64` vector as
+     `f32` and **narrow it**, which §4.4 says is a reopen.
 
 ### 3.3 The failure this section exists to prevent
 
@@ -781,7 +821,7 @@ as the dominating record term it always was. So:
   "narrowing" that was really a reversal).
 - **So: do not take P2 on the strength of the byte saving alone.** Take it if and when the journal's vector
   payload shows up as a real cost or a real operator problem, and then take it **exactly as specified here**
-  — its own PR, §3.2's seven pins as the review scope, and the `#11821` gate re-stated first (§5). If it is
+  — its own PR, §3.2's eight pins as the review scope, and the `#11821` gate re-stated first (§5). If it is
   never taken, this note is the recorded design that was declined, which is cheaper than rediscovering it.
 
 That judgement belongs to the owner of #11821 and of the journal's cost line — not to this note.
@@ -826,7 +866,9 @@ PY
 
 ```bash
 # 4. the §3.1 claim that no bypassing reader touches a vector: `embedding` as a CODE
-#    token (comments excluded) on every journal line-parser that skips `read_all`
+#    token (comments excluded) on every journal line-parser that skips `read_all`.
+#    ⛔ NAME tokens alone are not enough — a JSON access is a STRING token, so
+#    `rec["embedding"]` would be invisible to a NAME-only check. Both are counted.
 uv run python - <<'PY2'
 import io, inspect, tokenize
 import tortoise.sdk as s
@@ -836,8 +878,10 @@ for path in ("tortoise/log.py", "tortoise/subject_binding.py"):
         if t.type == tokenize.COMMENT and "embedding" in t.string:
             comments += 1
         elif t.type == tokenize.NAME and t.string == "embedding":
-            code.append(t.start[0])
-    print(f"{path}: code lines {code or 'none'}; comment mentions {comments}")
+            code.append(("NAME", t.start[0]))
+        elif t.type == tokenize.STRING and "embedding" in t.string:
+            code.append(("STRING", t.start[0]))
+    print(f"{path}: code tokens {code or 'none'}; comment mentions {comments}")
 for fn in ("_apply_journal_presence", "_journal_presence_state", "_journal_vector"):
     print(fn, "mentions embedding:", "embedding" in inspect.getsource(getattr(s, fn)).lower())
 PY2

@@ -76,6 +76,6 @@
    b85 (RFC 1924)         1,920     1,936    0.938x   False
    a85 (Adobe Ascii85)    1,920     1,970    0.954x   True
    z85 (ZeroMQ)           1,920     1,936    0.938x   False
-  b85/z85 are 25 % overhead against base64's 33.3 % — cheaper by 128 B on this field. base64 is chosen for ubiquity and hand-inspectability (every language's stdlib, `echo | base64 -d`), not for being the smallest.
+  b85/z85 are 25 % overhead against base64's 33.3 % — cheaper by 128 B on this field. base64 is chosen for ubiquity and hand-inspectability (most languages' stdlibs: Python, Java, Go, C#, Node -- not Rust's or C's, the same reason b85's support is thin -- and `echo | base64 -d`), not for being the smallest.
 
 VERDICT: measured. The frame is 2.27x the P0 vector span on a creating record, the float32 bits are unchanged, and the f64 population is preserved at its own width.

@@ -531,8 +531,9 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
         return 1
     print("  b85/z85 are 25 % overhead against base64's 33.3 % — cheaper by "
           f"{b64_field - (len(alphas[3][1]) + 16):,} B on this field. base64 is "
-          "chosen for ubiquity and hand-inspectability (every language's stdlib, "
-          "`echo | base64 -d`), not for being the smallest.")
+          "chosen for ubiquity and hand-inspectability (most languages' stdlibs: "
+          "Python, Java, Go, C#, Node -- not Rust's or C's, the same reason b85's "
+          "support is thin -- and `echo | base64 -d`), not for being the smallest.")
 
     print("\nVERDICT: measured. The frame is 2.27x the P0 vector span on a "
           "creating record, the float32 bits are unchanged, and the f64 "
