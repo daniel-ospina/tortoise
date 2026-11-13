@@ -1577,12 +1577,25 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(
     # measured figure.
     assert not re.search(r"\b\d+/\d+", emitted), (
         f"the ceiling note restates a measured figure: {emitted}")
+    # ⛔ PRESENCE, not just text: the previous form `continue`d past any arm
+    # without a note, so DELETING `arms.rerank.ceiling_note` from an artifact left
+    # the suite green (measured — the coverage came only from the lexical
+    # control's older assertion). The expected carriers are named here instead, so
+    # a missing note is a failure rather than a skip.
+    EXPECTED_CARRIERS = {
+        "measurement-lexical-control.json": {"rerank", "lexical_difflib", "lexical_overlap"},
+        "measurement-noun-path.json": {"rerank"},
+    }
     for artifact, name in ((lexical, "measurement-lexical-control.json"),
                            (noun, "measurement-noun-path.json")):
-        for arm, arm_data in artifact["arms"].items():
-            if not isinstance(arm_data, dict) or "ceiling_note" not in arm_data:
-                continue
-            got = arm_data["ceiling_note"]
+        carriers = {arm for arm, arm_data in artifact["arms"].items()
+                    if isinstance(arm_data, dict) and "ceiling_note" in arm_data}
+        assert carriers == EXPECTED_CARRIERS[name], (
+            f"{name}: the ceiling_note carriers moved — expected "
+            f"{sorted(EXPECTED_CARRIERS[name])}, found {sorted(carriers)} "
+            "(a missing note is not a pass)")
+        for arm in sorted(carriers):
+            got = artifact["arms"][arm]["ceiling_note"]
             assert got == emitted, (
                 f"{name}:{arm}: the artifact's ceiling_note is not what the tool "
                 f"emits — regenerate the artifact (it is generated, never "
