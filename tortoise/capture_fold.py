@@ -362,29 +362,49 @@ _STRUCTURAL_PROPS = ("id", "content", "content_hash", "createdAt",
                      # `ep_dirty_at`). Not evidence: the flag says "recompute me",
                      # and its value is derived from the graph, not asserted.
                      "ep_dirty", "ep_dirty_at",
-                     # The DENSE VECTOR, and the marker saying it was stored
-                     # verbatim rather than computed. Both are DERIVED from the
-                     # content — the projection's own ground for excluding
-                     # `embedding` from connector content identity is that "it is
-                     # a DERIVED vector, so re-encoding (or an embedding-model
+                     # The DENSE VECTOR. At THIS fold's seam the vector on a
+                     # duplicate is the projection's OWN: the duplicate is a
+                     # Point minted earlier in the same capture, and the write
+                     # door computed the vector from that Point's content
+                     # (`encode_for_row`). It is therefore DERIVED, and the
+                     # projection's own ground for excluding `embedding` from
+                     # connector content identity is the same one: "it is a
+                     # DERIVED vector, so re-encoding (or an embedding-model
                      # change) would advance the version with no item change"
-                     # (`projection/entities.py`) — so neither is asserted
-                     # evidence: the canonical keeps ONE wording and its own
-                     # vector matches it, and the duplicate's is recomputable
-                     # from the wording the fold keeps. Carrying it would carry
-                     # nothing new, and REPORTING it would put a residual on
-                     # every fold, which is the noise this vocabulary exists to
-                     # keep off the receipt.
-                     # ⚠️ Measured #12322: with an embedding model provisioned a
-                     # real write door mints `embedding`, and `_DECLARED_PROPS`
-                     # did not name it, so every capture receipt claimed
+                     # (`projection/entities.py`). The canonical keeps ONE
+                     # wording and its own vector matches it, so carrying the
+                     # duplicate's vector would hand the canonical a vector for
+                     # text the fold discards.
+                     # ⚠️ `_REPORTED_FIELDS` is NOT the louder alternative it
+                     # looks like: `_observed` is a FIXED five-key dict and
+                     # residuals are emitted only from `evidence.support`, so
+                     # moving `embedding` there would suppress it from
+                     # `undeclared` and report NOTHING — a silent drop wearing
+                     # the shape of a disclosure, which is the worst of the
+                     # three buckets.
+                     # ⚠️ MEASURED #12323: with an embedding model provisioned
+                     # the write door mints `embedding`, `_DECLARED_PROPS` did
+                     # not name it, and every capture receipt therefore claimed
                      # "dropped field(s) … could not carry: embedding" over a
-                     # prop the fold can always recompute. The drift guard
-                     # (`test_a_point_the_real_write_door_mints_reports_no_
-                     # undeclared_props`) could not catch it on a keyword-only
-                     # box, where `EmbeddingModel.get()` is None and the prop is
-                     # never minted — hence the injection arm added beside it.
-                     "embedding", "embedding_verbatim")
+                     # prop the fold can recompute. Neither drift guard could
+                     # catch it on a keyword-only box, where
+                     # `EmbeddingModel.get()` is None and no vector is minted —
+                     # hence the injection arm added beside it.
+                     # ⚠️ DECLARED BOUND, not a closed class (#12326): a
+                     # CALLER-SUPPLIED "foreign" vector reaches a Point through
+                     # `EventAPI.add_point(fields=…)` with NO attestation
+                     # (`api.py`), and that vector is NOT recomputable — nothing
+                     # on the canonical encodes that text. The fold cannot tell
+                     # the two apart, because the discriminator would be
+                     # `embedding_verbatim` ("the PRIMARY marker that says a
+                     # caller owns the value's storage form", `stored_form.py`)
+                     # and that marker is REFUSED at the same door
+                     # (`_SERVER_MANAGED_EMBEDDING_KEYS`), so a caller's vector
+                     # arrives carrying no marker at all. Declaring `embedding`
+                     # structural therefore silences that class rather than
+                     # reporting it; it is unreachable from any in-tree capture
+                     # producer today (#12326 holds the class and its options).
+                     "embedding")
 
 #: Everything the duplicate read DECLARES it knows: the occurrence address, the
 #: single slots in BOTH spellings (a producer stores `when` or `validFrom`, and
