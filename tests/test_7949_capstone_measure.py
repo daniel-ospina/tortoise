@@ -5364,8 +5364,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # from the tree it names: 9943 at `9828250732`, 9949 at `ba84fbfabf`
             # (+6 @6721, #11609), 9965 at `e200623286` (+16 @7514, #11926), 9973
             # at `cd22562c24` (+8 @2725, #12060), 9987 at `f1f74135a15b`
-            # (+13 @2237 and +1 @9150, #12294), 10022 at `42409813a7` (+1 @2237,
-            # #12348), 10076 at `ca74f2375e`, 10132 at `6408da01ce`, and 10147 at
+            # (+13 @2237 and +1 @9150, #12294), 10021 at `87c07462a807` (+34: 32 at
+            # 7537, 1 at 1039, 1 at 2237), 10022 at `42409813a7` (+1 @2237,
+            # #12348), 10076 at `ca74f2375e` (+54 in FIVE hunks: 12 at 1610, 7 at
+            # 2250, 8 at 6830, 22 at 7565, 5 at 9759), 10132 at `6408da01ce`, and 10147 at
             # the CURRENT `main` tip `2dbfb046d7` (+15 at 2266, #12372's
             # `tortoise_query` `entity_type` rows). Their +56 and +15 are each
             # stated from the tree that carries them, never summed off a diff:

@@ -1126,9 +1126,12 @@ def latest_readings(
     #
     # ⛔ KEEP THE PROJECTION EDGE-FREE. If a later change returns `id(r)` or any
     # other relationship property, duplicate edges become duplicate ROWS — and
-    # then a `dwell` of N can be satisfied by ONE measurement repeated, which is
-    # the hazard `hosted_backup.py:363-393` already records for `id()` semantics
-    # across the v4/v6 cores.
+    # then a `dwell` of N can be satisfied by ONE measurement repeated. That is
+    # this projection's OWN hazard and nothing else in the repo records it: the
+    # note at ``hosted_backup.py:359-370`` is the #4515 "TOTAL OR FAIL" rule and
+    # its load-bearing aggregate, and the operand table at ``:363-393`` is about
+    # ``id(n) > -1`` disagreeing across the v4/v6 cores — an OPERAND edge case,
+    # not duplicated rows.
     #
     # No Python de-duplication is layered on top on purpose: keyed on
     # `reading_id` it could DROP a distinct reading that legitimately shares an
