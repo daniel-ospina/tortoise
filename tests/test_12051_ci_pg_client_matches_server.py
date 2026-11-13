@@ -6456,6 +6456,18 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
             "the `#` is ambiguous, so the line must be graded BOTH ways"
         )
 
+    # ⛔ AND THE ARITHMETIC CLOSER MUST NOT OVER-BLOCK (#12318, measured): the `))`
+    # closer used to be boundary-gated, so `((a>0))` / `$((16#ff))` / `$((1<<2))`
+    # (glued `))`) left `arith` stuck above zero, every later REAL trailing comment
+    # was kept, and a COMMENTED-OUT rewrite became a refusal on 24 measured rows
+    # where `main` strips. These must stay GREEN — the rewrite never runs.
+    for arithmetic in ("echo $((16#ff));", "n=$((2#101));", "a=1; ((a>0));", "echo $((1<<2));"):
+        step = {"run": f"b=/usr/lib/postgresql; {arithmetic} # {replacement}"}
+        assert not any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
+            f"a commented-out rewrite after {arithmetic!r} was refused — the arithmetic "
+            f"closer did not close, so a real comment was kept as live code"
+        )
+
     # CONTROL: a GROUP-closing `)` IS an operator, so the rest of the line is a
     # comment and must be dropped (bash prints only `x` for the same line).
     step = {"run": f"(echo x)#note; {replacement}"}
@@ -7597,7 +7609,14 @@ def _strip_trailing_comment(line: str) -> str:
             boundary = False
             index += 2
             continue
-        if char == ")" and index + 1 < len(line) and line[index + 1] == ")" and arith and boundary:
+        # ⛔ THE `))` CLOSER IS NOT BOUNDARY-GATED (#12318, measured over-block):
+        # `((a>0))`, `$((16#ff))` and `$((1<<2))` all end `))` GLUED to a word, so a
+        # boundary requirement never fired, `arith` stayed non-zero, and every later
+        # REAL trailing comment was kept — a commented-out rewrite became a refusal
+        # on 24 measured rows (`main` strips them). The boundary rule exists to stop
+        # `case a in a)`/`${x%)}` closing a SUBSTITUTION frame; an `arith` frame is
+        # only ever opened by a glued `((`, so it needs no such guard.
+        if char == ")" and index + 1 < len(line) and line[index + 1] == ")" and arith:
             arith -= 1
             boundary = False
             index += 2
