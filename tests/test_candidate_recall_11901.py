@@ -1578,7 +1578,21 @@ def test_the_briefs_lexical_section_recomputes_from_the_artifact(lexical):
     is worse than a stale figure anywhere else: a reader acts on it.
     """
     arms = lexical["arms"]
-    text = _squash(RERANK_BRIEF.read_text())
+    # ⛔ THE WHOLE BRIEF IS NOT THE SECTION. Every figure §8 quotes also appears in
+    # §3/§6/§7 (the same pools, the same metrics), so a whole-document grep is
+    # satisfied by THOSE copies while §8's own table is arbitrarily wrong —
+    # measured: corrupting all three §8 rows left this test green. Scope the text
+    # to §8, then assert each figure inside it.
+    raw = RERANK_BRIEF.read_text()
+    assert "## 8." in raw, "the brief no longer has an §8"
+    text = _squash(raw.split("## 8.", 1)[1].split("\n## ", 1)[0])
+    # and the tables themselves: each §8 row must carry its OWN recall and nDCG
+    # cell, so a row edited to a figure borrowed from another section still reds.
+    section = raw.split("## 8.", 1)[1].split("\n## ", 1)[0]
+    table_rows = [ln for ln in section.splitlines()
+                  if ln.startswith("|") and "%" in ln and "." in ln]
+    assert len(table_rows) >= 3, (
+        f"§8's cost/quality table is gone or reshaped ({len(table_rows)} rows)")
     for pool in ("15", "40"):
         ce = arms["rerank"][pool]["exact"]
         lo = arms["lexical_overlap"][pool]["exact"]
@@ -1597,6 +1611,12 @@ def test_the_briefs_lexical_section_recomputes_from_the_artifact(lexical):
                       f"{lo['ndcg_mean_after']:.4f}"):
             assert value in text, (
                 f"§8 does not carry the recomputed pool-{pool} figure {value}")
+        # the figure must sit on a TABLE ROW of its own, not merely appear in the
+        # section's prose: a row whose recall cell was swapped for another
+        # section's number would still be found by the check above.
+        want = (f"{ce['recall_pct_after']:.1f} %", f"{ce['ndcg_mean_after']:.4f}")
+        assert any(all(w in row for w in want) for row in table_rows), (
+            f"§8 has no table row carrying both pool-{pool} figures {want}")
     # 4. the cost gap §8 prints is the artifact's
     ce_ms = arms["rerank"]["latency"]["ms_per_pair"]
     lo_ms = arms["lexical_overlap"]["latency"]["ms_per_pair"]

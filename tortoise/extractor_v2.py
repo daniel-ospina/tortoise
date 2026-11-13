@@ -2925,6 +2925,28 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
                                   # merely displayed. No-op for the non-Point legs
                                   # (the selection is gated on
                                   # ``entity_type == "point"``).
+                                  #
+                                  # ⛔ OVERRIDES: #8487's "no selection on the
+                                  # capture path" ruling is departed for the
+                                  # #12297 FUSED RERANK, and the departure is
+                                  # deliberate. That ruling refused a lever whose
+                                  # effect here was UNMEASURED reordering of the
+                                  # persisted prior; #12297 measured exactly this
+                                  # leg's recall@3 on the #11901 noun-path corpus
+                                  # (244→277 / 300 exact, 244→300 / 300 at the
+                                  # shipped widening, ZERO regressions, artifact
+                                  # `docs/research/2026-11-12-12297-rerank-
+                                  # calibration/measurement-noun-path.json`), and
+                                  # the lever ships OFF by default behind a gate
+                                  # whose OFF path is byte-identical. SCOPE: the
+                                  # measurement covers candidate COMPOSITION at
+                                  # the cut. It does NOT cover downstream
+                                  # link-before-create or supersession outcomes,
+                                  # which is why the gate's default is OFF and why
+                                  # `research-brief.md` §4 states the lexical
+                                  # near-identity bound on the claim. `_valid_time`
+                                  # selection stays OFF here — the rerank is a
+                                  # relevance reorder, not a temporal one.
                                   _valid_time_rerank=False,
                                   **extra)
     out = []

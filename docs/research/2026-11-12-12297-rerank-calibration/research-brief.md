@@ -229,7 +229,7 @@ raise nDCG by losing queries.
 
 User search scored **31,511 pairs in 2,685.6 s** — **85.2 ms/pair**, i.e.
 **≈ 3.4 s added per query** at pool 40. That is ~16× the noun path's
-5.179 ms/pair, and the cause is **passage length, not load or model**: the noun
+5.179 ms/pair, and the mechanism is **passage length** — and, because the two runs are not load-matched (see below), load cannot be excluded as a contributor to the ratio: the noun
 path's candidate text is a 2–4-word **name**, while here it is a 120–900-char
 **turn**. Both quantities come from the TWO COMMITTED ARTIFACTS, so each number has
 a run behind it and they are directly comparable in provenance if not in load:

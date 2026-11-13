@@ -41879,6 +41879,14 @@ class TortoiseSDK:
         #     so the prior leg is reranked here without a second call site and
         #     without touching its window (``#11901`` measured the window lever
         #     and declined it standalone; this is the PAIRED shape).
+        #     ⛔ That call site opts OUT of #8487's valid-time selection with a
+        #     "no selection on the capture path" rationale, because the prior it
+        #     persists is consumed as a SET. This rerank is a deliberate
+        #     departure from that ruling and carries its own ``OVERRIDES:``
+        #     record AT the call site (``extractor_v2._fts_rows``), naming the
+        #     measured recall@3 delta and, explicitly, that only candidate
+        #     composition is measured — not the downstream link/supersession
+        #     outcomes. Side with the gate OFF (the default), none of this runs.
         #
         # ⛔ Placed BEFORE ``result_ids[:limit]`` on purpose: a reranker that
         # ran after the cut could only reorder rows that already survived, and
