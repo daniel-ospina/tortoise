@@ -2059,7 +2059,7 @@ class TestDoctorHostedCredential:
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _seed_db(db_path, "doctor transient seed")
 
-        _run_doctor([])
+        rc = _run_doctor([])
         out = capsys.readouterr().out
 
         hosted = _row(out, "Hosted")
@@ -2075,7 +2075,13 @@ class TestDoctorHostedCredential:
         # this file, and it would be blamed on the credential work. The mutation
         # this line was meant to pin — the 429 arm rendering `❌` — is already red
         # on the line above.
-        assert "❌" not in out or "❌ Graph" in out, out[-1200:]
+        #
+        # ⛔ But the EXIT-CODE property (this test's own docstring: "and anything
+        # gating on its exit code") still has to be pinned, and `❌ Graph` is the
+        # ONLY row the transient can add (fresh review round 32 — dropping `rc`
+        # here removed a live pin; restoring a bare `rc == 0` reinstates the
+        # flake). So the tolerance is scoped to that row instead of dropped.
+        assert rc == 0 or "❌ Graph" in out, (rc, out[-1200:])
 
     def test_reply_bodies_are_read_with_a_bound(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
