@@ -3399,7 +3399,11 @@ tail is never mistaken for a blank report (a path that cannot be read at all yie
 name, and the sentence says that instead). A carried report **larger than the cap** declares the CUT
 and not its size — the excerpt is there to read, so the size adds nothing, and the squeeze loss, when
 there is one, is declared beside it as above — and one under the cap states nothing about its extent,
-because nothing was cut. It never claims an excerpt it is not showing, never guesses the cause when two states are
+because nothing was cut. A carried report whose **own size could not be measured** — the size probe is
+skipped for a path that is not a regular file (a `wc -c` reads to EOF, and a device never reaches one), and
+the size is never guessed when the count does not resolve to a number — declares the 6000-byte **window**
+instead of a cut: that only the report's last 6000 bytes are shown, and that its own size could not be
+measured. Whether anything was actually cut is exactly what the missing measurement would have said. It never claims an excerpt it is not showing, never guesses the cause when two states are
 indistinguishable from there, and the section intro no longer promises a "verbatim" report it
 may not be carrying (#12200): on-call reads the body, so a false claim there costs the reader
 the trip they were trying to avoid.
