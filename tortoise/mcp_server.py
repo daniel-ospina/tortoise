@@ -4973,18 +4973,21 @@ def _org_quota_block(sdk=None) -> dict:
     so the refusal read as a successful write.
 
     Resolution follows ``_enforce_quota`` — so that a report cannot disagree with
-    the gate it describes: the request's carried ContextVar limits first (the
-    same ones REST and this surface already gate on), else ``resolve_org_limits``.
-    It is NOT byte-for-byte the gate's pipeline and the difference is stated
-    rather than hidden: ``_enforce_quota`` additionally calls
-    ``_carry_allowances(limits, resource)`` to augment the dict with the
-    ruled-dimension allowances, and this block does not — deliberately, because
-    the ``points`` resource below is the legacy node cap and the ruled
-    dimensions (graph MB / Postgres bytes / extraction tokens) are enforced by
-    ``allowance_gate`` from their own resolver, which is inert until an allowance
-    is configured (#9567). Reporting a boundary whose meter is not wired would be
-    the opposite of the legibility this exists for. Only the ``points`` resource
-    is modelled — that is the one #11892 measured.
+    the gate it describes — and that includes the parts of its pipeline it would
+    be easy to skip: the request's carried ContextVar limits are AUGMENTED with
+    ``_carry_allowances(limits, resource)`` exactly as ``_enforce_quota`` does,
+    and ``org_quota_state`` then runs the allowance gate itself (the gate's
+    first check). ⛔ Skipping the carry published ``open`` for a tenant whose
+    every write was refused by a control-plane fault in that read — the false
+    PASS this report exists to remove, caught in fresh review of #12426. If the
+    carry itself raises, the write gate refuses in that state, so the block says
+    ``closed`` and names it rather than shrugging.
+
+    The ruled-dimension *dimensions* are still not modelled (graph MB / Postgres
+    bytes / extraction tokens have their own meters; this block reports the
+    ``points`` node cap) — but their REFUSAL is honoured, because it refuses the
+    same writes. Only the ``points`` resource is modelled: that is the one #11892
+    measured.
 
     Never raises and never degrades ``status``: a closed or unmeasurable quota is
     REPORTED, not folded into ``status``. Folding it in would pin a healthy
@@ -5002,9 +5005,30 @@ def _org_quota_block(sdk=None) -> dict:
             # Reported as `not_applicable`, NEVER as `open` (#11892).
             return org_quota_state(None, "points", sdk=sdk)
         limits = _current_org_limits.get()
-        if limits is None:
-            from tortoise.quota import resolve_org_limits
-            limits = resolve_org_limits(org_id)
+        try:
+            if limits is None:
+                from tortoise.quota import resolve_org_limits
+                limits = resolve_org_limits(org_id)
+            else:
+                # ⛔ THE SAME AUGMENTATION `_enforce_quota` APPLIES, for the same
+                # reason: this lane's ContextVar dict carries no allowance keys,
+                # and the gate's allowance check reads the CARRIED dict. Omitting
+                # it made the report say `open` while every write was refused by
+                # a fault in that very read (fresh review of #12426).
+                limits = _carry_allowances(limits, "points")
+        except Exception as exc:  # noqa: BLE001, RUF100 — the write gate refuses here
+            # A raise from this resolution IS a refusal in the write path
+            # (`_enforce_quota` turns it into ``QuotaCheckError``, which `_safe`
+            # surfaces as a structured error), so the honest state is `closed`
+            # with the fault named — not `open`, and not `unknown`: we did
+            # measure what the gate does with these limits.
+            return {"resource": "points", "state": "closed",
+                    "points_used": None, "points_limit": None,
+                    "points_remaining": None,
+                    "error": f"the limits could not be resolved/carried for "
+                             f"this request ({type(exc).__name__}: "
+                             f"{str(exc)[:160]}), and the write gate refuses in "
+                             f"that state"}
         return org_quota_state(limits, "points", sdk=sdk)
     except Exception as exc:  # noqa: BLE001, RUF100 — health must answer, always
         # Same shape as every other unmeasurable arm: `unknown` + None values +

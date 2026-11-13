@@ -80,6 +80,15 @@ def _refuses(limits, sdk) -> bool:
     return False
 
 
+def _refuses_raising(limits, sdk) -> bool:
+    """True when the gate refuses by RAISING ANYTHING (cap or fail-closed)."""
+    try:
+        enforce_org_limit(limits, "points", sdk=sdk)
+    except (QuotaExceededError, QuotaCheckError):
+        return True
+    return False
+
+
 # ── 1. agreement with the gate (the invariant) ────────────────────────────
 
 
@@ -122,26 +131,38 @@ def test_headroom_is_never_negative(tmp_path, monkeypatch):
 def test_an_unlimited_limit_is_open_and_says_so(tmp_path, monkeypatch):
     """A PRESENT-but-None limit means UNLIMITED (#683) — open, no number.
 
-    The distinction that matters: `points_limit: None` here is "no cap", not
-    "could not read the cap". `state` carries that, so a reader never has to
-    infer it from an absence.
+    ⛔ `points_used` is deliberately `None` here and NOT a measured count: the
+    gate RETURNS before counting when the limit is unlimited (#4010 — "must not
+    build a graph handle to prove it"), so paying for a full-graph count on every
+    `health` call would buy a number nothing enforces. `points_limit: None` is
+    what says "unlimited", so this `None` is not ambiguous with a failed read.
     """
     sdk = _sdk(tmp_path / "unl.db", "unl")
-    _pin_count(monkeypatch, 3)
+    calls = []
+    import tortoise.quota as quota_mod
+
+    monkeypatch.setattr(quota_mod, "_count_resource",
+                        lambda *a, **k: calls.append(a) or 3)
     state = org_quota_state({"org_id": "t", "max_points": None}, "points", sdk=sdk)
     assert state["state"] == "open"
     assert state["points_limit"] is None
     assert state["points_remaining"] is None
-    assert state["points_used"] == 3
+    assert state["points_used"] is None
     assert state["error"] is None
+    assert calls == [], "the gate skips the count when unlimited; so must we"
     sdk.close()
 
 
 # ── 2. unmeasured is None, never 0 ────────────────────────────────────────
 
 
-def test_an_unreadable_count_is_unknown_never_zero(tmp_path, monkeypatch):
-    """A failed count must not read as an empty graph."""
+def test_an_unreadable_count_is_closed_never_zero(tmp_path, monkeypatch):
+    """A failed count is a REFUSAL in the gate (#686), so it is `closed`.
+
+    ⛔ Not `open` (that was the class this report exists to remove) and not a
+    number — `points_used` stays `None` with the fault named. `unknown` is
+    reserved for OUR OWN inability to finish the check, never for a gate verdict.
+    """
     sdk = _sdk(tmp_path / "cnt.db", "cnt", points=1)
     import tortoise.quota as quota_mod
 
@@ -151,26 +172,29 @@ def test_an_unreadable_count_is_unknown_never_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(quota_mod, "_count_resource", _boom)
     state = org_quota_state({"org_id": "t", "max_points": 25_000},
                             "points", sdk=sdk)
-    assert state["state"] == "unknown"
+    assert state["state"] == "closed"
     # ⛔ the whole point: NOT 0, and NOT "open"
     assert state["points_used"] is None
     assert state["points_remaining"] is None
-    assert state["error"], "an unknown state must name why it is unknown"
+    assert state["error"] and "count" in state["error"]
+    # …and the gate really does refuse in this state, which is why `closed` is
+    # the honest word rather than "unknown".
+    assert _refuses_raising({"org_id": "t", "max_points": 25_000}, sdk)
     sdk.close()
 
 
-def test_a_missing_limit_key_is_unknown_not_unlimited(tmp_path):
+def test_a_missing_limit_key_is_closed_not_unlimited(tmp_path):
     """#310 GAP-B: a MISSING key is fail-closed; only an explicit None is open."""
     sdk = _sdk(tmp_path / "miss.db", "miss", points=1)
     state = org_quota_state({"org_id": "t"}, "points", sdk=sdk)
-    assert state["state"] == "unknown"
+    assert state["state"] == "closed"
     assert state["points_limit"] is None
     assert state["error"] and "max_points" in state["error"]
     sdk.close()
 
 
-def test_an_unreadable_limit_is_unknown(tmp_path):
-    """#4051: an int-formatted string is honoured; a float-formatted one is not."""
+def test_an_unreadable_limit_is_closed(tmp_path):
+    """#4051: an int-formatted string is honoured; a float-formatted one refuses."""
     sdk = _sdk(tmp_path / "unr.db", "unr", points=1)
 
     honoured = org_quota_state({"org_id": "t", "max_points": "1000"},
@@ -180,7 +204,7 @@ def test_an_unreadable_limit_is_unknown(tmp_path):
 
     refused = org_quota_state({"org_id": "t", "max_points": "1000.0"},
                               "points", sdk=sdk)
-    assert refused["state"] == "unknown"
+    assert refused["state"] == "closed"
     assert refused["points_limit"] is None
     assert refused["error"] and "max_points" in refused["error"]
     sdk.close()
@@ -220,6 +244,206 @@ def test_an_unknown_resource_never_raises():
     state = org_quota_state({"org_id": "t", "max_points": 10}, "not_a_resource")
     assert state["state"] == "unknown"
     assert state["error"]
+
+
+def test_a_gateable_but_unmodelled_resource_says_so():
+    """`documents` IS gated, through a DERIVED branch this report does not model.
+
+    Calling it "unknown resource" would misdescribe the gate; the honest answer is
+    `unknown` with a message saying the branch is unmodelled (fresh review of
+    #12426, non-blocking note made executable).
+    """
+    state = org_quota_state({"org_id": "t", "max_points": 10}, "documents")
+    assert state["state"] == "unknown"          # fail-closed, never `open`
+    assert state["error"] and "DERIVED" in state["error"]
+
+
+# ── the allowance seam: the false PASS fresh review of #12426 found ───────
+
+
+def test_a_fault_in_the_allowance_gate_is_closed_not_open(tmp_path, monkeypatch):
+    """⛔ THE regression this round exists for.
+
+    `enforce_org_limit` calls `enforce_allowances` FIRST (#5331/#9567), and
+    "inert by default" is about what that gate REFUSES, not about what it READS:
+    a fault in the read is a `QuotaCheckError` with no allowance configured. The
+    report used to skip the seam entirely and publish `open` for a tenant whose
+    every write was refused.
+    """
+    sdk = _sdk(tmp_path / "allow.db", "allow", points=1)
+    _pin_count(monkeypatch, 100)
+    import tortoise.allowance_gate as ag
+
+    def _boom(*a, **k):
+        raise QuotaCheckError("the team allowances could not be resolved")
+
+    monkeypatch.setattr(ag, "enforce_allowances", _boom)
+    state = org_quota_state({"org_id": "t", "max_points": 25_000},
+                            "points", sdk=sdk)
+    assert state["state"] == "closed", (
+        "a refusal by the allowance seam must never read as an open write path")
+    assert state["error"] and "allowance" in state["error"]
+    sdk.close()
+
+
+def test_an_armed_allowance_refusal_is_closed(tmp_path, monkeypatch):
+    """A configured dimension at its cap refuses the write — so: `closed`."""
+    sdk = _sdk(tmp_path / "arm.db", "arm", points=1)
+    _pin_count(monkeypatch, 100)
+    import tortoise.allowance_gate as ag
+
+    def _refuse(*a, **k):
+        raise QuotaExceededError("Team graph_mb limit reached (10)")
+
+    monkeypatch.setattr(ag, "enforce_allowances", _refuse)
+    state = org_quota_state({"org_id": "t", "max_points": 25_000},
+                            "points", sdk=sdk)
+    assert state["state"] == "closed"
+    assert state["error"] and "allowance" in state["error"]
+    sdk.close()
+
+
+def test_an_unreadable_allowance_gate_module_is_closed(tmp_path, monkeypatch):
+    """The gate turns an ImportError at that seam into a refusal; so do we.
+
+    ⛔ Fault injection note: patching `builtins.__import__` does NOT reach this
+    site, because an already-imported module is served from `sys.modules` and the
+    hook is never consulted — the first version of this test passed a fake importer
+    and read `open`. Putting `None` in `sys.modules` is what makes the real import
+    machinery raise ImportError.
+    """
+    import sys
+
+    sdk = _sdk(tmp_path / "imp.db", "imp", points=1)
+    _pin_count(monkeypatch, 1)
+    monkeypatch.setitem(sys.modules, "tortoise.allowance_gate", None)
+    state = org_quota_state({"org_id": "t", "max_points": 25_000},
+                            "points", sdk=sdk)
+    assert state["state"] == "closed"
+    assert state["error"] and "allowance gate is unavailable" in state["error"]
+    sdk.close()
+
+
+# ── "never raises" on shapes the caller can pass ─────────────────────────
+
+
+@pytest.mark.parametrize("limits", [[], "str", 7, {"org_id": None}])
+@pytest.mark.parametrize("resource", ["points", ["points"], None, "documents"])
+def test_it_never_raises_on_a_shape_it_cannot_read(limits, resource):
+    """⛔ Measured before the guard: AttributeError / TypeError escaped here.
+
+    `health` was safe because `_org_quota_block` has a blanket except, but the
+    docstring promises "never raises" for THIS function, and a future caller
+    wiring it on that promise would get an exception instead of the dict.
+    """
+    state = org_quota_state(limits, resource)  # must not raise
+    assert state["state"] in {"unknown", "not_applicable", "closed", "open"}
+    assert "points_used" in state and "error" in state
+
+
+def test_a_non_numeric_count_is_unknown_never_a_number(tmp_path, monkeypatch):
+    sdk = _sdk(tmp_path / "nn.db", "nn", points=0)
+    import tortoise.quota as quota_mod
+
+    monkeypatch.setattr(quota_mod, "_count_resource", lambda *a, **k: None)
+    state = org_quota_state({"org_id": "t", "max_points": 10}, "points", sdk=sdk)
+    assert state["state"] == "unknown"
+    assert state["points_used"] is None
+    assert state["error"] and "not a count" in state["error"]
+    sdk.close()
+
+
+# ── the bounded count: worker identity, the settled-future window, reset ───
+
+
+def test_the_count_uses_its_OWN_dedicated_worker(tmp_path, monkeypatch):
+    """A count must not share the graph-size or probe slot (#3143's class)."""
+    import tortoise.monitoring as mon
+    import tortoise.quota as quota_mod
+
+    sdk = _sdk(tmp_path / "wk.db", "wk", points=0)
+    used = []
+    real = mon.daemon_worker
+
+    def _spy(name, **k):
+        used.append(name)
+        return real(name, **k)
+
+    monkeypatch.setattr(mon, "daemon_worker", _spy)
+    quota_mod.reset_quota_state_worker()
+    org_quota_state({"org_id": "t", "max_points": 10}, "points", sdk=sdk)
+    assert used == [quota_mod.QUOTA_STATE_WORKER_NAME]
+    assert quota_mod.QUOTA_STATE_WORKER_NAME != mon.GRAPH_SIZE_WORKER_NAME
+    sdk.close()
+
+
+class _SettledFuture:
+    """A future that is already finished when the wait expires (#11962's window)."""
+
+    def __init__(self, value=None, exc=None):
+        self._value, self._exc = value, exc
+
+    def result(self, timeout=None):
+        if timeout is None:
+            return self._value
+        raise TimeoutError("budget expired")
+
+    def done(self):
+        return True
+
+    def cancelled(self):
+        return False
+
+    def exception(self):
+        return self._exc
+
+
+class _SettledWorker:
+    def __init__(self, fut):
+        self._fut = fut
+
+    def submit(self, fn):
+        return self._fut
+
+
+def test_a_count_that_COMPLETED_in_the_window_is_not_called_an_overrun(
+        monkeypatch):
+    """The wait can expire AFTER the count landed — return its answer.
+
+    Deleting this arm (the #11962 defect) previously left every test green; this
+    drives it with a settled future so the branch is reachable.
+    """
+    import tortoise.monitoring as mon
+    import tortoise.quota as quota_mod
+
+    monkeypatch.setattr(mon, "daemon_worker",
+                        lambda name, **k: _SettledWorker(_SettledFuture(value=7)))
+    assert quota_mod._bounded_resource_count("t", "points", timeout=0.01) == 7
+
+
+def test_a_count_that_FAILED_in_the_window_keeps_its_own_error(monkeypatch):
+    """…and a landed FAILURE propagates as itself, not as a budget overrun."""
+    import tortoise.monitoring as mon
+    import tortoise.quota as quota_mod
+
+    err = QuotaCheckError("store unreachable")
+    monkeypatch.setattr(mon, "daemon_worker", lambda name, **k: _SettledWorker(
+        _SettledFuture(exc=err)))
+    with pytest.raises(QuotaCheckError):
+        quota_mod._bounded_resource_count("t", "points", timeout=0.01)
+
+
+def test_a_wedged_worker_has_a_reset_hatch(monkeypatch):
+    """A stalled count must not silence `health.quota` until the next deploy."""
+    import tortoise.monitoring as mon
+    import tortoise.quota as quota_mod
+
+    quota_mod.reset_quota_state_worker()
+    first = mon.daemon_worker(quota_mod.QUOTA_STATE_WORKER_NAME)
+    quota_mod.reset_quota_state_worker()
+    second = mon.daemon_worker(quota_mod.QUOTA_STATE_WORKER_NAME)
+    assert first is not second, "the hatch must drop the worker, not reuse it"
+    quota_mod.reset_quota_state_worker()
 
 
 # ── 3. the health surface carries it, and stays healthy ───────────────────

@@ -1513,9 +1513,15 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
     "points_remaining", "error"}`` where ``state`` is one of:
 
     - ``"open"`` — a write of this resource would be ADMITTED;
-    - ``"closed"`` — ``enforce_org_limit`` would REFUSE it right now;
-    - ``"unknown"`` — the boundary could not be measured (the count or the
-      limit failed to read). Every number is then ``None``;
+    - ``"closed"`` — ``enforce_org_limit`` would REFUSE it right now. ⛔ This
+      includes the gate's **fail-closed** arms, not only a reached cap: a
+      missing ``max_points`` key, an unreadable limit, a refused or unreadable
+      ruled-dimension allowance, and a count that RAISED are all refusals, so
+      every one of them is ``closed``. A report that called those ``open``
+      would be the same false PASS (#11153) one layer in;
+    - ``"unknown"`` — THIS REPORT could not complete its own check (its bounded
+      count overran or the worker backlogged, the limits were not a mapping, the
+      resource is not one it models). It is never a claim about the gate;
     - ``"not_applicable"`` — this transport/tenant has no quota gate at all
       (stdio, operator, selfhost), so a write cannot be refused for quota.
       ⛔ NOT the same fact as ``"open"``, and never spelled as one.
@@ -1552,8 +1558,11 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
     this report models, so a refactor would change the surface it is measured
     against. The truth-table test is the guard instead of a comment nobody runs.
 
-    ``error`` explains ``unknown`` and ``not_applicable`` alike; it is ``None``
-    exactly when ``state`` is ``open`` or ``closed``. Consumers key on ``state``.
+    ``error`` explains every state except ``open``, and also the ``closed`` shape
+    a REACHED CAP produces (there the numbers themselves are the explanation).
+    So ``error`` is ``None`` when the state is ``open``, and ``None`` when it is
+    ``closed`` with ``points_used``/``points_limit`` measured. Consumers key on
+    ``state``.
 
     ``timeout`` bounds the COUNT (default ``QUOTA_STATE_TIMEOUT``) on its own
     daemon worker. Never raises: 'health must always answer' is the contract this
@@ -1564,6 +1573,25 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
                 "points_used": None, "points_limit": None,
                 "points_remaining": None, "error": reason}
 
+    def _refused(reason: str) -> dict:
+        """``closed`` by a FAIL-CLOSED arm: the numbers are `None` because the
+        gate refuses before it measures anything, and ``error`` names the check."""
+        return {"resource": resource, "state": "closed", "points_used": None,
+                "points_limit": None, "points_remaining": None,
+                "error": reason}
+
+    # ── 0. THIS FUNCTION'S OWN INPUTS. "Never raises" is a promise `health`
+    # depends on, so a caller-supplied shape it cannot read is an `unknown`, not
+    # an AttributeError. Measured before this guard: a non-dict `limits` escaped
+    # as `AttributeError: 'list' object has no attribute 'get'` and an unhashable
+    # `resource` as `TypeError: unhashable type` (fresh review of #12426, P2).
+    if limits is not None and not isinstance(limits, dict):
+        return _unavailable(
+            f"the resolved limits are not a mapping "
+            f"({type(limits).__name__}), so no boundary can be read")
+    if not isinstance(resource, str):
+        return _unavailable(
+            f"resource {resource!r} is not a name this report can look up")
     if limits is None:
         return _unavailable(
             "no tenant org context on this transport, so the quota gate is a "
@@ -1574,52 +1602,123 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
         return _unavailable(
             "the resolved limits carry no org_id, so there is no tenant whose "
             "quota could be enforced", state="not_applicable")
-    # ── limit first, count second — the gate's own ORDER (enforce_org_limit
-    # raises on an unreadable limit BEFORE it counts), so a data fault never
-    # costs a graph round-trip here either.
+    # ── 1. THE GATE'S FIRST CHECK, and the one a report that skips it gets WRONG.
+    # `enforce_org_limit` calls `enforce_allowances` BEFORE the point count
+    # (#5331/#9567), so a refused or UNREADABLE ruled dimension refuses the write
+    # whether or not a points cap is anywhere near. ⛔ "INERT BY DEFAULT" IS ABOUT
+    # WHAT THE ALLOWANCE GATE REFUSES, NOT ABOUT WHAT IT READS: a fault in that
+    # read is a `QuotaCheckError` **even with no allowance configured**
+    # (``tortoise/allowance_gate.py``'s own header). Omitting this published
+    # `open` for a tenant whose every write was refused — the exact false PASS
+    # this report exists to remove, and it was caught in fresh review of #12426.
+    try:
+        from .allowance_gate import enforce_allowances
+    except Exception as exc:  # noqa: BLE001, RUF100 — the gate refuses in this state
+        return _refused(
+            f"the allowance gate is unavailable ({type(exc).__name__}: "
+            f"{str(exc)[:120]}) and the write gate treats that as a refusal")
+    try:
+        enforce_allowances(limits, org_id=org_id, resource=resource)
+    except (QuotaExceededError, QuotaCheckError) as exc:
+        _logger.error(
+            "quota state: the allowance gate refuses (reporting closed): "
+            "team=%s resource=%s error=%r", org_id, resource, exc)
+        return _refused(
+            f"the ruled-dimension allowance gate raises for this write "
+            f"({type(exc).__name__}: {str(exc)[:160]})")
+    except Exception as exc:  # noqa: BLE001, RUF100 — never escape the contract
+        return _unavailable(
+            f"the allowance gate failed in an unexpected way "
+            f"({type(exc).__name__}: {str(exc)[:160]})")
+    # ── 2. limit next, count last — the gate's own ORDER (it raises on a
+    # missing/unreadable limit BEFORE it counts), so a data fault never costs a
+    # graph round-trip here either.
     limit_key = _RESOURCE_LIMIT_KEYS.get(resource)
     if limit_key is None:
+        if resource in GATEABLE_RESOURCES:
+            # `documents` is gated through a DERIVED branch this report does not
+            # model; saying "unknown resource" would misdescribe the gate.
+            return _unavailable(
+                f"resource {resource!r} is gated through a branch this report "
+                f"does not model (e.g. `documents`' DERIVED cap), so it is "
+                f"left unmeasured rather than guessed")
         return _unavailable(f"unknown quota resource {resource!r}")
     if limit_key not in limits:
-        # #310 GAP-B: a MISSING key is fail-closed. Only an explicit None is
+        # #310 GAP-B: a MISSING key is fail-closed, and the gate REFUSES on it —
+        # so this is `closed`, with the reason named. Only an explicit None is
         # UNLIMITED (#683), and the two must never be reported alike.
-        return _unavailable(
-            f"team limits missing {limit_key} for resource {resource!r} "
-            f"(fail-closed — a missing key is not an unlimited one, "
-            f"#310 GAP-B)")
+        return _refused(
+            f"team limits missing {limit_key} for resource {resource!r} — the "
+            f"gate refuses on a missing key (#310 GAP-B); only an explicit "
+            f"null means unlimited (#683)")
     limit = limits.get(limit_key)
     if limit is not None:
         try:
             limit = int(limit)
         except (TypeError, ValueError, OverflowError):
             # #4051: an integer-formatted string is honoured, a float-formatted
-            # one is not, and a limit nobody can read is never a pass.
-            return _unavailable(
+            # one is not, and a limit nobody can read is never a pass — the gate
+            # raises, so the honest state is `closed` with the field named.
+            return _refused(
                 f"team limits {limit_key} unreadable for resource "
-                f"{resource!r} ({limit!r})")
+                f"{resource!r} ({limit!r}) — the gate refuses (#4051)")
+    if limit is None:
+        # UNLIMITED. ⛔ Deliberately NO count: the gate returns before counting
+        # here (#4010 — "must not build a graph handle to prove it"), and a
+        # full-graph count on every `health` call to publish a number nothing
+        # enforces is cost with no answer behind it (fresh review of #12426).
+        # `points_limit: None` is what says "unlimited", so `points_used: None`
+        # is not ambiguous with a failed read.
+        return {"resource": resource, "state": "open", "points_used": None,
+                "points_limit": None, "points_remaining": None, "error": None}
     try:
         used = _bounded_resource_count(org_id, resource, sdk=sdk,
                                        timeout=timeout)
-    except Exception as exc:  # noqa: BLE001, RUF100 — every arm becomes "unknown"
-        _logger.error(
-            "quota state count failed (reporting unknown, never 0): "
-            "team=%s resource=%s error=%r", org_id, resource, exc)
+    except TimeoutError as exc:
+        # OUR budget, not the gate's: `enforce_org_limit` has no count timeout, so
+        # from here its answer is genuinely unknown (it may still land).
         return _unavailable(
-            f"could not count {resource!r} for org {org_id}: "
-            f"{type(exc).__name__}: {str(exc)[:160]}")
-    if limit is None:
-        # present-and-None = UNLIMITED (#683). The count above is still real, so
-        # `points_used` stays a measurement while "no cap" is carried by the
-        # ABSENCE of a limit and a ``None`` remaining — the reader never has to
-        # infer "unlimited" from a number.
-        return {"resource": resource, "state": "open", "points_used": used,
-                "points_limit": None, "points_remaining": None, "error": None}
-    return {"resource": resource,
-            "state": "open" if used < limit else "closed",
-            "points_used": used, "points_limit": limit,
-            # A live over-cap tenant is the case this exists for, so clamp: a
-            # negative "remaining" is not a headroom, it is a subtraction.
-            "points_remaining": max(0, limit - used), "error": None}
+            f"the {resource!r} count did not finish inside its budget "
+            f"({str(exc)[:120]}); the gate has no such timeout, so its own "
+            f"answer is unknown from here")
+    except Exception as exc:  # noqa: BLE001, RUF100 — the gate refuses in this state
+        _logger.error(
+            "quota state: the count raises (reporting closed, never 0): "
+            "team=%s resource=%s error=%r", org_id, resource, exc)
+        return _refused(
+            f"the {resource!r} count raises for org {org_id} "
+            f"({type(exc).__name__}: {str(exc)[:160]}) and the gate refuses on a "
+            f"failed count (fail-closed, #686)")
+    if not isinstance(used, int) or isinstance(used, bool):
+        # A non-numeric count is not a count. The gate would raise a bare
+        # TypeError; publishing it as a number would be worse than `unknown`.
+        return _unavailable(
+            f"the {resource!r} count returned {type(used).__name__}, which is "
+            f"not a count")
+    if used >= limit:
+        return {"resource": resource, "state": "closed", "points_used": used,
+                "points_limit": limit,
+                # A live over-cap tenant is the case this exists for, so clamp: a
+                # negative "remaining" is not a headroom, it is a subtraction.
+                "points_remaining": 0, "error": None}
+    return {"resource": resource, "state": "open", "points_used": used,
+            "points_limit": limit, "points_remaining": limit - used,
+            "error": None}
+
+
+def reset_quota_state_worker() -> None:
+    """Drop the quota-state worker so the next count lazily starts a fresh one.
+
+    The escape hatch the sibling counts have and this one originally lacked
+    (fresh review of #12426, P2): a count wedged on a black-holed socket holds
+    the pool's SINGLE slot, so every later ``health`` call submits behind it and
+    ``health.quota`` reports ``unknown`` for the life of the process — bounded
+    and fail-closed, but a permanently useless block until the next deploy. The
+    wedged thread is a daemon and is abandoned, never joined, so this cannot pin
+    interpreter exit.
+    """
+    from tortoise.monitoring import reset_daemon_worker
+    reset_daemon_worker(QUOTA_STATE_WORKER_NAME)
 
 
 def _bounded_resource_count(org_id: str, resource: str, sdk=None,
