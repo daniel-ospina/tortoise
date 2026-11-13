@@ -96,7 +96,7 @@ def test_a_broken_first_command_is_red_and_wins_over_anything_else():
 
 
 def test_absent_client_distribution_is_red_not_absent_ok():
-    """README.md documents `pip install tortoise-client` twice; a 404 is a
+    """README.md documents `pip install tortoise-client`; a 404 is a
     broken documented path. The arm must be gated, or the 404 that has been
     live since 2026-08-08 could never red anything."""
     report = canary.build_report(
@@ -586,10 +586,16 @@ def test_the_transcript_is_written_incrementally_not_only_at_the_end(tmp_path):
 class _Runner:
     """Records commands; returns scripted results per command tail."""
 
-    def __init__(self, results: dict[str, subprocess.CompletedProcess], creates_db_for=None):
+    def __init__(
+        self,
+        results: dict[str, subprocess.CompletedProcess],
+        creates_db_for=None,
+        creates_console: bool = True,
+    ):
         self.results = results
         self.calls: list[list[str]] = []
         self._creates_db_for = creates_db_for
+        self._creates_console = creates_console
 
     def __call__(self, cmd, **kwargs):
         # Faithful to the contract the tool relies on: without these the real
@@ -605,6 +611,14 @@ class _Runner:
         result = self.results.get(tail) or self.results.get(" ".join(cmd[1:]), None)
         if result is None:
             result = subprocess.CompletedProcess(cmd, 0, "", "")
+        if tail == "pip" and result.returncode == 0 and self._creates_console:
+            # A successful install is what puts a console script in the venv. The tool
+            # now READS that file: an artifact that installs but ships no entry point is
+            # a FAIL, not a detector outage. Without this the fake installs would look
+            # like entry-point-less wheels (#12363 round 5).
+            script = Path(cmd[0]).parent / "tortoise"
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text("#!/bin/sh\n")
         if self._creates_db_for is not None and tail == "tortoise":
             home = Path(kwargs["env"]["HOME"])
             db = home / ".tortoise" / "tortoise.db"
@@ -904,3 +918,202 @@ def test_a_tool_only_diff_selects_this_pin():
         "a diff to tools/published_artifact_canary.py no longer selects its own pin — "
         "the `CORE_ALSO` entry was dropped or the prefix behaviour changed"
     )
+
+
+# --------------------------------------------------------------------------
+# fetch_index — the ONLY thing that turns an index read into a verdict
+# --------------------------------------------------------------------------
+# These were unpinned: replacing the 404/410 → INDEX_ABSENT mapping with either constant
+# left the suite green, because every other test injects `engine_state=` and never reaches
+# `fetch_index`. The two directions cost very different money — 404 → UNREADABLE means a
+# genuinely absent project never names the release action, while 500 → ABSENT tells a human
+# to cut an IRREVERSIBLE upload on a transient server error (#12363 round 5).
+
+
+class _Response:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _fetch_with(monkeypatch, *, payload=None, raises=None):
+    import urllib.error
+    import urllib.request
+
+    def fake_urlopen(request, timeout=None):
+        if raises is not None:
+            raise raises
+        return _Response(payload)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return canary.fetch_index("tortoise-graph", 5)
+
+
+def test_a_real_404_is_ABSENT_so_the_release_action_is_named(monkeypatch):
+    import urllib.error
+
+    _doc, reason, state = _fetch_with(
+        monkeypatch, raises=urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+    )
+    assert state == canary.INDEX_ABSENT, state
+    assert "404" in reason
+
+
+def test_a_server_error_is_UNREADABLE_never_ABSENT(monkeypatch):
+    """A 500/429 is an index outage. Mapping it to ABSENT tells a human to cut a release
+    for a transient error — an irreversible action on a false premise."""
+    import urllib.error
+
+    for code in (500, 429, 503):
+        _doc, _reason, state = _fetch_with(
+            monkeypatch, raises=urllib.error.HTTPError("u", code, "boom", {}, None)
+        )
+        assert state == canary.INDEX_UNREADABLE, (code, state)
+
+
+def test_a_transport_failure_or_a_bad_body_is_UNREADABLE(monkeypatch):
+    import urllib.error
+
+    _doc, _reason, state = _fetch_with(monkeypatch, raises=urllib.error.URLError("name resolution"))
+    assert state == canary.INDEX_UNREADABLE
+    _doc, _reason, state = _fetch_with(monkeypatch, raises=TimeoutError("slow"))
+    assert state == canary.INDEX_UNREADABLE
+    _doc, _reason, state = _fetch_with(monkeypatch, payload=b"<html>not json</html>")
+    assert state == canary.INDEX_UNREADABLE
+    _doc, _reason, state = _fetch_with(monkeypatch, payload=b"[1, 2, 3]")
+    assert state == canary.INDEX_UNREADABLE, "a non-object body is not an index document"
+
+
+# --------------------------------------------------------------------------
+# main() — the CLI seam both workflows depend on
+# --------------------------------------------------------------------------
+# `--transcript-dir` is what makes the `if: always()` upload non-empty and `--summary-file`
+# is what puts the verdict on the run's page. Both were wiring-only and untested: hardcoding
+# `log_path = None` left the whole suite green (#12363 round 5).
+
+
+def _stub_main(monkeypatch, arm):
+    monkeypatch.setattr(
+        canary,
+        "fetch_index",
+        lambda package, timeout: (
+            {"releases": {"0.2.0": []}, "info": {"version": "0.2.0"}},
+            "",
+            canary.INDEX_OK,
+        ),
+    )
+
+    def fake_install(**kwargs):
+        # Write at the path MAIN passes in: the wiring under test is
+        # `--transcript-dir` → `transcript_path`, not the tool's own flush.
+        path = kwargs.get("transcript_path")
+        if path is not None:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text("$ fake transcript\n[exit 1]\n")
+        return arm, "$ fake transcript\n[exit 1]"
+
+    monkeypatch.setattr(canary, "install_and_run", fake_install)
+
+
+def test_the_cli_writes_the_transcript_the_workflows_upload(tmp_path, monkeypatch, capsys):
+    _stub_main(monkeypatch, canary.Arm("engine-init", canary.FAIL, "tortoise init exits 1"))
+    logs = tmp_path / "canary"
+    rc = canary.main(["--transcript-dir", str(logs)])
+    written = logs / "published-artifact-canary.log"
+    assert written.is_file(), "no transcript at the path the workflow uploads"
+    assert "fake transcript" in written.read_text()
+    assert rc == 1
+    assert "FAIL" in capsys.readouterr().out
+
+
+def test_the_cli_writes_the_summary_file_and_the_json_shape(tmp_path, monkeypatch, capsys):
+    """`--summary-file` is the only thing that puts the verdict on the run page; `--json`
+    is the machine-readable shape a future alert step would read."""
+    import json
+
+    _stub_main(monkeypatch, canary.Arm("engine-init", canary.FAIL, "tortoise init exits 1"))
+    summary = tmp_path / "summary.md"
+    canary.main(["--summary-file", str(summary)])
+    text = summary.read_text()
+    assert "Verdict: FAIL" in text, text
+    assert "engine-init" in text
+
+    capsys.readouterr()
+    canary.main(["--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == canary.FAIL
+    assert payload["exit_code"] == 1
+    assert {"name", "status", "gated", "detail"} <= set(payload["arms"][0])
+
+
+def test_a_wheel_that_installs_without_the_console_script_is_a_FAIL_not_UNKNOWN(tmp_path):
+    """An artifact that installs but ships no `tortoise` entry point cannot run the
+    documented command — that is a defect IN THE ARTIFACT. Classifying it as a detector
+    outage ("could not run") files it under the wrong owner (#12363 round 5)."""
+    wheel = tmp_path / "dist" / "tortoise_graph-0.3.0-py3-none-any.whl"
+    wheel.parent.mkdir(parents=True)
+    arm, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="",
+        workdir=tmp_path,
+        timeout=10,
+        # an artifact that installs cleanly but ships no `tortoise` entry point
+        runner=_Runner({}, creates_db_for=None, creates_console=False),
+        wheel=wheel,
+    )
+    assert arm.status == canary.FAIL, arm.detail
+    assert "console script" in arm.detail
+
+
+def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
+    """A step summary lives inside ONE run. The sibling detectors this workflow is
+    modelled on file an issue and close it on recovery — without that, a red the canary
+    produces is a red nobody opens, which is the 97-day-invisible class it exists to end
+    (#12363 round 5). The alarm text must also BRANCH on the exit code: leading an exit-2
+    detector outage with "this clears when a release lands" is the sentence that ends in
+    an irreversible upload."""
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "release-artifact-canary.yml").read_text()
+    )
+    assert workflow["permissions"].get("issues") == "write", (
+        "filing the alert issue needs issues: write — the repo's default token is "
+        "restricted (#2140), so without it the detector is deaf while looking green"
+    )
+    steps = {step.get("name"): step for step in workflow["jobs"]["canary"]["steps"]}
+
+    alarm = steps["What a red here means"]
+    assert "steps.canary.outputs.exit_code" in str(alarm), (
+        "the alarm must branch on the canary's exit code: exit 2 is a detector outage"
+    )
+    assert "DETECTOR outage" in str(alarm)
+
+    for name, condition in (
+        ("File or refresh the alert issue", "failure()"),
+        ("Close the alert issue on a green run", "success()"),
+    ):
+        step = steps[name]
+        assert "steps.canary.outcome" in str(step.get("if")), (
+            f"{name} must be gated on the canary's OWN outcome, not the job's"
+        )
+        assert condition in str(step.get("if"))
+        assert "published-artifact-alert.sh" in str(step.get("run")), (
+            f"{name} must go through the shared script — inlined shell here is what drifts"
+        )
+
+    script = REPO_ROOT / ".github" / "scripts" / "published-artifact-alert.sh"
+    assert script.is_file()
+    text = script.read_text()
+    assert "EXIT_CODE" in text and "not** evidence the artifact is broken" in text, (
+        "the alert body must separate a detector outage from a broken artifact"
+    )
+    assert "gh issue create" in text and "gh issue close" in text

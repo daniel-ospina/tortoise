@@ -7737,10 +7737,12 @@ surfaces:
   #     DB, no graph, no network, no venv — the install/run half is exercised
   #     through an injected runner.
   #   * `test_embedded_choke_point.py` — #2204's `os.makedirs` at the embedded
-  #     choke point, which had NO regression test (the only `makedirs` in the
-  #     suite are `tests/_embedded.py`'s own copies). Removing the line reds three
-  #     arms here; measured. Hermetic: `_build_guarded_falkordb` over a stand-in
-  #     base class, so no redis server is started.
+  #     choke point, which had NO regression test: nothing asserted that the data
+  #     dir exists (let alone that it exists BEFORE the server reads its config),
+  #     so the wheel could ship without it and only a fresh machine found out.
+  #     Removing the line reds three arms here; measured. Hermetic:
+  #     `_build_guarded_falkordb` over a stand-in base class, so no redis server
+  #     is started.
   # `core` is the surface that helps, and the two halves get there by DIFFERENT
   # routes — stated separately because conflating them was measured wrong on this
   # very PR (#12363 review E2): a `.github/workflows/` diff matches no
