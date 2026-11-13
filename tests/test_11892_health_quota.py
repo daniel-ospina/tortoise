@@ -717,6 +717,53 @@ def test_health_still_answers_when_the_quota_read_explodes(tmp_path, monkeypatch
     sdk.close()
 
 
+def test_the_blocks_own_blanket_except_reports_unknown_never_open(
+        tmp_path, monkeypatch):
+    """⛔ The `_org_quota_block` blanket `except` — the last arm before `health`
+    would 5xx — was unpinned. Found by a per-arm mutation sweep in round 5 of
+    #12426, after two rounds of the same class had been reported one arm at a
+    time.
+
+    ⛔ `test_health_still_answers_when_the_quota_read_explodes` LOOKS like it
+    covers this arm and does NOT: it patches `quota.org_quota_state` to raise, but
+    that call runs inside `_compute` on the bounded worker, where
+    `run_bounded_quota_state` catches it first and returns its own `unknown`. The
+    block's blanket `except` is only reached by a fault OUTSIDE `_compute` — the
+    guarded imports, or the ContextVar read — so flipping its hardcoded
+    `state` to `open` left this whole file green (49 passed, measured).
+
+    `open` here is the worst classification available: this is the arm that
+    doubles as `health`'s last line of defence, so it would claim an admitted
+    write path for a request whose quota machinery could not even be imported.
+    """
+    sdk = _sdk(tmp_path / "blanket.db", "blanket", points=1)
+    _wire_health(monkeypatch, sdk, {"org_id": "team11892", "max_points": 10})
+
+    from tortoise import mcp_auth
+    from tortoise.mcp_server import tortoise_health
+
+    class _ExplodingVar:
+        """A ContextVar handle whose read faults — outside `_compute`."""
+
+        def get(self, *a, **k):
+            raise RuntimeError("the auth ContextVar is unusable")
+
+        def set(self, *a, **k):  # pragma: no cover — never reached
+            raise AssertionError("this test must not write the ContextVar")
+
+    monkeypatch.setattr(mcp_auth, "_current_org_id", _ExplodingVar())
+
+    report = tortoise_health()
+    assert report["status"] == "ok", "a quota fault must never degrade status"
+    assert report["quota"]["state"] == "unknown", (
+        "the block's last-resort arm must be `unknown`, never `open`; got "
+        f"{report['quota']['state']!r}")
+    assert report["quota"]["points_used"] is None
+    assert report["quota"]["error"]
+    assert "quota state unavailable" in report["quota"]["error"]
+    sdk.close()
+
+
 # ── the BLOCK-level half of the allowance fix (mutation-verified gap) ──────
 
 
