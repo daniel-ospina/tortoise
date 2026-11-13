@@ -118,8 +118,13 @@ read per label (plus one per hop round, normally zero), and the verdict's facts
 reader adds a REVERSE read per label ("which nodes were folded into these ids?").
 That reverse read is now index-backed — `resolved_from` was added to
 `_RANGE_INDEX_LABEL_PROPS` and to `_REQUIRED_RANGE_INDEXES` for both identity
-labels, because un-indexed it measured 6.17 ms/query at 20k Objects (0.95 ms
-indexed) on every capture, twice per run. It does not change which rows S3's
+labels. ⚠️ **What carries that decision is a STRUCTURAL fact, not a figure:** an
+un-indexed reverse-edge lookup over an identity label is a full label scan by
+construction, on every capture, twice per run; the local spot measurement that
+first surfaced it was never recorded as an artifact, so **no milliseconds are
+claimed here** (the earlier `6.17 ms / 0.95 ms` figures were unpinned and are
+withdrawn — a number with no probe behind it cannot justify a REQUIRED index that
+sends every pre-existing graph through the one-time bootstrap sweep). It does not change which rows S3's
 `LIMIT` selected — a carrier that consumed a window slot still consumed it.
 `#12244` owns the write-side attachment sites; this is the read/prior side and its
 acceptance does not reach them.

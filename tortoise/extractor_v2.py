@@ -6692,10 +6692,12 @@ def _entity_verdict_facts(sdk, entities: list[dict]) -> dict:
 
     ⛔ **Cannot-answer is not an answer, and this read RAISES.** A verdict computed
     from a fact map that silently omitted the graph's own state would report
-    precision it did not have — the false-PASS shape. The D3 caller's guard turns
-    the raise into a recorded ``entity resolution failed`` for the run, which is
-    the pre-#12296 behaviour (no resolution, entities created as before) plus a
-    loud record, and never a merge made on missing evidence.
+    precision it did not have — the false-PASS shape. The caller CATCHES the raise
+    around THIS READ ALONE (never around the resolver): the fact-dependent vetoes
+    are skipped for the run and recorded, while phase 1 and — load-bearing — the
+    HOLD population still run. Swallowing it into the resolver's own `except`
+    would empty `resolution_held` and turn every entity S3 could not identify into
+    a CREATE, which is the §4.4 I1 inversion the hold exists to prevent.
     """
     ids = [str(e.get("id")) for e in entities or []
            if isinstance(e, dict) and e.get("id")]
@@ -15117,11 +15119,33 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # #11654: the run's narrative is S3's disambiguation
                 # context (§S3) — computed a stage earlier, and until now
                 # never handed to the resolver.
+                # ⛔ #12296 review: the facts read is a BOUNDED, OPTIONAL input to
+                # the verdict — not the pass. It costs four label reads on every
+                # capture, so a transient read failure is realistic; letting it
+                # escape into the pass's own `except` below would SKIP
+                # `resolve_entities` entirely, `resolution_held` would stay empty,
+                # and every entity S3 could not identify would then be CREATED
+                # rather than withheld — the §4.4 I1 inversion this issue exists to
+                # remove (pre-#12296 a healthy S3 always produced the hold
+                # population). Fail the FACTS read, not the pass: phase 1 and the
+                # hold population survive, and the only thing lost for this run is
+                # the fact-dependent vetoes (`target_retired` / `group_join` /
+                # `target_suppressed`), whose primary guard — the
+                # `_current_entity_priors` fold — is upstream and unaffected.
+                try:
+                    verdict_facts = _entity_verdict_facts(
+                        sdk, search.get("entities") or [])
+                except Exception as e:  # noqa: BLE001, RUF100 — optional input
+                    verdict_facts = None
+                    errors.append(
+                        "entity verdict facts unavailable: "
+                        f"{type(e).__name__}: {e} — the closure vetoes are "
+                        "skipped for this run; the S3 prior-set fold still "
+                        "excludes every merge-retired carrier (#12296)")
                 res = resolve_entities(ent_refs, search, model=model,
                                        stats=resolution_stats,
                                        narrative=story_arc,
-                                       facts=_entity_verdict_facts(
-                                           sdk, search.get("entities") or []))
+                                       facts=verdict_facts)
                 # ⛔ #11653: captured BEFORE the apply — a raise from it must not
                 # lose the hold (the entity it could not identify is then MINTED).
                 resolution_records = res.get("records") or []

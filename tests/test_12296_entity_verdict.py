@@ -1086,6 +1086,76 @@ class TestTheResolverBands:
             "table built by another caller")
         assert isinstance(seen["facts"], dict), seen
 
+    def test_a_raising_facts_reader_still_yields_the_hold_population(
+            self, monkeypatch):
+        """The facts read is optional INPUT; taking the D3 pass with it would
+        create what S3 could not identify (round-2 review, blocking).
+
+        `_entity_verdict_facts` costs four label reads per capture, so a
+        transient raise is realistic. Evaluated INLINE inside the pass's own
+        `try`, the raise skipped `resolve_entities` entirely: `resolution_held`
+        stayed `[]`, `execute_embed` was handed `held_entities={}`, and the
+        `_norm(name) in _entity_holds` skip plus `_strip_carriers` both went
+        inert — so an ambiguous name was MINTED and kept as a live reference.
+        That is the §4.4 I1 inversion ("a lookup that FAILED licensing a
+        CREATE") this issue exists to remove, and it is narrower than the
+        pre-#12296 behaviour the docstring used to claim: a healthy S3 always
+        produced the hold population.
+
+        The name here matches nothing in the prior set and the model declines to
+        call it new, which is the disambiguation-undecided HOLD.
+        """
+        embed = {"entities": [{"name": "Acme", "kind": "core:organisation"}],
+                 "events": [],
+                 "points": [{"content": "Acme signed the deal",
+                             "pointKind": "statement",
+                             "about_entities": ["Acme"]}],
+                 "operators": [], "chain_notes": [],
+                 "link_before_create": []}
+        empty_gaps = {"entities": [], "events": [], "points": [],
+                      "operators": [], "chain_notes": [],
+                      "link_before_create": []}
+
+        def responder(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "Acme signed the deal."
+            if "GRAPH MAPPER" in system:
+                return json.dumps(embed)
+            if "GAP REVIEWER" in system:
+                return json.dumps(empty_gaps)
+            if "ENTITY RESOLUTION" in system:
+                # neither a resolution nor a declaration of newness → HOLD
+                return json.dumps({"resolutions": [], "new": []})
+            raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+        class _M:
+            def complete(self, *, system: str, user: str):
+                return responder(system, user)
+
+        def boom(*a, **kw):
+            raise RuntimeError("graph read timed out")
+
+        monkeypatch.setattr(v2, "_entity_verdict_facts", boom)
+        monkeypatch.setattr(
+            v2, "search_graph",
+            lambda sdk, embed_list, story, **kw: {
+                "entities": [{"id": "obj-other", "name": "Other",
+                              "kind": "core:organisation"}],
+                "points": [], "events": [], "degraded": False})
+        out = v2.extract_session_v2(
+            _M(), [{"role": "user", "content": "Acme signed the deal."}],
+            session_id="s1")
+        assert out["payload"] is not None, out
+        held = [h.get("name") for h in out.get("resolution_held") or []]
+        assert held == ["Acme"], (
+            "a raising facts reader emptied the hold population; an entity S3 "
+            f"could not identify would be created — held={held!r} "
+            f"errors={out.get('errors')!r}")
+        assert "entity verdict facts unavailable" in " ".join(
+            out.get("errors") or []), (
+            "the skipped vetoes must be recorded, not silent: "
+            f"errors={out.get('errors')!r}")
+
 
 class TestTheFactsReader:
     def test_a_merged_carrier_reads_as_retired_and_the_survivor_as_a_group(

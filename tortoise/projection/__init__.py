@@ -6789,9 +6789,11 @@ _RANGE_INDEX_LABEL_PROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # measured 5k→40k). Same single-prop class as ``name`` beside it.
     # #12296: ``resolved_from`` is the REVERSE edge the capture path reads on
     # every run — `extractor_v2._entity_verdict_facts` asks "which nodes were
-    # folded into these ids?" for BOTH identity labels, and it was a full label
-    # scan (measured 6.17 ms/query at 20k Objects, 0.95 ms indexed). One write
-    # per merge, so none of the #522 write-amplification concern.
+    # folded into these ids?" for BOTH identity labels, twice per capture. An
+    # un-indexed reverse edge lookup is a FULL LABEL SCAN BY CONSTRUCTION (that
+    # structural fact is what carries this index; the local spot measurement that
+    # first surfaced it was not recorded as an artifact, so no figure is claimed
+    # here). One write per merge, so none of the #522 write-amplification concern.
     ("Subject", ("id", "name", "canonical_name", "resolved_from")),
     ("Object", ("id", "name", "canonical_name", "resolved_from")),
     # #7927: ``id`` added to Event. Every epistemic read anchors on ``id``
