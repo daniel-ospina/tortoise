@@ -4023,7 +4023,8 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
 #:
 #: Keyed by the register key, the routes are read off SOURCE at HEAD (no import, no graph — this
 #: suite is `core` and stays URI-less):
-#:   * `handoff` — the `(path, symbol)` that must still hand its payload to the delegate op;
+#:   * `handoff` — the `(path, symbol)` that must still hand its payload to the delegate op,
+#:     by calling `handoff_call`;
 #:   * `delegate` — the `(path, symbol)` the register's `reason` NAMES, which must still exist;
 #:   * `passthrough` — the call inside the delegate that performs the extra-props store;
 #:   * `allowlist` — the module constant the passthrough is fed from, which must still name
@@ -4033,6 +4034,7 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
 DELEGATED_STORE_ROUTES: dict[str, dict[str, object]] = {
     "tortoise.sdk::create_source": {
         "handoff": ("tortoise/sdk.py", "create_source"),
+        "handoff_call": "_create_entity",
         "delegate": ("tortoise/projection/entities.py", "_upsert_source"),
         "passthrough": "_persist_extra_props",
         "allowlist": "_SOURCE_EXTRA_PROPS",
@@ -4075,6 +4077,7 @@ def _delegation_violation(
     delegate_source: str,
     reason: str,
     handoff: tuple[str, str],
+    handoff_call: str,
     delegate: tuple[str, str],
     passthrough: str,
     allowlist: str,
@@ -4099,10 +4102,25 @@ def _delegation_violation(
         )
     # (a) the WRITER still hands its payload to the delegate, under a name discovery can see.
     handoff_tree = ast.parse(handoff_source)
-    if not any(
-        isinstance(n, ast.FunctionDef) and n.name == handoff[1] for n in ast.walk(handoff_tree)
-    ):
+    handers = [
+        n for n in ast.walk(handoff_tree)
+        if isinstance(n, ast.FunctionDef) and n.name == handoff[1]
+    ]
+    if not handers:
         return f"{handoff[0]}::{handoff[1]} is not defined any more"
+    hands_off = any(
+        isinstance(n, ast.Call)
+        and (
+            (isinstance(n.func, ast.Attribute) and n.func.attr == handoff_call)
+            or (isinstance(n.func, ast.Name) and n.func.id == handoff_call)
+        )
+        for fn in handers for n in ast.walk(fn)
+    )
+    if not hands_off:
+        return (
+            f"{handoff[1]} no longer calls {handoff_call} — the payload never reaches the "
+            "delegate the declaration names"
+        )
     delegate_tree = ast.parse(delegate_source)
     delegates = [
         n for n in ast.walk(delegate_tree)
@@ -4179,6 +4197,7 @@ def test_the_delegated_store_this_row_names_still_resolves() -> None:
             delegate_source=(REPO_ROOT / delegate[0]).read_text(encoding="utf-8"),
             reason=record.reason,
             handoff=handoff,
+            handoff_call=str(route["handoff_call"]),
             delegate=delegate,
             passthrough=str(route["passthrough"]),
             allowlist=str(route["allowlist"]),
@@ -4209,6 +4228,7 @@ def test_the_delegation_pin_REDS_on_each_fact_it_rests_on() -> None:
         handoff_source=handoff_source,
         reason=EMBED_WRITER_CLASSES["tortoise.sdk::create_source"].reason,
         handoff=route["handoff"],  # type: ignore[arg-type]
+        handoff_call=str(route["handoff_call"]),
         delegate=route["delegate"],  # type: ignore[arg-type]
         passthrough=str(route["passthrough"]),
         allowlist=allowlist,
@@ -4254,6 +4274,16 @@ def test_the_delegation_pin_REDS_on_each_fact_it_rests_on() -> None:
     violation = _delegation_violation(delegate_source=gone, **kwargs)
     assert violation is not None and "_upsert_source" in violation, (
         f"a renamed delegate must red the pin — got {violation!r}"
+    )
+
+    # (a') the writer stops handing its payload to the delegate — nothing reaches the store.
+    no_handoff = handoff_source.replace(
+        "self._create_entity(", "self._create_entity_renamed(")
+    assert no_handoff != handoff_source, "the handoff anchor did not change — a stale needle"
+    violation = _delegation_violation(
+        delegate_source=delegate_source, **{**kwargs, "handoff_source": no_handoff})
+    assert violation is not None and str(route["handoff_call"]) in violation, (
+        f"a writer that stops calling its handoff must red the pin — got {violation!r}"
     )
 
     # …and the reason no longer naming the delegate is its own red (the prose/pin drift guard).
