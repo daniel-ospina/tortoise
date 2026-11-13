@@ -81,10 +81,12 @@ key's own floor (#12295): a pair whose folded names share no 3-character prefix 
 excluded by that fact — the ``T`` (word order / transposition) and ``S`` (typo and separator
 classes) keys reach it. ⚠️ That is a relief, NOT a universal: ``T`` is emitted per token matched
 by ``_WORD = re.compile(r"[a-z0-9']+")`` that is also at least ``MIN_BLOCK_CHARS`` (3)
-characters long, so (i) a transposition whose tokens are shorter than 3 characters and (ii) every
-non-ASCII transposition still share no key at all — measured at this head:
-``'alpha beta'`` / ``'beta alpha'`` share ``T:alp`` and ``T:bet``, while ``'ab cd'`` / ``'cd ab'``,
-``'go py'`` / ``'py go'`` and ``'привет мир'`` / ``'мир привет'`` share NOTHING.
+characters long, so (i) a transposition whose tokens are shorter than 3 characters shares no
+``T`` key (``'ab cd'`` / ``'cd ab'`` share NOTHING), and (ii) ``T`` is ASCII-gated, so a
+non-ASCII transposition is reached only where an ``S`` band happens to collide — measured:
+``'привет клиент'`` / ``'клиент привет'`` share ``S:(20,…)``, while the shorter
+``'привет мир'`` / ``'мир привет'`` share NOTHING. ``_WORD`` is the reach limit, not
+non-ASCII: do NOT read this arm as "non-ASCII transpositions are never compared".
 ``test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_REQUIRES_it``
 pins each of ``P``/``T``/``S`` with a pair whose own namespace its arm REQUIRES (not
 "shares alone" — measured, only the ``P`` witness shares ``P`` by itself; the ``T``

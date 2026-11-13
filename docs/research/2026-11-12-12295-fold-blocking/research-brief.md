@@ -199,8 +199,11 @@ non-empty `oversized_skipped`, so a reader must check that field to know whether
 means what this column says it means. The third is the `T:` key's own floor — `block_keys` emits a
 word-order/transposition key only for tokens matched by `_WORD = re.compile(r"[a-z0-9']+")` **and** at
 least `MIN_BLOCK_CHARS` (3) characters long, so a transposition of shorter tokens (`'ab cd'` /
-`'cd ab'`) or of non-ASCII tokens (`'привет мир'` / `'мир привет'`) shares **no** key and is never
-compared. It does not move these figures — every token in this population's reachable classes
+`'cd ab'`) shares **no** key and is never compared, and a non-ASCII transposition is reached by `T`
+for no token at all — such a pair is compared only where an `S` band happens to collide (measured:
+`'привет клиент'` / `'клиент привет'` share `S:(20,…)`, while `'привет мир'` / `'мир привет'`
+share **nothing**). `T` is the ASCII-gated key, not the whole reach limit — do not read this floor
+as "all non-ASCII transpositions are unreachable". It does not move these figures — every token in this population's reachable classes
 clears the floor — but it is a real reach limit on the shipped comparison path, and it is stated
 here rather than left for a reader to infer from “transpositions are reached”.
 

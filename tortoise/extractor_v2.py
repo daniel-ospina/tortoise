@@ -6156,8 +6156,10 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
 
     The folded arm compares :func:`tortoise.entity_blocking.key_of`, which is
     ``entity_resolver.normalize_entity_name`` — the key every write door already
-    stores as ``canonical_name`` since `#12047` (``sdk.py``: the `_emit` fill at
-    ``:45886``; ``api.py:2628``; ``projection/entities.py``: Objects ON CREATE at
+    stores as ``canonical_name`` since `#12047` (cited by SYMBOL, the rule in
+    ``entity_blocking.py``: ``sdk.SDK._create_entity``'s funnel fill, ``api``'s
+    ``add_subject``/``add_object`` name arms, ``sdk.SDK._update_entity``'s
+    real-rename stamp; ``projection/entities.py``: Objects ON CREATE at
     ``:5094``). It differs from ``_norm``
     exactly where the measured variant classes live: it drops a leading article
     and folds every punctuation run to a space, so ``the plan-doc``,
