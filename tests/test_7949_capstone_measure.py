@@ -5384,10 +5384,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # reads — 10021 on `main` at `87c07462a8`, 10002 at this branch alone
             # (`4de7bbf511`), and 10036 merged. ⛔ `9951` is in that list only
             # because this row printed it — it was a predicted merge-tree value
-            # (9943 + 8), never a line any commit on `main` carried; the `10019`
-            # this row printed next was the same defect (an unmerged tree's
-            # `9987 + 32`), and `main` then overtook it by +34, which is the only
-            # reason a rebase was needed to re-derive rather than re-check it.
+            # (9943 + 8), never a line any commit on `main` carried. ⛔ The
+            # `10019` this row printed next was NOT that same defect, and saying
+            # it was is the error this note exists to stop: 10019 IS a line a
+            # commit on `main` carries — the anchor at `ea2c41a696`
+            # (`9987 + 32`, #12108) — reached with nothing of this lane in the
+            # tree. The 32 in that sum is `d036b9859960`'s block (#11825), not
+            # this lane's 15: the merge of this lane onto 9987 reads 10002, not
+            # 10019. `main` then overtook 10019 by **+2** (`a53ba8cf53` 10020,
+            # `73c479ce40` 10021), which is why a rebase had to RE-DERIVE the
+            # number rather than re-check it.
             # The deltas are just where the registrations landed, each measured
             # per commit with `git diff -U0 <c>^..<c> -- config/ci-surfaces.yml`
             # (a commit's OWN new-side offset): `+8 @2725` (`cd22562c24`, #12060 —
