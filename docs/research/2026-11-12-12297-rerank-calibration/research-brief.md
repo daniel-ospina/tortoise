@@ -98,7 +98,10 @@ scheduler.
 
 ## 3. Noun path — results
 
-Baseline in every row is the **same** rows, unreranked, at the same pool.
+Every figure in this section is `measurement-noun-path.json` (`arms.exact` /
+`arms.variant` before, `arms.rerank.<pool>` after) — named here for the reason §5
+gives: a figure may stand only if it is a field in a committed artifact named
+beside it. Baseline in every row is the **same** rows, unreranked, at the same pool.
 
 ### Pool 40 — the shipped `DEFAULT_FUSED_RERANK_POOL`, i.e. the real pool size
 
@@ -139,7 +142,9 @@ cut**.
 > as a pair.
 
 **Surface variants** (a capture saying an existing node a different, real way —
-article-drop / hyphen↔space / basename; 426 pairs):
+article-drop / hyphen↔space / basename / hash-dropped, five character-level
+perturbations summing to **426 pairs**: article-drop 180, space→hyphen 180,
+basename-only 30, hyphen→space 18, hash-dropped 18 — `arms.variant_by_class`):
 
 | pool | in-window@3 before | after | gained / lost |
 |---|---|---|---|
@@ -282,6 +287,8 @@ Measured over **39,930 pairs** in the arm-5 run (torch intra-op threads pinned t
 `score_s` and the per-pair mean — the three reconcile (`5.179 ms × 39,930 =
 206.8 s`). It is the 300-mention sample, not the 1,000-name population.
 
+`measurement-noun-path.json` → `arms.rerank.latency`:
+
 | | |
 |---|---|
 | **ms per pair** | **5.179** |
@@ -394,7 +401,7 @@ interface, so **only the scorer changes**. Two declared, untuned modes:
 - `difflib` — `SequenceMatcher(None, a, b).ratio()` on lowercased text (character level).
 - `overlap` — Jaccard over lowercased alphanumeric tokens (token level).
 
-All four tables below are `measurement-lexical-control.json` — `arms.*.40` / `arms.*.15`
+All three tables below are `measurement-lexical-control.json` — `arms.*.40` / `arms.*.15`
 for the recall and nDCG cells, `arms.*.latency` for the per-pair cost.
 
 | pool 40, exact arm | recall@3 | nDCG@10 | gained / lost | **ms/pair** |
