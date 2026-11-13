@@ -141,7 +141,12 @@ class NonFoldedEntry(NamedTuple):
     # reads the shape must not assume the first:
     #  (a) the GONE-SURVIVOR arms — every holder is a carrier of ONE merged entity
     #      whose survivor is deleted (`_ref_is_one_gone_entity` and the `if not
-    #      by_name` twins, four of the five sites);
+    #      by_name` twins, four of the five sites). ⛔ Those four answer by ENTITY
+    #      COUNT (review round 25): two DISTINCT entities holding the ref keep
+    #      `"ambiguous-name"`, because telling a consumer to fix ONE dangling
+    #      pointer where the graph holds two is the same false repair this note
+    #      exists to prevent. So "ONE merged entity" is a PRECONDITION of the
+    #      shape on all four, not a description of whatever reaches them.
     #  (b) the ID-LESS-TARGET arms — a resolved target that carries no id, so the
     #      journaled fold cannot address it (`commit_ops` id-less Object arm,
     #      `entity_identity._refuse`'s twin here).
