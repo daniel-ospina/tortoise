@@ -748,6 +748,9 @@ def _reconcile_or_report(sdk: Any, goal_id: str | None) -> dict:
     neither ``failed`` nor ``gone`` — so passing a goal id that is falsy for a
     reason the claim could have supplied is a reconcile that silently does not
     happen over the exact shape this helper exists for (#12336).
+    ⚠️ ``.get`` rather than ``[]``: an arm written with the subscript would
+    RAISE on a claim that lacks the prop, turning a reconcilable skip into a
+    ``failed`` the sweep books with ``found: None``.
 
     ⚠️ It is deliberately the SAME reconcile the retirement path uses (step 4),
     wrapped once, so there is one set of predicates behind
@@ -997,11 +1000,12 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     """
     if not goal_id:
         # ⛔ NOT "the claim names no goal" — this function cannot know that: it
-        # was handed nothing. Every arm that reads a claim sources the id from it
-        # (the already-terminal and success arms from `claim`, the post-exception
-        # arm from its re-read `after`), so a call that lands here means no caller
-        # supplied one, and the message says exactly that rather than asserting a
-        # fact about a claim it never read.
+        # was handed nothing. Every arm that reads a claim sources the id from it,
+        # CLAIM FIRST (the already-terminal, vanish-before-retirement and success
+        # arms from `claim`, the post-exception arm from its re-read `after`), so
+        # a call that lands here means no caller supplied one — and the message
+        # says exactly that rather than asserting a fact about a claim it never
+        # read.
         return {"checked": False,
                 "reason": "no goalId was supplied to the reconcile"}
     try:
