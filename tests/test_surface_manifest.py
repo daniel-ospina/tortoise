@@ -5893,14 +5893,16 @@ def test_a_NON_MAPPING_archive_entry_is_UNREADABLE_not_absent(tmp_path):
 
     sm = _load_manifest_tool()
     path = tmp_path / "MANIFEST.json"
-    # `schema` IS PART OF THE FIXTURE ON PURPOSE. Without it the DELEGATED sibling
-    # (`archive_surface.manifest_violations`) appends a schema violation and then raises
-    # `AttributeError: 'str' object has no attribute 'get'`, which `removal_records`' blanket
-    # `except Exception` wraps into the SAME `SurfaceEvidenceUnreadable` — so the guard below
-    # could be replaced by `continue` and this test still passed (it asserted only the TYPE).
-    # The operator-facing diagnostic then degraded to "could not grade the archive manifest
-    # against its own checker: AttributeError…" (review round 18 of PR #12313: the mutant
-    # survived with the pinned fixture).
+    # `schema` IS HERE SO THE FIXTURE IS WELL-FORMED for the delegated sibling — it is NOT what
+    # pins the guard. ⛔ THE MESSAGE ASSERTION BELOW IS WHAT PINS THE GUARD; an exception TYPE
+    # cannot: over a string entry the DELEGATED sibling (`archive_surface.manifest_violations`)
+    # raises `AttributeError: 'str' object has no attribute 'get'`, which `removal_records`'
+    # blanket `except Exception` wraps into the SAME `SurfaceEvidenceUnreadable` — so with the
+    # guard replaced by `continue` the old type-only assertion still passed, and the
+    # operator-facing diagnostic degraded to "could not grade the archive manifest against its
+    # own checker: AttributeError…". Measured: a SCHEMA-LESS fixture plus the same mutant also
+    # fails, on the message assertion — the schema does not close the hole (review round 19 of
+    # PR #12313 corrected round 18's claim that it did).
     path.write_text(_json.dumps({"schema": 1, "entries": ["mcp-tool:tortoise_x"]}), encoding="utf-8")
     with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
         sm.removal_records(path)
