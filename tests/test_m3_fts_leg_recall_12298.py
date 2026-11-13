@@ -1064,6 +1064,15 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, changelog: str)
                            round(pair["recall_at_3_base"], 4))
 
     text = " ".join(changelog.replace("**", "").split())
+    k5 = artifact["comparisons"]["falkordb_tfidf__vs__postgres_bm25/tokens"]["k5"]
+    assert k5["only_b"] == 0 and k5["only_a"] > 0, (
+        "the k=5 comparison no longer favours the shipped leg \u2014 the changelog's "
+        "k=5 sentence needs re-deriving")
+    assert (
+        f"is {'\u2212' if k5['delta_pts'] < 0 else '+'}{abs(k5['delta_pts']):.2f} at k=5"
+    ) in text, (
+        "the changelog does not state the k=5 direction \u2014 the only width where "
+        "the shipped leg leads")
     n = arms["falkordb_tfidf"]["identifier_fixture"]["n"]
     reach = {a: arms[a]["identifier_fixture"]["reachable"] for a in (
         "falkordb_tfidf", "falkordb_tfidf__tokens_fixed",
@@ -1323,6 +1332,19 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         f"+{k15['delta_pts']:.2f} pts at k=15 with "
         f"{'ZERO' if k15['discordant'] == 0 else k15['discordant']} discordant pairs"
     ) in plain, "§0's scorer bullet no longer matches the artifact's paired tests"
+    k5 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k5"]
+    assert k5["only_b"] == 0 and k5["only_a"] > 0, (
+        "the k=5 comparison no longer favours the shipped leg \u2014 the bullet's "
+        "'the shipped leg ahead N\u20130' sentence needs re-deriving")
+    assert (
+        f"while at k=5 it is {'\u2212' if k5['delta_pts'] < 0 else '+'}"
+        f"{abs(k5['delta_pts']):.2f} pts"
+    ) in plain, (
+        "\u00a70's scorer bullet does not state the k=5 direction. That is the ONE "
+        "width where the shipped leg leads, so dropping it turns a sign change "
+        "into a floor \u2014 the defect review cycle 6 fixed")
+    assert f"the shipped leg ahead {k5['only_a']}\u20130" in plain, (
+        "\u00a70 must state the k=5 discordant split, not just the delta")
 
     shipped = artifact["arms"]["falkordb_tfidf"]["ranks"]
     tokens = artifact["arms"]["postgres_bm25/tokens"]["ranks"]
@@ -1382,6 +1404,16 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
         "the status note's 'zero at k=15' must be the k=15 delta "
         f"{k15['delta_pts']}")
     assert k15["delta_pts"] == 0.0
+    k5 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k5"]
+    assert k5["only_b"] == 0 and k5["only_a"] > 0, (
+        "the k=5 comparison no longer favours the shipped leg \u2014 the status "
+        "note's k=5 sentence needs re-deriving")
+    assert (
+        f"**{'\u2212' if k5['delta_pts'] < 0 else '+'}{abs(k5['delta_pts']):.2f} pts at k=5**"
+    ) in text, (
+        "the status note does not state the k=5 direction \u2014 the only width "
+        "where the shipped leg leads, and the reason 'a sign change, not a "
+        "floor' is written there")
     assert f"the whole {dep['delta_pts']:g}-point swing" in text, (
         f"the status note's swing must be the deployable arm's {dep['delta_pts']}")
     assert recovery["delta_pts"] == dep["delta_pts"], (
@@ -1415,35 +1447,73 @@ def test_the_index_wait_requires_exactly_the_expected_count(tool_mod) -> None:
 
 
 def test_the_reuse_count_guard_is_wired(tool_mod) -> None:
-    """`arm_falkordb` must assert the graph's total `:Object` count.
+    """`arm_falkordb` must QUERY the graph's total `:Object` count AND refuse on it.
 
-    ⛔ The brief claims this guard (§2) and a brief-pin asserts the CLAIM, not the
-    CODE: deleting the count assertion from the harness left every test in this
-    file green while the brief went on claiming a guard that no longer existed
-    (#12349 review cycle 8). Pinned structurally, the same way the index-wait
-    operator above is.
+    ⛔ Two failures this pin exists for, and the reason it reads the AST rather
+    than the source text. (1) The brief claims this guard (§2), and a brief-pin
+    asserts the CLAIM, not the CODE — deleting the guard from the harness left
+    every test in this file green while the brief went on claiming it. (2) The
+    first version of this pin used `in src` substring checks, which a NEUTRALISED
+    guard defeats: commenting the block out, or wrapping it in `if False:`, keeps
+    both substrings present, so the pin reports OK over a graph that is silently
+    accepted (measured — the reviewer's reproduction). The guard is therefore
+    bound structurally: an `If` whose test compares `total` against `len(rows)`
+    with `!=`, whose body RAISES.
     """
-    src = inspect.getsource(tool_mod.arm_falkordb)
-    assert "MATCH (o:Object) RETURN count(o)" in src, (
+    import ast
+
+    tree = ast.parse(TOOL.read_text())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "arm_falkordb"), None)
+    assert fn is not None, "arm_falkordb is the measurement's sweep"
+
+    count_calls = [
+        c for c in ast.walk(fn)
+        if isinstance(c, ast.Call)
+        and any(isinstance(a, ast.Constant) and isinstance(a.value, str)
+                and "count(o)" in a.value for a in c.args)
+    ]
+    assert count_calls, (
         "the total-:Object count query is gone — the stale-name check cannot see "
         "a previous arm's `m3fx-*` fixture rows (`STARTS WITH 'm3-'` misses "
         "them), so a reused graph is accepted and swept as 305 against 300")
-    assert "!= len(rows)" in src, (
-        "the total count is queried but never compared against the population")
+
+    guards = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.If):
+            continue
+        if not isinstance(node.test, ast.Compare):
+            continue
+        operands = " ".join(ast.unparse(o) for o in
+                            [node.test.left, *node.test.comparators])
+        ops = {type(o).__name__ for o in node.test.ops}
+        if "total" not in operands or "len(rows)" not in operands:
+            continue
+        if not ops & {"NotEq", "Gt", "Lt"}:
+            continue
+        if any(isinstance(b, ast.Raise) for b in node.body):
+            guards.append(node)
+    assert guards, (
+        "the total count is queried but never COMPARED-and-REFUSED — the guard "
+        "must be an `if <count> != len(rows): raise SystemExit(...)`; a substring "
+        "match would also accept the block commented out or under `if False:`")
 
 
 def test_brief_states_what_the_reuse_guards_actually_do(brief_text) -> None:
-    """§2's reuse claim must match the guards — and now it can claim more.
+    """§2's reuse claim must match EXACTLY what the guards do — and that is narrow.
 
-    ⛔ HISTORY, because this claim has been lost twice. The harness once refused
-    a reused graph only when a STORED NAME differed, and the index wait accepted
-    `numDocuments >= n`, so `--graph <a previous run's graph>` with the SAME
-    population was ACCEPTED and the sweep ran over that run's leftover fixture
-    rows — the confound §3.5 and `measurement_notes` disclose. The brief said
-    "refuses a reused graph outright" and was corrected DOWN to disclose the
-    limitation. Both guards are now closed (`==`, plus a total `:Object` count
-    assert), so the strong claim is TRUE and must not be softened again — a
-    brief that under-claims is as wrong as one that over-claims.
+    ⛔ HISTORY, because this sentence has now been wrong in BOTH directions. The
+    harness once refused a reused graph only when a STORED NAME differed, and the
+    index wait accepted `numDocuments >= n`, so `--graph <a previous run's graph>`
+    with the SAME population was ACCEPTED and the sweep ran over that run's
+    leftover fixture rows — the confound §3.5 and `measurement_notes` disclose.
+    The brief said "refuses a reused graph outright", which was FALSE in the
+    over-claiming direction, and was corrected DOWN. Closing the two holes then
+    made that strong sentence tempting again — and it is STILL too wide: a graph
+    holding exactly the same 300 names and nothing else passes both guards. This
+    pin therefore requires the NARROWED claim (a different population, or that
+    population plus leftover rows) AND a disclosure of the case that is still
+    accepted. Over-claiming and under-claiming are the same failure.
     """
     flat = " ".join(brief_text.replace("**", "").split())
     assert "refuses a graph whose population differs, or that population plus leftover rows" in flat, (
