@@ -4939,15 +4939,17 @@ _BARE_NUM = re.compile(_LEADING_NUM_NO_POSITION)
 #: NEIGHBOUR line asks the same question of the same claim, so `_bare_number_hits_
 #: neighbour` calls `_bare_number_hits` and there is no unit-aware variant left to
 #: swap in. Measured at this head: `— 155 lines of rows` beside the manifest's name is
-#: refused (`['155']`) — an accepted FALSE RED, pinned where it is paid for — while
-#: `lists 60 entries` and `row: 166 s` stay GREEN, because `entries`, `s` and the rest
-#: of the unambiguous units are in `_UNIT_WORDS` and `lines`/`rows` are the only nouns
-#: this pattern treats as positions. (An earlier cut of this comment claimed the arm
-#: was "UNIT-AWARE" and that the strict pattern refused "all three" of those — stale
-#: text from the round that deleted the tail allow-list, refuted 1-of-3 here and by
-#: `_bare_number_hits_neighbour`'s own docstring.) An ORDINAL (`— its 9987th line`) is
-#: caught by the strict pattern too, which is why one matcher loses none of the class
-#: that matters.
+#: refused (`['155']`) — an accepted FALSE RED, pinned where it is paid for. ⚠️ The
+#: two other examples are green for a reason that is NOT "their noun is a unit":
+#: `lists 60 entries` is green only because `_NUM` needs THREE digits (`\d{3,}`) —
+#: `entries` IS positional (`_UNIT_POSITION_WORDS` is `lines|rows|entries`), so
+#: `lists 1450 entries` is refused, and this file asserts `9987 entries into the
+#: manifest` RED for that reason. `row: 166 s` is green because `s` is a unit.
+#: (Two earlier cuts of this comment were wrong in opposite directions: one claimed
+#: the arm was "UNIT-AWARE" and that the strict pattern refused "all three" of
+#: those, the next claimed `entries` was a unit — both refuted by measurement.) An
+#: ORDINAL (`— its 9987th line`) is caught by the strict pattern too, which is why
+#: one matcher loses none of the class that matters.
 
 #: ⛔ A LONE FOUR-DIGIT 19xx/20xx RUN IS A YEAR AS OFTEN AS A LINE NUMBER, and the bare
 #: arm cannot tell them apart — so it refuses the year rather than punishing prose that
@@ -6510,6 +6512,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # as noise REDs exactly these two rows, and nothing else in this table does.
     "the loader (`sdk.py:9612`) reads `config/ci-surfaces.yml` on every run",
     "`sdk.py:9612` then `config/ci-surfaces.yml`",
+    # ⛔ AND THE `entries` MEMBERSHIP OF `_UNIT_POSITION_WORDS` IS PAID FOR HERE
+    # (#12369 review, P3). `entries` is in that list; `_UNIT` excludes those nouns, so
+    # `_NUM` does not read `1450 entries` as a line cite — a COUNT of entries is a
+    # count. Nothing pinned that membership: moving `entries` back to `_UNIT_WORDS`
+    # turns this fixture into a MATCH and reds here, which is the property that was
+    # missing. (The strict arms are the opposite way round on purpose — they treat
+    # `entries` as positional and refuse `— 1450 entries` on a scanned line; that cost
+    # is pinned in their own table.)
+    "`config/ci-surfaces.yml` — 1450 entries",
 ])
 def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     """A legit reference near the filename is not a line cite — do not red it."""
@@ -6579,11 +6590,12 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     "`config/ci-surfaces.yml` — 9987 rows above it",
     "`config/ci-surfaces.yml` reads 9987 rows in.",
     "`config/ci-surfaces.yml` — 9987 lines of the file",
-    # ⛔ …and the tail the closed list was MISSING (#12369 review, P2): this module's
-    # own docstring cites `9987 lines up from the bottom` as proof that a closed tail
-    # list ACCEPTS a false position, and the doc-wide arm then shipped a list without
-    # it — so this spelling, beside the filename, was GREEN in both arms whenever the
-    # line also named another source file (the neighbour arm's early return).
+    # ⛔ …and the tail the closed list was MISSING (#12369 review, P2): the neighbour
+    # arm's own case lists `9987 lines up from the bottom` among the spellings that
+    # defeated the tail ALLOW-LIST this arm used to carry (a closed list ACCEPTS a
+    # false position), and the doc-wide arm then shipped a list without it — so this
+    # spelling, beside the filename, was GREEN in both arms whenever the line also
+    # named another source file (the neighbour arm's early return).
     "`config/ci-surfaces.yml` — 9987 lines up from the bottom",
     "`config/ci-surfaces.yml` — 9987 lines from the bottom",
     # ⛔ THE LONG FORM, and it was GREEN until this arm's `_GAP` was widened from 160
@@ -6808,7 +6820,11 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
     # P2: the helper was asserted only over manifest-spelled lines, so deleting its
     # `_ENTRY_STEMS` branch re-opened the "scan the line that names the entry" false
     # pass with all 240 cases green). A line naming the ENTRY carries none of the
-    # block's words and no filename, so ONLY that branch admits it.
+    # block's words and does not name the manifest (by word or by filename), so ONLY
+    # the `_ENTRY_STEMS` branch admits it. ⚠️ Its own `.py` filename DOES trip
+    # `_OTHER_FILE`'s exemption inside `_neighbour_number_strays` — measured: the
+    # un-stripped line yields `[]` — which is why the assertion below strips the entry
+    # before asking for a stray.
     for line in (
             "The row `test_pack_logic_writeprobe_11083.py` sits at `:9987` on this head.",
             "The write-probe row sits at `:9987` on this head.",
@@ -6850,8 +6866,12 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
             "population gate was reverted to a narrower spelling, and the false pass "
             "#12369 closed (a line naming the manifest by FILENAME, or the entry by "
             "name, going UNSCANNED) comes back with every constant test green")
-    # …and the unambiguous UNITS stay counts on a neighbouring line: `entries`, `s`,
-    # `bytes` are never positional nouns, so they are not what the strict arm refuses.
+    # …and the unambiguous UNITS stay counts on a neighbouring line: `s` and `bytes`
+    # are units in `_UNIT_WORDS`, so they are not what the strict arm refuses. ⚠️ NOT
+    # `entries`: it is POSITIONAL to the strict arms (`_UNIT_NO_POSITION` omits it), so
+    # the `60 entries` line below is green only because the patterns need THREE digits
+    # — `lists 1450 entries` is REFUSED (`['1450']`), and that cost is pinned in the
+    # strict arm's own table.
     for count in ("`config/ci-surfaces.yml` lists 60 entries in `carve_out:`",
                   "`config/ci-surfaces.yml`'s `durations:` row: 166 s",
                   "`config/ci-surfaces.yml` is 1319360 bytes"):
