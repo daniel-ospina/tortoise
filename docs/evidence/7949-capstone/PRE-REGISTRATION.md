@@ -2263,7 +2263,7 @@ to answer.
 > `tortoise/extractor_v2.py` (28 of it above the `#10360` read-back below), so §10.23's block
 > and §10.24's block are both records of the heads they name. That includes the note below
 > that calls `:10508` "still live": at this head `:10508` is a comment line and the
-> read-back assignment is `:11361`, which §10.28 re-points.
+> read-back assignment is `:10536`, which §10.28 re-points.
 >
 > ⛔ **Superseded for the merged tree by §10.24** — the §11 cite-block numbers below are a faithful
 > record of the head this entry names, and §10.24 carries the live values for those cites in this
