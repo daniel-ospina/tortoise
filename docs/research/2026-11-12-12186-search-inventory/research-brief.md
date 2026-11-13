@@ -400,8 +400,9 @@ The slot above is the skill's own vocabulary, not a substitute: `unread — no q
 for a box that cannot reach the graph, and it is **not** `nothing held` — the skill refuses that value at any
 query count when no query ran, so a zero here says nothing about what the graph holds.
 
-⚠️ **Locators drift, and a pin is not a citation.** Round 1's `sdk.py:39588-39606` for the BM25 arm's wiring
-is **`:40740-40758`** at this head — the file grew **1,184** lines in one day of merges (`1f28d107cf` =
+⚠️ **Locators drift, and a pin is not a citation.** Round 1's two pointers for the BM25 arm's wiring — the
+`is_embedded` gate `sdk.py:39588` and the stand-down clause `:39585-39606` — are **`:40740`** and
+**`:40737-40758`** at this head — the file grew **1,184** lines in one day of merges (`1f28d107cf` =
 51,075 → `9828250732` = 52,259; every anchor in this region moves **+1,152** — `_prf_supersedes_the_arm`
 `39585 → 40737`, the `is_embedded` gate `39588 → 40740`, the block's close `39606 → 40758` — and the arm's
 enclosing block is `:40806-40854`). Every locator below
@@ -837,9 +838,13 @@ persists a merge.
    merge, not a link.** (§7.7's own control table already records *“Merge = redirect, not rewrite”*.) A
    `resolved_from` write retires the node in every reader: `_ENTITY_READ` excludes it
    (`entity_resolver.py:207`), `find_live_holder` hops it (`:624`), and `entity_identity` collapses it on the
-   identity path (`:589-594`). `dedup_reviewed='link'` would be **read by nothing** — the tree reads only
-   `'merge'` (`entity_resolver.py:227`, `:694`, `sdk.py:23664`, `:23674`) and `'reject'` (`entity_resolver.py:229`, `sdk.py:24557`) — so the write
-   would be an unlabelled merge, not a link-without-merge band. ⛔ **N-4's dispatch readiness is therefore
+   identity path (`:589-594`). `dedup_reviewed='link'` would be **read by nothing that acts on it** — and
+   the exhaustive form of that claim does not hold, so state the narrow one. The readers that *branch* on the
+   value are `'merge'` (`entity_resolver.py:227`, `:694`, `sdk.py:23664`, `:23674`, `:24487`) and `'reject'`
+   (`entity_resolver.py:229`, `sdk.py:24557`); the one generic read is `reviewed == action` (`sdk.py:24482`,
+   `reviewed` set at `:24471`, `action` the caller's free string on `approve_merge`, `:24303`), which echoes the
+   stored value back as `already_reviewed` rather than giving it semantics. So a `'link'` write would gain no
+   behaviour the `'merge'` write does not already have: an unlabelled merge, not a link-without-merge band. ⛔ **N-4's dispatch readiness is therefore
    unchanged**: the mid band still needs the `SAME_AS` edge (the 2730 owner question) or a distinct read path
    for a linked-not-merged pair. Declare that, do not assume a redirect buys it —
    the 2730 brief's owner question (`:241`) is an ontology **`scope` property on `:Object`**, with `sameAs`
