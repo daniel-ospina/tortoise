@@ -143,9 +143,9 @@ not a shared threshold — precision needs hard rule-based vetoes"*
 
 | veto | tests | why it is safe |
 |---|---|---|
-| `identifier_conflict` | both sides carry identifier-shaped tokens, the sets are disjoint, **and the two names are otherwise identical** (`billing v2 ledger` / `billing v3 ledger`) | the skeleton equality (`entity_verdict.skeleton`) is what keeps it from firing on `basename-only` variants of a path — measured, `tortoise/sdk.py` → `sdk.py` fired without it. Separator/case folding means the `#8933` class (`ERR-4032` ≡ `err4032`) never fires |
-| `date_conflict` | both sides carry date tokens, values are disjoint **for a shared kind**, names otherwise identical (`the Q3 plan` / `the Q4 plan`) | per-kind comparison: `Q3 plan` vs `2026 plan` is not a contradiction and those two spellings can name one entity |
-| `kind_conflict` | both sides declare a SPECIFIC kind and they differ | `other`/empty is the write-time coalesce default (`projection/entities.py:5086`) and is treated as *unknown*, never as a value; the comparison is on the BARE kind (`extractor_v2._norm_kind`), so `core:person` vs `ops:person` is not a conflict — the namespace is an emission-time spelling |
+| `identifier_conflict` | both sides carry identifier-shaped tokens, the sets are disjoint, **and the two names are otherwise identical** (`billing v2 ledger` / `billing v3 ledger`) | the skeleton equality (`entity_verdict.skeleton`) is what keeps it from firing on `basename-only` variants of a path — measured, `tortoise/sdk.py` → `sdk.py` fired without it. Separator/case folding means the `#8933` class (`ERR-4032` ≡ `err4032`) never fires. A `#`-prefixed reference (`#11901`) is an identifier: it is the corpus's dominant spelling and the hash form is not a bare number, so `#11901 plan` / `#11905 plan` veto |
+| `date_conflict` | both sides carry date tokens, values are disjoint **for a shared kind**, names otherwise identical (`the Q3 plan` / `the Q4 plan`) | per-kind comparison: `Q3 plan` vs `2026 plan` is not a contradiction and those two spellings can name one entity. A `YYYY-MM` month is its own kind, so `2026-11 report` / `2026-12 report` reports a DATE conflict — the rule that fired — rather than being reported as an identifier one |
+| `kind_conflict` | both sides declare a SPECIFIC kind and they differ | `other`/empty is the write-time coalesce default (`projection/entities.py:5086`) and is treated as *unknown*, never as a value; so is `unclassified`, the #1695 classify-later SENTINEL the S2 prompt instructs the model to emit and `execute_embed` repairs later — treated as a declared kind it conflicts with every real kind and vetoes every merge in classify-later mode. The comparison is on the BARE kind (`extractor_v2._norm_kind`), so `core:person` vs `ops:person` is not a conflict — the namespace is an emission-time spelling |
 | `target_suppressed` | the candidate carries a `reject` that named no survivor | `_pair_reviewed`'s documented case (`entity_resolver.py:236-250`): the reviewer answered, against an ambiguous set, and re-asking against one survivor is not a different question |
 | `target_retired` | the candidate carries `resolved_from` | D-1 at the candidate-table layer — the belt to `_current_entity_priors`' braces, for any caller that built the table another way |
 | `group_join` | the candidate is itself a merge survivor (`dependents >= 1`) | **M-4.** It stands for a group; binding a name-only mention to it asserts membership from a pairwise comparison never made against the group's other members |
@@ -200,13 +200,27 @@ collapsed rather than reported, and nothing bounds it.
 * **Negative half, at the verdict** (`entity_verdict.closure_vetoes`): a target
   that is itself retired, or a candidate that carries dependents, is refused →
   `review`.
-* **Positive half, at the merge verb** (`entity_resolver._survivor_fixpoint`):
-  `apply_entity_merge` hops the survivor to its fixpoint **before writing**, so no
-  merge can create a chain of length ≥ 2. That makes "no chain longer than 1" an
-  invariant instead of a hope — which is exactly what makes the verdict's
-  `dependents >= 1` a reliable reading of "this target is a group". The hop is
-  reported (`survivor_hopped`), not silent; `approve_merge` therefore returns the
-  survivor it actually landed on.
+* **Positive half, at the merge verb** (`entity_resolver.apply_entity_merge`), and it
+  takes BOTH legs. The survivor is hopped to its fixpoint before writing **and**
+  the candidate side is closed: a candidate that is already retired is refused
+  (its entity is the fixpoint), the candidate's DEPENDENTS are re-pointed at the
+  final survivor in the same merge (path-shortening), and the candidate's
+  `aliases[]` are unioned into the survivor's. Hopping only the survivor is not
+  enough — a group survivor is a perfectly eligible CANDIDATE (`scan_entities`
+  keeps live nodes), so `N0 → N1` then `N1 → N2` wrote `N0 → N1 → N2` (measured),
+  which both broke the invariant below and stranded `N0`'s spellings on the
+  retired `N1`. The hop is reported (`survivor_hopped`) and so is the re-point
+  (`dependents_repointed`), not silent; `approve_merge` therefore returns the
+  survivor it actually landed on. Pinned by
+  `test_a_second_group_merge_repoints_the_members_and_keeps_their_spellings` and
+  `test_a_merge_of_an_already_retired_candidate_is_refused`.
+
+⚠️ **Residual, stated:** a `resolved_from` whose target no longer exists
+(`delete_entity` leaves the pointer behind) makes the guard's walk hop onto a node
+it cannot read. That row is graded cannot-answer (PARTIAL, per `#1` above) rather
+than re-emitted as the pre-hop carrier; the row is then absent from the candidate
+set for that run, which is a duplicate risk the record names rather than hides.
+Pinned by `test_a_dangling_resolved_from_is_cannot_answer_not_a_pre_hop_row`.
 
 ---
 

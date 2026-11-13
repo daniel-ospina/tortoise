@@ -24877,6 +24877,11 @@ class TortoiseSDK:
                 "survived_id": result["survivor_id"],
                 "target_id": result["survivor_id"],
                 **({"survivor_hopped": True} if result.get("survivor_hopped") else {}),
+                # #12296: the group the candidate stood for moved with it. Additive,
+                # and absent (not 0) when nothing was re-pointed — the same rule the
+                # receipt uses everywhere else.
+                **({"dependents_repointed": result["dependents_repointed"]}
+                   if result.get("dependents_repointed") else {}),
                 "aliases": result["aliases"],
                 "method": pair["method"],
                 "similarity": pair["similarity"],

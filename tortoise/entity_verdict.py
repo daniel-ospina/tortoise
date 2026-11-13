@@ -191,7 +191,15 @@ VETO_CODES: tuple[str, ...] = (
 #: Kinds that mean "not stated". `other` is the write-time coalesce default
 #: (`projection/entities.py:5086`), so treating it as a value would make the
 #: default act as evidence on every entity that never declared a kind.
-_UNSTATED_KINDS = frozenset({"", "other", "none", "unknown"})
+#:
+#: ⛔ `unclassified` is the #1695 classify-later SENTINEL — the S2 prompt
+#: *instructs* the model to emit it for pack-domain content, and it is repaired to
+#: a core kind later, in `execute_embed`. It therefore reaches the verdict from the
+#: raw entity refs, and it means "not yet decided" exactly as `other` does. Left
+#: out, it is folded into a DECLARED value and conflicts with every real kind —
+#: vetoing every true merge in classify-later mode, and an entity hold is not
+#: carried forward, so each mention is dropped.
+_UNSTATED_KINDS = frozenset({"", "other", "none", "unknown", "unclassified"})
 
 # ── Token extraction ─────────────────────────────────────────────────────
 
@@ -201,6 +209,20 @@ _SEPARATORS = re.compile(r"[^0-9a-z]+")
 #: date, and folding it to an identifier would veto `the top 3 accounts` against
 #: `the top 5 accounts` for the wrong reason.
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-/]*")
+#: A `#`-prefixed reference (`#11901`) — the corpus's dominant issue/PR spelling.
+#: `_TOKEN` starts at an alphanumeric, so the `#` is skipped and the digits read as
+#: a BARE NUMBER (excluded on purpose: a bare number is a quantity or a date). The
+#: reference form is not a bare number: `#11901 plan` and `#11905 plan` name two
+#: different issues, and without this they merged with no veto.
+_HASH_ID = re.compile(r"#(\d{2,})")
+#: `_TOKEN` or a hash id, in name order — the one scanner both `identifier_tokens`
+#: and `skeleton` use, so the two cannot disagree about what a token is.
+_TOKEN_OR_HASH = re.compile(r"#\d{2,}|[A-Za-z0-9][A-Za-z0-9._\-/]*")
+#: A `YYYY-MM` (or `YYYY/MM`) month reference. Excluded from identifiers (it is
+#: temporal, not an identifier) and compared by `date_tokens`, so
+#: `2026-11 report` / `2026-12 report` reports `date_conflict` — the rule that
+#: actually fired — instead of `identifier_conflict`.
+_YEAR_MONTH_RAW = re.compile(r"^(?:1[89]\d\d|2\d\d\d)[-/](?:0[1-9]|1[0-2])$")
 _YEAR = re.compile(r"\b(1[89]\d\d|2\d\d\d)\b")
 _QUARTER = re.compile(r"\bq([1-4])\b")
 #: Tokens that LOOK identifier-shaped (letter+digit) but are temporal, so they
@@ -235,20 +257,29 @@ def identifier_tokens(name: str) -> set[str]:
     """Identifier-shaped tokens in ``name``, separator- and case-folded.
 
     A token qualifies when it carries a DIGIT **and** (a letter or a separator) —
-    so `ERR-4032`, `v2`, `2026-11`, `abc123` and `x.y` qualify, while `4032`,
-    `billing` and `the` do not. Folding drops separators and case, which is what
-    makes `ERR-4032` and `err4032` the SAME identifier: the #8933 separator class
-    is a *variant* class, and a veto that fired across it would refuse exactly
-    the merges the fold exists to enable.
+    so `ERR-4032`, `v2`, `2026-11`, `abc123` and `v2.1` qualify, while `4032`,
+    `billing` and `the` do not. A `#`-prefixed reference (`#11901`) qualifies too,
+    folded onto its digits: the hash form is identifier-shaped, while the bare
+    digits are a quantity or a date. Folding drops separators and case, which is
+    what makes `ERR-4032` and `err4032` the SAME identifier: the #8933 separator
+    class is a *variant* class, and a veto that fired across it would refuse
+    exactly the merges the fold exists to enable.
     """
     out: set[str] = set()
-    for tok in _TOKEN.findall(str(name or "")):
+    text = str(name or "")
+    # `#11901` → `11901`: the hash form is identifier-shaped, the bare digits are
+    # not (see `_TOKEN`'s note). Folded onto the digits, so the same reference
+    # written with an inner separator still agrees.
+    out.update(_HASH_ID.findall(text))
+    for tok in _TOKEN.findall(text):
         has_digit = any(ch.isdigit() for ch in tok)
         if not has_digit:
             continue
         has_alpha = any(ch.isalpha() for ch in tok)
         has_sep = any(ch in tok for ch in "-_./")
         if not (has_alpha or has_sep):
+            continue
+        if _YEAR_MONTH_RAW.match(tok):
             continue
         folded = _SEPARATORS.sub("", tok.casefold())
         if not folded or _TEMPORAL_TOKENS.match(folded):
@@ -276,6 +307,15 @@ def date_tokens(name: str) -> dict[str, set[str]]:
         out["quarter"] = quarters
     if months:
         out["month"] = months
+    # `2026-11` / `2026/11`: a month reference, compared by its own kind so a
+    # disagreement is reported as a DATE conflict (the rule that fired). `2026-11`
+    # against `2026-12` contradicts; `2026-11` against `2026` does not (one side
+    # states a month, the other only a year) — the same like-with-like rule as
+    # year vs quarter.
+    year_months = {tok for tok in _TOKEN.findall(str(name or ""))
+                   if _YEAR_MONTH_RAW.match(tok)}
+    if year_months:
+        out["year_month"] = {tok.replace("/", "-") for tok in year_months}
     if years and quarters:
         out["year_quarter"] = {f"{y}-{q}" for y in years for q in quarters}
     return out
@@ -297,13 +337,23 @@ def skeleton(
     real.
     """
     out: list[str] = []
-    for tok in _TOKEN.findall(str(name or "")):
+    for tok in _TOKEN_OR_HASH.findall(str(name or "")):
+        if tok.startswith("#"):
+            # A hash reference is an identifier token under `replace_ids`, and its
+            # digits otherwise — the same shape `identifier_tokens` produces, so a
+            # `#`-id pair whose only difference is the number reduces to equal
+            # skeletons and the identifier veto can fire.
+            out.append("<id>" if replace_ids
+                       else _SEPARATORS.sub("", tok.casefold()))
+            continue
         folded = _SEPARATORS.sub("", tok.casefold())
         if not folded:
             continue
         if replace_ids and folded in identifier_tokens(tok):
             out.append("<id>")
-        elif replace_dates and (_TEMPORAL_TOKENS.match(folded) or folded in _MONTHS):
+        elif replace_dates and (_TEMPORAL_TOKENS.match(folded)
+                               or folded in _MONTHS
+                               or _YEAR_MONTH_RAW.match(tok)):
             out.append("<date>")
         else:
             out.append(folded)
@@ -371,7 +421,7 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
     if skeleton(mention.get("name", ""), replace_dates=True) == skeleton(
         candidate.get("name", ""), replace_dates=True
     ):
-        for kind in ("year_quarter", "year", "quarter", "month"):
+        for kind in ("year_quarter", "year", "quarter", "month", "year_month"):
             mine, theirs = m_dates.get(kind), c_dates.get(kind)
             if mine and theirs and not (mine & theirs):
                 got.append(VETO_DATE_CONFLICT)

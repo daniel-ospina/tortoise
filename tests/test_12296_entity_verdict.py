@@ -225,6 +225,24 @@ class TestThePriorSetNeverCarriesARetiredNode:
         assert [r["id"] for r in exc.value.folded] == ["obj-good"], exc.value
         assert exc.value.unresolved == ["obj-c0"]
 
+    def test_a_dangling_resolved_from_is_cannot_answer_not_a_pre_hop_row(
+            self, sdk_factory):
+        """A retired pointer whose target was DELETED must not re-emit the carrier.
+
+        `delete_entity` leaves `resolved_from` behind, so the walk hops and then
+        finds nothing on the label. Emitting the original row there would be the
+        pre-hop carrier — S4 renders it as an EXISTING ENTITY and
+        `link_before_create` records `found: True … existing <carrier>`.
+        """
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-orphan", "the team")
+        sdk._get_proj().g.query(
+            "MATCH (n:Object {id:'obj-orphan'}) SET n.resolved_from = 'obj-gone'")
+        with pytest.raises(v2._PriorFoldUnresolvable, match="pre-hop row"):
+            v2._current_entity_priors(
+                sdk, [{"id": "obj-orphan", "name": "the team", "kind": ""}],
+                {"obj-orphan": "Object"})
+
     def test_search_graph_folds_the_set_it_returns(self, sdk_factory, monkeypatch):
         """The wiring, not only the helper: S3's OWN return carries the survivor."""
         sdk = sdk_factory()
@@ -304,6 +322,44 @@ class TestHardVetoes:
         # never become evidence.
         assert verdict.judge({"name": "acme", "kind": "core:org"},
                              {"name": "acme", "kind": "other"})["vetoes"] == []
+        # ⛔ `unclassified` is the #1695 classify-later SENTINEL: the S2 prompt
+        # INSTRUCTS the model to emit it, and `execute_embed` repairs it later — so
+        # it reaches the verdict from the raw entity refs meaning "not decided".
+        # Treated as a declared value it conflicts with every real kind and vetoes
+        # every true merge in classify-later mode (measured before the fix).
+        assert verdict.judge({"name": "acme", "kind": "unclassified"},
+                             {"name": "acme holdings", "kind": "core:org"})[
+                                 "band"] == verdict.BAND_MERGE
+        assert verdict.judge({"name": "acme", "kind": "UNCLASSIFIED"},
+                             {"name": "acme holdings", "kind": "core:org"})[
+                                 "band"] == verdict.BAND_MERGE
+
+    def test_a_hash_reference_is_an_identifier(self):
+        """`#11901` is a reference, not a bare number.
+
+        The corpus's dominant issue/PR spelling is a measured variant class in this
+        PR's own instrument (`tools/candidate_recall_11901.py`, class `ident`), and
+        the token scanner used to skip the `#` and let the digits read as a bare
+        number — so `#11901 plan` / `#11905 plan` merged with NO veto.
+        """
+        assert verdict.judge({"name": "#11901 plan", "kind": "k"},
+                             {"name": "#11905 plan", "kind": "k"})["vetoes"] == [
+                                 verdict.VETO_IDENTIFIER_CONFLICT]
+        # The hash-dropped variant class stays safe: a bare number is not an
+        # identifier, so one side is empty and nothing is contradicted.
+        assert verdict.judge({"name": "#11901", "kind": "k"},
+                             {"name": "11901", "kind": "k"})["vetoes"] == []
+
+    def test_a_year_month_difference_is_reported_as_a_DATE_conflict(self):
+        """The band was right and the REASON was wrong — which this module calls
+        worse than no record (`_TEMPORAL_TOKENS`'s note)."""
+        out = verdict.judge({"name": "2026-11 report", "kind": "k"},
+                            {"name": "2026-12 report", "kind": "k"})
+        assert out["vetoes"] == [verdict.VETO_DATE_CONFLICT], out
+        # Like with like: a month against a bare year contradicts nothing.
+        assert verdict.judge({"name": "2026-11 report", "kind": "k"},
+                             {"name": "2026 report", "kind": "k"})[
+                                 "vetoes"] == []
 
     def test_graph_facts_are_their_own_vetoes(self):
         mention = {"name": "the team", "kind": "k"}
@@ -386,6 +442,59 @@ class TestClosureReverification:
             "RETURN n.id, n.resolved_from").result_set
         # Both point STRAIGHT at the fixpoint — a chain of length 1, never 2.
         assert {str(r[1]) for r in rows} == {"obj-survivor"}, rows
+
+    def test_a_second_group_merge_repoints_the_members_and_keeps_their_spellings(
+            self, sdk_factory):
+        """The CANDIDATE side of the invariant — the leg that was missing.
+
+        A group survivor is a perfectly eligible CANDIDATE (`scan_entities` keeps
+        live nodes), so `N0 -> N1` followed by `N1 -> N2` wrote `N0 -> N1 -> N2`
+        (measured length 3 after one more): hopping only the SURVIVOR cannot stop
+        it. Two things broke with it — the closure invariant `dependents >= 1`
+        relies on, and the alias record, which stayed stranded on the retired
+        `N1`, so `entity_verdict`'s alias escape stopped answering for `the team`.
+        """
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-a", "the team")
+        _create_object(sdk, "obj-b", "Acme Holdings")
+        _create_object(sdk, "obj-c", "Acme Holdings Ltd")
+        apply_entity_merge(sdk, "obj-a", "obj-b", method="exact", similarity=1.0)
+        result = apply_entity_merge(sdk, "obj-b", "obj-c",
+                                    method="exact", similarity=1.0)
+        assert result["survivor_id"] == "obj-c", result
+        assert result.get("dependents_repointed") == 1, result
+        graph = sdk._get_proj().g
+        rows = graph.query(
+            "MATCH (n:Object) WHERE n.id IN ['obj-a','obj-b','obj-c'] "
+            "RETURN n.id, n.resolved_from").result_set
+        edges = {str(r[0]): (str(r[1]) if r[1] is not None else None)
+                 for r in rows}
+        # Every edge is ONE hop deep, onto the same final survivor.
+        assert edges == {"obj-a": "obj-c", "obj-b": "obj-c", "obj-c": None}, edges
+        hops = [(a, b) for a, b in edges.items() if b]
+        assert verdict.chain_length("obj-a", hops) == 1
+        assert verdict.chain_length("obj-b", hops) == 1
+        aliases = graph.query("MATCH (n:Object {id:'obj-c'}) RETURN n.aliases") \
+            .result_set
+        stored = {str(a) for a in (aliases[0][0] or [])}
+        assert {"team", "acme holdings"} <= stored, stored
+        # …so the alias escape still answers for the group's first spelling.
+        facts = v2._entity_verdict_facts(sdk, [{"id": "obj-c"}])
+        derived = v2._verdict_facts(facts, "obj-c", "the team")
+        assert derived["mention_is_alias"] is True, derived
+        assert verdict.judge(
+            {"name": "the team", "kind": "core:plan"},
+            {"name": "Acme Holdings Ltd", "kind": "core:plan"},
+            derived)["band"] == verdict.BAND_MERGE
+
+    def test_a_merge_of_an_already_retired_candidate_is_refused(self, sdk_factory):
+        """A stale reviewer approval must not write a second hop."""
+        sdk = sdk_factory()
+        _merged_pair(sdk)
+        _create_object(sdk, "obj-third", "Acme Holdings Ltd")
+        with pytest.raises(ValueError, match="already retired"):
+            apply_entity_merge(sdk, "obj-carrier", "obj-third",
+                               method="exact", similarity=1.0)
 
 
 # ── the verdict as the resolver's gate ───────────────────────────────────

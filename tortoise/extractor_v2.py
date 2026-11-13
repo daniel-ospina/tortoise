@@ -3145,10 +3145,23 @@ def _current_entity_priors(sdk, rows: list[dict],
         seen.add(current)
         fact = facts.get((label, current))
         if fact is None or not fact[1]:
-            # The id is in the FTS result but not on its label (a row that vanished
-            # between the two reads): kept AS IT CAME rather than dropped, because a
-            # silently-missing prior reads downstream as measured absence and
-            # licenses a duplicate (#11653).
+            if current != rid:
+                # The walk hopped at least once and its target is not readable on
+                # the label — a DANGLING `resolved_from` (`delete_entity` leaves
+                # the pointer behind) or a cross-label one. Emitting `row` here
+                # would be the PRE-HOP carrier, the one thing this guard promises
+                # never to return: S4 would render it as an EXISTING ENTITY and
+                # `link_before_create` would record `found: True … existing
+                # <carrier> — connect, do not re-create`. Cannot-answer, per row.
+                raise _PriorFoldUnresolvable(
+                    f"entity prior {rid!r} resolves onto {current!r}, which is not "
+                    "readable on its label — refusing to return a pre-hop row "
+                    "(#12296 D-1)",
+                    folded=list(out), unresolved=[rid])
+            # Nothing hopped: the id is in the FTS result but not on its label (a
+            # row that vanished between the two reads). Kept AS IT CAME rather than
+            # dropped, because a silently-missing prior reads downstream as
+            # measured absence and licenses a duplicate (#11653).
             out.append(row)
             continue
         out.append({"id": current, "name": str(fact[1]),

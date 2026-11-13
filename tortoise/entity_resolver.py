@@ -758,6 +758,20 @@ def _survivor_fixpoint(graph, survivor_id: str) -> tuple[str, bool]:
     ``entity_verdict.group_join``'s ``dependents >= 1`` a reliable reading of
     "this target is a group".
 
+    ⛔ **Hopping the SURVIVOR is only one of the two legs — and the other was
+    missing (measured: `N0 -> N1`, then `N1 -> N2` left `N0 -> N1 -> N2`, length
+    3 after one more).** A group survivor is a perfectly eligible CANDIDATE
+    (`scan_entities` keeps live nodes; its only filter is `resolved_from IS
+    NULL`), so the chain is created by retiring the *candidate*:
+
+    * a candidate that is ALREADY retired is refused — its entity is the fixpoint,
+      and merging it would write a second hop the reviewer never saw;
+    * the candidate's DEPENDENTS are re-pointed at the final survivor in the same
+      merge (path-shortening), so every edge stays one hop deep;
+    * the candidate's ``aliases[]`` are unioned into the survivor's, so a spelling
+      the group folded earlier is not stranded on a retired node — which is what
+      keeps ``entity_verdict``'s alias escape working after a group merge.
+
     ``hopped`` is returned rather than only applied: it is the evidence that a
     chain existed (`#12186` M-10's *reporting* half), and a caller that expected a
     live survivor learns it was redirected rather than discovering it from a
@@ -773,6 +787,21 @@ def _survivor_fixpoint(graph, survivor_id: str) -> tuple[str, bool]:
         return str(survivor_id), False
     fixed = follow_resolved_from(graph, label, survivor_id)
     return str(fixed), str(fixed) != str(survivor_id)
+
+
+def _dependents_of(graph, node_id: str) -> list[str]:
+    """Ids whose ``resolved_from`` names ``node_id`` — the group it stands for.
+
+    Label-scoped on the two identity labels (this module's own rule: an unlabelled
+    ``MATCH (n) WHERE n.resolved_from = $id`` full-scans every label in the graph).
+    """
+    out: list[str] = []
+    for label in ("Object", "Subject"):
+        rows = graph.query(
+            f"MATCH (d:{label}) WHERE d.resolved_from = $id RETURN d.id",
+            params={"id": node_id}).result_set
+        out.extend(str(r[0]) for r in rows if r and r[0] is not None)
+    return out
 
 
 def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
@@ -816,6 +845,17 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
         raise ValueError(
             "a merge needs two distinct entities — the requested survivor was "
             f"itself retired and resolves onto the candidate {survivor_id!r}")
+    # The CANDIDATE side of the same invariant (see the docstring): merging a node
+    # that is already retired would write `fixpoint -> survivor` on top of the
+    # existing hop. The fixpoint is the entity; the caller's id is stale.
+    candidate_fixpoint, candidate_hops = _survivor_fixpoint(graph, candidate_id)
+    if candidate_hops:
+        raise ValueError(
+            f"a merge needs a LIVE candidate — {candidate_id!r} was already "
+            f"retired and resolves onto {candidate_fixpoint!r}")
+    if str(candidate_fixpoint) != str(candidate_id):
+        raise ValueError(
+            f"candidate {candidate_id!r} resolved onto {candidate_fixpoint!r}")
     # LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id` (this module's own
     # rule — an unlabelled id probe full-scans every label in the graph, and
     # `id` is a natural key on exactly two of them).
@@ -834,12 +874,23 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     elif not isinstance(aliases, (list, tuple)):
         aliases = []
     candidate = _identity_row(
-        graph, candidate_id, "c", "RETURN c.name, c.canonical_name")
+        graph, candidate_id, "c", "RETURN c.name, c.canonical_name, c.aliases")
     if candidate is None:
         raise ValueError(f"No entity {candidate_id!r}")
-    candidate_name, candidate_canonical = candidate
+    candidate_name, candidate_canonical, candidate_aliases = candidate
     folded = normalize_entity_name(candidate_canonical or candidate_name)
-    alias_list = sorted({a for a in (aliases or []) if isinstance(a, str)} | {folded})
+    # The candidate's own aliases travel with it: a group that already folded
+    # `the team` into THIS node keeps that spelling after the node itself is
+    # folded, so `entity_verdict`'s alias escape (and the by-name resolver's
+    # `$k IN n.aliases`) still answers for it.
+    if isinstance(candidate_aliases, str):
+        candidate_aliases = [candidate_aliases]
+    elif not isinstance(candidate_aliases, (list, tuple, set)):
+        candidate_aliases = []
+    alias_list = sorted(
+        {a for a in (aliases or []) if isinstance(a, str)}
+        | {a for a in candidate_aliases if isinstance(a, str)}
+        | {folded})
     # The survivor's folded key is only FILLED, never rewritten: a caller may
     # have supplied its own `canonical_name` (`_with_folded_entity_name`
     # setdefaults), and a merge has no business overwriting what the caller
@@ -862,7 +913,14 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     }
     if not candidate_canonical:
         _candidate_props["canonical_name"] = folded
+    # Path-shortening, read BEFORE the write below changes what `resolved_from`
+    # answers: every node the candidate stands for is re-pointed at the final
+    # survivor, so the closure stays one hop deep (M-4's positive half, candidate
+    # side) and `dependents >= 1` stays a reliable reading of "this is a group".
+    dependents = _dependents_of(graph, candidate_id)
     sdk.update_entity(candidate_id, **_candidate_props)
+    for dependent_id in dependents:
+        sdk.update_entity(dependent_id, resolved_from=survivor_id)
     out = {"survivor_id": survivor_id, "candidate_id": candidate_id,
            "aliases": alias_list, "method": method,
            "similarity": round(float(similarity), 4)}
@@ -871,6 +929,11 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
         # survives. A caller comparing this id with the one it passed can see the
         # redirect; nothing here is silent.
         out["survivor_hopped"] = True
+    if dependents:
+        # The group the candidate stood for moved with it. Reported for the same
+        # reason: a reviewer who merged `N1` into `N2` should be able to see that
+        # its earlier members now point at `N2`.
+        out["dependents_repointed"] = len(dependents)
     return out
 
 
