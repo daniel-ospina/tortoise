@@ -265,7 +265,10 @@ def _unscoped_heading_forms(doc: str,
                     "CommonMark renders (a `## ` inside a fenced block, say) — it "
                     "TRUNCATES the preceding section's scope")
         elif i in code_lines and re.match(
-                r"^[ \t]*(?:(?:>|[-*+]|\d{1,9}[.)])[ \t]+)?[ \t]*"
+                # ⛔ `)*`, not `)?`: container markers NEST, and one level was the
+                # whole distance between this arm and useless (`    - - ## 3.`
+                # scored 114 green with §2 falsified — round 22 review, P1).
+                r"^[ \t]*(?:(?:>|[-*+]|\d{1,9}[.)])[ \t]+)*[ \t]*"
                 r"(?:#{1,6}(?:[ \t]|$)|<h[1-6][\s>/])", line, re.IGNORECASE):
             # ⛔ DERIVED FROM THE PARSER, not a fourth regex: ANY `#`-run or `<hN>`
             # inside a code block (fenced or indented) is a line `_scope_slice`
@@ -299,9 +302,12 @@ def _unscoped_heading_forms(doc: str,
             # restate the truth under `    ## Restated finding` and the guard +
             # reuse pins stayed green; a FENCED block, by contrast, is caught by
             # the inverse arm.
-            flag(i, "is a `#` run inside an INDENTED CODE BLOCK (4+ spaces or a "
-                    "tab) — the parser renders no heading and `_scope_slice` sees "
-                    "no boundary, so the PRECEDING section's scope runs past it")
+            flag(i, "is a `#` run indented by 4+ spaces or a tab — "
+                    "`_scope_slice` sees no boundary there, so the PRECEDING "
+                    "section's scope runs past it. ⛔ This arm is a FAIL-CLOSED "
+                    "BACKSTOP, not a code-block oracle: the parser does not always "
+                    "call such a line code (a paragraph continuation renders as "
+                    "prose) and refusing those too costs only a docs edit")
         elif (not readable.match(line)
                 and re.match(rf"^{_BLOCK_PREFIX}#{{1,6}}\s?\d+(?:\.\d+)*\.\s",
                              line)):
@@ -1345,6 +1351,10 @@ LOOKALIKE_BUT_UNREADABLE = [
     "\t> ## 3. Results",                # … tab-indented, behind a quote
     "    <h2>3. Results</h2>",          # … indented raw HTML heading
     "\t<h2>3. Results</h2>",            # … tab-indented raw HTML heading
+
+    "    - - ## 3. Results",             # … NESTED container markers (depth 2)
+    "    1. 1. ## 3. Results",            # … nested ordered markers
+    "    > - ## 3. Results",             # … quote then bullet
 ]
 
 
