@@ -275,14 +275,12 @@ def test_session_drain_names_the_unrecorded_count_and_the_session(tmp_path,
 
 
 def test_session_health_reports_the_unrecorded_count(tmp_path, capsys):
-    """MUTATIONS THAT RED THIS: keep the marker off the entry (health counts 0 —
-    deletes the CAS stamp), or skip the stderr line. What it does NOT red is a
-    term folded into the PINNED stdout line: this row's absence check is a
-    cheap local guard, and the binding one is
-    `tests/test_capture_spool.py::test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state`,
-    which executes the shipped TypeScript against `capture_health_line(...).line`
-    and is what a Python-only term actually breaks (measured: folding
-    `, unrecorded {n}` in leaves THIS file green and reds that one)."""
+    """MUTATIONS THAT RED THIS (measured): delete the CAS stamp (the health count
+    stays 0); drop `_print_unrecorded_captures` from `_cmd_session_health`; or
+    fold a Python-only term into the PINNED stdout line, at EITHER edit site —
+    `capture_health_line`'s own line, or `_cmd_session_health`'s `print`. The
+    case-insensitive absence check below is what catches the lower-case
+    spelling (#12427); it does not depend on the other leg."""
     from tortoise import __main__ as main
 
     write_spool_entry(tmp_path, _snapshot())
