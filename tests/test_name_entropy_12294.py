@@ -194,6 +194,16 @@ def test_the_declines_artifact_carries_the_invariants():
             assert sum(1 for e in arms["gate_gated_names"]
                        if p in e["predicates"]
                        and e["in_window_by_k"].get(k) is True) == n, (p, k)
+        # each class denominator is the sample's own class count — `run()`
+        # increments it once per sampled row and refuses a starved class, so this
+        # cannot false-red; it is what makes "definite 71 of 180" (the PR body's
+        # ratio) checkable rather than merely quoted
+        for cls, c in arms["gate_by_class"].items():
+            assert c[p]["names"] == report["corpus"]["sample_by_class"][cls], (cls, p)
+        # the WINDOW SET is `_GATE_KS`, not whatever keys the artifact happens to
+        # carry — otherwise a whole window can be deleted from the evidence
+        assert set(g["suppressed_correct_by_k"]) == {str(k) for k in gate._GATE_KS}, p
+        assert set(arms["pooled_gate"][p]) == {str(k) for k in gate._GATE_KS}, p
         # the pooled population is the sample — UNLESS the run disclosed that it
         # is not. `_pooled_coverage.truncated` is the instrument's own supported
         # state (a wider `--sample`, fewer `--captures`), and a truncated run is

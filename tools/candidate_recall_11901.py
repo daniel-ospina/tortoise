@@ -1086,10 +1086,17 @@ def run(args: argparse.Namespace) -> int:
         #: recall cost, so it must be one the gate CAUSES: the canonical was in
         #: the UNGATED union (``merged``) and is not in the gated one. A gated
         #: name whose canonical neither union holds is
-        #: ``unreachable_regardless`` — the gate costs nothing there, and it is
-        #: exactly #12294's target class, so counting it as loss would inflate
-        #: the decline's own evidence (a defect that ran the flattering-for-the-
-        #: conclusion way: the first cut booked all 12 k=3 misses as ``lost``).
+        #: ``unreachable_regardless`` — the gate costs nothing there, so counting
+        #: it as loss would inflate the decline's own evidence (a defect that ran
+        #: the flattering-for-the-conclusion way: the first cut booked all 12 k=3
+        #: misses as ``lost``).
+        #: ⛔ IT IS PER-WINDOW, AND THAT IS NOT #12294's TARGET CLASS. This branch
+        #: books a name no query in THIS window can reach — at k=3 on the measured
+        #: corpus that is ~12 names window 15 finds fine. The target class (a name
+        #: unreachable at ANY measured window) is `gate[p]["gated_and_missed"]`,
+        #: which is 0 here. Reading this field as "the class Zep's gate protects"
+        #: inverts the finding; the label below says so because a lane quoting it
+        #: under the arm's authority would be quoting the inversion.
         #: ⚠️ THE COMMITTED ARTIFACT PREDATES THE SPLIT: its `shipped` k=3 cell
         #: (`lost` 85) is therefore an UPPER bound — the honest value is
         #: ``86 - rescued - unreachable_regardless``, bounded below by
