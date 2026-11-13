@@ -4962,6 +4962,59 @@ def tortoise_status() -> dict:
     return _safe(_get_org_sdk().status)
 
 
+def _org_quota_block(sdk=None) -> dict:
+    """The ``health.quota`` block: the ENFORCED boundary, from the gate's numbers.
+
+    #11892 option (3). ``health`` reported ``graph_size`` and nothing about the
+    quota gate, so a lane could not tell "the graph is healthy" from "the graph
+    is healthy and will refuse every write" except by attempting one. Measured
+    live: ``graph_size`` 31,248 against a ``max_points`` cap of 25,000, with every
+    ``create_point`` refused ``-32006`` — and the CLI exiting **0** on it (#11153),
+    so the refusal read as a successful write.
+
+    Resolution follows ``_enforce_quota`` — so that a report cannot disagree with
+    the gate it describes: the request's carried ContextVar limits first (the
+    same ones REST and this surface already gate on), else ``resolve_org_limits``.
+    It is NOT byte-for-byte the gate's pipeline and the difference is stated
+    rather than hidden: ``_enforce_quota`` additionally calls
+    ``_carry_allowances(limits, resource)`` to augment the dict with the
+    ruled-dimension allowances, and this block does not — deliberately, because
+    the ``points`` resource below is the legacy node cap and the ruled
+    dimensions (graph MB / Postgres bytes / extraction tokens) are enforced by
+    ``allowance_gate`` from their own resolver, which is inert until an allowance
+    is configured (#9567). Reporting a boundary whose meter is not wired would be
+    the opposite of the legibility this exists for. Only the ``points`` resource
+    is modelled — that is the one #11892 measured.
+
+    Never raises and never degrades ``status``: a closed or unmeasurable quota is
+    REPORTED, not folded into ``status``. Folding it in would pin a healthy
+    deployment ``degraded`` for as long as its graph is full and let Fly restart
+    it forever — the rule ``hosted_api.health``'s docstring already states for
+    ``change_feed``, ``record``, ``build`` and ``wait_bound_breaches``, and the
+    same reason ``record``'s cumulative counters do not degrade it (#10185).
+    """
+    from tortoise.quota import org_quota_state
+    try:
+        from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id, _current_org_limits
+        org_id = _current_org_id.get()
+        if not org_id or org_id == SELFHOST_ORG_ID:
+            # stdio/operator/selfhost: no tenant registry, so the gate is a no-op.
+            # Reported as `not_applicable`, NEVER as `open` (#11892).
+            return org_quota_state(None, "points", sdk=sdk)
+        limits = _current_org_limits.get()
+        if limits is None:
+            from tortoise.quota import resolve_org_limits
+            limits = resolve_org_limits(org_id)
+        return org_quota_state(limits, "points", sdk=sdk)
+    except Exception as exc:  # noqa: BLE001, RUF100 — health must answer, always
+        # Same shape as every other unmeasurable arm: `unknown` + None values +
+        # a reason. NOT `open` and NOT zeros — see org_quota_state's docstring.
+        return {"resource": "points", "state": "unknown", "points_used": None,
+                "points_limit": None, "points_remaining": None,
+                "error": f"quota state unavailable: {type(exc).__name__}: "
+                         f"{str(exc)[:160]}"}
+
+
 def tortoise_health() -> dict:
     """Health check + basic metrics: graph_size, last_ingest, error_count, uptime.
     Alias → graph_overview(section='health') (epic #888 W3).
@@ -5010,16 +5063,38 @@ def tortoise_health() -> dict:
     cannot be measured, the report carries the per-call ``graph_size_error``
     marker (``None`` when ``graph_size`` was really measured, so a 0 is a
     genuinely empty graph; a string otherwise), instead of the previous
-    indistinguishable ok/0."""
+    distinguishable ok/0.
+
+    #11892 option (3): the report carries a ``quota`` block — the ENFORCED
+    boundary (``state``: open/closed/unknown/not_applicable, plus
+    ``points_used``/``points_limit``/``points_remaining``) — so a caller can
+    learn that the write path is closed BEFORE it drafts the finding it cannot
+    record. Its own bounded phase (``quota.QUOTA_STATE_TIMEOUT``, 3.0s on a
+    dedicated daemon worker), so this tool's worst case becomes
+    ``probe_setup_timeout() + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT +
+    QUOTA_STATE_TIMEOUT`` — still a bounded tail, never "as long as the server
+    stalls". The block never changes ``status`` (a full graph is not a degraded
+    process — see ``_org_quota_block``) and never raises."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     # #3143: pass the cold-start allowance (call-time resolved) so a reachable
     # graph whose cold-start exceeds /health's shared budget is reported ok
     # with its real graph_size instead of degraded/0.
-    return _safe(lambda: monitoring.metrics(
-        sdk=_get_org_sdk(),
-        setup_timeout=monitoring.probe_setup_timeout(),
-    ))
+    # #11892: the SDK is acquired ONCE and shared with the quota block, so the
+    # block's count is measured on the SAME handle this report uses — "count on
+    # the SAME org SDK the tool writes to" is the gate's own rule
+    # (quota.enforce_org_limit); a second handle could open another graph.
+    def _report() -> dict:
+        sdk = _get_org_sdk()
+        report = monitoring.metrics(
+            sdk=sdk,
+            setup_timeout=monitoring.probe_setup_timeout(),
+        )
+        if isinstance(report, dict):
+            report["quota"] = _org_quota_block(sdk)
+        return report
+
+    return _safe(_report)
 
 
 def tortoise_session_context() -> dict:
