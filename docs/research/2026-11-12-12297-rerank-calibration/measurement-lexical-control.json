@@ -1055,7 +1055,7 @@
    },
    "applied": true,
    "arm": "lexical_difflib",
-   "ceiling_note": "a reranker only reorders rows the legs already returned, so its ceiling is the number of golds the legs put INSIDE the scored window at that width \u2014 in_window(P), WIDTH DEPENDENT: 277/300 at a 15-window, 300/300 at 40. miss_past_k at k=P is 0 BY CONSTRUCTION (a response has at most P rows, so 'the rank is past P' cannot occur) and is not the ceiling; miss_absent_at_max_k is not a width-independent bound either \u2014 it counts golds absent within arm 1's MAXIMUM window (15), and the pool-40 arm of this same run returns every one of them, which is why 40 reaches 300/300",
+   "ceiling_note": "a reranker only reorders rows the legs already returned, so its ceiling is the number of golds the legs put INSIDE the scored window at that width \u2014 in_window(P) of `mentions`, WIDTH DEPENDENT: read `arms.exact.<P>.in_window` for each width in this artifact rather than a figure quoted here (the pool-40 arm returns every gold arm 1's maximum window 15 already returned, which is why its in_window equals the mention count). miss_past_k at k=P is 0 BY CONSTRUCTION (a response has at most P rows, so 'the rank is past P' cannot occur) and is not the ceiling; miss_absent_at_max_k is not a width-independent bound either \u2014 it counts golds absent within arm 1's MAXIMUM window (15)",
    "latency": {
     "device": "cpu (this box has no GPU)",
     "ms_per_pair": 0.031,
@@ -1123,7 +1123,7 @@
    },
    "applied": true,
    "arm": "lexical_overlap",
-   "ceiling_note": "a reranker only reorders rows the legs already returned, so its ceiling is the number of golds the legs put INSIDE the scored window at that width \u2014 in_window(P), WIDTH DEPENDENT: 277/300 at a 15-window, 300/300 at 40. miss_past_k at k=P is 0 BY CONSTRUCTION (a response has at most P rows, so 'the rank is past P' cannot occur) and is not the ceiling; miss_absent_at_max_k is not a width-independent bound either \u2014 it counts golds absent within arm 1's MAXIMUM window (15), and the pool-40 arm of this same run returns every one of them, which is why 40 reaches 300/300",
+   "ceiling_note": "a reranker only reorders rows the legs already returned, so its ceiling is the number of golds the legs put INSIDE the scored window at that width \u2014 in_window(P) of `mentions`, WIDTH DEPENDENT: read `arms.exact.<P>.in_window` for each width in this artifact rather than a figure quoted here (the pool-40 arm returns every gold arm 1's maximum window 15 already returned, which is why its in_window equals the mention count). miss_past_k at k=P is 0 BY CONSTRUCTION (a response has at most P rows, so 'the rank is past P' cannot occur) and is not the ceiling; miss_absent_at_max_k is not a width-independent bound either \u2014 it counts golds absent within arm 1's MAXIMUM window (15)",
    "latency": {
     "device": "cpu (this box has no GPU)",
     "ms_per_pair": 0.005,
@@ -1217,7 +1217,7 @@
    },
    "applied": true,
    "arm": "rerank",
-   "ceiling_note": "a reranker only reorders rows the legs already returned, so its ceiling is the number of golds the legs put INSIDE the scored window at that width \u2014 in_window(P), WIDTH DEPENDENT: 277/300 at a 15-window, 300/300 at 40. miss_past_k at k=P is 0 BY CONSTRUCTION (a response has at most P rows, so 'the rank is past P' cannot occur) and is not the ceiling; miss_absent_at_max_k is not a width-independent bound either \u2014 it counts golds absent within arm 1's MAXIMUM window (15), and the pool-40 arm of this same run returns every one of them, which is why 40 reaches 300/300",
+   "ceiling_note": "a reranker only reorders rows the legs already returned, so its ceiling is the number of golds the legs put INSIDE the scored window at that width \u2014 in_window(P) of `mentions`, WIDTH DEPENDENT: read `arms.exact.<P>.in_window` for each width in this artifact rather than a figure quoted here (the pool-40 arm returns every gold arm 1's maximum window 15 already returned, which is why its in_window equals the mention count). miss_past_k at k=P is 0 BY CONSTRUCTION (a response has at most P rows, so 'the rank is past P' cannot occur) and is not the ceiling; miss_absent_at_max_k is not a width-independent bound either \u2014 it counts golds absent within arm 1's MAXIMUM window (15)",
    "latency": {
     "device": "cpu (this box has no GPU)",
     "ms_per_pair": 5.463,

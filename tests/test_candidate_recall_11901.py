@@ -1405,6 +1405,16 @@ def lexical() -> dict:
     return json.loads(LEXICAL_ARTIFACT.read_text())
 
 
+@pytest.fixture(scope="module")
+def noun() -> dict:
+    """The noun-path artifact — the OTHER committed copy of the same generated
+    note, and the one no test read before (measured: hand-editing its figure
+    left the suite green)."""
+    path = RERANK_BRIEF.parent / "measurement-noun-path.json"
+    assert path.exists(), f"missing committed artifact {path}"
+    return json.loads(path.read_text())
+
+
 def test_the_lexical_scorer_has_the_cross_encoder_interface(tool_mod):
     """Same call shape, so ONLY the scorer changes and the pools stay identical.
 
@@ -1541,7 +1551,8 @@ def test_an_armed_gate_is_measurable_only_when_asked_for(
     assert "TORTOISE_DB_URI" in capsys.readouterr().err
 
 
-def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(lexical, tool_mod):
+def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(
+        lexical, noun, tool_mod):
     """The artifact's ceiling_note must be REPRODUCIBLE by the tool that writes it.
 
     §7 points at this JSON as its citation, so a note left over from an earlier
@@ -1558,13 +1569,26 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(lexical, tool_mod)
     literal = literal[literal.index("(") + 1:]
     emitted = "".join(re.findall(r'"([^"]*)"', literal))
     assert emitted, "could not read the tool's ceiling_note literal"
-    for arm in ("rerank", "lexical_difflib", "lexical_overlap"):
-        got = lexical["arms"][arm]["ceiling_note"]
-        assert got == emitted, (
-            f"{arm}: the artifact's ceiling_note is not what the tool emits — "
-            f"regenerate the artifact (it is generated, never hand-edited)")
-        assert "its ceiling is arm 1" not in got, (
-            f"{arm}: the retracted 'arm 1's miss_past_k' reading is back")
+    # ⛔ THE FIGURES ARE NOT IN THIS STRING ANY MORE, and that is the point:
+    # it used to hardcode one run's pair, so a re-run on a grown corpus shipped a
+    # note contradicting its own ``arms.exact.<P>.in_window`` — and the NOUN-PATH
+    # copy was pinned by nothing at all (measured: rewriting its figure left the
+    # suite green). Both artifacts are checked here, and the note may not carry a
+    # measured figure.
+    assert not re.search(r"\b\d+/\d+", emitted), (
+        f"the ceiling note restates a measured figure: {emitted}")
+    for artifact, name in ((lexical, "measurement-lexical-control.json"),
+                           (noun, "measurement-noun-path.json")):
+        for arm, arm_data in artifact["arms"].items():
+            if not isinstance(arm_data, dict) or "ceiling_note" not in arm_data:
+                continue
+            got = arm_data["ceiling_note"]
+            assert got == emitted, (
+                f"{name}:{arm}: the artifact's ceiling_note is not what the tool "
+                f"emits — regenerate the artifact (it is generated, never "
+                f"hand-edited)")
+            assert "its ceiling is arm 1" not in got, (
+                f"{arm}: the retracted 'arm 1's miss_past_k' reading is back")
 
 
 def test_the_rerank_arm_measures_the_model_the_PRODUCT_would_load(

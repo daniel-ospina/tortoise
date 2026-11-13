@@ -481,9 +481,11 @@ class LexicalScorer:
     * ``difflib`` — ``SequenceMatcher(None, a, b).ratio()`` on lowercased text.
       Character-level, so it rewards the surface variants the noun path's
       character-only perturbations produce.
-    * ``overlap`` — Jaccard over lowercased alphanumeric tokens, with an
-      exact-after-normalisation short-circuit to 1.0. Token-level, so it is the
-      strongest fair form of "a 5 us string compare".
+    * ``overlap`` — Jaccard over lowercased alphanumeric tokens. Token-level,
+      so it is the strongest fair form of "a 5 us string compare". (An exact
+      match needs no short-circuit: equal token sets make the Jaccard ratio 1.0
+      on its own, and a branch that returned early would have been a second code
+      path to time.)
     """
 
     def __init__(self, mode: str = "difflib") -> None:
@@ -590,16 +592,27 @@ def _rerank_arm(
         "top_k": top_k,
         "ndcg_k": ndcg_k,
         "torch_threads": threads,
+        # ⛔ NO MEASURED FIGURE IN THIS STRING. It used to carry one run's
+        # numbers ("277/300 at a 15-window, 300/300 at 40") as a literal, so a
+        # re-run on a grown corpus (this file already records `population_digest`
+        # moving between runs) would have shipped a note contradicting its OWN
+        # `arms.exact.<P>.in_window`, and a hand-edit of either artifact's copy was
+        # invisible (measured: rewriting 277 -> 299 in the noun-path artifact left
+        # every test green). The figures now live only where they are COMPUTED —
+        # `arms.exact.<P>.in_window` / `mentions` — and the note says which cell
+        # to read.
         "ceiling_note": (
             "a reranker only reorders rows the legs already returned, so its "
             "ceiling is the number of golds the legs put INSIDE the scored "
-            "window at that width — in_window(P), WIDTH DEPENDENT: 277/300 at a "
-            "15-window, 300/300 at 40. miss_past_k at k=P is 0 BY CONSTRUCTION "
-            "(a response has at most P rows, so 'the rank is past P' cannot "
-            "occur) and is not the ceiling; miss_absent_at_max_k is not a "
-            "width-independent bound either — it counts golds absent within arm "
-            "1's MAXIMUM window (15), and the pool-40 arm of this same run "
-            "returns every one of them, which is why 40 reaches 300/300"),
+            "window at that width — in_window(P) of `mentions`, WIDTH DEPENDENT: "
+            "read `arms.exact.<P>.in_window` for each width in this artifact "
+            "rather than a figure quoted here (the pool-40 arm returns every gold "
+            "arm 1's maximum window 15 already returned, which is why its "
+            "in_window equals the mention count). miss_past_k at k=P is 0 BY "
+            "CONSTRUCTION (a response has at most P rows, so 'the rank is past P' "
+            "cannot occur) and is not the ceiling; miss_absent_at_max_k is not a "
+            "width-independent bound either — it counts golds absent within "
+            "arm 1's MAXIMUM window (15)"),
     }
     # ⛔ THE ORDER IS PRODUCED BY THE SHIPPED FUNCTION, NOT BY A COPY OF IT.
     # This arm used to sort the scores itself and reorder EVERY row, including a
@@ -1579,7 +1592,9 @@ def run(args: argparse.Namespace) -> int:
         # ⛔ A reranker REORDERS what retrieval returned; it cannot surface a row
         # the leg never produced. So this arm's ceiling is `in_window(P)` — the
         # golds the legs put INSIDE the scored window at that width — which is
-        # WIDTH DEPENDENT (277/300 at a 15-window, 300/300 at 40).
+        # WIDTH DEPENDENT, so the figures live in `arms.exact.<P>.in_window`
+        # (computed) and NOT as a literal here: a re-run moves them, and an
+        # earlier draft hardcoded one run's pair in the emitted note.
         #
         # ⛔ `miss_past_k` is NOT that ceiling, and this comment used to say it
         # was: at k=P it is 0 BY CONSTRUCTION (a response has at most P rows, so
