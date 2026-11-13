@@ -5011,9 +5011,11 @@ class TestThe12120ReviewRound20:
     a keep-first conflict warning, where the same graph with a same-spelling
     successor is silent. ⚠️ `main` is NOT silent on this graph — it refuses the
     record earlier, as `dangling successor`, because its raw successor probe cannot
-    resolve a fold-only successor at all (nor a duplicate `Old Co`); that gap is
-    what #12120 exists to close, and this docstring's earlier phrasing claimed
-    otherwise until a reviewer measured `origin/main` directly.
+    resolve a fold-only successor at all; its REF probe then cannot resolve the
+    duplicate `Old Co` either, and spelled in main's own space (`Acme Corporation`)
+    the record is refused THERE instead, as `never-guess`. Both gaps are what #12120
+    closes, and this docstring's earlier phrasing claimed `main` was silent until a
+    reviewer measured `origin/main` (`f33f5e2c32`) directly.
 
     ⛔ Neither half alone reproduces it (a merge-then-supersede target with a
     same-spelling successor is silent either way; so is a fold-only successor on a
