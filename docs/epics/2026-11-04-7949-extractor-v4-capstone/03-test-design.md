@@ -225,3 +225,18 @@ Otherwise it is a Tier E test, and it must **name the tier in its docstring** so
    moved, and that must be legible in the issue, not discovered at acceptance.
 4. **`test_graph_census_7949.py`'s live half moves to Tier E** — the only existing-test change this epic
    requires, and it is a *move*, not a deletion.
+
+---
+
+## Provenance of the numbers in this document
+
+**Read every `file:line` here as a STAMP, not as an address.** The **symbol** is authoritative; the number
+is as-of the head it was read at — `a577d0e25c` unless the row says otherwise — so a number can land on a
+different line at a later head *deliberately*. That policy is recorded in `05-verify.md` D5.
+
+⛔ **Do not re-point one in passing.** Re-pointing has been tried and the next forward merge rots it again;
+the repairs marked in the rows above are the ones a review measured, each at the head it names. This note
+lives at the *end* of the file on purpose: a note at the top would shift every number below it, including
+the `line 81 of the document` that `05-verify.md` D5 itself names. A lane that "fixes" a stale number reads
+this file — that is how the two citations on lines 81 and 147 were re-pointed and then reverted
+(`8aeb35399c`) by a lane that had not read D5.
