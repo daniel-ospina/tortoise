@@ -877,6 +877,18 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     documented repair route reported it again, forever. The absent case returns
     ``checked: False`` with ``gone: True``, which ``invalidate_stale`` surfaces as
     ``counts.gone`` — a sweep may not read clean while a reconcile did not happen.
+
+    ⚠️ AND ``gone`` IS NOT PROOF OF ABSENCE. It means "``sdk.get_entity`` could not
+    resolve this id", which an UNADDRESSABLE node produces exactly as a deleted one
+    does: this function resolves only the canonical labels, each by its OWN primary
+    identity prop (``Event`` is keyed by ``eventId``), so a ``:Widget``, an
+    unlabelled node, or a ``:Event {id:…}`` carrying no ``eventId`` all come back
+    the same as a node that is really gone. This function cannot tell those apart
+    and does not try — that is the caller's job, and a caller that needs proof of a
+    deletion must OBSERVE the graph (:data:`_GONE_PROBE` /
+    :data:`GONE_UNPROVEN`, #12336/#12457) rather than read this flag as one.
+    ⛔ ``invalidate_stale``'s ``counts.gone`` still derives straight from this
+    answer, un-probed — #12534.
     """
     if not goal_id:
         return {"checked": False, "reason": "no goalId on the retired claim"}
@@ -1240,15 +1252,18 @@ def reconcile_goal_states(
       ``guideline``) was left alone and reported, so a sweep cannot read clean over
       a goal it refused to touch. ⚠️ Scoped by VALUE for the same reason the gate
       above is: a human ``met``/``unmet`` in that window IS overwritten;
-    * ``gone`` — the goal node is GONE, so there is no cache to reconcile
-      (reported the same way :func:`invalidate_stale` reports ``counts.gone``).
+    * ``gone`` — the goal node is GONE, so there is no cache to reconcile. The
+      record carries the DOOR's ``reason``, not the sweep's. ⚠️ The same BUCKET
+      NAME as :func:`invalidate_stale`'s ``counts.gone``, but NOT the same meaning:
+      that one still derives from the un-probed door answer (#12534), so a consumer
+      must not read the two counters as one predicate.
       ⛔ The door's own ``gone`` answer is NOT sufficient to report this: it
       resolves only the canonical labels, each by its OWN identity prop, while the
       scan matched the node label-agnostically by ``n.id`` — so a node the surface
       cannot address is indistinguishable THERE from one that does not exist. This
       arm therefore probes the graph once (:data:`_GONE_PROBE`) and re-buckets a
       node that is still present as ``unaddressable``; only a node the graph no
-      longer holds is reported ``gone`` (:data:`GONE_UNPROVEN`);
+      longer holds is reported ``gone``;
     * ``failed`` — the reconcile could not run, its write was refused, or its
       ``gone`` answer could not be VERIFIED (the :data:`_GONE_PROBE` read raised, so
       the sweep could not tell a deletion from an id the surface cannot address).
