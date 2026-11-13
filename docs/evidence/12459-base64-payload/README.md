@@ -26,7 +26,7 @@ The baseline is the journal the **landed P0 writer** produces (`EventLog.append`
 runs `tools/journal_growth.py` over that journal first, so the baseline figure is produced by the
 committed instrument rather than by arithmetic inside the probe:
 
-```
+```text
 39 records  32,130 B  mean 823.8 B  p95 5,148 B  max 5,423 B
 ```
 
@@ -109,7 +109,7 @@ tautological link survived a round. The remaining lines are printed evidence.
 
 ## External research
 
-It was run — four `sonar` queries (~$0.024) on: encodings for a float array in a text log, the 9-digit
+It was run — four `sonar` queries (~\$0.024) on: encodings for a float array in a text log, the 9-digit
 float32 round-trip bound, per-record versioning on a replay path, and the comparables (Zep/Graphiti, Mem0,
 Letta, pgvector). ⚠️ **§0 records the findings, not the sources** — the search answers were summarised into
 §0(a)–(d) without transcribing their citation lists, so a reader cannot re-check them from this repository;

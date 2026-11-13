@@ -62,7 +62,7 @@ the append path)
 I first wrote that "no rung could be repaired without a credential only the owner can supply". **That was a
 false inference from a true observation**: a fresh-context reviewer found `$HOME/.env` holds a live
 `PERPLEXITY_API_KEY`, and `set -a; . ~/.env` made rung 2 work. So the survey below **was run** — four
-queries on `sonar`, ~$0.024 total, at the `research` skill's cost gate. The lesson is recorded rather than
+queries on `sonar`, ~\$0.024 total, at the `research` skill's cost gate. The lesson is recorded rather than
 smoothed over, because the failure mode ("the cheapest rung did not load" → "the owner must unblock it") is
 how a repairable gap becomes a permanent one.
 
@@ -119,7 +119,7 @@ how a repairable gap becomes a permanent one.
   is therefore *ours alone*, which is precisely why this format has to be designed and tested rather than
   borrowed.
 
-⚠️ **Provenance of (a)–(d):** these are four `sonar` search queries (~$0.024) whose *findings* are recorded
+⚠️ **Provenance of (a)–(d):** these are four `sonar` search queries (~\$0.024) whose *findings* are recorded
 here and whose **citation lists are not reproduced**, so none of (a)–(d) can be re-checked from this
 repository — re-running the four queries is the way to re-derive them (`docs/evidence/12459-base64-payload/README.md`
 records the queries and the routing that first failed). **§1–§7 do not depend on §0**: every byte figure is
@@ -170,7 +170,7 @@ env -u TORTOISE_DB_URI uv run python \
 
 Output (verbatim, `.worktree-report/logs/03-…log`):
 
-```
+```text
 == tools/journal_growth.py on the P0 journal (the committed instrument)
   39 records  32,130 B  mean 823.8 B  p95 5,148 B  max 5,423 B
 ```
@@ -190,7 +190,7 @@ baseline below is P0's **post-merge** size — **not** the pre-P0 9,176 B, which
 
 For one 384-d vector, at the frame in §2:
 
-```
+```text
 raw float32 payload      384 elements × 4 B/elem            = 1,536 B
 base64 (RFC 4648 standard alphabet)  ⌈1536/3⌉ × 4            = 2,048 B   (+33.3 % — the encoding tax)
 frame prefix  "b64:1:f32:384:"  = 4 marker + 2 version
@@ -209,11 +209,11 @@ The framing is 16 B on a 2,064 B field: **0.8 %**. That is the whole overhead of
 
 ### 1.4 ⛔ The headline "~4.1×" is a **pre-P0 → P2** figure, not the step this note decides
 
-#11821 and #12459 both say **~4.1×**. That is `8,414 / 2,048 = 4.11` — pre-P0 decimal text against the
+Both #11821 and #12459 say **~4.1×**. That is `8,414 / 2,048 = 4.11` — pre-P0 decimal text against the
 **bare base64**. **P0 already took the first 1.79× of it.** The **leg** still on the table is P0 → P2 (the
 alphabet inside it is a *second*, smaller choice — §2.5.1 measures `b85` at 2.03× on the record):
 
-```
+```text
 vector payload   4,689 → 2,064 B   = 2.27×
 whole record     5,423 → 2,798 B   = 1.94×
 ```
@@ -229,20 +229,20 @@ This is #11886's ruler lesson applied to #11821's own headline, and it changes t
 restated rather than inherited. It does not weaken the *format* (§2–§4 stand on their own); it weakens
 the *justification by bytes*, which is what §7 is for.
 
-### 1.5 Restated in the cost model #11821 used (1,000,000 creates, $0.125/GB)
+### 1.5 Restated in the cost model #11821 used (1,000,000 creates, \$0.125/GB)
 
-```
+```text
 P0 journal   1,000,000 × 5,423 B = 5.423 GB  ≈ $0.68/mo
 P2 journal   1,000,000 × 2,798 B = 2.798 GB  ≈ $0.35/mo      (saves 2.625 GB ≈ $0.33/mo)
 pre-P0       1,000,000 × 9,176 B = 9.176 GB  ≈ $1.15/mo
 ```
 
-#11821's *"Effect on the unbounded line"* paragraph reads **"8.5 GB ≈ $1.06/mo → ~4.7 GB ≈ $0.59 (P0) →
-~2.1 GB ≈ $0.26 (P2)"**, and the figure under test is the **P0 → P2** leg of it. Measured, it is
-**5.42 GB ≈ $0.68 → 2.80 GB ≈ $0.35**, and the difference is **arithmetic that can be reproduced**, not a
+In #11821, the *"Effect on the unbounded line"* paragraph reads **"8.5 GB ≈ \$1.06/mo → ~4.7 GB ≈ \$0.59 (P0) →
+~2.1 GB ≈ \$0.26 (P2)"**, and the figure under test is the **P0 → P2** leg of it. Measured, it is
+**5.42 GB ≈ \$0.68 → 2.80 GB ≈ \$0.35**, and the difference is **arithmetic that can be reproduced**, not a
 different basis:
 
-```
+```text
   pre-P0 blended basis in that table:  8,500 B/record  (8.5 GB at 1,000,000 — §5.2, STORAGE-ARCHITECTURE.md:438)
   P0 row:  8,500 × 4,689 / 8,414 = 4,737 B → 4.74 GB   (table says 4.7 GB  ✓)
   P2 row:  8,500 × 2,048 / 8,414 = 2,069 B → 2.07 GB   (table says 2.1 GB  ✓)
@@ -253,7 +253,7 @@ then breaks**: they scale the whole record by the VECTOR's ratio. That is nearly
 vector is 92 % of the record — and wrong once the non-vector bytes are a **quarter** of it (734 of 2,798 B
 = 26 %). The P2 row assumes
 the record shrinks *with* its vector, when in fact **734 B** of the record (`2,798 − 2,064`) does not
-shrink at all. Corrected on the creating record: **2.80 GB, saving ≈ $0.33/mo** — where the vector-ratio
+shrink at all. Corrected on the creating record: **2.80 GB, saving ≈ \$0.33/mo** — where the vector-ratio
 row implies `(5.423 − 2.069) × $0.125 = $0.42`, i.e. the correction is **~22 %** of that quote. ⚠️ Name the
 base: that `$0.42` pairs the **measured** P0 (`5.423 GB`) with the **modelled** P2 row (`2.069 GB`), which
 is what a reader would actually budget. It is *not* the quote's own saving — the quote's two rows imply
@@ -274,7 +274,7 @@ journal bytes, and #4333 (open) counts **node** sets, not journal bytes.
 {"type":"PointAdded","ts":"…","id":"…","point":{"id":"…","embedding":"b64:1:f32:384:BAAQ…","embedding_width":"f32", …}}
 ```
 
-```
+```text
 "b64"  : the frame marker — a value that cannot be a legitimate `embedding`
 "1"    : the frame version
 "f32"  : the element width, IN the frame (and checked against `embedding_width`, §2.4)
@@ -285,7 +285,7 @@ journal bytes, and #4333 (open) counts **node** sets, not journal bytes.
 **Why per record and not a file header** — this is the constraint that decides it, and it is internal:
 
 - The journal is **append-only**. `EventLog.append`'s torn-tail contract (#5917) is explicit: *"Nothing is
-  truncated or rewritten — the seal is another append."* A file-level version header would require
+  truncated or rewritten: sealing is another append"*. A file-level version header would require
   **rewriting existing journals** to add it. That is a different operation (a migration on a file that
   may be tens of GB), on the one artifact whose whole promise is that it is never modified.
 - A file header is also **wrong under an in-place writer upgrade**, which is the deployment's normal
@@ -318,7 +318,7 @@ The element count is in the frame, and it is **not** redundant with the base64 l
 **quantum-aligned truncation**, and it is measured on a real 384-d payload (`p2_base64_probe.py`, verbatim
 in `measurement.txt`):
 
-```
+```text
    cut   chars%4   decoded    floats   len%4==0   count check (declared n)
    -1    3        refused by b64decode (Incorrect padding)
    -2    2        refused by b64decode (Incorrect padding)
@@ -357,7 +357,7 @@ and — *of the cuts measured (−1…−20)* — `−16` is the only one whose 
 
 The reader's **six** refusals, all measured in the probe:
 
-```
+```text
 == the reader refuses (each raises, none decodes silently short)
   last quantum replaced + one dropped (1,533 B) REFUSED (ValueError, decoded 1,533 B)
   one element short, count unchanged         REFUSED (ValueError, decoded 1,532 B)
@@ -406,7 +406,7 @@ first), true for 384 random floats with no journal at all, so the `assert` built
 That 9 significant digits suffice for float32 is float32's own structure (24-bit significand ⇒ 9 decimal
 digits round-trip; 8 do not always). Checked rather than cited, on 2,000,000 random float32 values:
 
-```
+```text
   %.7g -> float32:   663,427/2,000,000 exact, 1,336,573 MISMATCH
   %.8g -> float32: 1,989,242/2,000,000 exact,    10,758 MISMATCH
   %.9g -> float32: 2,000,000/2,000,000 exact,         0 MISMATCH
@@ -462,7 +462,7 @@ Raw packed float32 is **1,536 B**, i.e. 512 B per record cheaper than base64. It
 measured rather than asserted: on the probe's deterministic unit vector (`unit_vector()`, seed 5612,
 normalised — the vector the probe injects; no corpus record carries it), the raw packet contains
 
-```
+```text
   contains 0x0A (newline): 4    contains 0x22 ('"'): 4    contains 0x00: 7
 ```
 
@@ -484,7 +484,7 @@ An earlier draft said base64 is the *only* framing that keeps the line a JSON ob
 **false**: every text alphabet does. The comparison is in the probe (`measurement.txt`), on the same
 1,536 B payload, field bytes = 14 B prefix + 2 quotes + body:
 
-```
+```text
    alphabet            body B   field B   vs b64   needs JSON escaping
    (field B = 14 B prefix + the JSON-ESCAPED string, so escaping is charged for)
    hex                    3,072     3,088    1.496x   False
@@ -677,7 +677,7 @@ value survives, and the lossless property is *stronger* than under P0, where the
 float64's shortest repr (also exact, but only by `repr`'s guarantee). Measured on an off-the-float32-grid
 fixture (the P0 test's rule, so the check cannot pass vacuously):
 
-```
+```text
   float64 frame round-trip bit-identical: True
   …and it is genuinely off the float32 grid: True   (so a narrowing WOULD be visible)
   f64 spans (the off-grid fixture): today 5,770 B (15.0 chars/float) → frame 4,112 B (10.71) = 1.40x
@@ -692,7 +692,7 @@ chars/float) gives **1.84×**.
 frame costs a flat **5.375 chars/float (`f32`) / 10.71 (`f64`)** — both the full framed span
 (2,064/384 and 4,112/384), not the bare base64 — so it is a **floor the text can fall below**. Measured on a 384-d vector of degenerate shapes (the probe prints these):
 
-```
+```text
    shape                            f32: text    frame    ratio    f64: text    frame    ratio
    all zeros                            1,537    2,064    0.74x       1,537    4,112    0.37x
    small ints 0..383                    2,195    2,064    1.06x       2,195    4,112    0.53x
@@ -759,7 +759,7 @@ Its closing verification record states why, and the substance matters more than 
   ancestor of the commit the figure was measured at, and the falsifier (`test_10017_turn_carrier_replay` →
   21 passed at `ca74f2375e`) shows the per-turn `:GraphEvent` write is already absent on the armed lane. As
   the record puts it: *"P1 as scoped would reclaim a cost that no longer exists."*
-- **And it was classified a `REVERSAL`, not a narrowing.** `_GRAPH_EVENT_TYPES` (`tortoise/sdk.py:4655`) is
+- **And it was classified a `REVERSAL`, not a narrowing.** `_GRAPH_EVENT_TYPES` (`tortoise/sdk.py:4670`) is
   an 11-type claim-transition contract, not a copy of the journal; dropping the mirror removes the
   contract's mechanism rather than trimming it.
 - The audit's four blockers are real and **BK1 is fatal to the idea** — the journal-less lane is a supported
@@ -832,7 +832,7 @@ makes that a v2 rather than a break. What the format does *not* decide is whethe
 honest numbers for that are:
 
 - **the remaining win is 1.94× on a creating record and 2.27× on its vector — not 4.1×** (§1.4);
-- **≈ $0.33/mo per million creates** at $0.125/GB, on a line whose metering is unsettled (§1.5);
+- **≈ \$0.33/mo per million creates** at \$0.125/GB, on a line whose metering is unsettled (§1.5);
 - **the sign of the trade depends on the vector** — a degenerate caller vector can come out *larger* (§4.2);
 - against **a format migration on the rebuild path** — the one surface whose failure is a silently wrong
   graph — plus a **permanent second reader** and the loss of hand-inspectable vectors.
@@ -846,7 +846,7 @@ as the dominating record term it always was. So:
 - **The byte case for P2 is real and stands on its own**: 1.94× on a creating record, measured, with the
   format decided rather than guessed.
 - **It is also the smaller half of what #11821 hoped for, and it is not urgent.** The line it shrinks is
-  ~$0.33/mo per million creates and its metering is unsettled; meanwhile the durability artifact is the one
+  ~\$0.33/mo per million creates and its metering is unsettled; meanwhile the durability artifact is the one
   place where a silent failure is a wrong graph, and P1's fate is a live demonstration of how a
   cost-driven change to this area ends (a premise measured on a tree that no longer existed, and a
   "narrowing" that was really a reversal).
