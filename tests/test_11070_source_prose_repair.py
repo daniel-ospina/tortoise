@@ -3147,7 +3147,12 @@ def test_a_PUNCTUATED_underscore_token_is_a_probe_because_the_read_addresses_ONE
         numDocuments), then queried by its OWN name through `run_fts_query` on
         FalkorDB 4.20.6 — `a_.`, `a_!`, `.a_`, `_a.` and `a_..` each returned their
         own record. So refusing them was a false block, the class this guard has
-        now repaired four times.
+        now repaired four times. ⛔ AND THE DECOY HALF MATTERS AS MUCH (`#12368`
+        review, P2): reachability alone does not prove a probe is clean, so each
+        shape was ALSO measured against a decoy carrying the bare word (`zz a zz`)
+        — none of them returns it, while `a_bc.` and `ab._` DO return their decoy
+        and are therefore over-matches (the first is refused for that reason, the
+        second is tracked as #12535).
     (3) REACHABLE: such a token is exactly what an operator copies out of prose.
     (4) AND THE OVER-MATCH CLASS STAYS REFUSED — pinned, so a future widening
         cannot swallow it: `web_search` emits `search|web|web_search` (three index

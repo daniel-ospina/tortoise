@@ -1330,9 +1330,15 @@ _SOURCE_INDEX_ENTRIES = (
 #:   splits on ``_`` too, which is what makes the READ's terms and the INDEX's
 #:   terms differ for exactly that character.
 #: * every NON-ASCII character stays INSIDE the word as well — the eight-shape
-#:   probe in :func:`tortoise.sparse._continues_a_word` shows only ASCII space,
-#:   ``.`` and ``-`` separating, and :func:`probe_phrase_rejection`'s own history
-#:   records ``!``/``?``/``/`` splitting while ``NBSP``/U+3000/CJK do not.
+#:   probe in :func:`tortoise.sparse._continues_a_word` shows ASCII space as the
+#:   only separator AMONG ITS EIGHT ROWS (the other seven are non-ASCII
+#:   characters, none separating), and the rest of the class is measured
+#:   elsewhere: a one-row probe at `#12368` (a record named ``ab<x>``, queried as
+#:   ``ab``) found ``.``, ``!``, ``?``, ``/``, ``,`` and ``-`` separating while
+#:   ``_`` and ``NBSP`` do not, and ``NBSP``/U+3000/CJK are in that eight-row
+#:   table. ⛔ Do not over-attribute the table again (P2, `#12368` review): it has
+#:   no ``.`` or ``-`` row, so the punctuation half of this class comes from the
+#:   one-row probe, not from it.
 #:
 #: Used by :func:`probe_phrase_rejection` to ask its length bound the only
 #: question that matters: can the read address ANY index term at all?
@@ -1757,6 +1763,16 @@ def probe_phrase_rejection(phrase: str) -> str | None:
         # refused it (``runs`` was ``['test','test']``, two runs) — so the read's
         # splitter was a REOPENING of a closed class, not a widening of it.
         # ``a_.`` is unaffected: both its alternatives are one index run, ``a_``.
+        #
+        # ⛔ AND ONE SHAPE THIS COMPARISON CANNOT SEE, tracked as #12535: a token
+        # that ends ``_`` AFTER a separator (``ab._``) is ACCEPTED here, while the
+        # read's query addresses the bare ``ab`` — MEASURED with a decoy record
+        # (``qq ab zz`` returned beside the target), i.e. an over-match. Neither
+        # guard above can catch it: ``build_or_query('ab._') == 'ab._'`` is ONE
+        # alternative (so this block is skipped entirely) and its index run is
+        # ``ab_`` (ONE run). Dropping the ``alternatives != {token.lower()}`` guard
+        # does NOT fix it — both sides still compare ``ab_`` to itself — so the fix
+        # needs the QUERY parser's term, not the index splitter.
         token_terms = {r.lower() for r in _INDEX_WORD_RUN_SPLIT_RE.split(token) if r}
         alternative_terms: set[str] = set()
         for alternative in alternatives:

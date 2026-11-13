@@ -120,7 +120,7 @@ contain):
 | the query builder | `tortoise/sparse.py:793` `build_or_query` | OR-union of `tokenize_sparse_query` terms, then the #8933 alias/phrase tail, then the #12360 `_`-preserving composite tail, deduped against the originals |
 | the tokenizer | `tortoise/sparse.py:662` `tokenize_sparse_query` | splits on **every** `[^a-z0-9]` (`_SPLIT_RE` at `:67`) — **including `_`** |
 | the query term cap | `tortoise/sparse.py:72` `DEFAULT_MAX_OR_TERMS = 12` | 12 terms, longest-first |
-| the degenerate branch | `sparse.py:937` — `if degenerate and not composites:` → `return escape_redisearch_literal(query)` | when ≤1 token survives, the whole query is the **escaped raw string** (⛔ NOT the `max_terms < 1` guard two lines above, whose `return` is byte-identical) |
+| the degenerate branch | `sparse.py:943` — `if degenerate and not composites:` → `return escape_redisearch_literal(query)` | when ≤1 token survives, the whole query is the **escaped raw string** (⛔ NOT the `max_terms < 1` guard two lines above, whose `return` is byte-identical) |
 | the leg | `tortoise/search_engine.py:2800` `run_fts_query`, Cypher at `:3008-3017` | `CALL db.idx.fulltext.queryNodes('Object', $query) … ORDER BY score DESC, <recency tie> LIMIT` |
 | the tie key | `search_engine.py:2642` `recency_tie_clause` | `coalesce(<recency>,'') DESC, coalesce(<id>,'') DESC` — the **id key is DESC on every label** |
 | the score discard | `tortoise/search_engine.py:4514` `for rank, (pid, _score) in enumerate(ranked)` | **why this is a recall question** |
