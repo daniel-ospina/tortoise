@@ -296,11 +296,14 @@ def test_the_paired_comparison_recomputes_from_both_arms_ranks(
     interchangeable (#12349 review, P2 caught the first cut of this test doing
     exactly that): ``tokens_controlled_subset`` is computed over the queries with
     a surviving token list (its recorded ``n``, with ``excluded_degenerate``
-    removed), so recomputing it from the full arms' ``ranks`` compares 174 rows
-    against 300 and reads a fabricated discrepancy. The full-population
-    comparisons are recomputed from the ranks; the subset comparison is checked
-    for internal consistency (its cells against its OWN ``n``) and for the
-    degenerate split that defines it.
+    removed), so its cells cannot be checked against the FULL arms' ranks. They are
+    recomputed from the ranks restricted to the NON-degenerate ids, which the
+    artifact records (``arms["<b>"]["degenerate_ids"]``); that is the same
+    computation as the full comparisons, on the population the comparison claims.
+    ⛔ An earlier revision of this docstring described the weaker version it
+    replaced — "checked for internal consistency, against its own ``n``" — which
+    is a self-consistency check a self-consistent rewrite passes (review cycle 4,
+    finding 5). The code below had already been made real; the docstring had not.
     """
     for key, cmp in artifact["comparisons"].items():
         ra = artifact["arms"][cmp["a"]]["ranks"]
@@ -636,7 +639,9 @@ def test_the_shipped_leg_fails_the_identifier_fixture_and_the_arms_differ(artifa
     assert fixed["PASS"] is True
     bad = {r["stored"] for r in shipped["results"] if r["rank_wide"] is None}
     assert "abc_def" in bad, (
-        "abc_def returning zero rows for its own name is the crispest case in "
+        "abc_def being unretrievable by its own name (no row at the production "
+        "window AND none at k=15 — that is what the artifact records; it is not a "
+        "row COUNT) is the crispest case in "
         "the lane; if it stopped happening the mechanism moved")
     # The scorer is not what fixes it: our terms fail, the analyser passes.
     assert artifact["arms"]["postgres_bm25/tokens"]["identifier_fixture"]["PASS"] is False

@@ -293,7 +293,10 @@ confirmation, and it is what `#12350` should be measured with. See `artifact.jso
 
 Two of those are decisive and none of them is about the scorer:
 
-* **`abc_def` is unretrievable at ANY k on the shipped leg** — it returns **zero rows** for its own name
+* **`abc_def` is unretrievable at ANY k on the shipped leg** — it returns **no row at the production
+  window and none at k=15** for its own name. ⛔ Stated as what the artifact records (`rank` and
+  `rank_wide`, both `None`), not as a row COUNT: the harness does not record the size of an empty
+  result set, so "zero rows" was a stronger claim than the committed evidence carries.
   (`abc|def`, and the index holds `abc_def`). The `#8933` machinery does not help: its alias tail
   (`err4032`) and adjacency phrase (`"err 4032"`) are *whitespace/punctuation* composites, and the index
   does not hold `abc_def` as `abc def` either.
