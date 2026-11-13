@@ -13805,7 +13805,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         # store won" when nothing is stored (fresh review at `7f206d2266`,
         # measured: `❌ … https://api.example.test refused the stored key` on a box
         # with `TORTOISE_API_KEY` set and no store at all). Same split as the two
-        # remedy strings below (`_transport_remedy`/`_identity_remedy`).
+        # remedy strings above (`_transport_remedy`/`_identity_remedy`).
         results.append(_combine("❌",
                         f"{health_part}; /v1/team 401 Invalid API key — "
                         f"{base} refused the "

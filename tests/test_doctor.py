@@ -599,6 +599,14 @@ class TestDoctorHostedCredential:
         # step is the raw-error-envelope pattern `team info` already fixed.
         assert "tortoise signup" in hosted and "tortoise recover" in hosted, hosted
         assert "config show" in hosted, hosted
+        # ⛔ The STORE half of the source-aware 401 split (fresh review at
+        # `64d6d7c96f`): this credential comes from `~/.tortoise`, so the row must
+        # say a STORE refused it. Nothing pinned it — forcing BOTH arms to the env
+        # wording left the whole module green (136 passed), i.e. a store user told
+        # about a `TORTOISE_API_KEY` they never set was invisible to this suite.
+        assert "stored key" in hosted, hosted
+        assert "which store won" in hosted, hosted
+        assert "TORTOISE_API_KEY" not in hosted, hosted
         assert rc == 1, "a broken hosted credential must exit non-zero"
         # The secret itself must never reach the transcript.
         assert _FAKE_HOSTED_KEY not in out
