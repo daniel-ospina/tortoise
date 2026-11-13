@@ -315,9 +315,6 @@ def push_to_tortoise(frontmatter: dict) -> dict:
             except ToolError as exc:
                 return {"error": str(exc)[:200]}
 
-        point_ids = []
-        failures = []
-
         meeting_point = _write("tortoise_create_point", {
             "kind": "event",
             "content": f"Meeting: {frontmatter['title']} ({frontmatter['date']})",

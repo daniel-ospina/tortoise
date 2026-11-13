@@ -33,6 +33,7 @@ The fix pinned here flips ONLY the verdict:
 from __future__ import annotations
 
 import contextlib
+import json
 
 import pytest
 from fastmcp.tools import FunctionTool
@@ -460,6 +461,82 @@ def test_every_designed_prose_refusal_is_classified_not_a_crash(monkeypatch):
     for crash in ("Error calling tool: TypeError: 'NoneType' object is not subscriptable",
                   "connection reset by peer"):
         assert mcp_client.refusal_message(crash) is None, crash
+
+
+def test_the_graph_target_family_is_a_designed_refusal_not_a_crash(monkeypatch):
+    """Round 10: the graph-target refusals were in NEITHER bucket.
+
+    A graph-bound credential declining to be re-targeted, and a graph that is not
+    reachable, are the surface working CORRECTLY — but they are prose with no
+    envelope, so `refusal_message` bucketed them as crashes. Measured consequence:
+    `read_points` has only `except C.CurationRefused` around its query, so the
+    refusal escaped as an uncaught `ToolError` traceback (rc 1, offset/row
+    diagnostics lost) instead of taking the documented graph fallback that
+    `_section`, `read_operators` and `read_events` all rely on for the SAME
+    refusal.
+    """
+    from fastmcp.exceptions import ToolError
+
+    from tortoise import curation as C
+    from tortoise import mcp_client
+    from tortoise.mcp_auth import _retarget_refusal
+
+    mod = _curate_graph_module("11153_graphtarget")
+    wire = str(_retarget_refusal("org_x_g_other"))
+    assert mcp_client.refusal_message(wire) == wire, wire
+    assert mcp_client.refusal_message(
+        "No graph 'org_x_g_other' is reachable from this workspace. "
+        "Available: a, b") is not None
+
+    def _refuse(*_a, **_k):
+        raise ToolError(wire)
+
+    monkeypatch.setattr(mcp_client, "call_tool", _refuse)
+    with pytest.raises(C.CurationRefused) as caught:
+        mod._live_call_tool("tortoise_get_entity", {})
+    assert str(caught.value) == wire, str(caught.value)
+
+def test_the_payload_is_redacted_in_the_cli_refusal_arm(monkeypatch, capsys):
+    """#10605 applies to the refusal arm too (round 10).
+
+    `describe_failure` is the redaction gate every other arm in that file uses —
+    fastmcp carries the server's JSON-RPC text into the exception, so a refusal
+    that echoed a credential would otherwise land verbatim on stdout, where
+    scripted callers log it. The classifier still runs on the RAW text, so
+    redaction cannot change which branch is taken.
+
+    The echoed value here IS this process's own credential (`TORTOISE_API_KEY`) —
+    the #10605 shape. A value this process does not know is not redactable, and
+    that is not what the rule is about.
+    """
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_refused_secret_value")
+
+    # `client/` is not on sys.path for the package's own tests; `test_client_cli_probe`
+    # inserts the CLI package's own root the same way.
+    import sys
+    from pathlib import Path
+
+    from fastmcp.exceptions import ToolError
+
+    client_dir = str(Path(__file__).resolve().parent.parent / "client")
+    sys.path.insert(0, client_dir)
+    try:
+        from tortoise_client import cli
+    finally:
+        sys.path.remove(client_dir)
+
+    def refused(*_a, **_k):
+        raise ToolError('{"error": "rejected key tt_refused_secret_value", '
+                        '"code": -32001}')
+
+    monkeypatch.setattr(cli, "call_tool", refused)
+    assert cli.main(["call", "tortoise_query"]) == 1
+    out = capsys.readouterr().out
+    assert "tt_refused_secret_value" not in out, (
+        f"the credential reached stdout: {out}")
+    assert "<redacted>" in out, out
+    assert json.loads(out)["is_error"] is True, out
+
 
 
 def test_a_total_outage_of_the_orientation_summary_is_a_refusal(monkeypatch):

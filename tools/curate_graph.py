@@ -1016,7 +1016,9 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
     (`{"error": …}`, the text of a `_safe`/`_quota_gated` payload) AND the prose
     refusals listed in `tortoise.mcp_auth.REFUSAL_PROSE_MESSAGES` (all three
     transport wait-bound arms — dispatched, never-dispatched, and a refused WRITE —
-    plus the graph-lookup margin arm and the sensitive-op rate-limit 429) — matched
+    plus the graph-lookup margin arm, the sensitive-op rate-limit 429, and the
+    GRAPH-TARGET family: a retarget refusal, "No graph … is reachable", a
+    requires-a-workspace refusal, and a graph that cannot be opened) — matched
     by PREFIX, not equality, because a wrapped message keeps its prefix. A `-32009`
     prose refusal is the ROUTINE answer for an
     expensive census read, so dropping the prose arm silently turned it back into a
@@ -1045,15 +1047,21 @@ def _is_refusal_envelope(text: str) -> bool:
     `content[0].text` = the JSON error dict) PLUS every prose entry in
     `tortoise.mcp_auth.REFUSAL_PROSE_MESSAGES` — the three `-32009` wait-bound arms
     (dispatched, never-dispatched, a refused WRITE), the graph-lookup margin
-    refusal, and the sensitive-op rate-limit 429 — matched by prefix. That list is
-    the ONE registry; do NOT restate a count here, because this docstring said
-    "FOUR shapes" while the delegate matched six (review round 5). A server-side
-    CRASH's text (`Error calling tool: TypeError: …`) matches none and stays a
-    `ToolError`, so a driver paging on "the run crashed" is not silenced.
+    refusal, the sensitive-op rate-limit 429, and the GRAPH-TARGET family (a retarget
+    refusal, "No graph … is reachable", requires-a-workspace, a graph that cannot be
+    opened) — matched by prefix. That list is the ONE registry; do NOT restate a
+    count here, because this docstring said "FOUR shapes" while the delegate matched
+    six (review round 5), and then said six while it matched nine. Every one of the
+    graph-target entries exists because the census sites that take a graph fallback
+    (`_section`, `read_operators`, `read_events`, and now `read_points`) receive that
+    family as `ToolError` and must classify it as a refusal, not a crash. A
+    server-side CRASH's text (`Error calling tool: TypeError: …`) matches none and
+    stays a `ToolError`, so a driver paging on "the run crashed" is not silenced.
 
     The rationale for the split, measured: review round 4 (the prose arm, which
-    turned the routine refusal into an uncaught traceback with rc 1) and round 8
-    (a second copy of this predicate would have been the third owner of it).
+    turned the routine refusal into an uncaught traceback with rc 1), round 8
+    (a second copy of this predicate would have been the third owner of it) and
+    round 10 (this docstring's own count was the narrowing hazard it described).
     """
     from tortoise.mcp_client import refusal_message
 

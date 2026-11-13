@@ -188,7 +188,15 @@ def _cmd_call(args: argparse.Namespace) -> int:
         # carries nothing, while a genuine failure stays on stderr with rc 1.
         refusal = refusal_message(exc)
         if refusal is not None:
-            print(json.dumps({"is_error": True, "result": refusal}, indent=2))
+            # ⛔ `describe_failure`, not the raw text: the standing rule three
+            # functions up ("#10605: the server may echo the credential it rejected;
+            # print evidence, never the VALUE") applies here too — fastmcp carries
+            # the server's JSON-RPC text into the exception, so a refusal that echoes
+            # a credential would land verbatim on stdout, where scripted callers log
+            # it. The CLASSIFICATION above already ran on the raw text, so redaction
+            # cannot change which branch this is.
+            print(json.dumps({"is_error": True, "result": describe_failure(exc)},
+                             indent=2))
         else:
             print(f"call failed: {describe_failure(exc)}", file=sys.stderr)
         return _EXIT_ERR
@@ -197,7 +205,9 @@ def _cmd_call(args: argparse.Namespace) -> int:
         # `raise_on_error=False` (the default is True), where an error result is
         # RETURNED instead of raised. Kept so the documented shape holds for both
         # client configurations rather than only the one this module builds.
-        print(json.dumps({"is_error": True, "result": str(result)}, indent=2))
+        # Redacted for the same #10605 reason as the arm above.
+        print(json.dumps({"is_error": True, "result": describe_failure(result)},
+                         indent=2))
         return _EXIT_ERR
     # The PAYLOAD is `content[0]`, and extra blocks are appended LAST by the
     # dispatch seam (a retired-name warning, the #10084 graph disclosure). Joining

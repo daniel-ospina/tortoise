@@ -852,6 +852,32 @@ _REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE = (
 #: `hosted_api._sensitive_op_budget`, the producer, which writes this constant).
 _REFUSAL_RATE_LIMIT_LEAD = "Rate limit exceeded for "
 
+#: The leads of the GRAPH-TARGET refusals — `_retarget_refusal`, the resolver's
+#: "No graph … is reachable" answer, and the `graph`-argument guards all raise this
+#: family, and each reaches a caller as `ToolError(str(exc))`
+#: (`mcp_server._resolve_graph_argument`). They are DESIGNED refusals: a graph-bound
+#: credential declining to be re-targeted is the surface working correctly. Two
+#: consumers need the classification (#11153 review round 10, measured):
+#: `read_points` has only `except C.CurationRefused` around its query, so an
+#: unclassified refusal escaped as an uncaught `ToolError` traceback (rc 1, losing
+#: the offset/row diagnostics) instead of taking the documented graph fallback; and
+#: `tortoise-client call` printed `call failed:` for a refusal.
+#: ⛔ LEADS, not whole messages: each embeds caller-specific detail (the requested
+#: graph, this transport's capabilities), and they live HERE beside their siblings so
+#: a reworded producer cannot silently re-open rc 1.
+#: ⛔ DELIBERATELY EXCLUDED: "`<tool>` does not take a `graph` argument"
+#: (`mcp_server._take_graph_argument`). It is a USAGE error — the caller fixes it by
+#: removing the argument — and its message begins with the tool NAME, so no stable
+#: prefix exists to key on. It stays a crash-class failure on purpose; the CLI still
+#: surfaces its text through `describe_failure`, and no census site would take a graph
+#: fallback for it.
+_REFUSAL_GRAPH_TARGET_LEADS = (
+    "This credential is bound to one graph and cannot be re-targeted ",
+    "No graph ",
+    "The `graph` argument requires a hosted workspace connection ",
+    "Graph ",
+)
+
 #: The refusal as a caller of a MUTATING tool must read it (#10849).
 #:
 #: ``_TRANSPORT_WAIT_BOUND_MESSAGE`` above is transport-neutral, so on the write
@@ -897,17 +923,19 @@ _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE = (
 #: in the CLI, round 9's measured finding). The JSON-envelope arm is matched
 #: separately, by parsing.
 #:
-#: ⛔ SCOPE, stated precisely because an earlier version of this comment said "Every
-#: DESIGNED tool-level refusal whose MESSAGE is PROSE" and that was FALSE: the
-#: `graph`-ARGUMENT family (`mcp_auth.GraphTargetError` — "cannot be re-targeted by
-#: a `graph` argument", "No graph '…' is reachable from this workspace", and
-#: `_take_graph_argument`'s "does not take a `graph` argument") is NOT registered
-#: here. Those are raised as `ToolError(str(exc))` from `mcp_server`, and they are
-#: still reported as crashes by the CLI — PRE-EXISTING, and deliberately not fixed
-#: at this gate: their messages embed a variable graph NAME, so matching them needs
-#: prefix design rather than a startswith on a static sentence. They are recognised
-#: where it matters for routing — `curate_graph` classifies them through
-#: `_looks_like_graph_refusal` to pick the credential-bound fallback.
+#: ⛔ SCOPE: an earlier version of this comment said "Every DESIGNED tool-level
+#: refusal whose MESSAGE is PROSE", which was FALSE at the time — the
+#: `graph`-ARGUMENT family (`mcp_auth.GraphTargetError`) was missing and the CLI
+#: reported it as a crash. It is registered now, through
+#: `_REFUSAL_GRAPH_TARGET_LEADS` above (declared there, beside the producers' other
+#: constants), so the exhaustive claim holds for the arms that carry a STABLE lead.
+#: ⛔ ONE arm remains OUT by design and it is named so the gap is not rediscovered as
+#: a bug: `_take_graph_argument`'s "`<tool>` does not take a `graph` argument" is a
+#: USAGE error whose message begins with the tool NAME, so no stable prefix exists;
+#: it stays crash-class (the CLI still prints its text through `describe_failure`).
+#: The other graph-target arms are ALSO classified where it matters for routing —
+#: `curate_graph` reads them through `_looks_like_graph_refusal` to pick the
+#: credential-bound fallback, which is the one place a wrong answer would mix graphs.
 #:
 #: ⛔ ALL THREE `-32009` wait-bound arms are named, including the WRITE one, rather
 #: than leaning on the base message's leading 60 characters: they agree today only
@@ -920,6 +948,7 @@ REFUSAL_PROSE_MESSAGES = (
     _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE,
     _REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE,
     _REFUSAL_RATE_LIMIT_LEAD,
+    *_REFUSAL_GRAPH_TARGET_LEADS,
 )
 
 
