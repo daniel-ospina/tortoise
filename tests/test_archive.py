@@ -1166,8 +1166,14 @@ class TestRestoreDependenciesResolve:
         return loads - local - set(dir(builtins))
 
     def test_every_free_name_in_a_frozen_handler_resolves_in_its_module(self) -> None:
-        records = sorted((arch.ARCHIVE_DIR / "mcp-tools"
-                          / "b1-removed-no-destination").glob("*.py"))
+        # Population from the MANIFEST, not a batch path literal: `archive_rel()`
+        # writes one directory per batch, so a hardcoded
+        # `mcp-tools/b1-removed-no-destination/` would silently exempt every future
+        # batch — the "covers one instance, calls it a class" shape this arm exists to
+        # avoid. Every MCP-tool record is in scope, whichever batch wrote it.
+        records = sorted(arch.ROOT / e["file"]
+                         for e in arch.load_manifest()["entries"]
+                         if e["kind"] == arch.MCP_TOOL)
         assert records, "the b1 archive is empty — this test would be vacuous"
         missing: list[str] = []
         checked = 0

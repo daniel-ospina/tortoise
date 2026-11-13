@@ -100,11 +100,14 @@ class TestRegistryEquivalence:
 
         #11609 batch 1 (this change): four no-destination tools were ARCHIVED —
         `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
-        `tortoise_pack_install` — so they are off the LIVE count while staying
-        declared in `RETIRED_TOOL_REGISTRY` (a caller still fails cleanly, and
-        `tools/archive_surface.py check` fails if a name resolves again).
-        72 − 4 = **68** live, 23 retired. The archival is its own move, disjoint from
-        both above — which is why this docstring's arithmetic has to name it.
+        `tortoise_pack_install` — so they are off the LIVE count and in NEITHER
+        registry: an archived name does not resolve at all, and a
+        `RETIRED_USE_INSTEAD` forward entry would make it SERVED again, which
+        `tools/archive_surface.py check` refuses by design (a forward entry is still
+        inside the product). They are the same shape as the five #4282 removals
+        above — no replacement NAME to redirect to. 72 − 4 = **68** live, 23 retired;
+        the archival is its own move, disjoint from both above, which is why this
+        docstring's arithmetic has to name it.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
         assert len(TOOL_REGISTRY) == 68, f"Expected 68, got {len(TOOL_REGISTRY)}"
