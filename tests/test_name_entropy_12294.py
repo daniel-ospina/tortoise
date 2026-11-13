@@ -33,14 +33,27 @@ MEASURED NUMBERS (the record the decline rests on — artifact: the `gate`,
 `#11901`'s committed artifacts are hybrid, and this arm's conclusion is about
 WHICH NAMES GET SEARCHED, which is leg-independent):
 
-  * shipped predicate: 85 distinct names of 300 gated; 0 of them unreachable at
-    any k; 85 of 98 rows in-window at k=3, 98 of 98 at k=15;
-  * exact Zep port: 13 distinct names (all ``#NNNN``), 26 of 26 rows in-window
-    at k=15, 0 of the 82-name unreachable class;
-  * within a real 15-name capture union, the other names' queries rescue 1 of 85
-    gated names — the recall cost is not an isolation artefact;
-  * gated VARIANT pairs that phase 1 binds today: 0 at every k, so the gate
-    prevents no duplicate (`#11901` measured variant attach 0.0 % either way).
+  * shipped predicate: **85 names of 300** gated, of which **73** have the
+    canonical in the k=3 window and **85 of 85** at k=15; **0** of the gated
+    names is unreachable at any k (the class the gate was proposed for, 81–82
+    of 300, is entirely OUTSIDE the gated set);
+  * the verbatim Zep port (with the fuzzy normaliser it actually receives):
+    **15** names, all `#NNNN` identifiers — **0** bare definite descriptions,
+    the 62.3 % class the issue targeted;
+  * within a real 15-name capture union, the other names' queries rescue **1 of
+    85** gated names at k=3 and **6 of 85** at k=15 — the recall cost is not an
+    isolation artefact;
+  * gated VARIANT pairs that phase 1 binds today: **0** at every k
+    (`would_attach_before_any_k`), so the gate prevents no duplicate
+    (`#11901` measured variant attach 0.0 % either way).
+
+Every figure above is checkable against the committed artifact
+`docs/research/2026-11-12-11901-candidate-recall/measurement-entropy-gate-12294.json`
+— the first draft of this module quoted ENTRY counts from an arm that appended
+one entry per gating predicate, so a name gated by both predicates was counted
+twice (98 entries for 85 names) and several ratios were doubled. The arm now
+emits one entry per name with a `predicates` list, and asserts it agrees with
+its own `gated` count.
 
 HOW TO RUN
 ----------
@@ -125,9 +138,9 @@ def test_the_premise_is_false_for_our_query_builder(name):
         survive; with one survivor it returns the RAW query (`sparse.py:536-550`);
       * RediSearch evaluates space-separated terms as implicit AND
         (`sparse.py:13-17`), so the leg searches BOTH terms — and finds the
-        node. Measured: 98 of 98 gated rows in-window at k=15.
+        node. Measured: 85 of 85 gated names in-window at k=15 (73 at k=3).
     """
-    from tortoise.sparse import build_or_query, SPARSE_STOPWORDS
+    from tortoise.sparse import SPARSE_STOPWORDS, build_or_query
 
     tokens = gate._signal_tokens(name)
     assert len(tokens) == 1, tokens          # the gate's trigger
@@ -143,22 +156,41 @@ def test_the_premise_is_false_for_our_query_builder(name):
 
 
 def test_the_identifiers_the_zep_port_gates_are_searched_verbatim():
-    """The verbatim Zep port gates only `#NNNN` — a literal the leg matches exactly."""
+    """The verbatim Zep port gates only `#NNNN` — a literal the leg matches exactly.
+
+    ⛔ The query is built from the SANITISED text, because that is what production
+    issues: `_sanitise_query_text` strips `#` (`extractor_v2.py`), so the leg sees
+    `2258`, not `#2258`. Asserting on the raw form would measure a query the
+    product never sends — the same mistake `window()` in the instrument warns
+    about.
+    """
+    from tortoise.extractor_v2 import _sanitise_query_text
     from tortoise.sparse import build_or_query
 
     for name in ("#2258", "#2981", "#1484"):
-        assert gate._has_high_entropy(name.lower().strip()) is False
+        sent = _sanitise_query_text(name)
+        assert sent == name.lstrip("#"), sent
+        # Zep's predicate runs on the FUZZY-normalised form (`dedup_helpers.py:46-50`),
+        # which is this arm's argument too.
+        assert gate._has_high_entropy(gate._zep_normalize_for_fuzzy(name)) is False
         assert gate._name_carries_signal(name) is False
-        assert build_or_query(name) == name
+        assert build_or_query(sent) == sent
 
 
-def test_a_zero_content_token_name_is_gated_by_both():
-    """The one class with no query to run — and it is empty on the measured corpus."""
+def test_a_zero_content_token_name_is_gated_by_the_shipped_predicate():
+    """The one class with NO query to run — and it is empty on the measured corpus.
+
+    ⛔ Named for what it asserts. The first draft called this "...by both" and was
+    false: on the stopword-only text Zep's own predicate PASSES it (`theand` has
+    entropy log2(6) = 2.585 ≥ 1.5, and "the and" is 7 characters / 2 tokens), so
+    only `_name_carries_signal` refuses it. Nothing in the product or the
+    instrument distinguishes the two reasons; the arm reports presence, not a
+    taxonomy.
+    """
     assert gate._signal_tokens("the and") == []   # article + connective, both stopwords
     assert gate._name_carries_signal("the and") is False
-    # A name whose only surviving token IS a content word is not this class,
-    # even though the predicate still gates it — the two reasons are distinct
-    # (`no_content_token` vs `low_entropy_token`) and must not be conflated.
+    assert gate._has_high_entropy(gate._zep_normalize_for_fuzzy("the and")) is True
+    # A name whose only surviving token IS a content word is a different case.
     assert gate._signal_tokens("the same") == ["same"]
 
 
@@ -186,9 +218,13 @@ def test_the_product_does_not_gate():
 def test_no_gated_entity_reporting_reached_the_product():
     """No `gated_entities` key, no `lookup_gated` hold reason — the wiring is out.
 
-    The two product-side seams the issue proposed were `search_graph`'s report
-    and `resolve_entities`' hold. Both were reverted with the gate; this pins
-    that a half-revert cannot leave one of them behind.
+    The THREE product-side seams the issue's implementation added were
+    `search_graph`'s `gated_entities` key on every return path,
+    `resolve_entities`' `HOLD_LOOKUP_GATED`, and the two helpers. All were
+    reverted with the gate; this pins that a half-revert cannot leave one behind.
+    ⛔ `gated_entities` is asserted on the SHAPE (a real `search_graph` return)
+    as well as on the source, because a key re-added unconditionally is exactly
+    the half-revert an attribute check cannot see.
     """
     from tortoise import extractor_v2 as v2
 
@@ -196,3 +232,10 @@ def test_no_gated_entity_reporting_reached_the_product():
     assert "lookup_gated" not in v2.HOLD_REASONS
     assert not hasattr(v2, "_name_carries_signal")
     assert not hasattr(v2, "_gated_entity_names")
+    # the degenerate return path needs no graph, and is the cheapest real shape
+    empty = v2.search_graph(None, {"entities": [{"name": "the fix"}]}, "")
+    assert "gated_entities" not in empty, sorted(empty)
+    # …and no other return path may carry it either, so the module cannot name
+    # the seam at all.
+    src = Path(v2.__file__).read_text()
+    assert "gated_entities" not in src

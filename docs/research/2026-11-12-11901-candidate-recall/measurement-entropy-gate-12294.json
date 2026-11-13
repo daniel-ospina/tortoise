@@ -1,0 +1,3770 @@
+{
+ "arms": {
+  "exact": {
+   "3": {
+    "attached": 181,
+    "in_window": 181,
+    "miss_absent_at_max_k": 81,
+    "miss_past_k": 38,
+    "rank_sum": 240,
+    "rows_zero": 10
+   },
+   "5": {
+    "attached": 192,
+    "in_window": 192,
+    "miss_absent_at_max_k": 81,
+    "miss_past_k": 27,
+    "rank_sum": 288,
+    "rows_zero": 10
+   },
+   "10": {
+    "attached": 209,
+    "in_window": 209,
+    "miss_absent_at_max_k": 81,
+    "miss_past_k": 10,
+    "rank_sum": 416,
+    "rows_zero": 10
+   },
+   "15": {
+    "attached": 219,
+    "in_window": 219,
+    "miss_absent_at_max_k": 81,
+    "miss_past_k": 0,
+    "rank_sum": 547,
+    "rows_zero": 10
+   }
+  },
+  "exact_by_class": {
+   "definite": {
+    "10": {
+     "in_window": 177,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "15": {
+     "in_window": 180,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "3": {
+     "in_window": 155,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "5": {
+     "in_window": 164,
+     "n": 180,
+     "rows_zero": 0
+    }
+   },
+   "ident": {
+    "10": {
+     "in_window": 18,
+     "n": 90,
+     "rows_zero": 10
+    },
+    "15": {
+     "in_window": 18,
+     "n": 90,
+     "rows_zero": 10
+    },
+    "3": {
+     "in_window": 17,
+     "n": 90,
+     "rows_zero": 10
+    },
+    "5": {
+     "in_window": 17,
+     "n": 90,
+     "rows_zero": 10
+    }
+   },
+   "path": {
+    "10": {
+     "in_window": 14,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "15": {
+     "in_window": 21,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "3": {
+     "in_window": 9,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "5": {
+     "in_window": 11,
+     "n": 30,
+     "rows_zero": 0
+    }
+   }
+  },
+  "exact_misses": [
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the diff",
+    "returned": 3,
+    "siblings_2tok": 14,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the diff itself",
+     "the diff hunks",
+     "the diff yourself",
+     "the diff adds",
+     "the diff with"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "web_search",
+    "returned": 1,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 1,
+    "wide_top": [
+     "the web for repo-internal"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tools/test_lane.py",
+    "returned": 3,
+    "siblings_2tok": 44,
+    "signal_tokens": 4,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the tool",
+     "tools/lane_wip.py",
+     "tools/hosted_api_cite_census.py",
+     "tools/closes_landing.py",
+     "tools/test_design_map_check.py"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "web_fetch",
+    "returned": 1,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 1,
+    "wide_top": [
+     "the web for repo-internal"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tools/ci_selection.py",
+    "returned": 3,
+    "siblings_2tok": 18,
+    "signal_tokens": 4,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the tool",
+     "tools/lane_wip.py",
+     "tools/hosted_api_cite_census.py",
+     "tools/closes_landing.py",
+     "tools/test_design_map_check.py"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "verified_files",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the files above",
+     "the lane brief files",
+     "the actual files",
+     "the four files",
+     "the three files"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "docs/00_index.md",
+    "returned": 3,
+    "siblings_2tok": 17,
+    "signal_tokens": 4,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/evidence/7949-capstone/preregistration.json",
+     "the docs",
+     "the index",
+     "docs/ONTOLOGY.md",
+     "docs/00_index.md"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_lane",
+    "returned": 3,
+    "siblings_2tok": 2,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh",
+     "scripts/lib/repo-set.test.sh",
+     "scripts/install-launchd.test.sh"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tests/test_ci_selection.py",
+    "returned": 3,
+    "siblings_2tok": 34,
+    "signal_tokens": 5,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the new tests",
+     "the tests",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "ci_selection",
+    "returned": 3,
+    "siblings_2tok": 3,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 5,
+    "wide_top": [
+     "docs/ops/ci-runner-x64.md",
+     "github/workflows/ci.yml",
+     "docs/ops/ci-wall-clock.md",
+     "github/workflows/python-ci.yml",
+     "config/ci-surfaces.yml"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tests/test_7949_capstone_measure.py",
+    "returned": 3,
+    "siblings_2tok": 47,
+    "signal_tokens": 6,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the new tests",
+     "the tests",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_ci_selection",
+    "returned": 3,
+    "siblings_2tok": 6,
+    "signal_tokens": 3,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/ops/ci-runner-x64.md",
+     "github/workflows/ci.yml",
+     "docs/ops/ci-wall-clock.md",
+     "github/workflows/python-ci.yml",
+     "config/ci-surfaces.yml"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tortoise/extractor_v2.py",
+    "returned": 3,
+    "siblings_2tok": 19,
+    "signal_tokens": 4,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the tortoise repo",
+     "tortoise/commit_schema.py",
+     "tortoise/activation_scorecard.py",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "tortoise/audit.py"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_7949_capstone_measure",
+    "returned": 3,
+    "siblings_2tok": 19,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "docs/evidence/7949-capstone/E1-E5-PROOFS.md",
+     "docs/evidence/7949-capstone/README.md",
+     "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tests/test_entry_point_python_guard.py",
+    "returned": 3,
+    "siblings_2tok": 31,
+    "signal_tokens": 7,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the entry",
+     "the new tests",
+     "the tests",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "extractor_v2",
+    "returned": 3,
+    "siblings_2tok": 2,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 4,
+    "wide_top": [
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "the extractor",
+     "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tortoise/hosted_api.py",
+    "returned": 3,
+    "siblings_2tok": 20,
+    "signal_tokens": 4,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "tortoise/api.py",
+     "the hosted graph",
+     "the hosted",
+     "the tortoise repo",
+     "the host"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "hosted_api",
+    "returned": 3,
+    "siblings_2tok": 4,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 5,
+    "wide_top": [
+     "the hosted graph",
+     "the hosted",
+     "tortoise/api.py",
+     "the host",
+     "the retired host"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tools/dod_5090_probe.py",
+    "returned": 3,
+    "siblings_2tok": 17,
+    "signal_tokens": 5,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the tool",
+     "tools/lane_wip.py",
+     "tools/hosted_api_cite_census.py",
+     "tools/closes_landing.py",
+     "tools/test_design_map_check.py"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "py_compile",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "tortoise/commit_schema.py",
+     "tools/lane_wip.py",
+     "tools/hosted_api_cite_census.py",
+     "tortoise/activation_scorecard.py",
+     "tests/test_demo_session_read_exclusion_8290.py"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tests/test_7949_capstone_verdict_check.py",
+    "returned": 3,
+    "siblings_2tok": 50,
+    "signal_tokens": 7,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the new tests",
+     "the tests",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "capstone_measure",
+    "returned": 3,
+    "siblings_2tok": 4,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 14,
+    "wide_top": [
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "docs/evidence/7949-capstone/E1-E5-PROOFS.md",
+     "docs/evidence/7949-capstone/README.md"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "evidence/7949-capstone/probes/capstone_measure.py",
+    "returned": 3,
+    "siblings_2tok": 20,
+    "signal_tokens": 7,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "docs/evidence/7949-capstone/E1-E5-PROOFS.md",
+     "docs/evidence/7949-capstone/README.md",
+     "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "head_sha",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the sha",
+     "the pushed head",
+     "the old head",
+     "the head moved",
+     "the rebased head"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "dod_5090_probe",
+    "returned": 3,
+    "siblings_2tok": 3,
+    "signal_tokens": 3,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 6,
+    "wide_top": [
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "probes/capstone_measure.py",
+     "evidence/7949-capstone/probes/capstone_measure.py",
+     "the census probe",
+     "the committed probe"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tests/test_dod_5090_probe.py",
+    "returned": 3,
+    "siblings_2tok": 33,
+    "signal_tokens": 6,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the new tests",
+     "the tests",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "document_sha256",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 3,
+    "wide_top": [
+     "the sha256 of each file",
+     "the documented",
+     "the document"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
+    "returned": 3,
+    "siblings_2tok": 23,
+    "signal_tokens": 7,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "evidence/7949-capstone/probes/capstone_measure.py",
+     "docs/evidence/7949-capstone/preregistration.json",
+     "the check and evidence for",
+     "the capstone"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "lease_until",
+    "returned": 0,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 0,
+    "wide_top": []
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_dod_5090_probe",
+    "returned": 3,
+    "siblings_2tok": 4,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "probes/capstone_measure.py",
+     "evidence/7949-capstone/probes/capstone_measure.py",
+     "the census probe",
+     "the committed probe"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the architecture doc for the",
+    "returned": 3,
+    "siblings_2tok": 6,
+    "signal_tokens": 2,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md",
+     "docs/architecture/STORAGE-ARCHITECTURE.md",
+     "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md",
+     "the architecture doc for the",
+     "the census doc"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "capstone_preregistration_check",
+    "returned": 3,
+    "siblings_2tok": 7,
+    "signal_tokens": 3,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/evidence/7949-capstone/preregistration.json",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "docs/evidence/7949-capstone/E1-E5-PROOFS.md"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tests/test_capstone_preregistration_9075.py",
+    "returned": 3,
+    "siblings_2tok": 41,
+    "signal_tokens": 6,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/evidence/7949-capstone/preregistration.json",
+     "the new tests",
+     "the tests",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the work",
+    "returned": 3,
+    "siblings_2tok": 4,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 7,
+    "wide_top": [
+     "the working tree",
+     "the work wasted",
+     "the work is finished",
+     "the work you were given",
+     "the work"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "tool_registry",
+    "returned": 3,
+    "siblings_2tok": 2,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the registry",
+     "the tool",
+     "tools/lane_wip.py",
+     "tools/hosted_api_cite_census.py",
+     "tools/closes_landing.py"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tools/capstone_preregistration_check.py",
+    "returned": 3,
+    "siblings_2tok": 25,
+    "signal_tokens": 5,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/evidence/7949-capstone/preregistration.json",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "docs/evidence/7949-capstone/E1-E5-PROOFS.md",
+     "docs/evidence/7949-capstone/README.md"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "mcp_server",
+    "returned": 3,
+    "siblings_2tok": 1,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 3,
+    "wide_top": [
+     "docs/product/mcp-sdk-surface.md",
+     "the servers",
+     "the server"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_capstone_preregistration_9075",
+    "returned": 3,
+    "siblings_2tok": 10,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/evidence/7949-capstone/preregistration.json",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "docs/evidence/7949-capstone/E1-E5-PROOFS.md",
+     "docs/evidence/7949-capstone/README.md"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "docs/evidence/7949-capstone/preregistration.json",
+    "returned": 3,
+    "siblings_2tok": 15,
+    "signal_tokens": 6,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "evidence/7949-capstone/probes/capstone_measure.py",
+     "docs/evidence/7949-capstone/E1-E5-PROOFS.md",
+     "docs/evidence/7949-capstone/README.md",
+     "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the work you were given",
+    "returned": 3,
+    "siblings_2tok": 10,
+    "signal_tokens": 2,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 7,
+    "wide_top": [
+     "the reviewer works",
+     "the working tree",
+     "the work wasted",
+     "the work is finished",
+     "the work"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": true,
+    "name": "#7949",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 1,
+    "tokens": 1,
+    "tokens_kept_numeric": true,
+    "wide_returned": 10,
+    "wide_top": [
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "docs/evidence/7949-capstone/E1-E5-PROOFS.md",
+     "docs/evidence/7949-capstone/README.md"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "search_engine",
+    "returned": 0,
+    "siblings_2tok": 1,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 0,
+    "wide_top": []
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tortoise/tool_registry.py",
+    "returned": 3,
+    "siblings_2tok": 20,
+    "signal_tokens": 4,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the registry",
+     "the tortoise repo",
+     "the tool",
+     "tortoise/commit_schema.py",
+     "tortoise/activation_scorecard.py"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "safe_load",
+    "returned": 1,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 1,
+    "wide_top": [
+     "the load-dependent class"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "config/surface-manifest.yml",
+    "returned": 3,
+    "siblings_2tok": 5,
+    "signal_tokens": 4,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 10,
+    "wide_top": [
+     "docs/product/mcp-sdk-surface.md",
+     "tools/surface-guard.py",
+     "the surface",
+     "config/surface-manifest.yml",
+     "the manifest"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "surface_manifest",
+    "returned": 3,
+    "siblings_2tok": 3,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 6,
+    "wide_top": [
+     "config/surface-manifest.yml",
+     "docs/product/mcp-sdk-surface.md",
+     "tools/surface-guard.py",
+     "the surface",
+     "the manifest"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tortoise/mcp_server.py",
+    "returned": 3,
+    "siblings_2tok": 18,
+    "signal_tokens": 4,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the tortoise repo",
+     "docs/product/mcp-sdk-surface.md",
+     "the servers",
+     "the server",
+     "tortoise/commit_schema.py"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "slow_files",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 14,
+    "wide_top": [
+     "the files above",
+     "the lane brief files",
+     "the actual files",
+     "the four files",
+     "the three files"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md",
+    "returned": 3,
+    "siblings_2tok": 23,
+    "signal_tokens": 9,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "evidence/7949-capstone/probes/capstone_measure.py",
+     "docs/evidence/7949-capstone/preregistration.json",
+     "the check and evidence for",
+     "the capstone"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the worktree",
+    "returned": 3,
+    "siblings_2tok": 11,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 12,
+    "wide_top": [
+     "the worktree being reaped",
+     "the worktree state",
+     "the worktree report",
+     "the worktree root",
+     "the worktree state and reading"
+    ]
+   },
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "tools/surface_manifest.py",
+    "returned": 3,
+    "siblings_2tok": 16,
+    "signal_tokens": 4,
+    "tokens": 3,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "config/surface-manifest.yml",
+     "docs/product/mcp-sdk-surface.md",
+     "the surface",
+     "tools/surface-guard.py",
+     "the tool"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the tree",
+    "returned": 3,
+    "siblings_2tok": 12,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 13,
+    "wide_top": [
+     "the tree clean",
+     "the tree immediately before",
+     "the tree at",
+     "the tree is clean",
+     "the tree you just found"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "pull_request",
+    "returned": 0,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 0,
+    "wide_top": []
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the lane",
+    "returned": 3,
+    "siblings_2tok": 7,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 8,
+    "wide_top": [
+     "the lane brief files",
+     "the lane actually",
+     "the lane state files",
+     "the lane",
+     "the lane was never asked"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "worktree_report",
+    "returned": 3,
+    "siblings_2tok": 2,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 14,
+    "wide_top": [
+     "the worktree report",
+     "the worktree state",
+     "the worktree root",
+     "the worktree state and reading",
+     "the git worktree"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "longmem_eval",
+    "returned": 0,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 0,
+    "wide_top": []
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "capstone_run",
+    "returned": 3,
+    "siblings_2tok": 1,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "docs/evidence/7949-capstone/E1-E5-PROOFS.md",
+     "docs/evidence/7949-capstone/README.md"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the record",
+    "returned": 3,
+    "siblings_2tok": 2,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 6,
+    "wide_top": [
+     "the recorder",
+     "the recorded decision",
+     "the recorded",
+     "the record is bound to",
+     "the record"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the worktree and reading the",
+    "returned": 3,
+    "siblings_2tok": 23,
+    "signal_tokens": 2,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the worktree state",
+     "the worktree report",
+     "the worktree root",
+     "the git worktree",
+     "the worktree"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "create_point",
+    "returned": 1,
+    "siblings_2tok": 1,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 1,
+    "wide_top": [
+     "the point"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "record_projection",
+    "returned": 3,
+    "siblings_2tok": 2,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 12,
+    "wide_top": [
+     "tortoise/projection/entities.py",
+     "projection/entities.py",
+     "projection/__init__.py",
+     "tortoise/projection/__init__.py",
+     "the project root"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_bfs_audit",
+    "returned": 3,
+    "siblings_2tok": 1,
+    "signal_tokens": 3,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "tortoise/audit.py",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh",
+     "scripts/lib/repo-set.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "registry_integrity",
+    "returned": 1,
+    "siblings_2tok": 1,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 1,
+    "wide_top": [
+     "the registry"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "capstone_verdict_check",
+    "returned": 3,
+    "siblings_2tok": 5,
+    "signal_tokens": 3,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "docs/evidence/7949-capstone/E1-E5-PROOFS.md",
+     "docs/evidence/7949-capstone/README.md"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the new",
+    "returned": 3,
+    "siblings_2tok": 7,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 8,
+    "wide_top": [
+     "the new one",
+     "the new tests",
+     "the new comment",
+     "the new arm",
+     "the new pin"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "carve_out",
+    "returned": 1,
+    "siblings_2tok": 1,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 1,
+    "wide_top": [
+     "the carve-out"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the test",
+    "returned": 3,
+    "siblings_2tok": 7,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 10,
+    "wide_top": [
+     "the test module",
+     "the test run",
+     "the test suites",
+     "the test suite",
+     "the test file"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "read_text",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 7,
+    "wide_top": [
+     "the read",
+     "the text",
+     "the worktree state and reading",
+     "the merge chain reads",
+     "the head and reading the"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "cache_projection",
+    "returned": 3,
+    "siblings_2tok": 2,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 6,
+    "wide_top": [
+     "the cache",
+     "tortoise/projection/entities.py",
+     "projection/entities.py",
+     "projection/__init__.py",
+     "tortoise/projection/__init__.py"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the merge",
+    "returned": 3,
+    "siblings_2tok": 7,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 11,
+    "wide_top": [
+     "the merge chain reads",
+     "the merge gate",
+     "the merge-base",
+     "the merge result keeps main",
+     "the merge base"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "check_type",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 10,
+    "wide_top": [
+     "the check and evidence for",
+     "the checks re-run",
+     "the verification checks now",
+     "the checks",
+     "the failing check"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_embed_writer_register",
+    "returned": 3,
+    "siblings_2tok": 3,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the register",
+     "the writer",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "commit_schema",
+    "returned": 3,
+    "siblings_2tok": 1,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 8,
+    "wide_top": [
+     "the committed probe",
+     "the committed",
+     "the commit under review",
+     "the parent commit",
+     "the merge commit"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the comment",
+    "returned": 3,
+    "siblings_2tok": 5,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 7,
+    "wide_top": [
+     "the comments",
+     "the comment says",
+     "the comment at",
+     "the comment",
+     "the evidence comment"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "embed_writer_register",
+    "returned": 2,
+    "siblings_2tok": 3,
+    "signal_tokens": 3,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 2,
+    "wide_top": [
+     "the register",
+     "the writer"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_v4_declared_mechanisms",
+    "returned": 3,
+    "siblings_2tok": 4,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "config/v4-mechanisms.yml",
+     "the declared",
+     "the declaration",
+     "the mechanism",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_7949_c2_door",
+    "returned": 3,
+    "siblings_2tok": 5,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the door",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh",
+     "scripts/lib/repo-set.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "update_point",
+    "returned": 1,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 1,
+    "wide_top": [
+     "the point"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the end of the run",
+    "returned": 3,
+    "siblings_2tok": 11,
+    "signal_tokens": 2,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 8,
+    "wide_top": [
+     "the reviewer runs",
+     "the check-runs are stale",
+     "the end",
+     "the checks re-run",
+     "the test run"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "pack_registry",
+    "returned": 1,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 1,
+    "wide_top": [
+     "the registry"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_files",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the test file",
+     "the files above",
+     "the lane brief files",
+     "the actual files",
+     "the four files"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_design_map_check",
+    "returned": 3,
+    "siblings_2tok": 7,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "the map",
+     "the design",
+     "the check and evidence for",
+     "the checks re-run"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "create_source",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 7,
+    "wide_top": [
+     "the source before applying",
+     "the source line that disproves",
+     "the primary source before reporting",
+     "the primary source before applying",
+     "the source"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "collision_preflight",
+    "returned": 0,
+    "siblings_2tok": 1,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 0,
+    "wide_top": []
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "capstone_ledger",
+    "returned": 3,
+    "siblings_2tok": 2,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 11,
+    "wide_top": [
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "docs/evidence/7949-capstone/E1-E5-PROOFS.md",
+     "docs/evidence/7949-capstone/README.md"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_derived_names",
+    "returned": 3,
+    "siblings_2tok": 1,
+    "signal_tokens": 3,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the derivation",
+     "the job name",
+     "the name",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "version_info",
+    "returned": 0,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 0,
+    "wide_top": []
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_substrate_map",
+    "returned": 3,
+    "siblings_2tok": 4,
+    "signal_tokens": 3,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the map",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh",
+     "scripts/lib/repo-set.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "write_path",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 6,
+    "wide_top": [
+     "the write prose rides",
+     "the write",
+     "the script path contains a",
+     "the path literally",
+     "the literal path"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the commit",
+    "returned": 3,
+    "siblings_2tok": 5,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 8,
+    "wide_top": [
+     "the committed probe",
+     "the committed",
+     "the commit under review",
+     "the commit message",
+     "the commit"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_fleet_state",
+    "returned": 3,
+    "siblings_2tok": 4,
+    "signal_tokens": 3,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the stated",
+     "the fleet",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "cache_eviction",
+    "returned": 1,
+    "siblings_2tok": 3,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 1,
+    "wide_top": [
+     "the cache"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the verdict",
+    "returned": 3,
+    "siblings_2tok": 4,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 5,
+    "wide_top": [
+     "the verdict on real output",
+     "the verdict comment",
+     "the verdict as a",
+     "the verdict",
+     "the verdict as the evidence"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "link_source_to_event",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 3,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 7,
+    "wide_top": [
+     "the source before applying",
+     "the source line that disproves",
+     "the primary source before reporting",
+     "the primary source before applying",
+     "the source"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "propagate_shock",
+    "returned": 0,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 0,
+    "wide_top": []
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the exact",
+    "returned": 3,
+    "siblings_2tok": 5,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 6,
+    "wide_top": [
+     "the exact head",
+     "the exact command",
+     "the exact string",
+     "the exact file",
+     "the exact line"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "relation_write",
+    "returned": 2,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 2,
+    "wide_top": [
+     "the write prose rides",
+     "the write"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_deploy_workflow",
+    "returned": 3,
+    "siblings_2tok": 1,
+    "signal_tokens": 3,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the workflow",
+     "github/workflows/ci.yml",
+     "github/workflows/python-ci.yml",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "closes_landing",
+    "returned": 0,
+    "siblings_2tok": 2,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 0,
+    "wide_top": []
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "event_id",
+    "returned": 0,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 0,
+    "wide_top": []
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_tool_risk_tiers",
+    "returned": 3,
+    "siblings_2tok": 3,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the tool",
+     "tools/lane_wip.py",
+     "tools/hosted_api_cite_census.py",
+     "tools/closes_landing.py",
+     "tools/test_design_map_check.py"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the review",
+    "returned": 3,
+    "siblings_2tok": 6,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 11,
+    "wide_top": [
+     "the reviewer works",
+     "the reviewer runs",
+     "the reviewed head",
+     "the reviewer",
+     "the review record"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_markers",
+    "returned": 3,
+    "siblings_2tok": 1,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the marker",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh",
+     "scripts/lib/repo-set.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "add_point",
+    "returned": 2,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 2,
+    "wide_top": [
+     "the point",
+     "the diff adds"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "fleet_state",
+    "returned": 3,
+    "siblings_2tok": 2,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the stated",
+     "the fleet",
+     "the worktree state",
+     "the state file",
+     "the current state before touching"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_memory_md_hygiene",
+    "returned": 3,
+    "siblings_2tok": 2,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh",
+     "scripts/lib/repo-set.test.sh",
+     "scripts/install-launchd.test.sh",
+     "the test module"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "mcp_auth",
+    "returned": 1,
+    "siblings_2tok": 0,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 1,
+    "wide_top": [
+     "docs/product/mcp-sdk-surface.md"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_doc_affiliation_frontmatter",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the census doc",
+     "the plan doc",
+     "the doc",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_pricing_storage_dimensions",
+    "returned": 3,
+    "siblings_2tok": 0,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md",
+     "docs/architecture/STORAGE-ARCHITECTURE.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "test_session_schema_3554",
+    "returned": 3,
+    "siblings_2tok": 5,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the session",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "scripts/harness-apply-timer.test.sh",
+     "scripts/orchestrator-harness/auto-rail.accounting.test.sh",
+     "scripts/lib/repo-set.test.sh"
+    ]
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "activation_scorecard",
+    "returned": 0,
+    "siblings_2tok": 1,
+    "signal_tokens": 2,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 0,
+    "wide_top": []
+   },
+   {
+    "cls": "ident",
+    "gated": false,
+    "name": "hosted_api_cite_census",
+    "returned": 3,
+    "siblings_2tok": 4,
+    "signal_tokens": 4,
+    "tokens": 1,
+    "tokens_kept_numeric": false,
+    "wide_returned": 12,
+    "wide_top": [
+     "the hosted graph",
+     "the hosted",
+     "tortoise/api.py",
+     "the cite",
+     "the cited"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the current state of the",
+    "returned": 3,
+    "siblings_2tok": 21,
+    "signal_tokens": 2,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the current state before touching",
+     "the current state",
+     "the stated",
+     "the current tree",
+     "the current"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the full",
+    "returned": 3,
+    "siblings_2tok": 4,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 5,
+    "wide_top": [
+     "the full picture",
+     "the full test suite",
+     "the full suite",
+     "the full",
+     "the full diff"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the tests",
+    "returned": 3,
+    "siblings_2tok": 1,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 10,
+    "wide_top": [
+     "the test module",
+     "the test run",
+     "the test suites",
+     "the test suite",
+     "the test file"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the pre",
+    "returned": 3,
+    "siblings_2tok": 3,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 4,
+    "wide_top": [
+     "the pre-fix",
+     "the pre-fix code",
+     "the pre-existing",
+     "the pre"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the tree before you touch",
+    "returned": 3,
+    "siblings_2tok": 20,
+    "signal_tokens": 3,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the current state before touching",
+     "the source before applying",
+     "the primary source before reporting",
+     "the primary source before applying",
+     "the tree immediately before"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the repo and reading the",
+    "returned": 3,
+    "siblings_2tok": 21,
+    "signal_tokens": 2,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 14,
+    "wide_top": [
+     "the worktree state and reading",
+     "the read",
+     "the head and reading the",
+     "the worktree and reading the",
+     "the merge chain reads"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the lane state files",
+    "returned": 3,
+    "siblings_2tok": 26,
+    "signal_tokens": 3,
+    "tokens": 4,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the state file",
+     "the files above",
+     "the actual files",
+     "the four files",
+     "the three files"
+    ]
+   }
+  ],
+  "exact_misses_recorded": 119,
+  "exact_misses_total": 119,
+  "gate": {
+   "shipped": {
+    "gated": 85,
+    "gated_and_missed": 0,
+    "names": 300,
+    "noise_rows_freed": 36,
+    "suppressed_correct_by_k": {
+     "15": 85,
+     "3": 73
+    },
+    "suppressed_correct_k_sum": 158
+   },
+   "zep_full_name": {
+    "gated": 15,
+    "gated_and_missed": 0,
+    "names": 300,
+    "noise_rows_freed": 3,
+    "suppressed_correct_by_k": {
+     "15": 15,
+     "3": 14
+    },
+    "suppressed_correct_k_sum": 29
+   }
+  },
+  "gate_by_class": {
+   "definite": {
+    "shipped": {
+     "gated": 70,
+     "names": 180,
+     "suppressed_correct_k_sum": 129
+    },
+    "zep_full_name": {
+     "gated": 0,
+     "names": 180,
+     "suppressed_correct_k_sum": 0
+    }
+   },
+   "ident": {
+    "shipped": {
+     "gated": 15,
+     "names": 90,
+     "suppressed_correct_k_sum": 29
+    },
+    "zep_full_name": {
+     "gated": 15,
+     "names": 90,
+     "suppressed_correct_k_sum": 29
+    }
+   },
+   "path": {
+    "shipped": {
+     "gated": 0,
+     "names": 30,
+     "suppressed_correct_k_sum": 0
+    },
+    "zep_full_name": {
+     "gated": 0,
+     "names": 30,
+     "suppressed_correct_k_sum": 0
+    }
+   }
+  },
+  "gate_gated_names": [
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the diff",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "diff"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the repo",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "repo"
+    ],
+    "wide_rows": 7
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the tool",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tool"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#2258",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "2258"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the issue",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "issue"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#2981",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "2981"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the end",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "end"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the model",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "model"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the open",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "open"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the rung in the",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "rung"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#1484",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "1484"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#3484",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "3484"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the work",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "work"
+    ],
+    "wide_rows": 7
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the sha",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "sha"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "#7949",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "7949"
+    ],
+    "wide_rows": 10
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the file",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "file"
+    ],
+    "wide_rows": 14
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the code",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "code"
+    ],
+    "wide_rows": 7
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#3175",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "3175"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the tree",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tree"
+    ],
+    "wide_rows": 13
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the lane",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "lane"
+    ],
+    "wide_rows": 8
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the head",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "head"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#5128",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "5128"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the guard",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "guard"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the brief",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "brief"
+    ],
+    "wide_rows": 5
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the fix",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "fix"
+    ],
+    "wide_rows": 9
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the pin",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "pin"
+    ],
+    "wide_rows": 6
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#11837",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "11837"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the suite",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "suite"
+    ],
+    "wide_rows": 7
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the gate",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "gate"
+    ],
+    "wide_rows": 5
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the new",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "new"
+    ],
+    "wide_rows": 8
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the test",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "test"
+    ],
+    "wide_rows": 10
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the merge",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "merge"
+    ],
+    "wide_rows": 11
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the rail",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "rail"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the claim",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "claim"
+    ],
+    "wide_rows": 5
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the body",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "body"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the doc",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "doc"
+    ],
+    "wide_rows": 5
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the row",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "row"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#1647",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "1647"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the delta",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "delta"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the diff of",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "diff"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the arm",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "arm"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#9548",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "9548"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the line",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "line"
+    ],
+    "wide_rows": 10
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the probe",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "probe"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#5090",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "5090"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the real",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "real"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the three",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "three"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the exact",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "exact"
+    ],
+    "wide_rows": 6
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#709",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "709"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#11412",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "11412"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the owner",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "owner"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#9664",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "9664"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the files",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "files"
+    ],
+    "wide_rows": 14
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10000",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10000"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the prose",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "prose"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the loop",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "loop"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the log",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "log"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the peer",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "peer"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the graph",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "graph"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the run",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "run"
+    ],
+    "wide_rows": 6
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the block",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "block"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the count",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "count"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the full",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "full"
+    ],
+    "wide_rows": 5
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the old",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "old"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the false",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "false"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the queue",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "queue"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the live",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "live"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the tests",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tests"
+    ],
+    "wide_rows": 10
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the pre",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "pre"
+    ],
+    "wide_rows": 4
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the base",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "base"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the fixes",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "fixes"
+    ],
+    "wide_rows": 9
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the list",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "list"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the four",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "four"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the table",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "table"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the class",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "class"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the five",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "five"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the state",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "state"
+    ],
+    "wide_rows": 14
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the rule",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "rule"
+    ],
+    "wide_rows": 5
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the pass",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "pass"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the final",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "final"
+    ],
+    "wide_rows": 3
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the entry",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "entry"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the key",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "key"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the job",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "job"
+    ],
+    "wide_rows": 2
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the repo at",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "repo"
+    ],
+    "wide_rows": 1
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the seam",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "seam"
+    ],
+    "wide_rows": 1
+   }
+  ],
+  "gate_variant": {
+   "shipped": {
+    "gated_pairs": 155,
+    "in_window_before": 56,
+    "pairs": 419,
+    "would_attach_before": 0,
+    "would_attach_before_any_k": 0
+   },
+   "zep_full_name": {
+    "gated_pairs": 82,
+    "in_window_before": 53,
+    "pairs": 419,
+    "would_attach_before": 0,
+    "would_attach_before_any_k": 0
+   }
+  },
+  "pooled": {
+   "3": {
+    "captures": 20,
+    "set_max": 37,
+    "set_min": 27,
+    "set_sum": 649
+   },
+   "5": {
+    "captures": 20,
+    "set_max": 58,
+    "set_min": 38,
+    "set_sum": 911
+   },
+   "10": {
+    "captures": 20,
+    "set_max": 89,
+    "set_min": 48,
+    "set_sum": 1376
+   },
+   "15": {
+    "captures": 20,
+    "set_max": 119,
+    "set_min": 56,
+    "set_sum": 1672
+   }
+  },
+  "pooled_gate": {
+   "shipped": {
+    "15": {
+     "gated": 85,
+     "lost": 79,
+     "rescued_by_union": 6
+    },
+    "3": {
+     "gated": 85,
+     "lost": 84,
+     "rescued_by_union": 1
+    }
+   },
+   "zep_full_name": {
+    "15": {
+     "gated": 15,
+     "lost": 15,
+     "rescued_by_union": 0
+    },
+    "3": {
+     "gated": 15,
+     "lost": 15,
+     "rescued_by_union": 0
+    }
+   }
+  },
+  "variant": {
+   "3": {
+    "attached": 0,
+    "attached_folded": 57,
+    "in_window": 215,
+    "in_window_not_attached": 215,
+    "pairs": 419
+   },
+   "5": {
+    "attached": 0,
+    "attached_folded": 59,
+    "in_window": 234,
+    "in_window_not_attached": 234,
+    "pairs": 419
+   },
+   "10": {
+    "attached": 0,
+    "attached_folded": 67,
+    "in_window": 266,
+    "in_window_not_attached": 266,
+    "pairs": 419
+   },
+   "15": {
+    "attached": 0,
+    "attached_folded": 70,
+    "in_window": 277,
+    "in_window_not_attached": 277,
+    "pairs": 419
+   }
+  },
+  "variant_by_class": {
+   "article-drop": {
+    "10": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 172,
+     "pairs": 180
+    },
+    "15": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 178,
+     "pairs": 180
+    },
+    "3": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 133,
+     "pairs": 180
+    },
+    "5": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 149,
+     "pairs": 180
+    }
+   },
+   "basename-only": {
+    "10": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 12,
+     "pairs": 30
+    },
+    "15": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 14,
+     "pairs": 30
+    },
+    "3": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 11,
+     "pairs": 30
+    },
+    "5": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 12,
+     "pairs": 30
+    }
+   },
+   "hash-dropped": {
+    "10": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 15,
+     "pairs": 15
+    },
+    "15": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 15,
+     "pairs": 15
+    },
+    "3": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 14,
+     "pairs": 15
+    },
+    "5": {
+     "attached": 0,
+     "attached_folded": 0,
+     "in_window": 14,
+     "pairs": 15
+    }
+   },
+   "hyphen-to-space": {
+    "10": {
+     "attached": 0,
+     "attached_folded": 13,
+     "in_window": 13,
+     "pairs": 14
+    },
+    "15": {
+     "attached": 0,
+     "attached_folded": 14,
+     "in_window": 14,
+     "pairs": 14
+    },
+    "3": {
+     "attached": 0,
+     "attached_folded": 9,
+     "in_window": 9,
+     "pairs": 14
+    },
+    "5": {
+     "attached": 0,
+     "attached_folded": 10,
+     "in_window": 10,
+     "pairs": 14
+    }
+   },
+   "space-to-hyphen": {
+    "10": {
+     "attached": 0,
+     "attached_folded": 54,
+     "in_window": 54,
+     "pairs": 180
+    },
+    "15": {
+     "attached": 0,
+     "attached_folded": 56,
+     "in_window": 56,
+     "pairs": 180
+    },
+    "3": {
+     "attached": 0,
+     "attached_folded": 48,
+     "in_window": 48,
+     "pairs": 180
+    },
+    "5": {
+     "attached": 0,
+     "attached_folded": 49,
+     "in_window": 49,
+     "pairs": 180
+    }
+   }
+  }
+ },
+ "corpus": {
+  "dir": "/home/cmux/.tortoise/session-events",
+  "elapsed_s": 28.2,
+  "files": 10,
+  "graph": "recall12294_e",
+  "harvested_distinct": {
+   "definite": 109655,
+   "ident": 9673,
+   "path": 3936
+  },
+  "input": {
+   "files": 10,
+   "lines": 8916,
+   "parse_errors": 0,
+   "records_without_text": 0
+  },
+  "population": 1000,
+  "population_digest": "e1e4d65d73c1b2ca",
+  "sample": 300,
+  "sample_by_class": {
+   "definite": 180,
+   "ident": 90,
+   "path": 30
+  }
+ },
+ "issue": 11901,
+ "ks": [
+  3,
+  5,
+  10,
+  15
+ ],
+ "measured_at": "2026-11-13T00:23:50Z",
+ "pooled_budget_note": "a pooled group is `max_queries` (15) names, which is the production BUDGET CAP, not the typical capture \u2014 a capture with 5 entities issues 5 object queries",
+ "retrieval": {
+  "has_embedder": false,
+  "legs_seen": {
+   "fallback": true,
+   "fts": true,
+   "structural": true,
+   "vector": false
+  },
+  "note": "\u26a0\ufe0f KEYWORD-ONLY: no embedder on this box, so the dense leg was never submitted \u2014 the numbers describe the lexical leg only, not the fused production read",
+  "uniform_windows": true,
+  "window_modes": {
+   "hybrid": 0,
+   "keyword_only": 4376
+  }
+ }
+}
