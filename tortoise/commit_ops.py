@@ -2152,9 +2152,13 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # dangling incarnation storing this successor must not answer for the
             # record. Measured: two gone-survivor entities, one storing this
             # successor and one storing another, were absorbed SILENTLY
-            # (`applied=0, skips=[], warns=[]`) where `main` refused with
-            # `ambiguous object name` — a divergence with no `skipped` entry, which
-            # is the one-entry-per-unapplied-record contract (#5365).
+            # (`applied=0, skips=[], warns=[]`) where `main` recorded
+            # `ambiguous-name` with its own warn and NO `_skip` — a divergence with
+            # no `skipped` entry, which is the one-entry-per-unapplied-record
+            # contract (#5365). ⛔ `main` does NOT refuse this shape "with
+            # `ambiguous object name`": that string does not exist in `main` at all
+            # (corrected — review round 31; see the round-29/30 note below, which
+            # this paragraph contradicted).
             if (_name_is_one_entity
                     and any(_same_successor(str(r[4] or ""), supersedes_by,
                                             candidate_names=_sb_carrier_spellings)
