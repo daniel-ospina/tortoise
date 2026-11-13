@@ -691,3 +691,56 @@ def test_the_docstring_discloses_the_cap_and_claims_no_complete_set():
         "tuple, and the direction to distrust is a green run over a REWORDED "
         "docstring."
     )
+
+
+def test_every_exception_the_read_can_raise_is_disclosed():
+    """Both exceptions ``latest_readings`` can raise are NAMED under ``Raises``.
+
+    #12544: the docstring documented the ordering, the ``limit`` cap, the
+    ``since`` semantics and the host-dependence residual at length, and disclosed
+    NEITHER exception (measured on ``main`` ``89c41ad8ba``: ``'Raises' in doc``
+    → ``False``, ``'RuntimeError' in doc`` → ``False``). The ``RuntimeError`` is
+    reachable on a BENIGN race — a concurrent DELETE or an UPDATE that moves a
+    row out of the predicate — so a caller that is never told it exists has no
+    reason to catch it, which is the disclosure this test exists to keep.
+
+    The assertions are POSITIONAL: each name must appear after the numpydoc
+    ``Raises`` HEADER, so a stray mention elsewhere in the ~110-line docstring
+    cannot satisfy them — and the header is matched as a header (``Raises`` plus
+    its dash underline), not as the first occurrence of the word, because
+    ``str.index`` cannot tell a sentence from a section. The docstring checks
+    above pin other clauses and none of them covers this one — deleting the
+    block leaves every other case in this file green.
+    """
+    import tortoise.goal_judgement as gj
+
+    doc = gj.latest_readings.__doc__ or ""
+    header = doc.find("\n    Raises\n    ------")
+    assert header != -1, (
+        "`latest_readings.__doc__` has no numpydoc `Raises` section (`Raises` "
+        "underlined with dashes). The function raises `ValueError` for "
+        "`limit < 0` and for `_READINGS_PAGE_SIZE < 1`, and `RuntimeError` when "
+        "the collected rows come back short of `count(e)`; a caller cannot "
+        "handle an exception the contract never names (#12544). A stray mention "
+        "of the word `Raises` in the prose above is not the section."
+    )
+    section = doc[header:]
+    for name, why in (
+        (
+            "ValueError",
+            "`limit < 0` and `_READINGS_PAGE_SIZE < 1` are both refused with "
+            "`ValueError`, and the constant is refused BY NAME so an operator is "
+            "told which one to fix",
+        ),
+        (
+            "RuntimeError",
+            "the fail-closed truncation arm is a `RuntimeError` reachable on a "
+            "benign race, so a caller that is not told about it cannot catch it",
+        ),
+    ):
+        assert name in section, (
+            f"the `Raises` section does not name `{name}`: {why} (#12544). If you "
+            "reworded the section, keep every exception the function can raise "
+            "listed under it — a partially restored contract is the defect this "
+            "case exists to keep out."
+        )

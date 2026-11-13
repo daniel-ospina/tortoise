@@ -4573,7 +4573,13 @@ def _cmd_config(args) -> int:
         # nothing reads it.
         print("  ·  a `.env` NO entry point reads")
         print(f"     {_printable(_other['path'])}")
-        print(f"  sets          {_printable(', '.join(_other['keys']))}")
+        if _other.get("state") == "unreadable":
+            # Nothing was parsed, so there is no key list to print — and printing
+            # "sets" with an empty list would report an observation this command
+            # could not make (#12441 item 3).
+            print("  sets          (unknown — this file cannot be read)")
+        else:
+            print(f"  sets          {_printable(', '.join(_other['keys']))}")
         print("  ⚠️  the daemon reads "
               f"{_printable(env_file['path'])} — not this file — and no CLI")
         print("      verb reads any .env for its graph target, so nothing above")
@@ -11662,9 +11668,25 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         cwd_assignments = _dotenv_file.parse_dotenv(candidate)
         if cwd_assignments:
             other.append({"path": _printable(candidate),
+                          "state": "present",
                           "keys": sorted(cwd_assignments),
                           "graph_keys": [key for key in _DB_LADDER_KEYS
                                          if key in cwd_assignments]})
+        elif not os.access(candidate, os.R_OK):
+            # ⛔ A file that cannot be READ and a file that sets NOTHING both
+            # parse to nothing, and only the parse result was consulted, so a
+            # `chmod 000` `.env` in the project directory vanished from the
+            # report while the daemon side of this same payload reports it as
+            # "exists but cannot be read — this command cannot tell". The
+            # posture "cannot tell is never a pass" is not a property of one
+            # path, so it applies one level out (#12441 item 3). EMPTY is not
+            # this state: an empty readable file configures nothing, and stays
+            # silent — the two are distinguished by READABILITY here, not by
+            # the key count, which an unreadable file cannot supply.
+            other.append({"path": _printable(candidate),
+                          "state": "unreadable",
+                          "keys": [],
+                          "graph_keys": []})
     payload["unread_env_files"] = other
     if payload["state"] == "absent":
         return payload
@@ -11946,6 +11968,17 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
     """
     rows: list[tuple[str, str, str]] = []
     for other in env_file.get("unread_env_files") or ():
+        if other.get("state") == "unreadable":
+            # ⛔ "cannot tell" is never a pass — the rule the daemon's own arm
+            # already applies. Nothing is known about what this file sets, so the
+            # row must not claim it sets anything and must not go silent either
+            # (#12441 item 3).
+            rows.append(("Config: .env (unread)", "⚠️",
+                         f"{_printable(other['path'])} exists but cannot be read — "
+                         "NO Tortoise entry point reads it, and this command "
+                         "cannot tell what it sets, so a target configured "
+                         "there is invisible here. Fix its permissions"))
+            continue
         keys = ", ".join(other.get("graph_keys") or other.get("keys") or ())
         rows.append(("Config: .env (unread)", "⚠️",
                      f"{_printable(other['path'])} sets {_printable(keys)} but "

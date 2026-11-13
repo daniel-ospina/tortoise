@@ -3002,24 +3002,26 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
     README.md).
 
     #8785: CHANGELOG.md and CLAUDE.md are deliberately NOT in this list. They are
-    prose whose CONTENT no test or tool reads (their only mentions are docstrings
-    and a generated-doc link), so they are reprieved to the tier-1 smoke by
-    `NON_CODE_DOC_PATHS` — pinned by
-    `test_non_code_doc_paths_have_no_content_reader`. ⛔ `CONTRIBUTING.md` LEFT
-    that tuple with #12313's `test_surface_manifest`
-    pin, which reads its "**To REMOVE a symbol**" paragraph — so it keeps FULL
-    now, and it appears below with the other read files instead of here. Every
-    name below IS read (README.md by `test_embedded_durability_claim.py:62`;
-    AGENTS.md by the base-subset pin; `.gitignore` by `test_kind_index.py:290`;
-    CONTRIBUTING.md by `test_surface_manifest.py`; …) and keeps FULL.
+    prose whose CONTENT no test or tool reads (their only mentions are docstrings,
+    a generated-doc link, or `record-review.sh`'s basename case), so they are
+    reprieved to the tier-1 smoke by `NON_CODE_DOC_PATHS` — pinned by
+    `test_non_code_doc_paths_have_no_content_reader`.
+    ⛔ CONTRIBUTING.md is NOT reprieved (it was, until #12313's
+    `tests/test_surface_manifest.py` started READING its text to hold the
+    documented surface rule to the shipped one). A doc a guard reads must run the
+    full matrix on the PR that edits it, so it left the list and
+    `test_doc_reprieve_is_per_path_not_per_diff` pins the FULL selection it now
+    takes. Every name below IS read
+    (README.md by `test_embedded_durability_claim.py:62`; AGENTS.md by the
+    base-subset pin; `.gitignore` by `test_kind_index.py:290`; …) and keeps FULL.
     """
     for name in ("README.md", "AGENTS.md",
                  "LICENSE", "MEMORY.md", "index.md",
                  ".gitignore", ".env.example", "fly.toml", "pyproject.toml",
                  ".python-version",
                  # #12313's `test_surface_manifest` pin reads this doc's
-                 # "**To REMOVE a symbol**" paragraph, so it left the reprieve
-                 # (`NON_CODE_DOC_PATHS`) and joins the other read files here.
+                 # "**To REMOVE a symbol**" paragraph, so it keeps FULL and joins the
+                 # other read files here rather than sitting in the docstring alone.
                  "CONTRIBUTING.md"):
         r = _sel([name])
         assert r["full"] is True, (
@@ -3310,11 +3312,6 @@ def test_the_github_prober_paths_fail_closed_to_the_full_matrix():
 def test_doc_reprieve_is_per_path_not_per_diff():
     """Mixed diffs: dropping the prose must not drop the code, and a
     docs+unknown diff must still escalate."""
-    # ⚠️ The reprieved doc here is `CHANGELOG.md`, not `CONTRIBUTING.md`: that one
-    # left `NON_CODE_DOC_PATHS` when a guard began reading it (see the tuple's own
-    # note), so it now escalates on its own. The PROPERTY this pins — the reprieve
-    # is per PATH, not per diff — is unchanged and does not depend on which member
-    # is used.
     r = _sel(["CHANGELOG.md", "tortoise/api.py"])
     assert r["full"] is False
     assert "api" in r["surfaces"] and "core" in r["surfaces"]
@@ -3327,12 +3324,13 @@ def test_doc_reprieve_is_per_path_not_per_diff():
     r3 = _sel(["CHANGELOG.md", "mystery-dir/thing.xyz"])
     assert r3["full"] is True
 
-    # And the file that LEFT the reprieve does NOT soften a mixed diff: it is
-    # unknown to every SOURCE_PATTERN, so the same shape escalates to FULL.
-    r4 = _sel(["CONTRIBUTING.md", "tortoise/api.py"])
-    assert r4["full"] is True, (
-        "CONTRIBUTING.md is read by a guard, so editing it must not ride a "
-        "reprieve into the smoke tier")
+    # ⛔ CONTRIBUTING.md is NO LONGER reprieved (`main`, #12313's
+    # `tests/test_surface_manifest.py:5538` READS its text to hold the documented
+    # surface rule to the shipped one). A root prose file outside the census list
+    # falls through to the unknown-path branch, which fails closed to FULL — and
+    # that is the point: the PR that edits the file runs the guard that reads it.
+    r4 = _sel(["CONTRIBUTING.md"])
+    assert r4["full"] is True
 
 
 def test_new_engine_module_maps_to_core():
