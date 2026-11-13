@@ -433,6 +433,53 @@ def test_a_count_that_FAILED_in_the_window_keeps_its_own_error(monkeypatch):
         quota_mod._bounded_resource_count("t", "points", timeout=0.01)
 
 
+def test_the_whole_block_pins_its_OWN_settled_future_window(monkeypatch):
+    """⛔ `run_bounded_quota_state` carries its own #11962 re-read, and it was
+    unpinned: replacing that body with a bare `unknown` return left 44 green, so a
+    block that measured fine but answered after the wait expired would silently
+    degrade to `unknown` exactly when latency rises (fresh review of #12426,
+    round 3). A settled future must hand back the MEASURED state.
+    """
+    import tortoise.monitoring as mon
+    import tortoise.quota as quota_mod
+
+    measured = {"resource": "points", "state": "open", "points_used": 1,
+                "points_limit": 10, "points_remaining": 9, "error": None}
+    monkeypatch.setattr(mon, "daemon_worker", lambda name, **k: _SettledWorker(
+        _SettledFuture(value=measured)))
+    assert quota_mod.run_bounded_quota_state(lambda: measured) == measured
+    # …including when an explicit budget expires under it.
+    assert quota_mod.run_bounded_quota_state(
+        lambda: measured, timeout=0.01) == measured
+
+
+def test_the_selfhost_arm_is_not_applicable_not_closed(tmp_path, monkeypatch):
+    """⛔ The gate returns EARLY for `SELFHOST_ORG_ID` (no billing, no registry), so
+    a report calling that `closed` would assert a refusal the gate does not make
+    — the report disagreeing with the gate it claims to describe. The arm was
+    unpinned: deleting the `== SELFHOST_ORG_ID` half left 44 green (fresh review
+    of #12426, round 3).
+    """
+    from tortoise import mcp_auth
+
+    sdk = _sdk(tmp_path / "sh.db", "sh", points=1)
+    _wire_health(monkeypatch, sdk, {"org_id": "selfhost", "max_points": 10})
+    monkeypatch.setattr(mcp_auth, "_current_org_id", _ctx(mcp_auth.SELFHOST_ORG_ID))
+    import tortoise.quota as quota_mod
+
+    def _must_not_run(*a, **k):
+        raise AssertionError("the selfhost arm must not resolve tenant limits")
+
+    monkeypatch.setattr(quota_mod, "resolve_org_limits", _must_not_run)
+    from tortoise.mcp_server import tortoise_health
+
+    report = tortoise_health()
+    assert report["quota"]["state"] == "not_applicable"
+    assert report["quota"]["points_used"] is None
+    assert report["status"] == "ok"
+    sdk.close()
+
+
 def test_a_wedged_worker_has_a_reset_hatch(monkeypatch):
     """A stalled count must not silence `health.quota` until the next deploy."""
     import tortoise.monitoring as mon
@@ -545,18 +592,31 @@ def test_health_reports_closed_when_the_CARRIED_limits_arm_a_dimension(
     _wire_health(monkeypatch, sdk, {"org_id": "team11892", "max_points": 25_000})
     import tortoise.mcp_server as mcp
 
-    # The resolver supplies a configured (and BLOCKED, i.e. unreadable) allowance.
+    # The resolver supplies a configured allowance, and the stub refuses ONLY when
+    # that allowance is actually present in the dict it is handed. ⛔ That
+    # conditionality is the point: an UNCONDITIONAL raising stub makes this test
+    # pass whether or not the carry happened, so the mutation that KEEPS the call
+    # but discards its return (`_carry_allowances(limits, "points")` as a bare
+    # statement) left 44 green while restoring the false PASS (fresh review of
+    # #12426, round 3).
     monkeypatch.setattr(mcp, "_carry_allowances",
                         lambda limits, resource: {**limits,
                                                   "max_graph_storage_mb": 10})
     import tortoise.allowance_gate as ag
 
-    monkeypatch.setattr(ag, "enforce_allowances",
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            QuotaCheckError("dimension 'graph_storage' is BLOCKED")))
+    seen_limits = []
+
+    def _refuse_only_if_armed(the_limits, *a, **k):
+        seen_limits.append(dict(the_limits))
+        if "max_graph_storage_mb" in the_limits:
+            raise QuotaCheckError("dimension 'graph_storage' is BLOCKED")
+
+    monkeypatch.setattr(ag, "enforce_allowances", _refuse_only_if_armed)
     from tortoise.mcp_server import tortoise_health
 
     report = tortoise_health()
+    assert seen_limits and "max_graph_storage_mb" in seen_limits[0], (
+        "the allowance the carry adds must reach the gate's own input")
     assert report["quota"]["state"] == "closed", (
         "a carried allowance that refuses the write must not read as open")
     assert report["status"] == "ok"  # still reported, never folded
