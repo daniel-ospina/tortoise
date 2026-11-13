@@ -1685,7 +1685,17 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
         bindir = tmp_path / "bin"
         bindir.mkdir(exist_ok=True)
         python_stub = bindir / "python"
-        python_stub.write_text(f"#!/bin/sh\n{stub_body}\n")
+        # ⛔ The step PARSES the verdict with `python -c` (#12422 review cycle 5, P1), so this
+        # stub must behave like the INTERPRETER for `-c`/`-` and like the CANARY only for a
+        # script path. Without the delegation the stub would answer the parse too, and the
+        # harness would pass for a reason that does not exist on a real runner.
+        python_stub.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  -c|-) exec "$REAL_PYTHON" "$@" ;;\n'
+            "esac\n"
+            f"{stub_body}\n"
+        )
         python_stub.chmod(0o755)
         runner_temp = tmp_path / "runner"
         runner_temp.mkdir(exist_ok=True)
@@ -1695,6 +1705,7 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
         env = {
             **os.environ,
             "PATH": f"{bindir}:{os.environ['PATH']}",
+            "REAL_PYTHON": sys.executable,
             "RUNNER_TEMP": str(runner_temp),
             "GITHUB_OUTPUT": str(out),
             "GITHUB_STEP_SUMMARY": str(summary),
@@ -1712,7 +1723,25 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
     # (b) the tool's own report says FAIL: 1 is published, which is the whole point.
     rc, output = execute('printf \'{"verdict": "FAIL", "exit_code": 1}\n\'; exit 1')
     assert rc == 1, "a genuine FAIL was downgraded to a detector fault"
+
+    # (c) ⛔ THE VERDICT IS A VALUE, NOT A FORMATTING (#12422 review cycle 5, P1, MEASURED).
+    # The step used to `grep '"verdict": "FAIL"'`, a literal that exists only because
+    # `json.dumps(indent=2)` writes `": "` after the key. A compact payload — the obvious
+    # "make the JSON smaller" tidy — therefore reported exit 2 for a genuine FAIL: the alarm
+    # telling a human NOT to cut a release about a broken, uninstallable artifact. Both
+    # spellings are the same report and must publish the same 1.
+    rc, output = execute('printf \'{"verdict":"FAIL","exit_code":1}\n\'; exit 1')
+    assert rc == 1, (
+        "a COMPACT FAIL payload was downgraded to a detector fault — the classifier is "
+        "keyed to json.dumps' formatting instead of to the verdict's value"
+    )
     assert "exit_code=1" in output, output
+
+    # (d) the other direction: a report that does NOT say FAIL never orders an upload, even
+    #     though the interpreter also exited 1.
+    rc, output = execute('printf \'{"verdict":"UNKNOWN","exit_code":2}\n\'; exit 1')
+    assert rc == 2, "an UNKNOWN (or absent) verdict was published as a RELEASE finding"
+    assert "exit_code=2" in output, output
 
 
 def test_the_pip_failure_detail_is_the_LAST_stderr_LINE_not_a_list_repr(tmp_path):
