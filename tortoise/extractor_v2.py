@@ -3045,26 +3045,17 @@ def _absorb_spellings(folded_row: dict, row: dict, fact: tuple | None) -> None:
         stored = [a for a in raw if a is not None]
     else:
         stored = []
-    # ⛔ The folded row's OWN name is NOT an alias. `aliases[]` is the MERGE's
-    # record ("these two are one entity"); the row's own spelling is not a record
-    # of anything, and `_find_existing_entity`'s last rung is deliberately
-    # kind-agnostic — so an own-name entry made EVERY prior row match itself by
-    # `alias`, phase 1 passed `mention_is_alias` for it, and all three SPELLING
-    # vetoes stood down: `plan "Acme"` bound onto `org "Acme"` with no hold and no
-    # warning. The CARRIER's spelling (why this function exists) always differs
-    # from the survivor's name, so it is unaffected.
-    own_fold = normalize_entity_name(folded_row.get("name") or "")
-    row_name = str(row.get("name") or "")
-    # ⛔ A row must never alias ITSELF (round-5 review). Every folded row carries
-    # its own folded name, and the kind-agnostic alias rung of
-    # `_find_existing_entity` then reported `mode: "alias"` for a mention spelled
-    # exactly like a DIFFERENT-kind row — so phase 1 stood its `kind_conflict`
-    # down on a "recorded alias" that was nothing but the row's own name, and a
-    # `plan` "Acme" bound to an `org` "Acme" with `band: merge`, `held: []` and no
-    # refusal. The name rungs already match a row's own name (within their kinds);
-    # a CARRIER's name still differs from the survivor's, so the alias rung keeps
-    # exactly the purpose it was added for.
+    # ⛔ A row must never alias ITSELF. `aliases[]` is the MERGE's record ("these
+    # two are one entity"), and the row's own spelling is not a record of anything
+    # — while `_find_existing_entity`'s last rung is deliberately kind-agnostic, so
+    # an own-name entry made EVERY prior row match itself by `alias`, phase 1
+    # derived a "recorded alias" from it, and all three SPELLING vetoes stood
+    # down: `plan "Acme"` bound onto `org "Acme"` with `band: merge`, `held: []`
+    # and no warning. The CARRIER's spelling (why this function exists) always
+    # differs from the survivor's name, so the alias rung keeps exactly the
+    # purpose it was added for.
     own_fold = normalize_entity_name(str(folded_row.get("name") or ""))
+    row_name = str(row.get("name") or "")
     for source in (row_name, *stored):
         folded = normalize_entity_name(source) if source else ""
         if folded and folded != own_fold and folded not in folded_row["aliases"]:
@@ -6217,6 +6208,16 @@ def _verdict_facts(facts, node_id, mention_name: str = "") -> dict:
     # "same spelling, different declared kind", which is the DOMINANT phase-2
     # shape (phase 1's name rungs are kind-gated, so that pair is exactly what
     # reaches phase 2) — a silent false merge, with no alias record behind it.
+    # ⛔ The candidate's OWN name is not an alias, here as much as in the fold
+    # (`_absorb_spellings`) and in phase 1. `apply_entity_merge` folds the
+    # CANDIDATE's name into the survivor's `aliases[]`, so merging two
+    # IDENTICALLY-NAMED nodes (the canonical exact-name pair) leaves the survivor
+    # aliased with its own name — and without this exclusion a phase-2 proposal of
+    # "same spelling, different declared kind" read `mention_is_alias: True`, stood
+    # all three SPELLING vetoes down, and merged two entities the doc pins as
+    # different (`plan "Acme"` vs `org "Acme"`). Measured live: phase 1 HELD that
+    # pair (kind_conflict) while phase 2 MERGED it.
+    spellings.discard(normalize_entity_name(entry.get("name") or ""))
     mention_folded = normalize_entity_name(mention_name) if mention_name else ""
     out["mention_is_alias"] = bool(mention_folded and mention_folded in spellings)
     # `mention_is_own_name` means the mention is spelled exactly like the target.
@@ -6420,9 +6421,11 @@ def resolve_entities(entity_refs: list[dict], search: dict,
       That is the one state that licenses an ADD.
     * UNRESOLVED (`held`) — everything else, with the reason: ``ambiguous``
       (phase 1 found >1 namespace-colliding matches and phase 2 did not pick
-      one), ``disambiguation_failed`` (the phase-2 call raised/timed out) or
+      one), ``disambiguation_failed`` (the phase-2 call raised/timed out),
       ``disambiguation_undecided`` (the call answered and named neither a
-      resolution nor `new` for this name).
+      resolution nor `new` for this name) or ``vetoed`` (#12296: a hard veto or
+      the closure re-verification refused the proposal, so it is HELD rather than
+      merged — and never asserted `new`).
 
     A name phase 2 RESOLVED is in NEITHER population (it is in `map`): the two
     populations are the disposition of what is left UNRESOLVED, so a resolved

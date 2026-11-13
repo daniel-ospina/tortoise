@@ -358,6 +358,31 @@ class TestThePriorSetNeverCarriesARetiredNode:
         hit, mode = v2._find_existing_entity(out, "alpha holdings", "core:org")
         assert (hit["id"], mode) == ("obj-c", "alias"), (hit, mode)
 
+    def test_a_same_name_merge_does_not_alias_the_survivor_with_itself(
+            self, sdk_factory):
+        """`apply_entity_merge` folds the CANDIDATE's name into the survivor's
+        `aliases[]`, so merging two identically-named nodes leaves the survivor
+        aliased with its OWN name. `_verdict_facts` must exclude it, or a phase-2
+        proposal of "same spelling, different declared kind" reads a recorded
+        alias and stands all three SPELLING vetoes down.
+
+        Measured before the fix: phase 1 HELD that pair (`kind_conflict`) while
+        phase 2 MERGED it — the same evidence, two answers.
+        """
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-a", "Acme", kind="core:org")
+        _create_object(sdk, "obj-b", "Acme", kind="core:plan")
+        apply_entity_merge(sdk, "obj-b", "obj-a", method="exact",
+                           similarity=1.0)
+        facts = v2._entity_verdict_facts(sdk, [{"id": "obj-a"}])
+        assert "acme" in {a.lower() for a in facts["obj-a"]["aliases"]}, facts
+        derived = v2._verdict_facts(facts, "obj-a", "Acme")
+        assert derived["mention_is_alias"] is False, derived
+        assert derived["mention_is_own_name"] is True, derived
+        assert verdict.judge(
+            {"name": "Acme", "kind": "core:project"},
+            {"name": "Acme", "kind": "core:org"}, derived)["band"] == "review"
+
     def test_a_bare_string_stored_alias_is_normalised_not_dropped(
             self, sdk_factory):
         """`update_entity(aliases="the team")` is reachable; the fold must not
