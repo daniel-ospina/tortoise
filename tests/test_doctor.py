@@ -46,13 +46,24 @@ def clear_db_env(monkeypatch):
 def _no_hosted_egress(monkeypatch):
     """#11912: `doctor` now probes the hosted endpoint when a credential resolves.
 
-    No test in this module needs the real network, and the alternative is worse
-    than slow: a box with a real `~/.tortoise/credentials.json` would SEND that
-    key to api.premiselabs.co during `pytest` (measured by the PR #12371 review).
-    Pin every run at a closed loopback port; the tests that exercise the probe
-    monkeypatch `urllib.request.urlopen` themselves and never reach this.
+    No test in this module may touch the real network. Pinning a URL is NOT
+    enough and the first version of this fixture was wrong that way (PR #12371
+    review, cycle 2, BLOCKING, measured): a **file-sourced** key ignores
+    `TORTOISE_API_URL` by design (#2369 D1.1 — one identity, one source chain),
+    so a developer's real `~/.tortoise/credentials.json` was still SENT to
+    api.premiselabs.co, 60 times across 30 doctor invocations. Block the
+    transport itself: every doctor run in this module is then offline and fast.
+    Tests that exercise the probe replace `urlopen` themselves and win (autouse
+    fixtures apply before the class-level monkeypatch).
     """
-    monkeypatch.setenv("TORTOISE_API_URL", "http://127.0.0.1:1")
+    import urllib.error
+    import urllib.request
+
+    def _blocked(req, *a, **k):
+        url = getattr(req, "full_url", req)
+        raise urllib.error.URLError(f"network disabled in tests ({url})")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _blocked)
     return monkeypatch
 
 
@@ -1827,6 +1838,25 @@ class TestDoctorHostedCredentialRows:
         assert "Hosted:" not in out.replace("no hosted credential", ""), out
         assert rc in (0, 1)   # graph rows decide; the hosted half made no claim
 
+    def test_the_egress_guard_itself_works(self, monkeypatch, tmp_path, capsys):
+        """The module-wide `_no_hosted_egress` fixture must not be a false gate.
+
+        The first version pinned `TORTOISE_API_URL`, which a FILE-sourced key
+        IGNORES by design (#2369) — so a developer's real stored key was still
+        sent (PR #12371 review, cycle 2, measured 60 requests / 30 invocations).
+        This test proves the fixture blocks at the TRANSPORT for a file key, which
+        is the shape the URL pin could not cover.
+        """
+        self._store(tmp_path, "tt_" + "z" * 40)
+        # NOTE: no `_install` here — the autouse fixture's blocked `urlopen` is
+        # the thing under test.
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "❌ Hosted" in out, out
+        assert "network disabled in tests" in out, out
+        assert rc == 1
+
     def test_offline_probes_nothing_but_still_names_the_credential(
             self, monkeypatch, tmp_path, capsys):
         """`--offline` is for the box whose NETWORK is the thing under test."""
@@ -1880,6 +1910,10 @@ class TestDoctorHostedCredentialRows:
 
         assert "❌ Hosted" not in out, out
         hosted = next(ln for ln in out.splitlines() if "Hosted" in ln)
+        # The GLYPH is pinned: ⚠️ also exits 0, so a downgrade would leave a
+        # correctly configured graph-scoped user reading a warning where the
+        # answer is "this is fine" (PR #12371 review, cycle 2).
+        assert "✅ Hosted" in hosted, hosted
         assert "graph-scoped" in hosted, hosted
         assert "by design" in hosted, hosted
 

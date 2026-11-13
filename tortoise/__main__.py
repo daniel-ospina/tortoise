@@ -12918,7 +12918,8 @@ def _probe_hosted(api_url: str, api_key: str,
         with _contextlib.suppress(Exception):
             exc.close()
         return ("❌", f"{shown}/health answered {exc.code} — the endpoint is up but "
-                      "not healthy; check status.premiselabs.co or retry")
+                      "not healthy; check status.premiselabs.co, your "
+                      "TORTOISE_API_URL, or retry")
     except Exception as exc:  # transport, bad URL, TLS, timeout
         reason = _printable(_scrub(str(getattr(exc, "reason", None) or exc),
                                    base, api_key))[:80]
@@ -12957,7 +12958,7 @@ def _probe_hosted(api_url: str, api_key: str,
     except urllib.error.HTTPError as exc:
         import http.client
         try:
-            body = exc.read().decode("utf-8", "replace") if exc.fp else ""
+            body = exc.read(65536).decode("utf-8", "replace") if exc.fp else ""
         except (OSError, http.client.HTTPException):
             body = ""
         verdict = _classify_hosted_refusal(exc.code, body, base, api_key)
@@ -13018,8 +13019,8 @@ def _doctor_hosted_rows(api_key: str | None, api_url: str | None, *,
     fingerprint = _publishable_fingerprint(api_key) or "withheld (key too short to digest)"
     target = _printable(_mask_display_target(
         api_url if isinstance(api_url, str) else str(api_url or "")))
-    detail = (f"{_printable(source or 'resolved')} — key {_mask_secret_tail(api_key)} "
-              f"fp {fingerprint}")
+    detail = (f"{_printable(source or 'resolved')} — key "
+              f"{_printable(_mask_secret_tail(api_key))} fp {fingerprint}")
     if target:
         detail += f" · {target}"
     if org_id:
@@ -13031,19 +13032,22 @@ def _doctor_hosted_rows(api_key: str | None, api_url: str | None, *,
         detail += f" · org {label}"
     rows: list[tuple[str, str, str]] = [("Credentials", "✅", detail)]
 
-    if offline:
-        rows.append(("Hosted", "ℹ️",
-                     "not probed (--offline) — the credential resolves, so hosted "
-                     "commands will use the endpoint above; drop --offline to test it"))
-        return rows
     raw_url = api_url if isinstance(api_url, str) else str(api_url or "")
     if not raw_url.strip():
         # A key with no endpoint cannot be verified at all, and pretending to
         # probe "" would report a transport failure for a configuration bug.
+        # Checked BEFORE the `--offline` note, which otherwise promises "hosted
+        # commands will use the endpoint above" when there is no endpoint at all
+        # (PR #12371 review, cycle 2).
         rows.append(("Hosted", "❌",
                      "no api_url resolved — the credential store carries none, so "
                      "not even the endpoint is known; `tortoise signup` (or "
                      "`tortoise init --api-key`) writes one"))
+        return rows
+    if offline:
+        rows.append(("Hosted", "ℹ️",
+                     "not probed (--offline) — the credential resolves, so hosted "
+                     "commands will use the endpoint above; drop --offline to test it"))
         return rows
     icon, why = _probe_hosted(raw_url, api_key)
     rows.append(("Hosted", icon, why))
@@ -15250,7 +15254,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor.add_argument(
         "--offline", action="store_true",
         help="Skip the hosted probe — report the resolved credential and endpoint "
-             "without making any request (no network access at all)",
+             "without making any request to the API (the graph probe still runs)",
     )
     onboard = sp.add_parser("onboard", help="Guided onboarding: init → index → demo → doctor")
     onboard.add_argument("--path", default=None, help="Path for embedded mode")
