@@ -3044,7 +3044,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # IN-PROGRESS feed cut, runs that ARE executing were never read, so the same reading is a
         # LOWER bound — and the reason list's first line says exactly that for that shape. The
         # pin carries the qualifier so dropping it reds.
-        ("module", "pr_running count in this state is an UPPER BOUND on executing work AMONG"),
+        ("module", "pr_running count in this state can only OVER-COUNT executing work among"),
         # ⛔ THE TWO-ARM HEADLINE, pinned for the same reason (round 23): reverting it to
         # the old universal "`OK` — but only when the PR wait was MEASURED …" measured
         # GREEN, so the claim could come back silently.
@@ -3069,7 +3069,13 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # ⛔ PER-FILE, NOT "SOMEWHERE" (review NIT, round 11). The comments above name a SITE, so
     # a presence check over all four surfaces passes when the named site loses the clause and
     # any OTHER file happens to carry the same phrase — the exact silent-deletion shape this
-    # leg exists to catch. Each entry declares the surface it belongs to.
+    # leg exists to catch. Each entry declares the surface it belongs to. ⛔ AND THE REMAINING
+    # RESIDUAL IS SAME-FILE DUPLICATION (measured, review round 27): the check is FILE-scoped,
+    # so an editor that inserts the clause elsewhere in the SAME file keeps the leg green while
+    # the named site loses it. All 16 phrases measured unique in their declared file at this
+    # head, so the hole is unrealized; closing it needs per-site anchoring (a line or a
+    # neighbour), which is the same unbounded per-site enumeration the `RESIDUAL` above says
+    # this guard does not attempt.
     # ⛔ AND `must_state` NEEDS THE SAME FLOOR (review P2, round 26). Its siblings got one after
     # the same measurement (`disarming` >= 5, `unconditional` >= 7); this list did not, so
     # deleting an entry removed its presence check AND its proof at once and the suite stayed

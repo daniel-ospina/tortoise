@@ -98,10 +98,14 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               for ``JOB_SETTLE_SECONDS`` — it, not the callee, holds the run
               projection); and the probe BUDGET. ⛔ NO ROUTE COUNT IS GIVEN:
               only the LAYER count is stable (see `pr_running_unmeasured`). So the
-              ``pr_running`` count in this state is an UPPER BOUND on executing work AMONG
-              THE RUNS IT READ and cannot certify health — ⛔ and it is a LOWER bound when the
-              IN-PROGRESS feed was cut (runs that were executing may never have been read; the
-              reason list's first line says so for that reading, #12166 review round 25).
+              ``pr_running`` count in this state can only OVER-COUNT executing work among
+              THE RUNS IT READ (an unmeasured run is counted as executing) and cannot certify
+              health. ⛔ AND IT IS NOT A CEILING ON THE REPO'S EXECUTING WORK EITHER: a cut
+              IN-PROGRESS feed drops runs entirely, so the same count can be BELOW a truth it
+              never read. (The reason list's first line says "counts are a LOWER BOUND" for
+              that reading — that is about the FEED COUNTS, not about this one; a count that
+              retains unmeasured runs as executing can only over-count WHAT IT SAW. #12166
+              review rounds 25-27.)
               ⛔ AND NOT "the status-string census": that is what the BUDGET layer leaves
               (nothing was read about those runs), while a run the settle gate downgraded
               WAS read — naming the whole population that way is false for it, and it is
@@ -777,9 +781,12 @@ class QueueHealth:
     def _unmeasured_token(self) -> str:
         """Name a PARTIALLY unmeasured census so `pr_running` is not read as exact.
 
-        `pr_running` is an UPPER BOUND whenever any counted run was not measured: an
+        `pr_running` can only OVER-COUNT executing work among the runs it read whenever any
+        counted run was not measured: an
         unmeasured run abstains toward EXECUTING, so it is counted while nothing about
-        it was observed. Two shapes need naming, and this property names BOTH: the
+        it was observed. ⛔ IT IS THEREFORE NOT AN UPPER BOUND ON THE REPO'S EXECUTING WORK
+        either — a cut IN-PROGRESS feed drops runs before they are counted, so under that
+        reading the number can sit below a truth it never read (#12166 review round 27). Two shapes need naming, and this property names BOTH: the
         PARTIAL case — `0 < pr_running_unmeasured < pr_running`, the ordinary outcome of
         a probe budget smaller than the census, which rendered byte-identically to a
         fully measured reading at the same count — and the FULLY-unmeasured case, which
@@ -1625,7 +1632,8 @@ def classify_queue(
         # the authorisation. Raising the constant would only move the horizon.
         #
         # So the verdict degrades instead: when EVERY run counted in `pr_running` is
-        # unmeasured, the count cannot certify health. It is an UPPER BOUND — for the budget
+        # unmeasured, the count cannot certify health. It can only OVER-COUNT what it read —
+        # for the budget
         # surplus that IS the old status-string census (nothing was read about those runs),
         # but a settle-downgraded run WAS read, so naming the whole population the
         # status-string census is false for it (#12166 review round 15). It
