@@ -5893,9 +5893,19 @@ def test_a_NON_MAPPING_archive_entry_is_UNREADABLE_not_absent(tmp_path):
 
     sm = _load_manifest_tool()
     path = tmp_path / "MANIFEST.json"
-    path.write_text(_json.dumps({"entries": ["mcp-tool:tortoise_x"]}), encoding="utf-8")
-    with pytest.raises(sm.SurfaceEvidenceUnreadable):
+    # `schema` IS PART OF THE FIXTURE ON PURPOSE. Without it the DELEGATED sibling
+    # (`archive_surface.manifest_violations`) appends a schema violation and then raises
+    # `AttributeError: 'str' object has no attribute 'get'`, which `removal_records`' blanket
+    # `except Exception` wraps into the SAME `SurfaceEvidenceUnreadable` — so the guard below
+    # could be replaced by `continue` and this test still passed (it asserted only the TYPE).
+    # The operator-facing diagnostic then degraded to "could not grade the archive manifest
+    # against its own checker: AttributeError…" (review round 18 of PR #12313: the mutant
+    # survived with the pinned fixture).
+    path.write_text(_json.dumps({"schema": 1, "entries": ["mcp-tool:tortoise_x"]}), encoding="utf-8")
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
         sm.removal_records(path)
+    # The GUARD'S OWN WORDING, so deleting the guard cannot be masked by the sibling's message.
+    assert "entry is not a mapping" in str(excinfo.value), excinfo.value
 
     # non-vacuity: a well-formed entry list is still read.
     path.write_text(
