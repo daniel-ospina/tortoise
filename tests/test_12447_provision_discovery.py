@@ -253,6 +253,11 @@ class TestTheListingDoorTeachesTheSameWay:
             # hosted builder to a call that answers `[]`.
             assert "list_memory_graphs" not in detail["message"], detail
             assert "no key-driven listing route" not in detail["message"], detail
+            # …and it must NOT name a scope: no scope makes this door work. The
+            # weight row in `config/ci-surfaces.yml` states that distinction, so
+            # it is pinned here — an edit that appends "re-issue with
+            # graphs:create" would otherwise pass silently and make the row false.
+            assert PROVISION_SCOPE not in detail["message"], detail
         finally:
             gen.close()
 
