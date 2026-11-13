@@ -313,10 +313,19 @@ def _refusal_arm(env: dict[str, str], name: str, pid: int) -> str:
             "running' for every cause named above)"
         )
     if arm == "no-start-time":
-        return ("the START-TIME leg refused (`pid_starttime`): the SUT could not read "
-                "the pid's start time — `/proc` on Linux, `ps -o lstart=` on a host "
-                "without it — so this is the retryable arm the poll exists to absorb, "
-                "and a persistent refusal here is a real read failure")
+        return ("the START-TIME leg refused (`pid_starttime`): the SUT read no start "
+                "time for the pid — `/proc/<pid>/stat` on Linux, `ps -o lstart=` on a "
+                "host without it. ⚠️ THE WITNESS DOES NOT SAY WHICH OF THIS ARM'S TWO "
+                "CAUSES FIRED, so this names both and neither: the box could not "
+                "PERFORM the read (`/proc` unreadable, or the row unparseable — and a "
+                "`pid_state` that returns EMPTY lands here too, because "
+                "`[[ \"\" != \"Z\" ]]` passes and `pid_starttime` is then what "
+                "refuses), or the pid EXITED AND WAS REAPED between `pid_running` and "
+                "this read — a gap in time that no retry reverses and whose cause is "
+                "the decoy, not the SUT. This is the retryable arm: the poll absorbs a "
+                "window, and a refusal that survives the deadline means one of these "
+                "two — which one is read off the decoy's own exit status and the job "
+                "log, never off this line")
     return f"unrecognised refusal witness {text!r} — the arm is not covered here"
 
 
@@ -611,9 +620,15 @@ def test_every_preview_boot_tolerates_a_dead_pid_from_record() -> None:
 def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) -> None:
     """#10283's own indicator (a): job A's cleanup leaves job B's decoy alive.
 
-    The decoy is a process whose `comm` is literally `workerd` — the name the
-    pre-fix teardown matched with `pkill workerd` — belonging to a DIFFERENT
-    job's state directory.
+    The decoy is a process whose `comm` is literally `workerd` — the process NAME
+    the pre-fix teardown matched with `pkill workerd` (no `-f`, so `pkill` reads the
+    name, not the command line) — belonging to a DIFFERENT job's state directory.
+
+    ⚠️ Scoped to a Linux host, and stated rather than implied: `comm` is set with
+    `prctl(PR_SET_NAME)`, which is Linux-only, and the assertion that the name really
+    took is read from `ps -o comm=` behind a `Path("/proc").is_dir()` guard. On a host
+    without `/proc` the decoy is still spawned and still recorded, but its `comm` stays
+    the interpreter's — so this test does not reproduce the `pkill workerd` shape there.
     """
     assert SCRIPT.is_file(), f"missing {SCRIPT}"
 
@@ -627,9 +642,11 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     # nothing wrong in the SUT. The sibling census fixture in `tests/test_fleet_state.py`
     # carries the same fix (`executable=`), for the same reason.
     #
-    # argv[0] is the name the pre-fix teardown matched, and `prctl(PR_SET_NAME)` gives the
-    # process the `comm` `pkill workerd` actually reads, so the decoy stays faithful to
-    # #10283's shape while no longer depending on a copied binary accepting its new name.
+    # ⛔ `argv[0]` IS NOT WHAT `pkill workerd` MATCHED — `pkill` with no `-f` matches the
+    # process NAME, which on Linux is `comm`, so `prctl(PR_SET_NAME)` is the half that
+    # makes this decoy faithful to #10283's shape. `argv[0]` is here only as the handle
+    # the interpreter is spawned under, and `executable=` is what removes the dependency
+    # on a copied binary accepting its new name.
     peer_bin = tmp_path / "bin"
     peer_bin.mkdir()
     peer_workerd = peer_bin / "workerd"
@@ -640,7 +657,8 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
          "try:\n"
          "    ctypes.CDLL(None).prctl(15, b'workerd', 0, 0, 0)\n"
          "except (OSError, AttributeError):\n"
-         "    pass\n"              # no prctl (macOS): argv[0] still carries the name
+         "    pass\n"              # no prctl (macOS): `comm` stays the interpreter's,
+         "                        #  and the name pin below cannot run without /proc\n"
          "time.sleep(120)\n"],
         tmp_path, executable=sys.executable,
     )
@@ -1124,9 +1142,23 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     # The OTHER arm of the same guard: a caller that really polled DOES name its deadline.
     # Pinned so "never claim one" cannot be implemented as "never state one".
     assert "refused pid 4242 for 10s:" in _recorded(dead, 4242, state, timeout=10.0)
+    # ⛔ BOTH of the start-time arm's causes, because the witness does not name one.
+    # `cmd_record` writes the same `no-start-time` for a read it could not perform AND
+    # for a pid reaped between `pid_running` and `pid_starttime`; a message claiming the
+    # arm "has ONE cause" would send a reader hunting a SUT `/proc` fault when the decoy
+    # simply exited — the attribution inversion this helper exists to end, one branch
+    # down from where the liveness arm already fixed it.
+    assert "could not PERFORM the read" in starttime, (
+        f"the start-time arm must name the read-failure cause: {starttime}"
+    )
+    assert "EXITED AND WAS REAPED" in starttime, (
+        "the start-time arm must name the exit-in-the-window cause — the witness "
+        f"cannot distinguish it from a read failure: {starttime}"
+    )
+    # …and it still does not BORROW the liveness arm's three-candidate wording: the two
+    # arms stay tellable apart, which is the whole point of reading the witness.
     assert "the candidates and not a culprit" not in starttime, (
-        "the start-time arm has ONE cause the witness names exactly — a multi-cause "
-        f"message here would send the reader hunting: {starttime}"
+        f"the two arms collapsed into one wording: {starttime}"
     )
 
     (state_dir / "app.refused").unlink()

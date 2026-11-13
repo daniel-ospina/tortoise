@@ -3717,9 +3717,9 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     census cannot see a live lane. Verified red with the flag removed.
 
     A real process carrying an arbitrary argv[0] (never a `#!` script — the kernel
-    rewrites argv[0] to the interpreter, which `_pi_pids_from_ps` documents). SKIPS where
-    the process table cannot be read at all (reported as an error by the reader), so a box
-    without that does not red a census that is fine.
+    rewrites argv[0] to the interpreter, which `_pi_pids_from_ps` documents). SKIPS only
+    where the process table cannot be read at all (reported as an error by the reader),
+    so a box without that does not red a census that is fine.
 
     ⛔ IT IS NOT A COPY OF `sleep` ANY MORE (measured on the `ubuntu-26.04` hosted
     runner `GitHub Actions 1000848497`, `test (c)`, head `70116a870dbb`). On that image
@@ -3765,8 +3765,6 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     import subprocess
     import tempfile
 
-    if not sys.executable:  # pragma: no cover — only an embedded interpreter
-        pytest.skip("no interpreter path (sys.executable) for the fixture lane")
     long_dir = Path(tempfile.mkdtemp(prefix="pi-census-" + "x" * 40))
     # ⛔ The narrow width is the FIXTURE, not the environment: without this the test
     # measures whatever terminal the suite happens to run under.
