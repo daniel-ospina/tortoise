@@ -400,6 +400,21 @@ def _reap(*pids: int) -> None:
             os.kill(pid, 9)
 
 
+def _reap_group(pid: int) -> None:
+    """Kill a `_spawn`ed tree by its SESSION, not by an enumerated child list (#12227).
+
+    `_spawn` sets `start_new_session=True`, so `pid` is the group leader and every
+    descendant is in its group — including a child forked AFTER the last
+    `_child_pids` sample. Reaping the ENUMERATION cannot cover that window: the one
+    place this matters is `assert len(children) == 2`, whose whole content is that the
+    enumeration is incomplete, and SIGKILL to the supervisor does not reach a child.
+    Measured before this change: a guard reaping only one of two enumerated children
+    left `sleep 120` (ppid 1) on the box, one per red shard.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, 9)
+
+
 @pytest.fixture()
 def state(tmp_path: Path) -> dict[str, str]:
     return {
@@ -747,6 +762,13 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     # sessions — which the comment above used to claim "the later `finally` still reaps on
     # the rest". It did not. This guard covers exactly that window; the `finally` below
     # covers everything after it, and a double reap is a suppressed no-op.
+    #
+    # ⛔ AND IT REAPS THE SESSION, NOT THE ENUMERATION (#12227 review cycle 8). Reaping
+    # `own.pid` plus the `children` LIST could not cover this guard's own failure mode:
+    # the list is exactly what `assert len(children) == 2` is about to reject when the
+    # poll timed out, and a child forked after the last sample is in the group but not in
+    # the list — SIGKILL to the supervisor does not reach it. Measured: omitting one
+    # enumerated child from the reap left `sleep 120` (ppid 1) behind.
     own = _spawn(["bash", "-c", "sleep 120 & sleep 120"], tmp_path)
     children: list[int] = []
     try:
@@ -760,7 +782,8 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         recorded = _record_when_running("app", own.pid, env=state)
         assert recorded.returncode == 0, _recorded(recorded, own.pid, state)
     except BaseException:
-        _reap(own.pid, *children, peer.pid)
+        _reap_group(own.pid)
+        _reap(peer.pid)
         raise
     result = _script("stop-all", env=state)
     try:
@@ -783,7 +806,8 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
             "ERR_CONNECTION_REFUSED"
         )
     finally:
-        _reap(own.pid, *children, peer.pid)
+        _reap_group(own.pid)
+        _reap(peer.pid)
 
 
 def test_await_exec_REFUSES_a_decoy_that_never_shows_its_name(tmp_path: Path) -> None:
@@ -792,16 +816,32 @@ def test_await_exec_REFUSES_a_decoy_that_never_shows_its_name(tmp_path: Path) ->
     #12039 replaced a liveness read that could only ever say "alive" in the window that
     matters. Mutating `_await_exec` to a bare `return` leaves every other test in this
     file green, because a healthy decoy is visible to both predicates; only the refusal
-    tells the two apart. A pid that is gone is the cheapest input it must reject.
+    tells the two apart.
+
+    ⛔ AND THE DECOY MUST BE ALIVE FOR THE ARM THAT DISCRIMINATES (#12227 review cycle 8).
+    A pid that is gone is the cheapest input to reject — but a LIVENESS-ONLY predicate
+    rejects it too, so a dead-pid-only pin stays green when `_await_exec` regresses to
+    exactly the check #12039 removed (measured: splicing `_wait_alive(pid, timeout);
+    return` in left every runnable test in this file green). The live-but-unnamed case is
+    the one that separates them: the row reads `/bin/sleep 60`, `_pid_alive` answers True,
+    and the row still does not start with the argv0 asked for — so only the name read can
+    be what refuses.
     """
     victim = _spawn(["/bin/sleep", "60"], tmp_path)
-    _wait_alive(victim.pid)
-    _reap(victim.pid)
+    try:
+        _wait_alive(victim.pid)
+        # THE DISCRIMINATING ARM: alive, and the table names something else.
+        with pytest.raises(pytest.fail.Exception):
+            _await_exec(victim.pid, "/nonexistent/never-shown", timeout=0.3)
+    finally:
+        _reap(victim.pid)
     deadline = time.time() + 10
     while time.time() < deadline and _pid_alive(victim.pid):
         time.sleep(0.02)
     assert not _pid_alive(victim.pid), "the harness cannot measure: the decoy survived its own kill"
 
+    # The cheap arm, kept: a pid that is gone is still rejected — legibly, without waiting
+    # out the deadline.
     with pytest.raises(pytest.fail.Exception):
         _await_exec(victim.pid, "/nonexistent/never-shown", timeout=0.3)
 
