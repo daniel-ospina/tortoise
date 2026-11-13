@@ -328,32 +328,78 @@ def test_a_vector_off_the_float32_grid_is_not_ours_to_narrow():
     assert stamped[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
 
 
-def test_the_quantiser_leaves_process_wide_warning_state_alone():
+def test_the_quantiser_leaves_process_wide_warning_state_alone(monkeypatch):
     """`warnings.catch_warnings()` mutates PROCESS-GLOBAL filter state and is
     documented as not thread-safe; the SDK documents concurrent writers (#5612).
     Two interleaved blocks can leave a leaked `ignore` entry behind for the life
     of the process, muting the numeric warnings that surface a bad vector.
 
     The range refusal is done in plain Python BEFORE any numpyd cast precisely
-    so that no suppression is needed at all — and THAT is the observable this
-    pins: with the cast reached, numpy emits `RuntimeWarning: overflow
-    encountered in cast`. Asserting only on `warnings.filters` could not see it
-    (a `catch_warnings` block restores the filters on `__exit__`, so the leak
-    this test names is invisible to a before/after comparison — measured: the
-    removed defect restored, 20 passed).
+    so that no suppression is needed at all.
+
+    ⛔ TWO OBSERVABLES, and the SECOND is the one that makes this pin real
+    (#11859). The regression this test names is "the quantiser wraps its casts
+    in `catch_warnings` + `simplefilter('ignore', RuntimeWarning)`" — and a
+    restored suppression is INVISIBLE to both assertions that used to stand
+    here alone: the `ignore` entry is scoped to the block, so
+    `warnings.filters == before` still holds on `__exit__` (per
+    <https://docs.python.org/3/library/warnings.html>, `catch_warnings`
+    RESTORES the module's filters on exit — only the list identity moves), and
+    the `RuntimeWarning` is swallowed before this test's own `record=True` block
+    can see it.
+
+    MEASURED before this fix, on the pre-`833272921b` shape restored (range
+    refusal deleted **and** the suppression put back): `1 passed` for this row,
+    and **51 passed** for the whole file — a pin that could not fail for its own
+    docstring. After adding the ban below, the same mutant reds here.
+
+    So the primary assertion asks the only question that makes the claim true:
+    **did the quantiser enter `catch_warnings` at all?** A `catch_warnings` call
+    on this path IS the defect, whether or not its `ignore` entry leaks — one
+    interleaved with a concurrent writer is already the recorded hazard.
     """
     import warnings
 
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "the quantiser entered `warnings.catch_warnings` — the path must "
+            "refuse an out-of-range value in plain Python, before any numpyd "
+            "cast, so it needs no process-global suppression at all (#5612)")
+
     before = list(warnings.filters)
+    outcomes: list = []
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")     # make the defect's warning VISIBLE
-        # out of range: the case that warned before the plain-Python refusal
-        assert shortest_float32_vector([1e300, 0.5]) is None
-        # underflowing to zero: the other cast-collision shape
-        assert shortest_float32_vector([1e-50, 0.5]) is None
-        # the on-grid path must still narrow (so the assertions above cannot be
-        # satisfied by a function that refuses everything)
-        assert shortest_float32_vector([float(np.float32(0.1)), 0.5]) == [0.1, 0.5]
+        # THE PRIMARY OBSERVABLE (#11859): the regression restores a
+        # suppression block; entering one is red even if its filters are
+        # restored on `__exit__` (which is why `filters == before` is blind).
+        # Patched INSIDE this test's own block, so only the quantiser's call is
+        # banned — the block above is entered before the patch is installed.
+        monkeypatch.setattr(warnings, "catch_warnings", _boom)
+        try:
+            # out of range: the case that warned before the plain-Python refusal
+            outcomes.append(shortest_float32_vector([1e300, 0.5]))
+            # underflowing to zero: the other cast-collision shape
+            outcomes.append(shortest_float32_vector([1e-50, 0.5]))
+            # the on-grid path must still narrow (so the assertions above cannot
+            # be satisfied by a function that refuses everything)
+            outcomes.append(shortest_float32_vector([float(np.float32(0.1)), 0.5]))
+        finally:
+            # ⛔ THE BAN MUST NOT OUTLIVE THE CALLS (#11859). pytest's own
+            # failure-reporting path calls `warnings.catch_warnings`, so a ban
+            # still installed while a failure is formatted turns a clean
+            # "1 failed" into a run-aborting INTERNALERROR — measured on BOTH
+            # mutants below, and it hides which assertion actually failed. So
+            # the ban's scope ends here, and every assertion is made outside it.
+            monkeypatch.undo()
+
+    assert outcomes[0] is None, (
+        "an out-of-range element must be refused, not narrowed")
+    assert outcomes[1] is None, (
+        "an underflowing element must be refused, not collapsed to 0.0")
+    assert outcomes[2] == [0.1, 0.5], (
+        "the on-grid path must still narrow — otherwise the refusals above are "
+        "satisfied by a function that refuses everything")
     numeric = [str(w.message) for w in caught
                if issubclass(w.category, RuntimeWarning)]
     assert not numeric, (
