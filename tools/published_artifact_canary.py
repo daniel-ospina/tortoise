@@ -467,13 +467,45 @@ def build_report(
                 )
             )
         else:
-            report.add(
-                Arm(
-                    "client-published",
-                    OK,
-                    f"{CLIENT_PACKAGE} resolves on the index ({client_version})",
+            # ⛔ `info.version` ALONE IS NOT "resolves" (#12363 round 14). `pip install
+            # tortoise-client` (README's documented command, UNPINNED) resolves from the
+            # latest release's FILES, not from the version string, and PEP 592 skips yanked
+            # files for an unpinned requirement. So a release that advertises a version but
+            # ships no installable file — a file deleted after publish, the release record
+            # created before its upload, every file yanked — fails for 100% of users while
+            # this arm reported PASS, filed nothing, and (because the close gate reads
+            # `exit_code == '0'`) actively RESOLVED the release-owed ledger. Measured:
+            # `build_report` with `releases: {"0.2.0": []}` and with the only file
+            # `yanked: True` both returned `Verdict: PASS` / `exit_code 0` before this.
+            # The ENGINE arm was never fooled the same way only because pip has to INSTALL
+            # it; the client arm has no install and no probe, so the file list IS its only
+            # evidence. Same defect class the module docstring names at "no files uploaded
+            # for `info.version`, every file yanked", which it claimed to catch.
+            installable = [
+                entry
+                for entry in release_files(client_doc, client_version)
+                if not entry.get("yanked")
+            ]
+            if installable:
+                report.add(
+                    Arm(
+                        "client-published",
+                        OK,
+                        f"{CLIENT_PACKAGE} resolves on the index ({client_version}, "
+                        f"{len(installable)} installable file(s))",
+                    )
                 )
-            )
+            else:
+                listed = len(release_files(client_doc, client_version))
+                report.add(
+                    Arm(
+                        "client-published",
+                        FAIL,
+                        f"the {CLIENT_PACKAGE} index advertises {client_version} but lists "
+                        f"NO installable file for it ({listed} file(s), none usable) — README.md "
+                        f"documents `pip install {CLIENT_PACKAGE}`, which cannot resolve",
+                    )
+                )
 
     # 4. informational rows — reported, never gated (see module docstring).
     published = latest_version(engine_doc or {})

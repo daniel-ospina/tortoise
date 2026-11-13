@@ -62,6 +62,30 @@ def _engine_doc(version: str = "0.2.0", uploaded: str = "2026-08-08T00:30:10.719
     }
 
 
+def _client_doc(version: str = "0.2.0", yanked: bool = False):
+    """A HEALTHY published client doc — a version AND an installable file for it.
+
+    ⛔ The file list is load-bearing, not decoration (#12363 round 14): `pip install
+    tortoise-client` is unpinned, so pip resolves from the release's files, and PEP 592
+    skips a yanked file. Before this helper existed the fixtures here passed
+    `{"info": {"version": "0.2.0"}}` with no `releases` entry — the precise
+    advertised-but-uninstallable shape — and `client-published` certified it OK. A fixture
+    that cannot be installed must not be the healthy default.
+    """
+    return {
+        "info": {"version": version},
+        "releases": {
+            version: [
+                {
+                    "filename": f"tortoise_client-{version}-py3-none-any.whl",
+                    "yanked": yanked,
+                    "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
+                }
+            ]
+        },
+    }
+
+
 def _ok_init_arm():
     return canary.Arm("engine-init", canary.OK, "`tortoise init` succeeds")
 
@@ -74,7 +98,7 @@ def _ok_init_arm():
 def test_all_gated_arms_green_is_the_only_green():
     report = canary.build_report(
         engine_doc=_engine_doc(),
-        client_doc={"info": {"version": "0.2.0"}},
+        client_doc=_client_doc(),
         tree_version="0.2.0",
         init_arm=_ok_init_arm(),
         now=NOW,
@@ -86,7 +110,7 @@ def test_all_gated_arms_green_is_the_only_green():
 def test_a_broken_first_command_is_red_and_wins_over_anything_else():
     report = canary.build_report(
         engine_doc=_engine_doc(),
-        client_doc={"info": {"version": "0.2.0"}},
+        client_doc=_client_doc(),
         tree_version="0.2.0",
         init_arm=canary.Arm("engine-init", canary.FAIL, "`tortoise init` exits 1"),
         now=NOW,
@@ -121,7 +145,7 @@ def test_an_unreadable_index_is_unknown_and_exits_nonzero():
         engine_doc=None,
         engine_error="URLError fetching https://pypi.org/pypi/tortoise-graph/json",
         engine_state=canary.INDEX_UNREADABLE,
-        client_doc={"info": {"version": "0.2.0"}},
+        client_doc=_client_doc(),
         tree_version="0.2.0",
         init_arm=None,
         now=NOW,
@@ -159,7 +183,7 @@ def test_a_report_with_no_gated_arm_is_never_green():
 def test_index_metadata_without_a_version_is_red():
     report = canary.build_report(
         engine_doc={"info": {}, "releases": {}},
-        client_doc={"info": {"version": "0.2.0"}},
+        client_doc=_client_doc(),
         tree_version="0.2.0",
         init_arm=None,
         now=NOW,
@@ -177,7 +201,7 @@ def test_a_MISSING_engine_project_is_red_and_an_UNREADABLE_index_is_unknown():
         engine_doc=None,
         engine_error="HTTP 404 from https://pypi.org/pypi/tortoise-graph/json",
         engine_state=canary.INDEX_ABSENT,
-        client_doc={"info": {"version": "0.2.0"}},
+        client_doc=_client_doc(),
         tree_version="0.2.0",
         init_arm=None,
         now=NOW,
@@ -189,7 +213,7 @@ def test_a_MISSING_engine_project_is_red_and_an_UNREADABLE_index_is_unknown():
         engine_doc=None,
         engine_error="URLError fetching the index: timed out",
         engine_state=canary.INDEX_UNREADABLE,
-        client_doc={"info": {"version": "0.2.0"}},
+        client_doc=_client_doc(),
         tree_version="0.2.0",
         init_arm=None,
         now=NOW,
@@ -238,6 +262,72 @@ def test_a_client_document_with_no_version_is_red_not_ok():
 # --------------------------------------------------------------------------
 # wheel mode — the PRE-publish gate — gates only the run, never the index
 # --------------------------------------------------------------------------
+
+
+def test_a_client_version_with_no_INSTALLABLE_file_is_red_not_ok():
+    """`info.version` alone is not "resolves": the FILES are what pip resolves (#12363 round 14).
+
+    `pip install tortoise-client` is UNPINNED, so it resolves from the latest release's file
+    list, and PEP 592 makes pip skip yanked files for an unpinned requirement. A release that
+    advertises a version but ships no usable file — a file deleted after publish, the release
+    record created before its upload, every file yanked — fails for 100% of users.
+
+    Measured BEFORE the fix: both shapes below returned `Verdict: PASS` / `exit_code 0`, filed
+    nothing, and — because the close gate now reads `exit_code == '0'` — actively RESOLVED the
+    release-owed ledger. The engine arm cannot be fooled the same way only because pip has to
+    INSTALL it; this arm has no install and no probe, so the file list is its only evidence.
+    """
+    empty_release = {"info": {"version": "0.2.0"}, "releases": {"0.2.0": []}}
+    all_yanked = {
+        "info": {"version": "0.2.0"},
+        "releases": {
+            "0.2.0": [
+                {
+                    "filename": "tortoise_client-0.2.0-py3-none-any.whl",
+                    "yanked": True,
+                    "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
+                }
+            ]
+        },
+    }
+    for doc, why in ((empty_release, "no files"), (all_yanked, "only-yanked")):
+        report = canary.build_report(
+            engine_doc=_engine_doc(),
+            client_doc=doc,
+            tree_version="0.2.0",
+            init_arm=_ok_init_arm(),
+            now=NOW,
+        )
+        arm = report.get("client-published")
+        assert arm.status == canary.FAIL, (why, arm.status, arm.detail)
+        assert report.verdict == canary.FAIL, (why, report.verdict)
+        assert report.exit_code == 1, (why, report.exit_code)
+        assert "installable" in arm.detail, (why, arm.detail)
+
+    # NON-VACUITY: one real file certifies the arm, so the pin cannot be satisfied by a
+    # blanket FAIL. (Without this arm a `return FAIL` would pass every case above.)
+    healthy = {
+        "info": {"version": "0.2.0"},
+        "releases": {
+            "0.2.0": [
+                {
+                    "filename": "tortoise_client-0.2.0-py3-none-any.whl",
+                    "yanked": False,
+                    "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
+                }
+            ]
+        },
+    }
+    ok_report = canary.build_report(
+        engine_doc=_engine_doc(),
+        client_doc=healthy,
+        tree_version="0.2.0",
+        init_arm=_ok_init_arm(),
+        now=NOW,
+    )
+    assert ok_report.get("client-published").status == canary.OK, ok_report.get(
+        "client-published"
+    ).detail
 
 
 def test_wheel_mode_gates_the_run_and_does_not_consult_the_index():
@@ -1168,7 +1258,7 @@ def test_release_age_and_tree_version_are_reported_but_never_gated():
     version would red every PR between a bump and a tag."""
     report = canary.build_report(
         engine_doc=_engine_doc(),
-        client_doc={"info": {"version": "0.2.0"}},
+        client_doc=_client_doc(),
         tree_version="0.3.0",
         init_arm=_ok_init_arm(),
         now=NOW,
