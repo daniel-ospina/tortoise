@@ -669,6 +669,12 @@ class TestDoctorHostedCredential:
         # asked nothing of the credential, and the same event on the authenticated
         # leg is ⚠️ too.
         assert "UNGRADED" in hosted, hosted
+        # EXACTLY ONE `Hosted` row (fresh review at `77c1f364b6`): `_row()` returns
+        # the FIRST match, so without this the `return` after this arm could be
+        # deleted — leaving a second, CONTRADICTORY `❌ Hosted … API error no
+        # status` line and exit 1 for a service blip (round 7 undone) — with the
+        # whole suite green. The surviving mutation is what this line kills.
+        assert len([ln for ln in out.splitlines() if " Hosted:" in ln]) == 1, out[-1500:]
         assert rc == 0
 
     def test_health_5xx_with_a_working_key_is_a_warning(
@@ -771,6 +777,45 @@ class TestDoctorHostedCredential:
         assert hosted is not None and "✅" in hosted, out[-1500:]
         assert "first attempt timed out" in hosted, hosted
         assert "❌ Hosted" not in out, out[-1200:]
+
+    def test_retry_failure_scrubs_a_url_password(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The RETRY row's reason is a THIRD scrub site, and it must be pinned.
+
+        The first `/health` attempt is pinned by
+        `test_transport_failure_scrubs_a_url_password` and the `/v1/team` leg by
+        round 7 — but the retry row interpolates `str(retry_reason)` through
+        `_scrub` as well, because `http.client`/a proxy embeds the request URL in
+        its own message and a userinfo `api_url` embeds the PASSWORD in that URL.
+        Reduced to a plain `str(...)` the suite stayed green, while a proxy
+        endpoint — exactly the `--offline` audience — printed the secret in the
+        very row that masks that URL two fields earlier (#5109; fresh review at
+        `77c1f364b6`).
+        """
+        password = "retrypw9x"
+        endpoint = f"https://svc:{password}@api.example.test/"
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY, api_url=endpoint)
+
+        def handler(url, req):
+            # BOTH `/health` attempts fail as a TIMEOUT (only a timeout is
+            # retried), carrying the userinfo URL the way a real client would.
+            raise TimeoutError(f"timed out reading {url}")
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "retryscrub.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor retry scrub seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "on retry" in hosted, hosted
+        assert password not in out, "the api_url password reached the retry row"
+        # Unreachable is UNGRADED, not a broken key: nothing was asked of it.
+        assert "UNGRADED" in hosted, hosted
+        assert rc == 0
 
     def test_control_bytes_in_api_url_cannot_forge_a_row(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
