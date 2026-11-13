@@ -5261,14 +5261,22 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
         # insertion that moved every number below it. That is the class here — a
         # line-number pin over a number another tool owns, not a citation anyone
-        # mis-copied. At THIS merge (`main` `9828250732` plus #12060's own 8-line
-        # registration block, which lands above the entry): entry 9951,
-        # `carve_out:` opens 9825, `uri_requiring:` 10156 — so 9951 is inside the
-        # section, and the identical text also sits at 6090 and 8467 (+8 on `main`'s
-        # 6082 / 8459 for the same cause), which is what the 5th element exists to
-        # refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8233 — the latter also +8, same cause) of `surfaces:`,
-        # so the resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8467 refuses
+        # mis-copied. The entry read 9943 at `9828250732` and reads 9973 at
+        # `c17e3c5f78` — +30 across THREE landing PRs that each registered test
+        # files above it (`ba84fbfabf` 9949, `e200623286` 9965, `cd22562c24`
+        # 9973). ⛔ The `9951` this comment used to defend was never a value on
+        # `main`: it was 9943 + the 8 lines #12060 was predicted to add, and two
+        # other registrations landed first, so the prediction described no
+        # checkable commit — which is why this one number has now been
+        # "re-derived" three times. That is the row's real defect and not a
+        # transcription slip: the number is owned by another tool, so every
+        # landing PR above it is a re-derivation this pin cannot do for itself.
+        # `carve_out:` opens 9847 and `uri_requiring:` 10178 at `c17e3c5f78`, so
+        # 9973 is inside the section, and the identical text also sits at 6090 and
+        # 8489 (+8 / +30 over `9828250732`'s 6082 / 8459 for the same cause), which
+        # is what the 5th element exists to refuse. ⚠️ Both of those are INDENTED
+        # sub-keys (`core:` 2235, `sdk:` 8255 — the latter also +30, same cause) of
+        # `surfaces:`, so the resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8489 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
@@ -5306,13 +5314,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("705", "`plan_hierarchy_edges` returns one"),
         ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            # 9714 -> 9951: re-derived from THIS merged tree (`awk
+            # 9714 -> 9951 -> 9973: re-derived from THIS tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
-            # the merge — `main` read 9943 and the branch read 9941, and neither
-            # number describes a tree that adds BOTH. The 8-line delta over `main`
-            # is #12060's own registration block above the entry.
-            ("9951", "- test_pack_logic_writeprobe_11083.py"),
+            # a merge. Measured values, not a delta: 9943 at `9828250732`, 9949
+            # at `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24` and at
+            # `c17e3c5f78`. ⛔ `9951` is in that list only because this row
+            # printed it — it was a predicted merge-tree value (9943 + 8), never a
+            # line any commit on `main` carried.
+            ("9973", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
