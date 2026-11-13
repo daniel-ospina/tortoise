@@ -10503,13 +10503,13 @@ def _cmd_sessions_import(args) -> int:
         try:
             from tortoise.capture_receipts import may_mint_local_receipt
             from tortoise.capture_spool import _clear_breadcrumb_for
-            from tortoise.session_confirm import FILED, confirm_capture
+            from tortoise.session_confirm import FILED, PENDING, confirm_capture
             from tortoise.session_verify import session_detail
 
             if not may_mint_local_receipt(status, detail):
                 return False
             if confirm_capture(session_detail, api_url, api_key,
-                               session_id, turns) != FILED:
+                               session_id, turns) not in (FILED, PENDING):  # MUTANT E
                 return False
             receipt.parent.mkdir(parents=True, exist_ok=True)
             receipt.write_text(_json.dumps({
