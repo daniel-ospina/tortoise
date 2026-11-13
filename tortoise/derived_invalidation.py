@@ -1626,15 +1626,16 @@ def invalidate_stale(
                 # ⚠️ `None` says the SWEEP could not tell, not that the answer is
                 # unknowable for every raise: `invalidate` raises from two places
                 # — `claim is None` (the FIRST read failed: genuinely unknown) and
-                # the trailing `raise exc`, reached when `retract_point` refused a
-                # claim this call had ALREADY read as live. ⛔ The re-read that
-                # follows a refusal does not change that by returning here: if it
-                # finds the claim GONE this function has already RETURNED with
-                # `found: False` (the second vanish window above), and if the
-                # re-read itself is UNREADABLE (`after` is `None`) it falls
-                # through BOTH terminal tests to this same `raise exc`. So
-                # "gone" is an ANSWER this door reports, not an unknown, and the
-                # trailing raise is the unreadable-after-refusal path. The
+                # the trailing `raise exc`. ⛔ Two shapes reach that raise, and the
+                # re-read is only how you tell them apart: (a) `after` came back a
+                # dict that is PRESENT and NOT terminal — a genuine refusal of a
+                # claim this call had already read as live, so the answer is `True`
+                # — and (b) the re-read itself failed (`after is None`, so both
+                # terminal tests cannot answer). Neither of the OTHER two re-read
+                # outcomes reaches the raise: GONE returns `found: False` above (the
+                # second vanish window), and already-terminal returns too. So "gone"
+                # is an ANSWER this door reports, not an unknown, while `None` and a
+                # present-but-live claim both leave through the trailing raise. The
                 # exception does not say which read failed, so the conservative
                 # `None` is reported and `error` carries the raise. `cache` stays
                 # absent: no reconcile ran.
