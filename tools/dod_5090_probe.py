@@ -2455,8 +2455,10 @@ def _compose_contexts(text: str) -> dict[int, str]:
     arm under `services.<svc>.environment`, a BUILD-TIME value under
     `services.<svc>.build.args` and a label under `labels` — the same line, three
     meanings (fresh review of PR #12474, P2). The TOML reader got a table scope for
-    exactly this reason; this is the same rule for compose, so the fourth reader stops
-    disagreeing with the other three about what a build-time value is.
+    exactly this reason; this is the same rule for compose. ⛔ The three are EXCLUSIVE
+    in the reader: only `environment` arms, `build.args` is reported as build-time, and
+    every other scope is reported rather than armed — the shape that armed "anything
+    not build.args/environment" made this docstring false for its own third example.
 
     Indentation-driven: a mapping key with no inline value opens a scope, and a line
     belongs to the innermost open scope. Array items (`- FLAG`) inherit their parent's.
@@ -2469,7 +2471,14 @@ def _compose_contexts(text: str) -> dict[int, str]:
             ctx[number] = ".".join(key for _, key in stack)
             continue
         indent = len(line) - len(line.lstrip())
-        while stack and stack[-1][0] >= indent:
+        # ⛔ A block SEQUENCE may sit at its parent key's own indentation
+        # (`environment:` then `- FLAG` flush with it), and YAML reads the two spellings
+        # as the same document — popping on `>=` dropped the parent before the item, so
+        # the flush-left item landed in no bucket while the indented one worked (fresh
+        # review of PR #12474, P2, measured against the pre-delta blob).
+        is_item = stripped.startswith("-")
+        while stack and (stack[-1][0] > indent
+                         or (stack[-1][0] == indent and not is_item)):
             stack.pop()
         entry = _COMPOSE_ENTRY_KEY.match(line)
         if entry:
@@ -2501,7 +2510,7 @@ def _is_unset_declaration(line: str, flag: str) -> bool:
     # ⛔ An INLINE comment is not part of the value: `- FLAG   # disable the gate` is
     # YAML-null (unset) and the comment-blind version read the words as a value, so the
     # disarming line landed in no bucket at all (fresh review of PR #12474, P3).
-    stripped = stripped.split(" #", 1)[0].strip()
+    stripped = _strip_inline_comment(stripped).strip()
     stripped = stripped.lstrip("-").lstrip()
     if not stripped or stripped.startswith("#"):
         return False
@@ -2639,6 +2648,17 @@ def _yaml_block_scalar_bodies(text: str) -> dict[int, str]:
     return body
 
 
+def _strip_inline_comment(text: str) -> str:
+    """Drop a `#` comment introduced by a SPACE **or a TAB**.
+
+    ⛔ One helper, because the two hand-rolled strips disagreed: `" #"` missed a
+    TAB-preceded comment, so `- FLAG\t# disable` and `FLAG=\t# empty` vanished from
+    every bucket (fresh review of PR #12474, P3). The white-space axis is the same one
+    `ENV`/`export` are read on, so it is fixed in one place.
+    """
+    return re.split(r"[ \t]#", text, maxsplit=1)[0].rstrip()
+
+
 def _assigned_value(line: str, flag: str) -> str | None:
     """The value ``line`` ASSIGNS to ``flag``, or `None` when it is a mention.
 
@@ -2726,7 +2746,7 @@ def _assigned_value(line: str, flag: str) -> str | None:
     # token carries its own `=`: prose tokens do not, so that test separates the two
     # (fresh review of PR #12474, P3; measured `ENV FLAG="1" OTHER=1` → OFF, a false
     # HOLD on a form Docker's own grammar defines).
-    value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
+    value = _strip_inline_comment(value).strip()
     tokens = value.split()
     if len(tokens) > 1 and not all("=" in token for token in tokens[1:]):
         return None
@@ -2929,6 +2949,23 @@ def flag_in_shipped_configs(flag: str) -> dict:
                         f"{posix}:{number}: {line.strip()[:90]} (build-time ARG)")
                     continue
                 where = compose_ctx.get(number, "") if compose_ctx is not None else ""
+                if (compose_ctx is not None
+                        and not (where == "environment"
+                                 or where.endswith(".environment"))
+                        and not (where == "build.args"
+                                 or where.endswith(".build.args"))
+                        and (_assigned_value(line, flag) is not None
+                             or _is_unset_declaration(line, flag))):
+                    # ⛔ POSITIVE scoping, not a subtraction: only `environment:` is a
+                    # deployed process's environment, so a flag under `labels:` (or any
+                    # other service scope) is reported and never armed. The earlier shape
+                    # armed everything that was not `build.args`/`environment`, which made
+                    # the docstring's "same line, three meanings" claim false for the third
+                    # (fresh review of PR #12474, P2).
+                    outside_runtime.append(
+                        f"{posix}:{number}: {line.strip()[:90]} "
+                        f"(not a runtime environment scope: {where or 'top level'})")
+                    continue
                 if where == "build.args" or where.endswith(".build.args"):
                     # A compose BUILD ARG reaches `docker build --build-arg`, never the
                     # container's environment — the same reading `[build.args]` and a

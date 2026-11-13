@@ -3413,17 +3413,50 @@ def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
     caveat = probe.per_file_scope_note(shipped["deployment"])
     assert "OVERRIDE it with a non-truthy one" in caveat, caveat
     # …and a compose BUILD ARG is not a runtime arm (the fourth reader now agrees with
-    # the other three about what build-time means).
+    # the other three about what build-time means) — in BOTH the map and the list
+    # spelling, since the flush-left sequence is the same document.
+    for args_block in ('      args:\n        TORTOISE_EMBED_GATE: "1"\n',
+                       '      args:\n      - TORTOISE_EMBED_GATE="1"\n'):
+        (tmp_path / "docker-compose.yml").write_text(
+            "services:\n  tortoise:\n    build:\n      context: .\n" + args_block,
+            encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["per_surface"]["docker-compose.yml"]["state"] == "OFF", shipped
+        assert any("build-time build arg" in hit
+                   for hit in shipped["outside_runtime"]), shipped["outside_runtime"]
+    # ⛔ And any OTHER compose scope is REPORTED, never armed: `labels` held the flag and
+    # read `ON` — a deployment armed off a value no process reads (fresh review of PR
+    # #12474, P2). Only `environment:` may arm.
     (tmp_path / "docker-compose.yml").write_text(
-        "services:\n  tortoise:\n    build:\n      context: .\n"
-        '      args:\n        TORTOISE_EMBED_GATE: "1"\n', encoding="utf-8")
+        'services:\n  tortoise:\n    labels:\n      TORTOISE_EMBED_GATE: "1"\n',
+        encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["per_surface"]["docker-compose.yml"]["state"] == "OFF", shipped
-    assert any("build-time build arg" in hit
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert any("not a runtime environment scope" in hit
                for hit in shipped["outside_runtime"]), shipped["outside_runtime"]
+
+    # ⛔ The FLUSH-LEFT sequence spelling is the same YAML document as the indented one,
+    # and the context tracker popped the parent before the item, so it landed in NO
+    # bucket while the indented form worked (fresh review of PR #12474, P2, measured
+    # against the pre-delta blob). Both spellings, plus a TAB-preceded comment.
+    for block in ("    environment:\n    - TORTOISE_EMBED_GATE\n",
+                  "    environment:\n      - TORTOISE_EMBED_GATE\n",
+                  "    environment:\n    - TORTOISE_EMBED_GATE\t# disable\n"):
+        (tmp_path / "docker-compose.yml").write_text(
+            "services:\n  tortoise:\n" + block, encoding="utf-8")
+        assert probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["unset_declarations"], block
+    # …and a flush-left FALSE value in `environment` is the OVERRIDE direction.
+    (tmp_path / "docker-compose.yml").write_text(
+        'services:\n  tortoise:\n    environment:\n    - TORTOISE_EMBED_GATE="0"\n',
+        encoding="utf-8")
+    assert probe.flag_in_shipped_configs(
+        "TORTOISE_EMBED_GATE")["disarming_assignments"]
 
     # …the map spellings too.
     for spelling in ("TORTOISE_EMBED_GATE:", "TORTOISE_EMBED_GATE: null",
+                     "TORTOISE_EMBED_GATE:\t# disable the gate",
                      "TORTOISE_EMBED_GATE:   # disable the gate"):
         (tmp_path / "docker-compose.yml").write_text(
             f"services:\n  tortoise:\n    environment:\n      {spelling}\n",
