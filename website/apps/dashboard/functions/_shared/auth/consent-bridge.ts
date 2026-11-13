@@ -441,6 +441,26 @@ export async function attemptKeyHash(key: string): Promise<string> {
 export const CONSENT_KEY_FINGERPRINT_HEX_CHARS = 12;
 
 /**
+ * THE ONE PLACE THIS DEPLOYMENT READS THE SIGNING KEY OUT OF THE ENVIRONMENT.
+ *
+ * ⛔ Both consumers must come through here, and that is the whole point of the function existing:
+ * the MINT (`api/consent/token.ts`) and the FINGERPRINT route (`api/consent/key.ts`) each used to
+ * read `env.CONSENT_TOKEN_SECRET` for themselves, with nothing enforcing that the two reads resolve
+ * to the same bytes. A future edit that derived one of them differently — trimming, falling back to
+ * a build-time constant, reading a second env name — would publish a fingerprint of bytes the mint
+ * no longer signs with, i.e. a GREEN AGREEMENT in front of a broken bridge, which is precisely the
+ * failure this whole mechanism exists to expose. The Python half has the same guarantee structurally
+ * (`/health` calls `consent_token_key_health()`, which calls the resolver the verifier uses, and a
+ * test pins that it holds no `hashlib` of its own).
+ *
+ * A single accessor is the smallest thing that makes the invariant checkable: one function, one
+ * phrase, and a test that neither route contains its own `env.CONSENT_TOKEN_SECRET` read.
+ */
+export function consentSecret(env: { CONSENT_TOKEN_SECRET?: string }): string | undefined {
+  return env.CONSENT_TOKEN_SECRET;
+}
+
+/**
  * The signing key's PUBLIC identity — `sha256(secret)[:12]`, or `null` when nothing is configured.
  *
  * ⛔ THE BYTES ARE THE CONTRACT. This hashes `utf8(secret)` — the SAME expression `mintConsentToken`

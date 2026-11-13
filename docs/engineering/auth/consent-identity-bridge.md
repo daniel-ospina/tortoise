@@ -331,12 +331,47 @@ whether they agree:
 | half | surface | field |
 |---|---|---|
 | AS | `GET {api}/health` → the `consent_token_key` block | `{key_fingerprint, configured, reason}` |
-| Pages | `GET {app}/api/consent/key` | the same three keys, as the whole body |
+| Pages | `GET {app}/api/consent/key` — **a new route** | the same three keys, as the whole body |
+
+The AS side is an **added block on an existing endpoint** (the convention the `build` block established,
+§"Which build is serving"), and it is deliberately **not** folded into `/health`'s `status`: a split must not
+make a healthy API look unhealthy, and a deployment-identity problem is not a liveness problem. The Pages
+side **is a new route**, because every session-free surface this project already had is unusable for it:
+`/api/session` answers `401` without a cookie **by design** (§8.2 — it is the session's single source of
+truth, and a 200 with no session would break that contract), and `/api/consent/token` is the very endpoint
+the defect is *about* — a `POST` behind the exact-origin allowlist and a `__Host-session` cookie, so a
+checker could never read a fingerprint off it without a browser. So the route adds **one** entry to the
+unauthenticated surface set, and it is `GET`-only, `no-store`, CORS-free (its only consumer is a
+server-side checker, not a browser). That is the whole justification — it is recorded here because "a new
+public route" is exactly the kind of surface that must not appear without its reasoning.
 
 `key_fingerprint` is **`sha256(key)[:12]`** — 12 lowercase hex — computed over the **same bytes the HMAC is
 computed over** (byte-exact, never trimmed; `consent_token.py::consent_key_fingerprint` and
 `consent-bridge.ts::consentKeyFingerprint` are the two statements of it). `configured: false` pairs with
 `key_fingerprint: null`, so an unprovisioned half can never compare as *equal* to a working one.
+
+`configured` has **three** states, and the third is not a detail: `true` (this half has a usable key),
+`false` (it has none), and **`null`** (it could not tell you — the resolver itself could not run). `null` is
+never read as `false`: "this deployment did not say" and "this deployment has no key" are different
+readings, and only the second may be compared against the other half's silence. `reason` is a **closed set
+of six codes**, deliberately free of numbers, lengths, env names and key material:
+
+| code | meaning |
+|---|---|
+| `not_set` | the variable is absent or empty on this half |
+| `padded` | it arrived with surrounding whitespace (a copy-paste that survived) |
+| `reused_credential` | it equals another credential this deployment holds (§2.3's ban) |
+| `too_short` | it is under the 32-byte floor |
+| `not_utf8` | it is not decodable as UTF-8 |
+| `unreadable` | the resolver could not run — paired with `configured: null` |
+
+The AS publishes the first five (`consent_token.py::_SECRET_PROBLEM_CODES`) or `unreadable`
+(`hosted_api.py`); the Pages half publishes only `not_set`, because the short/reused/encoding rules are the
+AS's and a half that claimed a code it never computed would be a second opinion about a value it cannot
+see. A consumer must treat an **unknown** code in this field as `UNVERIFIABLE` rather than as new
+information — `tools/consent_key_check.py` does exactly that (its `REASON_CODES` is the same closed set, and
+anything else is refused so the value is never echoed into a log or an issue body). The consumer-facing
+table lives in `docs/infra-runbook.md` §4.4.
 
 **Why publishing it is safe — argued, not asserted:**
 
@@ -346,9 +381,16 @@ records as an implementation floor and **not** a §2.3 requirement — so it is 
 a prefix of the key, and not invertible: a preimage search is 2^256 and 48 published bits leave the key's
 space untouched for any guessing strategy. A key an attacker can *enumerate* is already lost without this
 field — that is precisely why the floor exists at all;
-- it gives a **guessing** attacker nothing new: a guess can already be checked against the live verifier in
-one request (`GET /oauth/consent/preview`, with the token in `X-Consent-Token`, answers `signature does not verify`), so the fingerprint is a
-strictly **weaker** oracle than a surface that exists on purpose;
+- it gives a **guessing** attacker no new *capability*, only a cheaper check: any guess can already be
+tested against the live verifier in one request (`GET /oauth/consent/preview`, with the token in
+`X-Consent-Token`, answers `signature does not verify`). ⛔ **The two oracles are not equally expensive** —
+the live one is rate-limited (100/min) and logged, while 48 published bits let the same guess be tested
+offline in microseconds. So this bullet has a **precondition, and §8 states it for the operator**: it holds
+for a **RANDOM** key, not merely a ≥32-byte one. `_MIN_SECRET_BYTES` is a length heuristic and says so itself
+(`"passwordpasswordpasswordpassword"` clears it and is ~2^19 guesses). For a key that is already guessable
+this field makes an existing forgery *cheap* rather than *slow*; it does not make a forgery possible. If a
+key's provenance is in doubt, rotate to `secrets.token_urlsafe(48)` **before** relying on this check — which
+is exactly what step 1 of the rotation below does;
 - at 12 hex the only way this signal can lie is a **collision** between two independently generated keys
 (~2^-48 per rotation), and its cost is one turn of the incident this field exists to make visible — not a
 security loss;
@@ -379,16 +421,37 @@ repeats the reading (`check-deploy-staleness.sh`'s reason, one seam along);
 `NON_CODE_EVENTS` set excludes from the merge decision. The monitor's signal is the issue
 `auto-file-issue.sh` files (one issue per streak, closed on recovery), not a gate on a PR.
 
-**A rotation is THREE steps, and only the first is automated.** Measured: after the dashboard value was
-corrected, the **already-deployed** Function kept signing with the **old** key until a new deployment
-existed — Pages bakes env at deploy time. So:
+⛔ **To silence it — no PR needed, and no file edit:** `gh workflow disable consent-key-drift` (re-enable with
+`gh workflow enable`). Editing or reverting the workflow file is **not** the off-switch and is the worse
+option twice over: a `schedule` only fires from the default branch, so a revert lands one merge later, and a
+deleted file takes the whole monitor with it. The same verb is documented for `availability-watchdog` in
+`docs/infra-runbook.md`.
 
-1. `fly secrets set CONSENT_TOKEN_SECRET=…` (or land the deploy that stages it from the repo secret);
-2. set the same value on the `tortoise-dashboard` Pages project;
-3. **redeploy Pages** — correcting the dashboard value alone leaves the deployed Function on the old key.
+**A rotation is THREE steps over TWO sources, and only step 1 is automated.** Measured: after the dashboard
+value was corrected, the **already-deployed** Function kept signing with the **old** key until a new
+deployment existed — Pages bakes env at deploy time. So:
+
+1. **Rotate the GitHub repo secret** — `gh secret set CONSENT_TOKEN_SECRET=…` — then land (or
+   `workflow_dispatch`) the `deploy-hosted` run so Fly picks it up.
+   ⛔ **The repo secret is the source of truth, and `fly secrets set` ALONE IS NOT A ROTATION.**
+   `.github/scripts/fly-managed-secrets.txt` declares `CONSENT_TOKEN_SECRET gh-secret:CONSENT_TOKEN_SECRET`
+   and `deploy-hosted.yml` re-stages that value on **every** deploy
+   (`[ -n "$CONSENT_TOKEN_SECRET" ] && ARGS+=(CONSENT_TOKEN_SECRET="$CONSENT_TOKEN_SECRET")`), so a
+   hand-set Fly value is **silently reverted by the next deploy** — after this check had reported `AGREE`
+   and an operator had moved on. `config/required-bindings.yml` records the same thing from the other side.
+2. Set the SAME value on the `tortoise-dashboard` Pages project (Cloudflare dashboard → Settings →
+   Environment variables; it is not CI-written — see the open decision below).
+3. **REDEPLOY Pages** — `gh workflow run deploy-pages.yml` or `bash website/apps/dashboard/deploy.sh`, or
+   let the next push trigger it. Correcting the dashboard value alone leaves the deployed Function on the
+   old key.
 
 Then run `uv run python tools/consent_key_check.py` and require `AGREE`. Both fingerprints are printed, so
-the reading can be reconciled against a dashboard by eye.
+the reading can be reconciled against a dashboard by eye — and against the operator's own copy with the
+one-liner in §8.
+
+⛔ **BETWEEN STEP 1 AND STEP 3 THE CHECK READS `MISMATCH`, AND THAT IS THE ROTATION, NOT A REGRESSION.** The
+monitor will fire during that window: its issue body says so explicitly, so the two cannot be read as
+different stories. Finish step 3 rather than rotating again; the window ends when the redeploy lands.
 
 **What is still invisible after this lands (stated, not implied):**
 
@@ -597,6 +660,13 @@ Authorize inert and offers the retry.
       carries a value the API's env does not. Skipping it turns the verifier into a forgery oracle
       for anyone who HOLDS that key, since Supabase's model treats it as public and bounds it only
       by Row Level Security (this app does not publish it: #4054/#4178).
+- [ ] The key is **RANDOM**, not merely long. ⛔ This is a PRECONDITION of §2.5's safety argument, not an
+      extra nicety: the 32-byte floor is a LENGTH heuristic and says so itself
+      (`"passwordpasswordpasswordpassword"` clears it and is ~2^19 guesses). Publishing 48 bits of the
+      digest does not make a guessable key forgeable — it already is — but it turns the RATE-LIMITED online
+      oracle (100/min, logged) into an unlimited OFFLINE one. So a key whose provenance is in doubt is
+      rotated to `python3 -c 'import secrets;print(secrets.token_urlsafe(48))'` **before** the fingerprint
+      check is relied on (step 1 of the rotation does exactly this).
 - [ ] `docs/ops/auth-email-flows.md` §3's table is complete against the live allowlist (it claims to be the
       required set).
 

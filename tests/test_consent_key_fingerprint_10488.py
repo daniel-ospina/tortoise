@@ -119,6 +119,14 @@ def test_the_two_halves_publish_the_same_field_names_and_hex_shape() -> None:
     # never a comparison.
     for bad in ("", "abc", fp.upper(), fp + "0", "g" * 12, fp[:-1]):
         assert not consent_token.CONSENT_KEY_FINGERPRINT_RE.match(bad), bad
+    # ⛔ THE TRAILING NEWLINE, which `$` accepts and `\Z` refuses. A producer that read the key from a
+    # file (`fly secrets set … < file`) can end up appending one; a `$`-anchored gate would accept it,
+    # and the checker downstream would then print a broken line and report MISMATCH — telling an
+    # operator to rotate a key that is not wrong. Measured on the `$` version.
+    assert not consent_token.CONSENT_KEY_FINGERPRINT_RE.match(fp + "\n"), (
+        "a fingerprint with a trailing newline passed the shape gate — the anchor is `$` again"
+    )
+    assert not consent_token.CONSENT_KEY_FINGERPRINT_RE.match(fp + "\r\n")
 
 
 def test_the_fingerprint_leaks_no_key_material() -> None:
@@ -355,6 +363,32 @@ def test_the_SPEC_section_2_5_still_states_the_contract_the_code_implements() ->
     assert f"`sha256(key)[:{consent_token.CONSENT_KEY_FINGERPRINT_HEX_CHARS}]`" in section, (
         "§2.5 no longer states `sha256(key)[:N]` with N == CONSENT_KEY_FINGERPRINT_HEX_CHARS"
     )
+    # The `configured` THIRD state and the closed `reason` vocabulary — both are published facts a
+    # CONSUMER acts on, and both were documented only in a private constant before the review.
+    assert "`null`" in section and "unreadable" in section, section[:400]
+    for code in ("not_set", "padded", "reused_credential", "too_short", "not_utf8"):
+        assert code in section, f"§2.5 no longer documents the `{code}` reason code"
+    # The rotation's SOURCE OF TRUTH. `fly secrets set` alone is reverted by the next deploy
+    # (`fly-managed-secrets.txt` declares the name as `gh-secret:` and `deploy-hosted.yml` re-stages
+    # it), so a runbook whose step 1 is the Fly command re-creates the split it exists to prevent.
+    assert "gh secret set CONSENT_TOKEN_SECRET" in section, (
+        "§2.5's rotation no longer starts from the GitHub repo secret — the durable source"
+    )
+    assert "fly secrets set" in section and "reverted by the next deploy" in section, (
+        "§2.5 stopped warning that a hand-set Fly value is reverted by the next deploy"
+    )
+    # The rotation WINDOW, which reads as MISMATCH by construction (Pages bakes env at deploy time).
+    # Without this an operator completing a correct rotation is told "every consent grant is dead".
+    assert "NOT A REGRESSION" in section, "§2.5 no longer explains the rotation window"
+    # The off-switch, so nobody edits the file or lands a revert to silence a noisy monitor.
+    assert "gh workflow disable consent-key-drift" in section, (
+        "§2.5 no longer documents how to silence the monitor without a PR"
+    )
+    # WHY the Pages route is new — a new unauthenticated surface must carry its reasoning.
+    assert "`/api/consent/token` is the very endpoint" in section or "new route" in section, (
+        "§2.5 no longer justifies the new unauthenticated route"
+    )
+
     # The verdict vocabulary the tool exits on. A reader who cannot see it cannot act on a red run.
     # ⛔ `OFF` is matched as the VERDICT (backticked, as the section's table writes it), not as a bare
     # word: "cut off" / "OFFICE" in some later sentence would otherwise stand in for a deleted row.

@@ -30,12 +30,14 @@ import hashlib
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -222,6 +224,10 @@ def test_a_malformed_fingerprint_is_UNVERIFIABLE_and_the_VALUE_IS_NOT_ECHOED(mon
         _fp(_KEY_A).upper(),                           # wrong case (a producer drift)
         _fp(_KEY_A) + "0",                             # too long
         "",                                            # empty
+        # ⛔ A TRAILING NEWLINE. Python's `$` matches just before it, so a `$`-anchored gate accepts
+        # this — then prints a broken log line and compares it as MISMATCH, sending an operator to
+        # rotate a key that is not wrong. `\Z` is the anchor that refuses it (measured on `$`).
+        _fp(_KEY_A) + "\n",
     ]
     for bad in bad_values:
         _serve(monkeypatch, _health(bad), _pages(_fp(_KEY_A)))
@@ -305,3 +311,156 @@ def test_the_urls_asked_for_are_the_two_contracted_surfaces(monkeypatch) -> None
     asked = _serve(monkeypatch, _health(_fp(_KEY_A)), _pages(_fp(_KEY_A)))
     assert CKC.main(["--api-url", "https://api.example", "--app-url", "https://app.example"]) == 0
     assert sorted(asked) == ["https://api.example/health", "https://app.example/api/consent/key"]
+
+
+# ── the fourth disclosure gate: `reason` ──────────────────────────────────
+
+def test_a_key_placed_in_reason_is_NEVER_ECHOED(monkeypatch, capsys) -> None:
+    """THE GATE THE FIRST CUT MISSED, and the reason it matters is the ISSUE BODY.
+
+    `reason` is a string chosen by a REMOTE deployment, and this tool's output is pasted verbatim into
+    a PUBLIC auto-filed issue (`.github/workflows/consent-key-drift.yml` `cat`s the `--json` payload
+    into the body) as well as into the CI log. An earlier cut shape-gated `key_fingerprint` and passed
+    `reason` through untouched — so a half that answered with the key in `reason` (a debug build, a
+    proxy error page, a future field mix-up) would have had it republished by the very monitor built to
+    contain it. A raw `reason` is also the injection path into the issue body's ```json fence.
+
+    The gate is a CLOSED SET, not a charset filter: `^[a-z][a-z0-9_]{0,31}$` would still admit a
+    32-character all-lowercase key.
+    """
+    for hostile in (_KEY_A, _KEY_A[:12], "-----BEGIN PRIVATE KEY-----", "line1\nline2",
+                    "```", "x" * 200, "NOT_SET"):
+        _serve(monkeypatch, _health(_fp(_KEY_A), reason=hostile), _pages(_fp(_KEY_A)))
+        assert CKC.main([]) == 2, hostile
+        out = capsys.readouterr().out
+        assert "CONSENT-KEY: UNVERIFIABLE" in out
+        assert "reason_not_a_code" in out
+        assert hostile not in out, f"a hostile `reason` ({hostile[:20]!r}…) was echoed into the log"
+
+        _serve(monkeypatch, _health(_fp(_KEY_A), reason=hostile), _pages(_fp(_KEY_A)))
+        CKC.main(["--json"])
+        blob = capsys.readouterr().out
+        assert json.loads(blob)["verdict"] == "UNVERIFIABLE"
+        assert hostile not in blob, "a hostile `reason` reached the JSON payload (→ the issue body)"
+
+
+def test_every_published_reason_code_is_accepted(monkeypatch, capsys) -> None:
+    """The closed set is exactly what either half can publish — no wider, no narrower.
+
+    Source of truth: `tortoise/consent_token.py::_SECRET_PROBLEM_CODES` (the five provisioning
+    classes) plus `unreadable`, which `hosted_api._consent_token_key_health()` emits with
+    `configured: null` when the resolver itself cannot run. Asserted against the CODE, so a code added
+    on the publishing side without touching this tool reds here rather than going silently UNVERIFIABLE
+    in production.
+    """
+    from tortoise import consent_token
+
+    expected = set(consent_token._SECRET_PROBLEM_CODES) | {"unreadable"}
+    assert expected == CKC.REASON_CODES, (
+        "the checker's closed set drifted from what the halves publish — either extend both or the "
+        "`reason` field goes UNVERIFIABLE on a real reading"
+    )
+    for code in sorted(expected):
+        _serve(monkeypatch, _health(_fp(_KEY_A), reason=code), _pages(_fp(_KEY_A), reason=code))
+        assert CKC.main([]) == 0, code
+        assert f"reason={code}" in capsys.readouterr().out
+
+
+def test_a_null_reason_is_legitimate(monkeypatch) -> None:
+    """A configured half has nothing to report — `None` is not a fault, and must not become one."""
+    _serve(monkeypatch, _health(_fp(_KEY_A), reason=None), _pages(_fp(_KEY_A), reason=None))
+    assert CKC.main([]) == 0
+
+
+def test_the_REQUESTS_carry_our_OWN_user_agent(monkeypatch) -> None:
+    """⛔ LOAD-BEARING, measured in production: the edge in front of the Pages project refuses
+    urllib's DEFAULT agent (`Python-urllib/3.12` — exactly what the workflow's pinned
+    `python-version: 3.12` produces) with `403 error code: 1010`, while curl, python-requests, a
+    browser agent and even the lowercase `python-urllib/3.12` pass.
+
+    So without an explicit agent the Pages half is PERMANENTLY unreadable from CI: the monitor files
+    "the key could not be verified" every 30 minutes and never reaches a comparison. This test pins the
+    header on both requests, because one request without it is the same defect with a shorter window.
+    """
+    seen: list[str | None] = []
+
+    def fake_urlopen(request, timeout=None):
+        seen.append(request.get_header("User-agent"))
+        return _Response(json.dumps(_health(_fp(_KEY_A))).encode())
+
+    monkeypatch.setattr(CKC.urllib.request, "urlopen", fake_urlopen)
+    CKC.main([])
+    assert len(seen) == 2, "expected one request per half"
+    assert seen == [CKC.USER_AGENT, CKC.USER_AGENT]
+    # …and the agent must NOT be urllib's default: that is the value the edge refuses.
+    assert not (seen[0] or "").startswith("Python-urllib")
+
+
+# ── the workflow is the monitor: its alerting contract cannot go hollow ────
+
+WORKFLOW = REPO / ".github/workflows/consent-key-drift.yml"
+
+
+def _workflow() -> dict:
+    # `on:` parses as the BOOLEAN True under YAML 1.1, so every access below is by job/step, never by
+    # that key — the shape `tests/test_deploy_workflow.py` established for this repo's workflows.
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+
+def _steps() -> list[dict]:
+    return _workflow()["jobs"]["check"]["steps"]
+
+
+def test_the_workflow_files_the_drift_ON_A_FAILING_READING() -> None:
+    """⛔ `if: always() && outcome != 'skipped'` IS THE ALERTING CONTRACT — do not "tidy" it.
+
+    A red verdict FAILS the check step (`exit "$rc"`), so `if: success()` would skip the filing step
+    exactly when it must fire — the deaf-monitor class #2140/#2189 recorded. The second clause is not
+    belt-and-braces in the other direction: an `always()` step also runs when an EARLIER step failed,
+    and if checkout or setup-python failed then no reading exists — the body's fallback would present a
+    synthetic `UNVERIFIABLE` as "The reading (this run)" and point an operator at two PRODUCTION
+    deployments for what is a runner fault. A step that RAN and failed has outcome `failure`, not
+    `skipped`, so the red path this step exists for is untouched.
+    """
+    filing = [s for s in _steps() if "Auto-file" in (s.get("name") or "")]
+    assert len(filing) == 1, "exactly one auto-file step"
+    condition = filing[0]["if"]
+    assert "always()" in condition, f"the filing step must survive a failing check step, got {condition!r}"
+    assert "steps.check.outcome != 'skipped'" in condition, (
+        f"a skipped check step must NOT file a fabricated reading, got {condition!r}"
+    )
+
+
+def test_the_two_dedupe_TITLES_are_stable_constants() -> None:
+    """The title IS the dedupe key (`auto-file-issue.sh` searches `in:title` and comments a recurrence
+    rather than creating a second issue). Renaming one abandons the standing ledger issue and starts a
+    second streak — at 48 runs/day that is the duplicate spam the substrate exists to prevent. So both
+    titles are pinned byte-exactly, and they must differ: they assert different findings (a MEASURED
+    disagreement vs NO measurement).
+    """
+    body = "\n".join(s.get("run") or "" for s in _steps())
+    drift = "CONSENT_TOKEN_SECRET: the consent bridge's two halves hold different keys (#10488)"
+    unknown = "CONSENT_TOKEN_SECRET: the consent bridge's key could not be verified (#10488)"
+    assert drift in body, "the drift title changed — that abandons the standing issue"
+    assert unknown in body, "the unknown title changed — that abandons the standing issue"
+    assert drift != unknown, "two findings must not share one dedupe key"
+
+
+def test_the_workflow_steps_are_all_syntactically_valid_shell() -> None:
+    """Every `run:` body is shell; a parse error is an `exit 127`-shaped instrument fault, not a verdict."""
+    for step in _steps():
+        body = step.get("run")
+        if not body:
+            continue
+        result = subprocess.run(["bash", "-n", "-c", body], capture_output=True, text=True)
+        assert result.returncode == 0, f"{step.get('name')}: {result.stderr[:300]}"
+
+
+def test_the_workflow_asks_for_the_tools_the_ALERT_NEEDS() -> None:
+    """`auto-file-issue.sh::af_have_gh` requires `gh` AND `jq`; providing only `gh` lets the filing step
+    die with "gh and jq are required" on the fallback runner pool — i.e. this monitor's only output
+    cannot be produced. Both are named in the runner tool contract."""
+    contract = [s for s in _steps() if "runner-tools.sh" in (s.get("run") or "")]
+    assert len(contract) == 1
+    run = contract[0]["run"]
+    assert "ensure gh jq" in run, f"the tool contract supplies only gh: {run!r}"

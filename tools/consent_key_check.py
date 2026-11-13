@@ -36,11 +36,15 @@ THE CONTRACT
     key, never a prefix of it, never anything invertible.
 
 ⛔ THIS TOOL NEVER HOLDS, READS, OR ACCEPTS A KEY, and has no flag that would let it. That is the
-strongest form of "no key material in the output": the only strings it can print are the two
-fingerprints the deployments published, and it validates even THOSE against a fixed shape before
-comparing them — so a half that returned a key, a prefix, or a whole hash in that field is reported
-as UNVERIFIABLE rather than echoed. Without that check this tool would be a disclosure amplifier: it
-copies whatever the remote says into a CI log and an issue body.
+strongest form of "no key material in the output": EVERY string copied from a remote is
+shape-checked before it can reach a log line, a JSON body, or the issue body the workflow files —
+`key_fingerprint` against `FINGERPRINT_RE` (12 lowercase hex) and `reason` against the CLOSED set
+`REASON_CODES`. A half that answers with a key, a key prefix, or a whole hash in either field, or
+with any other string in `reason`, is reported as UNVERIFIABLE and the offending value is never
+echoed. ⛔ That gate is not decoration and this docstring is not a promise to take on trust: an
+earlier cut validated `key_fingerprint` only, and `reason` is published verbatim into a PUBLIC
+auto-filed issue. Without both checks this tool is a disclosure amplifier — it copies whatever the
+remote says into a CI log and an issue body.
 
 VERDICTS (exit codes)
 ---------------------
@@ -112,7 +116,40 @@ REASON_FIELD = "reason"
 #: 40-hex prefix of a real key, an uppercase value, and the key itself all fail — and a failure is
 #: UNVERIFIABLE, never a comparison. Case-sensitivity is deliberate: a case-insensitive compare would
 #: hide a producer that started emitting something other than `hexdigest()[:12]`.
-FINGERPRINT_RE = re.compile(r"^[0-9a-f]{12}$")
+#: ⛔ `\Z`, NOT `$`: Python's `$` also matches immediately before a TRAILING NEWLINE, so
+#: `"<12 hex>\n"` would pass this gate — printing a broken line and then comparing as MISMATCH,
+#: which tells an operator to rotate a key that is not wrong. Measured on the `$` version.
+FINGERPRINT_RE = re.compile(r"[0-9a-f]{12}\Z")
+
+#: The `reason` vocabulary, as a CLOSED set — the FOURTH disclosure gate, and the one an earlier cut
+#: of this file missed while claiming (§ "THE CONTRACT" above) that the fingerprints were the only
+#: strings it could print. `reason` is a string chosen by a REMOTE deployment and this tool pastes
+#: its output into a CI log and a PUBLIC auto-filed issue body, so an ungated `reason` is exactly the
+#: disclosure amplifier the fingerprint gate exists to prevent: a half that answers with the key in
+#: `reason` (a debug build, a proxy error page, a future field mix-up) would have it republished.
+#: It is also the injection path into the issue body's ```json fence.
+#:
+#: ⛔ A CLOSED SET, not a charset filter. A filter like `^[a-z][a-z0-9_]{0,31}$` still admits a
+#: 32-character all-lowercase key. These six are every code either half can publish —
+#: `tortoise/consent_token.py::_SECRET_PROBLEM_CODES` (five, the provisioning classes) plus
+#: `unreadable`, which `hosted_api._consent_token_key_health()` emits with `configured: null` when
+#: the resolver itself cannot run. A half publishing anything else is UNVERIFIABLE, and the tool says
+#: so with a code of its own (`reason_not_a_code`) rather than guessing. Growing this set is a
+#: deliberate act that must touch this constant, §2.5 and `docs/infra-runbook.md` together.
+REASON_CODES = frozenset(
+    {"not_set", "padded", "reused_credential", "too_short", "not_utf8", "unreadable"}
+)
+
+#: ⛔ THE USER-AGENT IS LOAD-BEARING, and finding out why cost a production measurement. Cloudflare's
+#: edge in front of `app.premiselabs.co` refuses urllib's DEFAULT agent — `Python-urllib/3.12`, which
+#: is exactly what the workflow's pinned `python-version: 3.12` produces — with
+#: `403 error code: 1010`, while `curl`, `python-requests`, a browser agent and even the LOWERCASE
+#: `python-urllib/3.12` all pass. Measured 2026-11-13, same URL, same minute, only the UA varied:
+#: 403 for `Python-urllib/3.12`, 404 (route not yet deployed) for every other agent. So before this
+#: constant existed, the Pages half could NEVER be read from CI: the monitor would have filed
+#: "the key could not be verified" every 30 minutes forever and never reached a comparison.
+#: ⛔ Do not "simplify" this to no headers: inheriting urllib's default is a permanent UNVERIFIABLE.
+USER_AGENT = "consent-key-drift/1.0 (+https://github.com/daniel-ospina/tortoise)"
 
 EXIT_AGREE = 0
 EXIT_DISAGREE = 1
@@ -168,7 +205,15 @@ def parse_reading(half: str, url: str, payload: object) -> Reading:
         # half's silence.
         return Reading(half, url, problem="configured_not_a_bool")
     raw_reason = payload.get(REASON_FIELD)
-    reason = raw_reason if isinstance(raw_reason, str) and raw_reason else None
+    # ⛔ THE FOURTH DISCLOSURE GATE. `reason` is remote-chosen and this tool's output is pasted into a
+    # PUBLIC issue body, so it is reduced to a CLOSED-SET code before it can be stored — see
+    # `REASON_CODES`. `None`/absent is legitimate (a configured half has no fault to report); any
+    # other string is a shape fault on the half, not a reason.
+    reason: str | None = None
+    if raw_reason is not None:
+        if not isinstance(raw_reason, str) or raw_reason not in REASON_CODES:
+            return Reading(half, url, problem="reason_not_a_code")
+        reason = raw_reason
     raw_fp = payload.get(FINGERPRINT_FIELD)
     if configured:
         if not isinstance(raw_fp, str) or not FINGERPRINT_RE.match(raw_fp):
@@ -234,7 +279,11 @@ def compare(api: Reading, app: Reading) -> Verdict:
 
 def _get_json(url: str, timeout: float) -> tuple[object | None, str | None]:
     """`(payload, problem)`. Any transport/parse failure is a `problem` CODE, never an exception."""
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    # ⛔ `User-Agent` is NOT cosmetic here — see `USER_AGENT`: urllib's default is refused 403 by the
+    # edge in front of the Pages project, which would make the Pages half permanently unreadable.
+    request = urllib.request.Request(
+        url, headers={"Accept": "application/json", "User-Agent": USER_AGENT}
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             status = response.status

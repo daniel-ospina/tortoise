@@ -5738,6 +5738,12 @@ surfaces:
   # `--changed-files config/ci-surfaces.yml` → `['core']`, both guards selected.
   - test_consent_key_check.py
   - test_consent_key_fingerprint_10488.py
+  # #10488: the §4.4 operator-table pin. Its SELECTION comes from `tier1` (a runbook-only diff
+  # reaches nothing else); this `core` row is what CLASSIFIES it, because `tier1` is not a
+  # manifest surface and an unclassified test file is integrity drift (#1266) — measured:
+  # `--integrity` → `half i entry test_consent_key_runbook_10488 is not in any manifest surface`.
+  # Belt-and-braces on the selection side too: `core` is where the consent pair already lives.
+  - test_consent_key_runbook_10488.py
   # #5656: the MACHINE-side half of #4568 — asserts the RUNNING machine's
   # `config.env` carries every `fly-toml-env` name with the value `fly.toml`
   # `[env]` declares. Registered in `core` beside its sibling deploy-time guards
@@ -9363,6 +9369,20 @@ tier1:
 # Pinned by tests/test_ci_selection.py::
 # test_the_record_schema_placement_pins_run_on_a_doc_only_diff.
 - test_record_schema_placement.py
+# #10488: the OPERATOR-facing table for the consent-key check (§4.4 of the runbook — the
+# `consent_token_key` field list, the `configured: null` state, the closed `reason` vocabulary,
+# and the two misreads: a rotation window that legitimately reads MISMATCH, and `fly secrets set`
+# being reverted by the next deploy). Same mechanism as the two entries below: the runbook matches
+# no SOURCE_PATTERNS row and `docs/` is in NON_PYTHON_PREFIXES, so a runbook-only diff takes the
+# docs-only early return — tier1 ONLY — and `select()` emits a surface's test files only for a
+# surface it MATCHED. So a pin on that table registered on `api`/`core` alone would be asleep on
+# the only diff that can break it. Measured before this entry:
+# `select(['docs/infra-runbook.md'])` -> `surfaces=[]`, this file NOT selected; selected once it is
+# in. It is its OWN file, not a test inside the fingerprint suite, because tier1 runs on EVERY PR:
+# one table does not justify pulling fourteen unrelated tests into the always-run smoke.
+# Hermetic (one file read, no graph, no DB) — tier1 is the correct lane. Pinned by
+# tests/test_ci_selection.py::test_the_consent_key_runbook_pin_runs_on_a_runbook_only_diff.
+- test_consent_key_runbook_10488.py
 # #11064 review round 9 (P2): the two runbook readers that census left asleep. Same
 # mechanism as the entry above — `docs/infra-runbook.md` matches no SOURCE_PATTERNS
 # entry and `docs/` is in NON_PYTHON_PREFIXES, so a runbook-only diff filters to

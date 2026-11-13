@@ -1146,6 +1146,44 @@ contract is unchanged and `deploy-health-gate.sh` still reads `db.ok` by value.
 
 ⛔ **The operator misread this section exists to prevent:** `build_identified: false` with `build_identified_reason: tree_dirt_unstated` is **unstamped**, not clean; and `commit_dirty: null` on any deployment still answers nothing about the tree. Read `commit_sha` against the expected commit, then read `commit_dirty` only as far as it goes (`null` ≠ clean).
 
+### 4.4 The consent bridge's two key homes — the `consent_token_key` block (#10488)
+
+**Symptom this answers.** *"Consent approvals expire instantly and the AS says `invalid_token … signature does
+not verify`."* `CONSENT_TOKEN_SECRET` has **two homes** — the Fly/AS copy, staged by CI from the GitHub repo
+secret, and the Cloudflare Pages copy a human types into the dashboard — and on 2026-11-01 they held
+different values. The mint answered `200` with a well-formed JWT, the verifier answered `401`, every deploy
+was green, and the only user-visible symptom was the consent page telling the visitor *"Your approval expired
+before it was issued"*, i.e. blaming their session. The full contract is
+`docs/engineering/auth/consent-identity-bridge.md` §2.5; this section is the reader-facing table.
+
+Each half publishes a **truncated hash** of the key it holds — `sha256(key)[:12]`, 12 lowercase hex, never the
+key and never a prefix of it — and one comparison settles whether the two agree:
+
+```bash
+uv run python tools/consent_key_check.py           # AGREE 0 · MISMATCH 1 · SPLIT 1 · OFF 2 · UNVERIFIABLE 2
+curl -s https://api.premiselabs.co/health | python3 -m json.tool | sed -n '/"consent_token_key"/,/}/p'
+```
+
+| field | what it tells you |
+|---|---|
+| `key_fingerprint` | `sha256(key)[:12]` of the key **this half holds** — 12 lowercase hex, or `null` when it holds none. Both halves publish it, so two equal strings are the only evidence of agreement. Reproduce it yourself: `printf %s "$CONSENT_TOKEN_SECRET" \| sha256sum \| cut -c1-12` |
+| `configured` | `true` / `false` / **`null`**. `false` = no usable key. ⛔ `null` = **the half could not tell you** (its resolver could not run) — never read it as `false`: "did not say" and "has no key" are different readings, and only the second may be compared against the other half's silence |
+| `reason` | a **CLOSED SET** of codes, never a message: `not_set` (absent/empty), `padded` (survived with surrounding whitespace), `reused_credential` (equals another credential this deployment holds — §2.3 bans it), `too_short` (under the 32-byte floor), `not_utf8`, `unreadable` (paired with `configured: null`). The Pages half publishes only `not_set`. ⛔ An **unknown** code is `UNVERIFIABLE`, not new information — the checker refuses anything outside the set so a value is never echoed into a log or an issue body |
+
+⚠️ **`consent_token_key` deliberately does NOT fold into `status`** — same reasoning as `build` above: a split
+key is a deployment-identity problem, not a liveness problem, and degrading `status` over it would make Fly
+restart a healthy process. Its consumer is `.github/workflows/consent-key-drift.yml` (every 30 minutes,
+auto-files one issue per streak); to silence it use `gh workflow disable consent-key-drift` — **no PR and no
+file edit**, because a `schedule` only fires from the default branch.
+
+⛔ **The operator misread this section exists to prevent — two of them.** (1) **`MISMATCH` during a rotation
+is the rotation.** Pages bakes env at deploy time, so between "set the value" and "redeploy Pages" the check
+reads `MISMATCH` by construction; finish the redeploy rather than rotating again. (2) **`fly secrets set`
+alone is not a rotation.** `.github/scripts/fly-managed-secrets.txt` declares
+`CONSENT_TOKEN_SECRET gh-secret:CONSENT_TOKEN_SECRET`, so every `deploy-hosted` run re-stages the GitHub
+value and silently reverts a hand-set Fly value — after you had seen `AGREE`. Rotate the **repo secret**
+first, then the Pages value, then redeploy Pages.
+
 ## 4.5 Local Development — Local Stays Local
 
 **Best practice: a self-hosted/local instance is intentionally local.** Do not

@@ -53,7 +53,7 @@
  * of a deployment's PREVIOUS key — the failure this route exists to expose, cached and re-served.
  */
 import { type Env, json } from "../../_shared/auth/session";
-import { consentKeyFingerprint } from "../../_shared/auth/consent-bridge";
+import { consentKeyFingerprint, consentSecret } from "../../_shared/auth/consent-bridge";
 
 /**
  * The refusal-free payload: the SAME three keys `tortoise.consent_token.consent_token_key_health()`
@@ -66,7 +66,11 @@ import { consentKeyFingerprint } from "../../_shared/auth/consent-bridge";
  * computed would be a second opinion about a value it cannot see.
  */
 async function payload(env: Env): Promise<{ key_fingerprint: string | null; configured: boolean; reason: string | null }> {
-  const secret = env.CONSENT_TOKEN_SECRET;
+  // ⛔ `consentSecret(env)`, never `env.CONSENT_TOKEN_SECRET` directly: the fingerprint must be over
+  // the SAME bytes the mint signs with, and one accessor is what makes that checkable (see its
+  // docstring in `consent-bridge.ts`). A second, independent read is how a future edit publishes
+  // agreement about bytes nothing signs.
+  const secret = consentSecret(env);
   const fingerprint = await consentKeyFingerprint(secret);
   return {
     key_fingerprint: fingerprint,
