@@ -5261,13 +5261,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
         # insertion that moved every number below it. That is the class here — a
         # line-number pin over a number another tool owns, not a citation anyone
-        # mis-copied. At THIS merge (`main` `9828250732` plus this branch's entries
-        # and #12060's own registration block, all landing above it): entry 10005,
-        # `carve_out:` opens 9879, `uri_requiring:` 10210 — so 10005 is inside the
-        # section, and the identical text also sits at 6090 and 8521 (+8 on `main`'s
-        # 6082 / 8459 for the #12060 cause), which is what the 5th element exists to
-        # refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8233 — the latter also +8, same cause) of `surfaces:`,
+        # mis-copied. At THIS merge (`main` `cd22562c24e4` plus this branch's
+        # entries and #12060's own registrations, all landing above it): entry
+        # 10005, `carve_out:` opens 9879, `uri_requiring:` 10210 — so 10005 is
+        # inside the section, and the identical text also sits at 6090 and 8521,
+        # which is what the 5th element exists to refuse. ⚠️ Both of those are
+        # INDENTED sub-keys (`core:` 2235, `sdk:` 8287) of `surfaces:`,
         # so the resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8521 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
@@ -5309,9 +5308,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # re-derived from THIS merged tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
-            # the merge — `main` read 9943 and the branch read 9941, and neither
-            # number describes a tree that adds BOTH. The 8-line delta over `main`
-            # is #12060's own registration block above the entry.
+            # the merge. Measured: `main` `9828250732` read 9943, the main TIP
+            # (`cd22562c24e4`, after #12060's own registrations) 9973, this branch
+            # alone 9981 — and no parent's number describes a tree that adds BOTH.
+            # The +32 from the main tip is this branch's own single registration
+            # block at 7519; the +30 before that is #12060's three registrations
+            # (measured, not a guessed +8 per row: only the 6090/`core:` rows sit
+            # above the FIRST of them and so move by 8).
             ("10005", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
