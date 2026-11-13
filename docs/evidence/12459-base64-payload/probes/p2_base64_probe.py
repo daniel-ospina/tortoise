@@ -452,11 +452,17 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
         silent.append(cut)
         elems = len(out) / 4
         len_only = len(out) % 4 == 0
+        # The declared-count check is a DIFFERENT question from the length check:
+        # it compares the decoded byte count against the element count the frame
+        # declares. Computed separately, or the column is a duplicate of len%4
+        # and the table reads as "the count check accepts a 381-float truncation"
+        # — the exact inverse of what this section proves.
+        count_ok = len(out) == len(vec) * 4
         if len_only:
             accepted_by_length_only.append(cut)
         print(f"   -{cut:<4} {(len(body) - cut) % 4:<8} {len(out):>7,} B  "
               f"{elems:>7.2f}   {str(len_only):<10}  "
-              f"{'ACCEPTS (381 floats)' if len_only else 'refuses'}")
+              f"{'ACCEPTS' if count_ok else 'refuses'}")
     if silent != [4, 8, 12, 16, 20]:
         print(f"  ⛔ unexpected silent cuts {silent} — every multiple-of-4 cut must "
               f"decode silently (4 base64 chars = 3 whole bytes)")
@@ -464,6 +470,10 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
     if accepted_by_length_only != [16]:
         print(f"  ⛔ unexpected sweep result {accepted_by_length_only} — only -16 "
               f"leaves a decoded length that is a multiple of the 4-byte element")
+        return 1
+    if len(vec) * 4 != len(base64.b64decode(body, validate=True)):
+        print("  ⛔ the declared count does not match the intact body — the "
+              "count check below would be vacuous")
         return 1
     # …and the frame REFUSES that exact cut, because of the count.
     short = f"b64:1:f32:{len(vec)}:{body[:-16]}"

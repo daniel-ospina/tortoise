@@ -115,6 +115,13 @@ how a repairable gap becomes a permanent one.
   this journal is required to **carry** it (R1's *presence is ownership*). The inline-in-a-text-log vector
   is therefore *ours alone*, which is precisely why this format has to be designed and tested rather than
   borrowed.
+
+⚠️ **Provenance of (a)–(d):** these are four `sonar` search queries (~$0.024) whose *findings* are recorded
+here and whose **citation lists are not reproduced**, so none of (a)–(d) can be re-checked from this
+repository — re-running the four queries is the way to re-derive them (`docs/evidence/12459-base64-payload/README.md`
+records the queries and the routing that first failed). **§1–§7 do not depend on §0**: every byte figure is
+the probe's, and every binding constraint is an in-repo decision (§4). (d) is used only to say *there is no
+practice to copy* — a claim whose failure would leave the design exactly as it stands.
 **CONTRADICTION TEST (asked first, before cost, quality or fit).** Three recorded positions bind this
 design, and none may be reversed by adoption:
 
@@ -209,7 +216,9 @@ whole record     5,423 → 2,798 B   = 1.94×
 ```
 
 ⚠️ **The 16 B frame sits at that join, so the legs do not multiply back to 4.11 exactly**: on the *framed*
-span the headline is `8,414 / 2,064 = 4.08`, and `1.79 × 2.27 = 4.08` closes it. Read `4.11` as
+span the headline is `8,414 / 2,064 = 4.08`, and the legs close it **unrounded** —
+`(8,414/4,689) × (4,689/2,064) = 8,414/2,064`; the printed 2-dp legs multiply to `4.06`, so quote the
+identity, not a product of rounded figures. Read `4.11` as
 *text-vs-bare-base64* and `4.08` as *text-vs-frame* — 1 % apart, each right on its own ruler, which is the
 whole point of §1.1.
 
@@ -242,8 +251,12 @@ vector is 92 % of the record — and wrong once the non-vector bytes are a **qua
 = 26 %). The P2 row assumes
 the record shrinks *with* its vector, when in fact **734 B** of the record (`2,798 − 2,064`) does not
 shrink at all. Corrected on the creating record: **2.80 GB, saving ≈ $0.33/mo** — where the vector-ratio
-row implies `(5.423 − 2.069) × $0.125 = $0.42`, i.e. the correction is **~22 %** of that quote. Stated
-because a reader would budget from the quote. Whether this line is metered at all is **not settled
+row implies `(5.423 − 2.069) × $0.125 = $0.42`, i.e. the correction is **~22 %** of that quote. ⚠️ Name the
+base: that `$0.42` pairs the **measured** P0 (`5.423 GB`) with the **modelled** P2 row (`2.069 GB`), which
+is what a reader would actually budget. It is *not* the quote's own saving — the quote's two rows imply
+`2.60 GB = $0.33/mo`, within 1.6 % of the measured saving, because both rows' absolute errors partly
+cancel (the P2 row is **35 % low**: 2.07 modelled vs 2.80 measured). The defect is the row *values*, not
+the saving the pair happens to imply. Stated because a reader would budget from the quote. Whether this line is metered at all is **not settled
 anywhere**: #11758, the pricing-of-record ticket, closed `COMPLETED` on 2026-11-12 without addressing
 journal bytes, and #4333 (open) counts **node** sets, not journal bytes.
 
@@ -285,9 +298,10 @@ journal bytes, and #4333 (open) counts **node** sets, not journal bytes.
 | `"embedding_b64": "…"` with `embedding` dropped | ⛔ **refused** — R1 is *presence is ownership*: an absent `embedding` key means "pre-#5004 record, recompute is the only behaviour available". Dropping it would make the replay **re-embed**, silently changing the graph. |
 | `"embedding": {"b64": "…"}` (a nested object) | ⛔ **refused** — `stamp_journal_embedding` treats a `dict` as *"not a numeric sequence"* and **drops the vector to an owned `None`** (`_drop_journalled_embedding`). It is the right refusal for a hand-edited journal and the wrong shape for a format. |
 
-A string is the one shape the seam already refuses to treat as a vector — `_drop_journalled_embedding`
-replaces it with an owned `None` and logs a warning (the row two lines above), so a mis-ordered pipeline
-is **loud**, not silently transposed.
+A string is **also** a shape the seam refuses to treat as a vector — `_drop_journalled_embedding` replaces
+it with an owned `None` and logs a warning. It is the *same* branch as the dict row two lines above
+(`isinstance(raw, (str, bytes, dict))`, `embeddings.py:502`), so the two rows are one refusal rather than
+two, and a mis-ordered pipeline is **loud**, not silently transposed.
 
 ### 2.2 How the length is encoded — and why the count is load-bearing, measured
 
@@ -303,9 +317,13 @@ in `measurement.txt`):
    -4    0          1,533 B   383.25   False       refuses
    -8    0          1,530 B   382.50   False       refuses
    -12   0          1,527 B   381.75   False       refuses
-   -16   0          1,524 B   381.00   True        ACCEPTS (381 floats)
+   -16   0          1,524 B   381.00   True        refuses
    -20   0          1,521 B   380.25   False       refuses
   count check on the -16 frame: REFUSED (frame declares 384 elements at f32 (1536 B), decoded 1524 B)
+
+Note the two checks disagree on exactly one row: `len%4==0` is `True` there while the declared-count
+check is `refuses`. That disagreement *is* the argument — a reader with only the length check accepts a
+381-float truncation, and the count is the only thing standing between it and a silently short vector.
 ```
 
 `b64decode` **refuses** a cut that is not a multiple of 4 characters (`Incorrect padding`, or *"cannot be 1
@@ -498,10 +516,13 @@ Named here so the implementation cannot choose a weaker one:
      i.e. #3316's behaviour, unchanged, with the frame in the record.
   5. **a sealed fragment before a P2 record still costs nothing**: the #5917 shape (torn fragment, then the
      next append) with P2-framed records — the record after the seal is present, once.
-  6. **the five refusals of §2.2 each red**: truncated body (−16 chars, the measured silent case), short
-     array with the count unchanged, **packed `f64` under a declared `f32`** (3,072 B decoded against a
-     declared 1,536 B — §6's rollback row depends on this one), unknown version, non-base64 character —
-     each must raise, not silently-short.
+  6. **every refusal of §2.2 and §2.4 each red**: truncated body (−16 chars, the measured silent case),
+     short array with the count unchanged, **packed `f64` under a declared `f32`** (3,072 B decoded against
+     a declared 1,536 B — §6's rollback row depends on this one), unknown version, non-base64 character,
+     **and the two §2.4 cross-checks**: a frame whose declared width *disagrees* with the payload's
+     `embedding_width` must raise, and a frame on a record carrying **no** `embedding_width` must raise.
+     §2.4 calls that cross-check the one thing stopping the width being wrong at rebuild "without anything
+     noticing", so it cannot be the only decode-path rule with no pin.
   7. **`append` decodes nothing**: a decoded record re-appended writes a **frame** (the encoder is at the
      write boundary, not on the in-memory record), so re-stamping a read record cannot flip its width —
      the #11835 F2 class of defect, one layer out.
