@@ -1071,10 +1071,11 @@ def test_a_derived_embedding_is_structural_so_a_fold_never_claims_it_dropped():
 
     ⚠️ The bucket is pinned too, not just membership. `embedding` must be
     STRUCTURAL rather than REPORTED — and the reason is NOT that reporting would
-    be noisy: `_REPORTED_FIELDS` is not a general disclosure channel (the
-    `_observed` dict is a FIXED five keys and residuals come only from
-    `evidence.support`), so a prop put there is dropped from `undeclared` and
-    reported NOWHERE. That silent shape is why the declaration has to be made
+    be noisy: `_REPORTED_FIELDS` is not a general disclosure channel. That
+    bucket has exactly ONE residual channel, `evidence.support`, and `support`
+    is built only from the FIXED five-key `_observed` dict, so `embedding` (not
+    one of those five) would be dropped from `undeclared` and reach no residual
+    at all. That silent shape is why the declaration has to be made
     deliberately, in one bucket or the other, rather than shuffled sideways.
     """
     proj = _FakeProj(_FakeGraph(
@@ -1085,9 +1086,10 @@ def test_a_derived_embedding_is_structural_so_a_fold_never_claims_it_dropped():
     assert out["undeclared"] == [], out
     assert "embedding" in capture_fold._STRUCTURAL_PROPS, (
         "`embedding` must stay STRUCTURAL, not move to `_REPORTED_FIELDS`: that "
-        "bucket is not a general disclosure channel (residuals are emitted from "
-        "the five keys `_observed` reads), so a prop moved there leaves "
-        "`undeclared` and is reported NOWHERE — a silent drop, not a residual"
+        "bucket has one residual channel, `evidence.support`, built only from "
+        "the five keys `_observed` reads, so a prop moved there leaves "
+        "`undeclared` and reaches no residual at all — a silent drop, not a "
+        "residual"
     )
 
 
