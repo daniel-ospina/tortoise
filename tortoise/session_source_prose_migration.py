@@ -1348,12 +1348,12 @@ def _indexed_term_runs(text: str) -> list[str]:
     ⚠️ ``_`` IS SPLIT HERE, and that is NOT the index's sense of it — the index
     treats it as a WORD character (MEASURED, #12360: `queryNodes('Object',
     'café_menu')` returns a record named ``café_menu`` as ONE term). Splitting it
-    is still right for THIS function's caller, because the question the probe
-    guard asks is *"does one typed token become several QUERY terms?"* — and
-    since #12360 an inner ``_`` does exactly that (``web_search`` ->
-    ``search|web|web_search``, the composite riding as an extra OR alternative).
-    ⚠️ NOT every inner ``_``: where the plain tokens all die (``a_bc``) the read
-    sends the escaped literal alone, exactly as before. So the runs
+    is still right for THIS function, whose question is *"what text does the read
+    send as terms?"* — and since #12360 an inner ``_`` makes the read emit MORE
+    than the composite (``web_search`` -> ``search|web|web_search``). ⚠️ But NOT
+    always: where at most one segment survives the tokeniser (``a_bc``) the read
+    sends ``a_bc`` alone, so ``_`` cannot be refused by run count and
+    :func:`probe_phrase_rejection` defers it to the read's own output. So the runs
     are the QUERY's runs, not the index's, for this one character; the refusal
     message says which of the two reasons fired.
     """
@@ -1481,32 +1481,28 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # run cannot be ONE indexed term, whatever the switch says. ``runs`` is
     # :func:`_indexed_term_runs`' unicode-aware split, so an accented letter is
     # not counted as a separator.
-    if len(runs) > 1:
-        # ⚠️ The two causes are NOT one problem, so the message DISCRIMINATES
-        # (#12360 review round 5, P3). An inner `_` really IS one indexed term —
-        # MEASURED ``build_or_query("x_y") == "x_y"`` (degenerate, so the read
-        # sends the literal) and ``build_or_query("web_search") ==
-        # "search|web|web_search"`` (the composite rides as an extra OR
-        # alternative) — while for any OTHER separator the ESCAPED literal cannot
-        # address one indexed term at all (``zx-99`` -> ``zx\-99``, which the index
-        # split). Before this wording BOTH clauses were stated unconditionally, so
-        # a probe the check 20 lines below would ACCEPT was refused with a false
-        # explanation.
-        has_us = "_" in token
-        has_other_sep = any(not (ch.isalnum() or ch == "_") for ch in token)
-        if has_us and not has_other_sep:
-            return (f"it splits into {len(runs)} alphanumeric runs {runs!r}; the "
-                    f"FTS index treats `_` as a WORD character (#12360), so a "
-                    f"token with an inner `_` IS one indexed term — but this read "
-                    f"either OR-expands it (`web_search` -> "
-                    f"`search|web|web_search`) or, where the plain segments all "
-                    f"die, sends the escaped literal (`x_y` -> `x_y`), so it "
-                    f"cannot be a ONE-TERM probe — pass a SINGLE RARE token (no "
-                    f"digits, dashes, underscores or punctuation inside it)")
+    # ⚠️ `_` IS NOT COVERED BY THIS GUARD, and the reason is measured (#12360
+    # review round 6, P3). The premise of the check below — "more than one
+    # alphanumeric run cannot be ONE indexed term" — is FALSE for `_`, because the
+    # index treats `_` as a word character. For a `_`-only token the read sends
+    # exactly one term and that term IS the index's own, in both arms:
+    # MEASURED ``build_or_query('a_bc') == 'a_bc'`` (the segment that survives is
+    # too short to stand alone, so the degenerate branch sends the literal) and
+    # ``build_or_query('web_search') == 'search|web|web_search'``. Refusing the
+    # first shape on this branch was a FALSE BLOCK — `a_bc`, `x_axis`, `a_web` are
+    # probes that work — and the round-5 attempt to justify it ("cannot be a
+    # ONE-TERM probe") was false for exactly those shapes. So a `_`-only token is
+    # deferred to the read's OWN answer, :func:`tortoise.sparse.build_or_query`,
+    # in the backstop below (which refuses it when the read emits several terms).
+    # ⛔ Not a licence for other separators: for `-`, `,`, `:` … the index really
+    # does split, so no single-term probe exists and this branch still refuses.
+    has_us = "_" in token
+    other_sep = any(not (ch.isalnum() or ch == "_") for ch in token)
+    if len(runs) > 1 and not (has_us and not other_sep):
         return (f"it splits into {len(runs)} alphanumeric runs {runs!r}; the "
                 f"FTS index splits on every non-alphanumeric character EXCEPT "
-                f"`_` (which it treats as a word character, #12360), so the "
-                f"escaped literal the read sends cannot address ONE indexed term "
+                f"`_` (which it treats as a word character, #12360), so a token "
+                f"carrying any other separator cannot address ONE indexed term "
                 f"at all — pass a SINGLE RARE token (no digits, dashes, "
                 f"underscores or punctuation inside it)")
     # ⛔ AND A TOKEN THE READ WILL **ESCAPE** IS NOT A PROBE (#11536 review

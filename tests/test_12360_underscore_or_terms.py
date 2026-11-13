@@ -309,6 +309,27 @@ class TestPin:
         monkeypatch.delenv(UNDERSCORE_ENV, raising=False)
         assert "web_search" in _or_terms(build_or_query("web_search"))
 
+    def test_a_probe_with_only_an_underscore_is_not_false_blocked(self):
+        """The probe guard's RUN-COUNT premise is false for `_`, so it defers.
+
+        A `_`-only token whose plain segments mostly die is sent by the read as
+        ONE term that the index holds (`a_bc` -> `a_bc`, `x_axis` -> `x_axis`),
+        so refusing it by run count was a false block with a false reason — the
+        round-6 finding. A token carrying any OTHER separator is still refused,
+        because there the index really does split.
+        """
+        from tortoise.session_source_prose_migration import probe_phrase_rejection
+
+        for shape in ("a_bc", "x_axis", "a_web", "aaaa_b"):
+            assert probe_phrase_rejection(shape) is None, shape
+            assert build_or_query(shape) == shape, shape
+        for shape in ("zx-99", "friday,", "a-b"):
+            assert probe_phrase_rejection(shape) is not None, shape
+        # a `_` run that the read DOES expand is still refused — by the read's
+        # own answer (`_café` -> `_café|_caf`), not by run count.
+        refusal = probe_phrase_rejection("_café")
+        assert refusal is not None and "expands" in refusal, refusal
+
     def test_a_garbage_switch_value_is_the_default_not_off(self, monkeypatch):
         monkeypatch.setenv(UNDERSCORE_ENV, "yes please")
         assert "web_search" in _or_terms(build_or_query("web_search"))
@@ -505,7 +526,6 @@ class TestLiveReachability:
             assert "o-12360-nonascii" in ids, (
                 f"{arm} arm lost a non-ASCII name it could find: "
                 f"{build_or_query(name)!r} -> {ids!r}")
-
 
 # ── the committed evidence ────────────────────────────────────────────────
 
