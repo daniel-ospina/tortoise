@@ -502,18 +502,23 @@ _UNRESOLVED = {
     # (`count(n)`, `sum(CASE …)`). Neither has a SET/CREATE/MERGE/DELETE/REMOVE,
     # neither calls a write procedure, and neither appends a journal record —
     # they exist to REPORT the propagation state, never to change it.
-    #
-    # ⛔ `_reachable_claim_count` is NOT in this set, and its absence is NOT
-    # "it stopped touching the handle" (#12138 §7). It still runs a full
-    # live-`:Point` id scan (`MATCH (n:Point) WHERE <non-operator> RETURN n.id`)
-    # on every call, then `_window_closure(anchors, max_hops)` and
-    # `_edged_claim_ids()`. What the #11823 extraction actually moved out of it
-    # was its OWN statement: the remaining literal — the anchor scan — is
-    # provable, while the edged predicate it depends on lives in
-    # `_edged_claim_ids`, whose row is above. Dropping the row from an audit
-    # whose question is "does this reach the write handle, and is it provably a
-    # read" would answer a WRITE-door audit with the wrong fact: the function
-    # still performs one id scan per call.
+    # ⛔ #12138 §7: the `_reachable_claim_count` row that used to sit here was
+    # dropped with the note "the function no longer touches the handle" — that
+    # note is FALSE and is corrected here. It STILL reaches the handle on every
+    # call: a full non-operator `:Point` id scan (`MATCH (n:Point) WHERE
+    # <non-operator> RETURN n.id` — DRAFTS INCLUDED; the closure SEED then drops
+    # them with the DRAFT-ONLY filter, `_window_closure`'s deliberate asymmetry:
+    # terminal/outdated window claims stay seeds on purpose, and `_live_only` is
+    # applied per hop, NOT at the seed — #12138 §7), then
+    # `_window_closure(anchors, max_hops)` and `_edged_claim_ids()`. What actually
+    # changed when the edged query was hoisted out is narrower: its OWN statement
+    # is now the literal anchor scan (resolvable, i.e. provably a read), while the
+    # unresolved edged predicate
+    # lives in `_edged_claim_ids` (the row BELOW this note). So the row moved
+    # because the UNRESOLVED TEXT moved, not because the handle reach went away —
+    # a write-door audit reading the old note would conclude this function does
+    # not query at all, and would answer a WRITE-door audit with the wrong fact:
+    # the function still performs one id scan per call.
     "_edged_claim_ids",
     "_propagation_counts",
     # #3590: `_refuse_ambiguous_rename` interpolates the LABEL into its probe

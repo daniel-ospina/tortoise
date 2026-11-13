@@ -317,6 +317,42 @@ def validate_manifest(
     # acceptance is the signal the declaration will work. Refuse it on THIS
     # route with the limitation named, so a pack author is told rather than
     # left with a pack that validates and never folds.
+    # #12060 guards — INERT ON THIS ROUTE, so they do not install (`statuses`/
+    # `folds` above is the same reasoning, and the same function). The write door
+    # runs `kind_guards.resolve(...)` with NO pack confusions, so the table it
+    # consults is `CORE_CONFUSIONS + _catalog_pack_guards()`, and the latter reads
+    # `domain_loader._get_registry()` — the process FILESYSTEM catalog. A hosted
+    # manifest lives as a `:PackManifest` in the tenant graph and never enters
+    # that registry, so a guard declared here is compiled by nothing at write
+    # time: measured (round-8 review P1) `resolve("w-12", "object", None,
+    # installed={"acme"})` ACCEPTED the write with the tenant guard absent from
+    # the table, and forcing it in made every own-namespace target skip
+    # `no-usable-home` because tenant kinds never enter `kind_index_sections()`.
+    # Acceptance is the signal the declaration will work, so refuse it here and
+    # name the limitation rather than ship a guard that cannot fire.
+    #
+    # ⛔ THIS READ MUST NOT RAISE, AND THE SHAPE IS **NOT** CHECKED HERE.
+    # (round-9 review P2 measured the RAISE: `ontology:` null / `core` / `[1,2]`
+    # became an unhandled `AttributeError` out of a bare `.get(...)`, i.e. a 500
+    # on the REST pre-check, which `hosted_api` calls with no try.)
+    # (round-13 review P3): this route refused those shapes with its own wording
+    # while `PackRegistry._validate` — the shared validator both surfaces use —
+    # still answered some of them with a raw `AttributeError` string, which is two
+    # owners of one rule and, measured, a divergence (`ontology.extraction` was
+    # refused here and accepted there). The registry now names the field, so this
+    # route inherits the message through `reg.errors[ns]` below.
+    _ont = raw.get("ontology")
+    if isinstance(_ont, dict) and _ont.get("guards"):
+        return ManifestValidation(
+            False, namespace=ns,
+            errors=["ontology.guards is not supported on a hosted (graph-native) "
+                    "tenant pack — the write-time guard table is compiled from "
+                    "the process filesystem catalog, which a tenant manifest "
+                    "never enters, so the guard would install and then be "
+                    "completely INERT. Install the pack self-hosted under "
+                    "TORTOISE_PACKS_DIR (where `tortoise pack validate` also "
+                    "gates it), or drop the guards block "
+                    "(tortoise#12060 hosted wiring is tracked separately)"])
     _fold_decls = _tenant_fold_declarations(raw)
     if _fold_decls:
         return ManifestValidation(
@@ -361,7 +397,6 @@ def validate_manifest(
             return ManifestValidation(
                 False, namespace=ns,
                 errors=[f"cannot install — {m}" for m in unresolved])
-
     return ManifestValidation(True, namespace=ns)
 
 
