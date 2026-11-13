@@ -2192,7 +2192,11 @@ NOT_A_REMOVAL_ROUTE = (
     "it as a contradiction. In that dangling state NEITHER route above works as written — "
     "`archive_symbol` reads the declaration and refuses without one, and `check` refuses to "
     "archive a name that is in that map — so restore the declaration from git FIRST, then "
-    "either keep it (a retirement) or freeze the code and delete it (a removal)."
+    "either keep it (a retirement), or — to REMOVE it — delete the map KEY before you archive "
+    "(the symbol is then an ordinary `TOOL_REGISTRY` row, so `archive_symbol` accepts it) and "
+    "only then delete the declaration again. Restoring the declaration and archiving WITHOUT "
+    "deleting the key is refused: the key that is still there makes the symbol a RETIREMENT "
+    "that is still SERVED. That key-first order is the one `CONTRIBUTING.md` states."
 )
 
 
@@ -2698,10 +2702,14 @@ def removal_report(
                     "no-record",
                     f"{symbol} (sdk) has no departure record: `--allow-removal` states the "
                     "rename but a caller of the old name needs the fail-closed `AttributeError` "
-                    "the map raises. Add the old name to `RETIRED_SDK_METHODS` / "
-                    "`REMOVED_SDK_METHODS` in `tortoise/sdk_retired.py` FIRST (that also runs "
-                    "the owner's approved-rename gates), then pass the same override — the "
-                    "map entry plus the override IS the record"
+                    "the map raises. For a RENAME add the old name to `RETIRED_SDK_METHODS` in "
+                    "`tortoise/sdk_retired.py` FIRST — that is the map the owner's "
+                    "approved-rename gates read — then pass the same override: the map entry "
+                    "plus the override IS the record and a rename needs no freeze. For a "
+                    "DEPARTURE with NO replacement a `REMOVED_SDK_METHODS` entry records it "
+                    "but does NOT clear this: the rename map is read alone, so the override "
+                    "changes nothing there and the code still has to be frozen (the map keeps "
+                    "no code)"
                 ))
                 continue
             if _waived_by_bare(symbol) and not _waived_by_qualified(symbol, cls):

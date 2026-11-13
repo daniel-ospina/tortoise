@@ -6754,3 +6754,142 @@ def test_a_bare_waiver_beside_a_QUALIFIED_one_is_not_the_two_surface_ambiguity()
     kinds = [p.kind for p in problems]
     assert kinds == ["no-record", "ambiguous-waiver"], problems
     assert "would waive 2 removals" in problems[1], problems
+
+
+def test_the_dangling_forward_REMEDY_runs_the_order_it_prints(tmp_path):
+    """The printed exit from the dangling-forward state must be EXECUTABLE, and key-first.
+
+    ⛔ F1 of the review at `2899c30e1e` (surviving at `62a8f3f773`): the paragraph closed by
+    telling the operator to "restore the declaration from git FIRST, then … freeze the code and
+    delete it", which is the REVERSE of what the writer accepts. With the declaration restored
+    the `RETIRED_USE_INSTEAD` KEY is still in the map, so the symbol is a RETIREMENT that is
+    still SERVED and `archive_symbol` refuses the freeze — the operator would follow the remedy
+    and meet the same contradiction again. `CONTRIBUTING.md` states the executable order
+    (delete the map KEY first, archive, then delete the declaration) and the printed twin said
+    the opposite. The pre-existing test asserted only that the paragraph was PRESENT, which
+    passes on any wording — round 15's lesson, one paragraph over.
+
+    So this runs the order, on a real scratch repo, in both directions.
+    """
+    from tools import archive_surface as arch
+
+    # The printed paragraph must NAME the order that the probe below proves works — a probe
+    # alone would pass with the paragraph still saying the reverse, which is exactly how the
+    # old wording survived a presence check.
+    sm = _load_manifest_tool()
+    assert "delete the map KEY before you archive" in sm.NOT_A_REMOVAL_ROUTE, (
+        "the paragraph no longer names the key-first order CONTRIBUTING.md states:\n"
+        + sm.NOT_A_REMOVAL_ROUTE
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / "archive").mkdir()
+    (repo / "archive" / "MANIFEST.json").write_text(
+        '{"schema": 1, "entries": []}\n', encoding="utf-8"
+    )
+    reg = repo / "tortoise" / "tool_registry.py"
+    reg.parent.mkdir()
+    decl = (
+        "from dataclasses import dataclass\n"
+        "\n"
+        "@dataclass(frozen=True)\n"
+        "class ToolDefinition:\n"
+        "    name: str\n"
+        "\n"
+        "TOOL_REGISTRY = [\n"
+        "    ToolDefinition(\n"
+        "        name='probe_fwd',\n"
+        "    ),\n"
+        "]\n"
+    )
+    reg.write_text(decl + "\nRETIRED_USE_INSTEAD = {'probe_fwd': 'probe_fwd_new'}\n")
+    _git(repo, "add", "tortoise/tool_registry.py", "archive/MANIFEST.json")
+    _git(repo, "commit", "-qm", "sources")
+    assert "probe_fwd" in arch._forward_names(repo)
+
+    # THE OLD ORDER (restore the declaration, then archive): refused, because the restored key
+    # makes the symbol a RETIREMENT that is still SERVED.
+    with pytest.raises(arch.ArchiveRefused) as refused:
+        arch.archive_symbol("mcp-tool", "probe_fwd", "probe-batch", "order probe", root=repo)
+    assert "still SERVED" in str(refused.value), refused.value
+
+    # THE ORDER THE PARAGRAPH NOW GIVES (delete the map KEY first): the same call succeeds.
+    reg.write_text(decl, encoding="utf-8")
+    _git(repo, "commit", "-qam", "drop the forward key, per CONTRIBUTING.md's order")
+    assert "probe_fwd" not in arch._forward_names(repo)
+    entry = arch.archive_symbol("mcp-tool", "probe_fwd", "probe-batch", "order probe", root=repo)
+    assert entry["kind"] == "mcp-tool" and entry["symbol"] == "probe_fwd", entry
+    assert (repo / entry["file"]).exists(), entry
+    assert "probe_fwd" in (repo / entry["file"]).read_text(encoding="utf-8")
+
+
+def test_the_SDK_map_entry_REMEDY_names_the_map_that_actually_clears_it():
+    """The ROW remedy must not offer the two OPPOSITE maps as interchangeable halves.
+
+    ⛔ F2 of the review at `2899c30e1e`, and the half round 21 did not reach: round 21 fixed the
+    CLOSING line (asserted elsewhere) but the row the same refusal prints still said "add the
+    old name to `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` … then pass the same override —
+    the map entry plus the override IS the record". `removal_records` populates `sdk_retired`
+    from BOTH maps and `sdk_renamed` from `RETIRED_SDK_METHODS` alone, and the no-freeze arm
+    reads `sdk_renamed` — so for a `REMOVED_SDK_METHODS` name (a departure with NO replacement)
+    the printed remedy changed NOTHING and printed the same refusal again, now demanding a
+    freeze. Both halves are RUN here, not quoted.
+    """
+    sm = _load_manifest_tool()
+
+    problems, _accounting = sm.removal_report(
+        {("probe_m", "sdk")},
+        set(),
+        {"archived": set(), "forward_raw": set(), "sdk_retired": set(), "sdk_renamed": set()},
+        allowed={"sdk:probe_m"},
+    )
+    assert len(problems) == 1 and problems[0].kind == "no-record", problems
+    row = str(problems[0])
+    assert "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`" not in row, (
+        "the row still offers the two opposite maps as interchangeable halves:\n" + row
+    )
+    # …and it does name the rename map, plus the departure map's own (different) requirement.
+    assert "`RETIRED_SDK_METHODS`" in row and "NO replacement" in row, row
+    # ⛔ NOT a bare `"freeze" in row.lower()`: the RENAME half of the same row says "a rename
+    # needs no freeze", so that assertion is satisfied by the OPPOSITE clause and deleting the
+    # departure requirement left the test GREEN (measured by mutation in the review of this
+    # very fix — the class of vacuous assertion this file exists to stop).
+    assert "does NOT clear this" in row, row
+    assert "still has to be frozen" in row, row
+
+    # HALF 1 — a `RETIRED_SDK_METHODS` name (a RENAME, replacement named) + the override IS the
+    # record: it clears, and needs no freeze.
+    problems, accounting = sm.removal_report(
+        {("probe_m", "sdk")},
+        set(),
+        {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"probe_m"},
+            "sdk_renamed": {"probe_m"},
+        },
+        allowed={"sdk:probe_m"},
+    )
+    assert problems == [], problems
+    assert accounting, "the rename was accepted without an accounting entry"
+
+    # HALF 2 — a `REMOVED_SDK_METHODS` name (a DEPARTURE) + the same override does NOT clear it:
+    # the row must not have implied it would.
+    problems, accounting = sm.removal_report(
+        {("probe_m", "sdk")},
+        set(),
+        {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"probe_m"},
+            "sdk_renamed": set(),
+        },
+        allowed={"sdk:probe_m"},
+    )
+    assert len(problems) == 1 and problems[0].kind == "no-record", problems
+    assert "FREEZE IT" in str(problems[0]), problems[0]
+    assert accounting == {}, accounting
