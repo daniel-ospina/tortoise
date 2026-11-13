@@ -3254,8 +3254,8 @@ def test_the_enumerator_returns_every_workflow_file_github_would_run():
     )
 
 
-def _glob_calls(source: str) -> list[tuple[int, str, list[str]]]:
-    """`(line, receiver, string literals)` for every `glob(`/`rglob(` call in `source`.
+def _glob_calls(source: str) -> list[tuple[int, str, str, list[str]]]:
+    """`(line, receiver, method, string literals)` for every `glob(`/`rglob(` call in `source`.
 
     ⛔ TOKENIZED, NOT TEXT-SCANNED — the third answer to this question rather than the first,
     and the same lesson `_yaml_run_scalars` records one screen up. Cut 1 matched
@@ -3277,7 +3277,7 @@ def _glob_calls(source: str) -> list[tuple[int, str, list[str]]]:
     pairing a `.yml` call with an unrelated `.yaml` call is how the previous cut's exemption was
     fail-open in one direction and false-red in the other.
     """
-    out: list[tuple[int, str, list[str]]] = []
+    out: list[tuple[int, str, str, list[str]]] = []
     tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
     for i, token in enumerate(tokens):
         if token.type != tokenize.NAME or token.string not in {"glob", "rglob"}:
@@ -3309,7 +3309,7 @@ def _glob_calls(source: str) -> list[tuple[int, str, list[str]]]:
             #: `"*"` (matches both, clean). Measured; the SCOPE states what fragments miss.
             elif inner.type == tokenize.FSTRING_MIDDLE:
                 literals.append(inner.string)
-        out.append((token.start[0], receiver, literals))
+        out.append((token.start[0], receiver, token.string, literals))
     return out
 
 
@@ -3414,12 +3414,17 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         `['*.yml']` and reds (a literally-spelled extension is one-sided however it is
         tokenized), while `glob(f"*{suffix}")` — this module's correct form — yields `['*']`,
         which matches both extensions and stays clean. What that CANNOT catch, declared: an
-        extension assembled from placeholders (`f"*{dot}yml"`, `glob("*" + ext)`), whose
-        fragments match neither witness stem on their own. Resolving those means executing the
-        code under test.
-      * a reader that never calls `glob` — `WORKFLOWS.iterdir()` filtered by suffix,
-        `os.listdir`, an `rglob` on an ancestor directory. Measured clean, and not pinnable from
-        source text without a dataflow analysis.
+        extension assembled from placeholders (`f"*{dot}yml"`, `glob("*" + ext)`). ⛔ The reason
+        is NOT that the fragments match nothing — `fnmatch("ci.yml", "*")` is true, so a lone
+        `"*"` fragment matches BOTH witness names. It is that fragments are graded
+        INDEPENDENTLY and never joined, so a symmetric fragment (`"*"`, `"yml"` alone) masks a
+        one-sided whole. Joining them would mean reconstructing the pattern the interpreter
+        builds, i.e. executing the code under test — and a naive join would false-red this
+        module's own `f"*{suffix}"`.
+      * a reader that never calls `glob`/`rglob` — `WORKFLOWS.iterdir()` filtered by suffix, or
+        `os.listdir`. Measured clean, and not pinnable from source text without a dataflow
+        analysis. (`rglob` IS graded: it is in the same NAME set as `glob`, and a recursive
+        enumeration of the workflows directory reds like any other one-sided glob.)
       * a both-extension pair spread across two DIFFERENT receivers. Pairing is per receiver, so
         that reads as one-sided. It is also the shape that would be a genuine bug — the two
         receivers need not name the same directory — so the red there is the safe direction.
@@ -3429,6 +3434,12 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         Measured, review round 5. Keying on the directory segment would close it and would red the
         legitimate pair whenever the two halves spell the directory differently, so it is declared
         instead.
+      * a one-sided pattern held in a LOCAL binding or a `__`-prefixed global rather than a
+        module-level constant (`globs = ("<star>.yml",)` inside a function, consumed by
+        `WORKFLOWS.glob(pattern)`). The constant arm reads module globals only, so a bare NAME
+        there has no literal in its span and no constant to resolve. Declared rather than
+        closed: the copyable idiom in this file IS module-level (`_SCRIPT_GLOBS`,
+        `_WORKFLOW_SUFFIXES`), which the arm does grade.
       * a `.yml`-only glob in this module that does NOT target workflows (a future config or
         fixture loader). It reds, and that is an OVER-BLOCK by choice: a receiver-based filter
         would have to guess which directories hold workflows, and every guess it got wrong in
@@ -3451,20 +3462,20 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
     #: unrelated `CONFIG.glob("<star>.yaml")` silence a narrow `WORKFLOWS.glob("<star>.yml")`.
     receivers_with_yml = {
         receiver
-        for _line, receiver, literals in calls
+        for _line, receiver, _method, literals in calls
         if receiver
         and any(_glob_matches(lit, yml_names) for lit in literals)
         and not any(_glob_matches(lit, yaml_names) for lit in literals)
     }
     receivers_with_yaml = {
         receiver
-        for _line, receiver, literals in calls
+        for _line, receiver, _method, literals in calls
         if receiver
         and any(_glob_matches(lit, yaml_names) for lit in literals)
         and not any(_glob_matches(lit, yml_names) for lit in literals)
     }
     one_sided: list[str] = []
-    for line, receiver, literals in calls:
+    for line, receiver, method, literals in calls:
         if not literals:
             continue
         opens_yml = any(_glob_matches(lit, yml_names) for lit in literals)
@@ -3475,7 +3486,7 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
             continue
         if opens_yaml and receiver in receivers_with_yml:
             continue
-        one_sided.append(f"line {line}: {(receiver or '<expression>')}.glob({literals!r})")
+        one_sided.append(f"line {line}: {(receiver or '<expression>')}.{method}({literals!r})")
     one_sided += [
         f"constant {label}"
         for label in _one_sided_workflow_pattern_constants(yml_names, yaml_names)
