@@ -594,3 +594,43 @@ def test_an_armed_gate_is_measurable_only_when_asked_for(monkeypatch, capsys):
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     assert cal.run(_run_ns(allow_reranked_baseline=True)) == 3
     assert "TORTOISE_DB_URI" in capsys.readouterr().err
+
+def test_every_artifact_reports_ms_per_pair_the_arithmetic_it_committed():
+    """⛔ The ARTIFACT's own arithmetic, not the brief's restatement of it.
+
+    ``config/ci-surfaces.yml`` says this file pins the artefacts' arithmetic
+    (``ms_per_pair`` = score_s / pairs_scored). It did not: the §5 test above
+    asserts that a figure APPEARS IN THE BRIEF, and replacing
+    ``1000.0 * score_s / pairs_scored`` with a wrong denominator in the
+    generators red nothing (measured — both survived). The committed numbers are
+    right today, so nothing wrong ships; what was missing is the guard on the
+    RATIO, which is the only figure a reader costs a budget with.
+
+    Derived from the artifacts alone, so it also catches a hand-edited cell:
+    every latency block that carries the trio must satisfy the identity.
+    """
+    doc = ROOT / "docs" / "research" / "2026-11-12-12297-rerank-calibration"
+    found: list[str] = []
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            if {"ms_per_pair", "score_s", "pairs_scored"} <= set(node):
+                expected = round(1000.0 * node["score_s"] / node["pairs_scored"], 3)
+                assert node["ms_per_pair"] == expected, (
+                    f"{path}: ms_per_pair {node['ms_per_pair']} != "
+                    f"1000 * {node['score_s']} / {node['pairs_scored']} "
+                    f"= {expected}")
+                found.append(path)
+            for key, value in node.items():
+                walk(value, f"{path}/{key}")
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                walk(value, f"{path}[{i}]")
+
+    for name in ("measurement-noun-path.json", "measurement-user-search.json",
+                 "measurement-lexical-control.json"):
+        walk(json.loads((doc / name).read_text()), name)
+    # non-vacuous: the three artifacts carry at least five latency blocks
+    # (noun 1, user 1, lexical 3) — a rename that emptied the walk would
+    # otherwise pass silently.
+    assert len(found) >= 5, found
