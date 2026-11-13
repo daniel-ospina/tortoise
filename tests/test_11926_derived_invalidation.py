@@ -301,6 +301,32 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_every_read_surface(sdk, 
     assert sdk.get_entity(made["point_id"])["status"] == "retracted"
 
 
+def test_a_truthy_NON_BOOLEAN_outdated_flag_is_terminal_like_is_terminal_status(sdk):
+    """The flag is read by ``bool()``, and the legacy population is why.
+
+    ``live.is_terminal_status``'s flag half is ``bool(outdated)``, and the Cypher
+    predicate (``coalesce(n.outdated, false) = false``) treats any non-``false``,
+    non-NULL value as terminal — so a legacy node holding ``outdated = 'true'``
+    (a STRING, which no in-repo writer produces but old graphs can carry) is
+    terminal to every flag-aware read surface. An identity test (``is True``)
+    called it LIVE: the same disagreement this arm exists to end, surviving on a
+    narrower population. The one value where ``bool()`` and Cypher still differ
+    (numeric ``0`` / ``""``: falsy in Python, terminal in Cypher) is the residual
+    ``is_terminal_status`` documents and #7075 rules unreachable in-repo.
+    """
+    i, t, g = _world(sdk, tag="legacy-outdated-truthy")
+    made = _judge(sdk, i, t, g)
+    sdk._get_proj().g.query(
+        "MATCH (n:Object) WHERE n.id = $id SET n.outdated = 'true'",
+        params={"id": t["id"]},
+    )
+    assert sdk.get_entity(t["id"])["outdated"] == "true"  # truthy, not boolean
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation.reason == "target-retired", v.invalidation
+    assert invalidate_stale(sdk, goal_id=g["id"])["counts"]["retired"] == 1
+    assert sdk.get_entity(made["point_id"])["status"] == "retracted"
+
+
 def test_the_LEGACY_outdated_FLAG_retires_an_input(sdk):
     """The OTHER legacy spelling: `outdated=true` with a LIVE status.
 

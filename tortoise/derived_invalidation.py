@@ -327,26 +327,45 @@ def _retirement(node: Any, *, goal: bool = False) -> str | None:
     if not isinstance(node, dict):
         return None
     status = node.get("status")
-    # ⛔ THE SHARED READ-SURFACE VOCABULARY, NOT THIS MODULE'S NARROWER ONE (#11926
+    # ⛔ THE RECALL LANE'S OWN OBJECT VOCABULARY, NOT THE NARROWER FOLD (#11926
     # review, P1). `commit_ops.OBJECT_TERMINAL_STATUSES` omits `outdated` — the
-    # legacy supersede/invalidate WORD — while ``live.TERMINAL_EXCLUDED_STATUSES``
-    # (what every retrieval leg, the EP factor extraction and this module's OWN
-    # ``invalidate`` filter on) includes it. Testing the narrower set meant an
-    # input retired with the legacy word read as HEALTHY and its derived state kept
-    # counting: measured, `update_entity(<goal>, status='outdated')` is an accepted
-    # public write, and the verdict came back ``None``. Agreement with the read
-    # surfaces is the invariant — if no reader will serve the input, no state
-    # derived from it may outlive it.
+    # legacy supersede/invalidate WORD — and the OBJECT family is SPLIT about it:
+    # the four retrieval legs and the recall view still SERVE an Object whose
+    # status is `outdated` (`search_engine._status_vocab_for`,
+    # `commit_ops.py:1472` states it: *"'outdated' IS visible — it is not in the
+    # object vocabulary, only in the POINT-terminal set"*), while the recall
+    # fold's own exclusion, ``assembly._RECALL_OBJECT_EXCLUDED_STATUSES``, is
+    # `OBJECT_TERMINAL_STATUSES | {"outdated"}` and is frozen by
+    # `tests/test_assembly_pure.py`.
+    #
+    # So this arm follows the RECALL lane, and the reason is STALENESS, not
+    # "every reader agrees": `outdated` is the legacy invalidate/stale word, and
+    # a state derived from an input carrying it is exactly the stale conclusion
+    # #11926 exists to retire (re-derivation mints a fresh claim, so nothing is
+    # lost). MEASURED red before this arm existed:
+    # `update_entity(<goal>, status='outdated')` is an accepted public write and
+    # the verdict came back ``None`` — HEALTHY, not `goal-retired`.
+    # `TERMINAL_EXCLUDED_STATUSES` = {retracted, superseded, outdated, archived} ∪
+    # {deprecated}: the first four are all writable on an Object and the last is
+    # legacy-only, so this is not over-broad (`draft`/`live` are not members).
     if isinstance(status, str) and status in TERMINAL_EXCLUDED_STATUSES:
         return f"its status is {status!r}"
     # The OTHER legacy spelling: `outdated=true` with a live status. No Object
     # WRITER sets it (``live._terminal_excluded`` passes
-    # ``include_outdated_flag=False`` for Objects for exactly that reason), so this
-    # shape only appears in legacy data — the population a retirement sweep must
-    # not serve as live. The claim's own lane already honours the flag
-    # (``invalidate`` -> ``claim.get("outdated") is True``), and the two lanes must
-    # not disagree about what "dead" means.
-    if node.get("outdated") is True:
+    # ``include_outdated_flag=False`` for Objects for that reason), so this shape
+    # only appears in legacy data — the population a retirement sweep must not
+    # serve as live.
+    #
+    # ⛔ READ BY ``bool()``, not ``is True``, and that is not a detail: it is how
+    # ``live.is_terminal_status``'s flag half reads it, and it is what the Cypher
+    # predicate agrees with on every BOOLEAN, NULL, non-empty string and non-zero
+    # number. An identity test diverges on a truthy non-boolean legacy value —
+    # a node holding `outdated = 'true'` is terminal to the flag-aware read
+    # surfaces and was LIVE here, which is the same disagreement this arm exists
+    # to end. The one place the two spellings differ in the OTHER direction
+    # (numeric ``0`` / ``""``: falsy here, terminal in Cypher) is the residual
+    # ``is_terminal_status`` documents and no in-repo writer can produce (#7075).
+    if bool(node.get("outdated")):
         return "its legacy outdated flag is set"
     successor = node.get("supersededBy") or node.get("superseded_by")
     if successor:
