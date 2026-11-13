@@ -70,8 +70,8 @@ The **wiring** it calibrates must respect, and does:
 
 ## 2. Method — the shipped configuration, not a second implementation
 
-**Noun path** — `tools/candidate_recall_11901.py --rerank` (arm 4, added on this
-branch; default OFF so the committed #11901 artifacts stay byte-identical).
+**Noun path** — `tools/candidate_recall_11901.py --rerank` (arm 5 — main's #12302 name-entropy
+gate holds arm 4 — added on this branch; default OFF so the committed #11901 artifacts stay byte-identical).
 
 - corpus: this box's own `~/.tortoise/session-events`, **18 files / 11,001
   lines**, harvested **111,059** definite + **10,820** ident + **4,226** path
@@ -244,12 +244,14 @@ draft of this section quoted 7.5 / 62.9 ms from a one-off micro-benchmark at loa
 2.7 that was never committed as an artifact — a number this document's own rule
 says it may not carry. Removed rather than defended.)
 
-⛔ **That table is an AD-HOC observation, not a recorded run** — the same status §6
-gives the 6.4 s model load: it is not in any committed artifact, and it was taken
-at loadavg **2.7** while the §5 run above ran at **14.0**, so it bounds the
-MECHANISM (text length drives the cost) rather than this run's ms/pair. Stated
-here for the same reason this section's provenance paragraph exists: a section may
-not present a number it does not carry as if it were carried.
+⛔ **This table IS carried** — each figure is a field in a committed artifact
+(named in its own row), which is the only reason it may stand here. What it does
+NOT carry is a load-matched comparison: the two runs were taken on different boxes
+under different load, so the RATIO bounds the mechanism (text length drives the
+cost) and neither absolute is a clean-box latency. (An earlier version of this
+paragraph called the table "an AD-HOC observation … at loadavg 2.7" — true of the
+7.5 / 62.9 ms micro-benchmark the table REPLACED, false of the table itself, and it
+contradicted the provenance paragraph seven lines above.)
 
 **And one honest gap in the artifact:** `measurement-user-search.json` was
 produced before `fused_rerank_gate_armed` was added to the report's `config`, so
@@ -268,7 +270,7 @@ the gate's default-off posture is what makes that scope enforceable.
 
 ## 6. Latency, at the real pool size, on CPU
 
-Measured over **39,930 pairs** in the arm-4 run (torch intra-op threads pinned to
+Measured over **39,930 pairs** in the arm-5 run (torch intra-op threads pinned to
 **1**). The count is the arm's own arithmetic, so it is checkable against §2/§3:
 **300 mentions × (15 + 40) = 16,500** exact-arm pairs + **426 variants × (15 + 40)
 = 23,430** variant pairs, recorded in `arms.rerank.latency.pairs_scored` beside
@@ -381,7 +383,7 @@ interface, so **only the scorer changes**. Two declared, untuned modes:
 | pool 40, exact arm | recall@3 | nDCG@10 | gained / lost | **ms/pair** |
 |---|---|---|---|---|
 | cross-encoder (`ms-marco-MiniLM-L6`) | 300/300 = **100.0 %** | 0.9865 | +56 / −0 | **5.463** |
-| lexical `difflib` | 300/300 = **100.0 %** | **1.0000** | +56 / −0 | **0.030** |
+| lexical `difflib` | 300/300 = **100.0 %** | **1.0000** | +56 / −0 | **0.031** |
 | lexical `overlap` | 300/300 = **100.0 %** | **1.0000** | +56 / −0 | **0.005** |
 
 | pool 15, exact arm | recall@3 | nDCG@10 | gained / lost |

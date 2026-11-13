@@ -41880,7 +41880,28 @@ class TortoiseSDK:
         # ⛔ Default OFF (``TORTOISE_FUSED_RERANK``): the shipped order is
         # byte-identical when the flag is unset, which is also why this costs
         # one env lookup rather than a batch read on every search.
-        if result_ids and rerank_pool_enabled() and (query or "").strip():
+        # ⛔ A CALLER-DECLARED RECENCY ORDER OUTRANKS A RELEVANCE REORDER. Step
+        # 4b above already ordered the fused list by date for a caller that asked
+        # for it (``recency_field`` + ``recency_boost``), and this block sorts on
+        # ``(-score, index)`` alone — so running it here demotes that multiplier
+        # to an exact-tie tie-break and INVERTS the page. Measured before this
+        # guard, end to end (5 points, ``recency_field="createdAt"``,
+        # ``recency_boost=10``, a positionally-descending scorer): gate off →
+        # newest→oldest, gate on → exactly REVERSED, and the trace said "ok" —
+        # no degrade, no disclosure. The skip is DISCLOSED for the same reason
+        # the degrade arms below are: an opted-in lever that declined to run must
+        # not be indistinguishable from one that was never switched on.
+        _rr_recency_conflict = bool(recency_field and recency_boost > 0)
+        if (result_ids and rerank_pool_enabled() and (query or "").strip()
+                and _rr_recency_conflict and status_trace is not None):
+            status_trace.append(dict(
+                _trace_entry("rerank", ran=False, degraded=False,
+                             reason="recency_order_requested", count=0),
+                **{RERANK_POOL_KEY: fused_rerank_pool_width(),
+                   RERANK_SCORED_KEY: 0,
+                   RERANK_UNSCORED_KEY: len(result_ids)}))
+        if (result_ids and rerank_pool_enabled() and (query or "").strip()
+                and not _rr_recency_conflict):
             # ONE width for the batch read AND the scorer (#12297 review): the
             # knob used to be resolved only inside ``rerank_pool``, so a
             # configured width ABOVE the default was silently unreachable —

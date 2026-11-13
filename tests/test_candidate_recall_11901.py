@@ -1441,8 +1441,10 @@ def test_the_control_artifact_covers_both_pools_and_all_three_scorers(lexical):
             assert exact["mentions"] == lexical["corpus"]["sample"], (
                 f"{arm}/{pool}: {exact['mentions']} mentions scored against a "
                 f"sample of {lexical['corpus']['sample']}")
-            assert exact["pairs_scored"] == exact["mentions"] * int(pool) or (
-                exact["pairs_scored"] >= 0)
+            # ⛔ No `or (… >= 0)` escape hatch: that clause is True for every
+            # non-negative count, so IT — not the equality — decided the
+            # assertion, and a wrong pair count in a future artifact passed.
+            assert exact["pairs_scored"] == exact["mentions"] * int(pool)
     for arm in ("lexical_difflib", "lexical_overlap"):
         assert "lexical_control" in arms[arm], (
             f"{arm} does not carry the note saying it is a control")

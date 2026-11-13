@@ -720,3 +720,56 @@ def test_a_row_returned_with_NO_TEXT_is_not_scored(sdk, monkeypatch):
     assert injected, "the stubbed row never entered the pool, so nothing was tested"
     assert entry[rerank.RERANK_UNSCORED_KEY] >= 1, entry
     assert entry[rerank.RERANK_SCORED_KEY] <= 4, entry
+
+
+class _Positional:
+    """Scores the LAST row highest — the worst case for a recency page."""
+
+    def score(self, query, texts):
+        n = len(texts)
+        return [float(i - n) for i in range(n)]
+
+
+def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
+        sdk, monkeypatch):
+    """#12297 — step 4b's recency order has the last word when a caller asks.
+
+    ``recency_field`` + ``recency_boost`` re-rank the fused set by date BEFORE
+    this block, and this block sorts on ``(-score, index)`` alone. Without a guard
+    the multiplier is demoted to an exact-tie tie-break and the page comes back
+    INVERTED — measured before the fix: newest→oldest with the gate off, exactly
+    REVERSED with it on, and the trace said ``ok`` (no degrade, no disclosure).
+    Both halves are asserted: the ORDER is unchanged, and the skip is DISCLOSED.
+    """
+    nonce = uuid.uuid4().hex[:8]
+    q = f"zebra {nonce}"
+    ids = []
+    for i in range(5):
+        pt = sdk.create_point(kind="statement",
+                              content=f"{q} recency probe {i}")
+        pid = pt["id"] if isinstance(pt, dict) else pt.id
+        # distinct increasing timestamps, so "newest" is unambiguous
+        sdk.update_point(pid, properties={"createdAt": f"2026-01-0{i + 1}"})
+        ids.append(pid)
+
+    off = [r["id"] for r in sdk.tortoise_fts_query(
+        q, entity_type="point", limit=5, recency_field="createdAt",
+        recency_boost=10.0)]
+    assert off, "premise: the read must return rows at all"
+    assert off == sorted(off, key=ids.index, reverse=True), (
+        "premise: step 4b must order newest-first WITHOUT the rerank "
+        f"(off={off})")
+
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    _inject(_Positional(), monkeypatch)
+    trace: list[dict] = []
+    on = [r["id"] for r in sdk.tortoise_fts_query(
+        q, entity_type="point", limit=5, recency_field="createdAt",
+        recency_boost=10.0, leg_trace=trace)]
+    assert on == off, (
+        "the rerank inverted a caller-declared RECENCY order — it must not run "
+        f"when recency_field/recency_boost are set (off={off} on={on})")
+    entries = _rerank_entries(trace)
+    assert entries and entries[0]["ran"] is False, (
+        f"the skip must be disclosed in the leg trace, not silent ({entries})")
+    assert entries[0]["reason"] == "recency_order_requested", entries[0]
