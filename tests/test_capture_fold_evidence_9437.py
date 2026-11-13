@@ -1064,7 +1064,7 @@ def test_a_derived_embedding_is_structural_so_a_fold_never_claims_it_dropped():
     the projection mints no vector at all, so the prop is absent and both arms
     are VACUOUS for this class. That is exactly how the red this case closes
     survived: measured #12323, `test (i)` red on every PR at `f33f5e2c32` with
-    `['embedding']`, while the same suite passed **99/99** locally with no model
+    `['embedding']`, while THIS FILE passed **99/99** locally with no model
     provisioned. A guard that only fires where the optional dependency is
     installed re-creates the bug for the next runner, so this case INJECTS the
     prop and pins the declaration on every box.
