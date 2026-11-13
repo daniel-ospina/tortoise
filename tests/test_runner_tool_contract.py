@@ -3269,7 +3269,9 @@ def _glob_calls(source: str) -> list[tuple[int, str, list[str]]]:
     attribute) immediately followed by `(`; the argument span is found by counting PAREN
     TOKENS, so a paren or quote inside a string cannot unbalance it; the patterns are the
     STRING tokens in the span, `ast.literal_eval`-ed. An f-string is tokenized as
-    FSTRING_START/MIDDLE/END, so it yields no pattern — declared in the test's SCOPE.
+    FSTRING_START/MIDDLE/END, so its literal FRAGMENTS are what the source holds — they are
+    collected as FRAGMENTS (never joined into a pattern, which only executing the code could
+    produce), and the test's SCOPE states exactly what that does and does not reach.
 
     `receiver` is the NAME before the dot (`WORKFLOWS` in `WORKFLOWS.glob(…)`), and it matters:
     pairing a `.yml` call with an unrelated `.yaml` call is how the previous cut's exemption was
@@ -3301,6 +3303,10 @@ def _glob_calls(source: str) -> list[tuple[int, str, list[str]]]:
                     continue
                 if isinstance(value, str):
                     literals.append(value)
+            #: FRAGMENTS, NOT PATTERNS: an f-string's literal middle is the only part of it the
+            #: source holds, so it is collected as a fragment and graded as one — `f"*.yml"`
+            #: yields `"*.yml"` (one-sided, reds) while the module's own `f"*{suffix}"` yields
+            #: `"*"` (matches both, clean). Measured; the SCOPE states what fragments miss.
             elif inner.type == tokenize.FSTRING_MIDDLE:
                 literals.append(inner.string)
         out.append((token.start[0], receiver, literals))
@@ -3402,9 +3408,15 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
     SCOPE, so a green run is not read as more than it is — what stays out of reach, declared
     rather than implied:
 
-      * a pattern COMPUTED at runtime from a non-literal (`glob(f"*{suffix}")`, this module's own
-        correct form). An f-string is tokenized as FSTRING_* tokens, so there is no pattern in
-        the source to grade; resolving it means executing the code under test.
+      * an f-string's pattern as a WHOLE. The source holds only its literal FRAGMENTS
+        (FSTRING_START/MIDDLE/END), so those are what `_glob_calls` collects — graded as
+        fragments, never joined. Measured on this file's own forms: `glob(f"*.yml")` yields
+        `['*.yml']` and reds (a literally-spelled extension is one-sided however it is
+        tokenized), while `glob(f"*{suffix}")` — this module's correct form — yields `['*']`,
+        which matches both extensions and stays clean. What that CANNOT catch, declared: an
+        extension assembled from placeholders (`f"*{dot}yml"`, `glob("*" + ext)`), whose
+        fragments match neither witness stem on their own. Resolving those means executing the
+        code under test.
       * a reader that never calls `glob` — `WORKFLOWS.iterdir()` filtered by suffix,
         `os.listdir`, an `rglob` on an ancestor directory. Measured clean, and not pinnable from
         source text without a dataflow analysis.
