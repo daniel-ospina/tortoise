@@ -467,32 +467,34 @@ def build_report(
                 )
             )
         else:
-            # ⛔ `info.version` ALONE IS NOT "resolves" (#12363 round 14). `pip install
-            # tortoise-client` (README's documented command, UNPINNED) resolves from the
-            # latest release's FILES, not from the version string, and PEP 592 skips yanked
-            # files for an unpinned requirement. So a release that advertises a version but
-            # ships no installable file — a file deleted after publish, the release record
-            # created before its upload, every file yanked — fails for 100% of users while
-            # this arm reported PASS, filed nothing, and (because the close gate reads
-            # `exit_code == '0'`) actively RESOLVED the release-owed ledger. Measured:
-            # `build_report` with `releases: {"0.2.0": []}` and with the only file
-            # `yanked: True` both returned `Verdict: PASS` / `exit_code 0` before this.
-            # The ENGINE arm was never fooled the same way only because pip has to INSTALL
-            # it; the client arm has no install and no probe, so the file list IS its only
-            # evidence. Same defect class the module docstring names at "no files uploaded
-            # for `info.version`, every file yanked", which it claimed to catch.
-            installable = [
-                entry
-                for entry in release_files(client_doc, client_version)
-                if not entry.get("yanked")
+            # ⛔ THE CRITERION IS "DOES THE UNPINNED REQUIREMENT RESOLVE", not "does the latest
+            # release have a file" (#12363 round 15). `pip install tortoise-client` is
+            # UNPINNED, so pip ignores yanked releases (PEP 592 skips them for a requirement
+            # that a non-yanked version can satisfy) and resolves to the highest release that
+            # still has an installable file. Round 14 checked ONLY `info.version`'s file
+            # list, which is the wrong scope in both directions:
+            #   * latest yanked, an older release installable → pip RESOLVES (to the older
+            #     release) while that arm FAILed with "README.md documents `pip install
+            #     tortoise-client`, which cannot resolve" — a false statement that orders an
+            #     irreversible release, fired by a maintainer doing exactly what PyPI
+            #     prescribes for a broken release (yank it);
+            #   * latest installable → OK either way.
+            # So the question is asked across the WHOLE release map: any release with a
+            # non-yanked file means the documented install resolves. Only when NO release has
+            # one is the arm red, which is the one state where the sentence above is true.
+            resolvable = [
+                version
+                for version, files in (client_doc.get("releases") or {}).items()
+                if isinstance(files, list)
+                and any(isinstance(entry, dict) and not entry.get("yanked") for entry in files)
             ]
-            if installable:
+            if resolvable:
                 report.add(
                     Arm(
                         "client-published",
                         OK,
-                        f"{CLIENT_PACKAGE} resolves on the index ({client_version}, "
-                        f"{len(installable)} installable file(s))",
+                        f"{CLIENT_PACKAGE} resolves on the index (unpinned → "
+                        f"{client_version}; installable: {', '.join(sorted(resolvable))})",
                     )
                 )
             else:
@@ -501,8 +503,8 @@ def build_report(
                     Arm(
                         "client-published",
                         FAIL,
-                        f"the {CLIENT_PACKAGE} index advertises {client_version} but lists "
-                        f"NO installable file for it ({listed} file(s), none usable) — README.md "
+                        f"the {CLIENT_PACKAGE} index lists NO installable file in ANY release "
+                        f"({listed} file(s) on {client_version}, none usable) — README.md "
                         f"documents `pip install {CLIENT_PACKAGE}`, which cannot resolve",
                     )
                 )
@@ -719,13 +721,32 @@ def install_and_run(
     home = workdir / "home"
     home.mkdir(parents=True, exist_ok=True)
     env = _clean_env(home)
-    if wheel is not None:
-        # WHEEL mode — the pre-publish gate. Install the exact bytes that are
-        # about to be uploaded, by path: an index-fetched package here would
-        # test the PREVIOUS release instead of this build.
-        spec = str(Path(wheel).resolve())
-    else:
-        spec = f"{package}=={version}" if version else package
+    # WHEEL mode (`wheel is not None`) — the pre-publish gate — installs the exact bytes that
+    # are about to be uploaded, by path: an index-fetched package here would test the
+    # PREVIOUS release instead of this build.
+    #
+    # ⛔ INDEX mode is UNPINNED, because that is the DOCUMENTED command (#12363 round 15). This used to
+    # run `f"{package}=={version}"` with `version = info.version`, which is a DIFFERENT
+    # question from `pip install tortoise-graph` in exactly the case that matters.
+    # PyPI yanks WHOLE RELEASES, and `info.version` keeps naming a yanked release. For
+    # an exact `==` pin pip INSTALLS THE YANKED FILE (it prefers the pin over the yank
+    # rule); for the unpinned requirement it IGNORES the yanked release and resolves to
+    # the previous one, or fails outright if no other release has an installable file.
+    # Measured with pip against a local PEP 503 page whose only release is yanked:
+    #   `pip download <name>`           → "Ignored the following yanked versions: 0.3.0"
+    #                                     "No matching distribution found"
+    #   `pip download <name>==0.3.0`    → resolves the yanked release (accepted, then
+    #                                     failed only on the fixture's empty file)
+    # So the pinned form reported PASS over bytes no unpinned user could ever get, and —
+    # because the close gate reads `exit_code == '0'` — RESOLVED both alert ledgers on a
+    # run whose documented install is impossible. It cut the other way too: with the
+    # latest release yanked-and-broken and an older good one, the pinned form tested bytes
+    # nobody receives.
+    # The arm's whole job is the documented path, so it now runs the documented spec.
+    # `version` is still used by `_main` for the release-age row (informational, never
+    # gated) — do not thread it back in here.
+    spec = str(Path(wheel).resolve()) if wheel is not None else package
+
     transcript: list[str] = []
 
     def flush() -> None:

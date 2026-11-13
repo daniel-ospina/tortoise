@@ -265,70 +265,113 @@ def test_a_client_document_with_no_version_is_red_not_ok():
 # --------------------------------------------------------------------------
 
 
-def test_a_client_version_with_no_INSTALLABLE_file_is_red_not_ok():
-    """`info.version` alone is not "resolves": the FILES are what pip resolves (#12363 round 14).
+def test_a_client_version_with_no_INSTALLABLE_file_in_ANY_release_is_red():
+    """The question is "does the UNPINNED requirement resolve", asked across the WHOLE release map (#12363 rounds 14 and 15).
 
-    `pip install tortoise-client` is UNPINNED, so it resolves from the latest release's file
-    list, and PEP 592 makes pip skip yanked files for an unpinned requirement. A release that
-    advertises a version but ships no usable file — a file deleted after publish, the release
-    record created before its upload, every file yanked — fails for 100% of users.
+    `pip install tortoise-client` is UNPINNED, so pip IGNORES a yanked release (PEP 592) and
+    resolves to the highest release that still has an installable file. Two earlier readings
+    of this arm were wrong, and both are pinned here:
 
-    Measured BEFORE the fix: both shapes below returned `Verdict: PASS` / `exit_code 0`, filed
-    nothing, and — because the close gate now reads `exit_code == '0'` — actively RESOLVED the
-    release-owed ledger. The engine arm cannot be fooled the same way only because pip has to
-    INSTALL it; this arm has no install and no probe, so the file list is its only evidence.
+      * `info.version` ALONE (round 14's predecessor): a release that advertises a version and
+        ships no file read PASS, filed nothing, and — with the close gate on
+        `exit_code == '0'` — RESOLVED both ledgers. The engine arm was never fooled only
+        because pip has to install it.
+      * `info.version`'s FILE LIST (round 14): wrong SCOPE in the other direction. With the
+        latest release yanked and an older one installable, pip resolves fine, yet that arm
+        FAILed with "README.md documents `pip install …`, which cannot resolve" — a false
+        statement that orders an irreversible release, fired by a maintainer doing exactly what
+        PyPI prescribes for a broken release. Measured with pip: the unpinned requirement
+        resolves to the older release, and yanking is whole-release on PyPI.
+
+    So: red only when NO release has a non-yanked file — the sole state where the sentence is
+    true — and green when any release does, naming which.
     """
-    empty_release = {"info": {"version": "0.2.0"}, "releases": {"0.2.0": []}}
-    all_yanked = {
-        "info": {"version": "0.2.0"},
-        "releases": {
-            "0.2.0": [
-                {
-                    "filename": "tortoise_client-0.2.0-py3-none-any.whl",
-                    "yanked": True,
-                    "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
-                }
-            ]
-        },
-    }
-    for doc, why in ((empty_release, "no files"), (all_yanked, "only-yanked")):
-        report = canary.build_report(
+
+    def _report(releases: dict) -> object:
+        return canary.build_report(
             engine_doc=_engine_doc(),
-            client_doc=doc,
+            client_doc={"info": {"version": "0.3.0"}, "releases": releases},
             tree_version="0.2.0",
             init_arm=_ok_init_arm(),
             now=NOW,
         )
+
+    good = {
+        "filename": "tortoise_client-0.2.0-py3-none-any.whl",
+        "yanked": False,
+        "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
+    }
+    yanked = {
+        "filename": "tortoise_client-0.3.0-py3-none-any.whl",
+        "yanked": True,
+        "upload_time_iso_8601": "2026-09-01T00:00:00Z",
+    }
+
+    # RED: nothing installable anywhere — the documented command cannot resolve.
+    for releases, why in (
+        ({"0.3.0": []}, "empty release"),
+        ({"0.3.0": [yanked]}, "only-yanked"),
+        ({}, "no releases at all"),
+    ):
+        report = _report(releases)
         arm = report.get("client-published")
         assert arm.status == canary.FAIL, (why, arm.status, arm.detail)
-        assert report.verdict == canary.FAIL, (why, report.verdict)
         assert report.exit_code == 1, (why, report.exit_code)
-        assert "installable" in arm.detail, (why, arm.detail)
+        assert "any release" in arm.detail.lower(), (why, arm.detail)
 
-    # NON-VACUITY: one real file certifies the arm, so the pin cannot be satisfied by a
-    # blanket FAIL. (Without this arm a `return FAIL` would pass every case above.)
-    healthy = {
-        "info": {"version": "0.2.0"},
-        "releases": {
-            "0.2.0": [
-                {
-                    "filename": "tortoise_client-0.2.0-py3-none-any.whl",
-                    "yanked": False,
-                    "upload_time_iso_8601": "2026-08-08T00:30:10.719404Z",
-                }
-            ]
-        },
-    }
-    ok_report = canary.build_report(
-        engine_doc=_engine_doc(),
-        client_doc=healthy,
-        tree_version="0.2.0",
-        init_arm=_ok_init_arm(),
-        now=NOW,
+    # GREEN: the latest release is yanked but an older one is installable — pip resolves, so
+    # the arm must NOT claim the documented install cannot resolve (round 15's false FAIL).
+    report = _report({"0.3.0": [yanked], "0.2.0": [good]})
+    arm = report.get("client-published")
+    assert arm.status == canary.OK, (arm.status, arm.detail)
+    assert report.exit_code == 0, report.exit_code
+    assert "0.2.0" in arm.detail, arm.detail
+
+    # GREEN: the ordinary healthy shape.
+    assert _report({"0.3.0": [good]}).get("client-published").status == canary.OK
+
+
+def test_index_mode_installs_the_DOCUMENTED_unpinned_spec(tmp_path):
+    """`pip install tortoise-graph`, not `tortoise-graph==info.version` (#12363 round 15).
+
+    The pinned form is a different question from the documented command in exactly the case
+    that matters: PyPI yanks WHOLE RELEASES and `info.version` keeps naming the yanked one, so
+    pip INSTALLS the yanked file for an exact `==` pin and IGNORES it — resolving to the
+    previous release, or failing — for the unpinned requirement. Measured with pip against a
+    local PEP 503 page whose only release is yanked: unpinned → "Ignored the following yanked
+    versions … No matching distribution found"; `==<yanked>` → resolves it.
+
+    Consequence of getting this wrong, measured on the pre-fix code: a fully-yanked latest
+    release installed and ran, the verdict was PASS / exit 0, and `report`'s close gate
+    RESOLVED both alert ledgers on a run whose documented install is impossible.
+    """
+    captured = {}
+
+    def runner(cmd, **kwargs):
+        if cmd[1:3] == ["-m", "venv"]:
+            venv = Path(cmd[3])
+            (venv / "bin").mkdir(parents=True, exist_ok=True)
+            (venv / "bin" / "pip").write_text("")
+            return _completed(cmd, 0)
+        if str(Path(cmd[0]).name) == "pip":
+            captured["cmd"] = cmd
+        return _completed(cmd, 0)
+
+    canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=runner,
     )
-    assert ok_report.get("client-published").status == canary.OK, ok_report.get(
-        "client-published"
-    ).detail
+    pip_call = captured.get("cmd")
+    assert pip_call, "the install never ran"
+    assert "tortoise-graph" in pip_call, pip_call
+    assert not any(arg.startswith("tortoise-graph==") for arg in pip_call), (
+        "index mode must install the DOCUMENTED unpinned requirement — a `==` pin installs a "
+        "yanked release that no unpinned user can get, and reports PASS over bytes nobody "
+        f"receives: {pip_call}"
+    )
 
 
 def test_wheel_mode_gates_the_run_and_does_not_consult_the_index():
