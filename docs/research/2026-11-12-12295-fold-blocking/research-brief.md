@@ -21,8 +21,15 @@ sha anyway (the pin's own comment records that, and is why it asserts the note's
 content-equivalence rather than an ancestry). What replaces it as the anchor is CONTENT, which is
 checkable without any sha being reachable: on a docstring-stripped AST compare,
 `tortoise/entity_resolver.py` and `tortoise/extractor_v2.py` are **identical** between
-`dcb43345a3b6` and this head, and `tortoise/entity_blocking.py` differs **only** by the two label
-changes named below. ⛔ This paragraph also named the `437d…`-generation shas (a first rebase
+`dcb43345a3b6` and the PRE-MERGE tip `b6a630d57d` (verified at this head: the docstring-stripped
+AST compare returns equal for both files there, and unequal against this head), and
+`tortoise/entity_blocking.py` differs only by the two label changes named below **plus this PR's
+own `P`-key delegation** (behaviour-identical: `block_key` is exactly the old
+`key[:MIN_BLOCK_CHARS]`, guarded by the same length test). ⛔ The anchor is the pre-merge tip, NOT
+"this head": the forward merge of `42409813a7` (`#12348`) landed real statements in both files
+(+1019 lines in `extractor_v2.py`, +156 in `entity_resolver.py`), so the figures in this brief
+describe the tree BEFORE that merge. Reproducing them on `dcb43345a3b6` or on this head measures a
+different tree than the note promises — say which tree you reproduced on. ⛔ This paragraph also named the `437d…`-generation shas (a first rebase
 generation, now dangling) until #12304 review round 10, for the same reason they are not named here
 now: a sha no ref serves is not provenance, and quoting one in full makes it look like it is.
 ⛔ And a reader should NOT expect the obvious guard: an "every quoted sha resolves" arm was
@@ -59,7 +66,10 @@ reaches the fallback: the harness calls
 three times already, so `grep -n` for the symbol in `tools/candidate_recall_11901.py` is the
 check), so the `label is None` branch is not taken. Nothing further is claimed about the
 range's contents: the two `git log -S` invocations above are the proof offered, and they
-answer only WHICH commits the two label changes are.
+answer only WHICH commits the two label changes are. ⛔ A THIRD statement change is NOT theirs and
+is not a measurement input: this PR's own conflict sweep made `block_keys` call
+`entity_resolver.block_key` instead of re-spelling `key[:MIN_BLOCK_CHARS]` (behaviour-identical —
+same output, same length guard), so a `git log -S` over the old slice will not find it.
 
 ⛔ **THE SCOPE ABOVE IS THE PRODUCT CODE — NOT THE HARNESS, WHICH ALSO MOVED.** The code that
 PRODUCES this artifact is `tools/candidate_recall_11901.py`, and `git diff --stat e9a572d4b4
