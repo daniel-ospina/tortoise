@@ -2646,8 +2646,7 @@ async def _resolve_graph_argument(ref: str | None,
             # the dispatch is never created. Hence a self-contained message
             # rather than that prefix with a different parenthetical.
             raise ToolError(
-                "The graph lookup for this request did not finish inside the "
-                "time it had left, so the call was not executed. "
+                f"{_mcp_auth._REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE}"
                 f"Retry after {_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s."
             ) from None
         # No time left at all (the transport had already spent the bound): keep

@@ -4108,6 +4108,16 @@ surfaces:
   # classified.
   - test_ci_preview_isolation.py
   - test_client_cli_probe.py
+  # #11153 review round 9: the minutes→CRM bridge's REFUSAL accounting (partial
+  # landed ids, the `partial` vs `failed` term, the escape-between-writes arm).
+  # Registered `core` and NOT only `api` like test_bridge_mcp.py, because a diff
+  # that touches `integrations/crm/twenty/bridge.py` and nothing else selects
+  # `core` (the bridge is a CORE_ALSO path in tools/ci_selection.py) — so an
+  # `api`-only entry leaves the guard asleep on exactly the file it guards, the
+  # silent-green class #2938 curated. The file is monkeypatch-only: no DB, no
+  # daemon, no network, so `core` (the default surface) is where it belongs; the
+  # daemon-backed end-to-end push stays in test_bridge_mcp.py under `api`.
+  - test_11153_bridge_refusal_accounting.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;
   # this `core` entry is the fallback arm (core is only added when nothing else matched),

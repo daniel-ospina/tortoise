@@ -943,23 +943,42 @@ class MCPReader:
         """
         args: dict[str, Any] = {"type": "events", "limit": limit}
         if not self.graph:
-            return C.normalise_tool_result(self._call("tortoise_get_entity", dict(args)))
+            return C.normalise_tool_result(self._event_call(dict(args)))
         try:
             res = C.normalise_tool_result(
-                self._call("tortoise_get_entity", {**args, "graph": self.graph}))
+                self._event_call({**args, "graph": self.graph}))
         except Exception as exc:
             reason = _unlabelled_refusal(exc)
             if not _looks_like_graph_refusal(reason):
                 raise
             self._note(f"the Event read: the explicit graph argument was refused "
                        f"({reason[:160]}); read from the credential's own graph instead")
-            return C.normalise_tool_result(self._call("tortoise_get_entity", dict(args)))
+            return C.normalise_tool_result(self._event_call(dict(args)))
         reason = _error_of(res)
         if reason and _looks_like_graph_refusal(reason):
             self._note(f"the Event read: the explicit graph argument was refused "
                        f"({reason[:160]}); read from the credential's own graph instead")
-            return C.normalise_tool_result(self._call("tortoise_get_entity", dict(args)))
+            return C.normalise_tool_result(self._event_call(dict(args)))
         return res
+
+    def _event_call(self, args: dict[str, Any]) -> Any:
+        """One Event-layer read, with a refusal re-raised UNDER its layer name.
+
+        ⛔ Same AST constraint as `_section_call`: `self._call("tortoise_get_entity", …)`
+        stays a LITERAL call so `tests/test_curation_11469.py`'s registry audit still
+        reads the tool name out of this file.
+
+        The LABEL matters on this shape (#11153 review round 9): `read_events` labelled
+        its in-band `_error_of` arm but a client-raised refusal came out of
+        `_get_entities` bare, so an operator saw `Team points limit reached (25000)`
+        with no indication which of the five census reads died — the same gap rounds
+        3–4 closed for `_section`, `read_points` and the operator layer.
+        """
+        try:
+            return self._call("tortoise_get_entity", args)
+        except C.CurationRefused as exc:
+            raise C.CurationRefused(
+                f"read of the Event layer was refused: {str(exc)[:300]}") from exc
 
     def _operator_call(self, args: dict[str, Any], label: str) -> Any:
         """One operator-layer read, with a refusal re-raised UNDER its label.
@@ -991,9 +1010,19 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
     ⚠️ NARROW ON PURPOSE: fastmcp raises `ToolError` for ANY error result, including
     a server-side crash (`Error calling tool: TypeError: …`). Translating that into
     a refusal would report a crash as a DESIGNED rc-3 refusal, so a driver paging
-    on rc 1 ("the run crashed") would stay silent. Only a message that parses as
-    the surface's refusal envelope (`{"error": …}` — the text of a `_safe` payload)
-    is translated; everything else is re-raised untouched.
+    on rc 1 ("the run crashed") would stay silent. So the translation is keyed on
+    `_is_refusal_envelope` → `tortoise.mcp_client.refusal_message`, whose matched
+    set is BOTH shapes a designed refusal arrives in: the JSON error envelope
+    (`{"error": …}`, the text of a `_safe`/`_quota_gated` payload) AND the prose
+    refusals listed in `tortoise.mcp_auth.REFUSAL_PROSE_MESSAGES` (all three
+    transport wait-bound arms — dispatched, never-dispatched, and a refused WRITE —
+    plus the graph-lookup margin arm and the sensitive-op rate-limit 429) — matched
+    by PREFIX, not equality, because a wrapped message keeps its prefix. A `-32009`
+    prose refusal is the ROUTINE answer for an
+    expensive census read, so dropping the prose arm silently turned it back into a
+    crash (the round-4 bug); the matched set lives in that one function, and this
+    sentence names its scope so a maintainer aligning the code cannot narrow it by
+    accident. Everything else is re-raised untouched.
     """
     from fastmcp.exceptions import ToolError
 

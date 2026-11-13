@@ -834,6 +834,24 @@ _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE = (
     "Re-sending it is safe once the advertised delay has elapsed."
 )
 
+#: The refusal when the graph LOOKUP's own margin cut the call while the request
+#: still had time on the clock (#11153 review round 9). Deliberately NOT the
+#: shared wording above: there the budget was not exceeded and nothing was
+#: executed, so "the work may still complete on the server" is false on both
+#: counts. Declared HERE, next to its siblings, so the classifier below can see it
+#: — the producer (`mcp_server._resolve_graph_argument`) writes this constant, and
+#: a copy of the sentence in two files is how a reworded message silently turns a
+#: designed refusal into a "crash" at every consumer.
+_REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE = (
+    "The graph lookup for this request did not finish inside the time it had "
+    "left, so the call was not executed. "
+)
+
+#: The LEAD of the sensitive-op rate-limit refusal (429) — the last designed
+#: refusal a tool caller can receive as prose (the per-op detail is appended by
+#: `hosted_api._sensitive_op_budget`, the producer, which writes this constant).
+_REFUSAL_RATE_LIMIT_LEAD = "Rate limit exceeded for "
+
 #: The refusal as a caller of a MUTATING tool must read it (#10849).
 #:
 #: ``_TRANSPORT_WAIT_BOUND_MESSAGE`` above is transport-neutral, so on the write
@@ -869,6 +887,28 @@ _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE = (
     "hint — is what decides whether a repeat is safe for THIS call, because a "
     "converging operation can still be called in a way that does not converge. "
     "Wait for the advertised delay before retrying."
+)
+
+#: Every DESIGNED tool-level refusal whose MESSAGE is PROSE rather than a JSON
+#: envelope. ONE collection, read by `mcp_client.refusal_message` — the classifier
+#: that keeps a designed refusal apart from a server CRASH (`Error calling tool:
+#: TypeError: …`). A refusal added without an entry here does not merely go
+#: unclassified: it reads as a crash at every consumer (rc 1 instead of rc 3 in
+#: `tools/curate_graph.py`, `call failed:` instead of the refusal payload in the
+#: CLI, round 9's measured finding). The JSON-envelope arm is matched separately,
+#: by parsing.
+#:
+#: ⛔ ALL THREE `-32009` wait-bound arms are named, including the WRITE one, rather
+#: than leaning on the base message's leading 60 characters: they agree today only
+#: by that prefix coincidence, and the prose is user-facing text a human may reword.
+#: A reworded WRITE arm would slip the match and a refused WRITE would re-raise as
+#: rc 1 "the run crashed" — the class rounds 4 and 8 closed.
+REFUSAL_PROSE_MESSAGES = (
+    _TRANSPORT_WAIT_BOUND_MESSAGE,
+    _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE,
+    _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE,
+    _REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE,
+    _REFUSAL_RATE_LIMIT_LEAD,
 )
 
 

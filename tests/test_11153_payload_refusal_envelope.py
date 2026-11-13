@@ -391,6 +391,58 @@ def test_every_wait_bound_prose_arm_is_a_designed_refusal():
 # ── the aggregate orientation door (review round 6) ────────────────────────
 
 
+def test_every_designed_prose_refusal_is_classified_not_a_crash(monkeypatch):
+    """The sentinel list must cover EVERY designed prose refusal this surface ships
+    (review round 9, measured).
+
+    Two shipped refusals were prose with no entry — the graph-lookup MARGIN arm and
+    the sensitive-op rate-limit (429) — so `refusal_message` bucketed them as CRASHES:
+    `tools/curate_graph.py` re-raised them bare (an uncaught traceback, rc 1, for a
+    designed refusal) and the CLI printed `call failed: …` instead of the refusal
+    payload. The list is read from `mcp_auth`, and each producer writes the CONSTANT
+    rather than a copy of the sentence, so this pin cannot drift from the wire.
+
+    A crash must still fall through — asserted here so a future widening cannot make
+    the classifier answer yes for everything.
+    """
+    from fastmcp.exceptions import ToolError
+
+    from tortoise import curation as C
+    from tortoise import mcp_client
+    from tortoise.mcp_auth import (
+        _REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE,
+        _REFUSAL_RATE_LIMIT_LEAD,
+        _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE,
+        REFUSAL_PROSE_MESSAGES,
+    )
+
+    # NON-VACUITY: the two round-9 arms are IN the list the classifier reads.
+    assert _REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE in REFUSAL_PROSE_MESSAGES
+    assert _REFUSAL_RATE_LIMIT_LEAD in REFUSAL_PROSE_MESSAGES
+    assert _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE in REFUSAL_PROSE_MESSAGES
+
+    # The two EXACT wire messages the producers emit.
+    margin = (f"{_REFUSAL_GRAPH_LOOKUP_MARGIN_MESSAGE}Retry after 10s.")
+    rate_limit = f"{_REFUSAL_RATE_LIMIT_LEAD}export. Please try again later. (Retry-After: 3600s)"
+    for wire in (margin, rate_limit):
+        assert mcp_client.refusal_message(wire) == wire, wire
+        assert mcp_client.refusal_message(ToolError(wire)) == wire, wire
+
+    mod = _curate_graph_module("11153_prose")
+    for wire in (margin, rate_limit):
+        def _refuse(*_a, **_k):
+            raise ToolError(wire)  # noqa: B023 - called inside this iteration only
+
+        monkeypatch.setattr(mcp_client, "call_tool", _refuse)
+        with pytest.raises(C.CurationRefused) as caught:
+            mod._live_call_tool("tortoise_query", {})
+        assert str(caught.value) == wire, str(caught.value)
+
+    for crash in ("Error calling tool: TypeError: 'NoneType' object is not subscriptable",
+                  "connection reset by peer"):
+        assert mcp_client.refusal_message(crash) is None, crash
+
+
 def test_a_total_outage_of_the_orientation_summary_is_a_refusal(monkeypatch):
     """`tortoise_overview()` with no `section` must not bury a total outage.
 

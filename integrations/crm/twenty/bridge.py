@@ -284,6 +284,15 @@ def push_to_tortoise(frontmatter: dict) -> dict:
     if not tortoise_available():
         return {"status": "skipped", "reason": "tortoise_unavailable"}
 
+    # ⛔ DECLARED BEFORE the `try` so the failure handler below can report them
+    # (#11153 review round 9): anything that already landed is STILL on the graph
+    # when an exception escapes mid-loop, and a handler that cannot see the ids
+    # produces an unreconcilable partial push — the same class `_write` narrows for
+    # `ToolError`, one exception class over (a `ConnectionError`/`McpError`/
+    # transport error between writes).
+    point_ids: list[dict] = []
+    failures: list[dict] = []
+
     try:
         from tortoise.mcp_client import call_tool
 
@@ -305,6 +314,9 @@ def push_to_tortoise(frontmatter: dict) -> dict:
                 return call_tool(name, payload)
             except ToolError as exc:
                 return {"error": str(exc)[:200]}
+
+        point_ids = []
+        failures = []
 
         point_ids = []
         failures = []
@@ -364,7 +376,13 @@ def push_to_tortoise(frontmatter: dict) -> dict:
     except Exception:
         import traceback
         traceback.print_exc()
-        return {"status": "error", "reason": "tortoise_push_failed"}
+        # The TERM follows what actually landed, exactly as the `failures` arm above
+        # does — an escape between writes must not report a push with landed rows as
+        # a total failure, or the caller discards ids that are on the graph.
+        landed_any = any(p.get("id") for p in point_ids)
+        return {"status": "error",
+                "reason": "tortoise_push_partial" if landed_any else "tortoise_push_failed",
+                "points": point_ids, "failed": failures}
 
 
 def _as_calendar_day(value) -> _date | None:

@@ -1130,23 +1130,24 @@ def refusal_message(error: BaseException | str) -> str | None:
     `call_tool`, and two callers (`client/tortoise_client/cli.py`,
     `tools/curate_graph.py`) each needed it. One owner, no second copy.
 
-    TWO designed refusal shapes arrive as a `ToolError`:
+    TWO designed refusal SHAPES arrive as a `ToolError`.
 
-    * a `_safe` / `_quota_gated` refusal — fastmcp raises `content[0].text`, which
-      for a `_safe` payload is the JSON error dict (`{"error": "Team points limit
-      reached …", "code": -32006}`);
-    * the TRANSPORT WAIT-BOUND refusal (`-32009`) — its `content` is PROSE, not
-      JSON, and on the hosted surface it is the ROUTINE refusal for an expensive
-      census walk. Its THREE arms (dispatched vs never-dispatched vs a refused
-      WRITE) say OPPOSITE things about whether a write can be in flight, so all
-      three are matched here and the text itself is handed back for the caller to
-      branch on. ⛔ All three are named in the import below rather than left to be
-      matched by their shared opening sentence: they agree today only because the
-      base prose's first 60 characters are a common prefix, which is user-facing
-      text a human may reword. A reworded WRITE arm would slip through `startswith`
-      and a refused write would re-raise as rc 1 "the run crashed" — the exact class
-      rounds 4 and 8 fixed (pinned by
-      `test_every_wait_bound_prose_arm_is_a_designed_refusal`, #11153 review round 9).
+    * a `_safe` / `_quota_gated` refusal ships a JSON error envelope
+      (`{"error": "Team points limit reached …", "code": -32006}`), matched by
+      parsing the text;
+    * a PROSE refusal, with no envelope at all: the transport wait-bound pair
+      (`-32009`) and its WRITE arm — three texts that say OPPOSITE things about
+      whether a write can be in flight, so the text itself is handed back for the
+      caller to branch on — plus the graph-lookup MARGIN arm and the sensitive-op
+      rate-limit (429).
+
+    `tortoise.mcp_auth.REFUSAL_PROSE_MESSAGES` is the ONE list of the prose ones, so
+    a reworded message cannot silently re-open the crash bucket, and each producer
+    writes the constant rather than a copy of the sentence. ⛔ Naming each wait-bound
+    arm explicitly (rather than leaning on their shared 60-char opening) is a PIN,
+    not a fix: they agree today only by prefix coincidence, and that is user-facing
+    prose a human may reword (pinned by
+    `test_every_wait_bound_prose_arm_is_a_designed_refusal`).
 
     A server-side CRASH's text is prose too (`Error calling tool: TypeError: …`)
     and matches neither arm — returns None, so a driver that pages on "the run
@@ -1159,19 +1160,15 @@ def refusal_message(error: BaseException | str) -> str | None:
     # this module stays importable without fastmcp (script callers degrade
     # gracefully). The prose lives there — one source, not copied here.
     try:
-        from tortoise.mcp_auth import (
-            _TRANSPORT_WAIT_BOUND_MESSAGE,
-            _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE,
-            _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE,
-        )
+        from tortoise.mcp_auth import REFUSAL_PROSE_MESSAGES
     except Exception:  # fastmcp absent; there is no client here to refuse anything
         pass
     else:
-        for prose in (_TRANSPORT_WAIT_BOUND_MESSAGE,
-                      _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE,
-                      _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE):
+        for prose in REFUSAL_PROSE_MESSAGES:
             # `startswith` and not equality: a wrapped message keeps its prefix,
             # and the refusal prose itself is the leading sentence either way.
+            # Every entry is prose with a STABLE lead (the rate-limit lead is a
+            # lead by construction), so the prefix is the message's identity.
             if text.startswith(prose[:60]):
                 return text
     try:
