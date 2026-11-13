@@ -5370,10 +5370,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # LOAD-BEARING, so do not tidy it down beside that assert. This test is RED on
     # `main` for unrelated rows, and THIS PR REPAIRS ONE OF THEM — `04-plan.md` cited
     # `tortoise/sdk.py:25284` for `declared = declared_relation_predicates()`, which the
-    # merged tree carries at `25393`, and the row above now reads `25393` — while ten
-    # others stay red on the same tree (`00-plan.md` / `00-align.md` /
-    # `RECONCILE-A1-A2-A5.md` cite `sdk.py:9955`/`10008`/`16346`/`16347`/`18547`/`18887`/
-    # `18899`/`18900`), so the order still decides whether this pin runs. Nor was it
+    # merged tree carries at `25393`, and the row above now reads `25393` — while
+    # SEVEN other rows stay red on the same tree, ten failure messages across four
+    # documents (`00-plan.md` and `03-test-design.md` both cite
+    # `sdk.py:9955`/`10008`, `00-plan.md` also `18547`, `00-align.md`
+    # `16346`/`16347`, and `RECONCILE-A1-A2-A5.md`
+    # `18887`/`18899`/`18900`), so the order still decides whether this pin runs. Nor was it
     # better at this branch's old base: at `ca74f2375e` the row cited `25189` and
     # `git show ca74f2375e:tortoise/sdk.py | sed -n '25189p'` is a bare `)`; the same
     # cite rot is tracked in #12456 / #12381. And
