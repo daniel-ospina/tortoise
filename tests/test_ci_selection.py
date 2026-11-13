@@ -3011,7 +3011,7 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
     the reader IN `tests/test_surface_manifest.py` (a suite that already existed;
     `#12313` did not create it), which reads the file's content, so the
     doc's edit must keep the FULL matrix or that guard is skipped on the only PR
-    that needs it (`#12443`). Every name below IS read
+    that needs it. Every name below IS read
     (README.md by `test_embedded_durability_claim.py:62`; AGENTS.md by the
     base-subset pin; `.gitignore` by `test_kind_index.py:302`; CONTRIBUTING.md by
     `test_surface_manifest.py`'s removal-docs pin; …) and keeps FULL.
@@ -3133,18 +3133,11 @@ _NON_CODE_DOC_ROOTS = ("tests", "tools", "scripts", ".github", "tortoise")
 #: different-loss leg reds (`test_the_mention_census_announces_an_absent_root_
 #: ONCE`; the dedupe-once leg itself stays green).
 #:
-#: So the header is a review PROMPT, not an enforced re-derivation — see the
-#: ⚠️ SCOPE note directly below.
-#:
-#: ⚠️ SCOPE, stated rather than overclaimed: this is a review PROMPT, not an
-#: enforced re-derivation. A synchronised DROP is GREEN only for roots nothing
-#: else keys on (`tortoise` measured) — dropping `tests` reds the announce test's
-#: different-loss leg, dropping `scripts` reds the trailing-slash pin (plus the
-#: two announce tests) — and a synchronised ADD REDs other tests in this file
-#: rather than this one (see the header above).
-#: One-list edits red at the BIND. What they do pin is the MECHANISM: a reader
-#: under every declared root, in both file kinds, must come back, so a walk that
-#: stopped seeing readers reds.
+#: So the header above is a review PROMPT, not an enforced re-derivation: what
+#: the tests below enforce is the MECHANISM — a reader under every declared root,
+#: in both file kinds, must come back, so a walk that stopped seeing readers
+#: reds — plus one-list edits at the BIND. A SYNCHRONISED edit is caught only
+#: where the rows above say so.
 _CENSUS_ROOTS_PINNED = ("tests", "tools", "scripts", ".github", "tortoise")
 
 # A shell read operation. `read\b` deliberately does NOT match "reads" (word
@@ -3288,9 +3281,11 @@ def test_the_content_census_leaf_detectors_see_a_reader():
     """The two LEAF detectors actually detect (#12448 review, P2).
 
     `test_non_code_doc_paths_have_no_content_reader` asserts `assert not
-    offenders` over every member — and after #12443 removed `CONTRIBUTING.md`
-    every remaining member answers `[]` (measured: `.github/
-    pull_request_template.md`, `CHANGELOG.md`, `CLAUDE.md`). So a DETECTOR that
+    offenders` over every member — and once `CONTRIBUTING.md` left the set
+    (`f244be9bc7`; the removal was this PR's own finding, whose issue is
+    `#12443`) every remaining member answers `[]`
+    (measured: `.github/pull_request_template.md`, `CHANGELOG.md`, `CLAUDE.md`).
+    So a DETECTOR that
     answered "no" for everything would leave that ratchet green forever: rename a
     `_READ_CALLS` entry, or change the AST shape it matches, and the guard
     protects nothing while reporting clean. The sibling
@@ -3473,8 +3468,8 @@ def test_doc_reprieve_is_per_path_not_per_diff():
     assert "api" in r["surfaces"] and "core" in r["surfaces"]
 
     # The #8726 SHAPE (its own pair was `CONTRIBUTING.md` + the template, which
-    # now selects FULL because a test reads `CONTRIBUTING.md` — #12443), carried
-    # here with `CHANGELOG.md` standing in: two prose files, no Python -> tier-1.
+    # now selects FULL because a test reads `CONTRIBUTING.md`), carried here with
+    # `CHANGELOG.md` standing in: two prose files, no Python -> tier-1.
     r2 = _sel(["CHANGELOG.md", ".github/pull_request_template.md"])
     assert r2["full"] is False and r2["surfaces"] == []
     assert r2["slow_run"] is False and r2["carve_out_run"] is False

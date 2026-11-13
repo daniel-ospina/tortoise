@@ -3478,8 +3478,7 @@ def _is_safe_root_file(path: str) -> bool:
 # `test (a)…(i)`, `test-carve-out (a)(b)(c)`, `test-slow (a)(b)` and more
 # (measured on PR #8726: 2 files, 0 Python, ~17 test jobs). That cost is now back
 # for `CONTRIBUTING.md` alone — a test reads its content, so it keeps the FULL
-# matrix (`#12443`, see the ⛔ block below); the reprieve still covers the other
-# prose paths.
+# matrix (see the ⛔ block below); the reprieve still covers the other prose paths.
 #
 # This is the DISTINCTION #8785 asks for: "no surface matched because the file is
 # not code" (drop it -> the tier-1 smoke, as `docs/` already does) versus "no
@@ -3550,8 +3549,10 @@ def _is_safe_root_file(path: str) -> bool:
 # By this set's OWN membership rule the entry
 # had to go, and leaving it reprieved is a fail-open: an edit to `CONTRIBUTING.md`
 # would select the tier-1 smoke and SKIP the guard that reads it, on the very PR
-# that edits the doc. `main` was red from `45cebfc5df` until this was removed
-# (`#12443`). Re-derive the reader census before re-admitting it; do not
+# that edits the doc. `main` was red from `45cebfc5df` until the removal landed
+# inside `f244be9bc7` (#12369's rebase repair) — earlier revisions of this
+# comment credited `#12443`, which is the ISSUE, and an issue removes nothing.
+# Re-derive the reader census before re-admitting it; do not
 # re-admit it on the older mention census, which is what produced the red.
 #
 # Ratchets: `test_non_code_doc_paths_exist` (liveness) and
