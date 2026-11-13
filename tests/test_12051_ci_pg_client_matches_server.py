@@ -6493,6 +6493,25 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         'echo "$(date)" # lead; ' + replacement,
         'echo "$(date)"; # ' + replacement,
         'echo "$(date +%T) syncing"; # ' + replacement,
+        # ⛔ AND A `$(` INSIDE `${…}` MUST NOT LEAVE THE EXPANSION OPEN FOREVER
+        # (#12279 REVIEW 12, P1, measured as a NEW FALSE RED AT f637bcde4c, WHERE THE
+        # RULE WAS STILL SHIPPED). That rule was "only the frame's own closer closes a
+        # `${…}`"; the `${…}`-interior arm pushes a `word` frame for any `(`, and a
+        # `word` frame is never popped, so the `}` of `${x:-$(date)}` sat on a `word`
+        # top and was read as DATA — `braces` stayed above zero for the rest of the
+        # line, this real trailing comment survived, and tombstoned
+        # `echo … >> "$GITHUB_PATH"` text became live code for `_github_path_writes`.
+        # ⛔ THE RULE IS NOT IN THIS FILE ANY MORE — it was reverted upstream for 25
+        # measured false REDs (R24), so `braces` is a FLAT COUNTER and these two rows
+        # pass on that counter alone. They stay because they pin the direction the
+        # reverted rule broke: if it is ever reinstated, an unpopped `word` frame will
+        # refuse these lines again and this test says so. The alternative that makes
+        # the rule reachable — a `sub` frame for a `$( … )` inside `${…}`, popped by
+        # its own `)` — was built and measured (10/10 against real bash) and is
+        # recorded, NOT shipped, in the plan doc (R26); the nested-`}` fail-open the
+        # revert leaves is pre-existing and lives on #12292.
+        'X=${x:-$(date)} # ' + replacement,
+        'X=${x:-$(date)}; # ' + replacement,
     ):
         step = {"run": line}
         assert replacement not in _run_commands(step), (
