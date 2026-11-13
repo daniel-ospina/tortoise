@@ -8830,7 +8830,14 @@ def _record_drain_deferrals(root, summary) -> None:
                 continue
             _reason = _deferral_reason(outcome.body)
             if not _reason:
-                # Extraction ran — this entry is not a deferral.
+                # No re-attempt to offer. That is NOT the same as "extraction
+                # ran": since #12362 a body may be `pending` — the turns are
+                # stored and the server has not RECORDED whether extraction ran
+                # (`extraction_outcome: unknown`) — and it correctly records no
+                # priced deferral, because pricing a session that may have
+                # extracted is the bug #12362 fixed. The resulting trace gap is
+                # a separate decision, owned by #12379 (a non-priced trace),
+                # NOT by this writer.
                 continue
             _meta = read_spool_meta(root, sid) or {}
             _turns = read_spool_turns(root, sid)
@@ -9738,7 +9745,11 @@ def _print_backlog_offer() -> int:
 def _degraded_extraction(body) -> str | None:
     """The deferral reason when a 2xx STORED the turns and extracted NOTHING.
 
-    ``None`` when extraction ran. The rule lives here, once, because THREE call
+    ``None`` when this body carries no degraded marker — which is NOT proof that
+    extraction ran: since #12362 a body may be ``pending`` (the server has not
+    RECORDED whether extraction ran), and it correctly yields ``None`` here
+    because pricing a session that may have extracted is the bug #12362 fixed.
+    The rule lives here, once, because THREE call
     sites observe the same response body — ``sessions import``, ``session
     capture`` and ``session drain`` — and when they disagreed the hook path lost
     the case the whole feature exists for: the server stored the session and
@@ -9756,7 +9767,13 @@ def _degraded_extraction(body) -> str | None:
 
 
 def _deferral_reason(body) -> str | None:
-    """WHY a 2xx stored the session without extracting — ``None`` if extraction ran.
+    """WHY a 2xx stored the session without extracting — ``None`` if no KNOWN reason.
+
+    ⛔ ``None`` does NOT assert that extraction ran (that was the #12362 bug in
+    another form): a ``pending`` body — durable turns, extraction outcome not
+    recorded — also yields ``None``, deliberately, because a PRICED deferral
+    for a session that may have extracted is the bug #12362 fixed. ``None``
+    means "no re-attempt to offer from this body", nothing more.
 
     THE single definition of "this capture still needs a re-attempt", used by all
     three writers (`sessions import`, `session capture`, `session drain`) so they
