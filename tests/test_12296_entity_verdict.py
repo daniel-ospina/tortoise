@@ -542,6 +542,54 @@ class TestHardVetoes:
                              {"name": "the 2026/Q4 report", "kind": "k"})[
                                  "vetoes"] == []
 
+    def test_a_full_date_and_a_bare_month_must_agree_on_the_month(self):
+        """Different KINDS never met, so a contradicting month MERGED (round 3).
+
+        `2026-11-12` and `2026-12` state the same kind of thing — a month — but
+        under different keys (`date` / `year_month`), and the per-kind comparison
+        looked at neither. The band was `merge`: the expensive direction, a retired
+        node, for a month the candidate explicitly contradicts. What must agree is
+        the dimension a kind IMPLIES; a month that DOES agree still states less and
+        still contradicts nothing.
+        """
+        for a, b in (("2026-11-12 weekly report", "2026-12 weekly report"),
+                     ("2026-12 weekly report", "2026-11-12 weekly report"),
+                     ("december report", "the 2026-11 report")):
+            out = verdict.judge({"name": a, "kind": "k"},
+                                {"name": b, "kind": "k"})
+            assert out["vetoes"] == [verdict.VETO_DATE_CONFLICT], (a, b, out)
+            assert out["band"] == verdict.BAND_REVIEW, (a, b, out)
+        # Containment: the implied month and year AGREE, so nothing is contradicted.
+        for a, b in (("2026-11-12 report", "2026-11 report"),
+                     ("december report", "2026-12 report")):
+            assert verdict.judge({"name": a, "kind": "k"},
+                                 {"name": b, "kind": "k"})["vetoes"] == [], (a, b)
+        # …and a quarter still states LESS than a month, so `2026-Q4` against
+        # `2026-11` is not a contradiction (the like-with-like rule the quarter
+        # test pins): only a stated month makes a month claim.
+        assert verdict.judge({"name": "the 2026-11 report", "kind": "k"},
+                             {"name": "the 2026/Q4 report", "kind": "k"})[
+                                 "vetoes"] == []
+
+    def test_a_zero_padded_date_is_the_same_value(self):
+        """`2026/1` and `2026/01` are ONE kind by the acceptance pattern
+        (`0?[1-9]`), so they cannot be two VALUES.
+
+        Comparing the emission-time spellings vetoed a genuine same-value pair, and
+        a veto on a real merge is not free: the mention is HELD, and an entity hold
+        is not carried forward, so it is dropped on every run.
+        """
+        for a, b in (("2026/1 report", "2026/01 report"),
+                     ("2026-1-5/x.md", "2026-01-05/x.md"),
+                     ("docs/2026/1/x.md", "docs/2026/01/x.md")):
+            out = verdict.judge({"name": a, "kind": "k"},
+                                {"name": b, "kind": "k"})
+            assert out["vetoes"] == [], (a, b, out)
+        # …and a genuine disagreement is still one, padding or not.
+        assert verdict.judge({"name": "2026/1 report", "kind": "k"},
+                             {"name": "2026/02 report", "kind": "k"})[
+                                 "vetoes"] == [verdict.VETO_DATE_CONFLICT]
+
     def test_graph_facts_are_their_own_vetoes(self):
         mention = {"name": "the team", "kind": "k"}
         cand = {"name": "Acme Holdings", "kind": "k"}
@@ -909,6 +957,28 @@ class TestTheResolverBands:
         assert res["held"] == [], res
         assert res["records"][0]["band"] == verdict.BAND_MERGE
 
+    def test_a_re_mention_of_a_folded_alias_outranks_an_identifier_veto(self):
+        """The tree's own merge RECORD beats a class-of-spelling rule (round 3).
+
+        `apply_entity_merge` writes `aliases[]` only after a reviewer approved the
+        merge, so `billing v2 ledger` and `billing v3 ledger` are one entity BY
+        RECORD. Phase 1's alias path still passed only `{"retired": …}` to the
+        vetoes, so a re-mention of the v2 spelling was HELD `identifier_conflict`
+        — and an entity hold is not carried forward, so it was dropped on every
+        run, for the life of the merge. The kind-agnostic alias rung of
+        `_find_existing_entity` exists for exactly this pair, so gating the bind on
+        the spelling made that rung self-defeating.
+        """
+        res = v2.resolve_entities(
+            [{"name": "billing v2 ledger", "kind": "core:plan"}],
+            {"entities": [{"id": "obj-survivor", "name": "billing v3 ledger",
+                           "kind": "core:plan",
+                           "aliases": ["billing v2 ledger"]}],
+             "degraded": False})
+        assert res["map"]["billing v2 ledger"]["id"] == "obj-survivor", res
+        assert res["records"][0]["mode"] == "alias", res
+        assert res["held"] == [], res
+
     def test_a_supersedes_ref_spelled_as_the_merged_variant_still_resolves(
             self, sdk_factory):
         """The fold replaces the carrier's row, so its SPELLING lives in `aliases[]`
@@ -1019,16 +1089,32 @@ class TestTheResolverBands:
                          "aliases": ["team"]}]
             hit, mode = v2._find_existing_entity(rows_any, "the team", kind)
             assert (hit["id"], mode) == ("S", "alias"), (kind, hit, mode)
-        # …and a genuinely CONFLICTING declared kind is then recorded where the
-        # design expects it: phase 1's veto holds the name with its code.
+        # …and on the ALIAS path the three SPELLING vetoes stand down: `aliases[]`
+        # is written only after a reviewer approved the merge, so it is the tree's
+        # OWN record that the two spellings are one entity — and an entity hold is
+        # not carried forward, so vetoing here drops every later re-mention of the
+        # variant for the life of the merge. The kind-agnostic alias rung just
+        # above exists for exactly this pair ("the kind on the retired variant need
+        # not match the survivor's"), so gating the bind on kind made the rung
+        # self-defeating. Measured before the fix: `billing v2 ledger` merged into
+        # `billing v3 ledger`, then a re-mention of the v2 spelling resolved to
+        # nothing and was HELD `identifier_conflict`.
         res = v2.resolve_entities(
             [{"name": "the team", "kind": "core:plan"}],
             {"entities": [{"id": "S", "name": "Acme Holdings", "kind": "core:org",
                            "aliases": ["team"]}], "degraded": False})
-        assert res["map"] == {}, res
-        assert res["new"] == [], res
-        assert res["held"][0]["reason"] == v2.HOLD_VETOED, res
-        assert verdict.VETO_KIND_CONFLICT in res["held"][0]["vetoes"], res
+        assert res["map"]["the team"] == {"id": "S", "name": "Acme Holdings"}, res
+        assert res["records"][0]["mode"] == "alias", res
+        assert res["held"] == [], res
+        # ⛔ The CONTROL: the escape is the RECORD, not an amnesty for mismatched
+        # kinds — asked at the veto layer, because phase 1 legitimately finds no
+        # row for a name whose declared kind is a different NAMESPACE (a `plan`
+        # "Acme" and an `org` "Acme" are different entities, so that name is not a
+        # hold but a create).
+        pair = ({"name": "the team", "kind": "core:plan"},
+                {"name": "Acme Holdings", "kind": "core:org"})
+        assert verdict.hard_vetoes(*pair, {}) == [verdict.VETO_KIND_CONFLICT]
+        assert verdict.hard_vetoes(*pair, {"mention_is_alias": True}) == []
 
     def test_an_unfolded_stored_alias_still_resolves(self):
         """`aliases` is undeclared-but-writable, so the stored side must be folded

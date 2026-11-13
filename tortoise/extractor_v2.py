@@ -6455,10 +6455,20 @@ def resolve_entities(entity_refs: list[dict], search: dict,
         ex, mode = _find_existing_entity(existing, name, kind)
         if ex is not None:
             # #12296: phase 1 binds on an exactly-equal folded name+kind OR on an
-            # alias the merge recorded (`mode == "alias"`). The name/kind vetoes
-            # CAN fire on the alias path — the two spellings differ there by more
-            # than separators — so the refusal is not hypothetical; what phase 1
-            # deliberately does NOT apply is `group_join`: an exactly-equal
+            # alias the merge recorded (`mode == "alias"`). On the ALIAS path the
+            # three spelling vetoes stand down: `aliases[]` is written only after a
+            # reviewer approved the merge, so it is the tree's own record that these
+            # two spellings are ONE entity, and re-litigating it refuses a binding
+            # the tree already made — permanently, because an entity hold is not
+            # carried forward, which LOST every later re-mention of the variant
+            # (measured: `billing v2 ledger` merged into `billing v3 ledger`, then
+            # refused `identifier_conflict` forever). The alias rung of
+            # `_find_existing_entity` exists for exactly this pair: the kind spelled
+            # on the retired variant need not match the survivor's. On the EXACT
+            # path they still fire — a same spelling with a different kind is two
+            # entities in different namespaces, which no merge recorded otherwise.
+            # What phase 1 deliberately does NOT apply
+            # is `group_join`: an exactly-equal
             # spelling (or one the survivor's `aliases[]` already records) is the
             # strongest evidence the tree has, and `_pair_reviewed`'s own rule
             # already lets an exact re-mention bind. `target_suppressed` is not
@@ -6473,11 +6483,12 @@ def resolve_entities(entity_refs: list[dict], search: dict,
             # D-1's second door, because a `search` dict built by another caller (a
             # test, `_index_search`, a replayed run) carries whatever that caller
             # fetched.
-            cfacts = _verdict_facts(facts, ex.get("id"))
+            cfacts = _verdict_facts(facts, ex.get("id"), name)
             refusal = _entity_verdict.hard_vetoes(
                 {"name": name, "kind": kind},
                 {"name": ex.get("name") or "", "kind": ex.get("kind") or ""},
-                {"retired": cfacts.get("retired")})
+                {"retired": cfacts.get("retired"),
+                 "mention_is_alias": mode == "alias"})
             if refusal:
                 vetoed[name] = (kind, refusal)
                 # The sentence names what actually fired: the veto codes carry the

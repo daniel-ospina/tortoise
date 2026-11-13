@@ -298,6 +298,67 @@ _MONTH_PART = re.compile(r"^(?:0?[1-9]|1[0-2])$")
 _DAY_PART = re.compile(r"^(?:0?[1-9]|[12]\d|3[01])$")
 
 
+def _pad_temporal(tok: str, parts: int) -> str:
+    """`2026/1` and `2026-01` are the SAME month — zero-pad the value.
+
+    The acceptance patterns deliberately admit both spellings as ONE kind
+    (`0?[1-9]`), and then comparing the raw strings reports `2026/1` against
+    `2026/01` as a `date_conflict`: the same defect the identifier class was
+    cured of, where *"the fold that makes the class measurable also makes its
+    variants agree"*. The value a veto compares must therefore be the folded one,
+    not the emission-time spelling.
+    """
+    bits = re.split(r"[-/]", str(tok or "").casefold(), maxsplit=parts - 1)
+    if len(bits) != parts:
+        return str(tok or "").casefold().replace("/", "-")
+    year, rest = bits[0], bits[1:]
+    nums = []
+    for bit in rest:
+        try:
+            nums.append(f"{int(bit):02d}")
+        except (TypeError, ValueError):
+            return str(tok or "").casefold().replace("/", "-")
+    return "-".join([year] + nums)
+
+
+def _date_dimensions(tokens: dict[str, set[str]]) -> dict[str, set[str]]:
+    """What the temporal tokens IMPLY, by dimension: ``year``, ``month``, ``day``.
+
+    `date_tokens` keys by the SPELLING's kind, so the recorded reason can name the
+    rule that fired. The veto then has to compare what those kinds STATE, because
+    kinds alone never meet across a date and a month: `2026-11-12` against
+    `2026-12` reached `merge` — they are different kinds, so the per-kind loop
+    looked at neither — and merging retires a node for a month the candidate
+    explicitly contradicts.
+
+    `quarter` is deliberately absent: a quarter CONTAINS months, so `2026-Q4`
+    against `2026-11` states less and contradicts nothing (the like-with-like rule
+    `test_a_year_quarter_compound_is_a_DATE_not_an_identifier` pins). A month is
+    not containment — `2026-12` against `2026-11-12` says a different month.
+    """
+    dims: dict[str, set[str]] = {}
+
+    def add(dim: str, value: str) -> None:
+        if value:
+            dims.setdefault(dim, set()).add(value)
+
+    for tok in tokens.get("year", set()):
+        add("year", tok)
+    for tok in tokens.get("year_month", set()):
+        year, _, month = tok.partition("-")
+        add("year", year)
+        add("month", month)
+    for tok in tokens.get("date", set()):
+        year, _, rest = tok.partition("-")
+        month, _, day = rest.partition("-")
+        add("year", year)
+        add("month", month)
+        add("day", day)
+    for tok in tokens.get("month", set()):
+        add("month", tok)
+    return dims
+
+
 def _temporal_compound(tok: str) -> bool:
     """Is ``tok`` a date written as one hyphenated compound?
 
@@ -392,6 +453,16 @@ def date_tokens(name: str) -> dict[str, set[str]]:
     Keyed by kind on purpose: the veto compares like with like, so `Q3 plan`
     against `2026 plan` is not a conflict (one side states a quarter, the other a
     year; nothing is contradicted), while `Q3 plan` against `Q4 plan` is.
+
+    ⛔ Kind is where a reason is NAMED, not where the comparison ends.
+    `_date_dimensions` then compares what the kinds IMPLY (year / month / day),
+    because two kinds never meet otherwise: a full date (`date`) and a bare month
+    (`year_month`) share no key, so a per-kind loop looked at neither and
+    `2026-11-12` against `2026-12` reached `merge` — a retired node for a month the
+    candidate contradicts. A month that AGREES still states less and contradicts
+    nothing. Values are zero-padded (`_pad_temporal`): the acceptance patterns
+    admit `2026/1` and `2026/01` as ONE kind (`0?[1-9]`), so they cannot be two
+    values — the class is made measurable by a fold, and its variants must agree.
     """
     text = str(name or "").casefold()
     years = set(_YEAR.findall(text))
@@ -415,8 +486,9 @@ def date_tokens(name: str) -> dict[str, set[str]]:
         # Case-folded like every sibling kind: `_YEAR_MONTH_RAW` matched on the
         # folded token, so an un-folded set here made `2026-Q4` vs `2026-q4` a
         # contradiction while `year`, `quarter` and `year_quarter` all agreed.
-        out["year_month"] = {tok.casefold().replace("/", "-")
-                             for tok in year_months}
+        # Zero-padded for the same reason, one level down: `2026/1` and `2026/01`
+        # are ONE kind by the acceptance pattern, so they cannot be two values.
+        out["year_month"] = {_pad_temporal(tok, 2) for tok in year_months}
     year_quarters = {tok for tok in _scan(name)
                      if _YEAR_QUARTER_RAW.match(tok.casefold())}
     if year_quarters:
@@ -432,8 +504,10 @@ def date_tokens(name: str) -> dict[str, set[str]]:
                   if _YEAR_MONTH_DAY_RAW.match(tok.casefold())}
     if full_dates:
         # Its own kind: `2026-11-12` against `2026-12-12` contradicts, while a full
-        # date against a bare month states LESS and contradicts nothing.
-        out["date"] = {tok.casefold().replace("/", "-") for tok in full_dates}
+        # date against a bare month states LESS — so it contradicts nothing when
+        # the implied month and year AGREE, and `date_conflict` when they do not
+        # (`_date_dimensions` does that comparison; the kind alone never would).
+        out["date"] = {_pad_temporal(tok, 3) for tok in full_dates}
     if years and quarters:
         out["year_quarter"] = {f"{y}-{q}" for y in years for q in quarters}
     return out
@@ -519,11 +593,15 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
          "mention_is_alias": bool}  # the mention's folded name is the
                                     # candidate's OWN name or one of its
                                     # `aliases[]` — the record that this spelling
-                                    # is already that entity
-                                    # ⛔ DERIVED by the caller's shim
-                                    # (`extractor_v2._verdict_facts`), never by
-                                    # the facts reader: only the shim sees the
-                                    # mention.
+                                    # is already that entity. ⛔ Stands down the
+                                    # three SPELLING vetoes as well as
+                                    # `group_join`: a recorded identity outranks
+                                    # a mechanical class-of-spelling rule, and a
+                                    # refusal here is permanent (an entity hold is
+                                    # not carried forward). ⛔ DERIVED by the
+                                    # caller's shim (`extractor_v2._verdict_facts`),
+                                    # never by the facts reader: only the shim sees
+                                    # the mention.
 
     Returns the veto codes (empty = no objection). **Order is the published
     ``VETO_CODES`` order**, so two runs over the same inputs produce the same
@@ -534,10 +612,22 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
 
     m_ids = identifier_tokens(mention.get("name", ""))
     c_ids = identifier_tokens(candidate.get("name", ""))
+    # ⛔ `mention_is_alias` stands the three SPELLING vetoes down as well as
+    # `group_join`, because it is the tree's own RECORD that the two spellings are
+    # one entity (`apply_entity_merge` writes `aliases[]` only after a reviewer
+    # approved the merge). Re-litigating that here does not just refuse a merge: an
+    # entity hold is not carried forward, so every later re-mention of the alias is
+    # held and LOST. Measured on a real graph — `billing v2 ledger` merged into
+    # `billing v3 ledger`, then a re-mention of the v2 spelling was vetoed
+    # `identifier_conflict` — and it makes `_find_existing_entity`'s kind-agnostic
+    # alias rung self-defeating, since the rung exists precisely because the kind
+    # spelled on a retired variant need not match the survivor's.
+    recorded_identity = bool(facts.get("mention_is_alias"))
     if (
         m_ids
         and c_ids
         and not (m_ids & c_ids)
+        and not recorded_identity
         and skeleton(mention.get("name", ""), replace_ids=True)
         == skeleton(candidate.get("name", ""), replace_ids=True)
     ):
@@ -545,18 +635,35 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
 
     m_dates = date_tokens(mention.get("name", ""))
     c_dates = date_tokens(candidate.get("name", ""))
-    if skeleton(mention.get("name", ""), replace_dates=True) == skeleton(
-        candidate.get("name", ""), replace_dates=True
-    ):
-        for kind in ("year_quarter", "year", "quarter", "month", "year_month",
-                     "date"):
+    if not recorded_identity and skeleton(
+        mention.get("name", ""), replace_dates=True
+    ) == skeleton(candidate.get("name", ""), replace_dates=True):
+        # Like-with-like first: the reason then names the rule that fired.
+        for kind in ("year_quarter", "quarter"):
             mine, theirs = m_dates.get(kind), c_dates.get(kind)
             if mine and theirs and not (mine & theirs):
                 got.append(VETO_DATE_CONFLICT)
                 break
+        else:
+            # Then the dimensions those kinds SHARE. Without this, a full date and
+            # a bare month never meet (`2026-11-12` vs `2026-12` merged: different
+            # kinds, so the loop above compared nothing) — and merging retires a
+            # node for a month the candidate contradicts.
+            m_dims = _date_dimensions(m_dates)
+            c_dims = _date_dimensions(c_dates)
+            for dim in ("year", "month", "day"):
+                mine, theirs = m_dims.get(dim), c_dims.get(dim)
+                if mine and theirs and not (mine & theirs):
+                    got.append(VETO_DATE_CONFLICT)
+                    break
 
     m_kind, c_kind = _fold_kind(mention.get("kind")), _fold_kind(candidate.get("kind"))
-    if m_kind not in _UNSTATED_KINDS and c_kind not in _UNSTATED_KINDS and m_kind != c_kind:
+    if (
+        not recorded_identity
+        and m_kind not in _UNSTATED_KINDS
+        and c_kind not in _UNSTATED_KINDS
+        and m_kind != c_kind
+    ):
         got.append(VETO_KIND_CONFLICT)
 
     if facts.get("suppressed"):

@@ -181,7 +181,7 @@ not a shared threshold — precision needs hard rule-based vetoes"*
 | veto | tests | why it is safe |
 |---|---|---|
 | `identifier_conflict` | both sides carry identifier-shaped tokens, the sets are disjoint, **and the two names are otherwise identical** (`billing v2 ledger` / `billing v3 ledger`) — "identical" after the tree's own fold, so a leading article (`the billing v3 ledger`) does not defeat it | a **path is scanned by component** (`entity_verdict._scan`): the directory parts are literals and the basename is tokenised like any name, so two spellings of ONE file stay silent (`tortoise/extractor_v2.py` → `extractor_v2.py`) while two different files still veto (`tortoise/extractor_v2.py` vs `.../extractor_v3.py`). Dropping a path token wholesale satisfied the first and lost the second — which a silence-only corpus test cannot tell apart. Separator/case folding means the `#8933` class (`ERR-4032` ≡ `err4032`) never fires. A `#`-prefixed reference (`#11901`) is an identifier: it is the corpus's dominant spelling and the hash form is not a bare number, so `#11901 plan` / `#11905 plan` veto |
-| `date_conflict` | both sides carry date tokens, values are disjoint **for a shared kind**, names otherwise identical (`the Q3 plan` / `the Q4 plan`) | per-kind comparison: `Q3 plan` vs `2026 plan` is not a contradiction and those two spellings can name one entity. Temporal compounds (`YYYY-MM`, `YYYY-MM-DD`, `YYYY-Qn`, `Qn-YYYY`) are their own kinds and are excluded from the identifier class, so a date disagreement is reported as a DATE conflict — the rule that fired — rather than under `identifier_conflict` |
+| `date_conflict` | both sides carry date tokens, values are disjoint **for a shared kind OR for a shared implied dimension** (a `date` and a `year_month` never share a kind, so the year/month they both state is what must agree), names otherwise identical (`the Q3 plan` / `the Q4 plan`) | per-kind comparison first: `Q3 plan` vs `2026 plan` is not a contradiction and those two spellings can name one entity, and a quarter still states LESS than a month (`2026-Q4` against `2026-11` is not a conflict — the like-with-like rule). ⛔ Kind alone was NOT enough: `2026-11-12` and `2026-12` are different kinds (`date` / `year_month`), so a per-kind loop looked at neither and the pair reached **`merge`** — a retired node for a month the candidate explicitly contradicts. `_date_dimensions` compares what the kinds IMPLY (year / month / day) instead of only the keys they are filed under; a month that AGREES still states less and still contradicts nothing. Values are **zero-padded** (`_pad_temporal`) because the acceptance patterns deliberately admit `2026/1` and `2026/01` as ONE kind, and comparing the emission-time spellings vetoed that genuine same-value pair. Temporal compounds (`YYYY-MM`, `YYYY-MM-DD`, `YYYY-Qn`, `Qn-YYYY`) are their own kinds and are excluded from the identifier class, so a date disagreement is reported as a DATE conflict — the rule that fired — rather than under `identifier_conflict` |
 | `kind_conflict` | both sides declare a SPECIFIC kind and they differ | `other`/empty is the write-time coalesce default (`projection/entities.py:5086`) and is treated as *unknown*, never as a value; so is `unclassified`, the #1695 classify-later SENTINEL the S2 prompt instructs the model to emit and `execute_embed` repairs later — treated as a declared kind it conflicts with every real kind and vetoes every merge in classify-later mode. The comparison is on the BARE kind (`extractor_v2._norm_kind`), so `core:person` vs `ops:person` is not a conflict — the namespace is an emission-time spelling |
 | `target_suppressed` | the candidate carries a `reject` that named no survivor | `_pair_reviewed`'s documented case (`entity_resolver.py:236-250`): the reviewer answered, against an ambiguous set, and re-asking against one survivor is not a different question |
 | `target_retired` | the candidate carries `resolved_from` | D-1 at the candidate-table layer — the belt to `_current_entity_priors`' braces, for any caller that built the table another way |
@@ -197,6 +197,24 @@ variant is refused **on every run for the lifetime of the merge**, and an entity
 hold is **not carried forward** (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch of `execute_embed`), so the mention is
 dropped rather than queued. Pinned by
 `test_a_repeat_mention_of_a_folded_alias_merges_instead_of_being_lost`.
+
+⛔ **The same escape covers the three SPELLING vetoes on phase 1's ALIAS path**
+(`identifier_conflict` / `date_conflict` / `kind_conflict`), for the same reason
+and with the same consequence. `aliases[]` is written only after a reviewer
+approved the merge, so it is the tree's own record that two differing spellings
+are ONE entity; re-litigating that in phase 1 refuses a binding the tree already
+decided, and the refusal is permanent (an entity hold is not carried forward), so
+the variant's spelling is lost on every run. It also made
+`_find_existing_entity`'s kind-agnostic alias rung **self-defeating** — the rung
+exists exactly because "the kind spelled on the retired variant need not match the
+survivor's" — and it is what turned a merged `billing v2 ledger` /
+`billing v3 ledger` pair into a permanent `identifier_conflict` hold. ⛔ The
+escape is the RECORD, not an amnesty for mismatched kinds: on the EXACT path a
+same spelling under a different kind namespace is still `kind_conflict`, because
+no merge recorded otherwise (`plan` "Acme" and `org` "Acme" are different
+entities). Pinned by
+`test_a_re_mention_of_a_folded_alias_outranks_an_identifier_veto` and the
+control in `test_a_name_match_beats_an_alias_match_and_two_aliases_are_ambiguous`.
 
 The fuller M-4 reading — compare the mention against the group's **members**, not
 only the survivor — remains available and is the next widening; the alias case is
