@@ -770,8 +770,10 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     # the list is exactly what `assert len(children) == 2` is about to reject when the
     # poll timed out, and a child forked after the last sample is in the group but not in
     # the list — SIGKILL to the supervisor does not reach it. Measured: omitting one
-    # enumerated child from the reap left that child (still `ppid` = the supervisor, which
-    # was killed but not waited) behind.
+    # enumerated child from the reap left that child behind as `ppid 1`, because Linux
+    # reparents at the parent's EXIT (`do_exit`), not at its reap — the supervisor was
+    # killed but never `wait()`ed, and its children were orphaned anyway (the same
+    # measurement `_reap_group` records).
     #
     # ⛔ AND THE SPAWN ITSELF IS INSIDE THE `try:` (#12227 review cycle 10). `_spawn` can
     # raise (`OSError` under fork pressure); with `own` created before the guard, that
@@ -795,7 +797,6 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
             _reap_group(own.pid)
         _reap(peer.pid)
         raise
-    result = None
     try:
         # ⛔ `stop-all` IS INSIDE THE `try:`, NOT BETWEEN THE GUARD AND IT (#12227 review
         # cycle 9). It was the one statement between the leak guard's `except` and the
@@ -803,8 +804,9 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         # stalled runner, an `OSError` under fork pressure — ran NEITHER teardown and
         # leaked the supervisor, its two `sleep 120` children and the peer's 120 s
         # `workerd` decoy. Measured before the move: forcing that call to raise left
-        # `bash -c "sleep 120 & sleep 120"`, two `sleep 120` (ppid 1) and the peer decoy
-        # alive. Nothing may sit between the two arms.
+        # `bash -c "sleep 120 & sleep 120"`, its two `sleep 120` children — still parented
+        # to the SURVIVING supervisor, because nothing on this path is killed — and the
+        # peer decoy, alive. Nothing may sit between the two arms.
         result = _script("stop-all", env=state)
         assert result.returncode == 0, result.stderr
         deadline = time.time() + 10
