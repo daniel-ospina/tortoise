@@ -50,9 +50,22 @@ def guarded(monkeypatch):
     path handling that runs BEFORE them, so they are no-ops here — the assertion
     would otherwise depend on machinery that has its own tests.
     """
+    import atexit
+
     import tortoise as tortoise_pkg
+    import tortoise.embedded_lifecycle as lifecycle
 
     monkeypatch.setattr(tortoise_pkg, "enforce_embedded_fork_safety", lambda *a, **k: None)
+    # ⛔ The guard imports these INSIDE the constructor body, so they must be stubbed on
+    # their own module — patching `tortoise.<name>` would miss the late import. Left live,
+    # each construction registers the stand-in in the process-global weak registry (and a
+    # bound atexit handler keeps it alive), so this file would leak entries for the whole
+    # `core` shard — into a registry that a reaper reads as "live embedded clients"
+    # (#12363 round 4). `atexit.register` is stubbed for the same reason: the handler binds
+    # the instance.
+    monkeypatch.setattr(lifecycle, "register_embedded_client", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "owner_socket_of", lambda *a, **k: None)
+    monkeypatch.setattr(atexit, "register", lambda *a, **k: None)
     return _build_guarded_falkordb(_RecordingBase)
 
 
@@ -130,3 +143,25 @@ def test_memory_is_exempt(guarded, tmp_path):
     before = set(os.listdir(tmp_path))
     guarded(":memory:")
     assert set(os.listdir(tmp_path)) == before
+
+
+def test_the_fixture_does_not_leak_a_client_into_the_lifecycle_registry(guarded, tmp_path):
+    """The choke-point tests construct the guard 6 times in the `core` shard; a live
+    registration (and its atexit handler) would outlive them and be read as live embedded
+    clients by anything that reaps those — a detector measuring the test suite's own
+    leftovers (#12363 round 4)."""
+    from tortoise import embedded_lifecycle
+
+    before = len(getattr(embedded_lifecycle, "_embedded_clients", {}) or {})
+    # HOLD the instances: the registry is WEAK, so a dropped reference would collect the
+    # client and hide a live registration behind refcounting — which is exactly how this
+    # test first passed under a mutation (#12363 round 4).
+    kept = [
+        guarded(str(tmp_path / f"home{index}" / ".tortoise" / "tortoise.db")) for index in range(3)
+    ]
+    after = len(getattr(embedded_lifecycle, "_embedded_clients", {}) or {})
+    assert len(kept) == 3
+    assert after == before, (
+        f"{after - before} stand-in client(s) registered in embedded_lifecycle — the "
+        f"fixture must stub register_embedded_client/atexit alongside fork safety"
+    )

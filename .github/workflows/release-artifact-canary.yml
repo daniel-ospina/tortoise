@@ -113,8 +113,12 @@ jobs:
       # A red here is NOT a code defect in the merged tree: it is the published artifact
       # being broken or missing, and only a release clears it. Say which, in the job
       # summary, so the next reader does not go looking for a PR to fix.
+      # ⛔ `if: failure()` alone is JOB-scoped: a checkout/setup-python failure, or a
+      # failed transcript upload, would print "cut a release" for a runner-side problem —
+      # and that ends in an irreversible upload. Gate it on the canary's OWN outcome
+      # (#12363 round 4).
       - name: What a red here means
-        if: failure()
+        if: failure() && steps.canary.outcome == 'failure'
         run: |
           {
             echo "### This is a RELEASE finding, not a tree finding"
@@ -124,5 +128,6 @@ jobs:
             echo "\`publish-pypi.yml\`) and \`tortoise-client\` is published. See #12363."
             echo
             echo "A run with exit 2 means the canary could not evaluate the artifact"
-            echo "(index unreachable / install failed) — that is RED on purpose."
+            echo "(index unreachable / install could not be judged) — that is RED on purpose,"
+            echo "and it is NOT a signal to cut a release."
           } >> "$GITHUB_STEP_SUMMARY"
