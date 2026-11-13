@@ -1,0 +1,65 @@
+corpus: record_projection_journal.jsonl — 39 committed records
+vector: 384-d, BAAI/bge-small-en-v1.5 @ 5c38ec7c
+turn text: 1000 chars (MODELLED — see the probe docstring)
+
+== per-record, measured through `EventLog.append` (post-#11821 P0)
+  TurnsRecorded, 1 turn        6,153 B
+  PointAdded (with vector)     5,418 B   [pinned #11821 P0: 5,423 B]
+  PointAdded, #11821 pin      5,423 B   [published: 5,423 B]
+  per-capture FIXED tail       5,003 B   (25 records: BatchIdStamped, CalibrationRecorded, ConfidenceChanged, DedupeRecorded, DedupeRejected, DirectEdgeCreated, DirectEdgeRepoint, DocumentCreated, EntityBindingRefused, EntityLinked, EntityMutated, EventRecorded, IngestStarted, ObjectRegistered, ObjectSuperseded, OperatorAnnotated, PointInvalidated, PointRetracted, PointRevised, PointSuperseded, SessionDeleted, SessionRecorded, SourceCreated, SourceVersioned, SubjectAdded)
+  marginal per extra turn      6,097 B   (carrier 2 turns − 1 turn)
+
+== per capture, measured (carrier + points + the measured tail)
+  scenario      turns  points        bytes
+  S  small         20       3      142,567
+  M  typical       98       8      642,952
+  L  heavy         98      25      734,269
+
+== the vector's share (this is what the P2 encoding step moves)
+  one turn, with its vector    6,153 B
+  its vector alone             4,689 B  (76% of the turn)
+  its vector under P2          2,064 B  (−2,625 B per vector)
+
+== the same captures under P2's base64 payload (ARITHMETIC, not a build)
+  scenario          post-P0     P2 frame   ratio
+  S  small          142,567       82,192   1.73×
+  M  typical        642,952      364,702   1.76×
+  L  heavy          734,269      411,394   1.78×
+
+== turn-text sensitivity (the one modelled knob)
+  one turn, 1,000 chars of text   6,153 B
+  one turn, 4,500 chars of text   9,636 B (+3,483 B; the p50 session's turns are ~4.5k chars)
+
+== multi-year projection — bytes on the persistent volume
+   (journal bytes are never deleted today, so the cumulative total
+    at month N is N × the monthly rate)
+  who                                   per month       1 year      3 years
+  a light user (30 captures/mo) · S     4,277,010   51,324,120  153,972,360
+  a light user (30 captures/mo) · M    19,288,560  231,462,720  694,388,160
+  a light user (30 captures/mo) · L    22,028,070  264,336,840  793,010,520
+  a power user (390 captures/mo) · S   55,601,130  667,213,560 2,001,640,680
+  a power user (390 captures/mo) · M  250,751,280 3,009,015,360 9,027,046,080
+  a power user (390 captures/mo) · L  286,364,910 3,436,378,920 10,309,136,760
+
+== the bill for ONE user's journal — steady state at month 36
+   (storage is charged on the CUMULATIVE bytes, every month)
+  who · scenario                       GB   $0.125/GB  Glacier IR  Deep Arch
+  a light user · S                   0.14      0.0179      0.0006     0.0001
+  a light user · M                   0.65      0.0808      0.0026     0.0006
+  a light user · L                   0.74      0.0923      0.0030     0.0007
+  a power user · S                   1.86      0.2330      0.0075     0.0018
+  a power user · M                   8.41      1.0509      0.0336     0.0083
+  a power user · L                   9.60      1.2001      0.0384     0.0095
+
+== the same bill at 1,000 power users (a project)
+  S      1864.17 GB   $   233.02/mo disk   $    1.85/mo deep archive
+  M      8407.09 GB   $  1050.89/mo disk   $    8.32/mo deep archive
+  L      9601.13 GB   $  1200.14/mo disk   $    9.51/mo deep archive
+
+== the trigger — when the journal line ALONE reaches solo's whole budget
+  a power user (M) adds $0.0292/month of disk each month
+  cumulative reaching $5.70/month: month 195 (16.2 years of one power user)
+  with P2's payload instead: month 344
+
+VERDICT: a measurement, not a bound — the three options on #9025 are
+priced from these bytes; choosing between them is the owner's.
