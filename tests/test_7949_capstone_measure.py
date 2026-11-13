@@ -5355,21 +5355,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # re-derived from THIS merged tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
-            # the merge: 9714 -> 9951 -> 9973 -> 10019 is the number's own trail,
-            # and only the last of those describes a tree that adds BOTH parents.
-            # Measured values, not a delta: 9943 at `9828250732`, 9949 at
-            # `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24e4`, 9987 at
-            # the `main` tip `abf186f1109a`, 10005 at this branch alone
-            # (`d036b9859960`), and 10019 merged. ⛔ `9951` is in that list only
-            # because this row printed it — it was a predicted merge-tree value
-            # (9943 + 8), never a line any commit on `main` carried. The deltas
-            # are just where the registrations landed: `main` adds +14 above the
-            # entry (a 13-line `surfaces:` block at 2237 plus a 1-line `tier1:`
-            # one at 9150) and this branch adds +32 (one 32-line block at
-            # 7522-7553; its 1-line `durations:` addition at 10291 falls below
-            # the entry), so a row sitting BELOW every insertion moves by the
-            # whole +46. The `core:` sub-key reads 2235 on every tree (no
-            # insertion above it); `sdk:` moves +30 then +13 then +32 to 8300.
+            # The value this row pins is MEASURED on the tree that merges, never
+            # predicted: `10076` at the merge of `main` `ca74f2375e` into this branch
+            # (`awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
+            # config/ci-surfaces.yml`), which is also what `main`'s tip reads — so the
+            # row and the base agree instead of the row carrying a branch-only offset.
+            # ⛔ The earlier trail (9943 -> 9973 -> 9987 -> 10005 -> "10019 merged")
+            # was PREDICTED arithmetic, not measurement: a predicted merge-tree value
+            # is what #11837's review removed from this file, and the prediction went
+            # stale the moment `main` moved again. Do not restore it; re-measure.
             ("10076", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
