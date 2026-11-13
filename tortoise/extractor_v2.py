@@ -5772,7 +5772,7 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     multiple namespaces collide on the bare form (never guess which one).
 
     ⛔ #12295 — THE FOLDED RUNG, and why it is a SECOND arm rather than a
-    replacement. ``_norm`` (``:4225``) is whitespace collapse + lowercase only;
+    replacement. ``_norm`` (``:4232``) is whitespace collapse + lowercase only;
     it is byte-identical to Zep's ``_normalize_string_exact``
     (``dedup_helpers.py``), i.e. the exact rung of the field's ladder. `#11901`
     measured what that costs: **0 of 419 real surface variants attach at every
@@ -5821,9 +5821,12 @@ def _find_by_folded_key(entities: list[dict], name: str, kind_folded: str,
 
     * ``folded``     — one candidate folds to the mention's key, same kind;
     * ``folded_bare`` — same, across namespace-folded kinds, only when unique;
-    * ``ambiguous``  — the fold collides on two or more live names. Fail closed:
-      an unresolved identity is never asserted ``new`` (§4.4 I1, ``#11653``), so
-      the caller holds it instead of minting a duplicate.
+    * ``ambiguous``  — the fold collides on two or more live names. The two
+      callers differ, and both are deliberate: ``resolve_entities`` HOLDS it
+      (an unresolved identity is never asserted ``new`` — §4.4 I1, ``#11653``),
+      while the capture create path persists it under the EXPLICIT kind and says
+      so in a warning. Neither guesses which of the colliding carriers was
+      meant.
 
     The non-injective keys are checked in ``entity_blocking.attach_matches``,
     which refuses to pick between two basename carriers.
@@ -6013,8 +6016,9 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     "mode"}], "new": [name], "held": [{"name", "kind", "reason"}],
     "warnings": [...]}.
 
-    Phase 1 (deterministic): the existing ``_find_existing_entity`` (exact
-    → bare → ambiguous) for every ref — no model call.
+    Phase 1 (deterministic): the existing ``_find_existing_entity`` (exact →
+    bare → folded → folded_bare → ambiguous; the folded arms are the `#12295`
+    comparison-side key) for every ref — no model call.
     Phase 2 (LLM fallback): fires ONLY when ``model`` is set AND the search
     has entity candidates AND >=1 ref is unmatched/ambiguous. ONE
     ``_complete`` call (existing 600s wall-clock bound; temperature 0.0 via
@@ -10192,7 +10196,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         else:
             if match_mode == "ambiguous":
                 warnings.append(f"entity '{name[:60]}' kind '{kind}' is ambiguous "
-                                "across namespaces in the existing graph — "
+                                "in the existing graph (two or more candidates "
+                                "matched its normalised name or kind namespace) — "
                                 "created with the explicit kind (link-before-"
                                 "create cannot disambiguate)")
             link_before_create.append(_failure_policy.created_record(

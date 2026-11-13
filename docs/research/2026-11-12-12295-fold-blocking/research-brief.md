@@ -71,33 +71,44 @@ from the old artifact: a before/after against a moving before is not a measureme
 
 Pair completeness = the fraction of true duplicate pairs landing in at least one block
 (`arXiv:1905.06167`; the ER field's own floor for "scoring is not capped before it starts" is 0.95).
+**Cost is quoted per MENTION**, because that is the only column in which the two generators are the
+same quantity: `k` rows per mention for the window, one candidate list per mention for the blocker.
 
-| generator | candidate set | pair completeness | reduction ratio |
-|---|---|---|---|
-| **FTS window, k=3** (production) | 3 rows per derived query | **0.9692** (409/422) | — |
-| FTS window, k=5 / 10 / 15 | — | 0.9953 / 0.9976 / 1.0 | — |
-| **FTS candidate set a capture actually sees** (`search_graph` pooled union) | **42.75** candidates mean | 0.9692 | **0.0428** |
-| **multi-key blocking** (`entity_blocking.BlockIndex`: folded key ∪ folded prefix ∪ per-token prefixes ∪ LSH shingle bands) | **34.75** candidates mean (max 152) | **1.0000** (422/422) | **0.0348** |
+| generator | candidates per mention | **pair completeness** |
+|---|---|---|
+| **FTS window, k=3** (production) | 3 | **0.9692** (409/422) |
+| FTS window, k=5 | 5 | 0.9953 |
+| FTS window, k=10 | 10 | 0.9976 |
+| FTS window, k=15 | 15 | **1.0000** |
+| FTS candidate set a capture actually sees (`search_graph` pooled union) | 2.86 (42.85 per capture of 15 mentions — **not** a per-mention figure, and not comparable to the row below) | not measured per mention |
+| **multi-key blocking** (`entity_blocking.BlockIndex`: folded key ∪ folded prefix ∪ per-token prefixes ∪ LSH shingle bands) | **34.73** (max 152) | **1.0000** (422/422), reduction ratio 0.0195 |
 
-**Multi-key blocking strictly dominates on this corpus: higher completeness at lower cost.** The
-index holds 8450 blocks over 10969 key insertions, largest block 93 members, **0 oversized** (the
-`MAX_BLOCK_SIZE = 200` skip never fired — and it is *reported* when it does, because a silently
-dropped block reads as "nothing shares this key").
-
-### 3.2 The falsifier, answered honestly
+### 3.2 The falsifier, answered — and it fires against the BLOCKER
 
 > *If pair completeness is already ≥ 0.99 on the measured corpus, the loss is not here — stop and
 > report the number.*
 
-**At the production window it is 0.9692 — below 0.99, so the falsifier does not fire; the work
-proceeds.** But the honest reading is sharper than a pass/fail, and it is what the numbers say:
+**At the production window pair completeness is 0.9692 — below 0.99, so the falsifier does not fire
+on its own terms, and the work proceeded.** But the number says something sharper, and reporting it
+is the point of having a falsifier:
 
-- the FTS blocker **already clears the 0.95 floor at every `k`**, and clears 0.99 from `k=5` up;
-- the matcher bound **0 of 422** variants anyway.
+- the shipped window **already clears the 0.95 floor at every `k`**, and reaches **1.0000 at `k=15`
+  with 15 candidates per mention** — **less than half the multi-key blocker's 34.73**;
+- the multi-key blocker reaches the same completeness at roughly **2.3× the cost**.
 
-⇒ **On this corpus, blocking is NOT the binding constraint for the variant class at the production
-window — the matcher was.** The multi-key blocker earns its place as *headroom plus a cheaper
-candidate set*, not as the thing that was capping recall. Reported as the falsifier intends.
+⇒ **Multi-key blocking is NOT earned for the capture prior on this corpus.** This is N-3's falsifier
+**F1** firing (*"pair completeness does not rise above the FTS-only blocker on the `#11901`
+population → no blocker needed"*), reported as a result rather than buried. And the width is not the
+reason to widen either: see 3.3 — attaching is flat in `k` (207 at `k=3`, 212 at `k=15`), so a wider
+window buys completeness that the matcher cannot spend.
+
+**Where the blocker IS load-bearing is a different surface: the dedupe scan** (`entity_candidates`),
+which has no FTS window at all and blocked on ONE 3-character prefix. There the union is the only
+candidate mechanism, and the pairs it adds (transpositions, typos, token-disjoint spellings) cannot
+be reached at any `k` — pinned by
+`test_the_scan_finds_a_transposition_the_single_prefix_key_could_not`, which reds when the union is
+reverted. ⚠️ **That corpus contains no token-disjoint pair by construction**, so the scan's gain is
+pinned structurally and is **not** quantified here — declared, not claimed.
 
 ### 3.3 The duplicate rate, and how many of the pairs move
 
@@ -105,7 +116,7 @@ At `k=3`, on the same 422 pairs, one run:
 
 | configuration | attached | minted a duplicate | rate |
 |---|---|---|---|
-| prior **off** (the pre-`#12047` world) | 0 | 422 | **1.0000** |
+| prior **off** (no candidate set at all — a definition, not a measurement) | 0 | 422 | **1.0000** |
 | prior **on**, pre-`#12295` matcher (`_norm` equality — the frozen control) | **0** | 422 | **1.0000** |
 | prior **on**, shipped matcher (with the folded rung) | **207** | 215 | **0.5095** |
 
@@ -119,7 +130,12 @@ At `k=3`, on the same 422 pairs, one run:
 | space-to-hyphen | 180 | 179 | **180** | **0** |
 | basename-only | 30 | 23 | **30** | **0** |
 
----
+⚠️ **The same run holds a higher number and it must be read beside 207, not instead of it:** the
+harness's `attached_folded` arm — a fold that scrubs `[-_./]` only and does **NOT** drop a leading
+article — binds **386 of 422 (91.5 %)**. The 179-pair gap between 386 and 207 is exactly the
+`space-to-hyphen` class, i.e. the article anchor (§4). 207 is what the *stored* key achieves without
+reversing a decision; 386 is the ceiling if that decision is reopened. Neither is "the fold works" on
+its own, which is why both are in the artifact.
 
 ## 4. The residual is exactly two declared classes, and one of them is a decision
 
@@ -132,9 +148,11 @@ boundary **before** it folds punctuation (`#12047` round-4 finding 5 — the fix
 folding to `b`), so `the-plan-doc` folds to `the plan doc` while the stored `the plan doc` folds to
 `plan doc`. The two never meet. **That decision is NOT reversed here** — this lane pins it from the
 outside (`test_the_article_anchor_decision_is_not_reversed`) and reports its measured cost instead.
-Relaxing the anchor for 3+-token phrases would recover **+180 pairs → 387/422 = 91.7 %**; that is a
-**reopen of a recorded finding**, not a candidate for quiet adoption, so it is filed as evidence
-(see §7).
+The artifact's own ceiling for this class is **179 pairs** — `variant_by_class["space-to-hyphen"]`
+has 179 of 180 in the window, so the 180th cannot attach at any `k`. Recovering them would take the
+lane from **207/422 = 49.1 %** to **386/422 = 91.5 %**, which is exactly the artifact's
+`attached_folded` = 386 (91.5 %). That is a **reopen of a recorded finding**, not a candidate for
+quiet adoption, so it is filed as evidence (see §7).
 
 **`basename-only` — 30 pairs, 30/30 blocked, 0 attach.** Deliberate: a basename is non-injective
 (`lib/config.py` and `server/config.py` share one), so `entity_blocking.attach_matches` attaches on it
@@ -188,8 +206,9 @@ retrieval-miss class `#11901` owns; the folded rung cannot reach what the window
 
 ## 7. What moves next, with the number attached
 
-1. **The article-anchor reopen (evidence filed, not adopted).** `+180` pairs (42.7 % of the variant
-   class) are blocked and reachable; only the anchor prevents the bind. Route: argue it where
+1. **The article-anchor reopen (evidence filed, not adopted).** `+179` pairs (42.4 % of the variant
+   class) are in the window and reachable; only the anchor prevents the bind. The artifact's
+   `attached_folded = 386` is the number that reopen is argued with, not an estimate of it. Route: argue it where
    `#12047` round-4 finding 5 lives, with this brief's §4 as the evidence — **not** a quiet change to
    `normalize_entity_name`, and not a second comparison key smuggled in beside it.
 2. **The basename class (30 pairs)** needs the adjudicator (B1) or a complete-population read on the

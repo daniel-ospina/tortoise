@@ -170,14 +170,22 @@ def test_entropy_gate_refuses_short_and_repetitive_keys_only():
 
 
 def test_shingles_and_bands_are_deterministic_across_processes():
-    """`blake2b`, never Python's salted `hash()` — a rebuild must agree.
+    """`blake2b`, never Python's salted `hash()` — pinned by LITERAL digits.
 
-    A salted hash would make the band keys differ between two processes (and
-    between two runs of the same process after PYTHONHASHSEED changes), so a
-    persisted index could never be trusted and two runs could not be compared.
+    Two calls in one process agree under a salted `hash()` too, so comparing two
+    calls pins nothing about the property that matters: the band keys must be the
+    same in a rebuilt process (PYTHONHASHSEED varies per process), or a persisted
+    index could never be trusted and two runs could not be compared. The literal
+    digest below is that cross-process witness — it was produced by an earlier
+    process and is re-derived here in a different one.
     """
+    from tortoise.entity_blocking import _hash_shingle
+
+    assert _hash_shingle("abc", 0) == 7705568351334315143
+    assert _hash_shingle("abc", 7) == 9497276989126298643
+    assert minhash_signature("the plan doc")[:3] == (
+        2235370570471054300, 532509505977748825, 647817455438147115)
     sig = minhash_signature("the plan doc")
-    assert sig == minhash_signature("the plan doc")
     assert len(sig) == 32
     assert len(lsh_bands(sig)) == 8                  # 32 permutations / band 4
     assert shingles("ab") == frozenset({"ab"})       # shorter than SHINGLE_SIZE
@@ -208,8 +216,13 @@ def test_blocking_is_per_label_object_and_subject_never_cross():
     assert set(index.candidates("the owner")) == {"obj", "sub"}
 
 
-def test_oversized_block_is_skipped_and_REPORTED():
-    """A dropped block must never read as "nothing shares this key"."""
+def test_oversized_block_is_skipped_by_a_QUERY_and_REPORTED():
+    """A dropped block must never read as "nothing shares this key".
+
+    This pins the QUERY path (`candidates`) only. The SCAN path deliberately has
+    no cap — see :func:`test_the_scan_path_has_no_size_cap_and_reports_its_blocks`,
+    because a cap there would drop pairs a smaller graph showed.
+    """
     index = BlockIndex()
     for i in range(MAX_BLOCK_SIZE + 1):
         index.add(f"m{i}", "shared token here", label="Object")
@@ -218,6 +231,8 @@ def test_oversized_block_is_skipped_and_REPORTED():
     assert stats["oversized_skipped"], (
         "an oversized block was skipped without being reported — a caller would "
         "read that as a false negative about the data")
+    # …and the scan still sees every block, so no pair is lost there.
+    assert max(len(m) for m in index.blocks()) == MAX_BLOCK_SIZE + 1
 
 
 def test_index_never_pairs_a_member_with_itself():
@@ -251,3 +266,113 @@ def test_reduction_ratio_is_reported_beside_completeness():
     assert reduction_ratio([], 0) is None
     assert reduction_ratio([frozenset({"a", "b"})], 2) == 1.0
     assert reduction_ratio([frozenset({"a", "b"})], 3) == 1 / 3
+
+
+# ── the LIVE consumer: `entity_resolver.entity_candidates` ────────────────
+# ⛔ These exist because the module's own tests are not coverage of the scan: a
+# wider block set is MONOTONE, so every pre-existing `entity_candidates` test
+# stayed green when the hunk landed. Each test below reds if its hunk is
+# reverted, which is the property "the suite would notice" actually means.
+
+
+def _stub_scan(monkeypatch, entities):
+    """Point `entity_candidates` at a fixed population (no graph, no model)."""
+    from tortoise import entity_resolver
+
+    monkeypatch.setattr(entity_resolver, "scan_entities",
+                        lambda graph, labels=None: list(entities))
+    return entity_resolver
+
+
+def _entity(mid, name, *, kind=None, created="2026-01-01T00:00:00Z",
+            canonical=None, label="Object"):
+    from tortoise.entity_resolver import normalize_entity_name
+
+    row = {"id": mid, "label": label, "name": name,
+           "canonical_name": canonical, "kind": kind, "createdAt": created,
+           "dedup_reviewed": "", "dedup_target_id": None,
+           "dedup_rejected_targets": None,
+           "folded": normalize_entity_name(canonical or name)}
+    return row
+
+
+def test_the_scan_finds_a_transposition_the_single_prefix_key_could_not(monkeypatch):
+    """`the project alpha` / `alpha project`: one noun, no shared 3-char prefix.
+
+    `#12047`'s single key was `folded[:3]` (`pro` vs `alp`), so the pair never
+    reached `similarity` at all — the claim is about the BLOCKER reaching the
+    comparison, not about the verdict (`difflib` may still score a transposition
+    under the review floor, and that is the fuzzy rung's business, not blocking's).
+    This reds if the multi-key union is reverted to `block_key(ent["folded"])`.
+    """
+    from tortoise import entity_resolver
+
+    compared: list[tuple[str, str]] = []
+    real = entity_resolver.similarity
+
+    def _spy(a, b):
+        compared.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(entity_resolver, "similarity", _spy)
+    er = _stub_scan(monkeypatch, [
+        _entity("o1", "the project alpha", kind="core:other"),
+        _entity("o2", "alpha project", kind="core:other", created="2026-01-02T00:00:00Z"),
+    ])
+    assert "pro" != "alp"
+    er.entity_candidates(None, include_semantic=False)
+    assert ("project alpha", "alpha project") in compared, (
+        "the pair never reached the comparison — the block set is the old single "
+        "3-char prefix key")
+
+
+def test_the_scan_still_reports_the_pair_a_prefix_shared_name_makes_exact(monkeypatch):
+    """The rung itself is unchanged: an exact folded pair is still `exact`."""
+    er = _stub_scan(monkeypatch, [
+        _entity("o1", "the plan doc", kind="core:other"),
+        _entity("o2", "plan doc", kind="core:other", created="2026-01-02T00:00:00Z"),
+    ])
+    rows = er.entity_candidates(None, include_semantic=False)
+    assert len(rows) == 1 and rows[0]["method"] == "exact"
+    assert rows[0]["similarity"] == 1.0
+
+
+def test_the_scan_blocks_on_the_STORED_fold_not_on_a_re_fold_of_the_name(monkeypatch):
+    """One value, one key: block on what the scan SCORES.
+
+    `scan_entities` scores ``normalize_entity_name(canonical or name)``
+    (`entity_resolver.py:266`), and a caller-supplied `canonical_name` is legal
+    (`api.py:2671`) — as is a pre-`#12047` row whose fold differs from its name.
+    Indexing such a row by ``key_of(name)`` blocks on one value and scores on
+    another, so an `exact` 1.0 pair silently leaves the queue.
+    """
+    er = _stub_scan(monkeypatch, [
+        # pre-#12047 shape: the stored key is `ab`, the name folds to `a b`
+        _entity("o1", "a-b", kind="core:other", canonical="ab"),
+        _entity("o2", "ab", kind="core:other", created="2026-01-02T00:00:00Z"),
+    ])
+    rows = er.entity_candidates(None, include_semantic=False)
+    assert rows, ("the pair vanished: the index blocked on key_of(name) while the "
+                  "scan scored canonical_name")
+    assert rows[0]["method"] == "exact"
+
+
+def test_the_scan_reports_its_largest_block_and_caps_NOTHING(monkeypatch):
+    """A cap on the scan's pair set would be a behaviour change, not a bound.
+
+    Every name here shares one shingle band, so the biggest block is the whole
+    population — and every pair must still be compared (main compared every block;
+    a cap would silently drop what a smaller graph showed).
+    """
+    ents = [_entity(f"o{i}", "the shared token here", kind="core:other",
+                    created=f"2026-01-{i + 1:02d}T00:00:00Z")
+            for i in range(6)]
+    er = _stub_scan(monkeypatch, ents)
+    rows = er.entity_candidates(None, include_semantic=False, limit=None)
+    # 6 entities, all mutually exact → the per-duplicate reduction keeps one row
+    # per candidate, so 5 candidates are reported, each against its survivor.
+    assert len(rows) == 5
+    from tortoise.entity_blocking import BlockIndex
+
+    stats = BlockIndex.from_rows(ents).stats()
+    assert stats["max_block_size"] == 6      # reported, not capped
