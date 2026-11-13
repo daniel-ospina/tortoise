@@ -4731,9 +4731,13 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     # `git show 3770e1e59a:docs/plans/…:118-123` left this test GREEN (`1 passed`).
     # A test that cannot fail on the exact defect it was written for is not a pin.
     #
-    # The check is therefore per-SENTENCE on emphasis-normalised text, EXCLUDING sentences
-    # that explicitly mark the sizing as history — so recorded history stays writable and a
+    # The check is therefore per-CLAUSE on emphasis-normalised text, EXCLUDING clauses whose
+    # history marker is attached to the SIZING — so recorded history stays writable and a
     # present-tense prescription reds in any emphasis or word order.
+    # ⚠️ NOT per-sentence: this paragraph still said "per-SENTENCE" for several commits after
+    # the unit became a clause, contradicting the rule documented nine lines below it — and
+    # describing exactly the SENTENCE-WIDE EXEMPTION the clause rule was written to close, so
+    # a maintainer reconciling prose to code would re-open the bypass.
     plan_norm = _re.sub(r"\*+", "", _re.sub(r"\s+", " ", plan))
     # ⛔ THE MARKER MUST BE TIED TO THE SIZING, NOT TO THE SENTENCE'S SUBJECT (review
     # cycle 10, measured). Leaving the loose markers in (`cycle N`, `original`, `first
@@ -4761,7 +4765,13 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         prescription ride along in the same sentence: "Earlier revisions aside, the read is
         no longer sized to the bound, it is **sized to `counts.Event + 1`** today" stayed
         GREEN — a single "no longer" excused a sentence that prescribes the defect. Commas
-        split too, so history and a live claim cannot share a unit.
+        split too.
+        ⚠️ NOT a universal, and the split was described as sufficient when it is not:
+        history and a live prescription CAN share a unit when no `.,;:` separates them, and
+        a history marker attached to the SIZING then exempts the live prescription in the
+        same unit. That shape is a KNOWN GAP — pinned by a self-test case below so it is
+        visible rather than mistaken for safety. The plan's history block is a separate
+        paragraph, so it does not take this shape.
         """
         return [
             c.strip() for c in _re.split(r"(?<=[.;:,])\s+", text)
@@ -4770,9 +4780,11 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
 
     # ⛔ THE DETECTOR IS SELF-TESTED, because a pin that cannot fail on its own defect is
     # the class this block has produced twice already. Each case below is a MEASURED
-    # mutation of the plan doc: the first is the verbatim withdrawn sentence (emphasis-
-    # wrapped, mid-sentence — the form the previous `is sized to` pin could not see), the
-    # second is the clause-splitting bypass, the last two must stay writable as history.
+    # mutation of the plan doc: the first is the withdrawn sentence's TEXT — ⚠️ mid-sentence,
+    # but NOT emphasis-wrapped: the input below carries no `**` and no line break, and it is
+    # passed to `_prescribes` without the `plan_norm` strip. The emphasis form is handled by
+    # that normalisation, not by this case (the label used to claim otherwise), the second is
+    # the clause-splitting bypass, the last two must stay writable as history.
     assert _prescribes(
         "The read is therefore sized to `counts.Event + 1`, which is the smallest "
         "request that PROVES non-truncation."), (
@@ -4787,6 +4799,14 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     assert not _prescribes(
         "The superseded row sized the request to `counts.Event + 1`."), (
         "recorded history must stay writable")
+    # ⚠️ KNOWN GAP, pinned so it cannot pass for safety: with no `.,;:` between a history
+    # marker and a live prescription, they share one unit and the marker exempts it. If this
+    # assertion ever starts failing, the detector got STRONGER — update the note it pins
+    # rather than deleting the case.
+    assert not _prescribes(
+        "Earlier revisions used to size the read to `counts.Event + 1` and the read sizes "
+        "its request to `counts.Event + 1` today."), (
+        "the no-punctuation mixed shape is now flagged: strengthen the note in _prescribes")
     # ⛔ ...and the other direction of the same trap: a history WORD is not a history
     # STATEMENT. `Cycle 3` says where the number came from; it does not withdraw it.
     # Measured GREEN before this case was added (review cycle 10).
