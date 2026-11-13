@@ -112,7 +112,7 @@ def turn_snapshot(i: int, vec: list[float], *, chars: int = TURN_CHARS) -> dict:
     """
     snapshot = {
         "id": f"sess{i // TURNS_FOR_ONE_SESSION:04d}_t{i % TURNS_FOR_ONE_SESSION}",
-        "content": ("turn %d " % i) + ("x" * max(0, chars - 8)),
+        "content": f"turn {i} " + ("x" * max(0, chars - 8)),
         "pointKind": "event",
         "speaker": "user",
         "is_episodic": True,
@@ -143,7 +143,7 @@ def capture_records(turns: int, points: int, seed0: int = 0) -> list[tuple[str, 
     }))
     for p in range(points):
         payload = {
-            "content": ("claim %d " % p) + ("y" * 240),
+            "content": f"claim {p} " + ("y" * 240),
             "pointKind": "statement",
             "status": "live",
             "createdAt": "2026-11-13T00:00:00Z",
