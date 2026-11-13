@@ -1137,9 +1137,16 @@ def refusal_message(error: BaseException | str) -> str | None:
       reached …", "code": -32006}`);
     * the TRANSPORT WAIT-BOUND refusal (`-32009`) — its `content` is PROSE, not
       JSON, and on the hosted surface it is the ROUTINE refusal for an expensive
-      census walk. Its two arms (dispatched vs never-dispatched) say OPPOSITE
-      things about whether a write can be in flight, so both are matched here and
-      the text itself is handed back for the caller to branch on.
+      census walk. Its THREE arms (dispatched vs never-dispatched vs a refused
+      WRITE) say OPPOSITE things about whether a write can be in flight, so all
+      three are matched here and the text itself is handed back for the caller to
+      branch on. ⛔ All three are named in the import below rather than left to be
+      matched by their shared opening sentence: they agree today only because the
+      base prose's first 60 characters are a common prefix, which is user-facing
+      text a human may reword. A reworded WRITE arm would slip through `startswith`
+      and a refused write would re-raise as rc 1 "the run crashed" — the exact class
+      rounds 4 and 8 fixed (pinned by
+      `test_every_wait_bound_prose_arm_is_a_designed_refusal`, #11153 review round 9).
 
     A server-side CRASH's text is prose too (`Error calling tool: TypeError: …`)
     and matches neither arm — returns None, so a driver that pages on "the run
@@ -1155,12 +1162,14 @@ def refusal_message(error: BaseException | str) -> str | None:
         from tortoise.mcp_auth import (
             _TRANSPORT_WAIT_BOUND_MESSAGE,
             _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE,
+            _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE,
         )
     except Exception:  # fastmcp absent; there is no client here to refuse anything
         pass
     else:
         for prose in (_TRANSPORT_WAIT_BOUND_MESSAGE,
-                      _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE):
+                      _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE,
+                      _TRANSPORT_WAIT_BOUND_WRITE_MESSAGE):
             # `startswith` and not equality: a wrapped message keeps its prefix,
             # and the refusal prose itself is the leading sentence either way.
             if text.startswith(prose[:60]):
@@ -1183,9 +1192,9 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> Any:
     wait-bound expiry (`-32009`), an auth rejection — and fastmcp's client is built with
     `raise_on_error=True` by default, so that refusal arrives as a RAISED `ToolError` and
     never reaches the caller as a payload. `normalise_tool_result` therefore cannot see it.
-    `refusal_message()` below is the ONE classifier for "is this text a DESIGNED refusal or
-    a crash?", so a consumer distinguishes the two the same way this module's other callers
-    do instead of re-deriving the shapes a fourth time.
+    `refusal_message()` in this module is the ONE classifier for "is this text a DESIGNED
+    refusal or a crash?", so a consumer distinguishes the two the same way this module's
+    other callers do instead of re-deriving the shapes a fourth time.
 
     ⚠️ **`ToolError` carries `result.content[0].text` ONLY** (measured:
     `fastmcp/client/mixins/tools.py`, `if result.isError and raise_on_error: msg =

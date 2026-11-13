@@ -360,6 +360,34 @@ def test_the_routine_wait_bound_refusal_is_still_a_designed_refusal(monkeypatch)
     assert "wait budget" in str(caught.value), str(caught.value)
 
 
+def test_every_wait_bound_prose_arm_is_a_designed_refusal():
+    """All THREE `-32009` prose arms must classify, not just the two named first.
+
+    `_wait_bound_refusal_result` picks one of three constants by whether the call was
+    dispatched and whether it was a WRITE (`mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE`,
+    `…_NOT_SENT_MESSAGE`, `…_WRITE_MESSAGE`). `refusal_message` matched only the first
+    two by NAME, and the third fell through only because all three happen to share the
+    base prose's leading 60 characters — user-facing text a human may reword.
+
+    ⛔ Measured: `WRITE.startswith(BASE[:60])` is True today, so this test is a PIN, not
+    a fix (no behaviour changes). It exists because a reworded write arm would make a
+    refused WRITE re-raise as rc 1 "the run crashed", which is the class rounds 4 and 8
+    closed.
+    """
+    from tortoise import mcp_auth
+    from tortoise.mcp_client import refusal_message
+
+    arms = (
+        mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+        mcp_auth._TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE,
+        mcp_auth._TRANSPORT_WAIT_BOUND_WRITE_MESSAGE,
+    )
+    for prose in arms:
+        assert refusal_message(prose) is not None, prose[:60]
+    # The three really are distinct texts, so this is three arms and not one repeated.
+    assert len(set(arms)) == 3
+
+
 # ── the aggregate orientation door (review round 6) ────────────────────────
 
 
