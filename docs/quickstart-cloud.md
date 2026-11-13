@@ -162,7 +162,11 @@ network call: which of the credential stores won (`TORTOISE_API_KEY` env →
 `<cwd>/.tortoise` → `~/.tortoise/credentials.json`), the `api_url` and org it claims, a
 masked form and a short fingerprint of the key in use (never the whole key), the graph
 target, and the cache-graph
-naming the `record-*` verbs expect. It also prints the **separate** store the Pi harness
+naming the `record-*` verbs expect. The graph target line also says whether the repo-root
+`.env` the **daemon** reads (`tortoise serve`, the MCP server) selects a *different* store —
+this command does not read that file, and the report names both targets when they differ, so
+"doctor says healthy" can never silently be about a database the daemon is not serving. It also
+prints the **separate** store the Pi harness
 reads (`~/.pi/agent/tortoise-config.json`). That is often the *same* key (the report says
 which): when the key *and* the `api_url` match, a refusal applies to both; a different key
 — or the same key pointed at a different host — means a refusal on one says nothing about

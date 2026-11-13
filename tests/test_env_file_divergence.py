@@ -1,0 +1,901 @@
+"""#12407 — the `.env` the daemon reads must never be silently ignored by the CLI verbs.
+
+The documented configure step is `cp .env.example .env` (`.env.example` line 1,
+`AGENTS.md` §Environment). The daemon (`tortoise serve` / the MCP server) reads
+that file at import; the CLI verbs do not. So on the documented setup
+`tortoise doctor` grades the CANONICAL EMBEDDED FILE while the daemon serves the
+FalkorDB the user just configured — and prints `Graph: health ✅` about it.
+
+These tests pin the fix direction #12407 recommends: **do not load it, make the
+divergence VISIBLE**. Two properties, and they are the ones that make the false
+✅ impossible:
+
+1. `tortoise config show` answers "which graph am I on" for BOTH entry points —
+   this CLI and the daemon — and names the divergence when they differ.
+2. `tortoise doctor` prints one row saying the same, so a `Graph: health ✅`
+   beside it is no longer a verdict about a store the daemon does not use.
+
+Three more properties protect the disclosure itself: a `.env` value is a
+credential and must never be printed; a diagnostic must not mutate the
+environment it reports on; and the report must use the SAME resolver and the
+SAME `.env` parser as the two entry points (a second implementation is how a
+reporter starts lying — the lesson `_cmd_config`'s own graph-store block carries).
+"""
+from __future__ import annotations
+
+import json
+import os
+
+import pytest
+
+import tortoise.__main__ as main
+import tortoise.dotenv_file as dotenv_file
+
+# The REAL cwd scan, bound at import time. The session fixture replaces the
+# module ATTRIBUTE (so a developer's repo-root `.env` cannot change any test's
+# output), and this module-level binding is what lets one case exercise the real
+# path comparison instead of the stub. A fixture runs after collection, so the
+# object bound here is the product's own function.
+from tortoise.__main__ import _dotenv_unread_candidates as _real_unread_candidates
+
+DB_ENV_VARS = (
+    "TORTOISE_DB_URI",
+    "TORTOISE_DB_PATH",
+    "FALKORDB_HOST",
+    "FALKORDB_PORT",
+    "FALKORDB_PASSWORD",
+)
+
+DOCKER_URI = "docker://:falkordb@localhost:6379/tortoise"
+MASKED_URI = "docker://:***@localhost:6379/tortoise"
+
+
+@pytest.fixture(autouse=True)
+def _isolated(monkeypatch, tmp_path):
+    """Never read the developer's real `.env`, stores, or environ.
+
+    The loader path is derived from the INSTALLED package's own file, so without
+    this patch a populated repo-root `.env` (the very state under test) would
+    leak into every other test in the suite.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    for var in (*DB_ENV_VARS, "TORTOISE_API_KEY", "TORTOISE_API_URL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(tmp_path)
+    env_path = tmp_path / "repo" / ".env"
+    monkeypatch.setattr(dotenv_file, "dotenv_path", lambda: str(env_path))
+    return env_path
+
+
+def _write_env(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def _run(argv=("config", "show")):
+    return main.main(list(argv))
+
+
+def _show_text(capsys, argv=("config", "show")):
+    assert _run(argv) == 0
+    return capsys.readouterr().out
+
+
+def _show_json(capsys):
+    out = _show_text(capsys, ("config", "show", "--json"))
+    return json.loads(out)
+
+
+# ── the defective state: `.env` selects the daemon's store, the CLI ignores it ──
+
+
+def test_config_show_names_the_env_file_it_does_not_read(capsys, _isolated):
+    """The measured defect: `.env` says docker://, `config show` says default."""
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+
+    out = _show_text(capsys)
+
+    assert str(_isolated) in out, (
+        "`config show` did not name the .env file the daemon reads; the user "
+        "cannot tell the file was even considered"
+    )
+    assert "does NOT read it" in out, out
+    assert "TORTOISE_DB_URI" in out, "the key the file sets was not named"
+    # The daemon's store, masked, and the fact it is a DIFFERENT store.
+    assert MASKED_URI in out, out
+    # NOT the bare word "DIFFERENT": the harness block below this one already says
+    # "a DIFFERENT store", so that assertion passes on an unrelated line and the
+    # divergence row is pinned by nothing (measured: with `differs` hardcoded
+    # False the test stayed GREEN — attribution harness, code-review Step 8).
+    assert "DIFFERENT graph than the target above" in out, out
+
+
+def test_config_show_json_carries_the_daemon_target(capsys, _isolated):
+    """A machine consumer must get both targets, not just the CLI's."""
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+
+    payload = _show_json(capsys)
+    env_file = payload["env_file"]
+
+    assert env_file["state"] == "present"
+    assert env_file["path"] == str(_isolated)
+    assert env_file["read_by_this_command"] is False
+    assert env_file["keys"] == ["TORTOISE_DB_URI"]
+    assert env_file["daemon_target"] == MASKED_URI
+    assert env_file["differs"] is True, (
+        "the two entry points resolve different stores; the payload said they agree"
+    )
+    # The CLI's own target is in the same document, so one read answers both.
+    assert payload["graph_store"]["target"] != env_file["daemon_target"]
+
+
+def test_doctor_reports_the_env_divergence(capsys, _isolated):
+    """`doctor` graded the embedded file while the daemon served FalkorDB."""
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+
+    assert _run(("doctor",)) == 0
+    out = capsys.readouterr().out
+
+    assert str(_isolated) in out, out
+    assert MASKED_URI in out, (
+        "doctor did not name the store the daemon actually serves"
+    )
+    assert "does NOT read it" in out, out
+
+
+# ── the divergence must be reported, never invented ───────────────────────────
+
+
+def test_doctor_is_silent_when_no_env_file_exists(capsys, _isolated):
+    """No `.env` → nothing is being ignored → no row (no new noise)."""
+    assert _run(("doctor",)) == 0
+    out = capsys.readouterr().out
+
+    assert ".env" not in out.replace(".env.example", ""), out
+
+
+def test_absent_env_file_is_reported_as_absent_in_json(capsys, _isolated):
+    payload = _show_json(capsys)
+
+    assert payload["env_file"]["state"] == "absent"
+    assert payload["env_file"]["differs"] is False
+    assert payload["env_file"]["daemon_target"] is None
+
+
+def test_env_key_already_in_the_environment_cannot_change_the_target(
+        capsys, _isolated, monkeypatch):
+    """`_load_dotenv` fills ABSENT keys only — so the file changes nothing here.
+
+    Reporting a divergence for a key the environment already wins would send a
+    user hunting a difference that cannot exist.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", DOCKER_URI)
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+
+    payload = _show_json(capsys)
+    env_file = payload["env_file"]
+
+    assert env_file["differs"] is False
+    assert env_file["graph_keys"] == [], (
+        "a key the environment already sets was reported as taking effect"
+    )
+    assert env_file["keys"] == ["TORTOISE_DB_URI"], (
+        "the file's own keys must still be disclosed — the user needs to know "
+        "the file also sets it"
+    )
+
+
+def test_env_file_setting_no_graph_key_is_reported_without_a_divergence(
+        capsys, _isolated):
+    """A `.env` that only carries provider keys is still not read — say so."""
+    _write_env(_isolated, "DEEPSEEK_API_KEY=sk-not-a-real-key\n")
+
+    payload = _show_json(capsys)
+    env_file = payload["env_file"]
+
+    assert env_file["state"] == "present"
+    assert env_file["keys"] == ["DEEPSEEK_API_KEY"]
+    assert env_file["graph_keys"] == []
+    assert env_file["differs"] is False
+
+
+def test_a_password_in_the_env_file_never_reaches_the_report(capsys, _isolated):
+    """`.env` values are credentials; the report names KEYS, never values."""
+    secret = "s3cr3t-pw-xyzzy"
+    uri = f"docker://user:{secret}@db.example:6379/tortoise"
+    _write_env(_isolated, f"TORTOISE_DB_URI={uri}\n")
+
+    out = _show_text(capsys)
+    assert secret not in out, (
+        "the .env value was printed — a diagnostic must not leak the credential "
+        "it reads"
+    )
+    # …and the same for the machine-readable half.
+    payload = _show_json(capsys)
+    assert secret not in json.dumps(payload)
+
+
+def test_reporting_does_not_mutate_the_environment(capsys, _isolated):
+    """The daemon-target computation overlays `.env`; it must not KEEP it.
+
+    A diagnostic that exports what it reports would change the very resolution
+    the NEXT verb in the same shell performs.
+    """
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+    before = dict(os.environ)
+
+    _show_text(capsys)
+
+    assert "TORTOISE_DB_URI" not in os.environ
+    assert dict(os.environ) == before, (
+        "`config show` left the environment changed: "
+        f"{set(os.environ) ^ set(before)}"
+    )
+
+
+# ── one parser, one resolver ──────────────────────────────────────────────────
+
+
+def test_the_shared_parser_matches_what_the_daemon_applies(tmp_path, monkeypatch):
+    """The disclosure parses `.env` the SAME way the daemon does.
+
+    Pin the parse rules the daemon's loader implements (quoted values literal,
+    unquoted values lose an inline comment, `export ` prefix, bare keys
+    skipped), so a second parser cannot drift from the one that decides what
+    the daemon really uses.
+    """
+    env = tmp_path / ".env"
+    env.write_text(
+        "# comment\n"
+        "export EXPORTED=one\n"
+        "PLAIN=two\n"
+        'QUOTED="three # not a comment"\n'
+        "INLINE=four # stripped\n"
+        "NOEQUALS\n"
+        "EMPTY=\n"
+    )
+
+    parsed = dotenv_file.parse_dotenv(str(env))
+
+    assert parsed == {
+        "EXPORTED": "one",
+        "PLAIN": "two",
+        "QUOTED": "three # not a comment",
+        "INLINE": "four",
+        "EMPTY": "",
+    }
+
+
+def test_the_daemon_loader_and_the_parser_agree(tmp_path, monkeypatch):
+    """`_load_dotenv` applies exactly what `parse_dotenv` returns."""
+    from tortoise.mcp_server import _load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text('A=1\nB="two words"\nc=x # tail\n')
+    for key in ("A", "B", "c"):
+        monkeypatch.delenv(key, raising=False)
+
+    expected = dotenv_file.parse_dotenv(str(env))
+    _load_dotenv(str(env))
+
+    assert expected == {"A": "1", "B": "two words", "c": "x"}
+    for key, value in expected.items():
+        assert os.environ[key] == value
+
+
+def test_the_parser_refuses_a_non_regular_file(tmp_path):
+    """A FIFO at the `.env` path must not hang the verb that reads it.
+
+    `read_text()` on a FIFO blocks in `open()` with no writer — the hang would
+    be in a diagnostic the user ran TO find out what is wrong. The parser
+    therefore reads regular files only.
+    """
+    fifo = tmp_path / ".env"
+    os.mkfifo(fifo)
+
+    assert dotenv_file.parse_dotenv(str(fifo)) == {}
+
+
+# ── the verdict split: informational, warning, and hard failure ───────────────
+
+
+def test_a_same_target_env_file_is_informational_not_a_warning(capsys, _isolated,
+                                                              monkeypatch, tmp_path):
+    """The docs tell a user to create this file — do not warn on every setup.
+
+    `doctor`'s own alert-fatigue rule (#3615): a row that fires ⚠️ on the
+    documented configuration teaches the reader to ignore warnings. The file is
+    still DISCLOSED, because "this command does not read it" is the part a user
+    cannot see.
+
+    The shape must be one where the daemon and the graded store AGREE: an
+    environment that already sets the same URI (so the file's fill is inert).
+    A `.env` with only a provider key is NOT that shape — the daemon refuses to
+    start when neither TORTOISE_DB_URI nor TORTOISE_DB_PATH is set, which is its
+    own (warned) state.
+    """
+    # DB_PATH in the ENVIRONMENT (not the file): both ladders then resolve it, so
+    # the file's provider key is inert for the graph target and the row is info.
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "same.db"))
+    _write_env(_isolated, "DEEPSEEK_API_KEY=sk-not-a-real-key\n")
+
+    # rc is not asserted: `doctor`'s fail count on a box includes unrelated
+    # checks (the issue itself records a local pi-hook staleness fail), so the
+    # ROW is what this pins.
+    _run(("doctor",))
+    out = capsys.readouterr().out
+
+    assert "ℹ️ Config: .env" in out, out
+    assert "⚠️ Config: .env" not in out, out
+    assert "does NOT read it" in out, out
+
+
+def test_doctor_fails_when_the_env_file_breaks_the_daemons_target(capsys, _isolated):
+    """A `.env` whose DAEMON key cannot resolve is the ❌ arm.
+
+    `TORTOISE_DB_URI=relative/path.db` makes `resolve_db_path` REFUSE (a relative
+    path is never permitted), so the daemon cannot open anything — a refusal no
+    retry fixes, while the rows below are green about a store it will never see.
+
+    ⛔ NOT `FALKORDB_PORT=notaport`: the DAEMON never reads the legacy trio (only
+    the CLI does), so that value cannot break it. Reporting it as a daemon
+    failure was the round-1 review finding (#12428) — the key list this reports
+    on is the daemon's, imported from `config.DAEMON_DB_KEYS`.
+    """
+    _write_env(_isolated, "TORTOISE_DB_URI=relative/path.db\n")
+
+    assert _run(("doctor",)) == 1
+    out = capsys.readouterr().out
+
+    assert "❌ Config: .env" in out, out
+    assert "unresolvable" in out, out
+    assert "relative/path.db" in out, "the offending value was not named"
+
+
+def test_a_legacy_trio_only_env_file_is_the_daemons_REFUSAL(capsys, _isolated):
+    """`.env` with only `FALKORDB_*`: the daemon reads NONE of it and refuses.
+
+    Measured before the fix (PR #12428 review round 1): the row claimed "the
+    daemon serves docker://…" — the CLI's trio target, attributed to a daemon
+    that never reads the trio and exits 1 in this state.
+    """
+    _write_env(_isolated, "FALKORDB_HOST=localhost\nFALKORDB_PORT=6379\n")
+
+    assert _run(("doctor",)) in (0, 1)
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+    assert "REFUSES to start" in row, row
+
+    payload = _show_json(capsys)
+    env_file = payload["env_file"]
+    assert env_file["daemon_rung"] == "refuses"
+    assert env_file["daemon_target"] is None
+    assert env_file["graph_keys"] == []      # the trio is NOT a daemon key
+    assert "docker://" not in json.dumps(env_file)
+
+
+def test_a_scheme_less_env_uri_WINS_over_the_environments_db_path(capsys, _isolated,
+                                                                monkeypatch):
+    """The daemon's ladder differs from the CLI's on this rung — say so.
+
+    Measured before the fix: env `TORTOISE_DB_PATH=/a.db` + `.env`
+    `TORTOISE_DB_URI=/b.db` was reported as "the same graph target" — while the
+    daemon opens `/b.db` (URI wins) and the CLI resolves `/a.db` (DB_PATH wins).
+    A missed divergence closed with a reassurance is the false PASS #12407 is
+    about.
+    """
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/cli-side.db")
+    _write_env(_isolated, "TORTOISE_DB_URI=/tmp/daemon-side.db\n")
+
+    payload = _show_json(capsys)
+    env_file = payload["env_file"]
+
+    assert env_file["differs"] is True, json.dumps(env_file, indent=2)
+    assert env_file["daemon_target"] == "/tmp/daemon-side.db"
+    assert env_file["cli_target"] == "/tmp/cli-side.db"
+
+    assert _run(("doctor",)) in (0, 1)
+    out = capsys.readouterr().out
+    assert "/tmp/daemon-side.db" in out and "DIFFERENT store" in out, out
+
+
+def test_doctor_reports_an_unreadable_env_file(capsys, _isolated):
+    """"Cannot tell" is never a pass: the file exists and was not read."""
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n").chmod(0o000)
+    if os.access(_isolated, os.R_OK):
+        # Root ignores mode 000, so the precondition cannot be created — the
+        # product is right and this host cannot express the case (containers and
+        # some CI images run as root). Skipping is honest; a red here would
+        # blame the code for the uid.
+        pytest.skip("running as a uid that ignores mode 000 — cannot create the state")
+
+    assert _run(("doctor",)) == 0
+    out = capsys.readouterr().out
+
+    assert "⚠️ Config: .env" in out, out
+    assert "cannot be read" in out, out
+
+
+def test_config_show_json_carries_a_daemon_error(capsys, _isolated):
+    """`--json` must carry the failure, not imply the daemon resolved fine."""
+    _write_env(_isolated, "TORTOISE_DB_URI=relative/path.db\n")
+
+    payload = _show_json(capsys)
+    env_file = payload["env_file"]
+
+    assert "relative/path.db" in env_file["daemon_error"]
+    assert env_file["daemon_target"] is None
+    assert env_file["differs"] is False
+
+
+# ── the file no reader reads (the documented step, in the wrong directory) ────
+
+
+def test_a_cwd_env_file_no_entry_point_reads_is_reported(capsys, _isolated, tmp_path,
+                                                         monkeypatch):
+    """`cp .env.example .env` in a PROJECT dir: the daemon reads the package root.
+
+    Nothing reads the cwd file — not the CLI (no verb loads a `.env`) and not the
+    daemon (it resolves from its own package location). Reporting it is the same
+    silently-ignored class one level out, and it is the shape a pip install
+    produces for a user who followed the instructions.
+    """
+    # The suite pins the scan away from the machine (conftest), so hand it this
+    # one file explicitly — the DISCOVERY itself is pinned separately, below.
+    _write_env(tmp_path / ".env", f"TORTOISE_DB_URI={DOCKER_URI}\n")
+    monkeypatch.setattr(main, "_dotenv_unread_candidates",
+                        lambda daemon_path: [str(tmp_path / ".env")])
+
+    payload = _show_json(capsys)
+    unread = payload["env_file"]["unread_env_files"]
+
+    assert [entry["path"] for entry in unread] == [str(tmp_path / ".env")]
+    assert payload["env_file"]["state"] == "absent"  # the daemon's own path
+    assert "TORTOISE_DB_URI" in unread[0]["graph_keys"]
+
+    assert _run(("doctor",)) == 0
+    out = capsys.readouterr().out
+    assert "NO Tortoise entry point" in out, out
+
+
+def test_the_unread_scan_ignores_the_daemons_own_file(tmp_path, monkeypatch):
+    """The cwd scan must not report the daemon's file as "read by nobody".
+
+    Pinned separately from the reporting above because the suite replaces the
+    scan wholesale (a developer's repo-root `.env` must not change test output);
+    this is the only case that exercises the real path comparison.
+    """
+    _write_env(tmp_path / ".env", f"TORTOISE_DB_URI={DOCKER_URI}\n")
+    monkeypatch.chdir(tmp_path)
+    elsewhere = str(tmp_path / "other" / ".env")
+    own = str(tmp_path / ".env")
+
+    assert _real_unread_candidates(elsewhere) == [own]
+    assert _real_unread_candidates(own) == []
+    (tmp_path / "empty").mkdir()
+    monkeypatch.chdir(tmp_path / "empty")
+    assert _real_unread_candidates(elsewhere) == []
+
+
+def test_the_daemon_dotenv_is_not_reported_as_unread_when_cwd_is_the_repo(
+        capsys, _isolated, monkeypatch):
+    """cwd == the daemon's root is the documented case, not a second file."""
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+    monkeypatch.chdir(_isolated.parent)
+
+    payload = _show_json(capsys)
+
+    assert payload["env_file"]["unread_env_files"] == []
+
+
+def test_a_null_byte_in_the_env_file_is_reported_not_raised(capsys, _isolated):
+    """A diagnostic must not traceback on the condition it diagnoses.
+
+    `os.environ` refuses a value carrying a NUL byte, and the parser decodes a
+    binary file with `errors="replace"` — so a NUL can survive parsing and blow
+    up the environment overlay that computes the daemon's target. It is reported
+    as an unloadable file (the daemon cannot load it either), never as a crash.
+    """
+    _isolated.parent.mkdir(parents=True, exist_ok=True)
+    _isolated.write_bytes(b"TORTOISE_DB_URI=docker://:pw@h:6379/t\x00ortoise\n")
+
+    payload = _show_json(capsys)
+    env_file = payload["env_file"]
+
+    assert env_file["daemon_target"] is None
+    assert "cannot be loaded" in env_file["daemon_error"]
+    # …and the environment it inspects is untouched afterwards.
+    assert "TORTOISE_DB_URI" not in os.environ
+
+
+# ── review round 1: the three findings, each pinned in the direction it failed ──
+
+
+def test_a_control_byte_in_the_env_file_cannot_rewrite_the_terminal(
+        capsys, _isolated, monkeypatch, tmp_path):
+    """A `.env` is attacker-shippable text; its KEY NAMES reach a terminal.
+
+    `.gitignore` excludes the file, but `git add -f`, a tarball or a zip still
+    ships it. Before the fix, a key carrying an ANSI clear-screen repainted
+    `doctor`'s output — i.e. the very rows this change adds could be erased or
+    forged. `_printable` is the escape everything else in this file uses.
+    """
+    # Two shapes, because the two doctor arms print DIFFERENT fields: a
+    # control byte in a key NAME reaches the "present, same target" row's key
+    # list, and one inside the URI reaches the divergent row's target. (The
+    # divergent row's `graph_keys` are the ladder's own fixed names, so a key
+    # name cannot reach it — hence two cases rather than one.)
+    # The "present, same target" arm is the one that prints arbitrary KEY NAMES;
+    # an environment DB_PATH makes both ladders agree so that arm is reached.
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "same.db"))
+    _write_env(_isolated, "\x1b[2J\x1b[HFAKEKEY=1\n")
+    _run(("doctor",))
+    out = capsys.readouterr().out
+    assert "Config: .env" in out, out
+    assert "\x1b" not in out, (
+        "a control byte from a .env KEY NAME reached doctor's output raw"
+    )
+    assert "\\x1b" in out, "the escaping is not visible either — check _printable"
+
+    _write_env(_isolated, "TORTOISE_DB_URI=docker://:pw@h:6379/t\x1b[2Jortoise\n")
+    assert _run(("doctor",)) in (0, 1)
+    out = capsys.readouterr().out
+    assert "\x1b" not in out, (
+        "a control byte in the .env TARGET reached doctor's output raw"
+    )
+
+    payload = _show_json(capsys)
+    assert "\x1b" not in json.dumps(payload)
+
+
+def test_doctor_compares_the_store_it_grades_not_the_environments(
+        capsys, _isolated, tmp_path):
+    """`doctor --db <path>` grades ITS target; the row must say that store.
+
+    Measured before the fix: with `.env` selecting FalkorDB and
+    `doctor --db /tmp/other.db`, the row claimed "the rows below grade that
+    DIFFERENT store" while they graded `/tmp/other.db` — a reassurance about a
+    store the run was not about to open.
+    """
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+    graded = tmp_path / "graded.db"
+
+    assert _run(("doctor", "--db", str(graded))) in (0, 1)
+    out = capsys.readouterr().out
+
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+    assert str(graded) in row, (
+        f"the row does not name the store the rows below grade: {row}"
+    )
+    assert MASKED_URI in row, row
+
+
+def test_config_show_does_not_claim_the_environment_sets_an_effective_key(
+        capsys, _isolated):
+    """A `.env` graph key that TAKES EFFECT must not be described as shadowed.
+
+    `graph_keys` is the set absent from the environment — the keys that DO take
+    effect. Keying the "the environment already sets them" sentence on it
+    inverted the claim, and the empty case then said "no graph key in this
+    file" about a file whose key the environment shadows.
+    """
+    shadowed = "TORTOISE_DB_PATH=/tmp/from-the-file.db"
+    _write_env(_isolated, shadowed + "\n")
+
+    out = _show_text(capsys)
+    assert "already sets" not in out, out
+    assert "no graph key in this file" not in out, out
+
+
+def test_config_show_names_the_shadowed_key_as_the_reason(capsys, _isolated,
+                                                          monkeypatch):
+    """The shadowed case names the environment as the reason, not the file."""
+    monkeypatch.setenv("TORTOISE_DB_URI", DOCKER_URI)
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+
+    out = _show_text(capsys)
+    assert "already sets TORTOISE_DB_URI" in out, out
+    assert "cannot change the target here" in out, out
+
+
+def test_the_already_applied_state_is_recorded_not_inferred(capsys, _isolated):
+    """`read_by_this_command` reports what HAPPENED, not what was imported.
+
+    The suite imports `tortoise.mcp_server` (its loader is tested elsewhere), and
+    under pytest that import's `.env` load is SKIPPED — so "the module is in
+    `sys.modules`" is not evidence the file was applied. This pins the recorded
+    fact: false until the loader actually runs for this path, true after.
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+    payload = _show_json(capsys)
+    assert payload["env_file"]["read_by_this_command"] is False, (
+        "importing the daemon module is not applying the file — under pytest its "
+        "load is skipped, so this must stay False"
+    )
+
+    _load_dotenv(str(_isolated))
+    payload = _show_json(capsys)
+    assert payload["env_file"]["read_by_this_command"] is True
+    # …and the prose stops claiming it does not read it.
+    assert _run(("config", "show")) == 0
+    out = capsys.readouterr().out
+    assert "this process already applied that file at import" in out, out
+
+
+def test_a_control_byte_in_a_broken_env_value_cannot_rewrite_the_terminal(
+        capsys, _isolated):
+    """The ❌ arm prints a RESOLVER MESSAGE, which can quote the `.env` value.
+
+    `resolve_db_path` refuses a relative target by embedding it in the message
+    (`RELATIVE_PATH_ERROR`), and `_scrub` removes credentials from that text but
+    not control bytes — so the ❌ row is a second path from a shipped `.env` to
+    a terminal, after the keys.
+    """
+    _write_env(_isolated, "TORTOISE_DB_URI=relative/\x1b[2J\x1b[Hpwned.db\n")
+
+    _run(("doctor",))
+    out = capsys.readouterr().out
+
+    assert "❌ Config: .env" in out, out
+    assert "\x1b" not in out, "a control byte from a .env VALUE reached doctor raw"
+    assert "\\x1b" in out, out
+
+
+# ── review round 2: the credential that leaked through the resolver's message ──
+
+# Each is REFUSED by `resolve_db_path` (so the resolver quotes it) AND carries a
+# credential, which is the combination that leaked.
+_CREDENTIAL_URIS = (
+    "alice:s3cr3t-PASSW0RD@dbhost.internal/tortoise.db",   # userinfo, scheme-less
+    "./x.db?password=QUERY-SECRET-9",                      # query credential (#5109)
+    "token@host/SECRET-TOKEN.db",                          # colon-less userinfo (#2987)
+)
+
+
+@pytest.mark.parametrize("uri", _CREDENTIAL_URIS)
+def test_a_credential_in_a_refused_env_value_never_reaches_any_surface(
+        capsys, _isolated, uri):
+    """`RELATIVE_PATH_ERROR` embeds the value — on all THREE surfaces.
+
+    `resolve_db_path` refuses a scheme-less relative target and quotes it, so the
+    `.env` value reaches a printed message. Round 1 introduced a raw `{exc}`
+    interpolation there (a REGRESSION: the parent commit scrubbed), and the
+    suite could not see it because its only credential case was a well-formed
+    `docker://` URI, which never enters the error arm (#12428 review round 2).
+    """
+    secret = ("QUERY-SECRET-9" if "password=" in uri
+              else uri.split("@")[0].lstrip("./").split(":")[-1]
+              if uri.startswith("alice:")
+              else "SECRET-TOKEN")
+    _write_env(_isolated, f"TORTOISE_DB_URI={uri}\n")
+
+    # 1. prose
+    out = _show_text(capsys)
+    assert secret not in out, f"leaked in `config show` prose: {out}"
+    # 2. --json
+    payload = _show_json(capsys)
+    assert secret not in json.dumps(payload), "leaked in `config show --json`"
+    assert payload["env_file"]["daemon_error"], "the refusal was not reported at all"
+    # 3. doctor
+    _run(("doctor",))
+    out = capsys.readouterr().out
+    assert secret not in out, f"leaked in `doctor`: {out}"
+
+
+def test_the_environment_value_is_redacted_too(capsys, _isolated, monkeypatch):
+    """The ENV value leaks through the same arm when the `.env` sets any other key.
+
+    The `.env`-free path was already protected; the path where a `.env` exists
+    was not — which inverts the threat model.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "alice:ENV-SECRET-PW@h/x.db")
+    _write_env(_isolated, "DEEPSEEK_API_KEY=sk-not-a-real-key\n")
+
+    out = _show_text(capsys)
+    assert "ENV-SECRET-PW" not in out, out
+
+
+def test_a_plain_relative_path_stays_legible_in_the_refusal(capsys, _isolated):
+    """Redaction must cut the CREDENTIAL, not the diagnosis.
+
+    `_scrub`-the-whole-value would replace `relative/path.db` with a marker,
+    destroying the one thing the message exists to say — so the two credential
+    shapes are cut and a plain path is kept.
+    """
+    _write_env(_isolated, "TORTOISE_DB_URI=relative/path.db\n")
+
+    payload = _show_json(capsys)
+    assert "relative/path.db" in payload["env_file"]["daemon_error"]
+
+
+def test_config_show_does_not_reassure_when_the_daemon_refuses(capsys, _isolated):
+    """The refusal must not be followed by "the target above is the daemon's too".
+
+    Measured: `FALKORDB_*`-only `.env` printed the refusal line and then "no
+    graph key in this file, so the target above is the daemon's too" — two
+    adjacent sentences contradicting each other (#12428 review round 2).
+    """
+    _write_env(_isolated, "FALKORDB_HOST=localhost\nFALKORDB_PORT=6379\n")
+
+    out = _show_text(capsys)
+    assert "REFUSES to" in out, out
+    assert "the daemon's too" not in out, out
+    assert "the same graph target as above" not in out, out
+
+    # …and the same for an EMPTY ladder value, which otherwise reads as effective.
+    _write_env(_isolated, "TORTOISE_DB_URI=\n")
+    out = _show_text(capsys)
+    assert "REFUSES to" in out, out
+    assert "the same graph target as above" not in out, out
+
+
+def test_the_daemons_refusal_is_still_the_one_the_user_sees(monkeypatch):
+    """`_get_sdk` must stay constructible on the refusal rung.
+
+    `main()` calls `_get_sdk()` BEFORE its own "set TORTOISE_DB_URI … in the
+    environment or .env" refusal, so handing `TortoiseSDK(db_path=None)` for that
+    rung made the SDK's own production guard raise `RuntimeError` first and
+    replace the message with a traceback (measured on a `FLY_APP_NAME` host,
+    #12428 review round 2). Both paths exit non-zero, so nothing false passed —
+    but the refusal a user READS is the product's.
+    """
+    import tortoise.mcp_server as mcp_mod
+
+    for key in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "TORTOISE_ALLOW_EMBEDDED"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("FLY_APP_NAME", "tortoise-test")
+    monkeypatch.setattr(mcp_mod, "_sdk", None, raising=False)
+    monkeypatch.setattr(mcp_mod, "sdk", None, raising=False)
+
+    sdk = mcp_mod._get_sdk()          # must NOT raise
+    assert sdk is not None
+
+
+@pytest.mark.parametrize("line", [
+    # A quoted python-dotenv value keeps its inner padding (the quotes go), while
+    # `resolve_db_path` STRIPS what it quotes back — so the printed form differs
+    # from the file's bytes by whitespace alone, and an exact-substring redactor
+    # matches nothing. Measured leak under round 2's own fix, closed in round 3.
+    # A CREDENTIAL-SHAPED value, on the rung the resolver STRIPS: the quoted form
+    # differs from the printed form by whitespace alone, and a bare relative path
+    # (which is not a secret) is deliberately left legible — see
+    # `test_a_plain_relative_path_stays_legible_in_the_refusal`.
+    'TORTOISE_DB_PATH="   alice:PADDED-SECRET-PW@host/x.db   "',
+    'TORTOISE_DB_URI=" alice:PADDED-SECRET-PW@host/x.db "',
+    "TORTOISE_DB_URI=alice:PADDED-SECRET-PW@host/x.db\t",
+])
+def test_a_padded_credential_is_redacted_too(capsys, _isolated, line):
+    """"It redacts the value" must hold for the value the RESOLVER quotes."""
+    _write_env(_isolated, line + "\n")
+
+    out = _show_text(capsys)
+    assert "PADDED-SECRET-PW" not in out, f"leaked in prose: {out}"
+    payload = _show_json(capsys)
+    assert "PADDED-SECRET-PW" not in json.dumps(payload), "leaked in --json"
+    _run(("doctor",))
+    out = capsys.readouterr().out
+    assert "PADDED-SECRET-PW" not in out, f"leaked in doctor: {out}"
+
+
+# ── review round 3 ───────────────────────────────────────────────────────────
+
+
+def test_doctor_reports_the_import_that_applies_the_file_mid_run(capsys, _isolated):
+    """`doctor` imports the daemon module (§5.5) — which APPLIES the `.env`.
+
+    So the row must not be computed before that import: measured before the fix,
+    `doctor` printed "this command does NOT read it" and then a
+    `Session extraction` verdict that existed only because it HAD read it
+    (`#12428` review round 3). The row now discloses the mid-run application
+    instead of denying it.
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    _write_env(_isolated, "DEEPSEEK_API_KEY=sk-not-a-real-key\n")
+    # Apply it the way `doctor`'s own §5.5 import does — deterministically, so
+    # the case does not depend on what else a given box happens to import.
+    _load_dotenv(str(_isolated))
+
+    _run(("doctor",))
+    out = capsys.readouterr().out
+
+    assert "Config: .env" in out, out
+    assert "this run imported the daemon module" in out, (
+        "the process applied the .env and the row did not disclose it"
+    )
+
+
+def test_a_duplicate_key_keeps_the_first_value_like_the_old_loader(tmp_path):
+    """Duplicate keys: FIRST wins — the pre-change daemon behaviour.
+
+    The old loader wrote a key only when absent, so a second line for the same
+    key was skipped. A dict comprehension silently flipped that to last-wins,
+    which for `TORTOISE_DB_URI` changes the DAEMON's graph for anyone who
+    appended a line instead of editing the first — a split-graph change with no
+    migration note (#12428 review round 3).
+    """
+    env = tmp_path / ".env"
+    env.write_text("TORTOISE_DB_URI=/first.db\nTORTOISE_DB_URI=/second.db\n")
+
+    assert dotenv_file.parse_dotenv(str(env))["TORTOISE_DB_URI"] == "/first.db"
+
+
+def test_config_show_does_not_reassure_when_the_cli_target_does_not_resolve(
+        capsys, _isolated, monkeypatch):
+    """The mirror of the daemon-refuses arm: the CLI resolved NOTHING.
+
+    Measured: env `FALKORDB_PORT=notaport` + a `.env` selecting a store printed
+    "configured but unusable" and then "the same graph target as above … the two
+    ladders agree", where the CLI had no target at all.
+    """
+    monkeypatch.setenv("FALKORDB_PORT", "notaport")
+    _write_env(_isolated, "TORTOISE_DB_PATH=/tmp/daemon-side.db\n")
+
+    out = _show_text(capsys)
+
+    # The prose wraps, so assert the fragments rather than one line.
+    assert "own target did not resolve" in out, out
+    assert "cannot be compared" in out, out
+    assert "the same graph target as above" not in out, out
+
+
+def test_doctor_does_not_name_a_store_it_never_graded(capsys, _isolated, tmp_path):
+    """`--db <unresolvable>` ⇒ the row must not claim the rows below grade a store.
+
+    Measured before the fix: the row named the ENVIRONMENT's store as "the rows
+    below grade" while the rows graded nothing (`#12428` review round 3).
+    """
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+
+    _run(("doctor", "--db", "relative/x.db"))
+    out = capsys.readouterr().out
+
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+    assert "grade NO store" in row, row
+    assert "the rows below grade" not in row.replace("rows below grade NO store", ""), row
+
+
+def test_doctor_does_not_reassure_when_the_ENVIRONMENT_target_fails(
+        capsys, _isolated, monkeypatch):
+    """The twin of the `config show` case, on the doctor surface.
+
+    `FALKORDB_PORT=notaport` makes the run's own resolution fail with no `--db`
+    involved, so the row must say the rows grade NO store — measured before the
+    fix: `ℹ️ … it selects the same graph target the rows below grade
+    ((unresolved))` while the graph rows reported the failure (#12428 round 4).
+    """
+    monkeypatch.setenv("FALKORDB_PORT", "notaport")
+    _write_env(_isolated, "TORTOISE_DB_PATH=/tmp/daemon-side.db\n")
+
+    _run(("doctor",))
+    out = capsys.readouterr().out
+
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+    assert "grade NO store" in row, row
+    assert "same graph target" not in row, row
+    assert "(unresolved)" not in row, row
+
+
+def test_the_sets_clause_describes_the_FILE_not_what_is_left_to_fill(
+        capsys, _isolated):
+    """"what the file sets" must survive the fill being emptied mid-run.
+
+    A mid-run application (`doctor`'s own import, or any earlier `_load_dotenv`)
+    makes every key "already set", so `graph_keys` — the keys that would STILL be
+    filled — goes empty while the file plainly sets one. Reading that as "sets no
+    graph key" misstated the file's contents on a full dev install
+    (#12428 round 4, NB1).
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    _write_env(_isolated, f"TORTOISE_DB_URI={DOCKER_URI}\n")
+    _load_dotenv(str(_isolated))          # as any earlier import would
+
+    out = _show_text(capsys)
+    assert "sets TORTOISE_DB_URI" in out, out
+    assert "no graph key" not in out, out

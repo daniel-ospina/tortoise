@@ -3098,6 +3098,53 @@ def _is_sendable_key(key: object) -> bool:
     return True
 
 
+def _redact_db_value(text: str, *values: object) -> str:
+    """Redact the CREDENTIAL-BEARING forms of a DB value inside resolver text.
+
+    `RELATIVE_PATH_ERROR` embeds the offending value in prose, and
+    `resolve_db_path` raises it for any scheme-less `TORTOISE_DB_URI` — which is
+    exactly where a `.env` value reaches a printed message (#5109's class).
+
+    ⛔ NOT `_scrub`, and that is deliberate: `_scrub` redacts the WHOLE value,
+    which for a plain relative path (`relative/path.db`) destroys the one thing
+    the message exists to say, while the path itself is not a secret. So the two
+    shapes that ARE credentials are cut and the path stays legible — the rule
+    `resolve_db_path`'s own log site already applies:
+
+    * URI USERINFO (``alice:pw@host/x.db``, ``//token@host/x.db``) -> the shared
+      predicate `tortoise.config.looks_like_uri_userinfo`, because a second,
+      narrower test is how a credential shape gets missed (#2987);
+    * a ``?``/``#`` QUERY OR FRAGMENT (``./x.db?password=…``) -> everything from
+      the delimiter is dropped, the way `_mask_display_target` cuts it.
+    """
+    from tortoise.config import looks_like_uri_userinfo
+
+    # ⛔ EVERY WHITESPACE FORM OF THE VALUE, longest first. The resolver quotes
+    # the value it ACTUALLY used, and `resolve_db_path` STRIPS a `TORTOISE_DB_PATH`
+    # before using it — so a `.env` line like `"   alice:pw@host/x.db   "` (a
+    # legal quoted python-dotenv value: the quotes go, the inner pad stays) is
+    # quoted WITHOUT the padding, and an exact-substring replace matched nothing
+    # and printed the credential under review round 2's own fix (#12428).
+    out = text
+    candidates: list[tuple[str, str]] = []
+    for value in values:
+        if not (isinstance(value, str) and value):
+            continue
+        for form in {value, value.strip()}:
+            if not form:
+                continue
+            head = form.split("?", 1)[0].split("#", 1)[0]
+            if looks_like_uri_userinfo(head):
+                candidates.append((form, "<redacted: userinfo-shaped>"))
+            elif head != form:
+                candidates.append((form, head + "…"))
+    # Longest search string first, so a padded form is consumed before the
+    # stripped one can rewrite part of it.
+    for form, replacement in sorted(candidates, key=lambda item: -len(item[0])):
+        out = out.replace(form, replacement)
+    return out
+
+
 def _scrub(text: str, *secrets: object) -> str:
     """Remove credentials from text that an exception or a reply copied verbatim.
 
@@ -3880,6 +3927,20 @@ def _cmd_config(args) -> int:
             f"--org {_shlex.quote(str(org_id))} --graph <graph_id>")
     payload["graph_store"] = graph_store
 
+    # ── the OTHER reader of the SAME config: the daemon's `.env` (#12407) ──
+    # `tortoise.mcp_server` loads `<repo>/.env` at import; no CLI verb does. So
+    # the documented `cp .env.example .env` step configured the daemon and not
+    # the command the user runs to CHECK the setup — and this verb reported
+    # "nothing is configured" about a target the very same file had selected.
+    # Computed from ONE shared function (also rendered as a `doctor` row), and
+    # placed here so `--json` and prose carry the same dict.
+    # `resolved` is this verb's OWN resolution (the graph-store block above), so
+    # it is handed over rather than re-run: one resolve per invocation, and no
+    # second copy of the resolver's stderr notice (measured: the legacy
+    # FALKORDB_* warning printed twice from one `config show`).
+    env_file = _dotenv_divergence(graded_target=resolved)
+    payload["env_file"] = env_file
+
     # ── the OTHER store: the harness seam resolves its own identity ──
     harness_path = (home / ".pi" / "agent" / "tortoise-config.json") if home is not None else None
     harness_state, harness_cfg = (_describe_store(harness_path, "apiKey")
@@ -4164,6 +4225,90 @@ def _cmd_config(args) -> int:
         print(f"  cache graph   {_printable(graph_store['cache_graph_convention'])}")
         print(f"  record scope  {_printable(graph_store['record_scope'])}"
               "   (+ --cache-graph, + --record-dsn/$TORTOISE_RECORD_DSN)")
+    if env_file.get("state") != "absent":
+        # THE SAME FILE, TWO READERS — and only one of them is this command.
+        # Printed under "Graph store" because that is the verdict it changes:
+        # without this block `doctor` said `health ✅` and this verb said
+        # "nothing is configured" about a store the daemon was not using.
+        print("  ·  a `.env` the daemon reads; this command does NOT read it")
+        print(f"     {_printable(env_file['path'])}")
+        if env_file.get("state") == "unreadable":
+            print("  ⚠️  it exists but this command cannot read it — the daemon's")
+            print("      target may differ from the one above. Fix its permissions.")
+        else:
+            print(f"  sets          {_printable(', '.join(env_file['keys']) or '(nothing)')}")
+            if env_file.get("read_by_this_command"):
+                # The one state in which "this command does not read it" would be
+                # FALSE: the daemon's import has already run in this process, so
+                # the environment below carries the file's values.
+                print("  ·  this process already applied that file at import, so both")
+                print("     ladders now read the SAME ENVIRONMENT — a difference")
+                print("     between them would come from the ladders, not the file")
+            if env_file.get("daemon_error"):
+                print("  ⛔ the daemon's target does not RESOLVE with this file:")
+                print(f"     {_printable(env_file['daemon_error'])}")
+                print("     this command does not read it, so the target above does")
+                print("     not show that error")
+            else:
+                if env_file.get("daemon_rung") == "refuses":
+                    print("  daemon        (none — `tortoise serve` REFUSES to")
+                    print("                start: neither TORTOISE_DB_URI nor")
+                    print("                TORTOISE_DB_PATH is set)")
+                else:
+                    print(f"  daemon        {_printable(env_file['daemon_target'] or '(unresolved)')}"
+                          "   (what `tortoise serve` resolves)")
+                if env_file.get("differs"):
+                    print("  ⚠️  the daemon loads that file at import, so it serves a")
+                    print("      DIFFERENT graph than the target above — this command")
+                    print("      resolved from the environment only")
+                    if env_file.get("difference_is_masked"):
+                        print(f"      ({_printable(env_file['difference_is_masked'])})")
+                elif env_file.get("daemon_rung") == "refuses":
+                    # The daemon has NO target to agree with — the three
+                    # branches below describe an agreement that cannot exist, and
+                    # printing one contradicted the refusal line immediately
+                    # above it (measured: `FALKORDB_*`-only `.env`, and
+                    # `TORTOISE_DB_URI=` empty, both reached the "same graph
+                    # target" sentence; #12428 review round 2).
+                    pass
+                elif env_file.get("cli_error") or env_file.get("graded_unresolved"):
+                    # The mirror of the daemon-refuses arm: the CLI resolved
+                    # NOTHING, so there is no pair to compare and no agreement to
+                    # report (#12428 review round 3).
+                    print("  →  this command's own target did not resolve, so the")
+                    print("     two ladders cannot be compared here")
+                # THREE branches, ordered by what actually took effect, and the
+                # reason named must be a LADDER key: `graph_keys` is the set the
+                # daemon's ladder reads that is absent from the environment. A
+                # non-ladder key in the reason ("the environment already sets
+                # TORTOISE_STARTER_PACKS") explained a graph agreement by a key
+                # that has nothing to do with the graph (#12428 review round 1).
+                elif env_file.get("graph_keys"):
+                    print("  →  the same graph target as above: the file's "
+                          f"{_printable(', '.join(env_file['graph_keys']))}")
+                    print("     resolves to it for the daemon too (no difference to")
+                    print("     report — the two ladders agree on this box)")
+                elif env_file.get("shadowed_graph_keys"):
+                    print("  →  the same graph target as above: the environment")
+                    print("     already sets "
+                          f"{_printable(', '.join(env_file['shadowed_graph_keys']))}"
+                          ",")
+                    print("     and the daemon only fills keys that are ABSENT — so the")
+                    print("     file cannot change the target here")
+                elif env_file["keys"]:
+                    print("  →  no graph key in this file, so the target above is the")
+                    print("     daemon's too — the daemon reads it for the other keys")
+    for _other in env_file.get("unread_env_files") or ():
+        # The documented `cp .env.example .env` run where NO entry point looks —
+        # a project directory beside a pip install. Reported because the user's
+        # intent is legible from the file: they configured a target, and
+        # nothing reads it.
+        print("  ·  a `.env` NO entry point reads")
+        print(f"     {_printable(_other['path'])}")
+        print(f"  sets          {_printable(', '.join(_other['keys']))}")
+        print("  ⚠️  the daemon reads "
+              f"{_printable(env_file['path'])} — not this file — and no CLI")
+        print("      verb reads any .env, so nothing above came from it")
     print()
     print("Harness credential — a DIFFERENT store; the CLI never reads it")
     print(f"  {_printable(harness['path'])}")
@@ -10871,6 +11016,471 @@ def _resolve_db_target(explicit: str | None = None) -> str:
     return resolve_db_path(None)
 
 
+def _daemon_db_keys() -> tuple[str, ...]:
+    """The keys the DAEMON's ladder reads (`config.DAEMON_DB_KEYS`).
+
+    ⛔ NOT `_resolve_db_target`'s key list: that ladder honours the legacy
+    `FALKORDB_*` trio (a CLI migration guard) and ranks `TORTOISE_DB_PATH` above
+    a scheme-less `TORTOISE_DB_URI`; the daemon does neither. The whole point of
+    this disclosure is to report the DAEMON's answer, so its key set is the
+    daemon's — imported, never re-listed (a hand-maintained second copy is how
+    the report starts describing a resolver that no longer runs).
+    """
+    from tortoise.config import DAEMON_DB_KEYS
+
+    return tuple(DAEMON_DB_KEYS)
+
+
+#: The graph ladder's keys, in `_resolve_db_target`'s own precedence order
+#: (TORTOISE_DB_URI > FALKORDB_* trio > TORTOISE_DB_PATH). The `.env`
+#: disclosure answers exactly one question — "would the daemon resolve a
+#: DIFFERENT store" — so this is the set that decides it. A provider key in the
+#: file is still disclosed BY NAME (#12407): the file it sits in is not read by
+#: the verb reporting it, and that is the part a user cannot see.
+_DB_LADDER_KEYS = _daemon_db_keys()
+
+
+@contextlib.contextmanager
+def _environ_overlay(extra: dict[str, str]):
+    """Run a block as if ``extra`` were exported — then put it all back.
+
+    Restores exactly: keys the overlay ADDED are removed, keys it changed are
+    restored to their previous value. `config show` computes the DAEMON's
+    target by resolving under the `.env` fill, and a diagnostic that left that
+    applied would change the resolution the NEXT verb in the same shell
+    performs — reporting a state it caused.
+    """
+    import os
+
+    added = [key for key in extra if key not in os.environ]
+    saved = {key: os.environ[key] for key in extra if key in os.environ}
+    try:
+        # INSIDE the try: `os.environ.__setitem__` refuses a value carrying a
+        # NUL byte (`ValueError: illegal environment variable name`), and a
+        # `.env` parsed from a binary file can carry one. A partial update that
+        # skipped the restore would leave the overlay APPLIED — the one outcome
+        # this function exists to prevent, reached through the arm that was
+        # supposed to be safe.
+        os.environ.update(extra)
+        yield
+    finally:
+        for key in added:
+            os.environ.pop(key, None)
+        os.environ.update(saved)
+
+
+def _resolve_db_target_quietly() -> tuple[str | None, str | None]:
+    """`_resolve_db_target()` as ``(target, error)``, stdout captured.
+
+    The resolver prints its legacy-trio notice to stdout, which would corrupt
+    both a `--json` payload and `doctor`'s row list; the notice belongs on
+    stderr for a reporting verb (the graph-store block above already does
+    this, and the daemon-target computation must agree with it).
+
+    The error text is SCRUBBED against every value the resolver actually read —
+    `RELATIVE_PATH_ERROR` embeds the raw target in prose, and a scheme-less
+    `user:password` DSN is not `@`-shaped, so `_mask_uri_userinfo` alone let it
+    through verbatim (#5109's class; the graph-store block next to this one uses
+    `_scrub` for exactly this reason, and a second, weaker scrubber is the drift
+    that test_cli_config_show's credential-leak cases caught on this seam).
+    Read from ``os.environ`` INSIDE the call, so a caller running under
+    `_environ_overlay` scrubs the daemon's values too.
+    """
+    import io as _io
+    import os
+
+    captured = _io.StringIO()
+    try:
+        with contextlib.redirect_stdout(captured):
+            target = _resolve_db_target()
+    except ValueError as exc:
+        return None, _scrub(
+            f"{type(exc).__name__}: {exc}",
+            os.environ.get("TORTOISE_DB_URI"),
+            os.environ.get("TORTOISE_DB_PATH"),
+            os.environ.get("FALKORDB_PASSWORD"),
+        )
+    finally:
+        if captured.getvalue().strip():
+            print(captured.getvalue().rstrip(), file=sys.stderr)
+    return target, None
+
+
+def _dotenv_unread_candidates(daemon_path: str) -> list[str]:
+    """`.env` files in cwd that NO entry point reads (`config show`/`doctor`).
+
+    THE DOCS SAY `cp .env.example .env`; a user who does that in their PROJECT
+    directory (a pip install, whose package root is not the cwd) has configured
+    nothing that reads it — the same silently-ignored class as the daemon/CLI
+    split, one level out. A module-level function (not inline in
+    `_dotenv_divergence`) because the SUITE must be able to pin it: the
+    conftest fixture pins the daemon's path away from the developer's real
+    `.env`, which would otherwise make this cwd scan find that same file and
+    report it as unread — machine-dependent output in exactly the class the
+    fixture exists to close.
+    """
+    try:
+        cwd_env = Path.cwd() / ".env"
+    except OSError:
+        return []
+    if str(cwd_env) == daemon_path or _same_path(cwd_env, Path(daemon_path)):
+        return []
+    return [str(cwd_env)] if cwd_env.is_file() else []
+
+
+def _dotenv_divergence(graded_target: str | None = None, *,
+                       graded_unresolved: bool = False) -> dict:
+    """What the repo-root `.env` changes — and what it cannot (#12407).
+
+    THE GAP THIS CLOSES. `tortoise.mcp_server` reads `<repo>/.env` at import,
+    so the daemon's store comes from the file. Every CLI verb resolves from
+    `os.environ` alone, so on the documented `cp .env.example .env` setup the
+    same file selected a FalkorDB for the daemon and was silently ignored by
+    `tortoise doctor` — which then printed `Graph: health ✅` about the
+    canonical embedded file the daemon does not serve.
+
+    DIRECTION: disclose, never widen. This does not load the file into the CLI
+    (that would change what every `.env` in the wild does to every verb, and
+    needs its own decision); it answers, for the graph target only, the
+    question a configuring user actually has — *is the file that selects the
+    daemon's store changing the store I resolve?* — and names the two targets
+    when it is.
+
+    `graded_target`: the store the CALLER is about to grade, when it already
+    resolved one. `tortoise doctor --db <uri|path>` grades ITS OWN target, not
+    the environment's, so comparing the daemon against the environment would
+    print a reassurance about a store the rows below do not grade (measured:
+    `--db /tmp/other.db` was told "the rows below grade that DIFFERENT store"
+    while they graded `/tmp/other.db`). Passing the resolved target makes
+    `differs` answer the question the row actually asks.
+
+    ONE computation, TWO surfaces: `config show` reads this dict as
+    `payload["env_file"]` and `doctor` renders it as one row. A second
+    computation is how a reporter starts lying — the rule `_cmd_config`'s
+    graph-store block already carries.
+
+    Never prints a VALUE. A `.env` value is a credential (`TORTOISE_DB_URI`
+    routinely carries a password), so keys are named and targets are masked by
+    the same maskers the rest of this file uses. An ABSENT file is reported as
+    absent and adds no prose anywhere: nothing is being ignored, so there is
+    nothing to disclose.
+    """
+    import os
+
+    from tortoise import dotenv_file as _dotenv_file
+    from tortoise.config import daemon_db_target
+
+    path = _dotenv_file.dotenv_path()
+    assignments = _dotenv_file.parse_dotenv(path)
+    present = os.path.isfile(path)
+    payload: dict = {
+        "path": _printable(path),
+        "state": ("present" if (present and os.access(path, os.R_OK))
+                  else ("unreadable" if present else "absent")),
+        # DERIVED from a RECORDED fact, never hardcoded and never inferred from
+        # an import. The premise "this process never applied the file" holds
+        # today for these verbs, but `tortoise.hosted_api` and
+        # `tortoise.selfhost` both import `mcp_server` at module scope, so a new
+        # check reachable from them could apply the `.env` at import — and a
+        # hardcoded `False` would then assert a falsehood while silently
+        # downgrading every divergence to "the environment already sets …".
+        # `sys.modules` is the wrong signal too: under pytest the loader's own
+        # guard SKIPS the load, so the module is present while the file was
+        # never applied (measured — that inference made this field `True` in the
+        # suite, #12428 review round 1). `LOADED_PATHS` records what actually
+        # happened.
+        "read_by_this_command": any(
+            _same_path(Path(loaded), Path(path))
+            for loaded in sorted(_dotenv_file.LOADED_PATHS)),
+        "read_by": ("the daemon (`tortoise serve`, the MCP server) — it loads "
+                    "this file at import time"),
+        # NAMES only. The values are the user's credentials.
+        "keys": sorted(assignments),
+        "keys_already_set_in_the_environment": sorted(
+            key for key in assignments if key in os.environ),
+        "graph_keys": [],
+        "file_graph_keys": [],
+        # Present in EVERY payload, including the `absent` and error states: a
+        # `--json` consumer must not have to guess whether a key exists.
+        "shadowed_graph_keys": [],
+        "daemon_rung": None,
+        "cli_target": None,
+        "daemon_target": None,
+        "differs": False,
+        # A `.env` that NO entry point reads. The docs say `cp .env.example .env`;
+        # a user who does that in their PROJECT directory (a pip install, whose
+        # package root is not the cwd) has configured nothing that reads it —
+        # the same silently-ignored class as the daemon/CLI split, one level
+        # out. `config show` reported "nothing is configured" and left it there.
+        "unread_env_files": [],
+    }
+    other: list[dict] = []
+    for candidate in _dotenv_unread_candidates(path):
+        cwd_assignments = _dotenv_file.parse_dotenv(candidate)
+        if cwd_assignments:
+            other.append({"path": _printable(candidate),
+                          "keys": sorted(cwd_assignments),
+                          "graph_keys": [key for key in _DB_LADDER_KEYS
+                                         if key in cwd_assignments]})
+    payload["unread_env_files"] = other
+    if payload["state"] == "absent":
+        return payload
+
+    # The daemon fills ABSENT keys only (`dotenv_file.load_dotenv`), so a key
+    # the environment already carries cannot change the daemon's target — and
+    # reporting a divergence for it would send the user hunting a difference
+    # that cannot exist. ⛔ CALLED, not re-implemented: `pending_assignments` is
+    # the loader's own filter, so a tightening added there cannot leave this
+    # report describing a loader that no longer runs (#12428 review round 1).
+    effective = _dotenv_file.pending_assignments(path)
+    payload["graph_keys"] = [key for key in _DB_LADDER_KEYS if key in effective]
+    # What the FILE declares, independent of whether it still takes effect (a
+    # mid-run application empties `graph_keys`). Used by the report's "sets …"
+    # clause, which describes the file, not the fill.
+    payload["file_graph_keys"] = [
+        key for key in _DB_LADDER_KEYS if key in assignments]
+    # Ladder keys the ENVIRONMENT already carries — the only keys that can
+    # explain a graph agreement. A provider key in the file explains nothing
+    # about the graph, so it must never be the stated reason.
+    payload["shadowed_graph_keys"] = [
+        key for key in _DB_LADDER_KEYS if key in os.environ]
+
+    if graded_unresolved:
+        # The caller TRIED to resolve a target of its own and failed (an invalid
+        # `--db`/`--path`). Re-resolving from the environment here would describe
+        # a store the rows below do not grade — they grade NOTHING — which is the
+        # misdescription `graded_target` exists to prevent, one state over.
+        payload["graded_unresolved"] = True
+        cli_target, cli_error = None, None
+    elif graded_target is None:
+        cli_target, cli_error = _resolve_db_target_quietly()
+    else:
+        # The caller already resolved the store it will grade. Using it — rather
+        # than re-resolving from the environment — is what makes `differs`
+        # answer "does the daemon serve the store I am grading?", which is the
+        # only question this row is allowed to answer.
+        cli_target, cli_error = graded_target, None
+    if effective:
+        # Only ask again when the `.env` actually changes something. An empty
+        # overlay would re-resolve to the same target AND re-emit the resolver's
+        # own stderr notice a second time (measured: the legacy FALKORDB_*
+        # warning printed twice from one `config show`).
+        #
+        # ⛔ THE DAEMON'S OWN LADDER, not `_resolve_db_target`. They disagree on
+        # two rungs (see `config.daemon_db_target`), and using the CLI's resolver
+        # here both invented a divergence and HID one — measured, PR #12428
+        # review round 1.
+        daemon_target: str | None = None
+        daemon_rung: str | None = None
+        daemon_error: str | None = None
+        # The overlay APPLIES the file, so everything that can fail — including
+        # the redactor, which must see the `.env`'s value in `os.environ` —
+        # happens INSIDE it. Redacting after the overlay's `finally` restored the
+        # environment redacted nothing and printed the credential: the round-2
+        # regression (#12428), caught by review, not by the suite.
+        try:
+            with _environ_overlay(effective):
+                try:
+                    daemon_target, daemon_rung = daemon_db_target()
+                except ValueError as exc:
+                    # `RELATIVE_PATH_ERROR` quotes the offending value.
+                    daemon_error = _redact_db_value(
+                        f"{type(exc).__name__}: {exc} — this `.env` cannot be "
+                        "loaded at all",
+                        os.environ.get("TORTOISE_DB_URI"),
+                        os.environ.get("TORTOISE_DB_PATH"),
+                    )
+        except ValueError as exc:
+            # `os.environ` REFUSES a value carrying a NUL byte, and
+            # `parse_dotenv` decodes a binary file with errors="replace" — so a
+            # NUL can survive parsing and blow up the overlay itself. A
+            # diagnostic that tracebacks on the condition it diagnoses IS the
+            # defect (this verb's whole reason to exist), so an unloadable file
+            # is reported instead.
+            daemon_error = (f"{type(exc).__name__}: {exc} — this `.env` cannot "
+                            "be loaded at all")
+        if daemon_rung in ("refuses", "embedded-allowed"):
+            # No target to compare: `refuses` means the daemon exits 1 (unless
+            # TORTOISE_ALLOW_EMBEDDED=1, which is the only reason
+            # `embedded-allowed` HAS one).
+            payload["daemon_rung"] = daemon_rung
+            if daemon_rung == "refuses":
+                daemon_target = None
+        else:
+            payload["daemon_rung"] = daemon_rung
+    else:
+        # Nothing to overlay: the daemon resolves the same environment this
+        # command does — through ITS ladder, which is the only honest answer.
+        try:
+            daemon_target, daemon_rung = daemon_db_target()
+            payload["daemon_rung"] = daemon_rung
+            daemon_error = None
+            if daemon_rung == "refuses":
+                daemon_target = None
+        except ValueError as exc:
+            daemon_target, daemon_error = None, _redact_db_value(
+                f"{type(exc).__name__}: {exc}",
+                os.environ.get("TORTOISE_DB_URI"),
+                os.environ.get("TORTOISE_DB_PATH"),
+            )
+    if cli_error:
+        payload["cli_error"] = cli_error
+    if daemon_error:
+        payload["daemon_error"] = daemon_error
+    # A masked value is for DISPLAY; the comparison is on the real strings, or
+    # two targets differing only in a password's bytes would read as agreeing.
+    if cli_target:
+        payload["cli_target"] = _mask_display_target(cli_target)
+    if daemon_target:
+        payload["daemon_target"] = _mask_display_target(daemon_target)
+    payload["differs"] = bool(cli_target and daemon_target
+                              and cli_target != daemon_target)
+    if payload["differs"] and payload["cli_target"] == payload["daemon_target"]:
+        # Reachable: the mask collapses userinfo, so two stores differing ONLY
+        # in credentials display identically. Say so rather than let the two
+        # printed lines look absurd beside a "they differ" verdict.
+        payload["difference_is_masked"] = (
+            "the two targets differ only in masked credential bytes")
+    return payload
+
+
+def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
+    """`doctor`'s rows for the `.env` files — from the shared payload.
+
+    THE GLYPHS ARE THE VERDICT SPLIT, and each is chosen from what the row
+    CLAIMS, not from "a `.env` exists":
+
+    * ⚠️ **divergent** — the rows below grade a different store than the daemon
+      serves. A warning, never ❌: a divergence can be DELIBERATE (a user
+      exporting a URI for one shell while the daemon serves the `.env` one), and
+      `doctor` must not fail a working setup (#3615's alert-fatigue rule).
+    * ❌ **the daemon's target does not RESOLVE** with this file (a malformed
+      `FALKORDB_PORT`, a relative path). No legitimate configuration does that,
+      and retrying cannot fix it — the file's own rule for ❌.
+    * ⚠️ **unreadable** — the file exists and this command cannot read it, so it
+      cannot tell. `cannot tell` is never a pass.
+    * ℹ️ **present, same target** — disclosed, and nothing is wrong. The docs
+      tell a user to create this file, so painting every documented setup with
+      a warning is the noise `doctor` exists not to add (#3615).
+    * ⚠️ **a `.env` nothing reads** (`unread_env_files`) — the documented
+      `cp .env.example .env` run in a project directory, where no Tortoise entry
+      point looks. A config file that no reader reads is the same
+      silently-ignored class one level out, so it is a warning even when the
+      daemon's own file is absent.
+
+    What the rows make impossible is the SILENT case: a `Graph: health ✅` two
+    lines below is no longer a verdict about a store the daemon does not use.
+
+    ⛔ EVERY `.env`-DERIVED STRING PASSES THROUGH `_printable`.
+    A `.env` is a file the repo's own `.gitignore` excludes but `git add -f`, a
+    tarball or a zip still ships, so its KEY NAMES are attacker-controlled text
+    rendered in a terminal. Measured before this was fixed: a key carrying
+    `\x1b[2J\x1b[H` repainted `doctor`'s output, i.e. the very rows this change
+    adds could be erased or forged. The sibling `config show` prose already
+    escaped (that is what `_printable` exists for); this row builder did not.
+    """
+    rows: list[tuple[str, str, str]] = []
+    for other in env_file.get("unread_env_files") or ():
+        keys = ", ".join(other.get("graph_keys") or other.get("keys") or ())
+        rows.append(("Config: .env (unread)", "⚠️",
+                     f"{_printable(other['path'])} sets {_printable(keys)} but "
+                     "NO Tortoise entry point reads it — the daemon reads "
+                     f"{_printable(str(env_file.get('path') or ''))}, and no "
+                     "CLI verb reads any .env. Point the daemon's file there, "
+                     "or export the values"))
+    if env_file.get("state") == "absent":
+        # Nothing is being ignored → no row (the `unread_env_files` rows above
+        # already cover the file that IS being ignored). Doctor already prints
+        # many rows; one that fires on every clean machine is the noise this
+        # report exists not to add.
+        return rows
+    path = env_file["path"]
+    if env_file.get("state") == "unreadable":
+        rows.append(("Config: .env", "⚠️",
+                     f"{path} exists but cannot be read — the daemon's graph "
+                     "target may differ from the one graded below and this "
+                     "command cannot tell. Fix its permissions"))
+        return rows
+    # Disclosed on EVERY comparative arm: a later check in the SAME run may
+    # import the daemon module, which applies the file at import — measured on
+    # the real CLI (`doctor` prints a `Session extraction` verdict that exists
+    # only because the file was applied, while this row said it was not read).
+    _applied_note = ""
+    if env_file.get("read_by_this_command"):
+        _applied_note = (" — ⚠️ this run imported the daemon module, which applies "
+                         "the file at import, so its values ARE in this process "
+                         "now (the graph verdict was resolved before that)")
+    if env_file.get("graded_unresolved") or env_file.get("cli_error"):
+        # This run has NO target — either the caller's `--db`/`--path` failed or
+        # the environment's own resolution did. Either way NOTHING below grades a
+        # store, so naming one here (the environment's, or "(unresolved)") is the
+        # misdescription the `graded_target` parameter exists to prevent
+        # (#12428 rounds 3-4).
+        if env_file.get("daemon_rung") == "refuses":
+            what = ("the daemon selects no store either — `tortoise serve` "
+                    "REFUSES to start without TORTOISE_DB_URI / "
+                    "TORTOISE_DB_PATH")
+        elif env_file.get("daemon_target"):
+            what = ("the daemon serves "
+                    f"{_printable(str(env_file['daemon_target']))}")
+        else:
+            what = "the daemon's target does not resolve either"
+        rows.append(("Config: .env", "⚠️",
+                     f"{path} is not read by this command (the daemon reads it), "
+                     f"and this run's own target did not resolve, so the rows "
+                     f"below grade NO store — {what}. The two cannot be compared"))
+        return rows
+    if env_file.get("daemon_rung") == "refuses":
+        # The daemon would not start at all: `mcp_server.main()` exits 1 rather
+        # than open an empty embedded DB. WARN, not FAIL — a hosted-CLI user
+        # whose `.env` carries provider keys but no local daemon has done
+        # nothing wrong, and `doctor` must not fail that setup (#3615). It IS a
+        # warning, because the rows below grade a store the daemon does not serve.
+        rows.append(("Config: .env", "⚠️",
+                     f"{path} selects no store for the daemon — neither "
+                     "TORTOISE_DB_URI nor TORTOISE_DB_PATH is set, and "
+                     "`tortoise serve` REFUSES to start in that state (it will "
+                     "not open an empty embedded DB). The rows below grade this "
+                     "CLI's own target, which the daemon does not serve"
+                     + _applied_note))
+        return rows
+    if env_file.get("daemon_error"):
+        rows.append(("Config: .env", "❌",
+                     f"{path} makes the DAEMON's target unresolvable: "
+                     f"{_printable(str(env_file['daemon_error'])[:90])} — this "
+                     "command does not read it, so the rows below do not show "
+                     "that error"))
+        return rows
+    # The store the rows BELOW grade. It is the payload's `cli_target` because
+    # `_cmd_doctor` hands `_dotenv_divergence` the target it already resolved —
+    # so `--db`/`--path` cannot make this sentence describe a store the rows do
+    # not grade (measured: `--db /tmp/other.db` was told "the rows below grade
+    # that DIFFERENT store" while they graded `/tmp/other.db`).
+    graded = env_file.get("cli_target") or "(unresolved)"
+    if env_file.get("differs"):
+        # The FILE's ladder keys — `graph_keys` is what the daemon would still
+        # take from it, which a mid-run application empties, and reading that
+        # here stated "sets no graph key" about a file whose only key it is
+        # (#12428 round 4, NB1).
+        detail = (f"{path} sets "
+                  f"{_printable(', '.join(env_file['file_graph_keys']) or 'no graph key')} — "
+                  "this command does NOT read it, the daemon does. The daemon "
+                  f"serves {_printable(str(env_file['daemon_target'] or ''))}; "
+                  f"the rows below grade {_printable(str(graded))} — a "
+                  "DIFFERENT store" + _applied_note)
+        if env_file.get("difference_is_masked"):
+            detail += f" ({env_file['difference_is_masked']})"
+        rows.append(("Config: .env", "⚠️", detail))
+        return rows
+    detail = (f"{path} sets "
+              f"{_printable(', '.join(env_file['keys']) or 'nothing')} — this "
+              "command does NOT read it (the daemon does); it selects the same "
+              f"graph target the rows below grade ({_printable(str(graded))})")
+    detail += _applied_note
+    rows.append(("Config: .env", "ℹ️", detail))
+    return rows
+
+
 def _uri_has_password(target: str) -> bool:
     """True if a DB URI embeds a password in its userinfo (:pw@ or user:pw@).
 
@@ -12876,6 +13486,19 @@ def _cmd_doctor(args):
         results.append(("Graph: health", "❌", _mask_uri_userinfo(str(e))[:60]))
         target = None
 
+    # 1.5 The OTHER reader of the same configuration (#12407) — the repo-root
+    # `.env` the daemon applies at import and no CLI verb reads. This slot is
+    # RESERVED here, right after the dependency rows and before the graph rows,
+    # but FILLED at the end of the function.
+    #
+    # ⛔ Why not fill it here: a later check imports `tortoise.hosted_api`
+    # (§5.5), which imports `tortoise.mcp_server` at module scope — and THAT
+    # applies the `.env` at import. Measured: the row printed "this command does
+    # NOT read it" a few rows before the run demonstrably did. Computing the
+    # payload last makes `read_by_this_command` describe what actually happened;
+    # the rows still render above the graph verdicts they qualify.
+    _dotenv_slot = len(results)
+
     # 2. Docker / FalkorDB — probe the RESOLVED target, never a hardcoded
     # localhost (#720 conf 78): URI targets get a live connect probe at
     # their OWN host/port, user/pass, ssl, AND graph name — all parsed from
@@ -13478,6 +14101,18 @@ def _cmd_doctor(args):
     except Exception as e:
         results.append(("Capture spool", "⚠️",
                         f"check unavailable: {str(e)[:60]}"))
+
+    # Fill the reserved slot now that every check has run: `_load_dotenv` may
+    # have been applied mid-run by a later import, and the disclosure has to
+    # report that rather than deny it.
+    results[_dotenv_slot:_dotenv_slot] = _dotenv_rows(
+        _dotenv_divergence(graded_target=target,
+                           # ⛔ `target is None` — NOT "a --db was given". The
+                           # environment's own failure to resolve is the same
+                           # state for the ROWS (they grade nothing), and keying
+                           # on the flag alone left that arm asserting an
+                           # agreement with "(unresolved)" (#12428 round 4).
+                           graded_unresolved=(target is None)))
 
     # Print results
     for check, icon, detail in results:
