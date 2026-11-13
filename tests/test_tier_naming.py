@@ -200,20 +200,49 @@ class TestEverySurfaceAgreesWithTheDeclaration:
 # ── 4. no doc may deny the plan exists ─────────────────────────────────────
 
 #: The denial this pin exists for, plus the paraphrases a re-edit reaches for.
-#: ⚠️ A heuristic, and stated as one: it cannot catch every way of being wrong.
+#:
+#: ⚠️ A heuristic, and stated as one — in BOTH directions:
+#:
+#:   * **False negatives.** It cannot catch every way of being wrong. A hard-wrapped
+#:     denial, or one phrased in a shape below, slips through; a green run is not a
+#:     proof of prose correctness.
+#:   * **False positives are the expensive half** and are why these patterns demand
+#:     an actual assertion of NON-EXISTENCE rather than the bare token sequence
+#:     ``no Builder tier``. Correct prose such as *"self-hosted installs require no
+#:     Builder tier at all"* or *"there is no Builder plan requirement in the OSS
+#:     path"* states a REQUIREMENT, not the plan's absence, and must stay green —
+#:     a lint that blocks correct docs is worse than the drift it guards (measured
+#:     in review: the first cut of these patterns flagged both).
+#:
+#: A sentence that records the RETRACTION is also exempt (:data:`_RETRACTION_CUES`),
+#: because this repo's convention for superseding a claim is to quote the old one
+#: with a date — and a pin that reds the doc recording the fix punishes exactly the
+#: behaviour it wants.
+_BUILDER_PLAN = r"['\"`]?builder['\"`]?\s+(?:plan|tier)"
+
 _DENIAL_PATTERNS = (
-    # "there is no 'builder' plan" / "there's no builder tier" / "is no builder plan"
-    re.compile(r"\b(?:there(?:'s| is| are)|is)\s+no\s+['\"`]?builder['\"`]?\s+"
-               r"(?:plan|tier)\b", re.I),
-    # "no 'builder' plan exists" / "no builder tier"
-    re.compile(r"\bno\s+['\"`]?builder['\"`]?\s+(?:plan|tier)\b", re.I),
-    # the measured sentence's own tail: "a builder buys pro or team"
-    re.compile(r"\bbuilder\s+buys\s+(?:the\s+)?(?:pro|team|builder)\b", re.I),
-    # "Builder is not a plan", "the builder tier does not exist"
+    # "there is no 'builder' plan" — asserted absence, not asserted absence of a
+    # REQUIREMENT ("there is no Builder plan requirement in the OSS path" is true).
+    re.compile(r"\bthere(?:'s| is| are)\s+no\s+" + _BUILDER_PLAN +
+               r"(?!\s*(?:requirement|needed|required|necessary|required\b))", re.I),
+    # "no 'builder' plan exists", "no such thing as a builder tier"
+    re.compile(r"\b(?:no\s+such\s+(?:thing\s+as\s+(?:a\s+)?)?)?" + _BUILDER_PLAN +
+               r"\s+exists\b", re.I),
+    re.compile(r"\bno\s+such\s+(?:thing\s+as\s+(?:a\s+)?)?" + _BUILDER_PLAN, re.I),
+    # "the builder plan does not exist", "Builder is not a plan/tier"
+    re.compile(r"\bbuilder\b[^.]{0,40}\b(?:does|do)\s+not\s+exist\b", re.I),
     re.compile(r"\bbuilder\b[^.]{0,40}\b(?:is|are)\s+not\s+(?:a\s+)?(?:plan|tier)\b",
                re.I),
-    re.compile(r"\bbuilder\b[^.]{0,40}\b(?:does|do)\s+not\s+exist\b", re.I),
+    # the measured sentence's own tail: "a builder buys pro or team"
+    re.compile(r"\bbuilder\s+buys\s+(?:the\s+)?(?:pro|team|builder)\b", re.I),
 )
+
+#: A sentence carries the retraction record, not the claim. `#4336` protects
+#: historical records that state the name "as it was at the time"; a doc that quotes
+#: the retracted denial is doing exactly that, correctly.
+_RETRACTION_CUES = re.compile(
+    r"\b(?:previously|formerly|used\s+to|no\s+longer|retract\w*|stale\w*|"
+    r"corrected|corrects|outdated|supersed\w*|before\s+#\d+)\b", re.I)
 
 
 def _doc_sentences(text: str) -> list[tuple[int, str]]:
@@ -230,6 +259,44 @@ def _doc_sentences(text: str) -> list[tuple[int, str]]:
 
 
 class TestNoDocDeniesABuilderPlanExists:
+    def test_the_lint_does_not_flag_correct_prose(self):
+        """The false-positive half, pinned — because a lint that blocks correct
+        docs is worse than the drift it guards, and the first cut of these
+        patterns really did flag the first two sentences below (review finding,
+        #12503)."""
+        correct = (
+            "Self-hosted installs require no Builder tier at all.",
+            "There is no Builder plan requirement in the OSS path.",
+            "No Builder tier is needed to run the local engine.",
+            "The Builder plan and the Team plan are both unlimited.",
+            # A doc recording the retraction quotes the old claim, which is the
+            # repo's own convention (#4336 protects as-it-was records).
+            "docs/product/beta-sdk-surface.md previously read 'there is no "
+            "\"builder\" plan'; #12444 corrected it.",
+        )
+        for sentence in correct:
+            hits = [p.pattern for p in _DENIAL_PATTERNS if p.search(sentence)]
+            exempt = bool(_RETRACTION_CUES.search(sentence))
+            assert not hits or exempt, (
+                f"the lint false-blocks correct prose: {sentence!r} matched {hits}")
+
+    def test_the_lint_does_flag_the_real_denial(self):
+        """The true-positive half, pinned so the false-positive fix cannot have
+        been bought by disarming the lint."""
+        denials = (
+            'the tiers are free, solo, pro, team, anon — there is no "builder" '
+            "plan; a builder buys pro or team",
+            "There is no 'builder' plan.",
+            "There's no builder tier.",
+            "No builder plan exists.",
+            "The builder tier does not exist.",
+            "Builder is not a plan.",
+        )
+        for sentence in denials:
+            assert any(p.search(sentence) for p in _DENIAL_PATTERNS), (
+                f"the lint MISSES a real denial, so it no longer guards #12444: "
+                f"{sentence!r}")
+
     def test_no_doc_asserts_a_builder_plan_does_not_exist(self):
         offenders: list[str] = []
         for doc in sorted(DOCS_ROOT.rglob("*.md")):
@@ -242,6 +309,8 @@ class TestNoDocDeniesABuilderPlanExists:
                     continue
                 if "plan" not in low and "tier" not in low:
                     continue
+                if _RETRACTION_CUES.search(sentence):
+                    continue  # records the retraction; quoting the old claim is correct
                 for pattern in _DENIAL_PATTERNS:
                     if pattern.search(sentence):
                         offenders.append(
