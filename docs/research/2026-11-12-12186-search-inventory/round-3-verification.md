@@ -17,7 +17,8 @@ aboutObjects: research-brief.md (rounds 1–2), SEARCH-ARCHITECTURE.md §6.2, ST
 **Predecessors:** round 1 `#12189` (merged) + comment `6828533944`; round 2 PR `#12270` + comment `6837406765` (branch `research/12186-round2-depth`, verified at `9828250732`).
 
 > ⛔ **Every locator below was re-measured at `f33f5e2c3215`, not inherited — with one declared exception.**
-> Round 2's own §7.5 item 8 makes this a discipline, and it is worth doing: **round 2's locators all hold at this
+> Round 2's own §7.0 makes this a discipline — *"Locators drift, and a pin is not a citation"* (round-2 branch
+> `research-brief.md`, `:393`) — and it is worth doing: **round 2's locators all hold at this
 > head** (checked individually — `entity_resolver.py` `:207`/`:536`/`:547`/`:624`/`:694`/`:739`/`:801`/`:809`,
 > `entity_identity.py` `:355`/`:378`/`:384`/`:417`/`:499`/`:589`/`:594`, `search_engine.py`
 > `:2986`/`:3103`/`:4492`, `sparse.py` `:13-14`, `projection/edges.py` `:717-730`) — while
@@ -137,7 +138,11 @@ work.** Round 2 said *"read by nothing"* and this lane's first draft added *"wri
 half is right for every value-aware reader, and wrong for the one reader that is value-agnostic — and the write
 half is wrong outright.**
 
-**Every read, at this head** (`dedup_reviewed` occurs in `tortoise/` only at these sites):
+**Every read, at this head** — `dedup_reviewed` occurs **21** times in `tortoise/` across four files; every site that
+**tests or writes the VALUE** is below. The other nine are the property declaration (`_placement_table.json:189`),
+an echo of the scanned row (`entity_resolver.py:273`), a second write-side key selector (`review_verdicts.py:513`,
+the same selector as `:382`), and comments/docstrings (`sdk.py:24087`, `:24321`, `:24324`; `review_verdicts.py:52`;
+`entity_resolver.py:687`, `:739`):
 
 | site | line | value tested |
 |---|---|---|
@@ -175,9 +180,12 @@ half is wrong outright.**
    (`_pair_reviewed` tests only `'merge'`/`'reject'`, `:226-230`), so the same stored string has two different
    meanings depending on the label.
 
-`grep -rn "'link'\|\"link\"" --include=*.py tortoise/` → **0 matches** as a *verdict value*; `tests/` → 0. It
-appears in `docs/` only twice, and neither is a `dedup_reviewed` value: round 2's own hypothesis (round-2 branch
-`research-brief.md` §7, ~`:830`) and an unrelated HTML void-element set (`docs/plans/2026-08-08-657-legal-pages-plan.md:194`).
+`grep -rn "'link'\|\"link\"" --include=*.py tortoise/` → **0 matches** as a *verdict value*; `tests/` → **26**, none
+of them a `dedup_reviewed` value (an HTML VOID set at `tests/e2e/test_legal_pages.py:424`, `os.link` monkeypatches,
+`tmp_path / "link"` at `tests/test_reaper.py:621`). In `docs/`, the only `"link"` occurrences are that same
+unrelated void-element set, restated **three** times in
+`docs/plans/2026-08-08-657-legal-pages-plan.md:194`, `:271`, `:450`; round 2's own hypothesis lives on the
+round-2 branch `research-brief.md` §7 ~`:830`, **not** in this tree's `docs/`.
 
 ⇒ **Corrected conclusion, and it is a *narrower* one:** a `'link'` band needs **a reader that means "linked"** —
 not a write (one `update_entity` call) and not a new field. And it inherits a hazard the envelope does not show:
@@ -211,7 +219,8 @@ RediSearch's TFIDF scorer ranks docs by term-overlap, which is the BM25-style ra
 prescribes (issue #1541 D1/D2)."* `bm25.py:5` quotes it back. The epic's row title — "BM25 instead of TF-IDF" —
 is literally accurate.
 
-**(d) ⛔ OVERTURNED: "the scorer acts only through `LIMIT`" is not what our code or our doc says.** It acts in
+**(d) ⛔ OVERTURNED: round 2's rule — *"the TF-IDF score never reaches the answer as a score: it decides which
+rows survive the LIMIT"* — is not what our code or our doc says.** It acts in
 **three** places, and `SEARCH-ARCHITECTURE.md` §6.2 (`:246-258`) already names the third:
 
 1. **`LIMIT` selection** — the FTS leg is `ORDER BY score DESC, <recency tie> LIMIT $limit`
@@ -236,11 +245,15 @@ is literally accurate.
    default; it is a live path all the same, and a rescale changes which rows clear it.
 
    §6.2 says exactly this (`:254-258`, *"when a single leg answers or the read is a full scan, a caller's
-   `threshold` IS compared against that **leg's raw score**"*). Round 2's *"only through `LIMIT`"* dropped it.
+   `threshold` IS compared against that **leg's raw score**"*). Round 2's *"it decides which rows survive the
+   `LIMIT`"* dropped it.
 
-**Two further corrections to round 2's §7.1, for the record:**
+**Two further corrections, for the record — neither is a correction to round 2:**
 
-- **"§6.2 `:268` is the only site in the repo that says it correctly" → two sites.** `:163` also says TF-IDF
+- **"§6.2 `:268` is the only site in the repo that says it correctly" was this lane's own first-draft claim, not
+  round 2's — and it is wrong: there are two sites.** Round 2's §7.1 table already cites §6.2 at `:163`,
+  `:241-246` and `:268-269`, and states *"the section table restates it at `:163`"* (round-2 branch
+  `research-brief.md`, `:436`), so `:163` was never missed. `:163` also says TF-IDF
   (*"`db.idx.fulltext` — RediSearch's TF-IDF scorer, documented as BM25-style behaviour in `tortoise/sparse.py`"*).
   Both are correct in substance; both point at `sparse.py` as the source of the wrong claim.
 - ⛔ **§6.2's own locators are stale at `f33f5e2c3215`** — it cites `search_engine.py:3021` / `:3091-3093` and
@@ -377,7 +390,10 @@ The chain, all at `f33f5e2c3215`:
    rewritten — `:799-805`).
 2. `:Object` and `:Subject` are full-text indexed **by `name` alone** (`projection/__init__.py:6823`, `:6819`).
 3. The FTS leg filters **`status`** and nothing else (`search_engine.py:148`, `:2973-2980`, cypher `:2986-2997`).
-   ⇒ a search for the merged-away spelling returns the survivor **and** the carrier as two rows.
+   ⇒ a search for the merged-away spelling **still returns the carrier**; the survivor joins it only where its own
+   `name` shares query tokens with that spelling, because the FTS fields are `name` alone
+   (`projection/__init__.py:6819`, `:6823`) and `aliases` — though written (`entity_resolver.py:792`) — is in
+   neither field list.
 4. **The capture path does not consult the resolver at all.** S3's entity prior set is built by `_fts_rows`
    (`extractor_v2.py:2887`) → `sdk.tortoise_fts_query(entity_type="object"|"subject", limit=3,
    include_terminal=True, …)` (`:2906-2907`, `:2908-2911`). Note `include_terminal=True` — the leg explicitly
@@ -387,7 +403,7 @@ The chain, all at `f33f5e2c3215`:
    through `resolved_from`.
    ⛔ **Correction to this lane's first draft, which said `exact[0]` is "the higher-scoring one". It is not.**
    The rows are accumulated into an **id-keyed dict** (`extractor_v2.py:3076-3081`) and re-listed by
-   `.values()` (`:3109-3112`); the code's own comment states it — *"S3's rows are accumulated into id-keyed
+   `.values()` (`:3104-3106` in the degraded branch, `:3118-3120` in the normal one); the code's own comment states it — *"S3's rows are accumulated into id-keyed
    dicts by `search_graph` (**order DISCARDED**)"* (`:2913-2914`). So `exact[0]` is first-**seen across the
    query sequence**, not highest-scoring. And inside one query the two candidates **tie** on score (same folded
    name, same `name`-only index), so their order is decided by `recency_tie_clause` (`search_engine.py:2993`),
@@ -443,7 +459,7 @@ substrates it would consume** and **a one-line applicability verdict**.
 | **prompt shape** | `prompts/dedupe_nodes.py` — system: *"NEVER fabricate entity names or mark distinct entities as duplicates"*; user blocks `<PREVIOUS MESSAGES>`, `<CURRENT MESSAGE>`, `<ENTITIES>`, `<EXISTING ENTITIES>`, each JSON. Output model `NodeResolutions{entity_resolutions:[NodeDuplicate{id, name, duplicate_candidate_id}]}`, **`-1` = new** (`:34-44`). Exact-count contract: *"Your response MUST include EXACTLY N resolutions with IDs 0 through N−1"* (`:146-152`) |
 | **what the adjudicator can SEE** | `existing_nodes_context` (`node_operations.py:703-712`) = `{**candidate.attributes, candidate_id, name, entity_types, summary[:120]}`. **No neighbours, no degree, no edges. Zero topology.** |
 | **batching** | `MAX_NODES = 30` (`:66`); dedupe output capped `min(max_tokens or 16384, 16384)` (`:736`) |
-| **model routing** | `ModelSize.small` for attribute extraction (`:1064`) and summaries (`:1243`); the **dedupe verdict call passes no `model_size`** (`:737-745`) → default model. ⚠️ **This is Graphiti's own model-size router, not Jev** — Jev is ours (TypeSafe). The phrase "Jev routing" is **round 2's**, not round 1's: `grep -c "Jev" research-brief.md` at this head is **0**, so it appears only on the round-2 branch (§7). Correcting it here is correcting a round-2 label, not a round-1 claim. |
+| **model routing** | `ModelSize.small` for attribute extraction (`:1064`) and summaries (`:1243`); the **dedupe verdict call passes no `model_size`** (`:737-745`) → default model. ⚠️ **This is Graphiti's own model-size router, not Jev** — Jev is ours (TypeSafe). ⛔ **Correction to this lane's first draft: it called the wrong phrase "Jev routing" and attributed it to round 2 — and "Jev" appears in neither round.** Measured: `grep -c "Jev" research-brief.md` is **0** at this head **and** **0** on `origin/research/12186-round2-depth`, and `git grep` finds no `Jev` anywhere under `docs/research/2026-11-12-12186-search-inventory/` on either. The phrase is this lane's own; the substantive correction stands — the dedupe verdict call passes no `model_size` (`:737-745`), so it takes the default model. |
 | **how `summary` is produced** | a separate small-model call (`:1230-1260`), truncated `MAX_SUMMARY_CHARS`, then `[:120]` again at prompt time |
 
 **Our substrates:** `name` → `name`; `entity_types` → the label (`:Object`/`:Subject`) plus `object_kind`;
@@ -481,9 +497,11 @@ the surveyed field** — defensible from ER practice (§8.3.5), not copied from 
 
 That is the noun matcher's exact shape: the right existing entity at similarity rank 1, with weak lexical and
 zero graph support, diluted out of a small window by RRF. ⛔ **`grep -rn interleave tortoise/` → 50 hits**, and
-the honest reading of them is narrower than "we have it" and wider than "we don't": the hits are
-`tortoise/retrieval.py:17-18` / `:2225` — *"Budget-capped, **rank-interleaved** reader context (C1 #1745)"* —
-which is an interleave of **assembled context blocks**, not of **retrieval arms**. **No arm-level interleave
+the honest reading of them is narrower than "we have it" and wider than "we don't": only **4** of the 50 are in
+`tortoise/retrieval.py` (`:17-18` / `:2225` — *"Budget-capped, **rank-interleaved** reader context (C1 #1745)"*);
+the other 46 are concurrency/write-interleaving comments across 26 files (`hosted_api.py` 11, `log.py` 5,
+`vector_write.py` 3, `sdk.py` 2, …). The 4 are an interleave of **assembled context blocks**, not of
+**retrieval arms**. **No arm-level interleave
 exists** (`rrf_fusion` is the only fusion in `search_engine.py`), and the two are different mechanisms that a
 lane must not conflate: assembly interleave decides *what order the reader sees*, fusion interleave decides
 *which candidates survive the cut*.
@@ -594,7 +612,7 @@ should take, and it is the shape §8.1.5 already settled.
 |---|---|---|
 | §8.1.1 `resolved_from` is a merge in identity and a duplicate in retrieval | **no recorded decision reaches this work** | statement about code |
 | §8.1.1b `aliases[]` is the only non-retiring pointer, and pointer ≠ link | **no recorded decision reaches this work** — it informs the `#2730` owner question, it does not answer it | evidence for that home |
-| §8.1.2 `'link'` is neither written nor read | **no recorded decision reaches this work** | statement about code |
+| §8.1.2 `'link'` is read by nothing *value-aware* — and it IS writable, which is worse than unread (this is §8.1.2's own verdict, **not** the retracted "neither written nor read") | **no recorded decision reaches this work** | statement about code |
 | §8.1.3 M3's six requirements | **none reversed** — V1 (`SEARCH-ARCHITECTURE.md:268`) gates the index *location*; M3 **is** V1's own named measurement (`:517`), pre-authorised inside `#12186`; this only narrows M3's metric set | **obeyed** |
 | §8.1.4 Zep: name shingles, no edge, deterministic-first | **no recorded decision reaches this work** | statement about a third party |
 | §8.1.5 shared-neighbour scoring is Hindsight's shape, gated on `aboutObject` fill | **no recorded decision reaches this work.** It moves nothing about the vector (§12.2c), the index (V1), the embeddings (V3/KEEP) or the record/cache split (§2.0) | candidate, gated on `#4211`'s substrate |
