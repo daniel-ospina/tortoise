@@ -319,6 +319,27 @@ class TestThePriorSetNeverCarriesARetiredNode:
         assert "team" in first[0]["aliases"], first
         assert "team" in second[0]["aliases"], second
 
+    def test_the_carrier_s_own_aliases_survive_the_fold(self, sdk_factory):
+        """A spelling that lives ONLY on the retired carrier must survive.
+
+        `_absorb_spellings` was fed the FIXPOINT's fact only, so the carrier's
+        own `aliases[]` — spellings the group folded before the forward union
+        shipped, or ones that came from `canonical_name` — were read by
+        `_entity_facts` and then discarded. A re-mention of such a spelling then
+        found nothing in phase 1 and the run created a duplicate.
+        """
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-b", "Beta Holdings",
+                       resolved_from="obj-c", aliases=["alpha holdings"])
+        _create_object(sdk, "obj-c", "Gamma Holdings")
+        out = v2._current_entity_priors(
+            sdk, [{"id": "obj-b", "name": "Beta Holdings", "kind": "core:org"}],
+            {"obj-b": "Object"})
+        assert [r["id"] for r in out] == ["obj-c"], out
+        assert "alpha holdings" in out[0]["aliases"], out
+        hit, mode = v2._find_existing_entity(out, "alpha holdings", "core:org")
+        assert (hit["id"], mode) == ("obj-c", "alias"), (hit, mode)
+
     def test_a_bare_string_stored_alias_is_normalised_not_dropped(
             self, sdk_factory):
         """`update_entity(aliases="the team")` is reachable; the fold must not
@@ -750,8 +771,10 @@ class TestVetoesAreSilentOnTheGenuineVariantCorpus:
         splits a path into COMPONENTS.
 
         Dropping a path token wholesale silenced both vetoes for every pair of
-        paths (`tortoise/extractor_v2.py` vs `.../extractor_v3.py` merged); a
-        silence-only corpus test cannot tell that from success.
+        paths (`tortoise/extractor_v2.py` vs `tortoise/extractor_v3.py` merged); a
+        silence-only corpus test cannot tell that from success. (The directory
+        components must MATCH: `.../extractor_v3.py` is the `basename-only` class
+        and stays silent by design.)
         """
         for a, b, code in (
             ("tortoise/extractor_v2.py", "tortoise/extractor_v3.py",

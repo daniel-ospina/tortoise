@@ -241,8 +241,11 @@ def _scan(text: str) -> list[str]:
     every path pair (`tortoise/extractor_v2.py` vs `.../extractor_v3.py` merged);
     keeping it whole folded two spellings of ONE file into disjoint "identifiers"
     while their skeletons were both ``("<id>",)``, so the `#11901`
-    `basename-only` class was vetoed. Components answer both: `tortoise` is a
-    literal, and the basename is tokenised like any other name.
+    `basename-only` class was vetoed. Components answer both: the directory parts
+    are literals and the basename is tokenised like any other name — so two
+    spellings of one file stay silent, and two files in the SAME directory veto.
+    ⚠️ The directory components must match for the veto: `a/x_v2.py` against
+    `b/x_v3.py` is silent by design (the `basename-only` class again).
 
     A SLASH-WRITTEN DATE (``2026/11``, ``2026/11/12``) is NOT split: it is one
     temporal compound, and splitting it into ``2026`` + ``11`` would delete the

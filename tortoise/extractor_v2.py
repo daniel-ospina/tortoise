@@ -3161,6 +3161,14 @@ def _current_entity_priors(sdk, rows: list[dict],
             # stays a candidate in its own right — kept verbatim, per row.
             out.append(row)
             continue
+        #: The CARRIER's own fact, captured before the walk rebinds `fact` to the
+        #: fixpoint's. Its `aliases[]` are spellings the group folded earlier and
+        #: they are only on this retired node — dropping them makes a re-mention a
+        #: measured absence (a duplicate create), which is the defect the forward
+        #: union in `apply_entity_merge` exists to prevent. Reachable whenever the
+        #: carrier was retired before that union shipped (a pre-#12296 group), or
+        #: its aliases came from `canonical_name`.
+        carrier_fact = facts.get((label, rid))
         current, hops = rid, 0
         while hops < _PRIOR_HOP_BOUND:
             fact = facts.get((label, current))
@@ -3178,6 +3186,7 @@ def _current_entity_priors(sdk, rows: list[dict],
             continue
         if current in emitted:
             _absorb_spellings(emitted[current], row, fact)
+            _absorb_spellings(emitted[current], row, carrier_fact)
             continue
         fact = facts.get((label, current))
         if fact is None or not fact[1]:
@@ -3210,6 +3219,7 @@ def _current_entity_priors(sdk, rows: list[dict],
                       "kind": "" if fact[2] is None else str(fact[2]),
                       "aliases": []}
         _absorb_spellings(folded_row, row, fact)
+        _absorb_spellings(folded_row, row, carrier_fact)
         emitted[current] = folded_row
         out.append(folded_row)
     if unresolved:
