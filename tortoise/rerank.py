@@ -91,12 +91,15 @@ FUSED_RERANK_MODEL_ENV = "TORTOISE_FUSED_RERANK_MODEL"
 #: pool is ~120 per leg (`retrieval.DEFAULT_POOL_SIZE`), so scoring all of it is
 #: 2x the cost for candidates the caller's `limit` will never show. 40 is the
 #: SIZE of #11901's measured mean effective candidate set for a production
-#: capture, which is the surface this lever is calibrated on: `set_sum` 854 over
-#: 20 captures = 42.7, the `arms.pooled["3"]` row of
-#: `measurement-noun-path.json`. ⛔ Name the step that row is keyed by — `k=3`,
-#: the capture prior's own per-query `limit`, UNIONED over the 15 reads a capture
-#: makes. The same table's `k=15` row is 3 713 / 20 = 185.7, so a reader who
-#: assumes the budget's own `k` lands 4.6x off. ⛔ And the set is the per-CAPTURE
+#: capture, which is the surface this lever is calibrated on: #11901 measured
+#: **40.4** at `k=3` — the capture prior's own per-query `limit`, UNIONED over the
+#: 15 reads a capture makes (807 / 20; the 11901 brief's own section 1 table) —
+#: and 40 is that figure rounded DOWN. The re-measurement on the grown corpus
+#: reads 42.7 (854 / 20, `arms.pooled["3"]` of `measurement-noun-path.json`); the
+#: two agree to ~5 %, which is why the width is quoted as an order of magnitude
+#: rather than an equality. ⛔ And name the step: the same tables' `k=15` row is
+#: 3 713 / 20 = 185.7 (3 416 / 20 = 170.8 in #11901), so a reader who assumes the
+#: budget's own `k` lands 4-5x off. ⛔ And the set is the per-CAPTURE
 #: union while this width bounds the SCORED HEAD of ONE derived query, which the
 #: wiring applies up to 15 times per capture: the two quantities are the same
 #: order and not the same thing, so a capture at the default prices at

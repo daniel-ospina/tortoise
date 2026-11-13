@@ -1728,8 +1728,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="pool width(s) the rerank arm fetches at; repeatable. "
                         "Default 15 (Zep's candidate count, the width #11901 "
                         "measured) and 40 (the mean effective candidate-list "
-                        "length #11901 measured for a production capture). "
-                        "MEASURED, never adopted — the shipped default stays 3.")
+                        "length #11901 measured for a production capture — the "
+                        "figure `TORTOISE_FUSED_RERANK_POOL` now defaults to). "
+                        "MEASURED HERE, never adopted HERE: this flag is not the "
+                        "product's default. The `limit` this harness reads at stays "
+                        "3 (the capture prior's own), a DIFFERENT quantity from the "
+                        "rerank width.")
     p.add_argument("--rerank-model", default=None,
                    help="cross-encoder to measure; default is "
                         "`tortoise.rerank.fused_rerank_model()` — the resolver "

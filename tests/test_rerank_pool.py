@@ -171,6 +171,35 @@ def test_ties_break_on_the_original_index(monkeypatch):
     assert stats["applied"] is True and stats["moved"] == 0
 
 
+def test_a_pool_whose_scored_window_carries_NO_TEXT_degrades_instead_of_raising(
+        monkeypatch):
+    """Every candidate in the window is textless: no scorer call, a NAMED reason.
+
+    ⛔ This arm is load-bearing OUTSIDE the SDK: the calibration and control
+    tools call ``rerank_pool(..., enabled=True, scorer=...)`` directly, with no
+    ``_scored_rows``-style pre-filter, and a mention whose rows carry no text is
+    exactly this shape. Deleting the arm makes the function RAISE
+    (``min() iterable argument is empty``) in the middle of a measurement run,
+    contradicting the docstring's "never raises" — and nothing else reds:
+    measured, the whole file stayed green with the arm removed.
+    """
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    calls: list[list[str]] = []
+
+    class _Recording:
+        def score(self, query, texts):
+            calls.append(list(texts))
+            return [0.0 for _ in texts]
+
+    blank = [{"id": "a", "content": ""}, {"id": "b", "content": "   "}]
+    out, stats = rerank.rerank_pool(
+        QUERY, blank, enabled=True, scorer=_Recording())
+    assert out == blank, "a degraded arm must return the input order untouched"
+    assert stats["applied"] is False
+    assert stats["degrade_reason"] == "no_scorable_text", stats
+    assert calls == [], "the scorer must not be called when nothing is scorable"
+
+
 def test_the_tie_break_is_the_original_SLOT_not_the_scorer_position():
     """Equal scores fall back to the SLOT index, not to the position in the
     scorer's own input.
@@ -205,6 +234,31 @@ def test_pool_width_bounds_scoring_and_preserves_the_tail(
     # rerank" means: a narrow pool cannot promote what it never scored.
     assert [r["id"] for r in out] == ["x1", "x0", "x2"]
     assert len(out) == len(ROWS)
+
+
+def test_the_pool_key_is_the_CONFIGURED_width_even_on_a_narrow_read(
+        sdk, monkeypatch):
+    """A 6-candidate read at the shipped width 40 reports ``pool=40``, not 6.
+
+    ⛔ ``RERANK_POOL_KEY``'s docstring forbids exactly one shape —
+    ``min(len(candidates), width)`` — and nothing pinned it: rewriting the write
+    site to that expression left all 60 tests green (measured), reporting
+    ``pool=6`` here. The key is the CAP THE KNOB RESOLVED; the applied bound is
+    the min, and ``scored + unscored`` already carries the candidate count.
+    """
+    _seed(sdk, 6)
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    _inject(rerank.FakeScorer(), monkeypatch)
+    trace: list[dict] = []
+    on = sdk.tortoise_fts_query("zebra migration", entity_type="point",
+                                limit=6, leg_trace=trace)
+    candidates = len(on)
+    assert candidates < rerank.DEFAULT_FUSED_RERANK_POOL, (
+        f"premise: the read must be NARROWER than the shipped width "
+        f"({rerank.DEFAULT_FUSED_RERANK_POOL}), got {candidates}")
+    entry = _rerank_entries(trace)[0]
+    assert entry[rerank.RERANK_POOL_KEY] == rerank.DEFAULT_FUSED_RERANK_POOL, entry
+    assert entry[rerank.RERANK_SCORED_KEY] == candidates, entry
 
 
 def test_the_SCORER_is_handed_the_knob_width_and_not_the_constant(
@@ -730,6 +784,7 @@ def test_the_wiring_is_a_permutation_and_discloses_the_cap(
     entry = entries[0]
     assert entry["reason"] == "ok" and entry["ran"] is True
     assert entry[rerank.RERANK_POOL_KEY] == 4      # the knob, not the constant
+
     # SCORED + UNSCORED is the candidate set the rerank was handed. Derive it
     # from the gate-off read at the SAME limit rather than assuming a count: the
     # legs' own windows decide how many rows fuse, and a hand-written number
@@ -1052,6 +1107,7 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         return out
 
     scanned: list[str] = []
+    seen_pairs: set[tuple[str, str]] = set()
     # ⛔ ``rglob``, not ``glob``: ``tortoise/`` holds 17 subpackages
     # (``projection/``, ``packs/``, ``session_import/``, …), and a caller placed
     # in one of them inherited the armed lever with the census still green.
@@ -1067,12 +1123,23 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
             scanned.append(f"{rel}:{owner}")
             if opted_out:
                 continue
+            seen_pairs.add((rel, owner))
             assert (rel, owner) in runs_the_lever, (
                 f"{rel}:{owner}'s read does not opt out of the "
                 "rerank and is not on the intentional list — with the gate "
                 "armed it re-picks which rows survive limit, undisclosed")
-    # non-vacuous: the enumeration must have found the surface it claims to
-    assert len(scanned) >= 16, scanned
+    # ⛔ EXACT MEMBERSHIP, then a loose floor. The named set is the authority for
+    # WHICH sites run the lever, so a deleted site reds on ``runs_the_lever``
+    # below (a ``>=`` alone never notices one going missing); the floor only has
+    # to catch a walk that stopped seeing the package at all, so it is set BELOW
+    # the population on purpose — consolidating two call sites onto one read is
+    # a legitimate edit, and a floor equal to today's count made it a false
+    # "the trees moved".
+    assert len(scanned) >= 12, scanned
+    assert set(runs_the_lever) == set(seen_pairs), (
+        "the sites that run the lever moved: added "
+        f"{sorted(set(seen_pairs) - set(runs_the_lever))}, gone "
+        f"{sorted(set(runs_the_lever) - set(seen_pairs))}")
 
     # The NAMED set below is the "must opt out" half; the DERIVED half (further
     # down) is what stops a NEW caller in these trees from staying green — a
@@ -1138,7 +1205,9 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                     f"{rel}:{owner} reads the rerankable page and neither opts "
                     "out nor is on the intentional-keep list — with the gate "
                     "armed it re-picks which rows survive limit, undisclosed")
-    assert len(seen_external) >= 16, (
+    # Below the population on purpose (consolidation is legitimate; the NAMED
+    # rows above are what makes a file's loss red).
+    assert len(seen_external) >= 12, (
         f"the derived census saw only {sorted(seen_external)} — the trees moved")
 
     # ⛔ AND THE CENSUS MUST SEE THE SEAM. A read bound as ``_search_fn=`` (the
