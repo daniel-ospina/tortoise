@@ -1107,6 +1107,18 @@ def test_the_supersession_line_renders_by_the_labels_own_status_rule(
         "an absent status on a status-carrying layer reads `live` (the recorded "
         "rule in status_as_reported): " + repr(object_view))
 
+    # ⛔ round 8: the ask-lane / assemble_context hits are built by
+    # `assembly.synthesize_hits` and carry `kind` (`"point"`/`"event"`) with NO
+    # `entity_type` — and `_decorate_real_rows` calls `enrich_items` with no
+    # entity-type gate, so THIS is the path on which an `:Event` reaches the
+    # projection. If the label comes only from `entity_type`, this hit falls to the
+    # unnamed arm and gets `live` again.
+    ask_hit_view = why_module.project_item(
+        {"id": "ev2", "kind": "event", "content": "a reading"}, bare_block,
+    )["supersession"]
+    assert ask_hit_view["line"] == "", (
+        "an ask-lane hit names its layer as `kind`, not `entity_type` — the "
+        ":Event still got a Point-lane status: " + repr(ask_hit_view))
     event_entry = why_module.item_to_why_entry(
         {"id": "ev1", "entity_type": "event", "why": {"support_chain": []}})
     assert event_entry is not None and event_entry["supersession"]["status"] == "", (
@@ -1123,6 +1135,27 @@ def test_the_supersession_line_renders_by_the_labels_own_status_rule(
         "fixture: the :Object block must carry no supersession view")
     goal_item = dict(goal, content="CI is fast", entity_type="object")
     assert why_module.project_item(goal_item, block)["supersession"]["line"] == "live"
+
+
+def test_an_ask_lane_event_hit_renders_no_status(sdk, monkeypatch):
+    """End to end on the path that actually reaches an ``:Event`` today.
+
+    ``assembly._decorate_real_rows`` enriches ``synthesize_hits`` rows with NO
+    entity-type gate, and those rows carry ``kind`` (``"point"``/``"event"``) and
+    no ``entity_type``. Before this PR the anchor was ``MATCH (n:Point)``, so no
+    Event resolved and the projection never ran; after the widening it does, so
+    this is the one path where the status rule MUST see the label (review round 8).
+    """
+    from tortoise import why as why_module
+
+    monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
+    reading = sdk.create_event("CI run", "measurement", value=8.0, unit="minutes")
+    item = {"id": reading["id"], "kind": "event", "content": "CI run"}
+    enriched = why_module.enrich_items(sdk._get_proj(), [dict(item)])
+    assert enriched, "fixture: the :Event must enrich to anything at all"
+    assert enriched[0].get("supersession", {}).get("line") == "", (
+        "an :Event reached the projection through the ask-lane path and got a "
+        "Point-lane status: " + repr(enriched[0].get("supersession")))
 
 
 def test_a_point_item_keeps_its_supersession_view(sdk):

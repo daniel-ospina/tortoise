@@ -1455,18 +1455,24 @@ def test_ontology_vocabulary_registered():
     assert row_line is not None, "ontology §5 has no why-block sections row"
     row_keys = {k.strip() for k in row_line.split(maxsplit=2)[2].split("#")[0]
                 .split("·") if k.strip()}
-    # ⛔ #11928 — `assessment` is a NEW emitted key and is NOT yet in the §5 row:
-    # registering it is an ONTOLOGY.md edit, which #11928's brief puts out of
-    # scope (the owner approves ONTOLOGY content). Leaving the row alone while
-    # W4_KEYS grew is EXACTLY the drift this test exists to catch, so the delta
-    # is named explicitly instead of being allowed to pass silently — and it
-    # FAILS WHEN THE ROW CATCHES UP, which is when this exemption must be deleted.
+    # ⛔ #11928 — `assessment` is a NEW emitted key and is NOT yet in the §5 row.
+    # The reason is OWNER GATING, not scope: `docs/ONTOLOGY.md` is owner-gated
+    # (no edit without Daniel's approval of the exact change), and registering the
+    # key is tracked by **#12282** (open, one line). An earlier version of this
+    # comment claimed "#11928's brief puts it out of scope" — that does not
+    # reproduce (the issue's out-of-scope list names the comparator #11822 and the
+    # propagation depth #11823 only), and a false reason here is the load-bearing
+    # part: it is what the next editor reads before deciding the exemption can be
+    # dropped. Leaving the row alone while W4_KEYS grew is EXACTLY the drift this
+    # test exists to catch, so the delta is named explicitly instead of being
+    # allowed to pass silently — and it FAILS WHEN THE ROW CATCHES UP, which is
+    # when this exemption must be deleted.
     assert row_keys == set(W4_KEYS) - {"assessment"}, (
         "the ONTOLOGY §5 why-block sections row is not exactly the enriched-item "
         "key set minus #11928's unregistered `assessment` "
         f"(keys={sorted(set(W4_KEYS))} row={sorted(row_keys)}). If the row now "
-        "lists `assessment`, drop the exemption here and let the equality be "
-        "exact; if a key was RENAMED, fix the row.")
+        "lists `assessment` (see #12282), drop the exemption here and let the "
+        "equality be exact; if a key was RENAMED, fix the row.")
 
 
 def test_bare_point_empty_conventions(w4_flag):

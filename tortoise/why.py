@@ -42,7 +42,12 @@ Contract invariants (plan §3.1.1/§3.1.3/§3.1.4/§6.1 + #2101):
   ``tradeoffs`` on a non-decision point) — or because that dimension's read
   failed for this label (see ``assemble_why_blocks``' graded fail-open: a
   dimension error is absorbed per label, so the block survives without that key
-  and, today, without any signal saying so). Clean empty is NEVER a
+  and, today, without any signal saying so); and ⛔ ``''`` = **this layer exposes
+  no ``status`` family at all** — the value ``live.status_as_reported`` renders for
+  a NAMED non-status-carrying layer, emitted as ``supersession.line`` /
+  ``supersession.status`` on an ``:Event`` (its lifecycle is ``eventStatus``) or a
+  ``:Source``. It is NOT a missing value and NOT the same as ``live``: the layers
+  that carry a ``status`` read ``live`` when it is absent. Clean empty is NEVER a
   degradation — this module raises nothing into the recall turn.
 - **Bounded reads (S8):** the assembly issues a number of batch Cypher
   queries that is FIXED for a given BATCH COMPOSITION and never grows with batch
@@ -112,6 +117,9 @@ from .search_engine import (  # type: ignore[import-not-found]
     ep_state_resolve,
     fetch_point_epistemic_state,
     numeric_operand,  # #11702: the ONE total numeric coercion (bool != number)
+)
+from .security import (  # #11928 r8: the ONE entity_type -> label map
+    ENTITY_TYPE_LABELS,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,31 +191,35 @@ def _snippet(text: str) -> str:
     return text[:SNIPPET_MAX]
 
 
-#: The label an item's ``entity_type`` names (#11928 review rounds 6-7). The
-#: search surfaces spell the layers in lower case. ⛔ ``document`` and ``source``
-#: are mapped too, even though they carry no epistemic label: they must reach
-#: ``status_as_reported`` as a NAMED non-status-carrying layer (⇒ ``''``), which
-#: ``None`` would silently upgrade to the Point-lane word ``live`` — the same
-#: #6976 conflation round 6 removed for ``:Event``, one entity type over.
-#: ``operator`` is deliberately absent: an operator IS a ``:Point``, so the
-#: unnamed arm's ``live`` is correct for it.
-_ENTITY_TYPE_LABELS = {"point": "Point", "subject": "Subject",
-                       "object": "Object", "event": "Event",
-                       "document": "Document", "source": "Source"}
+def _entity_label(item: dict) -> str | None:
+    """The graph label an ITEM names its own layer by, or None when it does not.
 
+    ⛔ THE MAPPING IS NOT DECLARED HERE (#11928 review round 8): it is
+    ``security.ENTITY_TYPE_LABELS``, the canonical ``entity_type`` → label map
+    (``document`` → ``Source``, ``operator`` → ``Point``). A local copy drifted
+    on the first day (it named a ``:Document`` label no writer produces), so the
+    canonical one is imported instead.
 
-def _entity_label(entity_type) -> str | None:
-    """The label an item's ``entity_type`` names, or None when it does not say.
+    Two spellings reach it, because two answers carry the layer and an item may
+    have either:
+      * ``entity_type`` — the search surfaces;
+      * ``kind`` — the ask-lane/``assemble_context`` hits built by
+        ``assembly.synthesize_hits`` (``"point"``/``"event"``), which carry NO
+        ``entity_type``. ⛔ Without this fallback the unnamed arm below took them,
+        and an ``:Event`` row got the Point-lane word ``live`` on the ask lane — the
+        #6976 conflation reaching the one path the search gates do not cover.
 
     An UNNAMED label is treated as STATUS-CARRYING, which is
     ``live.status_as_reported``' own rule — right for Point/Subject/Object (and
-    for an operator, which is a ``:Point``), and reachable here only for an item
-    that carries no ``entity_type`` at all. Every entity type the search surfaces
-    can actually emit IS named above, so the conflation is not reachable through
-    a known type."""
-    if not isinstance(entity_type, str):
-        return None
-    return _ENTITY_TYPE_LABELS.get(entity_type.strip().lower())
+    for an operator, which IS a ``:Point``), and reachable here only for an item
+    that names neither spelling."""
+    for _key in ("entity_type", "kind"):
+        _value = item.get(_key)
+        if isinstance(_value, str):
+            _label = ENTITY_TYPE_LABELS.get(_value.strip().lower())
+            if _label is not None:
+                return _label
+    return None
 
 
 def _mitigation_text(text: str | None) -> str | None:
@@ -1503,7 +1515,7 @@ def project_item(item: dict, block: dict) -> dict:
     # is why an `:Object` keeps the word.
     out["supersession"] = {
         "line": ss.get("status") or item.get("status") or status_as_reported(
-            None, label=_entity_label(item.get("entity_type"))),
+            None, label=_entity_label(item)),
         "successor_label": successor_label,
     }
     if block.get("assessment"):
@@ -1560,7 +1572,7 @@ def item_to_why_entry(item: dict) -> dict | None:
     superseded_by = item.get("superseded_by")
     entry["supersession"] = {
         "status": item.get("status") or status_as_reported(
-            None, label=_entity_label(item.get("entity_type"))),
+            None, label=_entity_label(item)),
         "superseded_by": (
             {"point_id": superseded_by["id"],
              "content_snippet": _snippet(superseded_by.get("content_snippet") or "")}
