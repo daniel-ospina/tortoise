@@ -5,9 +5,10 @@
 landed on this branch (`31cf88be51`) behind a gate that ships **OFF**
 (`TORTOISE_FUSED_RERANK`); this document is the calibration that decides whether
 it earns that gate. Machine-readable artifacts sit beside it:
-`measurement-noun-path.json` and `measurement-user-search.json` (the second was
+`measurement-noun-path.json`, `measurement-user-search.json` (the second was
 NOT in this branch when §5 first cited it — §5 records that correction and then
-carries the run that has since been performed).
+carries the run that has since been performed) and `measurement-lexical-control.json`,
+which carries every figure in §8 (the lexical arms' recall, nDCG and per-pair cost).
 
 Every number below was produced on **this box, on CPU** — it has no GPU — from
 the **shipped** code path, not a re-implementation.
@@ -382,7 +383,8 @@ one `--rerank --lexical-baseline both` invocation runs the cross-encoder arm and
 both lexical arms over the same deterministic fused read, so the comparison is
 counterfactual rather than merely adjacent — same mentions, same pool, same cut,
 same tie-break. ⛔ Each arm RE-DERIVES that read (the tool shares no capture), and
-the evidence that the baselines really are the same pools is in the artifact:
+the evidence that the baselines really are the same pools is in
+`measurement-lexical-control.json`:
 `recall_3_before` is **244** in all three arms at pool 15 and **244** in all three
 at pool 40, against `recall_3_after` of 277 / 277 / 277 and 300 / 300 / 300.
 
@@ -391,6 +393,9 @@ interface, so **only the scorer changes**. Two declared, untuned modes:
 
 - `difflib` — `SequenceMatcher(None, a, b).ratio()` on lowercased text (character level).
 - `overlap` — Jaccard over lowercased alphanumeric tokens (token level).
+
+All four tables below are `measurement-lexical-control.json` — `arms.*.40` / `arms.*.15`
+for the recall and nDCG cells, `arms.*.latency` for the per-pair cost.
 
 | pool 40, exact arm | recall@3 | nDCG@10 | gained / lost | **ms/pair** |
 |---|---|---|---|---|

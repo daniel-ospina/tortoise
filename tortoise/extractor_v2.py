@@ -2954,7 +2954,19 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
                                   # link-before-create or supersession outcomes,
                                   # which is why the gate's default is OFF and why
                                   # `research-brief.md` §4 states the lexical
-                                  # near-identity bound on the claim. `_valid_time`
+                                  # near-identity bound on the claim. ⛔ THE PRICE
+                                  # IS PART OF THE RECORD, because the price is the
+                                  # stated reason the gate ships OFF: ~5.18 ms/pair
+                                  # on name-length candidates ⇒ ≈207 ms added per
+                                  # mention, ≈3.1 s added per capture at the
+                                  # product's `max_queries=15` (brief §6, artifact
+                                  # `measurement-noun-path.json` →
+                                  # `arms.rerank.latency`). The gate is ONE
+                                  # process-wide variable at ONE wiring point
+                                  # shared with interactive search, where the same
+                                  # lever prices at ~3.4 s/query (brief §5) — so
+                                  # enabling it here buys BOTH, and the recall gain
+                                  # above is bought at that cost. `_valid_time`
                                   # selection stays OFF here — the rerank is a
                                   # relevance reorder, not a temporal one.
                                   _valid_time_rerank=False,
