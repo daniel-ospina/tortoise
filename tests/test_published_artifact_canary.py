@@ -1129,7 +1129,20 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
     assert "EXIT_CODE" in text and "not** evidence the artifact is broken" in text, (
         "the alert body must separate a detector outage from a broken artifact"
     )
-    assert "gh issue create" in text and "gh issue close" in text
+    # It must DELEGATE to the shared substrate (#3907) rather than re-implementing
+    # dedupe/Recurrence/close-then-comment inline — a local copy is how the fleet ended up
+    # with three different auto-file behaviours in the first place (#12363 round 6).
+    assert "auto-file-issue.sh" in text, "the alert must ride the shared auto-file substrate"
+    assert "gh issue create" not in text and "gh issue close" not in text, (
+        "inline filing is the drift the substrate exists to prevent"
+    )
+    assert "tail -n 40" in text, "the body must carry the transcript's TAIL (the failure)"
+    harness = REPO_ROOT / ".github" / "scripts" / "published-artifact-alert.test.sh"
+    assert harness.is_file(), "an alert script with no executable harness is unpinned"
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "published-artifact-alert" in ci, (
+        "the harness must be wired into ci.yml's ops-harnesses filter + job, or nothing runs it"
+    )
 
 
 def test_the_canary_cannot_be_SILENCED_without_reding_this_file():

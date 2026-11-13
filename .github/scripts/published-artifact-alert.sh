@@ -7,86 +7,103 @@
 # 97-day-broken published artifact can keep being broken while every summary says so.
 # A red that opens no issue is a red nobody sees.
 #
-# usage: published-artifact-alert.sh open|close
-#   open   — refresh the open alert issue for this repository (comment if it exists,
-#            create it if not). Reads $EXIT_CODE so an exit-2 detector outage is NOT
-#            presented as "the artifact is broken, cut a release".
-#   close  — comment + close every open alert issue (the run is green again).
+# ⛔ IT DOES NOT RE-IMPLEMENT FILING. Dedupe, `Recurrence #N`, close-then-comment and
+# the refusal to file on a failed search are the SHARED substrate
+# (`.github/scripts/auto-file-issue.sh`, #3907) — every other monitor rides it, and a
+# local copy is how the fleet ended up with three different behaviours in the first
+# place. This script only supplies the canary's TITLE and BODY.
 #
-# Contracts (both fail CLOSED, never silently):
-#   * `gh` must exist, or the step fails NAMING the missing tool (#9018) rather than
-#     filing nothing while reporting success.
-#   * GH_TOKEN must be present — Actions does not export GITHUB_TOKEN itself (#2140).
-#   * `close` with no `gh` exits 0: nothing to close is not an error, and a green run
-#     must never be turned red by the alert plumbing.
+# usage: published-artifact-alert.sh open|close
+#   open   — file or recur the alert issue. Reads $EXIT_CODE so an exit-2 detector
+#            outage is NOT presented as "the artifact is broken, cut a release".
+#            Needs GH_TOKEN + GITHUB_REPOSITORY (Actions does not export
+#            GITHUB_TOKEN itself — #2140).
+#   close  — resolve it (close-then-comment, via the substrate's `resolve` verb).
+#            Never fails a green run: nothing to resolve / no gh is a no-op.
 set -euo pipefail
 
 TITLE="release-artifact-canary: published PyPI artifact is red"
 
-die() {
-  echo "::error::$*" >&2
-  exit 1
-}
+# ⛔ The substrate path is spelled LITERALLY (no `$(dirname "$BASH_SOURCE")`, no variable):
+# every caller runs from the repository root — the workflow step by default, and the
+# harness by an explicit `cd` — and a literal path is what lets the shell-discard guard
+# READ the script before it runs. A `$`-spelled script path is unverifiable to that
+# guard, which fails closed and blocks the harness locally (#12363 round 6).
+af_file() { bash .github/scripts/auto-file-issue.sh file "$@"; }
+af_resolve() { bash .github/scripts/auto-file-issue.sh resolve "$@"; }
 
-require_gh() {
-  command -v gh >/dev/null 2>&1 || die "gh is missing on this runner — the alert issue cannot be filed (#9018)"
-  [ -n "${GH_TOKEN:-}" ] || die "GH_TOKEN is not set — Actions does not export GITHUB_TOKEN itself (#2140)"
-  [ -n "${GITHUB_REPOSITORY:-}" ] || die "GITHUB_REPOSITORY is not set"
+# ⛔ `die` RETURNS, it does not `exit`: the harness SOURCES this file, and an `exit` here
+# would kill the harness mid-run instead of failing the assertion that called us. The
+# dispatcher at the bottom turns a returned non-zero into the process exit.
+die() {
+  echo "::error::$1" >&2
+  return 1
 }
 
 open_issue() {
-  require_gh
+  [ -f .github/scripts/auto-file-issue.sh ] || {
+    die "the shared auto-file substrate is missing at .github/scripts/auto-file-issue.sh (#3907) — run from the repository root" || return 1
+  }
+  [ -n "${GH_TOKEN:-}" ] || {
+    die "GH_TOKEN is not set — Actions does not export GITHUB_TOKEN itself (#2140)" || return 1
+  }
+  [ -n "${GITHUB_REPOSITORY:-}" ] || { die "GITHUB_REPOSITORY is not set" || return 1; }
+
   local why
   if [ "${EXIT_CODE:-}" = "2" ]; then
-    why="The detector could not evaluate the artifact (exit 2: the index was unreachable or the install could not be judged either way). This is **not** evidence the artifact is broken — check the detector before anything else."
+    why="The detector could not evaluate the artifact (exit 2: the index was unreachable, or the install could not be judged either way). This is **not** evidence the artifact is broken — check the detector before anything else, and do NOT cut a release on this run."
   else
-    why="The **published** artifact fails the documented steps (\`pip install tortoise-graph\` then \`tortoise init\`, and \`pip install tortoise-client\` resolves on the index). No change in this repository fixes it: it clears when a release lands (version bump → tag → \`publish-pypi.yml\`)."
+    why="The **published** artifact fails the documented steps (\`pip install tortoise-graph\` then \`tortoise init\`, and \`pip install tortoise-client\` must resolve on the index). No change in this repository fixes it: it clears when a release lands (version bump → tag → \`publish-pypi.yml\`)."
   fi
 
+  # The TAIL is what carries the failure: the tool writes the venv/pip setup first and
+  # the `tortoise init` output plus its `[exit N]` last, so a head would show the setup
+  # and hide the diagnosis (#12363 round 6).
   local log="${RUNNER_TEMP:-/tmp}/canary/published-artifact-canary.log"
   local tail_text="(no transcript was written)"
   if [ -s "$log" ]; then
-    tail_text="$(sed -n '1,40p' "$log")"
+    tail_text="$(tail -n 40 "$log")"
   fi
 
-  local body
-  body="$(printf '%s\n\n```\n%s\n```\n\nRun: %s/%s/actions/runs/%s\nTranscript: the `published-artifact-canary-log` artifact on that run.\n\nRefs #12363\n' \
-    "$why" "$tail_text" "${GITHUB_SERVER_URL:-https://github.com}" "$GITHUB_REPOSITORY" "${GITHUB_RUN_ID:-unknown}")"
+  # No `trap ... RETURN`: the trap is PROCESS-global, so a harness that SOURCES this
+  # file inherits it and the next function return reads a local that is already out of
+  # scope (`body_file: unbound variable` under `set -u`). Clean up explicitly instead.
+  local body_file
+  body_file="$(mktemp)"
+  {
+    printf '%s\n\n' "$why"
+    printf '```\n%s\n```\n\n' "$tail_text"
+    printf 'Run: %s/%s/actions/runs/%s\n' \
+      "${GITHUB_SERVER_URL:-https://github.com}" "$GITHUB_REPOSITORY" "${GITHUB_RUN_ID:-unknown}"
+    printf 'Transcript: the `published-artifact-canary-log` artifact on that run.\n\n'
+    printf 'Refs #12363\n'
+  } >"$body_file"
 
-  local existing
-  existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-    --search "$TITLE in:title" --json number --jq '.[0].number // empty')"
-  if [ -n "$existing" ]; then
-    gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
-    echo "refreshed alert issue #$existing"
-  else
-    gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$body" --label bug
-    echo "opened the alert issue"
-  fi
+  local rc=0
+  af_file --title "$TITLE" --body-file "$body_file" --label bug || rc=$?
+  rm -f "$body_file"
+  return "$rc"
 }
 
 close_issues() {
-  # A green run must not be turned red by the alert plumbing: no gh here means the
-  # issue was never filed, so there is nothing to close.
-  command -v gh >/dev/null 2>&1 || { echo "gh absent — no alert issue to close"; return 0; }
-  [ -n "${GH_TOKEN:-}" ] || { echo "GH_TOKEN absent — no alert issue to close"; return 0; }
-  local numbers
-  numbers="$(gh issue list --repo "${GITHUB_REPOSITORY:?}" --state open \
-    --search "$TITLE in:title" --json number --jq '.[].number')"
-  if [ -z "$numbers" ]; then
-    echo "no open alert issue"
+  # A green run must not be turned red by the alert plumbing: no token/gh means the
+  # issue was never filed, so there is nothing to resolve.
+  if [ -z "${GH_TOKEN:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || ! command -v gh >/dev/null 2>&1; then
+    echo "no alert plumbing in this environment — nothing to resolve"
     return 0
   fi
-  for number in $numbers; do
-    gh issue comment "$number" --repo "$GITHUB_REPOSITORY" \
-      --body "Green: the published artifact now passes its documented first command. Closing. (Refs #12363)"
-    gh issue close "$number" --repo "$GITHUB_REPOSITORY" --reason completed
-    echo "closed alert issue #$number"
-  done
+  af_resolve --title "$TITLE" \
+    --why "Green: the published artifact now passes its documented first command."
 }
 
-case "${1:-}" in
-  open) open_issue ;;
-  close) close_issues ;;
-  *) die "usage: $0 open|close" ;;
-esac
+# Executed → dispatch. SOURCED → the caller owns the verbs (the harness redefines
+# `af_file`/`af_resolve` to record instead of filing).
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "${1:-}" in
+    open) open_issue || exit 1 ;;
+    close) close_issues || exit 1 ;;
+    *)
+      die "usage: $0 open|close" || exit 1
+      ;;
+  esac
+fi
