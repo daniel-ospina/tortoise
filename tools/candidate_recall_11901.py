@@ -604,9 +604,10 @@ def _rerank_arm(
         # `arms.<label>.<P>.exact.recall_3_after` / `mentions` — and the note says
         # which cell to read AND that it is the ACHIEVED count, not the ceiling
         # (`recall_3_before` minus `lost` plus `gained` is what separates them; the
-        # note called the two identical, and then called `lost` the discriminator,
-        # which is wrong in both directions — a no-gain rerank has `lost` 0 with the
-        # achieved figure still below the ceiling).
+        # note called the two identical, then called `lost` the discriminator, which
+        # is wrong in ONE direction — `lost` 0 is NECESSARY but not sufficient: the
+        # witness is a rerank with `lost` 0 and `gained` 0 that still leaves an
+        # in-pool gold outside the top 3).
         # ⛔ LABEL-DERIVED, and it has to be: this same note is emitted onto the
         # lexical carriers too (`_rerank_arm(..., label=...)`), where "this arm" is
         # `lexical_difflib` / `lexical_overlap`. A hard-coded `arms.rerank` pointer
@@ -615,8 +616,9 @@ def _rerank_arm(
         "ceiling_note": (  # noqa: UP032 — .format keeps the literal segments the test parses
             "a reranker only reorders rows the legs already returned, so its "
             "CEILING is in_window(P) — the number of golds the legs put INSIDE the "
-            "scored window at that width — while this arm RECORDS only what it "
-            "ACHIEVED: `arms.{label}.<P>.exact.recall_3_after` over its `mentions` "
+            "scored window at that width — while the figure this arm records as its "
+            "HEADLINE is the ACHIEVED one: "
+            "`arms.{label}.<P>.exact.recall_3_after` over its `mentions` "
             "denominator. ⛔ The two are not the same quantity: the achieved figure "
             "is the ceiling MINUS the in-pool golds the arm still leaves outside "
             "the top 3, i.e. `recall_3_before` minus `lost` plus `gained`, so read "
@@ -628,8 +630,10 @@ def _rerank_arm(
             "own in-window count for each of arm 1's widths and nothing else, so a "
             "pool width outside that set has no cell there "
             "at all. Read it only where its key matches the width you are asking "
-            "about; everywhere else the achieved cell above is the only figure this "
-            "artifact carries for this arm. miss_past_k is 0 BY CONSTRUCTION only "
+            "about; for the exact population it is the only figure this artifact "
+            "carries for this arm, and the VARIANT pairs have their own at-pool "
+            "window in `variant.in_window_3_before`. miss_past_k is 0 BY "
+            "CONSTRUCTION only "
             "at arm 1's WIDEST window (a response has at most that many rows, so "
             "'the rank is past it' cannot occur) and can only be non-zero at a "
             "narrower k, where a gold the legs returned further down is genuinely "

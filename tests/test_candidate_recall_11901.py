@@ -1495,8 +1495,9 @@ def test_the_control_artifact_covers_both_pools_and_all_three_scorers(lexical):
     # ⛔ THE CEILING NOTE IS A CLAIM, so it is pinned, not just generated: the
     # retracted wording ("its ceiling is arm 1's miss_past_k … the
     # miss_absent_at_max_k rows are unreachable at every pool width") is FALSE on
-    # this artifact's own data (miss_past_k at k=P is 0 by construction, and the
-    # pool-40 arm returns every gold), and it survived in this file after the
+    # this artifact's own data (miss_past_k is 0 by construction ONLY at arm 1's
+    # widest measured window, and the pool-40 arm returns every gold), and it
+    # survived in this file after the
     # brief retracted it — the artifact contradicting the document it is the
     # evidence for.
     for arm in ("rerank", "lexical_difflib", "lexical_overlap"):
@@ -1557,8 +1558,9 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(
 
     §7 points at this JSON as its citation, so a note left over from an earlier
     draft hands an auditing reader an inference the PR says it removed: the
-    committed file still called the ceiling "arm 1's miss_past_k" — which is 0 at
-    k=P BY CONSTRUCTION, and therefore no bound at all — two revisions after the
+    committed file still called the ceiling "arm 1's miss_past_k" — which is 0 BY
+    CONSTRUCTION only at arm 1's widest measured window (and non-zero below it),
+    and therefore no bound at any width — two revisions after the
     brief and the body were corrected. The note is a GENERATED string, so the pin
     is against the generator, not against a copy of its text: change either side
     and this reds.
