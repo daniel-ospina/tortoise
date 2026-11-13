@@ -865,6 +865,16 @@ def test_a_raising_stop_all_still_reaps_the_tree_and_the_peer_decoy(
     `sleep 120` children (still parented to it, because nothing on that path is killed)
     and the peer decoy are all alive when the `OSError` surfaces, and this test reds;
     with it inside, every spawned pid is gone when the raise propagates.
+
+    ⛔ THE SURVIVAL CHECK IS NOT THE WHOLE PIN (#12330 review, P3). `spawned` holds only
+    the pids `_spawn` RETURNED, so the supervisor's two `sleep 120` children are not in
+    it. A teardown downgraded from `_reap_group(own.pid)` to `_reap(own.pid)` kills the
+    supervisor, orphans both children (ppid 1) and left this test GREEN (measured).
+    A liveness probe cannot close that on its own either: `killpg(pid, 0)` still succeeds
+    for a group whose members are zombies, so it reports "alive" on the CORRECT tree
+    (measured, both spawned pids). The group reap is therefore pinned DIRECTLY, by
+    recording `_reap_group`'s calls while the production teardown runs — no dependence on
+    how fast a killed process leaves `/proc`.
     """
     spawned: list[int] = []
     injected: list[str] = []
@@ -885,6 +895,18 @@ def test_a_raising_stop_all_still_reaps_the_tree_and_the_peer_decoy(
 
     monkeypatch.setattr(sys.modules[__name__], "_spawn", recording_spawn)
     monkeypatch.setattr(sys.modules[__name__], "_script", raising_stop_all)
+
+    # ⛔ RECORD THE TEARDOWN'S GROUP REAP (#12330 review, P3). See the docstring: a
+    # per-pid `_reap(own.pid)` orphans the supervisor's children, and they are invisible
+    # to a check over `spawned`. The recorder DELEGATES, so the real teardown still runs.
+    group_reaps: list[int] = []
+    real_reap_group = _reap_group
+
+    def recording_reap_group(pid: int) -> None:
+        group_reaps.append(pid)
+        real_reap_group(pid)
+
+    monkeypatch.setattr(sys.modules[__name__], "_reap_group", recording_reap_group)
     # The teardown is asserted AFTER the raise, so a regression here is the one case where
     # this test must not leak: reap whatever survived before it reports.
     try:
@@ -904,6 +926,17 @@ def test_a_raising_stop_all_still_reaps_the_tree_and_the_peer_decoy(
         # fixed tree, gone well inside the first 50 ms). A one-sample assertion reds on a
         # correct tree; the same poll on a REVERTED tree never settles, because nothing on
         # that path kills these processes at all.
+        # ⛔ SNAPSHOT THE PRODUCTION TEARDOWN, NOT THIS TEST'S OWN CLEANUP (#12330).
+        # Taken here — after the `with pytest.raises(...)` exited and BEFORE the `finally`
+        # below — `group_reaps` holds only what the body's teardown did. If it held the
+        # `finally`'s calls too, the gap this pins would be hidden again.
+        assert spawned[-1] in group_reaps, (
+            "the `stop-all` teardown did not reap the job-A tree by its PROCESS GROUP "
+            f"(groups reaped: {group_reaps}, spawned: {spawned}). A per-pid `_reap` kills "
+            "the supervisor and orphans its two `sleep 120` children into the same "
+            "session — #12227's leak class — so `_reap_group(own.pid)` is the behaviour "
+            "this pins."
+        )
         deadline = time.time() + 10
         survived = [pid for pid in spawned if _pid_alive(pid)]
         while survived and time.time() < deadline:
