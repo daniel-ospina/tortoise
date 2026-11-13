@@ -926,6 +926,27 @@ class TestTheResolverBands:
                                      {"entities": monkeypatch_free})
         assert hit is not None and hit["id"] == "obj-survivor", hit
 
+    def test_a_supersede_ref_that_folds_onto_the_entity_itself_is_skipped(
+            self, sdk_factory):
+        """The self-supersession guard must match what the resolver matched.
+
+        After `the team → Acme Holdings`, `the team` is the survivor's own
+        recorded alias; a `supersedes` ref spelled that way resolves to the
+        entity itself, and a raw-name-only guard then recorded the entity as
+        superseded by its own spelling.
+        """
+        sdk = sdk_factory()
+        _merged_pair(sdk)
+        folded = v2._current_entity_priors(
+            sdk, [{"id": "obj-carrier", "name": "the team", "kind": "core:plan"}],
+            {"obj-carrier": "Object"})
+        raw = {"entities": [{"name": "Acme Holdings", "kind": "core:plan",
+                             "supersedes": "the team"}], "operators": [],
+               "points": [], "events": [], "chain_notes": [],
+               "link_before_create": []}
+        notes = v2._supersession_records(raw, {"entities": folded})
+        assert notes == [], notes
+
     def test_the_facts_reader_and_the_resolver_are_wired_together(
             self, sdk_factory):
         """The two FUNCTIONS compose: a foreign `search` table + the real reader.

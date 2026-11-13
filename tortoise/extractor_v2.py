@@ -6356,8 +6356,11 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     "vetoes"}],
     "warnings": [...]}.
 
-    Phase 1 (deterministic): the existing ``_find_existing_entity`` (exact
-    → bare → ambiguous) for every ref — no model call.
+    Phase 1 (deterministic): ``_find_existing_entity`` for every ref — no model
+    call. Its ladder is exact-kind NAME → bare-kind NAME → exact-kind ALIAS →
+    bare-kind ALIAS → kind-agnostic ALIAS (each alias rung unique-or-ambiguous;
+    name always outranks alias), so a spelling the merge RECORDED in a survivor's
+    ``aliases[]`` binds here, with ``mode: "alias"``.
     Phase 2 (LLM fallback): fires ONLY when ``model`` is set AND the search
     has entity candidates AND >=1 ref is unmatched/ambiguous. ONE
     ``_complete`` call (existing 600s wall-clock bound; temperature 0.0 via
@@ -9823,7 +9826,14 @@ def _supersession_records(entity_refs: list[dict], search: dict,
                                 "resolve to an S3 search result — the supersession "
                                 "is DROPPED (no graph id to record it against)")
             continue
-        if (_norm(existing.get("name", "")) == _norm(name)
+        # ⛔ The self-supersession guard must use the SAME predicate the resolver
+        # matched on, or it is narrower than the thing it guards: a ref that folds
+        # onto the new entity's own recorded spelling (`aliases[]`) resolves to the
+        # entity ITSELF and was then recorded as superseding itself.
+        _name_folded = normalize_entity_name(name)
+        if ((_norm(existing.get("name", "")) == _norm(name)
+             or normalize_entity_name(existing.get("name", "")) == _name_folded
+             or _alias_hit_for(_name_folded, existing.get("aliases")))
                 and _norm_kind(existing.get("kind", "")) == _norm_kind(kind)):
             if warnings is not None:
                 warnings.append(f"entity '{name[:60]}' supersedes itself "
