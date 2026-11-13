@@ -5365,11 +5365,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # this row was re-derived (`87c07462`). ⛔ `9951` is in that list
             # only because an earlier revision printed it: a predicted merge-tree
             # value (9943 + 8) no commit on `main` ever carried, and the
-            # `10005`/`10019` pair that replaced it described a retired branch's
+            # `10005`/`10019` pair that replaced it described a side branch's
             # OWN tree and its MERGE tree respectively — `10005` = 9973 + that
             # branch's 32 lines alone, `10019` = the same + the 14 `main`
-            # already carried. Neither is reachable today: the branch head that
-            # read 10005 is gone from the object DB, and its 32-line block has
+            # already carried. The branch's own tree still resolves — `10005` is
+            # line 10005 of `c1f69adff0:config/ci-surfaces.yml`, and that commit is
+            # reachable from `origin/fix/11825-replace-prim` (it is NOT gone from
+            # the object DB: a remote-tracking ref here proves the object is
+            # present, and `git for-each-ref --contains c1f69adff0` is the check
+            # that answers it) — and its 32-line block has
             # since landed on `main` itself (`ea2c41a696`), which is what makes
             # 10019 a real value again one landing later. The deltas are where
             # the registrations landed:
