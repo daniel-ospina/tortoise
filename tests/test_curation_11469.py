@@ -989,6 +989,51 @@ def test_a_transport_failure_does_not_fall_back_to_another_graph():
     assert len(calls) == 1, "a transport error must not trigger a second, unbound read"
 
 
+def test_a_labelled_refusal_quoting_the_graph_still_does_NOT_fall_back():
+    """Round-9: this file's OWN site label must not satisfy `_looks_like_graph_refusal`.
+
+    `_section_call` / `_operator_call` re-raise as
+    ``"read of section 'status' was refused: <raw>"``. The classifier requires the text to
+    QUOTE a graph AND read like a refusal — and the label supplies **"refused"**, so ANY
+    raw text that quotes a graph matched it. A timeout or a DB fault
+    (``"timed out reading graph 'org_x_g_aaa'"``) was therefore classified as a graph
+    refusal and the read FELL BACK to the credential's own graph, mixing two graphs into
+    one census while the artifact was stamped with the requested one — the exact failure
+    the fallback's own guard exists to prevent.
+    
+    On `origin/main` the handler classified the RAW text (there was no label), so this was
+    introduced by the wrapper, not inherited.
+
+    ⛔ The fake must raise `C.CurationRefused`, NOT a `TimeoutError`: `_section_call` /
+    `_operator_call` only wrap a `CurationRefused` (a `TimeoutError` propagates unlabelled,
+    so it reproduces nothing — measured, an earlier draft of this test passed under the
+    mutation). The refusal's OWN text must also quote the graph while carrying NONE of
+    the classifier's trigger words ("quota exhausted on graph 'x'"): that is the raw
+    half the classifier must say NO to. Measured: with `str(exc)` restored BOTH reads
+    make a second, unbound call; with `_unlabelled_refusal` they raise after ONE.
+    """
+    mod = _tool_module()
+
+    for which in ("section", "operators"):
+        calls: list[dict] = []
+
+        def call(_name, args, _which=which, _calls=calls):
+            _calls.append(dict(args or {}))
+            # Quotes the graph; contains NO trigger word (no "refus"/"unknown"/"cannot"…).
+            raise C.CurationRefused("quota exhausted on graph 'org_x_g_aaa'")
+
+        reader = mod.MCPReader(call, "org_x_g_aaa")
+        with pytest.raises(C.CurationRefused):
+            if which == "section":
+                reader._section("status")
+            else:
+                reader.read_operators()
+        assert len(calls) == 1, (
+            f"{which}: a refusal whose text merely QUOTES the graph was misread as a "
+            f"graph refusal because this file's own label says 'was refused', so the "
+            f"census re-read the credential's own graph ({calls})")
+
+
 def test_a_graph_refusal_does_fall_back_and_says_so_once_per_section():
     mod = _tool_module()
 

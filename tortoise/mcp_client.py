@@ -1179,17 +1179,31 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> Any:
 
     ⛔ Raises `fastmcp.exceptions.ToolError` for ANY tool-level ERROR RESULT, not only for
     transport/auth failure (#11153). The hosted surface flags a refused call with
-    `isError: true` — a quota refusal (`-32006`), an auth rejection, a validation error, a
-    wait-bound expiry — and fastmcp's client is built with `raise_on_error=True` by
-    default, so that refusal arrives as a RAISED `ToolError` and never reaches the caller
-    as a payload. `normalise_tool_result` therefore cannot see it; a caller that needs the
-    refusal's `code` must catch `ToolError` and read its text — `refusal_message()`
-    below is the ONE classifier for "is this text a DESIGNED refusal or a crash?",
-    so a consumer distinguishes the two the same way this module's other callers do
-    instead of re-deriving the shapes a fourth time.
+    `isError: true` — a quota refusal (`-32006`), a `_safe` validation refusal, a
+    wait-bound expiry (`-32009`), an auth rejection — and fastmcp's client is built with
+    `raise_on_error=True` by default, so that refusal arrives as a RAISED `ToolError` and
+    never reaches the caller as a payload. `normalise_tool_result` therefore cannot see it.
+    `refusal_message()` below is the ONE classifier for "is this text a DESIGNED refusal or
+    a crash?", so a consumer distinguishes the two the same way this module's other callers
+    do instead of re-deriving the shapes a fourth time.
+
+    ⚠️ **`ToolError` carries `result.content[0].text` ONLY** (measured:
+    `fastmcp/client/mixins/tools.py`, `if result.isError and raise_on_error: msg =
+    result.content[0].text` → `raise ToolError(msg)`). So how much of the refusal survives
+    depends on its shape:
+
+    * a `_safe` refusal puts the whole JSON error dict in `content[0].text`
+      (`{'error': …, 'code': -32006}`), so catch `ToolError` and hand its text to
+      `refusal_message()`;
+    * a **wait-bound** refusal (`-32009`) puts digit-free PROSE there
+      (`mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE`) and the machine-readable half in
+      `structured_content`/`meta` — so `code`, `data.retry_after`, `retry_safe` and
+      `committed` are **discarded** by `raise_on_error=True`. A caller that needs those
+      must go through `get_client()` and call `client.call_tool(..., raise_on_error=False)`.
 
     Also raises on transport failure, and `MCPKeyEmptyError` when an auth rejection leaves
-    no credential resolved.
+    no credential resolved. A PROTOCOL-level failure (arguments that violate the tool's
+    schema) raises `McpError`, not `ToolError` — that is a different path.
 
     ⚠️ `available()` answers REACHABILITY only — it cannot pre-empt a tool-level refusal, so
     "call `available()` first" is not a substitute for handling `ToolError`.

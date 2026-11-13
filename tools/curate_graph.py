@@ -332,7 +332,10 @@ class MCPReader:
             # ONLY a recognised graph-refusal may fall back. A timeout/429 says
             # nothing about the binding, and re-reading a DIFFERENT graph under the
             # requested graph's identity is how a census mixes two graphs.
-            reason = str(exc) or type(exc).__name__
+            # ⛔ The CAUSE, never the wrapper: `_section_call` labels the refusal with
+            # "was refused", which would itself satisfy this classifier — see
+            # `_unlabelled_refusal`.
+            reason = _unlabelled_refusal(exc)
             if not _looks_like_graph_refusal(reason):
                 raise
             res, reason = None, reason
@@ -619,7 +622,8 @@ class MCPReader:
             res = C.normalise_tool_result(
                 self._operator_call({**args, "graph": self.graph}, label))
         except Exception as exc:
-            reason = str(exc) or type(exc).__name__
+            # ⛔ The CAUSE, not the wrapper label — see `_unlabelled_refusal`.
+            reason = _unlabelled_refusal(exc)
             if not _looks_like_graph_refusal(reason):
                 raise
             self._note(f"the operator read: the explicit graph argument was refused "
@@ -778,11 +782,16 @@ class MCPReader:
             # so the existing `pytest.raises(RuntimeError, ...)` assertions still hold.
             raise C.CurationRefused(f"read of the Event layer was refused: {err[:300]}")
         if not _is_row_listing(res):
-            # ⛔ bare `RuntimeError` ON PURPOSE — rc 1, not rc 3. The sibling layers
-            # (`read_sources`, `read_operators`) raise the same class here, and the rc
-            # table (`docs/architecture/CURATION-11469.md`) puts "the payload was not a
-            # listing" on the rc-1 row: it is the READ being unusable, not a designed
-            # census refusal. Only the `_error_of` arm above is a designed refusal.
+            # ⛔ bare `RuntimeError` ON PURPOSE — rc 1, not rc 3. This is the PAYLOAD-level
+            # guard, and it matches the sibling layers exactly (`read_sources`,
+            # `read_operators`, both `RuntimeError` here). The rc table
+            # (`docs/architecture/CURATION-11469.md`) decides rc by the exception CLASS
+            # rather than naming listings, so keeping the class the siblings use is what
+            # keeps the three layers answering the same rc; the table's own Event row
+            # separately counts ROW-level shape drift as a `CurationRefused` site, which is
+            # a finer guard than this one and is pinned by
+            # `test_an_event_row_that_is_not_an_object_is_refused_not_a_traceback`. Only the
+            # `_error_of` arm above is a designed refusal.
             raise RuntimeError(
                 "read of the Event layer answered in an unrecognised shape "
                 f"({type(res).__name__} with keys "
@@ -939,7 +948,7 @@ class MCPReader:
             res = C.normalise_tool_result(
                 self._call("tortoise_get_entity", {**args, "graph": self.graph}))
         except Exception as exc:
-            reason = str(exc) or type(exc).__name__
+            reason = _unlabelled_refusal(exc)
             if not _looks_like_graph_refusal(reason):
                 raise
             self._note(f"the Event read: the explicit graph argument was refused "
@@ -1050,6 +1059,32 @@ def _looks_like_graph_refusal(reason: str) -> bool:
     return ("graph '" in low or 'graph "' in low) and (
         "refus" in low or "unknown" in low or "does not exist" in low
         or "not found" in low or "not reachable" in low or "cannot" in low)
+
+
+def _unlabelled_refusal(exc: BaseException) -> str:
+    """A refusal's OWN text, without this module's site label.
+
+    ⛔ NEVER classify ``str(exc)`` on an exception that `_section_call` /
+    `_operator_call` may have re-raised. Those wrappers prepend
+    ``"read of section 'status' was refused: "`` — and that label supplies the word
+    **"refused"**, which is itself one of `_looks_like_graph_refusal`'s trigger words.
+    The classifier's rule is "the message must QUOTE the graph AND read like a refusal",
+    so the wrapper silently satisfied the second half for ANY refusal text that quotes a
+    graph: a `CurationRefused` such as ``"quota exhausted on graph 'live-v4'"`` matches
+    NOTHING on its own, but wrapped it became
+    ``"read of section 'status' was refused: quota exhausted on graph 'live-v4'"`` —
+    classified as a graph refusal, and the read then FELL BACK to the credential's own
+    graph: a census mixing two graphs while the artifact was stamped with the requested
+    one, the exact failure the fallback's own comment says must never happen (measured,
+    review round 9). On `origin/main` the handler classified the RAW text, so this was
+    introduced by the label wrapper, not inherited.
+
+    Only a `CurationRefused` is wrapped, so that is the class this matters for; the
+    wrappers chain with ``raise … from exc``, making the original text ``__cause__``.
+    """
+    cause = exc.__cause__
+    text = str(cause) if isinstance(cause, BaseException) else str(exc)
+    return text or type(exc).__name__
 
 
 def _source_gap(counts: Any, read: int) -> int | None:
