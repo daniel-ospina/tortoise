@@ -45722,6 +45722,117 @@ class TortoiseSDK:
             params={"id": org_id},
         ).result_set
         return rows[0][0] if rows else None
+
+    def get_organisation_account(self) -> dict | None:
+        """Read THIS caller's account and the plan it is on (#10015, row 28).
+
+        Answers *"how full is my plan?"* BEFORE a write is refused, which the
+        refusal itself cannot: ``docs/capacity.md`` §4 records the cap as a
+        STOCK, not a flow — the 402 is terminal and carries no ``Retry-After``,
+        so backing off retries forever and the refusal is otherwise the first
+        time a builder learns the cap exists. Read-only: nothing here clears,
+        refills, prunes or overrides a cap, so an account held at its cap on
+        purpose (#10175) reads as held, not as an outage.
+
+        ⛔ **Scoped to the caller's own account — by construction, not by a
+        filter.** The method takes no ``org_id``: there is no argument through
+        which a caller could name another tenant's row (which is what
+        ``org_get`` permits, and why it stays the deprecated control-plane
+        primitive while this name is row 28's customer read). The account is
+        resolved from the SDK's own tenant — the SAME seam every write uses
+        (``record_writer.record_tenant_effective``: carried on the SDK by the
+        hosted REST lane, else the ``use_record_tenant`` scope, else the
+        declared single-tenant env pair). An SDK that names no tenant REFUSES;
+        it never falls back to a guess, because a guessed org is a
+        cross-tenant read that happens to return well-formed data.
+
+        Returns ``None`` when the tenant is bound but no account row exists
+        (mirrors ``org_get``'s contract), and raises ``ControlPlaneError`` when
+        no tenant is bound at all.
+
+        The reply — every field reuses vocabulary the quota surfaces already
+        own, so the pre-write read and the 402 that follows it line up::
+
+            {
+              "org_id": "<the caller's own account>",
+              "tier": "pro",
+              "plan": {
+                "resource": "points",
+                "used": 10234,     # or None when the count could not be read
+                "limit": 100000,   # int | None = UNLIMITED | ABSENT = UNKNOWN
+                "at_cap": False,   # present only when the answer is knowable
+              },
+            }
+
+        ``plan.resource`` names what the limit bounds — the ``points`` resource
+        (``quota.count_org_usage``: non-episodic Points + Object/Subject +
+        non-episodic Events) — because ``limit``/``used`` are unitless without
+        it (AIP-141: a quantity names its unit). ``plan.limit`` has THREE states
+        and none of them is a lie: a number (bounded), ``None`` (unlimited — a
+        key that is PRESENT with no value, ``billing.apply_limits``' own
+        encoding), or the key ABSENT (we could not read it, which the gate also
+        treats as fail-closed). ``plan.used`` is the count the gate compares, or
+        ``None`` when the count failed — a failed read is never a genuine ``0``
+        (#4331). ``plan.at_cap`` is the gate's own predicate (``used >=
+        limit``) and is omitted when it cannot be computed.
+
+        ⚠️ Which graph ``used`` counts: THIS SDK's, the same handle the caller
+        writes through. That is deliberate and it is ``enforce_org_limit``'s
+        house rule (#8906): a graph-bound credential is metered against the
+        graph it writes, so counting the default graph instead would report
+        headroom on a graph the caller cannot touch.
+        """
+        from .exceptions import ControlPlaneError
+        from .quota import (
+            OrgNotFoundError,
+            count_org_usage,
+            encode_plan_block,
+            resolve_org_limits,
+        )
+        from .record_writer import (
+            RECORD_GRAPH_ENV,
+            RECORD_ORG_ENV,
+            RECORD_SINGLE_TENANT_ENV,
+            is_usable_tenant,
+            record_tenant_effective,
+        )
+
+        tenant = record_tenant_effective(self._record_tenant)
+        if not is_usable_tenant(tenant):
+            raise ControlPlaneError(
+                "get_organisation_account needs a bound account: this SDK names "
+                "no tenant, and reading an account by a caller-supplied id is "
+                "the cross-tenant read row 28 must not allow (#10015). Bind it "
+                "one of the two supported ways: on the hosted REST lane the "
+                "credential's tenant is carried on the SDK it opens; elsewhere "
+                "enter record_writer.use_record_tenant(org_id, graph_id), or set "
+                f"{RECORD_ORG_ENV}/{RECORD_GRAPH_ENV} together AND declare the "
+                f"process single-tenant with {RECORD_SINGLE_TENANT_ENV}=1."
+            )
+        org_id = tenant[0]
+        try:
+            # ONE limits read, from the resolver the WRITE gates use — so the
+            # cap reported here is the cap they enforce, not a second opinion.
+            limits = resolve_org_limits(org_id)
+        except OrgNotFoundError:
+            # A bound tenant with no account row: a state, not a fault (#9567).
+            return None
+        used: int | None = None
+        try:
+            used = count_org_usage(org_id, "points", sdk=self)
+        except Exception:
+            # Best-effort, like /v1/team's #4331 node figure: the account read
+            # must not fail because one count did, and the reply says so
+            # explicitly (`used: None`) rather than reporting a reassuring 0.
+            _logger.warning(
+                "get_organisation_account: points count unavailable for %s",
+                org_id, exc_info=True,
+            )
+        return {
+            "org_id": limits.get("org_id") or org_id,
+            "tier": limits.get("tier"),
+            "plan": encode_plan_block(limits, "points", used=used),
+        }
     # ── Control Plane: Membership CRUD ─────────────────────────────
 
     def membership_create(self, org_id: str, user_id: str, role: str) -> dict:

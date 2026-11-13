@@ -533,6 +533,82 @@ def quota_refusal_payload(exc: QuotaExceededError) -> dict:
     return payload
 
 
+def encode_plan_block(limits: dict | None, resource: str = "points",
+                      used: int | None = None) -> dict:
+    """One resource's headroom for an account READ — the #10015 reply block.
+
+    The ONE encoding of the answer ``enforce_org_limit`` acts on, so a caller
+    can ask "how full is my plan?" and see the SAME states the gate
+    distinguishes. There are three of them, and collapsing any two is the
+    defect this function exists to prevent:
+
+    ====================  ====================  ==================================
+    ``limits[<key>]``     emitted ``limit``     means
+    ====================  ====================  ==================================
+    a number              that number           a bounded allowance
+    ``None`` (PRESENT)    ``None``              **unlimited** (#4010 / #683)
+    ABSENT                *the key is absent*   **UNKNOWN — fail-closed**
+    unreadable            *the key is absent*   **UNKNOWN — fail-closed**
+    ====================  ====================  ==================================
+
+    Row 2 is ``resolve_org_limits``' documented contract: a key that is PRESENT
+    with ``None`` means unlimited — ``billing.apply_limits`` writes NULL for
+    exactly that, and ``enforce_org_limit`` skips on it. Rows 3 and 4 are the
+    two shapes the gate REFUSES (a missing key is fail-closed, ``#310 GAP-B``;
+    an unreadable one is refused with the field named, ``#4051``). On a READ
+    neither is an exception — the caller is not writing — but neither may
+    become a number or a ``None`` either, because **``None`` reads as
+    unlimited**. So the key is OMITTED: the one encoding that cannot be
+    mistaken for a cap somebody granted. A fabricated ``None`` here would tell a
+    capped org it has no cap.
+
+    ⛔ ``limits.get(key)`` must never decide this: it collapses rows 3 and 4
+    into row 2, turning "we could not read your limit" into "you have no
+    limit" — a fail-open on a money surface. The presence test is the point,
+    and it is pinned by ``tests/test_10015_organisation_account.py``.
+
+    ``used`` is the count the gate would compare (``count_org_usage``), or
+    ``None`` when it could not be read — never a false ``0`` (#4331: a failed
+    read is not a genuine zero). ``at_cap`` is emitted only when it can be
+    KNOWN: it is the gate's own predicate (``used >= limit``, the comparison in
+    ``enforce_org_limit``), and for an unlimited resource it is a true ``False``
+    rather than an absence, because "no cap" does answer the question. An
+    unknown ``used`` under a bounded limit omits it — ``False`` there would be
+    the falsely reassuring answer #4331 forbids on ``/v1/team``.
+    """
+    key = _RESOURCE_LIMIT_KEYS.get(resource)
+    if key is None:
+        # Mirrors `enforce_org_limit`'s own refusal: a resource with no declared
+        # limit key (including the DERIVED caps) cannot be encoded, and guessing
+        # a key would be how the two surfaces drift apart.
+        raise QuotaCheckError(f"unknown quota resource: {resource!r}")
+    block: dict = {
+        "resource": resource,
+        "used": int(used) if used is not None else None,
+    }
+    if limits is None or key not in limits:
+        # No org context, or the limit is not present at all. Rows 3-4 above.
+        return block
+    limit = limits[key]
+    if limit is None:
+        block["limit"] = None
+        block["at_cap"] = False
+        return block
+    if isinstance(limit, bool):
+        # A bool is an int subclass, so `int(True)` would publish a cap of 1.
+        # The gate refuses it as unreadable; the read publishes no number.
+        return block
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError, OverflowError):
+        # Same class the gate refuses (`int(float('inf'))` included).
+        return block
+    block["limit"] = limit
+    if block["used"] is not None:
+        block["at_cap"] = block["used"] >= limit
+    return block
+
+
 def derived_tier(org_row: dict) -> str:
     """Effective tier for an org row — the #1082 anon-ceiling derivation.
 

@@ -192,14 +192,16 @@ def test_the_absence_failure_is_NOT_vacuous():
 
 
 def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
-    """#4282's true state: 40 approved, 124 live. Not green, and not vague.
+    """#4282's true state: 40 approved, 125 live. Not green, and not vague.
 
-    The approved side has not moved: 12 of the 40 exist, 28 do not. The LIVE side moved
+    The approved side has not moved: 13 of the 40 exist, 27 do not. The LIVE side moved
     150 → 124 on 2026-10-27, when the owner's ruling that the surplus methods nothing calls
     may be deleted (PR #10187) removed the 26 with no caller under `tortoise/**` — so the
-    off-surface gap falls 138 → 112 while `absent` stays 27. Nothing approved was removed:
-    the 26 are all off-surface surplus, which is why this premise and the 40 are separate
-    numbers.
+    off-surface gap falls 138 → 112 — and 124 → 125 on 2026-11-14 (#10015), when approved
+    row 28 `get_organisation_account` was IMPLEMENTED, which moves `absent` 27 → 26 without
+    touching the off-surface 112 (an approved name is not surplus). Nothing approved was
+    removed: the 26 are all off-surface surplus, which is why this premise and the 40 are
+    separate numbers.
     """
     declared = _declaration()["__all__"]
     live = _live()
@@ -212,9 +214,9 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
     # verify nothing at all. Each literal carries its own premise note —
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    assert len(live) == 124, "the live surface moved — update this premise (it pins today's gap)"
+    assert len(live) == 125, "the live surface moved — update this premise (it pins today's gap)"
     assert len(off_surface) == 112, "the gap moved — update this premise (it pins today's gap)"
-    assert len(absent) == 27, "the gap moved — update this premise (it pins today's gap)"
+    assert len(absent) == 26, "the gap moved — update this premise (it pins today's gap)"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.
     assert sum(1 for p in problems if "NOT on the approved surface" in p) == len(off_surface)

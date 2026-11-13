@@ -905,7 +905,7 @@ approval_date: '2026-09-18'
 # the count as "at this head" and the sha as "when the rows were cut".
 counts:
   tools: 72
-  sdk_public_methods: 124
+  sdk_public_methods: 125
   retired: 23
   keyword_distribution:
     fetch: 14
@@ -4109,6 +4109,29 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_historical_knowledge.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
+- name: sdk:get_organisation_account
+  method: get_organisation_account
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.get_organisation_account.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
   used_by: tooling, docs
