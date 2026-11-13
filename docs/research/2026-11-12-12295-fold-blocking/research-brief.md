@@ -77,8 +77,21 @@ here** — it is declared, not explained. It is also why the before/after below 
 run, on one corpus**, with the pre-`#12295` matcher frozen inside the harness rather than read back
 from the old artifact: a before/after against a moving before is not a measurement. ⚠️ **The same
 limit applies one field down, inside ARM 2:** this run's `attached_folded` = **386** is not
-comparable with `#11901`'s `attached_folded` = **114** either, because the arm now runs the SHIPPED
-matcher on a separator-normalised input (§3.3) — that movement is a **CODE** move, not a corpus move.
+comparable with `#11901`'s `attached_folded` = **114** either — and the movement is **both** terms,
+not either one alone: **386 = 114 + 186 CODE + 86 CORPUS**. The **186** is the classes the arm could
+not bind AT ALL before the shipped rung existed (`article-drop` 0 → 175, `hash-dropped` 0 → 11 —
+both `attached_folded` 0 in `#11901`); the **86** is the separator classes that were already **100 %
+of in-window in BOTH runs** (`space-to-hyphen` 101/101 → 179/179, `hyphen-to-space` 13/13 → 21/21),
+so their growth is the larger corpus and nothing else. ⛔ **The split is not optional bookkeeping, and
+the reason is structural:** the arm gates on `cand2.get("id") == row["id"]` and `cand2` is chosen only
+from `rows`, which IS the window — so `attached_folded <= in_window` always. `#11901`'s own
+`in_window` at `k=3` is **260**, so a code-only re-run of THAT corpus could reach at most 260 and
+never 386; a "code move" reading of the total is arithmetically impossible, not merely imprecise.
+⚠️ **And the arm did not start running the shipped matcher here:** `origin/main`'s arm already
+folds each row's NAME and the surface separately, then calls the matcher —
+`folded = [dict(r, name=_fold_punct(r["name"])) for r in rows]` and
+`_find_existing_entity(folded, folded_surface, "core:other")`, unchanged at this head. What moved is
+the MATCHER's body, which gained the folded rung (`#12295`). The arm only ever called it.
 
 ---
 

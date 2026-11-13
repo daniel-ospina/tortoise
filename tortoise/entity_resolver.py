@@ -79,8 +79,11 @@ Equal folded names always share ``E``, so the exact rung can never be missed by
 blocking. ⛔ The bound the prefix alone imposed is GONE (#12295): a pair
 whose folded names share no 3-character prefix is no longer excluded — that is
 exactly what the ``T`` (word order / transposition) and ``S`` (typo and separator
-classes) keys reach, and `test_the_scan_finds_a_transposition_the_single_prefix_key_could_not`
-pins it. ``E`` is always present; ``P`` is added only where the fold is at least
+classes) keys reach, and `test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_shares_only_it`
+pins each of ``P``/``T``/``S`` with a witness sharing THAT key alone. ⚠️ The
+transposition test (`test_the_scan_finds_a_transposition_the_single_prefix_key_could_not`)
+does NOT pin the namespace: its pair shares ``T`` *and* ``S``, so deleting either
+generator leaves it green. ``E`` is always present; ``P`` is added only where the fold is at least
 ``MIN_BLOCK_CHARS`` long, and there it is byte-identical to the pre-#12295 single
 key, so the block
 set is a strict superset of `main`'s. The scan applies NO size cap

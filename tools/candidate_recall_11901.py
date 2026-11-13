@@ -61,8 +61,24 @@ fixes:
                        which the stored `the plan doc` folds onto). Its 386 = the
                        article-drop class (175) + the separator class (179) + two
                        classes the shipped matcher already binds, so it is NOT
-                       comparable with `#11901`'s `attached_folded` field: the
-                       114 → 386 movement is a CODE move, not a corpus move.
+                       comparable with `#11901`'s `attached_folded` field — and the
+                       114 → 386 movement is BOTH terms, never either alone:
+                       386 = 114 + 186 CODE + 86 CORPUS — the two terms measured
+                       as the DIFFERENCE against #11901's per-class field. The CODE
+                       186 is the classes the arm could not bind AT ALL there
+                       (`article-drop` `attached_folded` 0 → 175, `hash-dropped`
+                       0 → 11); the CORPUS 86 is the separator classes, 100
+                       %-of-in-window in BOTH runs (`space-to-hyphen` 101/101 →
+                       179/179, `hyphen-to-space` 13/13 → 21/21). ⛔ attached_folded
+                       <= in_window by construction — the gate is
+                       `cand2.get("id") == row["id"]` with `cand2` chosen only from
+                       `rows`, which IS the window — and #11901's k=3 in_window is
+                       260, so a code-only re-run of that corpus caps at 260 and
+                       can never reach 386. ⚠️ The ARM itself never changed:
+                       `origin/main` already folds each row's NAME and the surface
+                       separately (`folded = [dict(r, name=_fold_punct(r["name"]))
+                       for r in rows]`) before calling `_find_existing_entity`;
+                       what changed is the MATCHER's body.
   ARM 3  THE UNION     how large is the candidate set a capture actually hands
                        `resolve_entities`? (not `limit` — see below)
 

@@ -12327,10 +12327,13 @@ durations:
   # never carry a junit reading yet), so these take the header's flat
   # `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a
   # SHARD-LAYOUT input. MEASURED LOCALLY as context only, not as the weight:
-  # 4.4 s for the whole entity-blocking file (26 cases; hermetic, no DB) and
-  # 3.5 s for the 8 measurement pins. Both are millisecond-scale, so the flat
-  # default OVERSTATES them until the refresher re-bases them, which is the safe
-  # direction for a shard layout.
+  # 4.4 s for the whole entity-blocking file (hermetic, no DB) and 3.5 s for the
+  # measurement pins. Both readings exceed the flat 2.0, so the default
+  # UNDERSTATES them until the refresher re-bases them — the same direction the
+  # `test_11822_goal_judgement.py` row above records. Stated rather than left to
+  # be inferred, because an understated weight under-packs the shard it lands in.
+  # ⛔ No case count is quoted here on purpose, per the neighbouring rows: it
+  # re-stales on every review round of this PR, and it is not a weight input.
   test_12295_entity_blocking.py: 2.0
   test_12295_fold_blocking_measurement.py: 2.0
   test_3589_3326_salvage.py: 4.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652): a single-test file cannot prove full coverage from a partial reading; the reading (0.2s) is a LOWER bound; kept 4.2
