@@ -2123,7 +2123,6 @@ def test_the_daemon_resolver_reports_the_rung_it_was_on(monkeypatch):
     assert uri_err.value.key == "TORTOISE_DB_URI"
     assert isinstance(uri_err.value, ValueError)      # call sites stay compatible
     assert "relative/x.db" in str(uri_err.value)      # the message is unchanged
-
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.setenv("TORTOISE_DB_PATH", "relative/y.db")
     with pytest.raises(DaemonTargetError) as path_err:
@@ -2137,6 +2136,27 @@ def test_the_daemon_resolver_reports_the_rung_it_was_on(monkeypatch):
     with pytest.raises(DaemonTargetError) as blank_err:
         daemon_db_target()
     assert blank_err.value.key == "TORTOISE_DB_URI"
+
+
+def test_the_rendered_diagnostic_keeps_its_ValueError_prefix(capsys, _isolated):
+    """The leading token of the USER-VISIBLE message must not move.
+
+    `config show` prints `env_file["daemon_error"]` verbatim and `doctor`
+    truncates it at 90 chars, so the prefix is what an operator grep or a runbook
+    keys on. Rendering `type(exc).__name__` would have changed `ValueError:` to
+    `DaemonTargetError:` now that the resolver raises a subclass — a silent change
+    to user-facing text that no test would have caught (review, P3).
+
+    The subclass exists to carry the rung INTERNALLY; the label stays the base
+    class, so every earlier run's output is byte-identical here.
+    """
+    _write_env(_isolated, "TORTOISE_DB_URI=relative/x.db\n")
+
+    payload = _show_json(capsys)["env_file"]
+    daemon_error = payload["daemon_error"] or ""
+
+    assert daemon_error.startswith("ValueError: "), daemon_error
+    assert "DaemonTargetError" not in daemon_error, daemon_error
 
 
 def test_the_attribution_reads_the_resolvers_key_not_a_second_walk(
@@ -2180,10 +2200,10 @@ def test_the_mixed_shadowed_doctor_row_credits_the_FILE_when_its_key_is_the_top_
     `_dotenv_rows` derives two mixed sentences and only the env-wins one was
     pinned. Measured by injecting `raise SystemExit` at the file-wins arm in the
     #12428 round-11 review: `test_env_file_divergence` + `test_doctor` +
-    `test_cli_config_show` — 434 tests at that head — stayed fully green. (With
-    this PR's two cases the same three files collect 437, so the figure is not
-    reproducible here; the substantive claim is: the mutant reddens exactly ONE
-    test, the new one.) The sentence is true in every state a review reached;
+    `test_cli_config_show` — 434 tests at that head — stayed fully green. (The
+    same three files collect 439 with this PR's four extra cases, so the figure is
+    not reproducible here; the substantive claim is: the mutant reddens exactly
+    ONE test, the new one.) The sentence is true in every state a review reached;
     only its pin was missing, the same class as the `file_graph_keys` clause.
 
     ⛔ The payload must be one `_dotenv_divergence` can actually emit, including

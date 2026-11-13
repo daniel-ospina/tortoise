@@ -11583,6 +11583,26 @@ def _db_value_source(key: str | None) -> str:
     return ("file" if _dotenv_file.applied_value(key, _path) == value else "env")
 
 
+def _daemon_error_label(exc: BaseException) -> str:
+    """The type name the USER sees for a daemon-target rejection.
+
+    ⛔ This string is user-facing, not internal: `config show` prints
+    `env_file["daemon_error"]` verbatim and `doctor`'s ❌ row truncates it at 90
+    chars, so the leading token is what a runbook or an operator grep keys on.
+    `DaemonTargetError` exists to carry the rung INTERNALLY, and rendering its
+    class name would have silently changed that token from the stable
+    `ValueError` every earlier run printed — a change nothing would have caught
+    (review, P3, #12441 item 5).
+
+    So the label is the BASE class for the subclass and the real class name for
+    everything else (a `ValueError` from the overlay itself, e.g. a value
+    `os.environ` refuses, keeps rendering as `ValueError`, as it always did).
+    """
+    from tortoise.config import DaemonTargetError
+
+    return "ValueError" if isinstance(exc, DaemonTargetError) else type(exc).__name__
+
+
 def _dotenv_already_applied() -> bool:
     """Has THIS process applied the daemon's `.env` yet? (Recorded in `LOADED_PATHS`)
 
@@ -11878,7 +11898,7 @@ def _dotenv_divergence(graded_target: str | None = None, *,
                     # at all" and "the value it rejects is the one this `.env`
                     # supplied" in the same breath (#12428 review).
                     daemon_error = _redact_db_value(
-                        f"{type(exc).__name__}: {exc}",
+                        f"{_daemon_error_label(exc)}: {exc}",
                         os.environ.get("TORTOISE_DB_URI"),
                         os.environ.get("TORTOISE_DB_PATH"),
                     )
@@ -11942,13 +11962,18 @@ def _dotenv_divergence(graded_target: str | None = None, *,
             # and only the record can tell (#12428 review).
             daemon_target = None
             # ⛔ The key the LADDER says it was on (`DaemonTargetError.key`) —
-            # never a second walk over `DAEMON_DB_KEYS`. `getattr` keeps this
-            # total for a ValueError raised before the keyed rungs (a value
-            # `os.environ` refuses, e.g. a NUL byte), which carries no rung.
+            # never a second walk over `DAEMON_DB_KEYS`. ⛔ `getattr`'s `None`
+            # default is UNREACHABLE today: this arm is the no-overlay one, where
+            # no `os.environ` write happens, and no rung of the ladder can raise
+            # without attaching a key (review, P3 — an earlier version of this
+            # comment named the NUL-byte `ValueError`, which is raised and caught
+            # in the OUTER arm and can never arrive here). It is kept so an
+            # unwrapped future rung degrades to "unknown origin" rather than
+            # naming a wrong key.
             _key = getattr(exc, "key", None)
             _source = _db_value_source(_key)
             daemon_error = _redact_db_value(
-                f"{type(exc).__name__}: {exc}"
+                f"{_daemon_error_label(exc)}: {exc}"
                 + (" — the value is the one this `.env` supplied"
                    if _source == "file" else ""),
                 os.environ.get("TORTOISE_DB_URI"),

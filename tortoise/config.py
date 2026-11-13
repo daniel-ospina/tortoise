@@ -524,15 +524,24 @@ class DaemonTargetError(ValueError):
     raised, and the report reads the attachment. A second spelling cannot drift
     out of step with the first if there is only one.
 
-    It SUBCLASSES :class:`ValueError` deliberately — every existing caller
-    catches ``ValueError`` (including ``mcp_server._get_sdk``), so the type is
-    additive and no call site has to change to keep working.
+    It SUBCLASSES :class:`ValueError` so that every existing ``except ValueError``
+    on this path keeps catching it — ``__main__``'s three call sites do, and so
+    does the disclosure's own overlay arms, so no call site had to change.
+    ⛔ ``mcp_server._get_sdk`` is NOT one of them: it calls this function with no
+    local try/except, so a relative target propagates out of it exactly as a
+    plain ``ValueError`` did before. The subclass changes no caller's behaviour;
+    it does not add a handler that did not exist.
     """
 
     def __init__(self, message: str, key: str | None) -> None:
         super().__init__(message)
-        #: The ``DAEMON_DB_KEYS`` entry the ladder was ON when it raised — or
-        #: ``None`` when the rejection did not come from a keyed rung.
+        #: The ``DAEMON_DB_KEYS`` entry the ladder was ON when it raised.
+        #: ⛔ ``None`` is UNREACHABLE from this ladder today (both keyed rungs
+        #: attach a key, and no other rung can raise — verified by review), and
+        #: it is typed ``str | None`` on purpose: an unwrapped future rung would
+        #: then degrade the disclosure to "unknown origin" instead of silently
+        #: naming a wrong key. No test covers that arm because no state reaches
+        #: it (agent-infra#3442 rule 3) — the type is the guard, not a claim.
         self.key = key
 
 
