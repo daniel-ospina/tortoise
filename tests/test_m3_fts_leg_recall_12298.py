@@ -3690,16 +3690,64 @@ def test_brief_derived_prose_figures_are_the_artifact(
         "§3.5's mechanism sentence",
         free=("not", "holds"))
 
+    # ── §3.4 — the identifier class's headline recall and its miss count ────
+    # ⛔ These four figures move the same class this commit is named for (round-25
+    # review, P2-1): each restates a value the artifact DERIVES, each sat in a
+    # section the docstring claimed, and each went GREEN on a one-token edit.
+    ident_pc = artifact["arms"]["falkordb_tfidf"]["per_class"]["ident"]
+    ident_recall = ident_pc["3"]
+    ident_total = sum(1 for n in population["names"] if n["cls"] == "ident")
+    ident_misses = round(ident_total * (1 - ident_recall))
+    _only_claim(
+        _scoped(brief, "3.4").replace("**", ""),
+        f"the identifier class's `recall@3` is {ident_recall:.2f}",
+        "§3.4's identifier-class recall",
+        values=(f"{ident_recall:.2f}",))
+    _only_claim(
+        _scoped(brief, "3.4"),
+        f"most of that class's {ident_misses} misses at k=3",
+        "§3.4's identifier-class miss count",
+        values=(str(ident_misses),))
+
+    # ── §3.3 — the score the BM25 arm EXACTLY matches on that class ─────────
+    # "a *BM25* index FED OUR TERMS" — the tokens arm, not the native one.
+    tokens_pc = artifact["arms"]["postgres_bm25/tokens"]["per_class"]["ident"]["3"]
+    assert tokens_pc == ident_recall, (
+        "§3.3 says BM25 fed our terms scores EXACTLY what the shipped leg scores "
+        f"on the identifier class; the artifact now differs ({tokens_pc} vs "
+        f"{ident_recall})")
+    _only_claim(
+        _scoped(brief, "3.3"),
+        f"what the shipped leg scores** there ({ident_recall:.4f})",
+        "§3.3's identifier-class score",
+        values=(f"{ident_recall:.4f}",), free=("shipped",))
+
+    # ── §4.4 — the DECISION summary's "at any k" count ──────────────────────
+    per_k_zero = [artifact["arms"]["falkordb_tfidf"]["recall_by_k"][k]["rows_zero"]
+                  for k in ("3", "5", "10", "15")]
+    assert len(set(per_k_zero)) == 1, (
+        "§4.4 says the queries return nothing AT ANY k; the artifact now varies "
+        f"by window: {dict(zip(('3', '5', '10', '15'), per_k_zero, strict=True))}")
+    _only_claim(
+        _scoped(brief, "4.4"),
+        f"{per_k_zero[0]} queries return nothing at any k",
+        "§4.4's at-any-k count",
+        values=(str(per_k_zero[0]),), free=("nothing", "any"))
+
     # ── §5 — the declared-limit whose DIRECTION is its entire content ───────
+    # ⛔ The claim now carries its own pivot (round-25 review, P2-2): the pin was
+    # labelled "the stricter-leg disclosure" while `stricter` → `looser` — which
+    # makes the sentence self-contradictory — stayed GREEN.
     _only_claim(
         _scoped(brief, "5"),
-        "the measured baseline can understate that caller's recall",
+        "measures a **stricter** leg than the prior uses, and the measured "
+        "baseline can understate that caller's recall",
         "§5's stricter-leg disclosure",
         # ⛔ Plain, not `understate|overstate`, for the reason above: the slot's
         # neighbours are literal, so the broader entry is strictly better — and it
         # reds a rewrite to a THIRD word too, which the alternation also reds but
         # only by not matching at all.
-        free=("understate",))
+        free=("stricter", "understate"))
 
     # ── §6 — the `#11901` count the brief cross-references ──────────────────
     # Both halves are committed artifacts; `12 there` planted GREEN before this.
