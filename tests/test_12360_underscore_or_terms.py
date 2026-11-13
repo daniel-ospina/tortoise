@@ -272,6 +272,28 @@ class TestAdditive:
         assert build_or_query("a_") == "a_"
         assert build_or_query("10:00_u") == "10\\:00_u|00_u"
 
+    def test_the_degenerate_dedupe_is_case_insensitive(self, monkeypatch):
+        """The dedupe must fold case, because the INDEX does (round 10, P2).
+
+        ``underscore_run_terms`` lowercases its term while the escaped literal
+        keeps the query's case, so a bare ``c != literal`` emitted the SAME
+        RediSearch term twice for a capitalised token — ``A_bc|a_bc`` — and
+        MEASURED on a lane ``queryNodes('Object','A_bc')`` and ``…'a_bc'`` return
+        the same record, i.e. the second alternative addresses the identical term
+        and is pure waste. ⛔ THIS ASSERTION IS THE PIN for that fix: reverting the
+        dedupe to ``c != literal`` reds it (the guard in
+        ``session_source_prose_migration`` does NOT — its comparison is itself
+        case-folded, so it stays green over the restored bug).
+        """
+        monkeypatch.setenv(UNDERSCORE_ENV, "1")
+        for capitalised in ("A_bc", "X_axis", "My_class", "X__Y", "A_B"):
+            assert build_or_query(capitalised) == capitalised, capitalised
+        # …and the shapes that MUST keep two terms are untouched by the fold
+        assert build_or_query("10:00_u") == "10\\:00_u|00_u"
+        assert _or_terms(build_or_query("año_actual")) == ["año_actual", "o_actual"]
+        assert _or_terms(build_or_query("web_search")) == [
+            "search", "web", "web_search"]
+
     def test_the_shipped_8933_bytes_are_untouched(self):
         # The #8933 pin's own byte assertion, re-stated here so a future edit
         # to this tail cannot silently move THAT contract either.
