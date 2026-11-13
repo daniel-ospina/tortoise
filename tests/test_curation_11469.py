@@ -675,16 +675,33 @@ def test_session_provenance_does_not_make_a_claim_noise():
     assert d.disposition == C.UNDECIDABLE, "a session-derived claim is still a claim"
 
 
-def test_operator_is_carried_as_reasoning():
-    d = C.classify(row(node_type="operator", kind=None, content="claim A implies claim B"), {})
-    assert d.disposition == C.CARRY and "reasoning" in d.reason
+def test_the_reasoning_layer_is_not_carried_without_its_endpoints():
+    """Was `test_operator_is_carried_as_reasoning` — which asserted CARRY on a rule
+    that could never run, because the harness declared the whole layer unlistable.
+
+    The layer IS readable: `tortoise_search(entity_type="operator", limit=5000)`
+    answers 3,727 rows in one call on live-v4, an exact match with
+    `structure.operators` (measured 2026-11-13, read-only). What that read serves is
+    the operator's LABEL as content and NO endpoints — so a carried operator arrives
+    in the clean graph as a floating node, which is the one shape this issue forbids
+    ("Every retained fact is connected ... not a floating node").
+    """
+    d = C.classify(row(node_type="operator", kind="IMPL", content="claim A implies claim B"), {})
+    assert d.disposition == C.UNDECIDABLE, d
+    assert "reasoning" in d.reason and "endpoint" in d.reason, d.reason
 
 
-def test_an_empty_operator_row_is_not_carried():
-    """The empty rule runs before the operator branch too, or an operator would be
-    carried as an empty Point."""
-    d = C.classify(row(node_type="operator", kind=None, content="  "), {})
-    assert d.disposition == C.NOT_CARRIED
+def test_an_operator_with_an_empty_label_is_undecidable_not_not_carried():
+    """Was `test_an_empty_operator_row_is_not_carried`.
+
+    An operator's ``content`` is its LABEL. An empty label does not mean the row has
+    "nothing to carry" — the relationship is still a relationship, and its endpoints
+    are what would be carried — so `not-carried` would report a decision nobody took
+    (it reads as "deliberately left behind"). The reason names the real blocker.
+    """
+    d = C.classify(row(node_type="operator", kind="IMPL", content="  "), {})
+    assert d.disposition == C.UNDECIDABLE, d
+    assert "endpoint" in d.reason, d.reason
 
 
 def test_empty_evidence_is_not_carried():
@@ -1047,7 +1064,7 @@ def test_an_unqualified_read_is_never_labelled_default(monkeypatch, tmp_path):
         if name == "tortoise_graph_overview" and args.get("section") == "sources":
             return {"result": [{"url": "https://x/y", "sourceKind": "article"}]}
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
     assert rc == 0
     report = json.loads((tmp_path / "inv.json").read_text())
@@ -1469,7 +1486,7 @@ def test_the_plan_can_emit_row_level_reasons(monkeypatch, tmp_path):
             # population — the state the unreconciled-zero refusal exists for.
             return {"counts": {"Source": 0}}
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     rows_out = tmp_path / "rows.jsonl"
     rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
                    "--out", str(tmp_path / "plan.json"), "--rows", str(rows_out),
@@ -1543,7 +1560,7 @@ def test_inventory_writes_the_row_artifact_it_advertises(monkeypatch, tmp_path):
         if args.get("section") == "status":
             return {"counts": {"Source": 0}}
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     rows_out = tmp_path / "inv.jsonl"
     assert mod.main(["inventory", "--out", str(tmp_path / "inv.json"),
                      "--rows", str(rows_out), "--no-verify-read"]) == 0
@@ -1871,7 +1888,7 @@ def test_the_cli_exit_codes_pin_every_failure_arm(monkeypatch, tmp_path, capsys)
         if name == "tortoise_query":
             return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     # the refs must be spellings the ROWS name, or every arm below would be the
     # identity refusal and the other two arms would go untested
     base = ["plan", "--graph", ROWS[0]["namespace"], "--target", ROWS[1]["namespace"],
@@ -2473,7 +2490,7 @@ def test_a_genuinely_empty_source_population_still_passes(monkeypatch, tmp_path)
         if args.get("section") == "status":
             return {"counts": {"Source": 0}}
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     assert mod.main(["inventory", "--out", str(tmp_path / "inv.json"),
                      "--no-verify-read"]) == 0
     report = json.loads((tmp_path / "inv.json").read_text())
@@ -2560,7 +2577,7 @@ def test_a_disarmed_run_over_an_unmeasurable_census_still_exits_zero(monkeypatch
         if args.get("section") == "status":
             return {"unexpected": "shape"}          # nothing to reconcile the empty listing
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
                    "--apply", "--off", "--no-verify-read",
                    "--ledger", str(tmp_path / "l.jsonl"), "--out", str(tmp_path / "p.json")])
@@ -2595,7 +2612,7 @@ def test_the_cli_hands_the_graph_rows_to_the_ledger_scope(monkeypatch, tmp_path)
             wire.append(args["graph"])
             return {"created": len(args["bundle"]["points"])}
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     base = ["plan", "--graph", "org_x_g_old", "--ledger", str(tmp_path / "l.jsonl"),
             "--out", str(tmp_path / "p.json"), "--no-verify-read", "--apply"]
     assert mod.main([*base, "--target", "org_x_g_new"]) == 0
@@ -2721,7 +2738,7 @@ def test_the_cli_refuses_a_target_spelling_the_graphs_surface_cannot_resolve(
             wire.append(args["graph"])
             return {"created": len(args["bundle"]["points"])}
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     base = ["plan", "--graph", "org_x_g_old", "--ledger", str(tmp_path / "l.jsonl"),
             "--out", str(tmp_path / "p.json"), "--no-verify-read", "--apply"]
     assert mod.main([*base, "--target", "org_x_g_new"]) == 0
@@ -2799,7 +2816,7 @@ def test_an_applying_run_with_no_identity_rows_is_refused(monkeypatch, capsys, t
             wire.append(args["graph"])
             return {"created": 1}
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--apply",
                    "--ledger", str(tmp_path / "l.jsonl"), "--no-verify-read"])
     assert rc == 3, capsys.readouterr()
@@ -2827,7 +2844,7 @@ def test_a_disarmed_run_over_a_damaged_ledger_still_exits_zero(monkeypatch, tmp_
         if name == "tortoise_query":
             return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--apply",
                    "--off", "--ledger", str(led), "--no-verify-read",
                    "--out", str(tmp_path / "p.json")])
@@ -2872,7 +2889,7 @@ def test_every_plan_payload_says_whether_the_census_was_measured(monkeypatch, tm
         if name == "tortoise_query":
             return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     assert mod.main(["inventory", "--out", str(tmp_path / "inv.json"),
                      "--no-verify-read"]) == 0
     assert json.loads((tmp_path / "inv.json").read_text())["census_measured"] is True
@@ -2903,7 +2920,7 @@ def test_the_disarmed_unreconciled_arm_says_the_sources_were_not_measured(monkey
         if args.get("section") == "status":
             return {"unexpected": "shape"}           # nothing to reconcile the empty listing
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     assert mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
                      "--apply", "--off", "--no-verify-read",
                      "--out", str(tmp_path / "p.json"),
@@ -2940,7 +2957,7 @@ def test_a_disarmed_run_over_a_damaged_ledger_reports_what_it_still_owes(monkeyp
         if name == "tortoise_ingest":
             raise AssertionError("a disarmed run reached the wire")
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--apply",
                    "--off", "--ledger", str(led), "--no-verify-read",
                    "--out", str(tmp_path / "p.json")])
@@ -3006,7 +3023,7 @@ def test_a_disarmed_run_over_a_damaged_ledger_keeps_the_unmeasured_source_fact(
         if args.get("section") == "status":
             return {"unexpected": "shape"}          # nothing to reconcile the empty listing
         return {"result": []}
-    monkeypatch.setattr(mod, "_live_call_tool", call)
+    monkeypatch.setattr(mod, "_live_call_tool", _with_operator_count(call))
     assert mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
                      "--apply", "--off", "--no-verify-read", "--ledger", str(led),
                      "--out", str(tmp_path / "p.json")]) == 0
@@ -3049,3 +3066,428 @@ def test_the_disarmed_operator_line_agrees_with_the_artifact_it_accompanies(monk
     assert payload["census_measured"] is False, payload["census_measured"]
     assert "census NOT measured" in err, err
     assert "census measured:" not in err, err
+
+
+# ── the operator layer is READABLE, and the census must not omit it ───────
+#
+# Measured on live-v4, 2026-11-13, read-only: `graph_overview(section="structure")`
+# reports `operators: 3,727`, and `tortoise_search(entity_type="operator",
+# limit=5000)` returns **3,727 rows in ONE call** — an exact match with the reported
+# count — with `match_source="structural"` and no vector leg. The harness described
+# that layer as unlistable (`NOT_ENUMERABLE["operator"]`: "no listing surface ... ask
+# for an operator kind") and never read it: `tortoise_query(kind="operator")` and
+# `tortoise_query(kind="IMPL")` both answer `total: 0` on that graph, so the named
+# escape hatch returns zero rather than rows.
+#
+# The consequence was a plan that reports `total_rows: 17,420` over a readable
+# population of 21,147, and a document table claiming `operator | carry` beside a
+# `carried_rows: 127`. The issue's own Target 2 — "every dropped row is named in the
+# report with its reason; nothing is dropped silently" — is what these cases pin.
+
+#: The real `tortoise_search(entity_type="operator")` row shape: `point_kind` (snake),
+#: `content` carrying the operator's LABEL (sdk.py's projection: "label is searchable
+#: text"), and no endpoints at all (`relationships: []`).
+OPERATOR_ROWS = [
+    {"id": "1a1a9ad8b1c-4d77ae46f01f", "content": "", "point_kind": "IMPL"},
+    {"id": "1a1a9ad8b1d-000000000002", "content": "", "point_kind": "IMPL"},
+    {"id": "1a1a9ad8b1e-000000000003", "content": "supports the claim", "point_kind": "NAND"},
+]
+
+
+_UNSET = object()
+
+
+def _with_operator_count(call, operators=()):
+    """Adapt a PRE-OPERATOR fake surface: it now has to answer ONE more section.
+
+    Every fake written before 2026-11-13 answers an unknown section with an empty
+    listing, which the harness cannot tell from an UNREAD operator layer — so the
+    designed refusal fires and a test about the ledger/identity/off-switch arms would
+    fail for an unrelated reason. The wrapper makes the fake's graph explicit: these
+    rows answer `tortoise_search`, and this count answers `structure.operators`.
+    A test that exercises the operator read itself must NOT be wrapped.
+    """
+    def wrapped(name, args):
+        args = args or {}
+        if name == "tortoise_search":
+            return {"result": list(operators)}
+        res = call(name, args)
+        if args.get("section") == "structure" and isinstance(res, dict) and "error" not in res:
+            merged = {k: v for k, v in res.items() if k not in ("result", "results", "points")}
+            merged.setdefault("operators", len(operators))
+            return merged
+        return res
+    return wrapped
+
+
+def _operator_surface(operators=None, *, reported=_UNSET, points=None):
+    """A fake surface whose operator layer answers `tortoise_search`, like the real one.
+
+    ``reported=None`` means the `structure` section carries NO `operators` key at all
+    (the unreported arm) — distinct from the default, which is the layer's own length.
+    """
+    operators = OPERATOR_ROWS if operators is None else operators
+    points = ([{"id": "p1", "kind": "decision", "content": "a durable claim"}]
+              if points is None else points)
+    reported = len(operators) if reported is _UNSET else reported
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_search":
+            if args.get("entity_type") == "operator":
+                return {"result": list(operators)}
+            return {"result": []}
+        if name == "tortoise_query":
+            return {"result": list(points), "total": len(points)}
+        if args.get("section") == "structure":
+            structure = {"total": len(points)}
+            if reported is not None:
+                structure["operators"] = reported
+            return structure
+        if args.get("section") == "status":
+            return {"counts": {"Point": len(points), "Source": 0}}
+        if args.get("section") == "sources":
+            return {"result": []}
+        if args.get("section") == "graphs":
+            return {"result": [{"namespace": "org_x_g_old"}, {"namespace": "org_x_g_new"}]}
+        return {"result": []}
+    return call
+
+
+def test_the_operator_layer_reaches_the_census(monkeypatch, tmp_path):
+    """The layer the harness declared unlistable is 3,727 readable rows in one call.
+
+    Dropping it made `total_rows` a claim about a population the pass had not read:
+    the operator rows are as much a part of "what is in the old graph" as a Point,
+    and a census that silently omits them cannot answer "what will be carried".
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _operator_surface())
+    assert mod.main(["inventory", "--out", str(tmp_path / "inv.json"),
+                     "--no-verify-read"]) == 0
+    report = json.loads((tmp_path / "inv.json").read_text())
+    census = report["census"]
+    assert census["total_rows"] == 4, census
+    assert census["by_class"]["operator:IMPL"]["undecidable"] == 2, census["by_class"]
+    assert census["by_class"]["operator:NAND"]["undecidable"] == 1, census["by_class"]
+    assert report["operators_read"] == 3, report.get("operators_read")
+    assert report["operators_total_reported"] == 3
+
+
+def test_the_operator_layer_is_not_claimed_unlistable():
+    """The surface table must not describe a readable layer as having no listing.
+
+    `NOT_ENUMERABLE["operator"]` told every consumer (and the architecture doc) to
+    count the layer instead of reading it, and named an escape hatch
+    (`ask for an operator kind`) that answers `total: 0` on the live graph.
+    """
+    mod = _tool_module()
+    assert "operator" not in mod.NOT_ENUMERABLE, mod.NOT_ENUMERABLE
+    # ...and the classes this pass does NOT read stay named, each with its own reason.
+    # `event` belongs here because it is NOT read by this pass — not because it is
+    # unlistable (it is not: see the entry's own text and #12378).
+    for still_named in ("object", "event", "subject"):
+        assert still_named in mod.NOT_ENUMERABLE, still_named
+    assert "no listing surface" not in mod.NOT_ENUMERABLE["event"], (
+        "the Event layer IS readable in one call (measured 2026-11-13); its entry "
+        "records that it is deliberately not read here, not that it cannot be read")
+
+
+def test_an_operator_is_never_carried_as_a_floating_node():
+    """Its meaning is its ENDPOINTS, which the read surface does not serve.
+
+    Carrying an operator as a point writes a node with no source and no targets —
+    the exact shape the issue forbids ("Every retained fact is connected ... not a
+    floating node"). The disposition is therefore undecidable, and the reason has to
+    say why: a reader who sees `carry` on 3,727 operator rows will migrate them.
+    """
+    labelled = C.classify(C.Row(node_id="o1", node_type="operator", kind="IMPL",
+                                content="supports the claim"), {})
+    assert labelled.disposition == C.UNDECIDABLE, labelled
+    assert "endpoint" in labelled.reason, labelled.reason
+    # An empty LABEL is not "nothing to carry": the row is a relationship, and its
+    # content being empty says nothing about whether the relationship matters.
+    unlabelled = C.classify(C.Row(node_id="o2", node_type="operator", kind="IMPL",
+                                  content=""), {})
+    assert unlabelled.disposition == C.UNDECIDABLE, unlabelled
+    assert "endpoint" in unlabelled.reason, unlabelled.reason
+
+
+def test_two_operators_with_the_same_empty_label_are_two_relationships():
+    """Content-addressing an operator folds DISTINCT relationships onto one keeper.
+
+    Their labels are empty, so a content hash makes 3,727 relationships one row plus
+    3,726 "exact duplicates" — the reasoning layer reported as a single claim (or, on
+    a two-row plan, one claim plus one row whose reason says it is a duplicate of it).
+
+    ⛔ The assertion is on the KEY and on the duplicate CLAIM, not on the row count:
+    `build_plan` appends a Decision for EVERY row, so `len(decisions)`,
+    `total_rows` and `totals` are identical under both keys and a row-count test passes
+    on the reverted code (measured by the round-1 reviewer).
+    """
+    plan = C.build_plan(
+        [row("o1", node_type="operator", kind="IMPL", content=""),
+         row("o2", node_type="operator", kind="IMPL", content="")],
+        source_graph="old", target_graph="new", packs={})
+    keys = [d.stable_key for d in plan.decisions]
+    assert len(set(keys)) == 2, keys
+    assert not any("duplicate" in d.reason for d in plan.decisions), [
+        d.reason for d in plan.decisions]
+    assert plan.census()["totals"]["undecidable"] == 2
+
+
+def test_an_operator_read_short_of_the_reported_count_is_refused(monkeypatch, capsys,
+                                                                tmp_path):
+    """The single-call operator read must reconcile, like the source listing does.
+
+    `tortoise_search` has no `offset`, so the layer is read in ONE bounded call. A
+    surface that answers fewer rows than `structure.operators` reports (a clamp, a
+    partial response) would otherwise enter the census as the whole layer — the
+    silent-partial-census class, one node type over.
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _operator_surface(operators=OPERATOR_ROWS, reported=9))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "operator" in capsys.readouterr().err.lower()
+
+
+def test_an_operator_layer_beyond_one_call_is_refused_not_truncated(monkeypatch, capsys,
+                                                                   tmp_path):
+    """A population the single-call read cannot cover is a refusal, never a page.
+
+    There is no offset walk on `tortoise_search`, so a layer larger than the declared
+    ceiling cannot be read completely — and a truncated read is worse than a refusal,
+    because it enters the census looking complete.
+    """
+    mod = _tool_module()
+    ceiling = mod.OPERATOR_READ_CEILING
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _operator_surface(operators=OPERATOR_ROWS, reported=ceiling + 1))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "offset" in capsys.readouterr().err.lower()
+
+
+def test_an_operator_read_that_fills_its_limit_is_refused_unless_the_count_vouches(
+        monkeypatch, capsys, tmp_path):
+    """A response that fills the requested limit EXACTLY may be truncated.
+
+    `tortoise_search` has a `limit` and no `offset`, so there is no page to walk to:
+    "a full page" and "a truncated layer" are the same bytes unless a reported count
+    says that is the whole population. Round-1 review found this arm unpinned.
+    """
+    mod = _tool_module()
+    at_limit = [{"id": f"o{i}", "content": "", "point_kind": "IMPL"}
+                for i in range(mod.OPERATOR_READ_CEILING)]
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _operator_surface(operators=at_limit, reported=None))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "truncat" in capsys.readouterr().err.lower()
+
+
+def test_an_operator_row_without_an_id_is_refused(monkeypatch, capsys, tmp_path):
+    """The class's identity key IS its id — its text is a label, routinely empty.
+
+    Two id-less operator rows are indistinguishable and would fold onto one keeper, so
+    the layer is refused rather than half-identified. Round-1 review found this arm
+    unpinned.
+    """
+    mod = _tool_module()
+    rows = [{"id": "o1", "content": "", "point_kind": "IMPL"},
+            {"content": "", "point_kind": "IMPL"}]
+    monkeypatch.setattr(mod, "_live_call_tool", _operator_surface(operators=rows))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "no `id`" in capsys.readouterr().err
+
+
+def test_a_zero_operator_read_with_no_count_is_refused(monkeypatch, capsys, tmp_path):
+    """An empty layer and an UNREAD one are the same bytes without a count.
+
+    The silent-zero class `read_points` and `_unreconciled_sources` already fail closed
+    on, one node type over. Round-1 review found this arm fail-OPEN: a 0-row read with
+    no `structure.operators` to reconcile it reported `census_measured: True` over an
+    operator population nobody had measured.
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _operator_surface(operators=[], reported=None))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "empty" in capsys.readouterr().err.lower()
+
+
+def test_the_operator_read_is_routed_to_the_graph_and_falls_back_on_a_binding_refusal(
+        monkeypatch, tmp_path):
+    """`graph` is the credential's per-call routing argument — the operator read needs it.
+
+    Omitting it read the operator layer from the DEFAULT graph while every other section
+    came from `--graph`: a census mixing two graphs, and a hard refusal on a correct run
+    whenever the two graphs' operator counts differed. Round-1 review found it, and found
+    that no fake surface exercised the argument.
+    """
+    mod = _tool_module()
+    seen: list[dict] = []
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_search":
+            seen.append(dict(args))
+            # A graph-BOUND credential refuses ANY graph argument, and the layer is
+            # then read from the credential's own graph — recorded, never silent.
+            if "graph" in args:
+                return {"error": "This credential is bound to one graph and cannot be "
+                                 "re-targeted by a `graph` argument (requested x)"}
+            return {"result": list(OPERATOR_ROWS)}
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
+        if args.get("section") == "structure":
+            return {"total": 1, "operators": len(OPERATOR_ROWS)}
+        if args.get("section") == "status":
+            return {"counts": {"Point": 1, "Source": 0}}
+        if args.get("section") == "sources":
+            return {"result": []}
+        return {"result": []}
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["inventory", "--graph", "org_x_g_old",
+                   "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
+    assert rc == 0
+    assert seen and seen[0].get("graph") == "org_x_g_old", seen
+    assert any("graph" not in a for a in seen), "the fallback read must omit the argument"
+    report = json.loads((tmp_path / "inv.json").read_text())
+    assert report["operators_read"] == len(OPERATOR_ROWS)
+    assert "credential's own graph" in (report["read_note"] or ""), report["read_note"]
+
+
+def test_a_disarmed_plan_over_a_refused_operator_layer_still_exits_zero(
+        monkeypatch, capsys, tmp_path):
+    """The off switch is TOTAL: a DESIGNED refusal of the layer is not a failure there.
+
+    Round-1 review found this arm unpinned — and it is the only place a
+    `CurationRefused` is deliberately converted into a success (nothing was going to be
+    written, so the round-22 contract applies), so it needs its own pin.
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _operator_surface(operators=OPERATOR_ROWS, reported=9))
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--off", "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0, (rc, capsys.readouterr())
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["census"] is None, payload
+    assert payload["census_measured"] is False
+    assert "structure.operators" in (payload["disarmed_reason"] or "")
+
+
+def test_a_quota_envelope_on_the_operator_read_does_not_re_read_another_graph():
+    """Only a refusal ABOUT the graph argument may fall back — `_section`'s rule.
+
+    Round-2 review measured this unpinned in the FAIL-OPEN direction: making both
+    fallbacks unconditional (`if reason:`) left the whole suite green, so a quota or DB
+    error would silently re-read the operator layer from a DIFFERENT graph and report it
+    under `--graph`'s identity. The sibling guards for the sections are pinned by
+    `test_a_quota_envelope_does_not_re_read_a_different_graph`.
+    """
+    mod = _tool_module()
+    calls: list[dict] = []
+
+    def call(name, args):
+        calls.append(dict(args or {}))
+        return {"error": "429 Too Many Requests — retry_after 10"}
+
+    reader = mod.MCPReader(call, "org_x_g_old")
+    with pytest.raises(RuntimeError, match="refused"):
+        reader.read_operators({"operators": 3})
+    assert len(calls) == 1, calls           # ONE call: no fallback, no second graph
+    assert calls[0].get("graph") == "org_x_g_old", calls
+
+
+def test_a_transport_error_on_the_operator_read_does_not_re_read_another_graph():
+    """A raised transport failure says nothing about the graph binding — it raises.
+
+    The round-2 counterpart of `test_a_transport_failure_does_not_fall_back_to_another_graph`:
+    deleting the operator read's `try/except` discrimination left the suite green.
+    """
+    mod = _tool_module()
+    calls: list[dict] = []
+
+    def call(name, args):
+        calls.append(dict(args or {}))
+        raise TimeoutError("read timed out after 10s")
+
+    reader = mod.MCPReader(call, "org_x_g_old")
+    with pytest.raises(TimeoutError):
+        reader.read_operators({"operators": 3})
+    assert len(calls) == 1 and calls[0].get("graph") == "org_x_g_old", calls
+
+
+def test_an_armed_plan_over_a_refused_operator_layer_exits_three(monkeypatch, capsys,
+                                                                tmp_path):
+    """An ARMED plan reports the designed refusal as rc 3, never as a traceback.
+
+    The doc's exit-code table defines 3 as a designed failure and 1 as "not part of the
+    designed contract"; without the `except C.CurationRefused` arm in `cmd_plan` the
+    refusal escapes as an unhandled `RuntimeError`. Round-2 review measured the whole
+    arm removable with the suite green — the disarmed counter-arm was covered, this one
+    was not.
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _operator_surface(operators=OPERATOR_ROWS, reported=9))
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "REFUSED" in capsys.readouterr().err
+
+
+def test_the_plan_payload_carries_the_operator_census(monkeypatch, tmp_path):
+    """`plan` is the artifact a driver reads before `--apply` — it needs the layer too.
+
+    The `inventory` copy is pinned by `test_the_operator_layer_reaches_the_census`;
+    round-2 review measured `cmd_plan`'s `build_plan(points + sources)` reverting to
+    leave the suite green, so an operator omission on the `plan` verb would have been
+    invisible while `inventory` reported 21,147 rows.
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _operator_surface())
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0, rc
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["operators_read"] == 3, payload.get("operators_read")
+    assert payload["operators_total_reported"] == 3
+    assert payload["census"]["total_rows"] == 4, payload["census"]
+    assert payload["census"]["by_class"]["operator:IMPL"]["undecidable"] == 2
+
+
+def test_a_graph_refusal_raised_as_an_exception_retries_without_the_argument():
+    """The OTHER fallback arm: a graph-bound credential that RAISES instead of answering.
+
+    Round-2 review measured this arm deletable with the suite green. Both shapes are
+    real — an envelope (`_error_of`) and a raised error — and each has its own guard, so
+    each needs its own pin: this one asserts the retry happens WITHOUT `graph` and with a
+    note, which is the behaviour a graph-bound venue depends on.
+    """
+    mod = _tool_module()
+    calls: list[dict] = []
+
+    def call(name, args):
+        args = dict(args or {})
+        calls.append(args)
+        if "graph" in args:
+            raise RuntimeError(
+                "graph 'org_x_g_old' does not exist or is not reachable by this credential")
+        return {"result": list(OPERATOR_ROWS)}
+
+    reader = mod.MCPReader(call, "org_x_g_old")
+    rows, reported = reader.read_operators({"operators": 3})
+    assert len(rows) == 3 and reported == 3, (rows, reported)
+    assert len(calls) == 2, calls
+    assert "graph" in calls[0] and "graph" not in calls[1], calls
+    assert reader.note is not None and "refused" in reader.note, reader.note

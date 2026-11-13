@@ -33,6 +33,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import json
 import os
+from collections.abc import Mapping
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -380,6 +381,174 @@ class MCPReader:
                 out.append({"namespace": row})
         return out
 
+    def read_operators(
+        self, structure: Mapping[str, Any] | None = None,
+    ) -> tuple[list[C.Row], int | None]:
+        """The reasoning layer — readable, and never read until this change.
+
+        ``tortoise_search(entity_type="operator")`` is the ONLY bulk listing of operator
+        Points on this surface. `tortoise_query` has no arm that reaches them: operator
+        nodes carry ``op_type``/``label`` rather than ``pointKind``, so no kind filter
+        enumerates them (``kind="operator"`` and ``kind="IMPL"`` both answer
+        ``total: 0`` on live-v4), while the search path scopes its Cypher with
+        ``n.is_operator = true`` and returns the layer. Measured 2026-11-13 on live-v4:
+        **3,727 rows in one call**, exact match with ``structure.operators``.
+
+        Two things the projection does NOT carry, and they decide the disposition:
+        ``content`` is the operator's ``label`` ("label is searchable text"), and the
+        endpoints are absent from the ENUMERATION — ``relationships`` is only decorated
+        for ``entity_type="point"`` (``sdk.py``'s step 7.5: ``… if entity_type ==
+        "point" else {}``), so it is empty here by construction rather than by
+        measurement. The endpoints ARE readable one operator at a time
+        (``tortoise_expand_relationships``), which is 3,727 calls this pass does not
+        fan out. See ``classify_point``'s operator branch: a carried operator would be
+        a floating node.
+
+        The read is ROUTED like every other one: ``graph`` is the credential's
+        per-call routing argument (``mcp_auth``'s ``_take_graph_argument``), and
+        ``tortoise_search`` takes it, so omitting it would read the operator layer
+        from the DEFAULT graph while every other section came from ``--graph`` — a
+        census mixing two graphs, which is what the graph-refusal fallback below
+        exists to make impossible.
+
+        Fail-closed rules, each one an observed failure mode one node type over:
+
+        * a row with no ``id`` is REFUSED — the class's identity key is its id (its text
+          is a label, routinely empty), so two id-less rows are indistinguishable and
+          would fold onto one;
+        * a read that fills the requested ``limit`` exactly is REFUSED when no reported
+          count says that is the whole layer — there is no offset walk here, so "a full
+          page" and "a truncated layer" are the same bytes;
+        * a read whose row count disagrees with ``structure.operators`` is REFUSED. The
+          reconciliation is the same discipline the source listing gets, and for the same
+          reason: two surfaces describing one population must agree, or one of them did
+          not read it.
+
+          ⚠️ They describe it with DIFFERENT predicates, so equality is a measurement,
+          not a guarantee: ``structure.operators`` counts ``(n.is_operator = true OR
+          n.op_type IS NOT NULL)`` with NO status filter (``sdk.summarize_structure``),
+          while this read is the search path's structural leg — ``n.is_operator = true``
+          PLUS the terminal-status/``outdated`` exclusion every Point scan applies
+          (``search_engine``, #1391). So a legacy ``op_type``-only operator (a shape this
+          repo backfills: ``graph-scripts/backfill_is_operator.py``) is counted and not
+          served, and a terminal operator is counted and excluded — either makes a
+          CORRECT read refuse. That direction is deliberate (a refusal is
+          diagnosable; a silent short census is not), and the refusal message names both
+          causes so the difference can be attributed instead of re-derived.
+
+        An UNREPORTED count (a ``structure`` section with no ``operators`` key) does not
+        refuse a NON-EMPTY read — the rows came from their own read, so it is a lost
+        cross-check, not a lost population, and it is recorded on the report. A
+        ZERO-ROW read with no count to reconcile it does refuse: "this graph has no
+        operator layer" and "the layer was not read" are otherwise the same bytes,
+        which is the silent-zero class `read_points` and `_unreconciled_sources`
+        already fail closed on.
+        """
+        reported: int | None = None
+        if isinstance(structure, Mapping):
+            value = structure.get("operators")
+            if isinstance(value, int) and not isinstance(value, bool):
+                reported = value
+        if reported is not None and reported > OPERATOR_READ_CEILING:
+            raise C.CurationRefused(
+                f"the operator layer holds {reported} rows, above this reader's "
+                f"{OPERATOR_READ_CEILING}-row single-call ceiling — `tortoise_search` has a "
+                "`limit` and NO `offset`, so there is no page walk, and a truncated layer "
+                "entering the census is indistinguishable from a complete one; refusing "
+                "rather than reporting a partial reasoning layer")
+        res = self._search_operators()
+        err = _error_of(res)
+        if err:
+            raise RuntimeError(f"read of the operator layer was refused: {err[:300]}")
+        if not _is_row_listing(res):
+            raise RuntimeError(
+                "read of the operator layer answered in an unrecognised shape "
+                f"({type(res).__name__} with keys "
+                f"{sorted(res)[:6] if isinstance(res, dict) else 'n/a'}) — refusing to "
+                "report an unreadable layer as an empty one")
+        raw = _rows_from_tool(res)
+        if reported is None and not raw:
+            raise C.CurationRefused(
+                "the operator read returned no rows AND the structure section reported no "
+                "`operators` count, so an empty layer cannot be told from an unread one — "
+                "refusing a census that would report the reasoning layer as empty")
+        if len(raw) == OPERATOR_READ_CEILING and reported != OPERATOR_READ_CEILING:
+            raise C.CurationRefused(
+                f"the operator read returned exactly its {OPERATOR_READ_CEILING}-row limit and "
+                f"no reported count says that is the whole layer (structure.operators "
+                f"reported {reported!r}) — the response may be truncated, and `tortoise_search` "
+                "has no offset walk to continue from; refusing a partial reasoning layer")
+        if reported is not None and len(raw) != reported:
+            raise C.CurationRefused(
+                f"the operator layer read {len(raw)} rows but structure.operators reports "
+                f"{reported} — refusing a layer two surfaces disagree about. The two "
+                "count it with DIFFERENT predicates, so the difference is one of: a "
+                "legacy `op_type`-only operator (`structure` counts `is_operator = true "
+                "OR op_type IS NOT NULL`, this read serves `is_operator = true` only — "
+                "`graph-scripts/backfill_is_operator.py` exists for that shape); a "
+                "terminal/`outdated` operator (counted, excluded from the read by the "
+                "#1391 status clause); or a genuinely partial read")
+        if reported is None:
+            self._note("the structure section reported no `operators` count, so the operator "
+                       "layer read is unreconciled (it is still the read's rows, not a count)")
+        out: list[C.Row] = []
+        for r in raw:
+            node_id = str(r.get("id") or "")
+            if not node_id:
+                raise C.CurationRefused(
+                    "an operator row arrived with no `id` — the class is identified by its id "
+                    "(its text is a label, routinely empty), so two id-less rows would fold "
+                    "onto one; refusing the layer")
+            out.append(C.Row(
+                node_id=node_id,
+                node_type="operator",
+                # The search projection spells it `point_kind`; the structural readers
+                # spell it `kind`/`pointKind`. Read all three rather than assume one.
+                kind=r.get("point_kind") or r.get("kind") or r.get("pointKind"),
+                content=str(r.get("content") or ""),
+                content_hash=r.get("content_hash"),
+                props={k: v for k, v in r.items() if k not in ("embedding",)},
+            ))
+        return out, reported
+
+    def _search_operators(self) -> Any:
+        """The operator enumeration, ROUTED to `self.graph` like every other read.
+
+        ``graph`` is the credential's per-call routing argument (#9340,
+        ``mcp_auth._take_graph_argument``) and ``tortoise_search`` is not in
+        ``GRAPH_ARGUMENT_EXCLUDED``, so it accepts and honours it. Omitting it was a
+        real defect: on a workspace with two namespaces, every other section came from
+        ``--graph`` while the operator layer came from the DEFAULT graph, and the
+        reconciliation then compared one graph's count against another graph's rows —
+        a confusing refusal on a correct run, and a silently mixed census when the two
+        counts coincided.
+
+        The fallback is `_section`'s, for `_section`'s reason: a graph-BOUND credential
+        cannot be re-targeted, so a refusal ABOUT the graph argument is answered by
+        re-reading WITHOUT it (omission means "this credential's own graph", a legal
+        read) and recording the fact on the report. Any other refusal — a quota, a
+        timeout, a DB fault — raises: re-reading a different graph under the requested
+        graph's identity is how a census mixes two graphs.
+        """
+        args: dict[str, Any] = {"entity_type": "operator", "limit": OPERATOR_READ_CEILING}
+        if not self.graph:
+            return C.normalise_tool_result(self._call("tortoise_search", dict(args)))
+        try:
+            res = C.normalise_tool_result(self._call("tortoise_search", {**args, "graph": self.graph}))
+        except Exception as exc:
+            reason = str(exc) or type(exc).__name__
+            if not _looks_like_graph_refusal(reason):
+                raise
+            self._note(f"the operator read: the explicit graph argument was refused "
+                       f"({reason[:160]}); read from the credential's own graph instead")
+            return C.normalise_tool_result(self._call("tortoise_search", dict(args)))
+        reason = _error_of(res)
+        if reason and _looks_like_graph_refusal(reason):
+            self._note(f"the operator read: the explicit graph argument was refused "
+                       f"({reason[:160]}); read from the credential's own graph instead")
+            return C.normalise_tool_result(self._call("tortoise_search", dict(args)))
+        return res
+
     def audit(self) -> dict[str, Any]:
         res = self._section("audit")
         return res if isinstance(res, dict) else {}
@@ -455,15 +624,37 @@ def _unreconciled_sources(read: int, gap: int | None) -> str | None:
 
 
 NOT_ENUMERABLE = {
-    "operator": "tortoise_query excludes operator Points unless an operator kind is "
-                "requested (sdk._operator_scope_clauses, #7108) — count from structure.operators",
     "object": "no listing surface on the MCP tool set — count from counts.Object",
-    "event": "no listing surface on the MCP tool set — count from counts.Event",
+    "event": "READABLE but NOT read by this pass: `tortoise_get_entity(None, "
+             "type='events', limit=N)` returns the WHOLE layer in one call (measured "
+             "2026-11-13: limit=5000 -> 4,670 rows, exactly counts.Event). Reading it is a "
+             "separate decision, not an unreachability fact: every Event classifies "
+             "`undecidable` today (session containers have no safe destination while the "
+             "record holds 0 rows for this tenant, #10000/D1; a domain Event has no "
+             "`events` write section), so it changes no disposition — only the census' "
+             "per-kind resolution. The layer's home is #10000's open question; reading it "
+             "is filed as #12378. Until then count from counts.Event",
     "subject": "no listing surface on the MCP tool set — count from counts.Subject",
     "source": "tortoise_list_sources matches `documentKind IS NULL` (sdk.list_sources), "
               "so a Document-kind Source is NOT listed — reconcile sources_read against "
               "counts.Source rather than reading the source count as complete",
 }
+#: ⛔ `operator` is deliberately NOT in the table above. It used to be, with the
+#: reason "tortoise_query excludes operator Points unless an operator kind is
+#: requested" — and that is false twice over, measured on live-v4 2026-11-13:
+#: `tortoise_query(kind="operator")` and `tortoise_query(kind="IMPL")` both answer
+#: `total: 0`, so the named escape hatch yields zero rows; and
+#: `tortoise_search(entity_type="operator", limit=5000)` answers **3,727 rows in one
+#: call**, an exact match with `structure.operators`, `match_source=structural`, no
+#: vector leg. A readable layer recorded as unreadable is how 3,727 rows — the whole
+#: reasoning layer — stayed out of a census that then reported itself complete.
+
+#: The operator layer is read in ONE call: `tortoise_search` takes a `limit` and has no
+#: `offset`, so there is no page walk to fall back on. A population above this ceiling
+#: is therefore REFUSED rather than truncated — a partial layer entering the census
+#: looks exactly like a complete one. 10,000 is far above this tenant's 3,727 and below
+#: the point at which one response is worth attempting unmeasured.
+OPERATOR_READ_CEILING = 10_000
 
 
 def cmd_inventory(args: argparse.Namespace) -> int:
@@ -473,13 +664,23 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     graphs = reader.graphs()
     points, total = reader.read_points(page=args.page, verify=args.verify_read)
     sources, source_total = reader.read_sources()
+    # ⛔ The reasoning layer: readable, and omitted from every census before this
+    # change. `structure` is handed over so the read reconciles against its count, and
+    # a refusal here is the DESIGNED kind (rc 3), not a crash: it says two surfaces
+    # disagree about one population, or that the layer cannot be read whole.
+    try:
+        operators, operators_reported = reader.read_operators(structure)
+    except C.CurationRefused as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 3
     gap = _source_gap(counts, len(sources))
     unreconciled = _unreconciled_sources(len(sources), gap)
     if unreconciled:
         print(f"REFUSED: {unreconciled}", file=sys.stderr)
         return 3
     audit = reader.audit()
-    plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
+    plan = C.build_plan(points + sources + operators,
+                        source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target or "(none: inventory only)")
     if args.rows:
         # inventory builds the plan (it IS the census), so the row artifact is
@@ -497,6 +698,11 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         "points_total_reported": total,
         "sources_read": len(sources),
         "sources_total_reported": source_total,
+        # The layer the census used to omit. `operators_read` is the READ's own count;
+        # `operators_total_reported` is `structure.operators`, and the reader refuses
+        # when they disagree, so a reader of this artifact can see both.
+        "operators_read": len(operators),
+        "operators_total_reported": operators_reported,
         "source_count_gap": gap,
         "structure": structure,
         "graphs": graphs,
@@ -520,7 +726,8 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
-        print(f"inventory: {len(points)} points + {len(sources)} sources -> {args.out}")
+        print(f"inventory: {len(points)} points + {len(sources)} sources + "
+              f"{len(operators)} operators -> {args.out}")
         print(json.dumps(report["census"]["totals"], indent=1))
     else:
         print(text)
@@ -627,11 +834,24 @@ def cmd_plan(args: argparse.Namespace) -> int:
     disarmed = C.off_switch_active(args.off)
     try:
         counts = reader.counts()
+        structure = reader.structure()
         points, points_total = reader.read_points(page=args.page, verify=args.verify_read)
         sources, source_total = reader.read_sources()
+        # ⛔ The reasoning layer, read and reconciled — see `read_operators`.
+        operators, operators_reported = reader.read_operators(structure)
         # INSIDE the guard too: `graphs()` feeds the identity guard and the ledger
         # scope, so a failure there is the same census class.
         graphs = reader.graphs()
+    except C.CurationRefused as exc:
+        # A DESIGNED refusal of the operator layer (two surfaces disagreeing about one
+        # population, or a layer that cannot be read whole) — rc 3, like every other
+        # refusal this tool reports, not the unhandled-failure rc 1. Disarmed keeps the
+        # round-22 contract: nothing was going to be written, so it is still exit 0 and
+        # the refusal travels on the artifact.
+        if not disarmed:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 3
+        return _disarmed_artifact(args, str(exc), refused=str(exc), read_failure=str(exc))
     except Exception as exc:
         # ⛔ THE SWITCH IS RESOLVED BEFORE THE CENSUS, for EVERY read — not only the
         # source section. An armed run still raises (a failed read must be loud); a
@@ -662,7 +882,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
               "`--target` names cannot be proven — an applying run is refused rather "
               "than resolved by shape", file=sys.stderr)
         return 3
-    plan = C.build_plan(points + sources, source_graph=args.graph or "(credential-bound)",
+    plan = C.build_plan(points + sources + operators,
+                        source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target)
     try:
         result = C.run_plan(
@@ -723,6 +944,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
                "rows_written": payload_rows,
                "points_read": len(points), "points_total_reported": points_total,
                "sources_read": len(sources), "sources_total_reported": source_total,
+               "operators_read": len(operators),
+               "operators_total_reported": operators_reported,
                "source_count_gap": gap,
                # The plan is the artifact a driver writes; a census without the
                # classes this read path cannot enumerate reads as complete.
