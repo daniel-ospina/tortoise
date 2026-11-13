@@ -891,6 +891,13 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     with pytest.raises(AssertionError, match="DIRECTION words are not all named"):
         _only_claim("the shipped leg ahead 2–0", "the shipped leg ahead 2–0",
                     "scope", values=("2", "0"))
+    # ⛔ …and the inflected pair, because a vocabulary entry that is REMOVED again
+    # (this list has regressed five times) must red a row, not just the reviewer
+    # (round-25 re-review, P3).
+    with pytest.raises(AssertionError, match="DIRECTION words are not all named"):
+        _only_claim("measures a stricter leg than the prior uses",
+                    "measures a stricter leg than the prior uses", "scope",
+                    free=("uses",))
     # 14. …and an ALTERNATION entry keeps two ADJACENT freed words precise instead
     #     of collapsing them into `\S+ \S+` (which matched the whole section).
     _only_claim("is strictly greater than", "is strictly greater than", "scope",
@@ -3688,8 +3695,11 @@ def test_brief_derived_prose_figures_are_the_artifact(
         fixture_rows["abc_def"]["rank_wide"] is None, (
         "§3.5's mechanism sentence says the shipped leg never returns `abc_def`; "
         f"the artifact now records {fixture_rows.get('abc_def')}")
+    # ⛔ Emphasis is NOT content: every prose scope strips `*`, or bolding a word
+    # in a correct document false-reds the pin (round-25 re-review, P2 — the same
+    # shape the previous round graded).
     _only_claim(
-        _scoped(brief, "3.5"),
+        _scoped(brief, "3.5").replace("*", ""),
         "are two terms the index does not hold; it holds `abc_def`",
         "§3.5's mechanism sentence",
         free=("not", "holds"))
@@ -3703,7 +3713,7 @@ def test_brief_derived_prose_figures_are_the_artifact(
     ident_total = sum(1 for n in population["names"] if n["cls"] == "ident")
     ident_misses = round(ident_total * (1 - ident_recall))
     _only_claim(
-        _scoped(brief, "3.4"),
+        _scoped(brief, "3.4").replace("*", ""),
         f"most of that class's {ident_misses} misses at k=3",
         "§3.4's identifier-class miss count",
         values=(str(ident_misses),))
@@ -3714,10 +3724,11 @@ def test_brief_derived_prose_figures_are_the_artifact(
     # emphasis-only edit false-redded it. The EQUALITY the sentence claims ("a
     # BM25 index fed our terms scores EXACTLY what the shipped leg scores") is
     # still asserted here, on the tokens arm — not the native one.
-    assert artifact["arms"]["postgres_bm25/tokens"]["per_class"]["ident"]["3"] \
-        == ident_recall, (
+    ident_tokens = artifact["arms"]["postgres_bm25/tokens"]["per_class"]["ident"]["3"]
+    assert ident_tokens == ident_recall, (
         "§3.3 says BM25 fed our terms scores EXACTLY what the shipped leg scores "
-        "on the identifier class; the artifact now differs")
+        f"on the identifier class; the artifact now records {ident_tokens} vs "
+        f"{ident_recall}")
 
     # ── §4.4 — the DECISION summary's "at any k" count ──────────────────────
     per_k_zero = [artifact["arms"]["falkordb_tfidf"]["recall_by_k"][k]["rows_zero"]
@@ -3726,7 +3737,7 @@ def test_brief_derived_prose_figures_are_the_artifact(
         "§4.4 says the queries return nothing AT ANY k; the artifact now varies "
         f"by window: {dict(zip(('3', '5', '10', '15'), per_k_zero, strict=True))}")
     _only_claim(
-        _scoped(brief, "4.4"),
+        _scoped(brief, "4.4").replace("*", ""),
         f"{per_k_zero[0]} queries return nothing at any k",
         "§4.4's at-any-k count",
         values=(str(per_k_zero[0]),), free=("nothing", "any"))
@@ -3736,8 +3747,8 @@ def test_brief_derived_prose_figures_are_the_artifact(
     # labelled "the stricter-leg disclosure" while `stricter` → `looser` — which
     # makes the sentence self-contradictory — stayed GREEN.
     _only_claim(
-        _scoped(brief, "5"),
-        "measures a **stricter** leg than the prior uses, and the measured "
+        _scoped(brief, "5").replace("*", ""),
+        "measures a stricter leg than the prior uses, and the measured "
         "baseline can understate that caller's recall",
         "§5's stricter-leg disclosure",
         # ⛔ Plain, not `understate|overstate`, for the reason above: the slot's
@@ -3760,7 +3771,7 @@ def test_brief_derived_prose_figures_are_the_artifact(
     other_ident = other["arms"]["exact_by_class"]["ident"]["3"]
     other_share = round(other_ident["in_window"] / other_ident["n"] * 100, 1)
     _only_claim(
-        _scoped(brief, "6"),
+        _scoped(brief, "6").replace("*", ""),
         f"`rows_zero` ({other_zero} there, {rows_zero} here) and its "
         f"`{other_share:.1f} %` keyword-only identifier figure",
         "§6's #11901 cross-reference",
