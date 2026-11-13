@@ -540,32 +540,32 @@ def test_the_rerank_runs_before_the_valid_time_demotion():
 def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
     """#12297 — **THE wiring point**: a candidate fusion pushed past the cut.
 
-    This is the only test that can FAIL if the rerank block is moved below
-    ``result_ids = result_ids[:limit]``, and that mutation is the whole design
-    under review: a rerank placed after the cut can only reorder what already
-    survived, which is not what "rerank the fused candidate list" means. Every
-    other test in this file reads with ``limit >= pool``, where there is NO cut
-    and the placement is unobservable — so a relocation left them all green.
+    This is the test that pins the placement BEHAVIOURALLY — a rerank placed after
+    ``result_ids = result_ids[:limit]`` can only reorder what already survived,
+    which is not what "rerank the fused candidate list" means. Every other test in
+    this file reads at ``limit >= pool``, where there is NO cut and the placement
+    is unobservable, so a relocation leaves their assertions green.
 
-    ⛔ ``pool_size`` is REQUIRED, and it is the difference between a test and a
-    tautology: the retrieval legs are asked for ``limit`` rows by default, so a
-    ``limit=2`` read without it retrieves exactly 2 candidates and the marker
-    could never be in the pool for the rerank to promote. The pool has to be
-    WIDER than the cut for the cut to be the thing under test.
+    ⛔ Not "the only test that fails" on a relocation: moving the block below the
+    cut also breaks ``test_the_rerank_runs_before_the_valid_time_demotion``,
+    because the cut sits below step 5e — measured, 2 failed.
+
+    ⛔ ``pool_size`` is NOT load-bearing, and an earlier draft of this docstring
+    claimed it was: the legs are asked for ``resolve_pool_size(limit * 2)``, whose
+    floor is ``DEFAULT_POOL_SIZE = 120``, so a ``limit=2`` read already retrieves
+    more rows than the cut and the marker is in the pool either way (measured
+    identical: ``scored=6``, marker promoted, with and without the kwarg). It is
+    passed to keep the intent legible; the PREMISE assertion below is what
+    guarantees the cut is the thing under test.
     """
     nonce = uuid.uuid4().hex[:8]
     q = f"zebrafish {nonce}"
-    # ⛔ THE PREMISE MUST BE CONSTRUCTED, NOT ASSUMED. Filler passages repeat the
-    # query terms THREE times each; the marker carries them once and is longer.
-    # Fusion is term-frequency weighted, so the fillers outrank the marker by
-    # construction — measured here: one occurrence per filler put the marker
-    # FIRST in a 6-doc corpus on this box (so a `limit=2` cut contained it and the
-    # premise below failed), while three occurrences place it LAST. Without the
-    # repetition the test would be testing which way the ranker happened to
-    # break. The marker's survival must come from the SCORER.
+    # Filler passages all contain the query terms, so fusion has every reason to
+    # rank them; the marker contains them too but is otherwise unremarkable, so
+    # its survival must come from the SCORER, not from lexical accident.
     for i in range(5):
         sdk.create_point(kind="statement",
-                         content=f"{q} {q} {q} filler passage number {i}")
+                         content=f"{q} filler passage number {i}")
     marker = sdk.create_point(
         kind="statement",
         content=f"{q} — the exact zebrafish husbandry protocol for the marker")
