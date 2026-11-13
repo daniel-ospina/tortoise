@@ -33,6 +33,7 @@ silently reversing a recorded measurement.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import tempfile
@@ -899,3 +900,111 @@ def test_the_phrase_offset_does_not_share_a_coordinate_base_with_span(monkeypatc
             f"span[0]+offset must miss the document index by exactly the stripped "
             f"prefix width ({-len(pad)}) for pad={pad!r}; measured "
             f"{span[0] + offset} against {true_index}")
+
+
+# ── 11. the offset's own guards (#3442 dead-weight pass) ───────────────────
+
+def test_the_phrase_offset_matches_a_case_and_whitespace_variant_occurrence(
+        monkeypatch):
+    """``IGNORECASE`` and the ``\\s+`` join are load-bearing, not decoration.
+
+    ``referentiality.judge`` decides on ``_tokens`` — lower-cased, edge-stripped —
+    so ``the former`` is the phrase it judged. The SECTION, however, is ordinary
+    prose and may carry that same phrase as ``The  Former``. A case-sensitive
+    search, or a join on a single ``\\s``, records ``None`` there — and ``None``
+    is the value this record documents as *the phrase is genuinely absent*. So the
+    record would assert a FALSE ABSENCE while every count above it stayed correct.
+
+    Measured at the #12102 mutation pass (agent-infra#3442): with either of those
+    two edits applied, the whole suite stayed GREEN (24 passed) — which is exactly
+    the dead weight #3442 exists to refuse, and the reason this fixture exists.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    body = "The  Former approach was chosen by the team after a long review."
+    api, _proj, _log = _proj_api()
+    payload = {"subjects": [{"name": "the former", "subjectKind": "other"}],
+               "objects": [], "aboutEntities": []}
+    monkeypatch.setattr(extractor_mod, "_SemanticStage", _FixedStage)
+    monkeypatch.setattr(_FixedStage, "payload", payload, raising=False)
+    ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
+    result = ext.extract_entities(
+        "## Product Strategy\n" + body + "\n", "strategy.md", api)
+
+    assert result["subjects_held"] == 1, "`the former` is a deictic and is HELD"
+    offset = result["held_subjects"][0]["phrase_offset"]
+    assert offset is not None, (
+        "the phrase IS present as `The  Former`; `None` is the documented "
+        "'genuinely absent' value, so a None here records a false absence")
+    assert body[offset:offset + len("The  Former")] == "The  Former", (
+        f"the offset must land on the occurrence AS WRITTEN (got {offset}: "
+        f"{body[offset:][:16]!r})")
+
+
+def test_a_raising_tokeniser_leaves_a_held_surface_with_no_offset(monkeypatch):
+    """Two guards, one fixture — because on this path they are reachable only
+    TOGETHER.
+
+    ``judge`` answers ``None`` for a surface with no word tokens
+    (``referentiality._tokens``), so a HELD surface always tokenises to a non-empty
+    phrase. That makes ``_phrase`` empty *only* when
+    ``referentiality.phrase_tokens`` itself RAISES — which is the arm
+    ``_referentiality_tokens`` catches (a provenance field must never abort a
+    capture), and it is also the ONLY way ``if _phrase else None`` is taken:
+    without that guard, ``re.search`` over an empty pattern matches at position 0,
+    and the record would carry ``0`` — a real coordinate pointing at the start of
+    the section, which is not where the surface is. ``None`` (absent) and ``0``
+    (the first character) are different claims, and only one of them is true.
+
+    Measured at the #12102 mutation pass (agent-infra#3442): deleting EITHER guard
+    left the suite fully green (24 passed) before this test existed.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    api, _proj, _log = _proj_api()
+    payload = {"subjects": [{"name": "it", "subjectKind": "other"}],
+               "objects": [], "aboutEntities": []}
+
+    def _boom(_surface):
+        raise RuntimeError("tokeniser exploded")
+
+    monkeypatch.setattr(referentiality, "phrase_tokens", _boom)
+    result = _extract(monkeypatch, payload, api)
+
+    assert result["subjects_held"] == 1, (
+        "the HOLD is decided by `judge`'s own `_tokens`, not by this offset helper")
+    held = result["held_subjects"]
+    assert len(held) == 1
+    assert held[0]["rule_id"] == referentiality.RULE_PRONOUN
+    assert held[0]["phrase_offset"] is None, (
+        "an untokenisable phrase has no locatable occurrence; 0 is a coordinate "
+        "into the section, not an absence")
+
+
+def test_a_raising_cue_emits_a_warning_naming_the_surface(monkeypatch, caplog):
+    """The fail-open is RECORDED in the result AND announced to the operator.
+
+    ``subjects_hold_failed`` / ``hold_failures`` are what a CALLER reads; the
+    ``logger.warning`` is what a human watching a run sees. #3442 measured the
+    record well pinned and this WARNING pinned by nothing: deleting the log line
+    left the suite fully green (24 passed). A degradation that reaches no operator
+    is the silent half of the same fail-open.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    api, _proj, _log = _proj_api()
+    payload = {"subjects": [{"name": "it", "subjectKind": "other"}],
+               "objects": [], "aboutEntities": []}
+
+    def _boom(_surface):
+        raise RuntimeError("cue exploded")
+
+    monkeypatch.setattr(extractor_mod, "_referentiality_hold", _boom)
+    with caplog.at_level(logging.WARNING, logger="tortoise.extractor"):
+        result = _extract(monkeypatch, payload, api)
+
+    assert result["subjects_hold_failed"] == 1
+    warnings = [r.getMessage() for r in caplog.records
+                if r.name == "tortoise.extractor"
+                and r.levelno == logging.WARNING]
+    assert any("#12094" in m and "it" in m and "Product Strategy" in m
+               for m in warnings), (
+        "the operator-facing warning must name the surface and its section; "
+        f"warning records were {warnings!r}")
