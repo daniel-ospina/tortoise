@@ -2497,6 +2497,27 @@ class TestDoctorHostedCredential:
         _data3, cut3 = _doctor_read_capped(resp3, 65536, _time.monotonic() - 1)
         assert cut3 is True, "a body with bytes still declared must be a cut"
 
+        # ── NO declared length (chunked / close-delimited) ────────────────
+        # `None` carries no information at the cap, so one probe byte decides.
+        class _Chunked(_FakeResponse):
+            length = None  # a chunked body declares nothing
+
+            def read(self, n=None):
+                return self._buf.read(n)
+
+            def read1(self, n=None):
+                return self.read(n)
+
+        # (a) body EXACTLY at the cap → complete, NOT cut.
+        exact = _Chunked(200, b"y" * 4096)
+        _data_a, cut_a = _doctor_read_capped(exact, 4096, _time.monotonic() + 5)
+        assert cut_a is False, "a chunked body that ends exactly at the cap is complete"
+
+        # (b) body OVER the cap → cut.
+        over = _Chunked(200, b"y" * (4096 + 10))
+        _data_b, cut_b = _doctor_read_capped(over, 4096, _time.monotonic() + 5)
+        assert cut_b is True, "a chunked body over the cap must be a cut"
+
     def test_a_cut_403_body_is_unproven_not_a_red_refusal(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
         """A cut 403 must not be graded from a fragment.

@@ -12995,11 +12995,23 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
     if outstanding is None:
         inner = getattr(resp, "fp", None)
         outstanding = getattr(inner, "length", None)
-    # ⛔ At the CAP, `None` means NO DECLARED LENGTH (chunked / close-delimited),
-    # not "the stream ended" — only `length == 0` is proof of completeness. The
-    # opposite reading let a chunked body over the cap pass as complete and put a
-    # fragment back in front of the no-identity arm (fresh review round 21).
-    return b"".join(chunks), outstanding != 0
+    if outstanding is not None:
+        # A declared length settles it: `0` means complete, anything else means
+        # the cap cut us short.
+        return b"".join(chunks), outstanding != 0
+    # ⛔ No declared length (chunked / close-delimited) carries NO information at
+    # the cap: it is equally "the stream ended exactly at cap" and "there is
+    # more". One bounded probe byte decides it — reading `None` as "cut" (round
+    # 21) downgraded a healthy body that ended exactly at the cap, and reading it
+    # as "complete" (round 20) put a fragment in front of the no-identity arm
+    # (round 22).
+    if time.monotonic() >= deadline:
+        return b"".join(chunks), True
+    try:
+        probe = reader(1)
+    except Exception:  # a probe failure cannot prove completeness
+        return b"".join(chunks), True
+    return b"".join(chunks), bool(probe)
 
 
 def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> None:
