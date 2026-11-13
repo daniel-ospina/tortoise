@@ -6404,6 +6404,19 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         ('cp -a "${b}/17/bin/." "${b}/16/bin/" # restore the client', "a braced destination"),
         ('sudo rsync -a "${b}/17/bin/" "${b}/16/bin/" # keep in sync', "the rsync carriage"),
         ('echo "b=${b}"; cp -a "$b/17/bin/." "$b/16/bin/" # x', "an `echo` before the copy"),
+        # ⛔ AND THESE TWO PIN THE **DUAL READING ITSELF**, which nothing else did
+        # (#12279 REVIEW 10, P2, measured: disabling the cut reading left the whole
+        # suite at 397 passed, so the mechanism that commit exists for was ungraded —
+        # and its cited mutation had been reassigned to the depth rule).
+        # Both are BALANCED and bash LANDS them; the kept reading cannot refuse them
+        # — `nested_depth` stays above zero across a substitution that contains a
+        # double-quoted string, so the real trailing `#` is not stripped and its words
+        # become the segment's last operands — and only the CUT reading refuses.
+        ('echo "$(echo ")")"; cp -a "$b/17/bin/." "$b/16/bin/" # x', "a balanced nested string"),
+        (
+            'echo "$(echo ")")"; sudo rsync -a "$b/17/bin/" "$b/16/bin/" # keep in sync',
+            "the rsync carriage after a balanced nested string",
+        ),
         # ⛔ AND A DATA `#` EARLIER ON THE LINE MUST NOT BE THE ONLY CUT (#12279
         # FINAL REVIEW 3, P0, measured 40 RED→GREEN spellings): with only the FIRST
         # word-position `#` cut, `echo "old $(pg_dump --version) # was"; cp … # pin`
@@ -7382,8 +7395,19 @@ def _strip_trailing_comment(line: str) -> str:
     braces = 0
     #: How many substitution/expansion contexts are open INSIDE the current
     #: double-quoted span (see the block in the quote branch). A `#` is DATA while
-    #: this is above zero, and NOT a comment once it returns to zero — the scope of
-    #: the distrust is the substitution, never the rest of the line.
+    #: this is above zero, and a comment again once it returns to zero — the scope of
+    #: the distrust is meant to be the substitution, never the rest of the line.
+    #:
+    #: ⛔ AND IT CAN ONLY BE RELIED ON TO FALL WHEN THE SUBSTITUTION CARRIES NO
+    #: DOUBLE-QUOTED STRING (#12279 REVIEW 10, P1, measured, filed as #12316). The
+    #: quote model is flat, so in `echo "$(echo " #note")"` the inner `"` is read as
+    #: closing the OUTER span; the substitution's `)` is then met outside a span (so
+    #: nothing decrements) or with `inner_quote` set (so the decrement is gated off),
+    #: and the depth can stay above zero to end of line — the real trailing `#` then
+    #: keeps its words as operands and the destination stops being last. That is a
+    #: FALSE GREEN the depth rule cannot see, which is exactly why `_executed_lines`
+    #: grades BOTH readings of an ambiguous `#` (R22) instead of trusting this one:
+    #: the cut reading refuses it. Do not read this counter as a scope proof.
     nested_depth = 0
     inner_quote = False
     #: `[[ … ]]` and `(( … ))` are WHOLE WORD PARTS (#12279 REVIEW 4, P1, measured
