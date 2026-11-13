@@ -1298,7 +1298,12 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`create_source(url, kind, props={'embedding': [0.1, 0.2, 0.3]})` then "
         "`MATCH (s:Source {url:$u}) RETURN s.embedding` returns the caller's array, and a no-props "
         "control node has no such key. ⛔ So `#12180`'s PREMISE IS CORRECT (a caller vector lands on "
-        "`:Source` with no gate and no width check) and this row does NOT close it. ⛔ A `:Source` "
+        "`:Source` with no gate and no width check) and this row does NOT close it. That is the "
+        "`#5004` caller-vector contract, which arrived on `main` in `18d43e0462` (`#12113`); the "
+        "disposition is the one `tortoise.api::add_point` carries — exempt as a CARRIER, and "
+        "`tortoise/projection/entities.py::_upsert_source`'s passthrough legitimately stores "
+        "`s.embedding` for the vector retrieval leg to read — NOT because no store is reachable "
+        "through it. ⛔ A `:Source` "
         "vector ALSO exists — `_upsert_document` writes one via `set_embedding_clause(\"s\")` on the "
         "document path — so `no-live-vector` here is a claim about this body, not about the label "
         "(`#12182` review cycle 3, P3). Added by `#12113` and landed on `main` undeclared; `#12180` "
@@ -1469,6 +1474,10 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("tortoise/api.py", "add_point",
          'p["embedding"] = fields["embedding"]'),),
     "tortoise.sdk::create_source": (
+        # ⛔ #11996 landed a DUPLICATE of this same evidence (byte-identical, so it
+        # only shadowed) and `ruff check .` F601 caught it on main; its one distinct
+        # sentence: deleting the guard (the `raise`) takes the needle AND the
+        # population entry away together, so a stale exemption cannot outlive it.
         # Needle 1 is the REFUSAL's own prose — the whole reason this name enrols, and the
         # only `_EMBED_WRITE` match in the body: delete the `raise` and it goes, taking the
         # population entry with it. Needle 2 is the guard's CONDITION
