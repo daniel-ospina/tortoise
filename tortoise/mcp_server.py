@@ -4001,8 +4001,9 @@ def tortoise_query(kind: str | None = None,
             f"For a structural Point read, omit entity_type or pass 'point' "
             f"(its default).")})
     # ── #12455: `filters=` was ACCEPTED on the `text=` and `tag=` arms and DROPPED
-    # `filters` is a STRUCTURAL-path argument. `text=` forwards only
-    # kind/entity_type/limit/min_confidence/order_by into
+    # `filters` is a STRUCTURAL-path argument. `text=` forwards
+    # kind/entity_type/limit/min_confidence/order_by (plus `include_terminal`,
+    # promoted from `include_retracted` — never a property filter) into
     # `sdk.tortoise_fts_query`, whose knobs are named (`exclude_status`,
     # `claim_class`, `exclude_turn_echo_session`, `relationship_filter`, …) and
     # which has NO property-filter parameter (sdk.py:40637-40710). `tag=` reads

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -401,31 +402,60 @@ def test_a_tag_read_without_filters_still_serves(stub) -> None:
     assert [c[0] for c in stub.calls] == ["query_points_by_tag"], stub.calls
 
 
+#: A refusal ATTACHED TO `filters=` — not merely the word "refus" somewhere in
+#: the bullet. The tag bullet legitimately contains "`entity_type` is REFUSED
+#: there", so a bare substring test passes on the stale wording this test exists
+#: to catch (#12455 round-3 finding 1, measured: restoring `origin/main`'s
+#: "ignores kind/filters/…" left the suite green under the bare test).
+_FILTERS_REFUSAL = re.compile(
+    r"refus\w*\s+`?filters=?`?|`?filters=?`?\s+is\s+refused", re.IGNORECASE)
+
+
+def _docstring_bullets(doc: str, head_prefix: str) -> list[str]:
+    """Each bullet that starts with ``head_prefix``, joined with its
+    continuation lines up to the next ``- `` bullet.
+
+    Joining matters: the served docstring wraps, and the stale claim sat on a
+    CONTINUATION line while a head-line-only read sees neither "filters" nor
+    "REFUS" — which is how a vacuous test looked discriminating.
+    """
+    lines = doc.splitlines()
+    heads = [i for i, line in enumerate(lines) if line.strip().startswith(head_prefix)]
+    out = []
+    for start in heads:
+        end = next((j for j in range(start + 1, len(lines))
+                    if lines[j].strip().startswith("- ")), len(lines))
+        out.append(" ".join(lines[start:end]))
+    return out
+
+
 def test_no_docstring_bullet_still_says_the_tag_arm_IGNORES_filters() -> None:
-    """The tag twin of the test below — its absence was round-2 finding 1.
+    """The tag twin of the test below (#12455 round-2 finding 1).
 
     The old tag bullet said tag mode "ignores kind/filters/min_confidence/
-    order_by" while a NEW bullet 17 lines later said `filters=` is REFUSED
-    there: two mutually exclusive statements about one argument in the same
-    served docstring, and the stale one is exactly the belief the guard exists to
-    correct. Fails if any `tag=` bullet advertises filters as merely ignored.
+    order_by" while a NEW bullet 17 lines later said `filters=` is REFUSED there:
+    two mutually exclusive statements about one argument in the same served
+    docstring, and the stale one is exactly the belief the guard exists to
+    correct.
+
+    Round 3 measured this test passing against that stale wording put back
+    verbatim, for two independent reasons — it read only head lines (the claim
+    was on a continuation line), and a bare ``"REFUS" in bullet`` was satisfied
+    by the bullet's own "`entity_type` is REFUSED there". So it now joins
+    continuations AND requires the refusal to be attached to `filters=`.
     """
     from tortoise.mcp_server import tortoise_query
 
-    doc = inspect.getdoc(tortoise_query) or ""
-    tag_bullets = [
-        line for line in doc.splitlines()
-        if line.strip().startswith("- tag=<name>")
-    ]
-    assert len(tag_bullets) >= 2, (
+    bullets = _docstring_bullets(inspect.getdoc(tortoise_query) or "", "- tag=<name>")
+    assert len(bullets) >= 2, (
         "expected the tag= bullet AND the tag-mode bullet; found "
-        f"{len(tag_bullets)}: {tag_bullets}"
+        f"{len(bullets)}: {bullets}"
     )
-    stale = [line for line in tag_bullets
-             if "filters" in line and "REFUS" not in line.upper()]
+    stale = [b for b in bullets
+             if "filters" in b and not _FILTERS_REFUSAL.search(b)]
     assert stale == [], (
-        "a `tag=` bullet still presents `filters=` as merely ignored on that "
-        f"arm, contradicting the refusal: {stale}"
+        "a `tag=` bullet mentions `filters` without refusing it, contradicting "
+        f"the guard: {stale}"
     )
 
 
