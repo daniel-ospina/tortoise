@@ -86,7 +86,7 @@ is a worse merge" and "a redirect is a merge **plus** a visible duplicate".
 
 **The retrieval readers — none of them knows the property exists.** Measured counts at this head:
 
-```
+```text
 tortoise/search_engine.py   resolved_from=0   dedup_reviewed=0
 tortoise/ranking.py         resolved_from=0   dedup_reviewed=0
 tortoise/session_link.py    resolved_from=0   dedup_reviewed=0
@@ -160,7 +160,7 @@ half is wrong outright.**
 | `review_verdicts.py:516` | the close verdict | `'close'` |
 | ⛔ **`sdk.py:51584 update_entity(id, **props)`** | the generic entity/point update door | **any string the caller passes** — it reaches `SET n += $props` (`:6499`, `:6526`, `:6688`), and `dedup_reviewed` is a declared point property (`tortoise/_placement_table.json:189`) |
 
-**Two corrections, both material**
+#### Two corrections, both material
 
 1. ⛔ **The vocabulary is NOT closed.** The two verdict *verbs* offer `{merge, reject, close}` and `approve_merge`
    refuses anything else (`sdk.py:24350` `if action not in ("merge", "reject")`), but that constrains one
