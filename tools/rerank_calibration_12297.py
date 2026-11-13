@@ -41,7 +41,8 @@ Both are the same fixed query set on every run, so before/after is paired.
 
 METRICS
 -------
-``ndcg@10``  1/log2(rank+1) for one gold per query (IDCG = 1). A query whose gold
+``ndcg@10``  1/log2(rank+2) for the 0-based ``rank`` this code carries, one gold
+per query (IDCG = 1). A query whose gold
              never entered the pool scores 0 and STAYS in the denominator —
              dropping it would let a reranker raise nDCG by losing queries.
 ``recall@10`` gold present in the first 10.

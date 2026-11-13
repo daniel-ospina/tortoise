@@ -354,7 +354,8 @@ def _fold_punct(text: str) -> str:
 #: SAME quantity as arm 1's ``in_window`` at k=3 and the two are comparable.
 TOP_K_RERANK_CUT = 3
 #: #12297: the rank at which the rerank arm reports nDCG. 10 is the issue's
-#: named metric; with one gold per mention nDCG@10 = 1/log2(rank+1).
+#: named metric; with one gold per mention nDCG@10 = 1/log2(rank+2)
+#: for the 0-based ``rank`` this code carries (rank 0 is the top hit).
 NDCG_K = 10
 #: #12297: the pool widths the rerank arm fetches at. 15 is Zep's candidate
 #: count — the width #11901 measured — and 40 is the mean effective
@@ -444,9 +445,13 @@ def _rerank_arm(
         "torch_threads": threads,
         "ceiling_note": (
             "a reranker only reorders rows the legs already returned, so its "
-            "ceiling is arm 1's miss_past_k (rows inside a 15-window that fell "
-            "past the limit=3 cut); the miss_absent_at_max_k rows are "
-            "unreachable at every pool width"),
+            "ceiling is the number of golds the legs put INSIDE the scored "
+            "window at that width (in_window(P), width dependent: 277/300 at a "
+            "15-window, 300/300 at 40). miss_past_k at k=P is 0 BY "
+            "CONSTRUCTION — every response has at most P rows, so 'the rank is "
+            "past P' cannot occur — and is therefore not the ceiling; the "
+            "width-independent non-ceiling is miss_absent_at_max_k (golds no "
+            "leg returned at ANY width), which no reranker can reach"),
     }
     pairs_scored = 0
     score_s = 0.0

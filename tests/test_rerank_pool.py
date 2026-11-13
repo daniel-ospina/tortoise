@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -507,3 +508,54 @@ def test_the_rerank_runs_before_the_valid_time_demotion():
     """
     src = inspect.getsource(sdk_mod.TortoiseSDK.tortoise_fts_query)
     assert src.index("rerank_pool(") < src.index("prefer_latest_ids(")
+
+
+def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
+    """#12297 — **THE wiring point**: a candidate fusion pushed past the cut.
+
+    This is the only test that can FAIL if the rerank block is moved below
+    ``result_ids = result_ids[:limit]``, and that mutation is the whole design
+    under review: a rerank placed after the cut can only reorder what already
+    survived, which is not what "rerank the fused candidate list" means. Every
+    other test in this file reads with ``limit >= pool``, where there is NO cut
+    and the placement is unobservable — so a relocation left them all green.
+
+    ⛔ ``pool_size`` is REQUIRED, and it is the difference between a test and a
+    tautology: the retrieval legs are asked for ``limit`` rows by default, so a
+    ``limit=2`` read without it retrieves exactly 2 candidates and the marker
+    could never be in the pool for the rerank to promote. The pool has to be
+    WIDER than the cut for the cut to be the thing under test.
+    """
+    nonce = uuid.uuid4().hex[:8]
+    q = f"zebrafish {nonce}"
+    # Filler passages all contain the query terms, so fusion has every reason to
+    # rank them; the marker contains them too but is otherwise unremarkable, so
+    # its survival must come from the SCORER, not from lexical accident.
+    for i in range(5):
+        sdk.create_point(kind="statement",
+                         content=f"{q} filler passage number {i}")
+    marker = sdk.create_point(
+        kind="statement",
+        content=f"{q} — the exact zebrafish husbandry protocol for the marker")
+    marker_id = marker["id"] if isinstance(marker, dict) else marker.id
+
+    off = [r["id"] for r in sdk.tortoise_fts_query(
+        q, entity_type="point", limit=2, pool_size=25)]
+    assert marker_id not in off, (
+        "premise: the marker passage must fall OUTSIDE a limit=2 cut without "
+        f"the rerank, or this test proves nothing (off={off})")
+
+    class _MarkerOnly:
+        """Scores only the marker; everything else is a flat zero."""
+
+        def score(self, query, texts):
+            return [1.0 if "husbandry protocol" in t else 0.0 for t in texts]
+
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    _inject(_MarkerOnly(), monkeypatch)
+    on = [r["id"] for r in sdk.tortoise_fts_query(
+        q, entity_type="point", limit=2, pool_size=25)]
+    assert marker_id in on, (
+        "the rerank did not promote the marker into the cut — either it ran "
+        "AFTER `result_ids[:limit]` (where it can only reorder what already "
+        f"survived) or it did not run at all (on={on})")

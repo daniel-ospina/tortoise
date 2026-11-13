@@ -4745,9 +4745,19 @@ def _fetch_rerank_pool_texts(graph, entity_type: str, graph_label: str,
                  "AND n.documentKind IS NOT NULL ")
     else:
         match = f"MATCH (n:{graph_label}) WHERE n.{id_field} IN $ids "
+    # ⛔ A POINT POOL CONTAINS OPERATOR ROWS, and an operator carries NO
+    # ``content`` (``create_operator`` writes ``label``/``op_type``/``direction``
+    # only) while the operator leg above is a SEPARATE ``entity_type`` — so on a
+    # point read an operator arrives here with ``content = null``. Returning the
+    # empty string for it scored the operator on ``""``, and a cross-encoder
+    # ranks an empty passage ABOVE an unrelated real one, so the demotion ran
+    # backwards. ``label`` is the operator's own text; coalescing gives it one.
+    text_expr = (f"coalesce(n.{field}, n.label, '')"
+                 if graph_label in (None, "Point") and field == "content"
+                 else f"n.{field}")
     try:
         rows = graph.query(
-            match + f"RETURN n.{id_field}, n.{field}",
+            match + f"RETURN n.{id_field}, {text_expr}",
             params={"ids": ids},
         ).result_set
     except Exception:  # noqa: BLE001, RUF100 — best-effort, degrade below
@@ -41588,8 +41598,21 @@ class TortoiseSDK:
             _pool_texts = _fetch_rerank_pool_texts(
                 graph, entity_type, graph_label, id_field, _pool_ids)
             if _pool_texts:
-                _rows = [{"id": pid, "content": _pool_texts.get(pid, "")}
-                         for pid in _pool_ids]
+                # ⛔ A ROW THE READ DID NOT RETURN IS NOT SCORED. An id the read
+                # excluded (a :Source without ``documentKind``, an operator on
+                # the ``is_operator`` leg with no row) used to be handed to the
+                # scorer as ``""`` — and an empty passage outranks an unrelated
+                # real one, so an EXCLUDED row was PROMOTED over included ones.
+                # Only ids that came back are scored; the rest ride with the
+                # unscored tail, keeping their relative retrieval order, and
+                # the disclosed ``unscored`` count counts them.
+                _scored_rows = [{"id": pid, "content": _pool_texts[pid]}
+                                for pid in _pool_ids if pid in _pool_texts]
+                _scored_n = len(_scored_rows)
+                _rows = _scored_rows + [
+                    {"id": pid, "content": ""}
+                    for pid in _pool_ids if pid not in _pool_texts
+                ]
                 # ⛔ THE UNSCORED TAIL RIDES ALONG. Handing ``rerank_pool`` only
                 # the scored head made its ``unscored`` count structurally ZERO
                 # — the stats said "nothing went unscored" while every candidate
@@ -41598,7 +41621,7 @@ class TortoiseSDK:
                 # never read (it is not scored); it is here so the count is true.
                 _rows += [{"id": pid, "content": ""}
                           for pid in result_ids[_pool_n:]]
-                _reranked, _rr_stats = rerank_pool(query, _rows, pool=_pool_n)
+                _reranked, _rr_stats = rerank_pool(query, _rows, pool=_scored_n)
                 if _rr_stats.get("applied"):
                     # ``rerank_pool`` is a permutation of what it was handed — the
                     # scored head reordered, the unscored tail in its retrieval

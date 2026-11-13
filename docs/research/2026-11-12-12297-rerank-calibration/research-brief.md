@@ -117,11 +117,22 @@ Baseline in every row is the **same** rows, unreranked, at the same pool.
 | gained / lost | — | **+33 / −0** | zero regressions |
 | pairs scored | — | 4,500 | |
 
-⛔ **The pool-15 number is the ceiling, exactly.** Arm 1 measured **277/300**
-golds inside a 15-window and **`miss_past_k = 0`**, so 92.3 % is the *maximum
-recall@3 any reranker can reach at pool 15* — the other 23 names are never
-returned by the legs at that width. The rerank landed on **277, not 276**. It
-recovered **every single in-pool candidate that fusion had pushed past the cut**.
+⛔ **The pool-15 number is the ceiling, and it is the WIDTH that sets it.** Arm 1
+measured **277/300 golds inside a 15-window** (`in_window@15`), so 92.3 % is the
+*maximum recall@3 any reranker can reach at pool 15* — the other 23 names are
+never returned by the legs at that width. The rerank landed on **277, not 276**.
+It recovered **every single in-pool candidate that fusion had pushed past the
+cut**.
+
+> **The bound is width-dependent, and an earlier version of this paragraph said
+> otherwise.** It cited `miss_past_k = 0` as the ceiling proof and called the
+> `miss_absent_at_max_k` rows unreachable "at every pool width". Both are wrong in
+> the same direction: `miss_past_k` at k=P is **0 by construction** (a response
+> has at most P rows, so "its rank is past P" cannot occur) — it is a property of
+> the counter, not a measurement of the legs; and the pool-40 arm reaches
+> **300/300**, so those rows are reachable. The ceiling is `in_window(P)` and it
+> moves with the width; the only width-independent non-ceiling is
+> `miss_absent_at_max_k`, which no reranker can reach.
 
 **Surface variants** (a capture saying an existing node a different, real way —
 article-drop / hyphen↔space / basename; 426 pairs):
