@@ -1183,7 +1183,10 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> Any:
     wait-bound expiry — and fastmcp's client is built with `raise_on_error=True` by
     default, so that refusal arrives as a RAISED `ToolError` and never reaches the caller
     as a payload. `normalise_tool_result` therefore cannot see it; a caller that needs the
-    refusal's `code` must catch `ToolError` and read its text.
+    refusal's `code` must catch `ToolError` and read its text — `refusal_message()`
+    below is the ONE classifier for "is this text a DESIGNED refusal or a crash?",
+    so a consumer distinguishes the two the same way this module's other callers do
+    instead of re-deriving the shapes a fourth time.
 
     Also raises on transport failure, and `MCPKeyEmptyError` when an auth rejection leaves
     no credential resolved.
