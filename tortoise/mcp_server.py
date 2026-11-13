@@ -3777,11 +3777,23 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "limit=10000) — one call at the SDK's maximum. That tool has no "
         "offset walk and slices at `limit` (default 10), so a limit-less "
         "call answers a SILENTLY TRUNCATED layer, and a layer above 10,000 "
-        "rows has no single-call read."),
+        "rows has no single-call read. It answers the CURRENT VIEW, not the "
+        "label: the structural leg is status-filtered "
+        "(`search_engine._STATUS_FILTERED_LABELS` includes `Point`), so a "
+        "terminally-stated operator is not returned. Reconciling a short "
+        "answer means two separate causes, not one: "
+        "tortoise_graph_overview(section='structure').operators counts "
+        "`is_operator = true OR op_type IS NOT NULL` over EVERY status, so it "
+        "also counts operators this leg cannot return at all (those carrying "
+        "only `op_type`) and operators a caller sees here as missing."),
     "event": (
         "Enumerate it with tortoise_get_entity(None, type='events', "
-        "limit=...) — one call, reconcilable against the graph's own Event "
-        "count — or tortoise_search(entity_type='event', kind=...)."),
+        "limit=...) — reconcilable against the graph's own Event count — "
+        "but it DEFAULTS TO 20 and answers a bare list with no total, so a "
+        "limit-less call returns a SILENTLY TRUNCATED window: pass the "
+        "limit you need. Or tortoise_search(entity_type='event', "
+        "kind=<eventKind>, limit=10000) — one kind per call, which also "
+        "slices at `limit` (default 10, no total)."),
     "source": (
         "Enumerate it with tortoise_list_sources()."),
     "document": (

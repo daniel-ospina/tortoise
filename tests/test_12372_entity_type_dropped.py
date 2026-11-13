@@ -745,3 +745,55 @@ def test_a_falsy_non_none_text_must_still_refuse(stub_factory) -> None:
 
     assert _is_refusal(result), f"a falsy text served the Points: {result!r}"
     assert stub.calls == [], f"the structural arm read before refusing: {stub.calls}"
+
+
+# ── review round 6: two remedies still implied completeness ─────────────────
+
+
+def test_the_operator_remedy_discloses_the_view_it_bounds() -> None:
+    """The operator remedy names a CURRENT-VIEW read while implying the layer.
+
+    `tortoise_search`'s structural leg for `operator` sets
+    `label_str = "Point"` (`tortoise/search_engine.py:4261` region) and `Point`
+    is in `_STATUS_FILTERED_LABELS` (`:148`), so the terminal-status clause is
+    appended to the WHERE — a terminally-stated operator is NOT returned. And
+    the reconciliation target counts a WIDER predicate than the leg reads:
+    `summarize_structure` uses `is_operator = true OR op_type IS NOT NULL`
+    (`tortoise/sdk.py:26563`) while the leg appends only `n.is_operator = true`
+    (`search_engine.py:4261`). So "one call at the SDK's maximum … no
+    single-call read above 10,000" hands the caller a short answer shaped like
+    the layer, and a reconciler two causes conflated into none — the same false
+    PASS this guard removes, one level down (round 2 fixed the `limit` half of
+    it). Fails on the `CURRENT VIEW` clause and on the second cause; deleting
+    either reds it.
+    """
+    message = _message_for("operator")
+
+    assert "CURRENT VIEW" in message, (
+        f"the remedy implies the operator LAYER while naming a view: {message!r}"
+    )
+    assert "op_type" in message and "status" in message, (
+        "a reconciled gap has two causes (terminal status, and operators "
+        f"carrying only `op_type`) and the message names neither: {message!r}"
+    )
+
+
+def test_the_event_remedys_alternative_branch_is_bounded_where_it_truncates() -> None:
+    """`tortoise_search` slices at `limit` (default 10) with a bare list.
+
+    `tortoise/sdk.py` validates `limit: int = 10` and `1-10000`, and the tool
+    returns a plain list — no `total`, no `hasMore`. So the event remedy's
+    alternative branch answers TEN rows of a multi-thousand-row layer shaped
+    exactly like the window, which is the shape round 2 removed for `operator`.
+    The `get_entity` branch has the same trap via its own default. Fails on the
+    `limit=10000` in the alternative branch and on `DEFAULTS TO 20`; a
+    limit-less alternative reds it.
+    """
+    message = _message_for("event")
+
+    assert "DEFAULTS TO 20" in message, (
+        f"the get_entity branch's truncating default must be named: {message!r}"
+    )
+    assert "limit=10000" in message, (
+        f"the tortoise_search branch truncates at 10 without a limit: {message!r}"
+    )
