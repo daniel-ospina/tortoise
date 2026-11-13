@@ -26037,7 +26037,8 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
 # Tier gate: only tiers whose default graph FILLS the quota are blocked
 # (free=1, anon=1 — the default occupies slot 1; anon addition recorded in
 # the plan D2 note, free-pin unchanged). Solo=2 passes and gets exactly 1
-# custom; pro/org are unlimited (Gate #2 decision). 402 is the
+# custom; Builder (tier `pro`, #4336) and Team are unlimited (Gate #2 decision).
+# 402 is the
 # upgrade-CTA response, checked AFTER the suspension check (#1853: a
 # suspended FREE org must 403 SUSPENDED, never 402) and BEFORE the
 # quota gate per W1 ordering (E2E-3 pin — never any-4xx for a tier
@@ -26067,7 +26068,7 @@ async def _graph_quota_gate(org: dict) -> None:
     """Quota gate — 409 + X-Graph-Quota when at cap (distinct from the
     402 tier gate; D2/D3). Fail-closed: counting errors raise 500, never
     a silent pass (#686). No 80% warn band in v1 (Gate #2 — unreachable
-    at free=1/solo=2, dormant until a finite pro/org cap exists).
+    at free=1/solo=2, dormant until a finite Builder (tier `pro`) cap exists).
 
     Known mode divergence (review #2b arch, recorded): sdk._graph_count's
     Supabase branch drift-swallows to 1 (default-only) on ANY read error
@@ -26082,7 +26083,7 @@ async def _graph_quota_gate(org: dict) -> None:
     limits = _org_limits_from_node(org)
     max_graphs = limits.get("max_graphs")
     if max_graphs is None:
-        return  # unlimited (pro/org)
+        return  # unlimited (Builder = tier `pro`, #4336; and Team)
     try:
         count = _make_sdk(namespace="registry")._graph_count(org["id"])
     except Exception as e:
