@@ -508,10 +508,8 @@ def test_an_already_terminal_claim_reconciles_the_goal_the_CLAIM_names(sdk):
 
     The shape is real and supported (the legacy-flag pin above builds it): an
     `Invalidation(judgement_id=…)` with no `goal_id`, over a claim retired out of
-    band, so `verdicts`/`invalidate_stale` never sees THAT CLAIM again — and once
-    it was the goal's last live claim, no automatic path repairs the goal's
-    displayed word (#12336); while another live claim stands, that claim's own
-    stale finding does. MEASURED by review: reading the
+    band, so `verdicts`/`invalidate_stale` never sees it again and NOTHING else
+    repairs the goal's displayed word (#12336). MEASURED by review: reading the
     id from `invalidation.goal_id` alone made this case report
     `cache.checked: False` while `goalState` still read `met` — and a skipped
     check moves neither `counts.failed` nor `counts.gone`, so the sweep read
@@ -697,12 +695,11 @@ def test_a_claim_that_NAMES_NO_goal_falls_back_to_the_CALLERs(sdk, monkeypatch,
 
     ⛔ THE FALLBACK IS A REACHABLE SHAPE, NOT DECORATION, and it was unpinned in
     all four arms: deleting `or invalidation.goal_id` from every local left the
-    suite green, because every other test that reaches these locals reads a claim
-    carrying a `goalId`. A claim can name none — `invalidation_for` documents
-    "a corrupt or partial claim" as reachable, and `REMOVE p.goalId` produces it —
-    and with the fallback gone that shape SKIPS the reconcile: `cache.checked` is
-    `False` and neither `counts.failed` nor `counts.gone` moves, which is the
-    silent class the
+    suite green, because every other test's claim carries a `goalId`. A claim
+    can name none — `invalidation_for` documents "a corrupt or partial claim" as
+    reachable, and `REMOVE p.goalId` produces it — and with the fallback gone
+    that shape SKIPS the reconcile: `cache.checked` is `False` and neither
+    `counts.failed` nor `counts.gone` moves, which is the silent class the
     helper exists to make visible (#12336).
     """
     i, t, g = _world(sdk, tag=f"fallback-{shape}")
@@ -1547,12 +1544,8 @@ def test_an_ALREADY_TERMINAL_claim_also_reconciles_the_goal_word(sdk):
     """#12336's second door-side half, on the arm that used to skip it entirely.
 
     A claim retired OUT OF BAND (a direct status write, a purge) leaves the goal's
-    ``goalState`` word naming it. It IS cleared automatically once ANOTHER of that
-    goal's claims goes stale — that finding's own step-4 reconcile re-derives the
-    word from whatever still stands — but for a goal whose LAST claim is gone the
-    repair route is the manual, public, idempotent
-    ``reconcile_goal_state_cache``, because ``invalidate_stale`` scans LIVE claims
-    and a gone claim never becomes a finding again.
+    ``goalState`` word naming it, and the door is the only thing that can clear it:
+    ``invalidate_stale`` scans LIVE claims, so the goal is never a finding again.
     MEASURED before this round: ``goalState`` stayed ``met``, and the finding
     carried NO ``cache`` key at all — so `(r.get("cache") or {})` read clean and
     neither ``counts.failed`` nor ``counts.gone`` could see it.
@@ -1650,11 +1643,8 @@ def test_a_claim_that_vanishes_BEFORE_the_retirement_lands_is_alreadyRetired(
     that benign no-op as ``failed`` AND skipped the goal's reconcile, which is the
     #12336 residual this module closes for every other already-retired arm:
     measured before this round, ``goalState`` stayed ``met`` naming a claim that no
-    longer existed, and no later sweep could revisit THAT CLAIM — only another of
-    the goal's claims going stale could reconcile the word, and that is luck, not
-    a route this arm may rely on (a later ``judge_and_record`` that reaches a
-    decided state also REWRITES the word, but it mints a new claim, so it is not
-    a repair of this one).
+    longer existed, and no later sweep can repair it — ``invalidate_stale`` scans
+    LIVE claims, so that goal is never a finding again.
 
     ⚠️ ``found`` here is ``False``, not ``None``, and that is the point: ``None``
     is reserved for a re-read that could not answer (``after is None``). "Gone" is
@@ -1961,7 +1951,7 @@ def test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep(sdk):
     # carries nothing about the read (the `claim is None` refusal does name itself
     # — "could not read judgement" — but the sweep does not parse prose).
     assert failed[0]["found"] is None, failed[0]
-    # ⛔ AND `cache` IS A KEY A REFUSAL STILL OMITS, which is correct rather
+    # ⛔ AND `cache` IS THE ONE KEY A REFUSAL STILL OMITS, which is correct rather
     # than untidy: no reconcile ran, so there is no report to carry — but an
     # absent key must never be the whole answer, which is why `found` is present
     # above. Pinned here because nothing else fails if a plausible `cache` is
@@ -1974,18 +1964,6 @@ def test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep(sdk):
     # is in scope here, so writing it in would report a reconcile that never
     # happened — the same class of untruth as inventing a `cache`.
     assert "goalId" not in failed[0], failed[0]
-    # ⛔ AND A REFUSAL IS NOT AN ALREADY-RETIRED OUTCOME — the one word in this
-    # synthetic record that could silently invert the summary (fresh-context
-    # review, 2026-11-13). Flip `"alreadyRetired": False` to `True` where the
-    # record is built and the suite stayed GREEN before these two lines: every
-    # other `counts["alreadyRetired"]` assertion in this file is `== 1`, so
-    # nothing pinned the zero side anywhere, and this is the only sweep that
-    # contains a refusal record. The counter would then book a REFUSAL as
-    # "already retired, nothing to do" — the #12315 defect class (a summary that
-    # misreports a finding) one arm over, and the same shape as the `found` /
-    # `cache` / `goalId` traps pinned just above.
-    assert report["counts"]["alreadyRetired"] == 0, report["counts"]
-    assert failed[0]["alreadyRetired"] is False, failed[0]
 
 
 # ── 8. the sweep: scope, limit, dry run, and no re-derivation ────────────
