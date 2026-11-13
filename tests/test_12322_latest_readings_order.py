@@ -6,7 +6,7 @@ read cut its page with
     ORDER BY coalesce(e.startedAt, e.createdAt, '') DESC, e.id DESC LIMIT $lim
 
 i.e. it selected WHICH readings a judgement is computed from using the very
-string comparison this module documents as wrong ~400 lines away
+string comparison this module documents as wrong ~500 lines away
 (``instant_at_or_after``: *"comparing the raw strings instead would order
 ``...+00:00`` against ``...Z`` lexically — a bug that reads as correct whenever
 both sides happen to share a spelling"*). ``compare()`` then takes

@@ -1093,6 +1093,26 @@ def latest_readings(
     would restart the trend across a definition change nobody can date.
     ``mark_definition_change`` refuses to WRITE such a stamp and repairs one it
     finds, so this state is reachable only through an outside write.
+
+    Raises
+    ------
+    ValueError
+        ``limit < 0``, or ``_READINGS_PAGE_SIZE < 1`` — both are local
+        misconfigurations and are refused BY NAME so the operator is told which
+        constant to fix.
+    RuntimeError
+        The collected rows came back SHORT of the independent ``count(e)``. This
+        is the fail-closed arm: the read refuses rather than answering from an
+        incomplete set. It is raised for a ``RESULTSET_SIZE`` pinned below the
+        page size, for a set that SHRANK after the count was taken (a concurrent
+        DELETE, or an UPDATE that moves a row out of the predicate — those take
+        the same remedy, re-run), for an indicator that disappeared between the
+        count and the pages, and for two object nodes sharing one ``o.id`` whose
+        rows fall across a page boundary (#12511). The message enumerates them;
+        the first has a remedy, the rest are re-run-and-report. ``judge()`` does
+        not catch it — a judgement computed from a partial set is the defect this
+        guard exists to prevent, and #4515's incident is that it used to be
+        silent.
     """
     where = "MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator"
     params: dict[str, Any] = {"indicator": indicator_id}
@@ -1183,7 +1203,7 @@ def latest_readings(
         # ⛔ REFUSED BY NAME, because the count guard below would otherwise report
         # it as something else: `LIMIT 0` returns an empty page on every page, so
         # a MEASURED indicator would reach the truncation check and raise
-        # `RuntimeError` — "a page came back short" — blaming a server cap for a
+        # `RuntimeError` — "N row(s) never arrived" — blaming a server cap for a
         # local misconfiguration, while an indicator with NO readings would return
         # `[]`, which is the correct answer. The independent `count(e)` is what
         # makes "nothing was ever measured" unreachable for a measured indicator;
@@ -1205,8 +1225,14 @@ def latest_readings(
         page = g.query(
             cypher, params={**params, "cursor": cursor, "batch": batch}
         ).result_set
-        # `if not page` FIRST (the order `_paged_rows` uses): an empty tail must
-        # end the loop, never reach `page[-1]`.
+        # `len(page) < batch` already ends an EMPTY tail (`batch >= 1` is enforced
+        # above, so `0 < batch`), which is what keeps `page[-1]` out of reach on
+        # the next statement. The `not page` disjunct is therefore DEFENCE IN
+        # DEPTH, not the reader's protection: it is kept because `_paged_rows`
+        # (the shape this loop is copied from) indexes `rows[-1]` BEFORE its length
+        # check and needs it, and because a future relaxation of the `batch >= 1`
+        # guard must not turn an empty page into an IndexError. Measured: deleting
+        # the disjunct leaves all 15 cases green.
         if not page or len(page) < batch:
             rows.extend(page)
             break
