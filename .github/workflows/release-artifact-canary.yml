@@ -1,0 +1,116 @@
+# release-artifact-canary (#12363) — the missing reading on the PUBLISHED PyPI artifact.
+#
+# WHY THIS EXISTS
+# ---------------
+# 2026-11-13: `pip install tortoise-graph` (0.2.0, uploaded 2026-08-08) followed by the
+# documented first command `tortoise init` exits 1 on a clean machine, and
+# `pip install tortoise-client` — documented twice in README.md — 404s. Neither fact was
+# visible to any instrument in this repo, so the artifact stayed broken for 97 days.
+#
+# Every existing check reads the TREE or the wheel it just BUILT:
+#   - `ci.yml` → `packaging-smoke` builds a wheel and asserts pack content + imports;
+#   - `publish-pypi.yml` → `build` smoke-tests the freshly built wheel (packs + `--help`);
+#   - nothing ever runs a DOCUMENTED COMMAND, and nothing reads what the index serves
+#     weeks later.
+# A wheel that is broken at upload time therefore stays broken silently, forever. Same
+# class as deploy-staleness (#10109): a thing that never attempted to run cannot be
+# caught by a DECLINE channel.
+#
+# WHAT IT READS: `tools/published_artifact_canary.py` installs the LATEST PUBLISHED
+# `tortoise-graph` from PyPI into a fresh venv with a fresh `HOME` and runs `tortoise
+# init` (exit 0 AND the DB file exists), asserts `tortoise-client` resolves, and reports
+# the published version + upload age. It exits 1 when the artifact is broken and 2 when
+# it could not be evaluated — a detector that cannot run is RED, never a pass.
+#
+# WHY IT CANNOT BE STARVED INTO SILENCE (the load-bearing property, #10109):
+#   1. its OWN `schedule` + `workflow_dispatch` — no `push: main`, so no merge creates or
+#      cancels its run and it never queues behind the CI backlog;
+#   2. its OWN concurrency group with `cancel-in-progress: false`, so a run is never
+#      superseded mid-flight;
+#   3. it detects a STEADY STATE (the published artifact stays broken until someone
+#      releases), so a GitHub-dropped or delayed scheduled fire is not a loss — the next
+#      tick re-fires the same red;
+#   4. it fails closed: an unreadable index, a failed install, or an unevaluated arm is a
+#      RED, never a green.
+#   Residual (stated, not hidden): a GitHub Actions outage takes the schedule down with
+#   it, so the canary's own absence is the one thing it cannot observe — the same
+#   residual availability-liveness (#4573) names for the pager. Closing it needs a
+#   scheduler outside GitHub, which is an owner decision.
+#
+# THIS IS NOT A MERGE GATE. It is deliberately absent from `.mergify.yml` and from the
+# required-check set: a broken PUBLISHED artifact is not fixed by any PR, so blocking
+# merges on it would stop the fleet without moving the release. It is an alert channel
+# whose red names the one action that clears it (a release, #12363).
+name: release-artifact-canary
+
+on:
+  schedule:
+    # Daily. The state under test changes only when a release lands, so a faster tick
+    # buys nothing; a red persists until the release, so no tick is a lost alert.
+    - cron: '41 6 * * *'
+  workflow_dispatch:
+
+# Never cancel: the reading is the point, and a superseded run is a reading nobody got.
+concurrency:
+  group: release-artifact-canary
+  cancel-in-progress: false
+
+# contents: read for actions/checkout (the tool reads pyproject.toml for the tree
+# version). No write scope: this workflow alerts by FAILING; it does not comment.
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    # A cold install of the published artifact (numpy/scipy/fastapi/falkordb) plus a
+    # `tortoise init` boot is ~90 s measured; 20 min leaves room for a slow index without
+    # letting a wedged pip hold a runner for hours.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # No `uv`, no project install: the tool is stdlib-only on purpose, so this job
+      # measures the PUBLISHED dependency graph and never the repo's own environment.
+      - name: Smoke the published artifact (documented first command, clean HOME)
+        id: canary
+        run: |
+          set -o pipefail
+          rc=0
+          # 3 runner calls (venv, pip, `tortoise init`) x 300 s fits inside this job's
+          # 20 min budget; the tool's 600 s default does not (3 x 600 s reaches the job
+          # timeout, which kills the run BEFORE the report, the transcript and the
+          # "what a red means" step are written — #12363 review B3).
+          python tools/published_artifact_canary.py \
+            --timeout 300 \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            --transcript-dir "$RUNNER_TEMP/canary" || rc=$?
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+      - name: Keep the install/run transcript on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-artifact-canary-log
+          path: ${{ runner.temp }}/canary/
+          if-no-files-found: warn
+      # A red here is NOT a code defect in the merged tree: it is the published artifact
+      # being broken or missing, and only a release clears it. Say which, in the job
+      # summary, so the next reader does not go looking for a PR to fix.
+      - name: What a red here means
+        if: failure()
+        run: |
+          {
+            echo "### This is a RELEASE finding, not a tree finding"
+            echo
+            echo "The published PyPI artifact failed the documented steps. No change in"
+            echo "this repo fixes it: it clears when a release lands (version bump → tag →"
+            echo "\`publish-pypi.yml\`) and \`tortoise-client\` is published. See #12363."
+            echo
+            echo "A run with exit 2 means the canary could not evaluate the artifact"
+            echo "(index unreachable / install failed) — that is RED on purpose."
+          } >> "$GITHUB_STEP_SUMMARY"
