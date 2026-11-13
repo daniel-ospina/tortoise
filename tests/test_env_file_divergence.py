@@ -2101,6 +2101,79 @@ def test_a_blank_env_uri_beside_a_broken_file_key_is_not_reported_as_both(
         payload["daemon_error"])
 
 
+def test_the_daemon_resolver_reports_the_rung_it_was_on(monkeypatch):
+    """`daemon_db_target` attaches the KEY it was reading when it raised.
+
+    #12441 item 5. The disclosure has to say which key decided a rejection, and
+    it used to re-derive that with a second walk of `DAEMON_DB_KEYS` spelled
+    "first truthy key". That agrees with the ladder ONLY while the ladder stays
+    exactly that shape: the day it gains a rung which is not "first truthy", the
+    attribution desyncs silently and nothing fails. So the resolver owns the
+    answer and the report reads it.
+
+    Both keyed rungs are pinned, plus the `ValueError` compatibility every
+    existing caller (`mcp_server._get_sdk`, the `.env` disclosure) relies on.
+    """
+    from tortoise.config import DaemonTargetError, daemon_db_target
+
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_URI", "relative/x.db")
+    with pytest.raises(DaemonTargetError) as uri_err:
+        daemon_db_target()
+    assert uri_err.value.key == "TORTOISE_DB_URI"
+    assert isinstance(uri_err.value, ValueError)      # call sites stay compatible
+    assert "relative/x.db" in str(uri_err.value)      # the message is unchanged
+
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_PATH", "relative/y.db")
+    with pytest.raises(DaemonTargetError) as path_err:
+        daemon_db_target()
+    assert path_err.value.key == "TORTOISE_DB_PATH"
+
+    # …and a whitespace-only URI is a DECIDING rung (`if uri:`), not an unset
+    # one — the distinction the whole attribution rests on.
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_URI", "   ")
+    with pytest.raises(DaemonTargetError) as blank_err:
+        daemon_db_target()
+    assert blank_err.value.key == "TORTOISE_DB_URI"
+
+
+def test_the_attribution_reads_the_resolvers_key_not_a_second_walk(
+        capsys, _isolated, monkeypatch):
+    """Pinned by MUTATION, because no INPUT can distinguish the two forms.
+
+    Today "first truthy key" and "the rung the resolver was on" agree in every
+    reachable state — that IS item 5's hazard: a second spelling is only
+    detectably wrong after the ladder changes, and then it fails silently. So the
+    seam is tested the only way it can be: make the resolver name the LOWER rung
+    and require the attribution to follow it. An implementation that re-walks
+    `DAEMON_DB_KEYS` ignores the forged key, still answers from its own scan, and
+    this assertion fails.
+    """
+    import tortoise.config as config
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "   ")     # deciding, and rejected
+    _write_env(_isolated, "TORTOISE_DB_PATH=/tmp/file-path.db\n")
+
+    real = config.daemon_db_target
+
+    def forged():
+        try:
+            return real()
+        except config.DaemonTargetError as exc:
+            # The resolver now claims the rejection came from the PATH rung.
+            raise config.DaemonTargetError(str(exc), "TORTOISE_DB_PATH") from exc
+
+    monkeypatch.setattr(config, "daemon_db_target", forged)
+
+    payload = _show_json(capsys)["env_file"]
+
+    # The file DOES supply `TORTOISE_DB_PATH`, so the key the resolver named was
+    # supplied by the file → `both`. A re-walking implementation says `env`.
+    assert payload["daemon_error_source"] == "both", payload.get("daemon_error")
+
+
 def test_the_mixed_shadowed_doctor_row_credits_the_FILE_when_its_key_is_the_top_rung():
     """The `doctor` surface's FILE-wins half, which no test reached at all.
 

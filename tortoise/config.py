@@ -504,6 +504,38 @@ def parse_uri_userinfo(uri: str) -> tuple[str | None, str | None]:
 #: daemon simply ignores the file's key (#12407).
 DAEMON_DB_KEYS = ("TORTOISE_DB_URI", "TORTOISE_DB_PATH")
 
+
+class DaemonTargetError(ValueError):
+    """A rejection from :func:`daemon_db_target`, carrying the RUNG it was on.
+
+    ⛔ WHY THIS TYPE EXISTS (#12441 item 5). The disclosure has to answer "which
+    key DECIDED the daemon's target" for two different questions — who to blame
+    for a rejection, and which side of a divergence to name. Both used to be
+    answered by a SECOND walk of ``DAEMON_DB_KEYS`` from ``__main__``, spelling
+    the ladder's rule again as "first truthy key". That is faithful only while
+    the ladder stays exactly that. The day it gains a rung which is not "first
+    truthy" (a stripped URI, ``TORTOISE_ALLOW_EMBEDDED`` promoted above
+    ``TORTOISE_DB_PATH``, a typed value), the attribution desyncs **silently**
+    and nothing fails — the ladder is right and the report describes a resolver
+    that no longer runs, which is the one failure this disclosure exists to
+    prevent.
+
+    So the resolver OWNS the answer: it attaches the key it was reading when it
+    raised, and the report reads the attachment. A second spelling cannot drift
+    out of step with the first if there is only one.
+
+    It SUBCLASSES :class:`ValueError` deliberately — every existing caller
+    catches ``ValueError`` (including ``mcp_server._get_sdk``), so the type is
+    additive and no call site has to change to keep working.
+    """
+
+    def __init__(self, message: str, key: str | None) -> None:
+        super().__init__(message)
+        #: The ``DAEMON_DB_KEYS`` entry the ladder was ON when it raised — or
+        #: ``None`` when the rejection did not come from a keyed rung.
+        self.key = key
+
+
 def daemon_db_target() -> tuple[str | None, str]:
     """The MCP daemon's DB target — ONE implementation, TWO consumers (#12407).
 
@@ -533,8 +565,9 @@ def daemon_db_target() -> tuple[str | None, str]:
     ``embedded-allowed`` (the `TORTOISE_ALLOW_EMBEDDED=1` test hatch) the target
     is the canonical embedded path the daemon then opens.
 
-    Raises ValueError exactly where the daemon's own resolution would (a
-    relative or otherwise unpalatable `TORTOISE_DB_URI`/`TORTOISE_DB_PATH`).
+    Raises :class:`DaemonTargetError` (a ``ValueError``) exactly where the
+    daemon's own resolution would (a relative or otherwise unpalatable
+    `TORTOISE_DB_URI`/`TORTOISE_DB_PATH`), carrying the key the ladder was on.
     """
     uri = os.environ.get("TORTOISE_DB_URI", "")
     if is_db_uri(uri):
@@ -542,9 +575,17 @@ def daemon_db_target() -> tuple[str | None, str]:
     if uri:
         # `_get_sdk`: "File path — use Lite mode (backward compat: bare
         # non-docker URI)". The URI wins; TORTOISE_DB_PATH is not consulted.
-        return resolve_db_path(uri), "file-uri"
+        try:
+            return resolve_db_path(uri), "file-uri"
+        except ValueError as exc:
+            # ⛔ `from exc` keeps the original message and traceback intact for
+            # every existing caller; only the TYPE gains the attribution.
+            raise DaemonTargetError(str(exc), "TORTOISE_DB_URI") from exc
     if os.environ.get("TORTOISE_DB_PATH"):
-        return resolve_db_path(), "path"
+        try:
+            return resolve_db_path(), "path"
+        except ValueError as exc:
+            raise DaemonTargetError(str(exc), "TORTOISE_DB_PATH") from exc
     if os.environ.get("TORTOISE_ALLOW_EMBEDDED") == "1":
         return resolve_db_path(), "embedded-allowed"
     return None, "refuses"
