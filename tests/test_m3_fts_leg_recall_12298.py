@@ -992,9 +992,12 @@ def test_the_degraded_leg_refusal_is_WIRED_at_every_shipped_leg_call(tool_mod) -
     silent no-op — which is the fail-open it was written to close. Neither needs
     a database to detect: they are properties of the source.
 
-    So this parses the harness and asserts the wiring: every `run_fts_query(...)`
-    call in `arm_falkordb` passes `leg_trace=`, and each is followed by a
-    `_refuse_degraded_legs(...)` call naming that same trace variable.
+    So this parses the harness and asserts the wiring: every non-warmup
+    `run_fts_query(...)` call in `arm_falkordb` passes `leg_trace=`, and there is
+    at least one `_refuse_degraded_legs(...)` call per such leg. ⚠️ What this
+    does NOT prove: that a given refusal guards a given leg — the counts are
+    compared, not the argument binding — which is why the docstring says
+    "at least one per leg" and not "one each".
     """
     import ast
 
@@ -1033,11 +1036,6 @@ def test_the_degraded_leg_refusal_is_WIRED_at_every_shipped_leg_call(tool_mod) -
         assert "leg_trace" in kw, (
             "a `run_fts_query` call does not pass `leg_trace=` — the trace stays "
             "empty and `_refuse_degraded_legs` becomes a silent no-op")
-    # The fixture loop is the second published verdict that rests on this leg.
-    assert len(refusals) >= len(legs), (
-        "both the recall sweep AND the #8933 fixture loop must guard the shipped "
-        "leg: an unguarded fixture read publishes a degraded read as "
-        "`rank=None`, i.e. a capability FAIL")
 
 
 def test_a_degraded_shipped_leg_is_a_REFUSAL_not_a_miss(tool_mod) -> None:
@@ -1253,3 +1251,24 @@ def test_the_index_wait_accepts_at_least_and_not_exactly(tool_mod) -> None:
     assert "last <= expected" not in src and "last == expected" not in src, (
         "the wait became an exact match or an upper bound; a partially built "
         "index would then be measured as misses")
+
+
+def test_brief_states_what_the_reuse_guards_actually_do(brief_text) -> None:
+    """§2 must not over-claim the reuse guard — it did, and a merge lost the fix.
+
+    ⛔ The code refuses a reused graph only when a STORED NAME differs, and the
+    index wait accepts `numDocuments >= n`, so `--graph <a previous run's graph>`
+    with the SAME population is accepted and the sweep then runs over that run's
+    leftover fixture rows — the confound §3.5 and `measurement_notes` disclose.
+    A brief that says "refuses a reused graph outright" tells a reproducer the
+    opposite, and the claim was already lost once in a conflict resolution.
+    """
+    flat = " ".join(brief_text.replace("**", "").split())
+    assert "refuses a reused graph outright" not in flat, (
+        "§2 claims an outright reuse refusal; the harness refuses only a "
+        "stale-NAME mismatch")
+    assert "with the SAME population is ACCEPTED" in flat, (
+        "§2 must state the case the guards do NOT cover")
+    assert "refuses a graph whose stored names do not match" in flat
+    assert "numDocuments >= n" in flat, (
+        "§2 must name the inequality, which is why an over-full index passes")

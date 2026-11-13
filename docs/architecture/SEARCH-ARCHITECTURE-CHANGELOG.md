@@ -105,9 +105,9 @@ decision.
 
 **The `#8933` identifier fixture is part of the DoD, and the shipped leg fails it.** Five fixture records
 queried at the production window: shipped **3 of 5 reachable**, the in-place query **5 of 5**, BM25 fed
-our terms **3 of 5**, BM25 with its own analyser **5 of 5**. the `abc_def` row is **absent from its own name's window at the production
-limit and at k=15** on the shipped leg. The identifier capability the product believes it has is defeated on exactly
-the shapes `#8933` was built for.
+our terms **3 of 5**, BM25 with its own analyser **5 of 5**. On the shipped leg the `abc_def` row is **absent
+from its own name's window at the production limit and at k=15**. The identifier capability the product
+believes it has is defeated on exactly the shapes `#8933` was built for.
 
 **The defect it found, stated as a design fact rather than as tracker state.** RediSearch treats `_` as a
 word character; `sparse.tokenize_sparse_query` (`tortoise/sparse.py:381`, splitting on `[^a-z0-9]` at

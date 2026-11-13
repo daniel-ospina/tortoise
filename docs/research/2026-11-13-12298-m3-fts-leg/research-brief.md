@@ -172,7 +172,7 @@ change, so the primary arm hands Postgres **our production term set** rather tha
 harness sends the raw sanitised text to Postgres — which is verbatim the `native` arm.
 
 **126 of the 300 queries are degenerate** (108 `definite` — a `the X` name whose only surviving token is
-`X` — and 18 ident/path), and for every one of them the two Postgres arms' ranks are identical. The
+`X` — and 18 ident — none of them a path), and for every one of them the two Postgres arms' ranks are identical. The
 artifact records the split (`terms_census`, `degenerate_ids`) and a second comparison restricted to the
 **174 tokens-controlled queries**, which is the number quoted for the primary arm in §0:
 **0.5172 → 0.5287, +1.15 pts, p = 0.727**. (Of the full arm's net +4 rows at k=3, **2** sit on collapsed
