@@ -802,8 +802,9 @@ def invalidate(
        stands — but a goal whose LAST claim is gone is never a finding again, so
        on that shape the repair route that needs no NEW INPUT is the manual,
        public, idempotent :func:`reconcile_goal_state_cache` (a later
-       ``judge_and_record`` also rewrites the word, but it mints a new claim, so
-       it is not a repair of this one). ``found`` says which shape it was —
+       ``judge_and_record`` THAT REACHES A DECIDED STATE also rewrites the word —
+       but it mints a new claim, so it is not a repair of this one, and an
+       ``unknown`` judgement writes nothing at all). ``found`` says which shape it was —
        ``False`` when there is
        NO CLAIM NOW (it was absent, or it was read at the top and then vanished
        before ``retract_point`` landed — in that second shape a claim WAS read,
@@ -1011,8 +1012,11 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     * a goal retired by its ``status`` (``archived``) whose cache said ``met``
       kept ``met`` forever, because the reason was ``goal-retired`` and that arm
       reconciled nothing — the issue's headline surviving one of its own three
-      inputs, with no later pass able to repair it (the claim is no longer live,
-      so no sweep revisits the goal);
+      inputs, with no later pass revisiting that goal once its LAST live claim is
+      gone (the archived sweep retires them together, and while a live claim does
+      remain, its own stale finding reconciles the word — so the shape that could
+      recur here is the last-claim one); the manual route for it is the public,
+      idempotent :func:`reconcile_goal_state_cache`);
     * a ``blocked`` goal lost the word when a ``target-revised`` retirement
       cleared the cache under it.
 
