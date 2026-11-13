@@ -274,6 +274,38 @@ class TestThePriorSetNeverCarriesARetiredNode:
         assert [r["id"] for r in exc2.value.folded] == ["obj-good"], exc2.value
         assert exc2.value.unresolved == ["obj-c0"]
 
+    def test_a_prior_set_read_failure_withholds_every_row_by_name(
+            self, sdk_factory, monkeypatch):
+        """A read that fails BEFORE any hop resolved names its withheld population.
+
+        `_entity_facts` raising carries no per-row payload, so the arm would
+        discard every prior row and name NONE — the candidate set empties, D3 is
+        skipped, `resolution_held` stays `[]` and the run CREATES the mention the
+        FTS read had just found.
+        """
+        sdk = sdk_factory()
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("graph gone")
+
+        monkeypatch.setattr(v2, "_entity_facts", _boom)
+        monkeypatch.setattr(v2, "_is_searchable_backend",
+                            lambda mode, sdk=None: True)
+        monkeypatch.setattr(
+            v2, "_fts_rows",
+            lambda *a, **kw: [{"id": "obj-acme", "name": "Acme",
+                               "kind": "core:org"}])
+        search = v2.search_graph(sdk, {"entities": [{"name": "Acme"}]},
+                                 "the story", max_queries=1, limit=3)
+        assert search["degraded"] is False, search
+        assert search["entities"] == [], search
+        assert search.get("entities_unresolved") == ["Acme"], search
+        # …and a healthy lookup never takes this arm.
+        monkeypatch.undo()
+        ok = v2.search_graph(sdk, {"entities": [{"name": "Acme"}]},
+                             "the story", max_queries=1, limit=3)
+        assert "entities_unresolved" not in ok, ok
+
     def test_a_dangling_resolved_from_is_cannot_answer_not_a_pre_hop_row(
             self, sdk_factory):
         """A retired pointer whose target was DELETED must not re-emit the carrier.

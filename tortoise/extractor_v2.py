@@ -3418,6 +3418,18 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     except Exception as e:  # noqa: BLE001, RUF100 — degrade the leg, not capture
         entities = list(getattr(e, "folded", None) or [])
         entities_unresolved = list(getattr(e, "unresolved_names", None) or [])
+        if not isinstance(e, _PriorFoldUnresolvable):
+            # ⛔ A read that failed BEFORE any hop resolved (`_entity_facts` raised
+            # — a driver error, a timeout, or the pre-sweep unindexed dependents
+            # scan) carries no per-row payload, so the arm above would withhold
+            # every prior row and NAME NONE of them: the candidate set empties, D3
+            # is skipped outright, `resolution_held` stays `[]` and the run CREATES
+            # the mention the FTS read had just found. Every prior row is
+            # unreadable, so every one is WITHHELD (never absent) — the per-row
+            # arm's disposition, applied whole-arm.
+            entities_unresolved = [str(r.get("name") or "").strip()
+                                   for r in results["entities"].values()]
+            entities_unresolved = [n for n in entities_unresolved if n]
         reason = ("S3 partial: the entity prior-set fold could not resolve every "
                   f"row ({type(e).__name__}: {e}) — refusing pre-hop rows")
         for _leg in ("object", "subject"):
