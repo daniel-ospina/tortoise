@@ -1028,7 +1028,17 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "table's number onto the other. "
             "THIS entry is the survivor. \u26d4 Its survival is NOT a claim that `#12016`'s copy "
             "was wrong: the passthrough it described is real (see the correction above), and the "
-            "pair is deleted for being a DUPLICATE, which is what makes the register unimportable",
+            "pair is deleted for being a DUPLICATE, which is what makes the register unimportable. "
+            "⛔ The DELEGATION above is pinned, not a review habit (`#12170`): "
+            "`tests/test_embed_writer_register.py::"
+            "test_the_delegated_store_this_row_names_still_resolves` re-derives it from SOURCE — the "
+            "writer still hands its payload to this delegate, the delegate still feeds the "
+            "passthrough's `allow_keys=` FROM the allowlist, and the allowlist still names "
+            "`embedding` — with its own mutation arm, and "
+            "`tests/test_11858_source_door_markers.py::"
+            "test_a_caller_vector_still_gets_a_truthfully_minted_marker` proves the vector lands on "
+            "the NODE. Without the first, dropping `embedding` from the allowlist leaves this "
+            "reason FALSE and every owner suite green",
             "#5004",
             stores=NO_LIVE_VECTOR,
         ),
