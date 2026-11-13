@@ -132,6 +132,33 @@ def test_entropy_is_over_characters_with_spaces_stripped():
 # ── 2. why the gate was declined: the premise is false for OUR leg ─────────
 
 
+@pytest.mark.parametrize("sample,captures,budget,measured,truncated", [
+    (300, 20, 15, 300, False),   # the committed artifact's shape — exact fit
+    (301, 20, 15, 300, True),    # a tail no group ever reaches
+    (286, 20, 15, 285, True),    # the trailing SINGLETON the loop skips
+    (29, 20, 15, 29, False),     # fewer names than captures x budget
+])
+def test_the_pooled_arms_record_their_cap(sample, captures, budget, measured,
+                                         truncated):
+    """The pooled arms' denominator is RECORDED, not left to be reconstructed.
+
+    `pooled_gate`'s `rescued_by_union` is quoted as the gate's production-truth
+    cost, and it rides on a loop that reaches at most `captures * budget` names
+    and skips a trailing singleton. A share whose population is neither the
+    sample nor disclosed is #11823's defect class in this instrument, so the
+    cap is a field (`truncated`) and this test is what reds if the field stops
+    tracking the loop: drop the singleton skip, or stop clamping to the sample,
+    and one of these four rows disagrees.
+    """
+    cov = gate._pooled_coverage(sample, captures, budget)
+    assert cov["names_measured"] == measured, cov
+    assert cov["truncated"] is truncated, cov
+    assert cov["names_measured"] <= cov["names_reached"] <= cov["names_in_sample"]
+    assert cov["skipped_singleton"] in (0, 1)
+    # the two fields must reconcile: reached = measured + skipped
+    assert cov["names_reached"] == measured + cov["skipped_singleton"]
+
+
 @pytest.mark.parametrize("name", ["the suite", "the diff", "the repo",
                                   "the tool", "the issue"])
 def test_the_premise_is_false_for_our_query_builder(name):

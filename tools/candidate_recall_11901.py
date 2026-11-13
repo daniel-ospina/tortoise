@@ -160,13 +160,21 @@ KS: tuple[int, ...] = (3, 5, 10, 15)
 
 #: The windows the GATE arms account at (#12294). Two, not four: k=3 is what the
 #: capture prior ships and k=15 is the widest window #11901 measured, so the pair
-#: bounds the answer. Module-level so the arm's schema, its accounting loop and
-#: `gated_and_missed`'s `not any(...)` read ONE declaration: if this set and the
-#: loop's k set ever diverge, `_g_hit[p]` can be empty for a gated name and
-#: `not any({})` counts it as unreachable — the headline number inverting
-#: silently. (This is the drift the set is hoisted to prevent; not a bug that
-#: has already happened.)
-_GATE_KS: tuple[int, ...] = (3, 15)
+#: bounds the answer.
+#:
+#: ⛔ DERIVED from ``KS``, and asserted non-empty, because the three readers do
+#: NOT read one thing: the arm's schema drops members outside ``KS``
+#: (``if k in KS``), and the accounting loop iterates ``KS`` and gates on
+#: ``if k in _GATE_KS`` — so a member of this set that is not in ``KS`` is
+#: silently ignored by the loop AND dropped by the schema. If that intersection
+#: were empty, ``_g_hit[p]`` would be ``{}`` for every gated name,
+#: ``not any({})`` is ``True``, and every gated name would book as
+#: ``gated_and_missed`` with ``suppressed_correct_by_k == {}`` — inverting the
+#: headline from "the gate removes correct candidates" to "the gate is exactly
+#: what we need". Deriving (rather than merely hoisting) makes that
+#: unrepresentable; the assert catches an edit that empties it.
+_GATE_KS: tuple[int, ...] = tuple(k for k in (3, 15) if k in KS)
+assert _GATE_KS, f"the gate arms must measure at least one window in KS={KS}"
 
 #: ``the <1-4 tokens>`` — the definite-description class. Bounded to 4 tokens:
 #: longer spans are clauses, not names, and the audit found real names are short.
@@ -532,6 +540,32 @@ def _name_carries_signal(name: str) -> bool:
     return _has_high_entropy(" ".join(tokens))
 
 
+def _pooled_coverage(sample_size: int, captures: int, budget: int) -> dict:
+    """The population a ``pooled``/``pooled_gate`` arm ACTUALLY measures.
+
+    ⛔ THE CAP IS RECORDED, NOT IMPLIED (#11823's defect class: a cap that
+    truncates without saying so). Both pooled arms are built by one loop that
+    reaches at most ``captures * budget`` names and skips a trailing singleton
+    (``len(group) < 2``), so without this the artifact leaves a reader to
+    reconstruct the denominator from ``captures`` and the ``budget`` literal —
+    and a ``--sample``/``--captures`` edit could narrow the population silently
+    while the arm still reports a share.
+
+    ``truncated`` is the field to read: True means the pooled numbers are about
+    ``names_measured`` names, not ``names_in_sample``. At the committed
+    artifact's shape (300 names, 20 captures, budget 15) it is False.
+    """
+    reached = min(sample_size, captures * budget)
+    singleton = 1 if reached % budget == 1 else 0
+    return {
+        "names_in_sample": sample_size,
+        "names_reached": reached,
+        "names_measured": reached - singleton,
+        "skipped_singleton": singleton,
+        "truncated": (reached < sample_size) or bool(singleton),
+    }
+
+
 def _allocate_shares(sample: int, pop: list[dict]) -> dict[str, int]:
     """Largest-remainder allocation of ``sample`` across the harvested classes.
 
@@ -762,6 +796,13 @@ def run(args: argparse.Namespace) -> int:
                 "suppressed_correct_k_sum": 0,
                 "suppressed_correct_by_k": {str(k): 0 for k in _GATE_KS
                                             if k in KS},
+                #: ⛔ A SUM OVER THE MEASURED WINDOWS, like
+                #: ``suppressed_correct_k_sum`` above and for the same reason:
+                #: a gated name missed at BOTH k=3 and k=15 contributes twice.
+                #: There is no per-k sibling for this field (none is quoted
+                #: anywhere), so read it as an event count, never as a count of
+                #: names — the 184 %-ratio and 4×-over-report defects this
+                #: module records twice are exactly this key's failure mode.
                 "noise_rows_freed": 0}
             for p in ("zep_full_name", "shipped")}
         #: per gated name, the evidence the falsifier needs: ONE entry per name,
@@ -947,9 +988,8 @@ def run(args: argparse.Namespace) -> int:
                 for k in KS:
                     var[k]["pairs"] += 1
                     by_class[vclass][str(k)]["pairs"] += 1
-                    vgate_total = _v_gated  # the gate evaluates the MENTION
                     if k == _GATE_KS[0]:
-                        for _p, _g in vgate_total.items():
+                        for _p, _g in _v_gated.items():
                             vgate[_p]["pairs"] += 1
                             if _g:
                                 vgate[_p]["gated_pairs"] += 1
@@ -965,7 +1005,7 @@ def run(args: argparse.Namespace) -> int:
                     # #12294 false-suppression: a gated mention's query is never
                     # issued, so a pair that WAS in-window loses its canonical
                     # from phase 1's window AND from phase 2's candidate table.
-                    for _p, _g in vgate_total.items():
+                    for _p, _g in _v_gated.items():
                         if not _g:
                             continue
                         if hit_ok:
@@ -1016,7 +1056,11 @@ def run(args: argparse.Namespace) -> int:
                 for k in _GATE_KS if k in KS}
             for p in ("shipped", "zep_full_name")}
         budget = 15   # production ``max_queries``
-        for start in range(0, min(len(sample), args.captures * budget), budget):
+        #: The pooled arms' own denominator, recorded beside their numbers — see
+        #: `_pooled_coverage` for why a silent cap is the defect here.
+        _pooled = _pooled_coverage(len(sample), args.captures, budget)
+        arms["pooled_coverage"] = _pooled
+        for start in range(0, _pooled["names_reached"], budget):
             group = sample[start:start + budget]
             if len(group) < 2:
                 continue
