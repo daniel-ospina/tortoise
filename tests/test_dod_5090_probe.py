@@ -2486,9 +2486,13 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     call site moves it, and this PR's own fix commits already did, three times over. Do
     not substitute `31 + 1` either — measure. And a bare `grep -c` over this file also
     matches THIS sentence, so it over-reports by one (fresh review of PR #12016, P3).
-    The call sites that DIVERGE are this test, the `#11455` row-holds test below, and
-    `test_the_shipped_default_is_searched_not_assumed` — which scores the REAL tree but
-    asserts only the note, never `row.verdict`. So reverting the one line
+    The call sites that DIVERGE — this test, the `#11455` row-holds test below,
+    `test_the_shipped_default_is_searched_not_assumed` (which scores the REAL tree but
+    asserts only the note, never `row.verdict`), and
+    `test_a_deployment_channel_that_arms_NOTHING_holds_row_one_and_is_NAMED` (`#12022`)
+    — are named as EXAMPLES and never as an exhaustive list: a list here rotted the
+    first time a fix commit added a call site, which is the defect `#12070` item 1
+    recorded. So reverting the one line
     `on_by_default = deployment["on"]` to `shipped["on"]`, or folding `ambient` back
     into it, left the WHOLE suite green — and `row.verdict` is the artefact `#11086`
     item 4 is ticked on, so the clause `#11455` exists for was pinned nowhere.
@@ -3040,6 +3044,30 @@ def test_a_deployment_channel_that_arms_NOTHING_holds_row_one_and_is_NAMED(
     assert "fly.toml=OFF(toml:[env])" in note, note
     assert "entrypoint.sh=OFF(shell:export)" in note, note
     assert "docker-compose.yml=ON(compose)" in note, note
+
+
+def test_row_one_reaches_MET_when_the_ONLY_deployment_channel_is_FLY(
+        tmp_path, monkeypatch):
+    """`#12022`'s other half: a channel that DOES arm is read as armed, and can green.
+
+    The widening is a MEASUREMENT, not a blocker: a tree whose only deployment
+    channel is `fly.toml`'s `[env]` must reach `MET` once the writer clauses hold,
+    and the note must say which CHANNELS were walked — so a reader can see the TOML
+    table was read rather than trusting that "every deployment file" covered it.
+    """
+    _fake_rule_tree(tmp_path)
+    (tmp_path / "fly.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "1"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "MET", f"{row.verdict}: {row.observed}"
+    note = next(n for n in row.notes if n.startswith("gate enabled by default:"))
+    assert "gate enabled by default: True" in note, note
+    assert "fly.toml=ON(toml:[env])" in note, note
 
 
 def test_the_per_file_caveat_is_ONE_string_BOTH_notes_call(tmp_path, monkeypatch):

@@ -53,6 +53,16 @@ tree that change landed in, every deployment FILE — `docker-compose.yml`,
 `Dockerfile.hosted`, `Dockerfile.selfhost` — is silent, so row 1 goes back to
 `PARTIAL`, which is the reading `#11086` item 4 must not be ticked over.
 
+⛔ **`#12022` widened that DEPLOYMENT subset, because it had two real channels
+missing.** `fly.toml`'s `[env]` table and the image's `entrypoint.sh` both shape a
+deployed process's environment and were outside the walk, so "every existing
+deployment file is armed" named a population that excluded them. They are walked
+now — and, like the image build files, they are DISCOVERED from the manifests
+rather than listed (see `DEPLOYMENT_SURFACES`), which is the part that keeps the
+NEXT channel from being missed the same way. On this tree all five deployment
+files are still silent, so the stricter walk CONFIRMS row 1's `PARTIAL` instead
+of moving it.
+
 ## §12.2a — the distinct-predicate count
 
 `STORAGE-ARCHITECTURE.md` §12.2a forbids *"a second, independently-derived rule
@@ -2044,7 +2054,7 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #:   container's environment.
 #: * `.github/workflows` runs CI, not a deployment.
 #:
-#: ⛔ This is a READING of the six surfaces, not a removal from them: `#11455`
+#: ⛔ This is a READING of the surfaces, not a removal from them: `#11455`
 #: forbids dropping `.env.example` from the walk, because a walk that skipped it
 #: would report `set ON in: none` over a tree that arms it.
 #:
@@ -2105,7 +2115,7 @@ DEPLOYMENT_SURFACES: tuple[str, ...] = (
 #: input of its own — a single armed variant must not stand in for the rest.
 #:
 #: ⚠️ The glob is REPO-ROOT-scoped (`REPO_ROOT.glob`), and that is a boundary like
-#: the three above rather than an unstated truth: a NESTED image file
+#: the two above rather than an unstated truth: a NESTED image file
 #: (`docker/Dockerfile.prod`, which a compose `build.dockerfile:` can reference)
 #: is outside both this glob and the walk, so moving the images out of the root
 #: would leave the surface reading `ABSENT` while `deployment["on"]` could still
@@ -2529,7 +2539,12 @@ def flag_in_shipped_configs(flag: str) -> dict:
     Returns ``{"on": bool, "files": [...], "searched": [paths],
     "mentions": [paths], "unreadable": [paths], "per_surface": {rel: {...}},
     "armed": [rels], "silent": [rels], "absent": [rels], "unmeasured": [rels],
-    "deployment": {...}}``.
+    "indeterminate": [paths], "outside_runtime": [paths],
+    "deployment": {...}}`` — where ``deployment`` carries ``files`` (per-FILE
+    state), ``channels`` (the READER applied to each file: `toml:[env]`,
+    `shell:export`, `compose`, `dockerfile`), ``builds_from`` (each compose file's
+    MEASURED image build reference) and the ``present``/``armed``/``silent``/
+    ``absent``/``unmeasured``/``measured``/``on`` reading row 1 uses.
 
     ⛔ **``on`` answers *any surface arms it* — it is NOT the question DoD row 1
     asks, and reading it as one was the `#11455` defect.** Row 1 published
@@ -2565,6 +2580,15 @@ def flag_in_shipped_configs(flag: str) -> dict:
     read; `unreadable` names any path the walk could not read (oversize, I/O
     error) so "nowhere" cannot silently exclude a file that does set it — and a
     deployment surface holding an unreadable file is `UNMEASURED`, never silent.
+
+    ⛔ **The same doctrine, one shape over (#12022): an assignment the walk cannot
+    RESOLVE is also `UNMEASURED`.** `export FLAG="${OTHER}"` may arm the flag, so
+    reading it as silence would be a claim about half an assignment; it lands in
+    ``indeterminate`` and the file holds as `UNMEASURED`. And an assignment in a
+    place a deployed process never reads — a TOML key outside `[env]`, a shell
+    variable the entrypoint never `export`s — lands in ``outside_runtime`` and is
+    REPORTED rather than silently discounted, because a reader has to be able to
+    see that the walk found the line and why it is not a shipped default.
     """
     from tortoise.env_truthy import is_truthy
 
