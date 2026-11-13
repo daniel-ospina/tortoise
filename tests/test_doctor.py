@@ -3020,6 +3020,51 @@ class TestDoctorHostedCredential:
         assert "CUT" in hosted and "UNPROVEN" in hosted, hosted
         assert rc == 0, "an unread refusal body is not a failing credential"
 
+    def test_a_cut_401_body_is_still_a_fail(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A cut 401 stays `❌` + exit 1 — the one cut that must NOT be unproven.
+
+        401 is status-definitive: the arm reads no body, so an unreadable one
+        cannot make a revoked key look merely unverified. That exemption
+        (`if team_cut and team_code != 401:`) is the ONLY thing keeping a cut 401
+        red, and nothing pinned it — removing it left the suite green (fresh
+        review, round 26 measurement). It is load-bearing in MORE shapes now that
+        the reader reports our own watchdog interrupt as a cut: a 401 body that a
+        proxy drops mid-chunk used to read complete (→ ❌) and now reads cut (→ ⚠️
+        without the exemption), which would be #11912's regression class — a
+        revoked key reading pass.
+        """
+        import http.client as _http_client
+        from urllib.error import HTTPError
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        class _IncompleteBody401(io.BytesIO):
+            """A 401 body whose stream drops mid-chunk."""
+
+            def read1(self, n=-1):
+                raise _http_client.IncompleteRead(b'{"detail":', 50)
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise HTTPError(url, 401, "Unauthorized", {},
+                            _IncompleteBody401(b'{"detail":"Invalid API key"}'))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "incomplete-401.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor incomplete 401 seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "❌" in hosted, hosted
+        assert "401" in hosted and "Invalid API key" in hosted, hosted
+        assert rc == 1, "a revoked key must fail even when its body is unreadable"
+
     def test_a_cut_body_is_reported_even_when_the_prefix_parses(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
         """A cut must be reported even when the bytes read so far are VALID JSON.
