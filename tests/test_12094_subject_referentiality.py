@@ -627,7 +627,7 @@ def test_the_phrase_offset_is_a_word_boundary_match(monkeypatch):
     ``body.find("it")`` is wrong for precisely the class this gate holds: the
     pronoun ``it`` occurs INSIDE ``with``/``within``/``itself``, so the recorded
     offset named a different word than the surface — measured at the #12102
-    review (``body[34:36] == 'it'`` inside "with"). A phrase that is genuinely
+    review (``body[14:16] == 'it'`` inside "with"). A phrase that is genuinely
     absent records ``None``, which is the honest answer; a nearby substring is
     not.
     """

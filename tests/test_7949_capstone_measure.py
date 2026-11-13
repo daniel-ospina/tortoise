@@ -5261,27 +5261,35 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         # and the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # At this PR's HEAD: entry 9982, `carve_out:` opens 9856, `uri_requiring:`
-        # 10187 — so 9982 is inside the section, and the identical text also sits at
-        # 6082 and 8498, which is what the 5th element exists to refuse.
-        # ⛔ THE ANCHOR IS THE HEAD, NOT THE BASE, because four of the five are this
-        # PR's own numbers: at `9828250732` (the rebase base) the same five read
-        # 9943 / 9817 / 10148 / 6082 / 8459. Pairing a head-derived number with the
-        # base sha is the defect this comment keeps being caught in.
-        # The two causes are separable and measured: main's advance to `9828250732`
-        # inserts NINE lines above all of them (`#12159` and its neighbours), and THIS
-        # PR's own `core` registration adds THIRTY-NINE more above the entry and the
-        # second twin (9943 on main alone -> 9982 here). So the ENTRY and the SECOND
-        # twin are +48 on their `0e281a900b` values, while the FIRST twin is +9 and
-        # nothing more — it sits above that block, which is the row's point: an
-        # insertion ANYWHERE above a cite moves it, not only a nearby one.
-        # The file is tool-MAINTAINED, not generated
-        # from a source of truth: `tools/ci_selection.py::register_tests` reads the
-        # text, splices the new entry into the surface's block and writes every other
-        # line back verbatim, which is why it also carries hand-authored prose. Either
-        # way the property this row trips on holds: an insertion anywhere above the
-        # entry moves it. That is the class here — a line-number pin over a number
-        # another tool owns, not a citation anyone mis-copied.
+        # At THIS merged tree (`main` `cd22562c24` + this PR): entry 10012,
+        # `carve_out:` opens 9886, `uri_requiring:` 10217 — so 10012 is inside the
+        # section, and the identical text also sits at 6090 and 8528, which is what
+        # the 5th element exists to refuse.
+        # ⛔ THE ANCHOR IS THIS TREE, not either side of the merge, and the
+        # decomposition is measured rather than asserted. The rebase base
+        # `f33f5e2c32` read 9949 / 9823 / twins 6082 + 8465. THIS PR alone puts the
+        # entry at 9988 (+39, its own `core` registration block, and the same +39 on
+        # the second twin: 8465 -> 8504), while `main`'s eleven-commit advance to
+        # `cd22562c24` adds +24 to the entry (9949 -> 9973) and +24 to the second
+        # twin (8465 -> 8489) but only +8 to the FIRST twin (6082 -> 6090) — eight
+        # of its twenty-four inserted lines sit above 6082, so the advance is NOT a
+        # uniform shift, and a comment claiming one would be the same carried-forward
+        # arithmetic this block exists to refuse. 9949 + 39 + 24 = 10012 for the
+        # entry, which is why neither side's number describes a tree that adds BOTH.
+        # ⛔ The pin this branch carried before the merge (9982) was ALSO wrong on
+        # its own base — that tree read 9988, six higher — so it is recorded here
+        # rather than quietly replaced: a rebase that keeps a stale cite is the same
+        # defect as the one this row exists to catch, one merge later.
+        # The file is tool-MAINTAINED, not generated from a source of truth:
+        # `tools/ci_selection.py::register_tests` reads the text, splices the new
+        # entry into the surface's block and writes every other line back verbatim,
+        # which is why it also carries hand-authored prose. Either way the property
+        # this row trips on holds: an insertion anywhere above the entry moves it —
+        # measured on `main` as `#12159` (`33781512b6`) registering
+        # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
+        # insertion that moved every number below it. That is the class here — a
+        # line-number pin over a number another tool owns, not a citation anyone
+        # mis-copied.
         # ⚠️ Both of the twins are INDENTED sub-keys
         # (`core:` 2235, `sdk:` 8264 at THIS head; `sdk:` is 8225 at `9828250732`) of
         # `surfaces:`, so the
