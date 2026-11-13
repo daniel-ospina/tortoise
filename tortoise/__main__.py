@@ -4255,7 +4255,14 @@ def _cmd_config(args) -> int:
             if env_file.get("daemon_error"):
                 print("  ⛔ the daemon's target does not RESOLVE with this file:")
                 print(f"     {_printable(env_file['daemon_error'])}")
-                if env_file.get("read_by_this_command"):
+                if env_file.get("daemon_error_from_env"):
+                    # The ENVIRONMENT's own value does not resolve, so the file
+                    # neither caused it nor can this command avoid it — both
+                    # entry points see the same refusal (#12428 review).
+                    print("     the ENVIRONMENT's own value does not resolve — this")
+                    print("     file did not cause it, and the target above fails the")
+                    print("     same way")
+                elif env_file.get("read_by_this_command"):
                     # The process applied the file, so ITS OWN resolution ran on
                     # the same values — the target above fails the same way.
                     print("     this process applied that file at import as well, so")
@@ -11178,7 +11185,8 @@ def _dotenv_unread_candidates(daemon_path: str) -> list[str]:
 
 
 def _dotenv_divergence(graded_target: str | None = None, *,
-                       graded_unresolved: bool = False) -> dict:
+                       graded_unresolved: bool = False,
+                       graded_explicit: bool = False) -> dict:
     """What the repo-root `.env` changes — and what it cannot (#12407).
 
     THE GAP THIS CLOSES. `tortoise.mcp_server` reads `<repo>/.env` at import,
@@ -11256,6 +11264,11 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         "cli_target": None,
         "daemon_target": None,
         "differs": False,
+        # TRUE when the caller graded an EXPLICIT target (`doctor --db`/`--path`)
+        # rather than one resolved from the environment. The printing arms need it
+        # to explain a divergence correctly: with an explicit target the
+        # difference is that target, NOT the two ladders (#12428 review).
+        "graded_explicit": bool(graded_explicit),
         # A `.env` that NO entry point reads. The docs say `cp .env.example .env`;
         # a user who does that in their PROJECT directory (a pip install, whose
         # package root is not the cwd) has configured nothing that reads it —
@@ -11322,6 +11335,18 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         daemon_target: str | None = None
         daemon_rung: str | None = None
         daemon_error: str | None = None
+        # ⛔ Does the ENVIRONMENT alone already fail? A `ValueError` raised under
+        # the overlay can come from a value the FILE did not supply — e.g. an
+        # inherited `TORTOISE_DB_URI=relative/x.db` while the file sets a valid
+        # `TORTOISE_DB_PATH` — and blaming the file ("this `.env` cannot be
+        # loaded at all", then "the target above does not show that error") makes
+        # two false statements about a healthy file, in a diagnostic the user is
+        # reading to find out what is wrong (#12428 review).
+        _env_error_preexists = False
+        try:
+            daemon_db_target()
+        except ValueError:
+            _env_error_preexists = True
         # The overlay APPLIES the file, so everything that can fail — including
         # the redactor, which must see the `.env`'s value in `os.environ` —
         # happens INSIDE it. Redacting after the overlay's `finally` restored the
@@ -11334,11 +11359,16 @@ def _dotenv_divergence(graded_target: str | None = None, *,
                 except ValueError as exc:
                     # `RELATIVE_PATH_ERROR` quotes the offending value.
                     daemon_error = _redact_db_value(
-                        f"{type(exc).__name__}: {exc} — this `.env` cannot be "
-                        "loaded at all",
+                        f"{type(exc).__name__}: {exc}"
+                        + ("" if _env_error_preexists else
+                           " — this `.env` cannot be loaded at all"),
                         os.environ.get("TORTOISE_DB_URI"),
                         os.environ.get("TORTOISE_DB_PATH"),
                     )
+                    if _env_error_preexists:
+                        # Attribute the refusal to the ENVIRONMENT, so the
+                        # printing arms stop claiming the file caused it.
+                        payload["daemon_error_from_env"] = True
         except ValueError as exc:
             # `os.environ` REFUSES a value carrying a NUL byte, and
             # `parse_dotenv` decodes a binary file with errors="replace" — so a
@@ -11372,6 +11402,9 @@ def _dotenv_divergence(graded_target: str | None = None, *,
                 os.environ.get("TORTOISE_DB_URI"),
                 os.environ.get("TORTOISE_DB_PATH"),
             )
+            # No `.env` key took effect here, so the refusal is the ENVIRONMENT's
+            # — the printing arms must not blame the file for it (#12428 review).
+            payload["daemon_error_from_env"] = True
     if cli_error:
         payload["cli_error"] = cli_error
     if daemon_error:
@@ -11385,11 +11418,27 @@ def _dotenv_divergence(graded_target: str | None = None, *,
     payload["differs"] = bool(cli_target and daemon_target
                               and cli_target != daemon_target)
     if payload["differs"] and payload["cli_target"] == payload["daemon_target"]:
-        # Reachable: the mask collapses userinfo, so two stores differing ONLY
-        # in credentials display identically. Say so rather than let the two
-        # printed lines look absurd beside a "they differ" verdict.
-        payload["difference_is_masked"] = (
-            "the two targets differ only in masked credential bytes")
+        # Reachable: the mask collapses userinfo, so two stores differing ONLY in
+        # credentials display identically. ⛔ The claim is
+        # "differ ONLY in credential bytes" — so only make it when BOTH raw
+        # targets really carry userinfo. A path with an `@` in it masks to the
+        # same sentinel as another such path, and saying those two "differ only
+        # in masked credential bytes" would reassure about STORE IDENTITY — two
+        # wholly different databases read as "same store, different login"
+        # (#12428 review).
+        from tortoise.config import looks_like_uri_userinfo as _looks_userinfo
+
+        def _has_userinfo(raw: str) -> bool:
+            head = raw.split("?", 1)[0].split("#", 1)[0]
+            return _looks_userinfo(head)
+
+        if _has_userinfo(cli_target) and _has_userinfo(daemon_target):
+            payload["difference_is_masked"] = (
+                "the two targets differ only in masked credential bytes")
+        else:
+            payload["difference_is_masked"] = (
+                "both targets render as the same masked text — the difference "
+                "cannot be shown here")
     return payload
 
 
@@ -11509,9 +11558,15 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
         # file, the rows below resolved from the SAME values and DO show the
         # error, so the round-4 sentence was false in that state (#12428 review).
         rows.append(("Config: .env", "❌",
-                     f"{path} makes the DAEMON's target unresolvable: "
-                     f"{_printable(str(env_file['daemon_error'])[:90])} — "
-                     + ("this process applied that file at import as well, so "
+                     (f"{path} is disclosed, but the DAEMON's target is unresolvable "
+                      f"from the environment itself: "
+                      if env_file.get("daemon_error_from_env") else
+                      f"{path} makes the DAEMON's target unresolvable: ")
+                     + f"{_printable(str(env_file['daemon_error'])[:90])} — "
+                     + ("this file did not cause it and the rows below fail the "
+                        "same way"
+                        if env_file.get("daemon_error_from_env") else
+                        "this process applied that file at import as well, so "
                         "the rows below fail the same way"
                         if _applied else
                         "this command does not read it, so the rows below do not "
@@ -11535,16 +11590,55 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                   f"the rows below grade {_printable(str(graded))} — a "
                   "DIFFERENT store" + _applied_note)
         if _applied:
-            detail += (" (both read the SAME environment now, so the difference "
-                       "comes from the two LADDERS ranking its keys differently)")
+            # ⛔ The ladders clause is only true when BOTH targets come from the
+            # SAME (post-fill) environment. With `--db`/`--path` the caller graded
+            # an EXPLICIT target, so the difference is that target, not ladder
+            # ranking (measured: `doctor --path …/graded.db` + a `.env` URI blamed
+            # the ladders; #12428 review).
+            if env_file.get("graded_explicit"):
+                detail += (" (this run graded its OWN explicit target, so the "
+                           "difference is that target, not this file)")
+            else:
+                detail += (" (both read the SAME environment now, so the difference "
+                           "comes from the two LADDERS ranking its keys differently)")
         if env_file.get("difference_is_masked"):
             detail += f" ({env_file['difference_is_masked']})"
         rows.append(("Config: .env", "⚠️", detail))
         return rows
-    detail = (f"{path} sets "
-              f"{_printable(', '.join(env_file['keys']) or 'nothing')} — "
-              f"{_read_clause}; it selects the same "
-              f"graph target the rows below grade ({_printable(str(graded))})")
+    # ⛔ The SAME three-way split `config show` uses (graph_keys / shadowed /
+    # none). An unconditional "it selects the same graph target" is false when the
+    # file has NO graph key (provider keys only) and when the environment shadows
+    # the file's key — both credited the file with selecting a target it never
+    # touched (#12428 review).
+    if env_file.get("graph_keys"):
+        _deciding = next(
+            (key for key in _DB_LADDER_KEYS
+             if key in env_file["graph_keys"]
+             or key in (env_file.get("shadowed_graph_keys") or ())),
+            None)
+        if _deciding and _deciding not in env_file["graph_keys"]:
+            detail = (f"{path} sets "
+                      f"{_printable(', '.join(env_file['graph_keys']))} — "
+                      f"{_read_clause}; the ENVIRONMENT's {_printable(_deciding)} "
+                      f"decides it for the daemon, so the file's key cannot change "
+                      f"the target the rows below grade ({_printable(str(graded))})")
+        else:
+            detail = (f"{path} sets "
+                      f"{_printable(', '.join(env_file['graph_keys']))} — "
+                      f"{_read_clause}; it selects the same graph target the rows "
+                      f"below grade ({_printable(str(graded))})")
+    elif env_file.get("shadowed_graph_keys"):
+        detail = (f"{path} sets "
+                  f"{_printable(', '.join(env_file['keys']) or 'nothing')} — "
+                  f"{_read_clause}; the environment already sets "
+                  f"{_printable(', '.join(env_file['shadowed_graph_keys']))}, and "
+                  "the daemon only fills keys that are ABSENT — so the file cannot "
+                  f"change the target the rows below grade ({_printable(str(graded))})")
+    else:
+        detail = (f"{path} sets "
+                  f"{_printable(', '.join(env_file['keys']) or 'nothing')} — "
+                  f"{_read_clause}; no graph key is in this file, so the target the "
+                  f"rows below grade ({_printable(str(graded))}) is the daemon's too")
     detail += _applied_note
     rows.append(("Config: .env", "ℹ️", detail))
     return rows
@@ -15287,6 +15381,7 @@ def _cmd_doctor(args):
     # report that rather than deny it.
     results[_dotenv_slot:_dotenv_slot] = _dotenv_rows(
         _dotenv_divergence(graded_target=target,
+                           graded_explicit=bool(db or path),
                            # ⛔ `target is None` — NOT "a --db was given". The
                            # environment's own failure to resolve is the same
                            # state for the ROWS (they grade nothing), and keying

@@ -66,7 +66,20 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     env_path = tmp_path / "repo" / ".env"
     monkeypatch.setattr(dotenv_file, "dotenv_path", lambda: str(env_path))
-    return env_path
+    # ⛔ `_load_dotenv` writes `os.environ` DIRECTLY, and the session-level
+    # `_isolate_process_env` only restores TORTOISE_*/SUPABASE_*/PACK_STATE_* —
+    # so a provider key a fixture `.env` fills (`DEEPSEEK_API_KEY=…`, an arbitrary
+    # `A`/`B`/`c`) would survive the test and flip later `doctor` provider rows,
+    # which is exactly what `test_doctor.py::_keyless_llm_env` exists to prevent
+    # (#12428 review). Restore EVERY key added or changed while this test ran.
+    before = dict(os.environ)
+    yield env_path
+    for key in list(os.environ):
+        if key not in before:
+            del os.environ[key]
+    for key, value in before.items():
+        if os.environ.get(key) != value:
+            os.environ[key] = value
 
 
 def _write_env(path, text):
@@ -1042,3 +1055,121 @@ def test_config_show_names_the_LADDERS_as_the_cause_when_it_applied_the_file(
 
     assert "they differ only through the two LADDERS ranking" in out, out
     assert "resolved from the environment only" not in out, out
+
+
+def test_two_at_paths_are_not_described_as_credential_only(capsys, _isolated,
+                                                           monkeypatch):
+    """Two `@`-bearing PATHS mask alike; that is not "differ only in credentials".
+
+    Measured before the fix: env `TORTOISE_DB_PATH=/srv/alice@corp/cli.db` and a
+    `.env` URI `/home/bob@corp/daemon.db` both mask to the same sentinel, and the
+    row said "the two targets differ only in masked credential bytes" — i.e. "same
+    store, different login" about two different databases, a false reassurance
+    about STORE IDENTITY (#12428 review).
+    """
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/srv/alice@corp/cli.db")
+    _write_env(_isolated, "TORTOISE_DB_URI=/home/bob@corp/daemon.db\n")
+
+    out = _show_text(capsys)
+
+    assert "differ only in masked credential bytes" not in out, out
+    assert "the difference cannot be shown here" in out, out
+
+
+def test_doctor_info_row_does_not_credit_a_file_key_that_cannot_act(
+        capsys, _isolated, monkeypatch):
+    """Provider-only `.env` + an environment store: the file selected nothing.
+
+    Measured before the fix: `sets DEEPSEEK_API_KEY … it selects the same graph
+    target the rows below grade (/tmp/env-only.db)` — the file has no graph key
+    at all (#12428 review).
+    """
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/env-only.db")
+    _write_env(_isolated, "DEEPSEEK_API_KEY=sk-not-a-real-key\n")
+
+    _run(("doctor",))
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+
+    assert "it selects the same graph target" not in row, row
+    assert "the environment already sets TORTOISE_DB_PATH" in row, row
+
+
+def test_doctor_info_row_says_when_the_file_has_no_graph_key(
+        capsys, _isolated, monkeypatch):
+    """The `embedded-allowed` rung: no ladder key anywhere, so say exactly that."""
+    monkeypatch.setenv("TORTOISE_ALLOW_EMBEDDED", "1")
+    _write_env(_isolated, "DEEPSEEK_API_KEY=sk-not-a-real-key\n")
+
+    _run(("doctor",))
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+
+    assert "it selects the same graph target" not in row, row
+    assert "no graph key is in this file" in row, row
+
+
+def test_doctor_does_not_blame_the_ladders_for_an_explicit_target(capsys, _isolated):
+    """`--path` grades its OWN target, so the difference is not ladder ranking.
+
+    Measured before the fix: applied `.env` + `doctor --path …/graded.db` printed
+    "both read the SAME environment now, so the difference comes from the two
+    LADDERS ranking its keys differently" — the difference was the flag
+    (#12428 review).
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    _write_env(_isolated, "TORTOISE_DB_URI=/tmp/daemon-side.db\n")
+    _load_dotenv(str(_isolated))
+    graded = str(_isolated.parent / "graded.db")
+
+    _run(("doctor", "--path", graded))
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+
+    assert "two LADDERS" not in row, row
+    assert "graded its OWN explicit target" in row, row
+
+
+def test_a_broken_ENVIRONMENT_value_is_not_blamed_on_the_file(capsys, _isolated,
+                                                             monkeypatch):
+    """The file is healthy; the ENVIRONMENT's URI is what does not resolve.
+
+    Measured before the fix: env `TORTOISE_DB_URI=relative/env.db` (invalid) with
+    a valid `.env` `TORTOISE_DB_PATH` printed "— this `.env` cannot be loaded at
+    all" and then "the target above does not show that error", while the target
+    above showed exactly that error: two false statements about a healthy file
+    (#12428 review).
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "relative/env.db")
+    _write_env(_isolated, "TORTOISE_DB_PATH=/tmp/file-path.db\n")
+
+    out = _show_text(capsys)
+
+    assert "cannot be loaded at all" not in out, out
+    assert "does not show that error" not in out, out
+    assert "the ENVIRONMENT's own value does not resolve" in out, out
+
+
+_LEAK_PROBE = "ZZ_DOTENV_LEAK_PROBE"
+
+
+def test_a_dotenv_applied_by_a_test_leaks_no_environment(capsys, _isolated):
+    """`_load_dotenv` writes `os.environ` directly, so the fixture must undo it.
+
+    Paired with the test below (same file order): without the restore the key
+    survives and flips later `doctor` provider rows — the reason
+    `test_doctor.py::_keyless_llm_env` exists (#12428 review).
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    _write_env(_isolated, f"{_LEAK_PROBE}=1\n")
+    _load_dotenv(str(_isolated))
+    assert os.environ[_LEAK_PROBE] == "1"
+
+
+def test_the_previous_test_leaked_nothing_into_the_environment(_isolated):
+    """The other half of the pair — runs immediately after the leaking test."""
+    assert _LEAK_PROBE not in os.environ, (
+        "a `.env` applied by one test leaked its key into the next one"
+    )
