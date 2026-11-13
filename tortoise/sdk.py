@@ -41967,7 +41967,7 @@ class TortoiseSDK:
         #     record AT the call site (``extractor_v2._fts_rows``), naming the
         #     measured recall@3 delta and, explicitly, that only candidate
         #     composition is measured — not the downstream link/supersession
-        #     outcomes. Side with the gate OFF (the default), none of this runs.
+        #     outcomes. With the gate OFF (the default), none of this runs.
         #
         # ⛔ Placed BEFORE ``result_ids[:limit]`` on purpose: a reranker that
         # ran after the cut could only reorder rows that already survived, and

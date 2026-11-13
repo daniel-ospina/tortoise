@@ -2948,7 +2948,7 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
                                   # does not earn where it runs. Artifact
                                   # `docs/research/2026-11-12-12297-rerank-
                                   # calibration/measurement-noun-path.json`, whose
-                                  # brief calls that row the honest counter-case),
+                                  # brief calls that row the honest counter-case —
                                   # and the lever ships OFF by default behind a
                                   # gate whose OFF path is byte-identical. SCOPE: the
                                   # measurement covers candidate COMPOSITION at
