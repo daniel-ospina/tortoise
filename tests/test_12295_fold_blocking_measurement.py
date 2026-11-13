@@ -654,3 +654,99 @@ def test_every_figure_the_brief_quotes_is_bound_to_the_artifact(report):
     exact = arms["exact_by_class"]["definite"]["3"]
     assert f"definite class {exact['in_window']}/{exact['n']} here" in text, (
         "the brief does not quote the artifact's exact-arm definite class figure")
+
+
+def _row(*cells: object) -> str:
+    """The markdown table row the brief renders for ``cells``."""
+    return "| " + " | ".join(str(c) for c in cells) + " |"
+
+
+def test_the_briefs_tables_are_exactly_the_artifacts(report):
+    """Every claim-bearing TABLE ROW must equal the row the artifact generates.
+
+    ⛔ A COLUMN TOTAL is not a pin: one cell can be moved by moving a second so the
+    total holds. Measured #12304 review round 27 — each gave ``13 passed`` while
+    the brief's claim went false: ``article-drop.attached_folded`` 175 -> 174
+    TOGETHER WITH ``space-to-hyphen`` 179 -> 180 (sum still 386, breaking the
+    brief's ``386 = 175 + 179 + 21 + 11`` decomposition); and
+    ``space-to-hyphen.in_multikey_block`` 180 -> 179 with ``article-drop``
+    180 -> 181 (sum still 422, breaking ``180/180 reachable by the blocker`` and
+    silently making the class only as reachable as the window, which the residual
+    test's ``>=`` arm cannot see).
+
+    ⛔ And a needle cannot tell "the brief quotes this as its figure" from "this
+    numeral occurs in unrelated prose": ``pair_completeness["5"]`` 0.9953 -> 0.99
+    was satisfied by the falsifier's OWN ``>= 0.99`` elsewhere, and a value mutated
+    TO 1.0 skipped the completeness check entirely. An exact row closes both at
+    once — a moved cell changes the row, and no unrelated numeral supplies one.
+    """
+    text = BRIEF.read_text()
+    arms = report["arms"]
+    blocking = arms["blocking"]
+    pool = blocking["fts_only"]
+    pairs = blocking["pairs"]
+    prod_k = int(arms["duplicate_rate"]["window_k"])
+
+    #: §3.1 — cost and completeness per window. Bold marks the production row and
+    #: any completeness of 1.0; only the production row carries its numerator.
+    for k in sorted(int(x) for x in pool["pair_completeness"]):
+        ks = str(k)
+        pc = pool["pair_completeness"][ks]
+        production = k == prod_k
+        label = (f"**FTS window, k={k}** (production)" if production
+                 else f"FTS window, k={k}")
+        cell = f"**{pc:.4f}**" if (production or pc == 1.0) else f"{pc:.4f}"
+        if production:
+            cell = f"{cell} ({pool['in_window'][ks]}/{pairs})"
+        expected = _row(label, k, cell)
+        assert expected in text, (
+            "the brief's k={} table row is not the one the artifact generates "
+            "({!r})".format(k, expected))
+
+    #: §3.3 — the per-class table at the production window. The blocker cell is bold
+    #: exactly where it exceeds the window, which is the shape the brief uses; the
+    #: attached cell is always bold.
+    for cls, rows in arms["variant_by_class"].items():
+        row = rows[str(prod_k)]
+        reach = row["in_multikey_block"]
+        reach_cell = f"**{reach}**" if reach > row["in_window"] else f"{reach}"
+        expected = _row(cls, row["pairs"], row["in_window"], reach_cell,
+                        f"**{row['attached']}**")
+        assert expected in text, (
+            "the brief's {!r} class row is not the one the artifact generates "
+            "({!r})".format(cls, expected))
+
+    classes = arms["variant_by_class"]
+    folded = arms["variant"][str(prod_k)]["attached_folded"]
+    addends = [classes[c][str(prod_k)]["attached_folded"]
+               for c in ("article-drop", "space-to-hyphen", "hyphen-to-space",
+                         "hash-dropped")]
+    #: The prose WRAPS mid-claim, so the sentence-level assertions read a
+    #: whitespace-normalised copy; the table rows above must stay exact because a
+    #: row is one line by construction.
+    flat = " ".join(text.split())
+    #: Each addend bound to its OWN class name, so the 386 total cannot be
+    #: preserved by trading between two classes.
+    for cls, value in zip(("article-drop", "space-to-hyphen", "hyphen-to-space",
+                           "hash-dropped"), addends):
+        assert f"{value} (`{cls}`" in flat, (
+            f"the brief does not bind {value} to `{cls}` in its 386 decomposition")
+    assert (f"{folded} = {addends[0]} + {addends[1]} + {addends[2]} + "
+            f"{addends[3]}") in flat, (
+        f"the brief does not state the decomposition as the artifact's addends "
+        f"({folded} = {' + '.join(map(str, addends))})")
+
+    #: The class the residual argument rests on: its reach, and the per-k claim the
+    #: brief asserts by NAME ("= 180 at each of those k").
+    spc = classes["space-to-hyphen"]
+    row3 = spc[str(prod_k)]
+    assert (f"{row3['pairs']}/{row3['in_multikey_block']} reachable by the "
+            "blocker") in flat, (
+        "the brief does not quote this class's reach as the artifact holds it")
+    wide = {spc[str(k)]["in_window"] for k in (5, 10, 15)}
+    assert wide == {row3["pairs"]}, (
+        f"the artifact's k=5/10/15 in-window counts are {sorted(wide)}, not the "
+        f"single value ({row3['pairs']}) the brief states at each of those k")
+    assert f"all {row3['pairs']} are in the window" in flat, (
+        "the brief no longer states the wide-window claim this class's diagnosis "
+        "rests on")
