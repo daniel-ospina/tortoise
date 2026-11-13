@@ -256,8 +256,9 @@ move the census, and it lands in a reviewed diff like any other edit.
    carve-out — it records a method deliberately outside
    the reachable set, and the guard reds if such a method later becomes reachable.
 
-**To REMOVE a symbol** (a tool from `TOOL_REGISTRY` or from `RETIRED_USE_INSTEAD`, a public
-method from `TortoiseSDK`), the cut **refuses** a symbol that disappears with no record —
+**To REMOVE a symbol** (a tool from `TOOL_REGISTRY`, a public method from `TortoiseSDK` — a
+`RETIRED_USE_INSTEAD` forward is **graded** by this gate but is not a removal source, see the
+end of this paragraph), the cut **refuses** a symbol that disappears with no record —
 whenever a committed baseline exists to compare against (a first cut is not gated; deleting
 `config/surface-manifest.yml` first, or splicing one row out of the baseline by hand, defeats the
 comparison — no gate can see a removal both documents already agree on, so take the archive
@@ -281,7 +282,13 @@ rename**, which keeps no code by design: its record is the map entry plus
 `RETIRED_USE_INSTEAD` entry is **not** a route for a removal, and the refusal no longer pretends
 it is: with the declaration still live the symbol is RETIRED rather than removed (it is still
 served, and the baseline's `retired:` half is compared), and with the declaration gone the map
-key dangles, which the cut refuses as a contradiction. A genuine **rename**
+key dangles, which the cut refuses as a contradiction. So do not archive a forward entry: while
+its KEY is in the map, `archive_surface.py archive` refuses it ("a `RETIRED_USE_INSTEAD`
+forward entry — still SERVED"); with the key and the declaration BOTH gone it refuses too
+("has no `ToolDefinition` … nothing to archive"); and `archive/README.md` says the same of the
+23 committed entries. To really remove such a tool, delete the map KEY first (it is then an
+ordinary `TOOL_REGISTRY` tool, and neither half of the baseline loses a name), archive it, then
+delete the declaration. A genuine **rename**
 passes `--allow-removal <symbol> --allow-removal-reason <why>`, which is logged in the cut output and belongs in the PR
 body — and for an SDK method that is also the route out of the map-only shape: the recorded rename
 procedure (old name into `RETIRED_SDK_METHODS`, method gone from `sdk.py`) is exactly a departure

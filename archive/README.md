@@ -101,7 +101,14 @@ enforced at two different seams, deliberately:
   in `check`: it iterates the manifest's own entries, so a symbol gone from **both** is
   invisible to it. `cut` is the seam where a row is actually forgotten, so the refusal is
   there — **whenever a committed baseline exists to compare against** (a first cut has no
-  prior to lose, so it is not gated). ⚠️ **Two hand-edits defeat the comparison, and neither is
+  prior to lose, so it is not gated) — **and for exactly the symbols that baseline carries: MCP
+  tool rows, public `TortoiseSDK` methods, and the `retired:` forward names.** ⚠️ **A
+  whole-`module` removal is NOT graded by it**: the surface baseline has no module rows, so a
+  module deletion moves nothing `cut` compares, and this `check` iterates the manifest's
+  entries, so a module that was never archived is invisible here too — archive a module by hand
+  from the batch procedure below, and
+  [#12402](https://github.com/daniel-ospina/tortoise/issues/12402) tracks the gate that would
+  enforce it. Do not read this bullet as covering every archive kind. ⚠️ **Two hand-edits defeat the comparison, and neither is
   a defect of the gate — no comparison of two documents can see a removal both already agree
   on:** deleting `config/surface-manifest.yml` before the cut (a first cut has no prior), or
   **splicing** the baseline by hand — deleting the row, the derived row, and the four

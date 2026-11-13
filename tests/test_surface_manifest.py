@@ -5319,6 +5319,65 @@ def test_an_SDK_rename_with_NO_map_entry_is_refused_so_the_CALLER_fails_closed(
     # that needs no freeze — see `test_a_STATED_RENAME_clears_the_SDK_map_ONLY_half`.
 
 
+def test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES():
+    """CONTRIBUTING must not list `RETIRED_USE_INSTEAD` as a removal source.
+
+    The opening line said "a tool from `TOOL_REGISTRY` or from `RETIRED_USE_INSTEAD`", and
+    the archive route it then prescribes refuses that symbol in BOTH orders an operator can
+    perform (`archive_surface.archive` — "a `RETIRED_USE_INSTEAD` forward entry — still
+    SERVED" with the declaration live; "has no `ToolDefinition` … nothing to archive" with it
+    gone), while six lines later the same paragraph says the forward is NOT a route and
+    `archive/README.md` says the 23 committed entries are deliberately not archived
+    (review of PR #12313, round 19). A doc is a prescription, so this is pinned.
+    """
+    sm = _load_manifest_tool()
+    contributing = (sm.ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    start = contributing.index("**To REMOVE a symbol**")
+    paragraph = contributing[start : contributing.index("\n\n", start)]
+    assert "or from `RETIRED_USE_INSTEAD`" not in paragraph, paragraph[:400]
+    # ...and the correction names it as GRADED but not a removal source, rather than dropping
+    # the map from the docs entirely (it is graded: the `retired:` half is compared).
+    assert "`RETIRED_USE_INSTEAD`" in paragraph
+    assert "not a removal source" in paragraph
+    # The README's blanket claim is qualified: the surface classes are named, and the module
+    # gap it cannot see is disclosed with the issue that tracks it (#12402).
+    readme = (sm.ROOT / "archive" / "README.md").read_text(encoding="utf-8")
+    bullet = readme[readme.index("**a symbol that disappears with NO record is RED**") :]
+    bullet = bullet[: bullet.index("\n  `#12327`") if "\n  `#12327`" in bullet else 1800]
+    assert "whole-`module` removal is NOT graded" in bullet, bullet[:600]
+
+
+def test_a_class_the_archive_knows_but_the_baseline_cannot_carry_is_REFUSED_by_name():
+    """An unmapped surface class must refuse BY NAME, not raise a bare `KeyError`.
+
+    `ARCHIVE_KIND_BY_CLASS` is closed over the two classes `surface_symbols` can emit, so a
+    `module` (a real archive kind, and the one committed archive entry) never reaches
+    `removal_report` from `cut` — the #12237 hole is closed for surface rows, and the module
+    half is #12402. The lookup used to be `ARCHIVE_KIND_BY_CLASS[cls]`, so a caller passing a
+    `module` class got `KeyError: 'module'`, which names neither the class nor what a new class
+    needs (review of PR #12313, round 19). This pins the MESSAGE, not just the exception type:
+    the type alone is satisfied by the old `KeyError` not being re-raised.
+    """
+    sm = _load_manifest_tool()
+    with pytest.raises(ValueError) as excinfo:
+        sm.removal_report({("tortoise.archived.search_legacy", "module")}, set(), {})
+    message = str(excinfo.value)
+    assert "'module'" in message, message
+    assert "ARCHIVE_KIND_BY_CLASS" in message, message
+    assert "REMOVAL_WAYS" in message, message
+    assert "12402" in message, message
+
+    # Non-vacuity: the two classes the baseline DOES carry are still graded normally.
+    records = {
+        "archived": {("mcp-tool", "tortoise_x")},
+        "forward_raw": set(),
+        "sdk_retired": set(),
+        "sdk_renamed": set(),
+    }
+    problems, accounting = sm.removal_report({("tortoise_x", "tool")}, set(), records)
+    assert problems == [] and accounting, (problems, accounting)
+
+
 def test_the_MAP_HALF_has_a_printed_route_it_can_actually_use(
     monkeypatch, tmp_path, derived_baseline, capsys
 ):
@@ -6117,8 +6176,11 @@ def test_an_archive_entry_without_its_FIELDS_is_not_a_RECORD(tmp_path):
 
     # non-vacuity: the REAL row, unmodified, is a record — so the refusals above are about the
     # missing field, not about the fixture. (The committed entry is a `module`, which the
-    # removal gate does not grade — `ARCHIVE_KIND_BY_CLASS` is tool/sdk — so this asserts the
-    # READER's acceptance, and, below, that a module row is not mistaken for a tool record.)
+    # removal gate cannot grade at all: `ARCHIVE_KIND_BY_CLASS` is closed over the classes the
+    # SURFACE BASELINE can carry — tool rows and SDK methods — so a module deletion moves
+    # nothing `cut` compares. That gap is #12402, not something this test can close; what it
+    # asserts here is the READER's acceptance, and that a module row is not mistaken for a tool
+    # record.)
     path.write_text(_json.dumps({"schema": 1, "entries": [real]}), encoding="utf-8")
     records = sm.removal_records(path)
     assert records["archived"] == {(real["kind"], real["symbol"])}, records

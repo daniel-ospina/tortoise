@@ -2129,6 +2129,16 @@ def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
 # and then everything is green with the removed code gone from the repo — which is exactly
 # what the #11609 owner ruling forbids ("we archive it in case we made a mistake").
 
+# ⛔ CLOSED OVER THE CLASSES `surface_symbols` CAN EMIT (tool rows and SDK methods) — and that
+# closure is a LIMIT, not a coverage claim. `module` is a real archive kind
+# (`archive_surface.KINDS`) and the one committed archive entry is a module, but the surface
+# baseline carries no module rows, so a whole-module deletion moves nothing this gate compares
+# and `archive_surface.check` (which iterates the manifest's own entries) cannot see it either:
+# the #12237 hole is closed here for the surface classes only, and #12402 tracks the module
+# half. Do not read this map as "every archived kind is graded". A NEW class is wired here
+# plus in `REMOVAL_WAYS`, and `removal_report` refuses an unmapped class by name rather than
+# raising a bare `KeyError` (measured: `removal_report({('x', 'module')}, set(), {})` used to
+# raise `KeyError: 'module'`).
 ARCHIVE_KIND_BY_CLASS = {"tool": "mcp-tool", "sdk": "sdk-method"}
 
 REMOVAL_WAYS = (
@@ -2518,7 +2528,21 @@ def removal_report(
         if (symbol, cls) in derived:
             continue
         found: list[str] = []
-        kind = ARCHIVE_KIND_BY_CLASS[cls]
+        try:
+            kind = ARCHIVE_KIND_BY_CLASS[cls]
+        except KeyError:
+            # Not a bare `KeyError` from a lookup nobody thought about: a class the archive
+            # knows but this map does not is exactly how a removal goes ungraded, and the
+            # traceback named neither the class nor the fix. A new surface class needs an
+            # archive kind HERE and a runnable route in `REMOVAL_WAYS`, or the operator gets
+            # a refusal they can act on instead of a crash they cannot.
+            raise ValueError(
+                f"surface class {cls!r} has no archive kind — `ARCHIVE_KIND_BY_CLASS` covers "
+                f"{sorted(ARCHIVE_KIND_BY_CLASS)}, the classes the surface baseline can carry. "
+                "A new class needs an entry there AND a printed route in `REMOVAL_WAYS`; a "
+                "class the baseline never carries (e.g. `module`, #12402) cannot be graded by "
+                "comparing baselines at all, and must not be silently skipped."
+            ) from None
         archived = (kind, symbol) in records.get("archived", ())
         if cls == "sdk" and symbol in records.get("sdk_retired", ()):
             # ONE record (round 5: counting the pair apart refused this tree's own procedure),
