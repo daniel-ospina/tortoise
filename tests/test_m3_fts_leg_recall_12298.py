@@ -1372,6 +1372,14 @@ def test_brief_headline_table_pins_every_column_and_the_subset_row(
     for arm, cell in _HEADLINE_ROWS:
         assert arm in rows, f"§0's table has no row for {arm!r}"
         cells = rows[arm]
+        if arm == "__subset__":
+            # ⛔ The LABEL cell carries an artifact-derived number too (round-25
+            # review, cycle 8): `n=174` → `173` left §0 asserting a count that §2
+            # and the changelog contradict, with every gate green.
+            n_sub = artifact["comparisons"]["tokens_controlled_subset"]["n"]
+            assert f"(n={n_sub})" in _plain(cells[0]), (
+                f"§0's subset row states {cells[0]!r}; the artifact records "
+                f"n = {n_sub}")
         want_recall = (artifact["comparisons"][cell[0]][cell[1]]["b_recall"]
                        if arm == "__subset__"
                        else artifact["arms"][arm]["recall_by_k"]["3"]["recall"])
@@ -1825,6 +1833,12 @@ def test_brief_paired_table_is_the_artifact(artifact, brief: str) -> None:
             raise AssertionError(f"§3.2 row this pin cannot identify: {cells[0]!r}")
         assert key in want, f"§3.2 row {key} is not one the artifact records"
         assert key not in seen, f"§3.2 states {key} twice"
+        if key[0] == "subset":
+            # ⛔ …and its `n=` label, same reason (round-25 review, cycle 8).
+            n_sub = artifact["comparisons"]["tokens_controlled_subset"]["n"]
+            assert f"(n={n_sub})" in _plain(cells[0]), (
+                f"§3.2's subset row states {cells[0]!r}; the artifact records "
+                f"n = {n_sub}")
         seen.add(key)
         pair = want[key]
         for cell, field, nd in (
@@ -3731,7 +3745,8 @@ def test_brief_derived_prose_figures_are_the_artifact(
     # scope (and from every claim literal), and routed the STRUCTURAL matches
     # through the same rule: `_table`'s header needles and body cells, the
     # changelog's row/label needles and its `(N of N queries)` label, §0's arm-name
-    # extraction and subset label, §1's marker (indexed on the same string it is
+    # extraction and subset label, the subset rows' `n=` labels in §0 and §3.2,
+    # §1's marker (indexed on the same string it is
     # applied to), the `NOT RECORDED` cell, and the document-wide NEGATIVE
     # assertion. ⛔ The list is an ENUMERATION, not a universal promise: a NEW
     # structural match added to this file must route through `_plain`/a stripped
