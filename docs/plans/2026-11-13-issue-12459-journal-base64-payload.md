@@ -72,7 +72,10 @@ how a repairable gap becomes a permanent one.
   record greppable, while the *values* become opaque. The binary alternatives are cheaper and worse here:
   protobuf `packed repeated float` is `4N + h + ℓ` (≈ `4N+3`), MessagePack and CBOR are ≈ `5N` for an
   array of float32, and Arrow/Parquet add buffers, offsets and schema framing that dominate a single small
-  record. **Only base64 keeps the log line a JSON object**, which is the property §2.5 needs. On
+  record. **Only a *text* encoding keeps the log line a JSON object**, which is the property §2.5 needs — and
+  several do, so base64 is chosen among them for ubiquity, not for being the smallest (§2.5.1 measures all
+  six: `b85`/`z85` are 25 % overhead against base64's 33.3 %, `a85` is refused for containing `"` and
+  `\`, `hex` costs +100 %). On
   **corruption detection all six give this note nothing**: none carries a checksum over *this* payload by
   default (Parquet's optional page-level CRC32 is the exception, and it covers the page, not the vector),
   and a checksum would not catch a **validly re-encoded** alteration in any case. That is why §2.2's
@@ -254,8 +257,9 @@ shrink at all. Corrected on the creating record: **2.80 GB, saving ≈ $0.33/mo*
 row implies `(5.423 − 2.069) × $0.125 = $0.42`, i.e. the correction is **~22 %** of that quote. ⚠️ Name the
 base: that `$0.42` pairs the **measured** P0 (`5.423 GB`) with the **modelled** P2 row (`2.069 GB`), which
 is what a reader would actually budget. It is *not* the quote's own saving — the quote's two rows imply
-`2.60 GB = $0.33/mo`, within 1.6 % of the measured saving, because both rows' absolute errors partly
-cancel (the P2 row is **35 % low**: 2.07 modelled vs 2.80 measured). The defect is the row *values*, not
+`2.67 GB = $0.33/mo` unrounded (`2.60 GB` on the table's printed 4.7/2.1 rows), within **0.95 %** of the
+measured saving, because both rows' absolute errors partly cancel — the P2 row **understates the truth by
+26 %** (2.069 modelled vs 2.798 measured). The defect is the row *values*, not
 the saving the pair happens to imply. Stated because a reader would budget from the quote. Whether this line is metered at all is **not settled
 anywhere**: #11758, the pricing-of-record ticket, closed `COMPLETED` on 2026-11-12 without addressing
 journal bytes, and #4333 (open) counts **node** sets, not journal bytes.
@@ -284,9 +288,12 @@ journal bytes, and #4333 (open) counts **node** sets, not journal bytes.
   truncated or rewritten — the seal is another append."* A file-level version header would require
   **rewriting existing journals** to add it. That is a different operation (a migration on a file that
   may be tens of GB), on the one artifact whose whole promise is that it is never modified.
-- A file header is also **wrong under concatenation and restore**, both of which the deployment does:
-  a header says "every line below is v2", which is false for a journal that was restored over a v1 tail
-  or had a segment concatenated.
+- A file header is also **wrong under an in-place writer upgrade**, which is the deployment's normal
+  shape: once a v2 build appends to a v1 journal the file holds **both** shapes, and there is no
+  rewrite-free way to declare v2 for the tail alone. (An earlier draft blamed concatenation and restore —
+  `backup.restore` **replaces** the journal (`backup.py:638`, `shutil.copy2`, truncating the destination;
+  its docstring says "REPLACES the destination journal"), so a restored file is single-version and a header
+  would be *correct* for it. Rotation yields separate files, which a per-file header would also handle.)
 - Per-record is self-describing, so the reader needs **no file-level state** — the same property that
   makes §3's mixed-version replay a per-line dispatch instead of a sequential state machine.
 
@@ -419,6 +426,40 @@ in the appendix: `0x0A=0`, `0x22=0`), so:
 - `read_all`'s existing split-on-`b"\n"` is untouched, including its deliberate refusal to use
   `str.splitlines()` (which would split a raw U+2028 inside a content string);
 - the +33.3 % is the price of **not** replacing the reader, the writer and the tear contract at once.
+
+#### 2.5.1 base64 is not the only text alphabet — so the cheaper ones are measured, not waved at
+
+An earlier draft said base64 is the *only* framing that keeps the line a JSON object, and that is
+**false**: every text alphabet does. The comparison is in the probe (`measurement.txt`), on the same
+1,536 B payload, field bytes = 14 B prefix + 2 quotes + body:
+
+```
+   alphabet            body B   field B   vs b64   needs JSON escaping
+   hex                    3,072     3,088    1.496x   False
+   base64 (RFC 4648 §4)   2,048     2,064    1.000x   False
+   base64url (§5)         2,048     2,064    1.000x   False
+   b85 (RFC 1924)         1,920     1,936    0.938x   False
+   a85 (Adobe/RFC 1924)   1,920     1,936    0.938x   True
+   z85 (ZeroMQ)           1,920     1,936    0.938x   False
+```
+
+**b85 and z85 are 128 B cheaper on this field** — a record of `5,423 − 4,689 + 1,936 = 2,670 B`, i.e.
+**2.03×** on the record and **2.42×** on the vector instead of 1.94×/2.27×. So the choice is a **recorded
+trade, not an optimum**, and this note does not claim otherwise:
+
+- **base64 wins on ubiquity and hand-inspectability.** RFC 4648, in every language's standard library,
+  and `echo '<b64>' | base64 -d | xxd` lets a human read a vector out of a journal during an incident.
+  b85 has a Python stdlib decoder and much less support elsewhere; z85 has none in Python's stdlib (the
+  probe implements it) and its alphabet is a ZeroMQ spec (RFC 32), not an IETF one.
+- **a85 is refused outright**: its alphabet contains `"` and `\`, so it would need JSON escaping and would
+  break the one-write-no-escaping property §2.5 exists to keep (measured: `needs JSON escaping = True`).
+- **hex is refused on size**: +100 % overhead, 3,088 B — still 1.52× better than P0, but it gives back a
+  third of the win for no property base64 lacks.
+
+If a later lane wants the extra 128 B/record, **b85 is the drop-in** — same frame, same count, same width
+tag, `base64.b85encode`/`b85decode` — and the format version is what makes that a v2 rather than a break.
+Choosing it here buys 4.6 % of the record and costs a decoder most non-Python readers would have to write;
+this note declines that trade rather than overlooking it.
 
 ### 2.6 What a torn tail looks like under the new frame — unchanged, and why
 
@@ -593,8 +634,9 @@ both through one `json.dumps` would put the `f32` row on a **form the journal do
 
 A ratio **below 1 means the frame is LARGER than the text**. So on zeros, base64 loses for **both** widths
 (the `f64` frame is 2.68× the text; even `f32` is 1.34×), and on small integers it loses for `f64` (1.87×)
-while only marginally winning for `f32` (1.06×). Sparse and zero-heavy **caller** vectors are real, so this
-is not a corner case to wave away: base64 is a **size trade whose sign depends on the vector**. It is taken
+while only marginally winning for `f32` (1.06×). ⚠️ Sparse and zero-heavy **caller** vectors are an **assumption, not a measurement** — nothing in this
+repository measures the caller-owned population's density — so the row is presented as *if* they occur; the
+conclusion does not need them to be common. Base64 is a **size trade whose sign depends on the vector**. It is taken
 here for the *bit exactness*, the single reader and the removal of the shortest-decimal invariant — not
 because it always shrinks. A degenerate vector that loses bytes is still a correct vector.
 
@@ -606,7 +648,8 @@ field is what carries the promise — `f64` in, `f64` out.
 ### 4.3 What happens to a caller-owned vector under the new format
 
 It is encoded at float64, decoded at float64, and restored through the same `embedding_verbatim` guard that
-exists today — the guard is **not** touched by the encoding, because it reads the marker, not the width.
+exists today — the guard is **not** touched by the encoding, because it reads `embedding_verbatim` (the
+caller-ownership marker), not `embedding_width` (the format marker).
 R1 is likewise untouched in substance: presence is ownership still (the key is present in every case), the
 replay still restores rather than recomputes, and `embedding_model` / `embedding_revision` /
 `embedding_text_hash` still ride the creating record. **The one thing the implementation must prove** is
@@ -668,7 +711,7 @@ The frame was chosen so that this question has a cheap answer, which is the stro
 | scenario | recovery | permanently lost |
 |---|---|---|
 | the **decode** is wrong (unpack, endianness, the count) | **rebuild from records**: the journal bytes are intact and the frame is self-describing, so a fixed reader replays them correctly. The graph is rebuilt, not restored. | **nothing** — the bytes were never destructive |
-| the **encode** is wrong (pack) | a wrong pack puts wrong bytes **in the journal**, so a rebuild replays them faithfully and wrongly. A pack that violates the frame's own length (packed `<d` under a declared `f32`, or 383 elements under a count of 384) is **refused** by the count — measured: 3,072 B and 1,532 B decoded against a declared 1,536 B. A pack that is self-consistent but wrong (element order, a transposition) decodes **silently**, and the replay writes the wrong vector with no error — §3.3's failure exactly. | **the vector as written**, in the silent case: the journal is the record of record, so the correct value cannot be recovered from it. The rest of the record still rebuilds. |
+| the **encode** is wrong (pack) | a wrong pack puts wrong bytes **in the journal**, so a rebuild replays them faithfully and wrongly. A pack that violates the frame's own length (packed `<d` under a declared `f32`, or 383 elements under a count of 384) is **refused** by the count — measured: 3,072 B and 1,532 B decoded against a declared 1,536 B. A pack that is self-consistent but wrong (element order, a transposition) decodes **silently**, and the replay writes the wrong vector with no error — §3.3's failure exactly. | **the vector as written**, in the silent case: the journal is the record of record, so it can never supply the correct value again. ⚠️ **But the window is not zero** — the graph is written from the *same in-memory payload* (`projection/entities.py:2976`, `vecf32($embedding)`), so while a wrong pack has corrupted only the journal bytes the live graph still holds the correct vector: **dump the graph's vectors before the next `rebuild_all`** and they are recoverable; after a rebuild the wrong bytes are replayed and it is permanent. The rest of the record always rebuilds. |
 | the format is wrong (base64 turns out to be the wrong choice) | **dual reader**: both shapes stay readable indefinitely, because dispatch is per record and needs no state. The writer reverts to JSON text; journals that already carry frames keep replaying. | **nothing** — no record is rewritten, so no migration is needed in either direction |
 | the frame is withdrawn entirely | a reader that stops decoding still has to keep understanding frames for as long as any frame-bearing journal exists. That reader is a **permanent** obligation of the format. | a second reader path, forever |
 | base64 makes the log un-inspectable in an incident | a decode helper (`tools/journal_decode.py`-shaped) restores human readability on demand; it is a **tool**, not a format change | **human greppability of the vector** — you can no longer read, diff or hand-edit a vector in the log by eye. This is a real, permanent loss and the main non-byte cost of P2. |
@@ -682,11 +725,14 @@ journal — every frame-bearing journal is thereafter a second code path that mu
 
 ## 7. Recommendation — stated plainly, because the number is smaller than the headline
 
-**The format in §2–§4 is the correct one if P2 is taken.** It is the only framing that satisfies all four
-recorded constraints at once: per-record versioning (append-only), a count that fails closed on the
+**The format in §2–§4 is the correct one if P2 is taken.** It is the only framing **of those compared**
+that satisfies all four recorded constraints at once: per-record versioning (append-only), a count that fails closed on the
 measured silent-truncation path, two widths so #5004 is preserved rather than overridden, and JSONL
-compatibility so the tear contract and the reader are not replaced. What it *does not* decide is whether P2
-is worth taking, and the honest numbers for that are:
+compatibility so the tear contract and the reader are not replaced. ⛔ **"Of those compared" is load-bearing**:
+§2.5.1 measures the text alphabets, and `b85` would be **128 B/record cheaper** (2,670 B, 2.03×) for a
+decoder most non-Python readers would have to write — base64 is a recorded trade on ubiquity, not an
+optimum, and a lane may reopen it by changing the frame's version token. What it *does not* decide is whether
+P2 is worth taking, and the honest numbers for that are:
 
 - **the remaining win is 1.94× on a creating record and 2.27× on its vector — not 4.1×** (§1.4);
 - **≈ $0.33/mo per million creates** at $0.125/GB, on a line whose metering is unsettled (§1.5);

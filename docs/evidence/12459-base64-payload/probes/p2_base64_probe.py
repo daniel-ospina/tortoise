@@ -485,6 +485,50 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
         print("  count check on the -16 frame: ⛔ DECODED — this is a defect")
         return 1
 
+    # ---- text alphabets: base64 is NOT the only one that keeps the line JSON.
+    # The design claims base64 for ubiquity, not for optimality, so the cheaper
+    # alphabets are measured here rather than waved at. Sizes are the FIELD only
+    # (frame prefix + 2 JSON quotes are the same 16 B for all of them).
+    print("\n== text alphabets (field bytes: 14 B prefix + 2 quotes + encoded body)")
+    print("   alphabet            body B   field B   vs b64   needs JSON escaping")
+    raw = b"".join(struct.pack("<f", x) for x in vec)
+
+    def _z85(data: bytes) -> str:
+        alphabet = ("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                    ".-:+=^!/*?&<>()[]{}@%$#")
+        pad = (-len(data)) % 4
+        data = data + b"\0" * pad
+        out = []
+        for i in range(0, len(data), 4):
+            n = int.from_bytes(data[i:i + 4], "big")
+            chunk = []
+            for _ in range(5):
+                n, r = divmod(n, 85)
+                chunk.append(alphabet[r])
+            out.extend(reversed(chunk))
+        return "".join(out)
+
+    alphas = [
+        ("hex", base64.b16encode(raw).decode()),
+        ("base64 (RFC 4648 §4)", base64.b64encode(raw).decode()),
+        ("base64url (§5)", base64.urlsafe_b64encode(raw).decode()),
+        ("b85 (RFC 1924)", base64.b85encode(raw).decode()),
+        ("a85 (Adobe/RFC 1924)", base64.a85encode(raw).decode()),
+        ("z85 (ZeroMQ)", _z85(raw)),
+    ]
+    b64_field = len(base64.b64encode(raw)) + 16
+    for name, enc in alphas:
+        field = len(enc) + 16
+        needs_escape = any(c in enc for c in '"\\\n\r')
+        print(f"   {name:<20} {len(enc):>7,}   {field:>7,}   "
+              f"{field / b64_field:>6.3f}x   {needs_escape}")
+    if not any(n.startswith("b85") for n, _ in alphas):
+        return 1
+    print("  b85/z85 are 25 % overhead against base64's 33.3 % — cheaper by "
+          f"{b64_field - (len(alphas[3][1]) + 16):,} B on this field. base64 is "
+          "chosen for ubiquity and hand-inspectability (every language's stdlib, "
+          "`echo | base64 -d`), not for being the smallest.")
+
     print("\nVERDICT: measured. The frame is 2.27x the P0 vector span on a "
           "creating record, the float32 bits are unchanged, and the f64 "
           "population is preserved at its own width.")
