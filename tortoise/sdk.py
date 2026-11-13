@@ -8471,9 +8471,11 @@ def _item_type_text(item: dict) -> str:
     """The item's `type` as its WRITER reads it: content, lowercased.
 
     ⛔ One rule, applied by EVERY Phase-1 arm that asks what an item IS. The
-    writer is `(type or "").strip().lower()`, and `str.strip` builds a PLAIN
-    `str` from a `str` subclass's CONTENT — no `__str__` is consulted on that
-    path. An arm that compared `str(item.get("type") or "")` was asking a
+    writer's rule is content, then lowercase — implemented once in `_type_text`
+    (`:8447`), which this function delegates to. `_type_text` calls
+    `str.strip`/`str.lower` as BASE functions, so neither an overridden
+    `strip`/`lower` nor an overridden `__str__` can change the answer: the
+    content is what is read, on every path. An arm that compared `str(item.get("type") or "")` was asking a
     DIFFERENT question (the `__str__` rendering), so a subclass whose content is
     a real label and whose `__str__` differs passed Phase 1 and step 3 then
     raised with the point items already committed — the #2422/#7925
@@ -28540,10 +28542,13 @@ class TortoiseSDK:
             if not isinstance(item, dict):
                 continue
             # ⛔ THE TYPE IS RESOLVED THE WAY ITS OWN WRITER RESOLVES IT — by
-            # CONTENT, not by `__str__`. `ingest` and `create_entity` route with
-            # `(type or "").strip().lower()`, and `str.strip` builds a PLAIN `str`
-            # from the subclass's content, so no `__str__` is consulted anywhere on
-            # that path. This arm therefore reads `str.__str__` too: asking the
+            # CONTENT, not by `__str__`. `ingest` and `create_entity` route by the
+            # writer's rule — content, then lowercase — through `_type_text` /
+            # `_item_type_text` (`:8447`, `:8470`), whose explicit `str.strip` /
+            # `str.lower` calls make that answer unspoofable: `str.strip` builds a
+            # PLAIN `str` from the subclass's content, so no `__str__` is consulted
+            # anywhere on that path, and no overridden `strip`/`lower` can change it
+            # either. This arm therefore reads `str.__str__` too: asking the
             # UNION here (as the API label arms rightly do, because the fold
             # interpolates the label by `str()` while the journal keeps its
             # content) made Phase 1 refuse a `content="object", __str__="event"`
