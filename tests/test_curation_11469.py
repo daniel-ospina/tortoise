@@ -4598,8 +4598,12 @@ def test_a_layer_that_grew_past_the_bound_is_not_accepted_as_complete():
     `limit_sent` used to be `min(reported + 1, EVENT_READ_CEILING)`, which collapses to
     `reported` exactly when `counts.Event == EVENT_READ_CEILING`: a layer that had grown to
     10,050 then came back as 10,000 rows == the count, passed the reconciliation, and was
-    filed `events_reconciled: True` with 50 rows unread. Measured by the PR reviewer; the
-    fix is to send `reported + 1` unbounded (the surface validates no upper `limit`).
+    filed `events_reconciled: True` with 50 rows unread. Measured by the PR reviewer. The
+    fix is NOT `reported + 1` either: that leaves ONE row of headroom, so a single Event
+    created between the count and the read fills the request and a truncated response
+    becomes indistinguishable from a whole one (measured as a grow-then-shrink race in a
+    later cycle). The request is now `EVENT_READ_CEILING + 1` on every read, so a response
+    strictly below it is provably whole at any size.
     """
     mod = _tool_module()
     ceiling = mod.EVENT_READ_CEILING
@@ -4700,9 +4704,10 @@ def test_a_layer_that_shrank_with_an_agreeing_recount_is_accepted_not_refused():
 
     The re-count was applied only when `read > reported`, so a `:Event` deleted by the
     hosted entity-delete path in the two-request window made a COMPLETE read refuse —
-    the same false block in the other direction (PR-review cycle 2). The request was
-    `reported + 1`, so a response shorter than the count cannot be truncated: the rows
-    ARE the newer layer, and a fresh count that equals them proves it.
+    the same false block in the other direction (PR-review cycle 2). The request is
+    `EVENT_READ_CEILING + 1`, so a response that stays BELOW it is the exact layer at any
+    size in either direction, and a fresh count that equals the rows confirms the
+    disagreement was a stale count.
     """
     mod = _tool_module()
     rows = [{"id": "ev-1", "eventKind": "meeting", "name": "a"},

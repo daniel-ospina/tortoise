@@ -671,8 +671,9 @@ class MCPReader:
                 "refusing a census that would report the episodic layer as empty")
         if reported is None and len(raw) >= limit_sent:
             raise C.CurationRefused(
-                f"the Event read returned {len(raw)} rows, filling its "
-                f"{EVENT_READ_CEILING}-row RESPONSE BOUND, and no reported count says that "
+                f"the Event read returned {len(raw)} rows, filling the "
+                f"{limit_sent}-row request (the `EVENT_READ_CEILING` bound plus one), and "
+                "no reported count says that "
                 "is the whole layer — the response may be truncated, and this read has no "
                 "offset walk to continue from; refusing a partial episodic layer")
         if reported is not None and len(raw) != reported:
@@ -792,10 +793,13 @@ class MCPReader:
 
         `type="events"` with no `id` is the whole-layer listing (`tortoise_get` treats
         `id` as an optional eventKind FILTER on this arm), and `limit` is the response the
-        truncation check in `read_events` is sized against — exactly one more than the
-        reported count where a count is available (`reported + 1`, NOT capped at
-        `EVENT_READ_CEILING`: capping it ate the headroom at the bound), so a full response
-        PROVES the layer grew rather than being silently cut.
+        truncation check in `read_events` is sized against — ALWAYS `EVENT_READ_CEILING + 1`,
+        never the reported count: `reported + 1` leaves exactly one row of headroom, so a
+        single Event created between the count and the read fills the request and a
+        truncated response becomes indistinguishable from a whole one, and
+        `min(reported + 1, EVENT_READ_CEILING)` loses the headroom entirely at the bound.
+        Sizing to the bound plus one makes a response STRICTLY BELOW the request the whole
+        layer at ANY size, and a response that FILLS it a refusal.
         """
         args: dict[str, Any] = {"type": "events", "limit": limit}
         if not self.graph:
@@ -977,8 +981,10 @@ OPERATOR_READ_CEILING = 10_000
 #: The Event layer is read in ONE `tortoise_get_entity(type="events", limit=…)` call,
 #: which forwards to `tortoise_get_events` (`mcp_server.py`) — a
 #: `MATCH (e:Event) … ORDER BY e.startedAt DESC LIMIT $lim` with NO offset and a BARE
-#: LIST return (`sdk.py`), so a short response is indistinguishable from a truncated
-#: layer: the same hazard as the operator read, and the same refusals apply.
+#: LIST return (`sdk.py`). A response that FILLS the request is therefore
+#: indistinguishable from a truncated layer, while a response STRICTLY BELOW it is the
+#: exact layer at any size — which is what `read_events` rests completeness on. Same
+#: hazard as the operator read, and the same refusals apply.
 #:
 #: ⛔ 10,000 here is OUR DECLARED response bound, NOT the surface's maximum — and that
 #: difference is worth stating because the operator constant is the opposite case. The
@@ -1075,13 +1081,15 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         "operators_reconciled": operators_reported is not None,
         # The episodic layer this census used to omit entirely (#12378). Same two facts
         # as the operator pair, for the same reason: `events_read` is the READ's own
-        # count, `events_total_reported` is `counts.Event`, and the reader refuses when
-        # they disagree — so a reader of this artifact can see both.
+        # count, `events_total_reported` is `counts.Event`, and a disagreement is
+        # re-counted once and then accepted or refused — so a reader of this artifact can
+        # see both.
         "events_read": len(events),
         "events_total_reported": events_reported,
         # `events_total_reported is None` means NO cross-check was available: the layer's
-        # completeness then rests on `get_events` having no `offset`, where a short
-        # response is indistinguishable from a whole layer. A driver must be able to
+        # completeness then rests on the response having stayed STRICTLY BELOW the
+        # `EVENT_READ_CEILING + 1` request, because a response that FILLS it cannot be told
+        # from a truncation. A driver must be able to
         # answer that from a FIELD rather than from prose.
         "events_reconciled": events_reported is not None,
         "source_count_gap": gap,
