@@ -2236,6 +2236,51 @@ def _exec_script_names(text: str, instructions: tuple[str, ...]) -> set[str]:
     return names
 
 
+#: A compose mapping KEY, bare or quoted — `entrypoint:` / `"entrypoint":`.
+_COMPOSE_KEY = re.compile(r"""^(?P<q>["']?)(?P<key>[A-Za-z_][\w.-]*)(?P=q)\s*:""")
+
+
+def _script_tokens(text: str) -> set[str]:
+    """Basenames of the `.sh` tokens in one command rendering."""
+    return {Path(token).name for token in re.split(r'[\s,\[\]"]+', text)
+            if token.strip("'").endswith(".sh")}
+
+
+def _compose_exec_scripts(text: str) -> set[str]:
+    """Scripts a compose file names through `entrypoint:` / `command:`.
+
+    ⛔ Every spelling compose accepts for those keys is read, because a reader that
+    handled only the inline form reported `entrypoint` ABSENT over a deployment that
+    names it — the "route looks live, the spelling is missed" defect (fresh review of
+    PR #12474, P3). Handled: the inline scalar (`entrypoint: /entrypoint.sh`), the
+    flow list (`entrypoint: ["/entrypoint.sh"]`), the BLOCK list
+    (`entrypoint:` then `- /entrypoint.sh`) and a QUOTED key (`"entrypoint": …`).
+    """
+    names: set[str] = set()
+    key: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # A compose KEY may be bare or quoted (`entrypoint:` / `"entrypoint":`), so it
+        # is parsed rather than prefix-matched — a prefix match on the raw line missed
+        # the quoted spelling (fresh review of PR #12474, P3).
+        header = _COMPOSE_KEY.match(line)
+        if header and header.group("key").lower() in ("entrypoint", "command"):
+            key = header.group("key").lower()
+            rest = line[header.end():].strip()
+            if rest:
+                names |= _script_tokens(rest)
+                key = None
+            continue
+        if key is not None:
+            if line.startswith("-"):
+                names |= _script_tokens(line[1:])
+                continue
+            key = None
+    return names
+
+
 def _entrypoint_scripts() -> list[Path]:
     """The container entrypoint SCRIPTS this tree's deployment manifests run.
 
@@ -2259,9 +2304,8 @@ def _entrypoint_scripts() -> list[Path]:
             continue
     for manifest in _compose_files():
         try:
-            names |= _exec_script_names(
-                manifest.read_text(encoding="utf-8", errors="ignore"),
-                ("entrypoint:", "command:"))
+            names |= _compose_exec_scripts(
+                manifest.read_text(encoding="utf-8", errors="ignore"))
         except OSError:
             continue
     return sorted(p for p in (REPO_ROOT / name for name in sorted(names)) if p.is_file())
@@ -2529,10 +2573,19 @@ def _assigned_value(line: str, flag: str) -> str | None:
     stripped = stripped.lstrip("-").lstrip()
     if not stripped or stripped[0] in "#;":
         return None
-    for prefix in ("export ", "ENV ", "ARG "):
-        if stripped.startswith(prefix):
+    # ⛔ Dockerfile instruction NAMES are case-insensitive, so `env FLAG=1` arms the
+    # container exactly like `ENV FLAG=1` — and reading only the uppercase spelling
+    # published "silent" over an image whose container really has the flag (fresh
+    # review of PR #12474, P3; measured, and pre-existing). `export` stays
+    # case-SENSITIVE because that is shell, not Dockerfile.
+    head = stripped.upper()
+    for prefix in ("ENV ", "ARG "):
+        if head.startswith(prefix):
             stripped = stripped[len(prefix):].lstrip()
             break
+    else:
+        if stripped.startswith("export "):
+            stripped = stripped[len("export "):].lstrip()
     # The flag must be the KEY: at the start of the line, followed by `=` or
     # `:` and nothing but the value. `Set FLAG=1 to enable` and
     # `name: verify FLAG=1 takes effect` fail here, which is the point.
@@ -2830,11 +2883,14 @@ def flag_in_shipped_configs(flag: str) -> dict:
         "absent": _rels("ABSENT", DEPLOYMENT_SURFACES),
         "unmeasured": deployment_unmeasured,
         # MEASURED requires at least one deployment surface FILE to exist, every
-        # existing one to be READABLE and every assignment of the flag in it to be
-        # RESOLVABLE: a tree that ships no deployment config cannot answer "what does
-        # a deployment get", and neither can one whose flag line the walk could not
-        # read (`${OTHER}`). Both are UNMEASURED — never a pass, and never a `False`
-        # that blames the product.
+        # existing one to be READABLE, and every RUNTIME-RELEVANT assignment of the
+        # flag in it to be RESOLVABLE: a tree that ships no deployment config cannot
+        # answer "what does a deployment get", and neither can one whose flag line the
+        # walk could not read (`${OTHER}`). Both are UNMEASURED — never a pass, and
+        # never a `False` that blames the product. ⛔ A build-time `ARG` is NOT
+        # runtime-relevant: it is reported in `outside_runtime` and does not hold the
+        # file at UNMEASURED, so an unresolvable `ARG` leaves `measured` True — which
+        # is the `not deployment_unmeasured` expression this comment describes.
         "measured": (bool(deployment_present) and not deployment_unmeasured),
     }
     deployment["on"] = (deployment["measured"] and not deployment["silent"]
@@ -3574,9 +3630,12 @@ def score_rule_bullet() -> Row:
             # carries the flag". ⛔ `ARG TORTOISE_EMBED_GATE=1` is no longer one of the
             # divergence shapes READ ON — it is build-time only and never reaches the
             # container's environment, so `#12022` routes it to `outside_runtime`
-            # (a deployed process never reads it) instead of counting it as a hit. The
+            # (a deployed process never reads it) instead of counting it as a hit. ONE
             # remaining shape is `ENV …=1` followed by `ENV …=0`: last-wins, so a build
-            # from that file carries 0, and the walk still reads the file ON. The claim
+            # from that file carries 0, and the walk still reads the file ON; ANOTHER is
+            # a builder-stage-only `ENV` in a multi-stage build, since nothing here reads
+            # stage semantics. Stated as examples, never as an enumeration — a list here
+            # is what `#12070` item 1 recorded rotting. The claim
             # is deleted rather than qualified — a second arm here would be another
             # sentence to falsify, and the per-FILE caveat below already carries the
             # meaning.

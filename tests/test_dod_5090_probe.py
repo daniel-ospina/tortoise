@@ -3013,6 +3013,79 @@ def test_a_shell_indirection_is_UNMEASURED_never_silent(tmp_path, monkeypatch):
     assert "indeterminate assignments: [" in note, note
 
 
+def test_a_LOWERCASE_dockerfile_instruction_is_still_a_deployment_hit(
+        tmp_path, monkeypatch):
+    """Dockerfile instruction names are case-insensitive, so `env FLAG=1` arms it.
+
+    ⛔ Measured (fresh review of PR #12474, P3, pre-existing): `env
+    TORTOISE_EMBED_GATE=1` read `OFF` and nothing was reported, so the row published
+    "silent" over an image whose container really has the flag — a false HOLD, and the
+    mirror of the false PASS the `ARG` fix closes. The sibling matcher in this same
+    module already compares Dockerfile instructions case-insensitively (that is how the
+    compose route was fixed), so the two readers now agree.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nenv TORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+    # …and `arg` lowercase is still BUILD-TIME, not a hit (the two rules compose).
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\narg TORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
+    assert any("build-time ARG" in hit for hit in shipped["outside_runtime"]), shipped
+
+
+def test_a_BLOCK_LIST_compose_entrypoint_is_discovered_too(tmp_path, monkeypatch):
+    """The canonical compose block-list spelling is not silently outside the walk.
+
+    ⛔ Measured (fresh review of PR #12474, P3): the inline-only reader returned `set()`
+    for `entrypoint:` followed by `- /entrypoint.sh`, so the surface read `ABSENT` while
+    the script armed the gate — the same "route looks live, the spelling is missed"
+    defect the compose arm was fixed for. A QUOTED key is covered by the same reader.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    entrypoint:\n      - /entrypoint.sh\n"
+        "    command:\n      - --serve\n", encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "deployment"]["files"]["entrypoint.sh"] == "ON"
+    # The quoted-key spelling of the same key.
+    (tmp_path / "docker-compose.yml").write_text(
+        'services:\n  tortoise:\n    "entrypoint": /entrypoint.sh\n', encoding="utf-8")
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+
+
+def test_an_UNPARSEABLE_test_file_fails_the_citation_check_CLOSED(tmp_path):
+    """A file the universe cannot parse must not make its citations vanish.
+
+    ⛔ The fix for "unparseable files were silently dropped" had no falsifier (fresh
+    review of PR #12474, P3): `by_file[rel] = set()` keeps the file in the universe, so
+    a node-id citation INTO it is UNRESOLVED (fail-closed) instead of being skipped like
+    a citation of a file that does not exist. Driven on a tmp root, because on the real
+    tree the branch is never taken.
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_broken.py").write_text(
+        "def test_x(:\n    pass\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_ok.py").write_text(
+        "def test_fine():\n    pass\n", encoding="utf-8")
+    defined, modules, by_file = _test_symbols(tmp_path)
+    assert "tests/test_broken.py" in by_file and by_file["tests/test_broken.py"] == set()
+    assert "test_fine" in defined
+    assert _unresolved_citations(
+        "`tests/test_broken.py::test_x`", defined, modules, by_file
+    ) == ["tests/test_broken.py::test_x"]
+    # …and a resolvable sibling still resolves, so the arm is not red for everything.
+    assert _unresolved_citations(
+        "`tests/test_ok.py::test_fine`", defined, modules, by_file) == []
+
+
 def test_a_COMPOSE_named_entrypoint_is_discovered_too(tmp_path, monkeypatch):
     """The compose `entrypoint:` route is not decoration — it is a second name source.
 
@@ -9718,8 +9791,8 @@ def test_the_citation_check_REDS_on_a_deliberately_broken_citation():
     """The falsifier: red on a broken citation, green once it is fixed.
 
     ⛔ Against the REAL universe, not a toy one: the broken name is the one `#12312`
-    was filed for, so this also pins the rename that fixed it. Without this arm the
-    check above could compare two sets that never intersect and stay green forever.
+    was filed for, so this also pins the citation the CASE fix restored. Without this
+    arm the check above could compare two sets that never intersect and stay green.
     """
     root = Path(probe.__file__).resolve().parent.parent
     defined, modules, by_file = _test_symbols(root)
@@ -9727,10 +9800,19 @@ def test_the_citation_check_REDS_on_a_deliberately_broken_citation():
     # checker scans RAW TEXT, so a broken citation written in one piece would red the
     # very check the falsifier is testing — a self-reference, not a defect.
     stale_stem = "test_a_named_ungated_writer_is" + "_the_accepted_exception_reading_b"
-    real_stem = "test_naming_a_LIVE_undeclared_writer_is" + "_the_acceptance_reading_b_describes"
+    # ⛔ A RESOLVABILITY example, and deliberately NOT the citation the engine should
+    # use: `#12312`'s correction falsifies repointing the sentence at this test (it is
+    # a different test, cited correctly elsewhere). The arm only needs a name that
+    # resolves, so that is all it is used as.
+    resolving_stem = "test_naming_a_LIVE_undeclared_writer_is" + \
+        "_the_acceptance_reading_b_describes"
+    restored_stem = "test_a_named_UNGATED_writer_is" + "_the_accepted_exception_reading_b"
     broken = f"…the declared direction is `{stale_stem}` below."
     assert _unresolved_citations(broken, defined, modules, by_file) == [stale_stem], broken
-    fixed = f"…the declared direction is `{real_stem}` below."
+    # …the CASE fix resolves it, which is the one-character repair #12312 prescribes.
+    assert _unresolved_citations(
+        f"…`{restored_stem}`", defined, modules, by_file) == [], restored_stem
+    fixed = f"…the declared direction is `{resolving_stem}` below."
     assert _unresolved_citations(fixed, defined, modules, by_file) == [], fixed
     # A NODE-ID citation is checked against the FILE's defs, not the whole universe:
     # `<this file>::<a name this file does not declare>` is wrong even when the name
