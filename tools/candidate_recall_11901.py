@@ -604,26 +604,29 @@ def _rerank_arm(
         # which cell to read AND that it is the ACHIEVED count, not the ceiling
         # (`lost` is what separates them; the note called them identical, which
         # held only because this run lost nothing).
-        "ceiling_note": (
+        # ⛔ LABEL-DERIVED, and it has to be: this same note is emitted onto the
+        # lexical carriers too (`_rerank_arm(..., label=...)`), where "this arm" is
+        # `lexical_difflib` / `lexical_overlap`. A hard-coded `arms.rerank` pointer
+        # read the WRONG ARM there — the same defect the ceiling half of this note
+        # was rewritten to remove, reintroduced by a constant string.
+        "ceiling_note": (  # noqa: UP032 — .format keeps the literal segments the test parses
             "a reranker only reorders rows the legs already returned, so its "
             "CEILING is in_window(P) — the number of golds the legs put INSIDE the "
             "scored window at that width — while this arm RECORDS only what it "
-            "ACHIEVED, `arms.rerank.<P>.exact.recall_3_after` over its `mentions` "
-            "denominator. ⛔ The two are not the same quantity: the achieved figure "
+            "ACHIEVED: `arms.{label}.<P>.exact.recall_3_after` over its `mentions` "
+            "denominator. ⛔ The two are not the same quantity; the achieved figure "
             "equals the ceiling only where that arm lost nothing, so read it "
             "together with `lost` in the same cell rather than as the ceiling "
-            "itself (at pool 40 the pool returns every gold arm 1's maximum window "
-            "15 already returned, so there the achieved figure does equal the "
-            "mention count). WIDTH DEPENDENT throughout, and not quoted here. "
+            "itself. WIDTH DEPENDENT throughout, and not quoted here. "
             "⛔ NOT `arms.exact.<P>`: that table is keyed by "
             "arm 1's own k (three, five, ten and fifteen), is the arm-1 "
             "membership figure, and carries no pool-40 "
             "entry at all, so the width this note is about has no cell there (the "
-            "two tables coincide only at k=15). miss_past_k at k=P is 0 BY "
+            "two coincide only at k=15). miss_past_k at k=P is 0 BY "
             "CONSTRUCTION (a response has at most P rows, so 'the rank is past P' "
             "cannot occur) and is not the ceiling; miss_absent_at_max_k is not a "
             "width-independent bound either — it counts golds absent within "
-            "arm 1's MAXIMUM window (15)"),
+            "arm 1's MAXIMUM window (15)").format(label=label),
     }
     # ⛔ THE ORDER IS PRODUCED BY THE SHIPPED FUNCTION, NOT BY A COPY OF IT.
     # This arm used to sort the scores itself and reorder EVERY row, including a

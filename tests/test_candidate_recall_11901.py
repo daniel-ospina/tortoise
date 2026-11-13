@@ -1565,7 +1565,12 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(
     """
     source = Path(tool_mod.__file__).read_text()
     start = source.index('"ceiling_note": (')
-    literal = source[start:source.index("}", start)]
+    # ⛔ SLICE TO THE `.format(` TERMINATOR, not to the first `}`: the template
+    # carries a `{label}` placeholder, and `source.index("}", start)` stopped
+    # INSIDE it — truncating the "literal" to the text before the placeholder, so
+    # every comparison below would have been against half a note.
+    end = source.index(".format(label=label)", start)
+    literal = source[start:end]
     literal = literal[literal.index("(") + 1:]
     emitted = "".join(re.findall(r'"([^"]*)"', literal))
     assert emitted, "could not read the tool's ceiling_note literal"
@@ -1596,10 +1601,19 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(
             "(a missing note is not a pass)")
         for arm in sorted(carriers):
             got = artifact["arms"][arm]["ceiling_note"]
-            assert got == emitted, (
+            # ⛔ RENDER THE TEMPLATE PER CARRIER. The note names the arm's OWN
+            # achieved cell, so the same literal becomes three different strings;
+            # comparing every carrier against one rendering is what let a
+            # `arms.rerank` pointer sit on the lexical arms, naming a different
+            # arm's numbers than the one the note describes.
+            assert "{label}" in emitted, (
+                "the ceiling note lost its {label} placeholder — a constant arm "
+                "pointer reads the WRONG arm on the lexical carriers")
+            want = emitted.replace("{label}", arm)
+            assert got == want, (
                 f"{name}:{arm}: the artifact's ceiling_note is not what the tool "
-                f"emits — regenerate the artifact (it is generated, never "
-                f"hand-edited)")
+                f"emits for this arm — regenerate the artifact (it is generated, "
+                f"never hand-edited)")
             assert "its ceiling is arm 1" not in got, (
                 f"{arm}: the retracted 'arm 1's miss_past_k' reading is back")
 
