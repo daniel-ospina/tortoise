@@ -4974,7 +4974,7 @@ def _neighbour_number_strays(line: str) -> list[str]:
         loop, `:4906`)``
 
     — measured RED before this guard, and again for ``The `corpus` block in
-    `capstone_run.py` … its literal sits at `:1194` ``. Both are cites of ANOTHER
+    `capstone_run.py` … its literal sits at `:1186` ``. Both are cites of ANOTHER
     module, which this module's own contract says must stay green ("elsewhere in the
     document that is a legitimate cite of some OTHER module").
 
@@ -5237,8 +5237,10 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
     not "unify" these three readers.
 
     The hand scan it replaces also could not see an INDENTED entry: this very
-    test file is registered that way under the `core:` and `sdk:` mirrors of
-    `surfaces:` — the same filename indented, which a scan that only looks at
+    test file is registered that way under the `core:` mirror of `surfaces:`
+    (measured with `parse_manifest_text`: `core` holds it, `sdk` does not — that
+    mirror holds 128 entries and none of them is this file) — the
+    same filename indented, which a scan that only looks at
     column 0 cannot see — and a scan that misses those cannot honestly claim a
     section "holds none". (Those mirrors are inside a block `register_tests` DOES
     write, so their line numbers move on the next registration; naming them by
@@ -6264,6 +6266,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     "`config/ci-surfaces.yml` — 1,320,023 bytes",
     "`config/ci-surfaces.yml` — 166 hours",
     "`config/ci-surfaces.yml` — 12 shards",
+    # ⛔ …AND THE FALSE-RED THAT `(?<![\w.])` ON THE SECOND ARM EXISTS FOR. Without
+    # that lookbehind, ANOTHER file's cite sitting BEFORE the manifest's name is read
+    # as a manifest cite (`sdk.py:9612` matches `<sep><num>` and then any gap to the
+    # filename), and the pin accuses the author of a number they never wrote. Measured
+    # by rebuilding the pattern without the lookbehind: both fixtures below become
+    # matches (`True`), and with it they are clean (`False`) — so removing the guard
+    # as noise REDs exactly these two rows, and nothing else in this table does.
+    "the loader (`sdk.py:9612`) reads `config/ci-surfaces.yml` on every run",
+    "`sdk.py:9612` then `config/ci-surfaces.yml`",
 ])
 def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     """A legit reference near the filename is not a line cite — do not red it."""
@@ -6414,11 +6425,11 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     # ⛔ THE NEIGHBOUR ARM MUST NOT REFUSE ANOTHER FILE'S CITE, and both of these were
     # measured RED before `_neighbour_number_strays` existed. They are the natural
     # prose of a maintainer explaining the block's mechanism — and `03-test-design.md`
-    # is the bundle's cite-heavy document (`sdk.py:9612`/`:9665`, `capstone_run.py`),
+    # is the bundle's cite-heavy document (`sdk.py:9867`/`:9920`, `capstone_run.py`),
     # so its neighbours WILL name other modules with line numbers.
     ("`surfaces:` blocks are spliced by `tools/ci_selection.py::register_tests` (its "
      "`entry_lines` loop, `:4906`) and the entry line moves under them.", []),
-    ("The `corpus` block in `capstone_run.py` is frozen; its literal sits at `:1194`.",
+    ("The `corpus` block in `capstone_run.py` is frozen; its literal sits at `:1186`.",
      []),
     ("`sdk.py`'s `extraction_mode` pair (`sdk.py:24003` → `:24634`) is the same row.",
      []),
