@@ -2204,17 +2204,20 @@ def _compose_files() -> list[Path]:
 def _exec_script_names(text: str, instructions: tuple[str, ...]) -> set[str]:
     """Basenames of the script-looking tokens in a manifest's exec command.
 
-    Handles both Dockerfile forms — exec (`ENTRYPOINT ["/entrypoint.sh"]`) and
-    shell (`ENTRYPOINT /entrypoint.sh --flag`) — and the compose `entrypoint:` /
-    `command:` overrides, by taking every token that names a `.sh` file. A
-    non-script form (`CMD ["uvicorn", …]`) yields nothing, which is the honest
+    Handles both Dockerfile forms — exec (`ENTRYPOINT ["/entrypoint.sh"]`) and shell
+    (`ENTRYPOINT	/entrypoint.sh --flag`) — by taking every token that names a `.sh`
+    file. A non-script form (`CMD ["uvicorn", …]`) yields nothing, which is the honest
     answer: that deployment has no entrypoint SCRIPT, so there is nothing to walk.
 
-    ⛔ The instruction match is CASE-INSENSITIVE: Dockerfile instructions are, and
-    a compose key never is uppercase at all — the first version uppercased the line
-    and compared it to the RAW instruction, so the compose call site (which passes
-    `("entrypoint:", "command:")`) could never match and that whole route was dead
-    code behind a docstring claiming it worked (fresh review of PR #12474, P2).
+    ⛔ This function reads DOCKERFILE instructions only; `_compose_exec_scripts` is the
+    compose `entrypoint:`/`command:` reader. The two were one function until the
+    compose route turned out to be dead code here (the line was uppercased and compared
+    to a raw lowercase instruction, so it could never match — fresh review of PR
+    #12474, P2); keeping the split means neither docstring can claim the other's route
+    again, which is exactly the defect that cost a round.
+
+    ⛔ The instruction match is CASE-INSENSITIVE and accepts a SPACE OR A TAB: Dockerfile
+    instruction names are case-insensitive, and `ENTRYPOINT	/entrypoint.sh` is legal.
     """
     names: set[str] = set()
     for line in text.splitlines():
@@ -2241,20 +2244,33 @@ _COMPOSE_KEY = re.compile(r"""^(?P<q>["']?)(?P<key>[A-Za-z_][\w.-]*)(?P=q)\s*:""
 
 
 def _script_tokens(text: str) -> set[str]:
-    """Basenames of the `.sh` tokens in one command rendering."""
-    return {Path(token).name for token in re.split(r'[\s,\[\]"]+', text)
-            if token.strip("'").endswith(".sh")}
+    """Basenames of the `.sh` tokens in one command rendering.
+
+    Both quote kinds are stripped: a compose list item may be written `'/entrypoint.sh'`
+    and the first version dropped it (the split kept single quotes inside the token, so
+    `.endswith(".sh")` was false) — a missed spelling that read as `ABSENT` (fresh review
+    of PR #12474, P3).
+    """
+    tokens = re.split(r"[\s,\[\]]+", text)
+    return {Path(token.strip("'\"")).name for token in tokens
+            if token.strip("'\"").endswith(".sh")}
 
 
 def _compose_exec_scripts(text: str) -> set[str]:
     """Scripts a compose file names through `entrypoint:` / `command:`.
 
-    ⛔ Every spelling compose accepts for those keys is read, because a reader that
-    handled only the inline form reported `entrypoint` ABSENT over a deployment that
-    names it — the "route looks live, the spelling is missed" defect (fresh review of
-    PR #12474, P3). Handled: the inline scalar (`entrypoint: /entrypoint.sh`), the
-    flow list (`entrypoint: ["/entrypoint.sh"]`), the BLOCK list
-    (`entrypoint:` then `- /entrypoint.sh`) and a QUOTED key (`"entrypoint": …`).
+    ⛔ A reader that handled only the inline form reported `entrypoint` ABSENT over a
+    deployment that names it — the "route looks live, the spelling is missed" defect
+    (fresh review of PR #12474, P3). **Handled**, and this is the measured list rather
+    than "every spelling compose accepts": the inline scalar
+    (`entrypoint: /entrypoint.sh`), the flow list (`entrypoint: ["/entrypoint.sh"]`),
+    the BLOCK list (`entrypoint:` then `- /entrypoint.sh`) and a QUOTED key
+    (`"entrypoint": …`).
+
+    ⚠️ Declared bound: a BLOCK SCALAR (`command: |` … a shell string) and a one-line
+    FLOW MAPPING (`services: {t: {entrypoint: [/entrypoint.sh]}}`) are not read. Both
+    are latent here — this repo's compose file names no entrypoint — and both read as
+    `ABSENT` rather than as a false arm.
     """
     names: set[str] = set()
     key: str | None = None
@@ -2578,14 +2594,16 @@ def _assigned_value(line: str, flag: str) -> str | None:
     # published "silent" over an image whose container really has the flag (fresh
     # review of PR #12474, P3; measured, and pre-existing). `export` stays
     # case-SENSITIVE because that is shell, not Dockerfile.
+    # ⛔ A SPACE **or a TAB** separates a Dockerfile instruction from its arguments
+    # (`ENV\tFLAG=1` is legal), and accepting only the space read it OFF — the same
+    # false-HOLD the lowercase fix closed, on the white-space axis (fresh review of PR
+    # #12474, P3). `export` stays space-only because that is shell, not Dockerfile.
     head = stripped.upper()
-    for prefix in ("ENV ", "ARG "):
-        if head.startswith(prefix):
-            stripped = stripped[len(prefix):].lstrip()
-            break
-    else:
-        if stripped.startswith("export "):
-            stripped = stripped[len("export "):].lstrip()
+    dockerfile_instruction = re.match(r"^(?:ENV|ARG)[ \t]+", head)
+    if dockerfile_instruction:
+        stripped = stripped[dockerfile_instruction.end():].lstrip()
+    elif stripped.startswith("export "):
+        stripped = stripped[len("export "):].lstrip()
     # The flag must be the KEY: at the start of the line, followed by `=` or
     # `:` and nothing but the value. `Set FLAG=1 to enable` and
     # `name: verify FLAG=1 takes effect` fail here, which is the point.
@@ -2784,7 +2802,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 # nothing for the one Dockerfile instruction that has the same property
                 # (fresh review of PR #12474, P2, measured: `ARG FLAG=1` read `ON`).
                 if (posix.startswith(IMAGE_BUILD_GLOB.rstrip("*"))
-                        and line.strip().upper().startswith("ARG ")
+                        and re.match(r"^ARG[ \t]+", line.strip(), re.IGNORECASE)
                         and _assigned_value(line, flag) is not None):
                     outside_runtime.append(
                         f"{posix}:{number}: {line.strip()[:90]} (build-time ARG)")

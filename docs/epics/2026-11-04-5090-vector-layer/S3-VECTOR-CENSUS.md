@@ -370,11 +370,11 @@ actually born and where
 `main-lint.yml`'s ruff gate (`#2174`) only reds it after the fact; the scan also found the live
 `# noqa: F601` duplicate in `tests/test_commit_schema.py`, which the census-scoped pin cannot see —
 and which lint itself does NOT catch, because the suppression is on the repeated line), and eighteen by
-`#12022`/`#12054`/`#12070`/`#12312` together (four DEPLOYMENT-CHANNEL falsifiers — a `fly.toml` `[env]`
-key arms while a `[build.args]` one does not, a second `fly*.toml` is discovered rather than listed, the
+`#12022`/`#12054`/`#12070`/`#12312` together (four DEPLOYMENT-CHANNEL falsifiers (among them: a `fly.toml` `[env]`
+key arms while a `[build.args]` one does not, a second `fly*.toml` is discovered rather than listed, and the
 entrypoint is found through the image's `ENTRYPOINT` and its `export`/`${VAR:-default}` read, and an
 UNEXPORTED shell variable is not an environment entry — plus an INDETERMINATE `${OTHER}` assignment
-holding as `UNMEASURED`; one that holds row 1 over a deployment channel which arms NOTHING and names
+holding as `UNMEASURED`); one that holds row 1 over a deployment channel which arms NOTHING and names
 it, one that reaches `MET` when `fly.toml` is the only channel and asserts the
 note names it, one that a compose `entrypoint:`-named script is still DISCOVERED
 (the route was dead code behind a docstring claiming it — review of PR #12474), one

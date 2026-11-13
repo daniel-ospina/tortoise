@@ -3036,6 +3036,18 @@ def test_a_LOWERCASE_dockerfile_instruction_is_still_a_deployment_hit(
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
     assert any("build-time ARG" in hit for hit in shipped["outside_runtime"]), shipped
+    # ⛔ …and a TAB between the instruction and its value is the same instruction: the
+    # space-only split read `ENV\tFLAG=1` as silent and let `ARG\tFLAG=1` disappear
+    # without even a report (fresh review of PR #12474, P3).
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV\tTORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nARG\tTORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
+    assert any("build-time ARG" in hit for hit in shipped["outside_runtime"]), shipped
 
 
 def test_a_BLOCK_LIST_compose_entrypoint_is_discovered_too(tmp_path, monkeypatch):
@@ -3055,9 +3067,15 @@ def test_a_BLOCK_LIST_compose_entrypoint_is_discovered_too(tmp_path, monkeypatch
     assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
     assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
         "deployment"]["files"]["entrypoint.sh"] == "ON"
-    # The quoted-key spelling of the same key.
+    # The quoted-key spelling of the same key, and a SINGLE-quoted list value — the
+    # first token splitter kept the single quotes inside the token, so `.endswith(".sh")`
+    # was false and the spelling was silently dropped (fresh review of PR #12474, P3).
     (tmp_path / "docker-compose.yml").write_text(
         'services:\n  tortoise:\n    "entrypoint": /entrypoint.sh\n', encoding="utf-8")
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    entrypoint:\n      - '/entrypoint.sh'\n",
+        encoding="utf-8")
     assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
 
 
@@ -8537,7 +8555,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `197 + 1` and `196 + 2` at THIS tree, both equal to the `198` the pin re-derives
+    count: `204 + 1` and `203 + 2` at THIS tree, both equal to the `205` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
