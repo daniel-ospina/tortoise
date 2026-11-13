@@ -4732,11 +4732,28 @@ _GAP = r"(?:(?!\.\w)[^|]){0,160}?"
 #: document is caught by the arm above.
 _LINE_CITE = re.compile(rf"{_SEP}\s*{_WRAP}{_NUM}{_WRAP}")
 
+#: ⛔ THE BINDING MUST INCLUDE THE NAME THE DOCUMENT ACTUALLY USES. The document
+#: names the manifest BOTH ways: ``config/ci-surfaces.yml`` in the row's first
+#: column and *"`surfaces:` sits ABOVE `carve_out:` in the manifest"* on the claim's
+#: own sentence. Binding only the literal FILENAME left the doc-wide arm blind to
+#: the sentence's own vocabulary: appending *"the `carve_out:` entry the table above
+#: names sits on line 9987 of the manifest at this head"* was GREEN, while the same
+#: sentence with the literal filename was RED. That is the exact rot this arm
+#: removes, re-armable in the document's own words — measured, then closed here.
+_MANIFEST = r"(?:ci-surfaces\.yml|the\s+manifest)"
 _MANIFEST_CITE = re.compile(
-    rf"ci-surfaces\.yml{_GAP}{_SEP}\s*{_WRAP}{_NUM}{_WRAP}"
-    rf"|{_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}ci-surfaces\.yml"
-    rf"|{_WRAP}{_LEADING_NUM}{_WRAP}\s*{_SEP}{_GAP}ci-surfaces\.yml"
+    rf"{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_NUM}{_WRAP}"
+    rf"|{_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}{_MANIFEST}"
+    rf"|{_WRAP}{_LEADING_NUM}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
 )
+
+#: A bare integer in CITIZEN position on the claim's own sentence — no separator, no
+#: filename binding. `_LINE_CITE` above needs a separator beside the number, so the
+#: form a maintainer produces when trimming the recorded history down to its number
+#: ("the entry read 9943 before the last re-derivation") passed it AND the doc-wide
+#: arm. It reuses `_NUM`'s vocabulary rather than a blanket 3-digit rule, so a
+#: unit-suffixed COUNT ("166 s") stays green on the same sentence.
+_BARE_NUM = re.compile(_LEADING_NUM)
 
 
 class _ManifestShapeError(RuntimeError):
@@ -5562,6 +5579,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         """
         return any(re.match(rf"{re.escape(section)}:", ln) for ln in ci_lines)
 
+    #: Sections whose SHAPE error is already in `block_failures`. Without this the
+    #: caller cannot tell "shape error collected" from "absent", and reports BOTH —
+    #: a mapping-shaped `carve_out:` produced the correct shape error AND a second
+    #: message asserting the block "holds NO entries", which is false (it holds the
+    #: entry, one level down). A reader following the false one looks for a missing
+    #: block that is right there.
+    shape_errors: set[str] = set()
+
     def _entries_or_failure(section: str) -> list[str] | None:
         """`_section_entries` over the ONE parsed mapping; shape errors are collected.
 
@@ -5575,10 +5600,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             return _section_entries(manifest, section)
         except _ManifestShapeError as exc:
             block_failures.append(str(exc))
+            shape_errors.add(section)
             return None
 
     carve_all = _entries_or_failure("carve_out")
-    if carve_all is None and manifest is not None:
+    if carve_all is None and manifest is not None and "carve_out" not in shape_errors:
         block_failures.append(
             f"config/ci-surfaces.yml has a `carve_out:` block that holds NO entries"
             f"{'' if _has_top_level('carve_out') else ' (the key is ABSENT entirely)'} "
@@ -5621,7 +5647,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     for other in ("uri_requiring", "slow_files"):
         entries = _entries_or_failure(other)
         if entries is None:
-            if manifest is not None:
+            if manifest is not None and other not in shape_errors:
                 block_failures.append(
                     f"config/ci-surfaces.yml has a `{other}:` block that holds NO "
                     f"entries{'' if _has_top_level(other) else ' (the key is ABSENT entirely)'} "
@@ -5650,8 +5676,48 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"— the sentence is the only place the document says WHICH entry it "
                 f"means, so a sentence that names another file, or none, is the "
                 f"defect this pin exists to catch")
+        # ⛔ THE DOCUMENT'S "hold none" HALF IS PART OF THE CLAIM, and it was
+        # unchecked: the tree was verified to hold none in `uri_requiring:` and
+        # `slow_files:`, but the SENTENCE could be rewritten to claim the opposite
+        # ("`uri_requiring:` holds `test_graph_census_7949.py`") and stay GREEN,
+        # because the doc arm only looked for the phrase, the entry name and a
+        # cite. Reproduced before this arm existed. D2 closed the REPLACEMENT case
+        # only; this closes the ADDITION case.
+        for needed in ("`uri_requiring:`", "`slow_files:`", "hold none"):
+            if needed not in doc_hits[0]:
+                block_failures.append(
+                    f"03-test-design.md's `carve_out:` sentence no longer carries "
+                    f"{needed!r} — the sentence makes a three-part claim (the block "
+                    f"holds ONE, `uri_requiring:` and `slow_files:` hold NONE) and "
+                    f"the pin verifies all three against the tree, so a sentence "
+                    f"that drops one of them is a claim the pin can no longer "
+                    f"check. Restore the clause; do not narrow the sentence.")
+        # Only the ONE named entry may appear: a second `test_*.py` token is the
+        # addition case above in another spelling. Path-prefixed references stay
+        # legal — this pin's own module is cited that way beside the clause.
+        extra_files = sorted(set(re.findall(r"(?<![\w/])test_\w+\.py",
+                                            doc_hits[0].replace(ENTRY, ""))))
+        if extra_files:
+            block_failures.append(
+                f"03-test-design.md's `carve_out:` sentence names {extra_files!r} "
+                f"besides {ENTRY!r} — the sentence is the document's claim that the "
+                f"block holds ONE capstone entry, so a second filename on it either "
+                f"contradicts the tree or re-opens the claim to a file the pin "
+                f"does not pick up. Name one entry.")
         # ⛔ scan the sentence with the ENTRY NAME removed: `test_pack_logic_
         # writeprobe_11083.py` carries a 5-digit run that is not a line cite.
+        sentence_numbers = [m.group(0) for m in
+                            _BARE_NUM.finditer(doc_hits[0].replace(ENTRY, ""))]
+        if sentence_numbers:
+            block_failures.append(
+                f"03-test-design.md hands a reader a NUMBER on the `carve_out:` "
+                f"sentence: {sentence_numbers[0]!r} — that sentence used to carry a "
+                f"line number for this entry, and even as HISTORY the digit reads as "
+                f"a current cite to anyone grepping for one. This arm is the one the "
+                f"separator-based matcher cannot cover: the number here is in a "
+                f"position no cite shape describes (`read 9943`, `was 9943`), which "
+                f"is why the check is on the NUMBER and not on its neighbours. "
+                f"Describe the history by head, or by \"moved again\"; print no digit.")
         if _LINE_CITE.search(doc_hits[0].replace(ENTRY, "")):
             block_failures.append(
                 "03-test-design.md attaches a LINE NUMBER to "
