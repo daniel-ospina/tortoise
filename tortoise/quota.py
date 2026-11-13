@@ -31,7 +31,7 @@ Batch caps are unconditional in both modes.
 
 Downgrade-over-limit decision (#683)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When an org downgrades (e.g. Pro→Free) while over the NEW tier's limits
+When an org downgrades (e.g. Builder→Free) while over the NEW tier's limits
 (e.g. 2 memberships but Free allows only 1), the downgrade MUST be BLOCKED
 with a clear error message listing which limits the org exceeds.
 
