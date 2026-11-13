@@ -6787,8 +6787,15 @@ _RANGE_INDEX_LABEL_PROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # i.e. quadratic over a 44k re-file, for a lookup its own docstring called an
     # indexed equality. Indexed it is flat (0.90–0.95 ms at every population
     # measured 5k→40k). Same single-prop class as ``name`` beside it.
-    ("Subject", ("id", "name", "canonical_name")),
-    ("Object", ("id", "name", "canonical_name")),
+    # #12296: ``resolved_from`` is the REVERSE edge the capture path reads on
+    # every run — `extractor_v2._entity_verdict_facts` asks "which nodes were
+    # folded into these ids?" for BOTH identity labels, twice per capture. An
+    # un-indexed reverse edge lookup is a FULL LABEL SCAN BY CONSTRUCTION (that
+    # structural fact is what carries this index; the local spot measurement that
+    # first surfaced it was not recorded as an artifact, so no figure is claimed
+    # here). One write per merge, so none of the #522 write-amplification concern.
+    ("Subject", ("id", "name", "canonical_name", "resolved_from")),
+    ("Object", ("id", "name", "canonical_name", "resolved_from")),
     # #7927: ``id`` added to Event. Every epistemic read anchors on ``id``
     # (``live.epistemic_labels_of``, the ranker sweeps, the BFS frontier legs),
     # and Event carried only an ``eventId`` index — so the id-anchored Event
@@ -20297,6 +20304,12 @@ class FalkorProjection(
         ("Object", "id", "RANGE"),
         ("Object", "name", "RANGE"),
         ("Object", "canonical_name", "RANGE"),
+        # #12296: ``resolved_from`` must be REQUIRED, not merely created — the
+        # #8400 trap documented above. The capture path reads it backwards on
+        # every run; without this entry a pre-#12296 graph reads current, the
+        # sweep is skipped forever, and that read stays a full label scan.
+        ("Object", "resolved_from", "RANGE"),
+        ("Subject", "resolved_from", "RANGE"),
         ("Event", "eventId", "RANGE"),
         # #7927: ``:Event(id)`` must be REQUIRED, not merely created — the
         # exact #8400 trap three entries above. Every epistemic read anchors a
