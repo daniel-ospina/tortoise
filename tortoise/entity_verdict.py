@@ -602,7 +602,7 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
         {"retired": bool,        # candidate carries `resolved_from`
          "dependents": int,      # nodes whose `resolved_from` is the candidate
          "suppressed": bool,     # `dedup_reviewed='reject'` naming no survivor
-         "mention_is_alias": bool,}  # the mention's folded name is one of the
+         "mention_is_alias": bool,  # the mention's folded name is one of the
                                     # candidate's `aliases[]` — a spelling a MERGE
                                     # RECORDED, so it stands the three SPELLING
                                     # vetoes AND `group_join` down. ⛔ `aliases[]`
@@ -619,7 +619,7 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
                                     # from the row's own name, because
                                     # `_absorb_spellings` used to alias every row
                                     # with its own name (round-5 review).
-         "mention_is_own_name": bool,}  # the mention is spelled exactly like the
+         "mention_is_own_name": bool}  # the mention is spelled exactly like the
                                     # candidate. Not an inference about a group, so
                                     # it stands `group_join` down only — but it is
                                     # not a reviewer's record either, so the

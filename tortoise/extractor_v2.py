@@ -3051,8 +3051,10 @@ def _absorb_spellings(folded_row: dict, row: dict, fact: tuple | None) -> None:
     # kind-agnostic — so an own-name entry made EVERY prior row match itself by
     # `alias`, phase 1 passed `mention_is_alias` for it, and all three SPELLING
     # vetoes stood down: `plan "Acme"` bound onto `org "Acme"` with no hold and no
-    # warning. The CARRIER's spelling (why this function exists) always differs
-    # from the survivor's name, so it is unaffected.
+    # warning. The CARRIER's spelling is the reason this function exists: where it
+    # differs from the survivor's name it is unioned below, and where it folds to
+    # the survivor's own name the injection is skipped — that spelling is then
+    # matched by the name rungs, not by `aliases[]`.
     # ⛔ But only the INJECTION is skipped: a STORED `aliases[]` entry is a
     # reviewer's record (`apply_entity_merge` unions the candidate's fold
     # unconditionally, so a merge of two same-fold rows legitimately leaves the
