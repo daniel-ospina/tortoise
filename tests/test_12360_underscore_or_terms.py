@@ -356,6 +356,17 @@ class TestPin:
             assert build_or_query(shape) == shape, shape
         for shape in ("zx-99", "friday,", "a-b"):
             assert probe_phrase_rejection(shape) is not None, shape
+        # ⛔ ONE DISTINCT ALTERNATIVE IS NOT ONE PROBE (review round 12, P2). A
+        # doubled accented fragment makes the read OR-join alternatives that
+        # merely COINCIDE — `build_or_query('cafécafé') == 'caf|caf'` — while the
+        # index holds `cafécafé` as ONE term, so the probe matches NOTHING and
+        # certifies `ran=True, leaked=[]` over a still-present sentence. That is
+        # the FALSE PASS this guard exists to prevent, and accepting it was a
+        # regression against `origin/main` (which refused these).
+        for doubled in ("cafécafé", "überüber", "testétest"):
+            refusal = probe_phrase_rejection(doubled)
+            assert refusal is not None and "expands" in refusal, (doubled, refusal)
+            assert len(build_or_query(doubled).split("|")) > 1, doubled
         # a CASE-VARIANT of one index term is not an OR over-match (measured:
         # RediSearch lowercases, and `queryNodes('A_B')` returns the record named
         # `a_b`), so it must not be refused.

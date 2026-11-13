@@ -1581,8 +1581,25 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # a capitalised `_` token no longer emits the duplicate at all
     # (``build_or_query('A_B') == 'A_B'``), but this comparison is what makes the
     # guard independent of the builder's dedupe staying case-aware.
+    # ⛔ ONE DISTINCT ALTERNATIVE IS NOT ENOUGH — IT MUST BE **THE TOKEN ITSELF**
+    # (review round 12, P2, MEASURED). ``len(alternatives) != 1`` accepts any token
+    # whose read OR-joins into alternatives that merely COINCIDE — and a doubled
+    # accented fragment does exactly that while addressing a term the index does
+    # not hold: ``build_or_query('cafécafé') == 'caf|caf'`` (one distinct
+    # alternative, ``caf``) while the index holds ``cafécafé`` as ONE term, so
+    # ``queryNodes('Source','cafécafé')`` returns the node and ``'caf|caf'``
+    # returns NOTHING. Accepting it certified ``ran=True, leaked=[]`` over a
+    # still-present sentence — the FALSE PASS this guard exists to prevent, in
+    # the fail-open direction, and it was introduced by the round-8 narrowing
+    # (``origin/main`` REFUSED ``cafécafé``; verified by loading the base
+    # module). Same shape: ``überüber`` -> ``ber|ber``, ``testétest`` ->
+    # ``test|test``. So the requirement is the strict one: the emitted set must
+    # BE the token, case-folded. That still accepts every shape the file pins
+    # (``a_bc``, ``x_axis``, ``A_B``, ``año``, ``résumé``, ``friday.`` — the read
+    # sends the token itself) and still refuses ``web_search`` (three distinct
+    # terms) and the doubled-fragment class.
     alternatives = {t.lower() for t in built.split("|")}
-    if len(alternatives) != 1:
+    if alternatives != {token.lower()}:
         return (f"the read expands it into several terms ({built!r}) — either "
                 f"the identifier mechanism (a digit/dash run), the #12360 "
                 f"`_`-composite tail (`TORTOISE_UNDERSCORE_TERMS`), or the "
