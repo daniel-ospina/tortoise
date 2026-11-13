@@ -59,10 +59,14 @@ _UNFILTERED_POPULATION = 7
 class _StubSDK:
     """Records what each accessor was asked for; applies NO filter.
 
-    The fts leg mirrors the real signature's knobs (``exclude_status``,
-    ``claim_class``, ``relationship_filter``, …) and, exactly like the real one,
-    has no property-filter parameter — so a test cannot accidentally pass by
-    inventing a filter path the product does not have.
+    The fts leg mirrors the REAL signature's PUBLIC knobs and declares **no
+    ``**kwargs``** — that is load-bearing, not tidiness (#12455 round 9): the
+    real ``TortoiseSDK.tortoise_fts_query`` declares 36 named parameters and no
+    ``VAR_KEYWORD``, so an unknown keyword raises ``TypeError``. A stub with
+    ``**kwargs`` would swallow an injected ``filters=`` on the fts call — a
+    change that breaks every ``text=`` read against the real SDK — and the suite
+    would stay green. Measured: with ``**kwargs`` the injected regression is
+    **22 passed**; with this signature it **reds 4**.
     """
 
     def __init__(self, population=_UNFILTERED_POPULATION):
@@ -70,12 +74,29 @@ class _StubSDK:
         self.rows = [{"id": f"p{i}", "kind": "statement"} for i in range(population)]
 
     def tortoise_fts_query(self, query=None, kind=None, *, entity_type="point",
-                           limit=10, min_confidence=0.0, order_by="relevance",
-                           **kwargs):
-        self.calls.append(("tortoise_fts_query", query, kind,
-                           {"entity_type": entity_type, "limit": limit,
-                            "min_confidence": min_confidence,
-                            "order_by": order_by, **kwargs}))
+                           structural_kind=None, structural_hops=0,
+                           min_confidence=0.0, order_by="relevance",
+                           graph_ranker=None, limit=10, threshold=0.0,
+                           relationship_filter=None, traversal_path=None,
+                           exclude_status=None, claim_class=None,
+                           exclude_turn_echo_session=None,
+                           include_terminal=False):
+        self.calls.append(("tortoise_fts_query", query, kind, {
+            "entity_type": entity_type,
+            "structural_kind": structural_kind,
+            "structural_hops": structural_hops,
+            "min_confidence": min_confidence,
+            "order_by": order_by,
+            "graph_ranker": graph_ranker,
+            "limit": limit,
+            "threshold": threshold,
+            "relationship_filter": relationship_filter,
+            "traversal_path": traversal_path,
+            "exclude_status": exclude_status,
+            "claim_class": claim_class,
+            "exclude_turn_echo_session": exclude_turn_echo_session,
+            "include_terminal": include_terminal,
+        }))
         return self.rows
 
     def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
