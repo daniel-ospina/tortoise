@@ -826,8 +826,15 @@ def test_the_zone_child_gets_the_parents_sys_path_not_just_the_repo_root() -> No
     )
     # ⛔ ORDER, not just membership (#12330 review, P3). `sys.path` order IS the
     # resolution order, so a dedupe that sorts — or that moves an entry — changes WHICH
-    # module a child resolves, and the assertions above cannot see it (measured:
-    # replacing the dedupe with `[repo_root, *sorted(set(...))]` kept this test green).
+    # module a child resolves, and NO assertion above can see it: first-position,
+    # membership and uniqueness all survive a pure reordering. ⚠️ The mutant that proves
+    # it is `sorted({p for p in sys.path if p})` — with NO `repo_root` prefix. Adding one
+    # does NOT prove this: `tests/conftest.py:121` already inserts the repo root into
+    # `sys.path` at import, so the prefix becomes a DUPLICATE and reds the uniqueness
+    # assert above, leaving the order assert unexercised (measured; the same class this
+    # file's own `MEMORY.md` `[pin-defensive-claim]` row names — a falsifier entry must
+    # name the assert its mutant actually reds). Measured with the correct mutant:
+    # 1 failed at `assert tail == sorted(tail)`.
     position = {p: i for i, p in enumerate(sys.path)}
     tail = [position[p] for p in entries[1:]]
     assert tail == sorted(tail), (
