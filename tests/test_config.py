@@ -202,8 +202,9 @@ class TestGetSdkEnvPrecedence:
       2. TORTOISE_DB_URI without docker:// → resolve_db_path (backward compat)
       3. No URI → resolve_db_path() default (~/.tortoise/tortoise.db)
 
-    _load_dotenv() only fills keys NOT already in os.environ (mcp_server.py:72),
-    so a process-level TORTOISE_DB_URI always wins over .env.
+    _load_dotenv() only fills keys NOT already in os.environ (the rule lives in
+    tortoise/dotenv_file.py, shared with the verbs that report the file), so a
+    process-level TORTOISE_DB_URI always wins over .env.
     """
 
     @pytest.fixture(autouse=True)

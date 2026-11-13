@@ -968,3 +968,27 @@ def test_every_remedy_that_names_a_search_names_the_silent_cause() -> None:
         "make it answer [] with nothing reporting it: "
         f"{sorted(missing)}"
     )
+
+
+def test_the_event_remedy_names_the_population_to_reconcile_against() -> None:
+    """`event` is the one entry whose size source is a RECONCILIATION, not a count key.
+
+    The table's own rule is that every entry says where the layer's SIZE comes
+    from. `document`/`object`/`subject` name `graph_overview(section='status')`
+    and are pinned by `test_a_non_enumerable_remedy_states_its_bound_and_the_real_size_source`;
+    `event` names no count key at all — it names a read that can be reconciled
+    against the graph's own Event count, which is a different and equally
+    load-bearing claim (`tortoise_get_entity(None, type='events')` →
+    `sdk.get_events` → `MATCH (e:Event) LIMIT $lim`, default 20, a bare list,
+    no status filter, so `counts.Event` is the matching population). Round 10
+    measured the gap: deleting that clause left the suite fully GREEN, i.e. the
+    one entry whose size source is prose could lose it silently — the same
+    "bound pinned, reconcilability not" defect this PR removes. Fails on the
+    reconciliation clause being absent.
+    """
+    message = _message_for("event")
+
+    assert "reconcilable against the graph's own Event count" in message, (
+        "the event remedy sells a truncated window with nothing to reconcile "
+        f"it against: {message!r}"
+    )

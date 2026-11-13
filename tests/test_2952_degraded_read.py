@@ -137,6 +137,31 @@ class TestDeclaredDegradedRead:
         assert marker[VECTOR_LEG_UNAVAILABLE] is False
         assert marker["missing_legs"] == []
 
+    def test_an_audit_only_entry_neither_earns_nor_defeats_the_structural_escape(
+            self):
+        """#12382 — a lever's DISCLOSURE is not a retrieval leg.
+
+        ``rerank`` entries DECLARE what the lever did (a skip with a reason, or
+        ``ran=True`` and what it moved) and contribute no candidate; they ask for
+        no LEG. Before this rule, arming the lever on a ``query=None`` full scan
+        (a single-leg read BY DESIGN, ``None`` above) added a non-structural entry
+        and the hatch stopped firing — the same correct read declared
+        ``vector_leg_unavailable`` and blamed an embedder it never consulted.
+        """
+        structural = _leg("structural", True, False, "ok", 3)
+        rerank = _leg("rerank", False, False, "empty_query", 0)
+        assert declared_degraded_read([structural]) is None
+        # the audit entry does not DEFEAT the escape
+        assert declared_degraded_read([structural, rerank]) is None
+        # and it does not EARN it either: a text leg plus the same entry is
+        # still declared, and an audit entry alone is not structural evidence.
+        assert declared_degraded_read(
+            [_leg("fts", True, False, "ok", 2), rerank]) is not None
+        assert declared_degraded_read([rerank]) is not None
+        # unknown vocabulary is NOT in the audit set — it still fails closed.
+        assert declared_degraded_read(
+            [structural, _leg("newleg", True, False, "ok", 1)]) is not None
+
     def test_zero_count_fallback_is_not_declared(self):
         trace = [
             _leg("fts", True, False, "ok", 1),
