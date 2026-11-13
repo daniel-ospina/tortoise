@@ -4679,9 +4679,14 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
     return failures
 
 
-#: A LINE CITE bound to the tool-maintained manifest. The supported spellings, and
-#: they are exhaustive on purpose (the docstring of a guard should not promise more
-#: than the guard does): ``ci-surfaces.yml:9973``, `` `ci-surfaces.yml`, `:9987` ``,
+#: A LINE CITE bound to the tool-maintained manifest. ⛔ THE SPELLING SET IS `_SEP`
+#: ABOVE; THIS LIST IS A READING AID, NOT THE CONTRACT. It used to say it was
+#: "exhaustive on purpose", and two shapes its own must-catch fixtures require
+#: (`` → 9987 `` and `` line no. 9987 ``) were absent from it — the guard promised
+#: less than it did, which reads as a false claim the moment a reader trusts the
+#: word. `_SEP` also carries the plural forms (`` lines ``/`` rows ``/`` entries ``),
+#: `` of ``, and the optional `` number ``/`` no. `` tail. Every spelling below is
+#: a real one:
 #: `` at :9987 ``, `` — `:9987` ``, `` at 9987 `` / `` — 9987 `` (no colon),
 #: `` line `9987` `` / `` row 9987 `` / `` (entry 9987) ``, `` :9,987 ``,
 #: `` ci-surfaces.yml#L9987 `` / `` L9987 `` / `` L. 9987 `` (the GitHub-anchor and
@@ -5292,7 +5297,28 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
             f"config/ci-surfaces.yml `{section}:` is a {type(entries).__name__}, not a "
             f"list — this pin compares entries and cannot read a mapping")
     # a YAML `# comment` is already gone; keep the value verbatim otherwise.
-    return [str(e).strip() for e in entries]
+    #
+    # ⛔ A NON-STRING ENTRY IS A SHAPE ERROR, NOT SOMETHING TO `str()` (measured
+    # fail-open). This used to be `str(e).strip()`, and `str()` of a mapping or a
+    # list yields a REPR whose basename is the repr itself — so with
+    # `- {test_pack_logic_writeprobe_11083.py: 3.0}` or
+    # `- [test_pack_logic_writeprobe_11083.py]` spliced under `slow_files:`, the
+    # entry classified as "not a capstone file" (`_is_capstone` compares the
+    # BASENAME, and `PurePosixPath("{'…': 3.0}").name` is the whole string) and
+    # the document's "hold none" half stayed GREEN over a block that does hold
+    # the entry. `merge=union` is exactly the mechanism that can splice a
+    # foreign shape into a hand-curated block, which is why this is refused
+    # rather than guessed at: the grammar is `- <filename>` strings and a value
+    # outside it has no filename to compare.
+    for e in entries:
+        if not isinstance(e, str):
+            raise _ManifestShapeError(
+                f"config/ci-surfaces.yml `{section}:` holds a {type(e).__name__} "
+                f"entry ({e!r}) where the grammar is `- <filename>` strings — "
+                f"this pin compares entries by basename, and an entry wrapped in "
+                f"a mapping or a list has no basename to compare, so the file "
+                f"inside it would read as 'not a capstone file'")
+    return [e.strip() for e in entries]
 
 
 def test_the_bare_continuation_cites_name_what_they_say():
@@ -6103,7 +6129,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         _ONE_ENTRY = (
             r"`carve_out:`\s*holds\s*\*\*one\*\*\s*(?:entry|file)?\s*"
             r"(?::|—|–)\s*`"
-            + ENTRY + r"`"
+            # ⛔ `re.escape`, because `ENTRY` is a FILENAME and its `.` is a regex
+            # wildcard. Un-escaped, the sentence named
+            # `test_pack_logic_writeprobe_11083_py` (or `…Xpy`) and this arm still
+            # matched — measured — while `_stray_entry_finding` is silent by
+            # construction in that state (`if entry not in sentence: return None`,
+            # and the exact name IS absent). So a one-character typo in the one
+            # filename the sentence exists to state left the pin GREEN
+            # (a fresh-context review's #1 finding, reproduced before it was fixed).
+            + re.escape(ENTRY) + r"`"
             # ⛔ THE DEFAULT IS "NOTHING MAY FOLLOW", so this is a POSITIVE lookahead
             # for a clause break, not a deny-list of connectives. The deny-list
             # shipped one round and four same-meaning tails walked straight past it —
@@ -6514,8 +6548,12 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     # ⛔ THE NEIGHBOUR ARM MUST NOT REFUSE ANOTHER FILE'S CITE, and both of these were
     # measured RED before `_neighbour_number_strays` existed. They are the natural
     # prose of a maintainer explaining the block's mechanism — and `03-test-design.md`
-    # is the bundle's cite-heavy document (`sdk.py:9867`/`:9920`, `capstone_run.py`),
-    # so its neighbours WILL name other modules with line numbers.
+    # is the bundle's cite-heavy document (`sdk.py:9938`/`:9991`, `capstone_run.py`),
+    # so its neighbours WILL name other modules with line numbers. Both numbers are
+    # re-derived at this head (`grep -n subject_binding_available tortoise/sdk.py`) —
+    # an earlier revision carried `9867`/`9920`, which is that pair minus 71: a
+    # carried OFFSET, the exact rot this PR exists to remove, caught by the same
+    # review that re-derived the document's copy of the pair.
     ("`surfaces:` blocks are spliced by `tools/ci_selection.py::register_tests` (its "
      "`entry_lines` loop, `:4906`) and the entry line moves under them.", []),
     ("The `corpus` block in `capstone_run.py` is frozen; its literal sits at `:1186`.",
@@ -6719,6 +6757,16 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
     (lambda doc, man: (doc, man.replace(
         "\ncarve_out:\n", "\ncarve_out:\ncarve_out:\n", 1)),
      "the duplicate-key refusal"),
+    # ⛔ THE TWO THE SAME REVIEW FOUND AS FAIL-OPENS, so they get a case like the
+    # rest: each is RED here and GREEN if the arm it names is deleted.
+    (lambda doc, man: (doc.replace(
+        "`carve_out:` holds **one**: `test_pack_logic_writeprobe_11083.py`",
+        "`carve_out:` holds **one**: `test_pack_logic_writeprobe_11083_py`", 1), man),
+     "`_ONE_ENTRY` (`re.escape` — the filename's `.` is a wildcard unescaped)"),
+    (lambda doc, man: (doc, man.replace(
+        "\nslow_files:\n",
+        "\nslow_files:\n- {test_pack_logic_writeprobe_11083.py: 3.0}\n", 1)),
+     "the non-string entry refusal in `_section_entries`"),
 ])
 def test_each_block_arm_reds_on_the_mutation_it_guards(mutation, arm, monkeypatch,
                                                       tmp_path):
