@@ -279,8 +279,29 @@ def _refusal_arm(env: dict[str, str], name: str, pid: int) -> str:
     attribution inversion this helper exists to end, one layer up.
 
     An unrecognised, mismatched or missing witness is reported as such, never guessed.
+
+    ⛔ AND "MISSING" MUST BE ASKED OF THE SUT'S OWN STATE DIRECTORY. `Path(env.get(
+    "PREVIEW_STATE", ""))` is `Path("")` → `.`, the TEST's cwd, when the variable is
+    unset — while the SUT's `state_dir` falls back to
+    `${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tortoise-preview/<run>-<job>`. Reading the wrong
+    directory would report "no witness was written" about a witness `cmd_record` DID
+    write, i.e. the same attribution inversion this helper exists to end, one layer
+    down. The SUT answers this question itself (`dir`), so this mirrors nothing and
+    there is no second derivation to drift.
     """
-    path = Path(env.get("PREVIEW_STATE", "")) / f"{name}.refused"
+    root = env.get("PREVIEW_STATE", "")
+    if root:
+        state_dir = Path(root)
+    else:
+        resolved = _script("dir", env=env)
+        reported = resolved.stdout.strip()
+        if resolved.returncode != 0 or not reported:
+            return (
+                "`PREVIEW_STATE` is unset and the SUT's own `dir` verb reported no state "
+                "directory — the arm is unrecorded (the witness cannot be located)"
+            )
+        state_dir = Path(reported)
+    path = state_dir / f"{name}.refused"
     try:
         text = path.read_text().strip()
     except OSError:
@@ -1173,6 +1194,49 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     assert "ESRCH" in now, now
     assert "LIVENESS" not in now and "START-TIME" not in now, (
         f"the observation asserted an arm — that is what `_refusal_arm` is for: {now}"
+    )
+
+
+def test_a_witness_is_located_by_the_SUTs_own_state_dir_when_PREVIEW_STATE_is_unset(
+    tmp_path: Path, state
+) -> None:
+    """#12227 review cycle 5: "no witness was written" must not be a guess.
+
+    `_refusal_arm` read `Path(env.get("PREVIEW_STATE", "")) / "<name>.refused"`, and
+    `Path("")` is `.` — the TEST's cwd — while the SUT's `state_dir` falls back to
+    `${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tortoise-preview/<run>-<job>`. With the variable
+    unset the helper therefore read a directory the SUT never writes to, and reported
+    "no `app.refused` witness was written" about a witness `cmd_record` DID write —
+    asserting a cause it had not measured, which is the inversion this helper exists to
+    end, one layer down. The SUT answers the question itself (`dir`), so the helper now
+    asks it instead of deriving a second copy of the rule.
+
+    Latent rather than live: every call site in this file passes a `state` fixture with a
+    non-empty `PREVIEW_STATE`, which is exactly why it is pinned here directly — no
+    fixture-shaped test would ever reach the arm.
+    """
+    # ⛔ THE STATE ROOT COMES FROM THE SUT, not from a literal here. A test that spelled
+    # `${RUNNER_TEMP}/tortoise-preview/<run>-<job>` itself would still pass against a
+    # helper carrying the same second copy, and the drift between the two IS the defect.
+    no_state = {k: v for k, v in state.items() if k != "PREVIEW_STATE"} | {
+        "RUNNER_TEMP": str(tmp_path / "runner-temp"),
+        "GITHUB_JOB": "dashboard-e2e",
+    }
+    where = _script("dir", env=no_state)
+    assert where.returncode == 0 and where.stdout.strip(), (
+        f"the harness cannot measure: the SUT must report a state dir: {where.stderr}"
+    )
+    state_dir = Path(where.stdout.strip())
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "app.refused").write_text("refused 4242 no-start-time\n")
+
+    arm = _refusal_arm(no_state, "app", 4242)
+    assert "START-TIME leg refused" in arm, (
+        "the helper did not read the SUT's own state directory when `PREVIEW_STATE` was "
+        f"unset — it reported about a directory the SUT never writes: {arm}"
+    )
+    assert "witness was written" not in arm, (
+        f"the helper claimed no witness exists while one was on disk: {arm}"
     )
 
 
