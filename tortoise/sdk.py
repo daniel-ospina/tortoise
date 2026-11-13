@@ -47227,9 +47227,14 @@ class TortoiseSDK:
                 raise ValueError(
                     f"update_entity refused {_lifecycle_fields}: the Point bound "
                     f"by {id_val!r} carries no `id`, so its lifecycle state "
-                    f"cannot be checked. Give the Point an `id` (the canonical "
-                    f"key every other door uses) or write the window through "
-                    f"`update_point(id, ...)`."
+                    f"cannot be checked. ⛔ No SDK door can fix that for you: "
+                    f"`id` is refused as a caller prop (`_sanitize_props`,"
+                    f" `reject_id=True`), and every lifecycle verb resolves by "
+                    f"`id`, so an id-less node is unreachable to "
+                    f"`update_point`/`retract_point`/`supersede_point` until it "
+                    f"has one. Stamp the canonical `id` on the node directly and "
+                    f"re-send this call, or re-create the Point with "
+                    f"`create_point(...)`, which always stamps one."
                 )
             # ⛔ Review F5-1: BOTH the exemption and the status arm read the row set
             # the WRITE binds (`n.id IN $ids`), never the row set the ADDRESS
@@ -47403,9 +47408,26 @@ class TortoiseSDK:
                         "write path) — `retract_point(...)` is the SDK route to "
                         "retirement."
                         if _status == "archived" else "")
+                    # AX rule 2's third part, and it must be PERFORMABLE: the
+                    # prescription names the RESOLVED id, not the address the
+                    # caller typed. A `:Point:Event` addressed by its `eventId`
+                    # reaches this arm with `id_val='EVT'` while the Point's own
+                    # id is something else, and `supersede_point` resolves by
+                    # `id` only — so `supersede_point('EVT', …)` would raise
+                    # `No point 'EVT'`, an unexecutable repair in the message
+                    # this door exists to get right (#9649 review round 12).
+                    # `_lifecycle_ids` is the resolved list and is non-empty
+                    # here (this arm is inside `if _lifecycle_ids:`), so the
+                    # named id is real; the typed address is kept as a separate
+                    # clause so the caller can still recognise its own call.
+                    _named_id = _lifecycle_ids[0]
+                    _addressed_as = (
+                        "" if _named_id == id_val
+                        else f" (addressed as {id_val!r})")
                     raise ValueError(
                         f"update_entity refused the status transition "
-                        f"{_stored!r} -> {_status!r} on Point {id_val!r}: "
+                        f"{_stored!r} -> {_status!r} on Point "
+                        f"{_named_id!r}{_addressed_as}: "
                         f"this door's declared Point transitions from "
                         f"{_stored!r} are {{{_declared_text}}} "
                         f"(`_ALLOWED_TRANSITIONS` — ONTOLOGY §5's table, plus "
@@ -47415,7 +47437,7 @@ class TortoiseSDK:
                         f"declared transition, or — "
                         f"if the claim itself changed — mint a new Point and "
                         f"supersede this one with "
-                        f"`supersede_point({id_val!r}, <new_id>)`."
+                        f"`supersede_point({_named_id!r}, <new_id>)`."
                     )
                 # Write FIRST, journal SECOND, gated on the write having
                 # MATCHED (a missed/no-op write must never leave a phantom

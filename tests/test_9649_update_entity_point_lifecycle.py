@@ -989,3 +989,68 @@ def test_the_refusal_also_names_the_route_for_a_read_modify_write(env):
     assert sdk.get_point(old)["content"] == "a re-sent, corrected reading"
     assert _row(sdk, old)["validTo"] == stored["validTo"], (
         "the revision must not disturb the window the supersession closed")
+
+
+def test_the_transition_refusal_names_the_RESOLVED_id_not_the_typed_address(env):
+    """Review round 12 (P3, AX rule 2): the prescription must be PERFORMABLE.
+
+    A `:Point:Event` addressed by its `eventId` reaches the transition arm with
+    `id_val='EVT'` while the Point's own id is something else — and
+    ``supersede_point`` resolves by ``id`` ONLY, so the message's
+    ``supersede_point('EVT', …)`` was a call that raises ``No point 'EVT'``. The
+    refusal now names the RESOLVED id (kept, with the typed address as a separate
+    "addressed as" clause) and interpolates that same id into the prescription,
+    matching what the dead-claim refusal already did.
+
+    Fixture-reachable only — no production writer mints a `:Point:Event` — which
+    is why it is a message defect and not a hole in the guard.
+    """
+    sdk, _ = env
+    pid = _live(sdk, "a claim addressed by its eventId")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid, n.status='live'",
+        params={"id": pid, "eid": "evt-round12-9649"})
+
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity("evt-round12-9649", status="archived")
+    text = str(exc.value)
+
+    assert f"supersede_point({pid!r}" in text, (
+        f"the prescription must name the RESOLVED id {pid!r}, or it cannot be "
+        f"run: {text!r}")
+    assert "supersede_point('evt-round12-9649'" not in text, (
+        f"supersede_point resolves by `id` only — this call would raise "
+        f"`No point`: {text!r}")
+    assert "addressed as 'evt-round12-9649'" in text, (
+        f"the typed address must still be shown, so the caller recognises its "
+        f"own call: {text!r}")
+
+    # ...and the call the message names really resolves (non-vacuity).
+    assert sdk.get_point(pid)["id"] == pid
+
+
+def test_the_id_less_refusal_prescribes_no_unperformable_route(env):
+    """Review round 12 (P3, AX rule 2): no repair the caller cannot execute.
+
+    The fail-closed arm used to offer ``update_point(id, ...)`` — unperformable
+    twice over: the node has no ``id`` to address it by, and this refusal may be
+    about ``status``, which ``update_point`` cannot set at all (it promotes
+    ``draft -> live`` only). It now says what is true: no SDK door can stamp an
+    ``id`` (``_sanitize_props`` refuses it as a caller prop), so the routes are a
+    direct stamp on the node or a re-create.
+    """
+    sdk, _ = env
+    sdk._get_proj().g.query(
+        "CREATE (n:Point:Source {url:'src://idless-9649-msg', "
+        "status:'superseded'})")
+
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity("src://idless-9649-msg", status="retracted")
+    text = str(exc.value)
+    assert "update_point(" not in text, (
+        f"the refusal must not prescribe an id-keyed call for a node with no "
+        f"id (it resolves to nothing): {text!r}")
+    assert "create_point(" in text, (
+        f"the re-create route is the one that works and must be named: {text!r}")
+    assert "_sanitize_props" in text, (
+        f"the message must say WHY no SDK door can stamp the id: {text!r}")
