@@ -1021,7 +1021,7 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
       remain, its own stale finding reconciles the word — so the shape that could
       recur here is the last-claim one); that shape is what
       :func:`reconcile_goal_states` sweeps for, and this function is the per-goal
-      door it routes through);
+      door it routes through.
     * a ``blocked`` goal lost the word when a ``target-revised`` retirement
       cleared the cache under it.
 
@@ -1248,11 +1248,15 @@ def reconcile_goal_states(
       claim, already-terminal claim, the post-refusal terminal arm, and the
       second vanish window), so the issue's own route — ``invalidate`` →
       ``alreadyRetired: True`` → the word still standing — no longer reproduces
-      through the door. The one arm that reconciles nothing is the ``raise`` for a
-      claim that is live and REFUSED, which is a genuine refusal rather than a
-      missed repair. This sweep is the graph-wide repair for everything the door
-      is never called on; it is not a substitute for that door work, and it does
-      not duplicate it.
+      through the door. ⛔ TWO arms reconcile nothing, not one, and the earlier of
+      them is a residual this PR does not close: the trailing ``raise`` for a
+      claim that is live and REFUSED (a genuine refusal rather than a missed
+      repair), AND the earlier ``raise`` on ``claim is None``, where the claim
+      could not be READ at all — a failed ``get_entity`` is not a refusal, it is
+      an unreadable claim, so that path reports ``counts.failed`` and leaves the
+      goal's word for this sweep. This sweep is the graph-wide repair for
+      everything the door is never called on; it is not a substitute for that
+      door work, and it does not duplicate it.
     * **a node holding a derived word but no ``id``** — the entity surface cannot
       address it, so the sweep cannot repair it. Reachability is narrow (the
       ``:Source`` write surface refuses ``goalState``, so only a raw write and an
