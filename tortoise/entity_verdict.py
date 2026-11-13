@@ -122,8 +122,10 @@ reported. Two closure vetoes make that hazard decidable at the verdict:
     target then stands for a group, and binding a new mention to it asserts
     "mention matches group" from a pairwise comparison that was never made
     against the group's other members. That is the transitive-closure hazard, and
-    the precision-first answer is `review`: a human can accept it, the band may
-    not infer it.
+    the precision-first answer is `review`: the name is HELD (`HOLD_VETOED`) and
+    NOT bound — and because an entity hold is not carried forward (there is no
+    queue for one; see `extractor_v2.execute_embed`), it is not re-offered either.
+    The alias escape below is the one case this band can prove a membership for.
 
     ⛔ **Except where the group membership of THIS spelling is already proven.**
     `facts["mention_is_alias"]` is the caller's answer to "is the mention's
@@ -312,6 +314,15 @@ def identifier_tokens(name: str) -> set[str]:
         if not (has_alpha or has_sep):
             continue
         if _temporal_compound(tok):
+            continue
+        if "/" in tok:
+            # ⛔ A PATH is a locator, not an identifier. `_TOKEN` includes `/`, so
+            # a whole path is ONE token and folds to one identifier — which made
+            # two spellings of the same file (`tortoise/extractor_v2.py` vs
+            # `extractor_v2.py`) a "disjoint identifier" pair while their
+            # skeletons were both `("<id>",)`: the veto fired on the `#11901`
+            # `basename-only` variant class it exists to spare, and the mention was
+            # HELD (and an entity hold is not carried forward, so lost).
             continue
         folded = _SEPARATORS.sub("", tok.casefold())
         if not folded or _TEMPORAL_TOKENS.match(folded):
@@ -561,16 +572,27 @@ def chain_length(node_id: str, edges) -> int:
 
     ``edges`` is an iterable of ``(retired_id, survivor_id)`` pairs. The walk is
     cycle-guarded (`follow_resolved_from`'s own rule, `entity_resolver.py:552`)
-    because a corrupt record must not hang a report, and it stops on a cycle
-    rather than reporting an infinite length.
+    because a corrupt record must not hang a report.
+
+    ⛔ A CYCLE HAS NO FIXPOINT, so it returns ``-1`` rather than a hop count: the
+    question is *"how far from the survivor"*, and on a cycle there is no
+    survivor. Returning a number there would under-count exactly the corrupt
+    record this helper exists to surface (and a caller reading it as a bound would
+    be reading a value that means the opposite).
+
+    No production caller: it is the measurement the closure invariant is checked
+    with (`apply_entity_merge` enforces the bound by construction), so a lane
+    asking "is this chain longer than 1?" reads it against a graph, not a hope.
     """
     survivor_of = {str(a): str(b) for a, b in edges}
     current, seen = str(node_id), {str(node_id)}
     hops = 0
     while True:
         nxt = survivor_of.get(current)
-        if not nxt or nxt in seen:
+        if not nxt:
             return hops
+        if nxt in seen:
+            return -1
         current, hops = nxt, hops + 1
         seen.add(nxt)
 

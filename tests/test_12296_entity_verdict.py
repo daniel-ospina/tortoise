@@ -547,7 +547,9 @@ class TestClosureReverification:
 
     def test_chain_length_is_cycle_guarded(self):
         assert verdict.chain_length("a", [("a", "b"), ("b", "c")]) == 2
-        assert verdict.chain_length("a", [("a", "b"), ("b", "a")]) == 1
+        # A cycle has NO fixpoint: `-1`, not a hop count, so a caller reading this
+        # as a bound cannot be told "1" about a record that is corrupt.
+        assert verdict.chain_length("a", [("a", "b"), ("b", "a")]) == -1
         assert verdict.chain_length("a", []) == 0
 
     def test_the_merge_verb_cannot_create_a_chain(self, sdk_factory):
@@ -680,6 +682,7 @@ class TestVetoesAreSilentOnTheGenuineVariantCorpus:
         ("#11901", "ident"),
         ("hosts.yml", "path"),
         ("tortoise/sdk.py", "path"),
+        ("tortoise/extractor_v2.py", "path"),
         ("test_12047_entity_resolution.py", "path"),
         ("docs/research/2026-11-12-12186-search-inventory/research-brief.md",
          "path"),
