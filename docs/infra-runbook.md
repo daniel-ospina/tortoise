@@ -3373,11 +3373,45 @@ leave the same silence on the rest. The step id in the title is what keeps a
 per-gate reading possible.
 
 **When the failing step is the migration-drift gate**, the issue body additionally
-carries the gate's **own** report verbatim — the `BLOCKING` versions, the
-`OUT OF ORDER` subset, and the ordered remediation. That report is the gate's
-stdout, teed to a file in the same step (`$DRIFT_REPORT_FILE`), deliberately
-**not** a second run of the gate: a second reading of prod could name a different
-blocking set than the run being reported.
+carries the gate's **own** report — the `BLOCKING` versions, the `OUT OF ORDER`
+subset, and the ordered remediation. That report is the gate's stdout, teed to a file
+in the same step (`$DRIFT_REPORT_FILE`), deliberately **not** a second run of the gate:
+a second reading of prod could name a different blocking set than the run being reported.
+It is **quoted, not guaranteed verbatim**: the body carries the report's **last 6000
+bytes** (a tail — the gate prints the actionable block last), and it declares beside the
+excerpt the losses it makes (the 6000-byte cut; a multibyte character split by the cut and
+dropped by the squeeze; the non-ASCII bytes dropped by the ASCII fallback when `iconv` is
+unavailable, refused to emit, or emitted nothing it could convert — a healthy converter does
+that for a tail that is entirely undecodable — or emitted only blank lines, which the shell
+strips as trailing newlines). A loss that leaves no excerpt to sit beside is
+declared in the state sentence instead, which is where that third converter cause lands. When
+neither path produces an excerpt the body says exactly
+which state it is in, and **the two read-failure states point at different places**: a report
+the alert did not read at all (the variable unset, the file missing, or a named pipe it will
+not block on) sends the reader to the
+`Check migration drift (fail-closed)` **step log** inside the run — the gate's own stdout is
+there, and the alert deliberately does not re-run the gate — while a report that exists but
+yields no text (empty, nothing left by the squeeze and its fallback, or one it could not read
+through — a directory, or a path that could not be re-read) sends them to the
+**run link**. In the two states that carry **no** excerpt, a report **larger than the cap** is named by
+its real size, with the statement that only its last 6000 bytes were read, so a blank or undecodable
+tail is never mistaken for a blank report (a path that cannot be read at all yields no size to
+name, and the sentence says that instead). A carried report **larger than the cap** declares the CUT
+and not its size — the excerpt is there to read, so the size adds nothing, and the squeeze loss, when
+there is one, is declared beside it as above — and one under the cap states nothing about its extent,
+because nothing was cut. When the length comparison that detects a squeeze loss **cannot itself be made**
+(a `wc` that yields no number, or a count longer than the 18 digits the guard compares), the body says the loss is **unmeasured** rather than declaring none: an
+unmeasured comparison is not evidence that nothing was dropped. A carried report whose **own size could not be measured** — the size probe is
+skipped for a path that is not a regular file, and the size is never guessed when the count does not resolve
+to a number — declares the 6000-byte **window** instead of a cut: that only the
+report's last 6000 bytes are shown, and that its own size was not used — it could not be measured, or it was
+longer than the 18 digits the guard compares. Whether anything was cut is
+not asserted in that state: the measurement that could say so was not taken, and the excerpt cannot stand in
+for it — the capture strips NUL bytes and the squeeze drops undecodable sequences, so an excerpt shorter than
+6000 bytes does not prove the report was under the cap. It never claims an excerpt it is not showing, never guesses the cause when two states are
+indistinguishable from there, and the section intro no longer promises a "verbatim" report it
+may not be carrying (#12200): on-call reads the body, so a false claim there costs the reader
+the trip they were trying to avoid.
 
 **What to do when it fires.** Read the issue, then the linked run. For a drift
 block, the remediation is the one the report prints — resolve any `OUT OF ORDER`

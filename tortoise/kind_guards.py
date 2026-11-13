@@ -1139,6 +1139,7 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
             # rule id, but this function is also reachable from the Python API
             # with a dict that never went through a manifest (round-17 review).
             where = f"{namespace} guards[{i}].onConfusion[{j}]"
+            entry_where = f"{namespace} guards[{i}]"
             rule = c.get("rule")
             if rule is None:
                 rule = f"{namespace}:{entry.get('kind')}:{j}"
@@ -1155,7 +1156,12 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
             if when is None:
                 when = "nameMatches"
             pattern = c.get("pattern")
-            if when not in WHEN_PREDICATES or not isinstance(pattern, str):
+            # ⛔ `pattern: ""` IS A STRING (round-23 review P3, measured):
+            # `re.compile("")` matches EVERY name, so one guard redirected every
+            # entity write — the inverse of a dead guard, on the same Python-API
+            # route. Blank is unusable, not universal.
+            if (when not in WHEN_PREDICATES or not isinstance(pattern, str)
+                    or not pattern.strip()):
                 _logger.warning(
                     "kind_guards: %s guards[%d].onConfusion[%d] has an "
                     "unsupported predicate/pattern — skipped", namespace, i, j)
@@ -1238,8 +1244,13 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 from_kinds=_kept_kinds(namespace, from_kinds),
                 from_layers=_kept_layers(from_layers),
                 link_predicate=_declared_link_predicate(c, "linkPredicate", where),
-                guarded_kind=_declared_kind(entry, "kind", namespace, where),
-                guarded_layer=_declared_layer(entry, "layer", where),
+                # ⛔ `entry_where`, NOT `where` (round-23 review P3, measured):
+                # `kind`/`layer` are read from the ENTRY, so naming
+                # `onConfusion[0].kind` sent the author to a key that does not
+                # exist there (`_CONFUSION_KEYS` has no `kind`) and whose real
+                # value is fine.
+                guarded_kind=_declared_kind(entry, "kind", namespace, entry_where),
+                guarded_layer=_declared_layer(entry, "layer", entry_where),
                 declaring_pack=namespace,
             ))
     return tuple(out)
@@ -1277,30 +1288,50 @@ def _declared_layer(entry: dict, key: str, where: str):
 
 
 def _declared_link_predicate(entry: dict, key: str, where: str):
-    """The linking predicate, or None — reporting a value that cannot be one.
+    """The linking predicate, or None — and a TRUTHY-UNUSABLE one still ABSTAINS.
 
-    ⛔ A BLANK MUST STAY None (round-23 review P2, measured): compiling `""` (or
-    `str(0)` -> `'0'`) made `confusion.link_predicate` TRUTHY, so the guard
-    ABSTAINED where it used to fire — an unannounced behaviour change on the
-    Python-API route, from a field the author never validly declared. `None` keeps
-    the pre-existing meaning (no linking predicate), and the drop is reported.
+    The pre-existing expression was `str(c["linkPredicate"]) if
+    c.get("linkPredicate") else None`: FALSY -> None (no predicate, the guard
+    fires) and any TRUTHY value -> a string (the guard ABSTAINS with
+    `SKIP_LINK_PREDICATE_UNAVAILABLE` — the no-orphan-role rule). That asymmetry is
+    load-bearing and is preserved exactly (round-23 review P2, measured: an earlier
+    cut of this helper returned None for the unusable truthy values, turning an
+    abstention the author DECLARED into a redirect — the opposite direction from
+    the fix it claimed to make).
+
+    The only intended deltas: a usable predicate is STRIPPED (like the sibling
+    fields) and every discarded or coerced value is REPORTED.
     """
     value = entry.get(key)
-    if value is None:
+    if not value:
+        if value is not None:
+            _logger.warning(
+                "kind_guards: %s.%s is blank — the guard runs without a "
+                "predicate", where, key)
         return None
-    if not isinstance(value, str) or not value.strip():
-        _logger.warning(
-            "kind_guards: %s.%s is not a usable linking predicate — the guard "
-            "runs without one", where, key)
-        return None
-    return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:  # whitespace only: previously truthy, so it abstained
+            _logger.warning(
+                "kind_guards: %s.%s is only whitespace — the guard abstains",
+                where, key)
+            return value
+        if text != value:
+            _logger.warning(
+                "kind_guards: %s.%s has surrounding whitespace — using %r",
+                where, key, text)
+        return text
+    _logger.warning(
+        "kind_guards: %s.%s is not a string (%s) — the guard abstains rather "
+        "than guessing", where, key, type(value).__name__)
+    return str(value)
 
 
 def _optional_str_field(entry: dict, key: str, namespace: str, where: str) -> str:
-    """A qualified kind field, reporting a value that cannot be one.
+    """A qualified kind field, or "" — reporting a value that cannot be one.
 
-    A blank is DECLARED and unusable, and the guard silently loses its R4
-    degrade without it (round-22 review P3, measured). Absent stays silent.
+    A blank is DECLARED and unusable, and the guard silently loses its R4 degrade
+    ladder without it (round-22 review P3, measured). Absent stays silent.
     """
     value = entry.get(key)
     if value is None:
@@ -1419,8 +1450,12 @@ def _catalog_pack_guards() -> tuple[Confusion, ...]:
         # ⛔ `is not None`, not truthiness (round-22 review P3, measured): a
         # FALSY non-sequence block (`{}` / `""` / `0` / `false`) never reached
         # `pack_guards` at all, so the "whole block is skipped" warning added for
-        # exactly those shapes was unreachable from the only caller. An empty
-        # list stays silent, as before.
+        # exactly those shapes was unreachable from the runtime reader's one
+        # caller. An empty list stays silent, as before. (The two MANIFEST-side
+        # callers — `check_guard_table`, `pack validate` — are gated the same way
+        # below/next door; a manifest cannot carry the shape, since `_validate`
+        # refuses `ontology.guards: {}` outright, but one filter for three callers
+        # beats three.)
         if declared is not None:
             out.extend(pack_guards(ns, declared))
     compiled = tuple(out)

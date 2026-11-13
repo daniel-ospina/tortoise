@@ -11993,7 +11993,7 @@ def _cmd_pack_validate(args) -> int:
     _guard_confusions: list = []
     for ns in sorted(reg.packs):
         _declared = getattr(reg.packs[ns], "guards", None)
-        if _declared:
+        if _declared is not None:   # same gate as the two other callers
             _guard_confusions.extend(pack_guards(ns, _declared))
     # `pack_kinds` — the LOADED namespaces' routable kinds — turns the table's
     # deliberate pack-target abstention into a real answer wherever the pack IS
