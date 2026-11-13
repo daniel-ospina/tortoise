@@ -2827,22 +2827,33 @@ def _carrier_issues_a_call(statement: ast.stmt) -> bool:
     ⚠️ Residual, stated (`#12020` round 10, widened round 13): this does not reach a store clause
     BUILT into a value and never issued — `_unused = "…" + set_embedding_clause("e")`, and the same
     for an `AnnAssign`/`AugAssign`/tuple-or-attribute target, an `.append(…)` that only buffers the
-    clause, and a `raise`/`return`/`yield`/`with` that carries it. Those bind, buffer or escape the
+    clause, and a `raise`/`return` that carries it. Those bind, buffer or escape the
     value, and proving the built string never reaches a `query(…)` is DATA FLOW — the same limit
     `UNDECIDABLE_WRITE_SHAPES` names for the map merge. Measured on the reviewed head: the assignment
     and `raise` mutations stayed GREEN. ⛔ `raise` is NAMED rather than decided on purpose (round 13):
     its value escapes into the exception, so it is the same data-flow class as `return` — unlike
     `assert`, which discards what it evaluated.
+    ⛔ `with` and `yield` must NOT be listed with the shapes above (`#12182` review, P3, re-measured
+    at this head): they are REJECTED, not accepted, so they are the fail-CLOSED direction — an
+    over-block, not a blind spot. `_statements_that_store` skips every `_COMPOUND_STATEMENTS`
+    member, so a clause in a `with`'s context expression never reaches a body statement and the row
+    reds with "'…' is carried by 1 statement(s) in w, and none of them stores anything"; and
+    `_carrier_issues_a_call` answers `isinstance(statement.value, ast.Call)` for an `ast.Expr`,
+    which is False for an `ast.Yield`, so a `yield` reds the same way. Listing them as residual
+    invited a maintainer to "decide" them — which would WIDEN the hole instead of narrowing it.
+    Both directions are pinned by
+    `test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list`.
     ⛔ `#12182` review cycle 3 (P3): TWO of the shapes above are pinned, not the list. The plain
     `Assign` by `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual` (it rewrites the
     shipped statement to `_unused = (…`) and `raise` by
     `test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind`. `AnnAssign`, `AugAssign`, the
-    tuple/attribute target, `.append(…)`, `return`, `with` and `yield` are NAMED here and measured by
+    tuple/attribute target, `.append(…)` and `return` are NAMED here and measured by
     hand — `return` included: it is the same data-flow class and was omitted from an earlier version
     of THIS accounting while being named in the list above — and
     NOTHING reds if one of them silently changes direction — the previous wording ("they are pinned …
     so the blind spot can narrow in neither direction silently") claimed otherwise, which is the
-    stale-disclosure shape the round-10 test exists to prevent.
+    stale-disclosure shape the round-10 test exists to prevent. (`with` and `yield` used to be listed
+    here; they are rejected, not accepted, and are accounted for separately below.)
     """
     if isinstance(statement, ast.Expr):
         return isinstance(statement.value, ast.Call)
@@ -3689,6 +3700,51 @@ def test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind() -> None:
     assert "`raise` is NAMED rather than decided" in (_carrier_issues_a_call.__doc__ or ""), (
         "`raise` is credited by the choke point and no longer NAMED as a residual — an undisclosed "
         "fail-open is the claim being wider than the mechanism")
+
+
+def test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list() -> None:
+    """`#12182` review, P3: `with`/`yield` were listed as fail-OPEN residual shapes and are not.
+
+    `_carrier_issues_a_call`'s docstring grouped `raise`/`return`/`yield`/`with` together as "a store
+    clause BUILT into a value and never issued", i.e. shapes the choke point ACCEPTS. Two of the four
+    do not: measured at this head, a clause in a `with` context expression and a clause in a `yield`
+    both RED the row. That is the fail-CLOSED direction, so the disclosure pointed a maintainer the
+    wrong way — "decide this residual" would have WIDENED the hole.
+
+    The two mechanisms, so this pin is not a transcript of one run:
+      * `_statements_that_store` skips every `_COMPOUND_STATEMENTS` member, and `ast.With`/
+        `ast.AsyncWith` are members — so the clause in `with <here>:` never reaches a body statement
+        and the row reports "carried by N statement(s) … and none of them stores anything".
+      * `_carrier_issues_a_call` returns `isinstance(statement.value, ast.Call)` for an `ast.Expr`,
+        which is False for `ast.Yield` — so `yield <clause>` is carried and not issued.
+
+    ⛔ Pinned in BOTH directions on purpose: the two names must be REJECTED, and the four shapes that
+    really are accepted must stay accepted. If a future change makes `with`/`yield` accepted, the
+    disclosure becomes wrong the OTHER way and this reds instead of silently contradicting itself.
+    """
+    accepted = {
+        "assign": 'def w(x):\n    _unused = "MERGE (e:Event) " + set_embedding_clause("e")\n',
+        "return": 'def w(x):\n    return "MERGE (e:Event) " + set_embedding_clause("e")\n',
+        "raise": 'def w(x):\n    raise ValueError("MERGE (e:Event) " + set_embedding_clause("e"))\n',
+        "append": 'def w(x):\n    _buf = []\n    _buf.append("MERGE (e:Event) " + set_embedding_clause("e"))\n',
+    }
+    rejected = {
+        "with": ('def w(x):\n    with open("MERGE (e:Event) " + set_embedding_clause("e")) as f:\n'
+                 '        pass\n'),
+        "yield": 'def w(x):\n    yield "MERGE (e:Event) " + set_embedding_clause("e")\n',
+    }
+    for name, source in accepted.items():
+        assert _evidence_violation(source, "w", "MERGE (e:Event)", claim="store") is None, (
+            f"the {name} shape is no longer the accepted residual — the docstring now understates "
+            "the blind spot and must name it again")
+    for name, source in rejected.items():
+        violation = _evidence_violation(source, "w", "MERGE (e:Event)", claim="store")
+        assert violation is not None, (
+            f"{name} is ACCEPTED now, so it belongs in the residual list again — the docstring "
+            "claims it is rejected, and an undisclosed fail-open is the claim being wider than "
+            "the mechanism")
+        assert "none of them stores anything" in violation, (
+            f"{name} reds for a DIFFERENT reason than the disclosure names: {violation!r}")
 
 
 def test_a_deleted_vector_write_reds_the_BOUND_STORE_row() -> None:
