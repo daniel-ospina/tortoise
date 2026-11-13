@@ -5407,18 +5407,22 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     # Section bounds: `carve_out:` up to the next column-zero KEY. A column-zero
     # `- ` entry or `#` comment does NOT end the block — the block's own entries sit
     # at column zero (which is why the generic resolver's nearest-key rule needed a
-    # 5th element for this row in the first place).
-    start = next((i for i, ln in enumerate(lines)
-                  if ln.startswith("carve_out:")), None)
-    assert start is not None, (
-        "config/ci-surfaces.yml carries no `carve_out:` key — the surface the bundle "
-        "pins has been renamed, so re-read the section before trusting this pin")
-    end = len(lines)
-    for j in range(start + 1, len(lines)):
-        ln = lines[j]
-        if ln and ln[0] not in (" ", "\t", "-", "#"):
-            end = j
-            break
+    # 5th element for this row in the first place). The same bounds are reused below
+    # for the two blocks the row says hold NONE of this file (#12266 review, P2).
+    def _block_bounds(key: str) -> tuple[int, int]:
+        head = next((i for i, ln in enumerate(lines) if ln.startswith(key + ":")), None)
+        assert head is not None, (
+            f"config/ci-surfaces.yml carries no `{key}:` key — the surface the bundle "
+            f"pins has been renamed, so re-read the section before trusting this pin")
+        tail = len(lines)
+        for j in range(head + 1, len(lines)):
+            ln = lines[j]
+            if ln and ln[0] not in (" ", "\t", "-", "#"):
+                tail = j
+                break
+        return head, tail
+
+    start, end = _block_bounds("carve_out")
 
     # ⛔ Match the WRITER's parse, not the raw line. `carve_out:` carries six
     # hand-authored entries with an inline `#` comment today, and
@@ -5443,6 +5447,15 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     assert "config/ci-surfaces.yml" in rows[0], (
         "the `carve_out:` row must still name the FILE the entry lives in — the "
         "symbol alone names no tree to look in")
+    # ⛔ The row's SYMBOL, not just its file (#12266 review, P2). Every check below
+    # reads WHERE the entry is; none read WHICH entry the row names, so the row could
+    # name a different — even non-existent — file and stay GREEN, while the assertion
+    # above the manifest read states this pin is what reads that claim.
+    symbol = entry.removeprefix("- ")
+    assert symbol in rows[0], (
+        f"the `carve_out:` row names no `{symbol}` — it must name the entry this pin "
+        f"holds in `carve_out:`, or the row and the manifest drift apart while every "
+        f"other check here stays GREEN")
     # ⛔ `split(...)[1]` is NOT "the text after the file". The row mentions
     # `config/ci-surfaces.yml` TWICE, so that slice is the text BETWEEN the two
     # mentions — a row that named a different section first still passed it (#12266
@@ -5459,6 +5472,20 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
         "`tools/ci_selection.py::register_tests`, so it re-stales on somebody "
         "else's merge and reds a shard whose diff is unrelated (#12266 settled "
         "this four times by hand). Cite the symbol and the section instead.")
+
+    # ⛔ The row's OTHER half — "`uri_requiring:` and `slow_files:` hold none" — is
+    # graded here too (#12266 review, P2). It is true today (the symbol occurs at
+    # `6103`, `8502`, `9987` and `11573`, of which only `9987` is in `carve_out:`; the
+    # rest are `surfaces:` registrations), and nothing else in the tree reads it, so an
+    # entry slipped into either block would make the row false with no check to red.
+    for key in ("uri_requiring", "slow_files"):
+        block_start, block_end = _block_bounds(key)
+        stray = [n + 1 for n in range(block_start, block_end)
+                 if lines[n].strip().split("#", 1)[0].rstrip() == entry]
+        assert not stray, (
+            f"`{entry}` sits in the `{key}:` block at {stray} — the bundle's capstone "
+            f"row states `uri_requiring:` and `slow_files:` hold NONE of this file, "
+            f"and this pin is what reads that claim")
 
 
 def test_a_cite_that_names_a_directory_names_a_file_that_exists():
