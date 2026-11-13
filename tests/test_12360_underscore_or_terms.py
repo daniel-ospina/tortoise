@@ -320,7 +320,12 @@ class TestPin:
         """
         from tortoise.session_source_prose_migration import probe_phrase_rejection
 
-        for shape in ("a_bc", "x_axis", "a_web", "aaaa_b"):
+        # ⚠️ the ZERO-token shapes too (#12360 round 7): the tokeniser yields no
+        # term for them, which used to hit the term-count refusal — whose reason
+        # ("the read OR-joins multi-term input") is false when the read sends one
+        # term. Both the ≥2-segment and the all-sub-2-char cases must pass.
+        for shape in ("a_bc", "x_axis", "a_web", "aaaa_b",
+                      "a_b", "x__y", "a_1", "1_a", "a_b_c"):
             assert probe_phrase_rejection(shape) is None, shape
             assert build_or_query(shape) == shape, shape
         for shape in ("zx-99", "friday,", "a-b"):
@@ -526,6 +531,36 @@ class TestLiveReachability:
             assert "o-12360-nonascii" in ids, (
                 f"{arm} arm lost a non-ASCII name it could find: "
                 f"{build_or_query(name)!r} -> {ids!r}")
+
+    def test_the_128_char_bound_is_live(self, proj, monkeypatch):
+        """The bound's UPPER end is a live fact, not a unit assertion.
+
+        ``test_length_bound`` is a pure unit test, so tightening
+        ``MAX_COMPOSITE_RUN_LEN`` back toward 48 would only red on the 61-char
+        arm. The index really does hold a 128-char composite (measured), so that
+        end is pinned against a real index here.
+        """
+        from tortoise.search_engine import run_fts_query
+
+        name = ("a_" + "b" * 126)
+        assert len(name) == 128
+        proj._upsert_object({"id": "o-12360-128", "name": name,
+                             "object_kind": "core:other"})
+        self._wait_indexed(proj, 1)
+
+        monkeypatch.setenv(UNDERSCORE_ENV, "1")
+        ids = [i for i, _s in run_fts_query(proj.g, name, entity_type="object",
+                                            limit=3)]
+        assert "o-12360-128" in ids, (
+            f"the index holds a 128-char composite but the read dropped it: "
+            f"{build_or_query(name)!r}")
+
+        over = name + "b"
+        assert len(over) == 129
+        assert underscore_run_terms(over) == [], (
+            "129 must exceed the bound — if this passes, the bound moved and "
+            "sparse.py's docstring probe is stale")
+
 
 # ── the committed evidence ────────────────────────────────────────────────
 

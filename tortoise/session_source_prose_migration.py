@@ -1446,12 +1446,23 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # way is a SEARCH STOPWORD, which is refused by NAME instead — ``the``/``of``
     # are common words, so they match almost every node and can evidence nothing.
     single_run = len(runs) == 1
+    # ⚠️ A `_`-ONLY TOKEN IS DEFERRED TO THE READ *HERE*, before the term count,
+    # and the reason is measured (#12360 review round 7, P3). The deferral has to
+    # cover the ZERO-term case too: `build_or_query('a_b') == 'a_b'`,
+    # `'x__y' -> 'x__y'`, `'a_b_c' -> 'a_b_c'` — one term, the index's own, because
+    # `_` is a word character — yet `tokenize_sparse_query` yields NO term for them,
+    # so the count branch below refused them with "the FTS read OR-joins multi-term
+    # input, so the probe would match on any one of them", which is false: there
+    # are no OR terms. Round 6 fixed only the ≥2-segment case and its own prose
+    # over-claimed as a result.
+    deferred = "_" in token and not any(
+        not (ch.isalnum() or ch == "_") for ch in token)
     if (single_run and token.lower() == runs[0]
             and token.lower() in SPARSE_STOPWORDS):
         return ("it is a search stopword; a probe must be a RARE token that "
                 "appears only in the pre-fix prose")
 
-    if not single_run:
+    if not single_run and not deferred:
         tokens = tokenize_sparse_query(token)
         if len(tokens) != 1:
             return (f"it tokenises to {len(tokens)} term(s) {tokens!r}; the FTS "
@@ -1498,7 +1509,7 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # does split, so no single-term probe exists and this branch still refuses.
     has_us = "_" in token
     other_sep = any(not (ch.isalnum() or ch == "_") for ch in token)
-    if len(runs) > 1 and not (has_us and not other_sep):
+    if len(runs) > 1 and not (has_us and not other_sep):  # == `not deferred`
         return (f"it splits into {len(runs)} alphanumeric runs {runs!r}; the "
                 f"FTS index splits on every non-alphanumeric character EXCEPT "
                 f"`_` (which it treats as a word character, #12360), so a token "
