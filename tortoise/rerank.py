@@ -188,6 +188,7 @@ def rerank_pool(
     pool: int | None = None,
     enabled: bool | None = None,
     model: str | None = None,
+    scorer=None,
 ) -> tuple[list[dict], dict]:
     """#12297 — reorder a FUSED candidate list by cross-encoder relevance.
 
@@ -227,7 +228,15 @@ def rerank_pool(
     n_scored = min(len(untouched), pool_n)
     head = untouched[:n_scored]
 
-    scorer, reason = load_scorer(model or fused_rerank_model())
+    # ⛔ ``scorer`` IS A SEAM FOR OFFLINE HARNESSES, NEVER A PRODUCT PATH. The
+    # calibration/control tools must drive THIS function (a re-implementation of
+    # its scoring+reorder credited the reranker with a promotion the product
+    # structurally refuses — an empty passage is never scored, so it never
+    # moves), and a tool that re-implemented the semantics measured a different
+    # lever. Injecting the scorer is what lets them measure the SHIPPED one;
+    # nothing in ``tortoise/`` passes it.
+    if scorer is None:
+        scorer, reason = load_scorer(model or fused_rerank_model())
     if scorer is None:
         return untouched, {"applied": False, "degrade_reason": reason}
 

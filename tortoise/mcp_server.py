@@ -4150,7 +4150,16 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     Returns [{id, name, kind, confidence}] sorted by confidence DESC.
     """
     try:
-        results = _safe(_get_org_sdk().tortoise_fts_query, query, kind=kind_filter, limit=limit)
+        # #12297: ENTITY RESOLUTION RE-OWNS THIS ORDER — it sorts the rows by
+        # ``confidence`` DESC and returns the top ``limit`` (default 5, far
+        # inside the shipped pool width of 40), and the SDK lane it mirrors
+        # (``sdk.suggest_entry_points``) already opts out. Without this the
+        # armed gate re-picked WHICH entities resolve, with no ``leg_trace``
+        # here to disclose it — the "membership probe reading a page smaller
+        # than the pool width" class this PR's own docstring defines.
+        results = _safe(_get_org_sdk().tortoise_fts_query, query,
+                        kind=kind_filter, limit=limit,
+                        _rerank_candidates=False)
         # #3926: a _safe failure is an _SafeError (never a list), so the
         # list check alone is the failure gate — a row whose props carry a
         # user key named "error" must still resolve.

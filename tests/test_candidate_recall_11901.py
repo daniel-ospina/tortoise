@@ -1671,6 +1671,86 @@ class _ToyScorer:
         return [0.0 for _ in texts]
 
 
+def test_the_arm_measures_the_SHIPPED_reorder_not_a_copy_of_it(
+        tool_mod, monkeypatch):
+    """A textless candidate must not be scored-and-promoted by the ARM either.
+
+    ⛔ The arm used to be a SECOND implementation: it scored every row (including
+    one whose name is ``""``) and reordered all of them. ``rerank_pool`` scores
+    only the slots with text and writes them back into their own slots, and an
+    empty passage outranks an unrelated real one — so the copy credited the
+    reranker with a promotion the product structurally refuses, and counted a
+    pair the product never scores. Measured on the copy: a textless gold rose to
+    rank 3 and ``pairs_scored`` said 4 where the product scores 3.
+
+    The arm now calls ``rerank_pool`` (through its ``scorer`` seam), so the two
+    cannot drift: this drives the same rows and asserts the numbers the product
+    would produce.
+    """
+    # the arm pins torch's intra-op threads before the first score; this box has
+    # no torch, and the pin is not what this test is about
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
+        set_num_threads=lambda n: None))
+    rows = [{"id": "r1", "name": "alpha"},
+            {"id": "r2", "name": "beta"},
+            {"id": "r3", "name": "gamma"},
+            {"id": "gold", "name": ""}]
+
+    class _BlankLovingScorer:
+        """The inverse of a real ranker: it loves empty passages."""
+
+        def score(self, query, texts):
+            return [1.0 if not t.strip() else 0.0 for t in texts]
+
+    sample = [{"id": "gold", "name": "alpha", "cls": "exact"}]
+
+    def window(_name, _pool):
+        return list(rows)
+
+    arm = tool_mod._rerank_arm(
+        sample, window, lambda n, c: [], model="cross-encoder/toy",
+        pools=(4,), top_k=3, scorer=_BlankLovingScorer())
+
+    exact = arm["4"]["exact"]
+    assert exact["rerank_degraded"] == 0, exact
+    # the product scores 3 of the 4 rows and leaves the textless one in LAST place
+    assert exact["pairs_scored"] == 3, exact
+    assert exact["recall_3_after"] == 0, (
+        "the arm promoted a textless candidate the product never scores")
+    assert exact["gained"] == 0, exact
+
+
+def test_a_degraded_rerank_on_the_arm_is_COUNTED_not_measured(
+        tool_mod, monkeypatch):
+    """"Rerank ran and changed nothing" and "rerank did not run" are different
+    measurements, and the artifact must not average them together.
+
+    The product degrades instead of raising, so an arm that took the degraded
+    pool as the "after" order would report the before/after pair as a measured
+    zero. ``rerank_degraded`` is the disclosure.
+    """
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
+        set_num_threads=lambda n: None))
+    rows = [{"id": "r1", "name": "alpha"}, {"id": "r2", "name": "beta"}]
+    sample = [{"id": "r1", "name": "alpha", "cls": "exact"}]
+
+    def window(_name, _pool):
+        return list(rows)
+
+    class _Raises:
+        def score(self, query, texts):
+            raise RuntimeError("no model here")
+
+    arm = tool_mod._rerank_arm(
+        sample, window, lambda n, c: [], model="cross-encoder/toy",
+        pools=(2,), top_k=3, scorer=_Raises())
+
+    exact = arm["2"]["exact"]
+    assert exact["rerank_degraded"] == 1, exact
+    assert exact["mentions"] == 0, (
+        "a degraded pool was measured as if the reranker had run")
+
+
 def test_the_latency_note_matches_what_happened_to_torch(tool_mod, monkeypatch):
     """A ``--rerank-threads 0`` run must not claim a pin it never made.
 

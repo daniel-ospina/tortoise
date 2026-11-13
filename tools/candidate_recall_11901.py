@@ -563,7 +563,7 @@ def _rerank_arm(
        the attach rate moving (an earlier draft said it computed one; it does
        not, and it no longer says so).
     """
-    from tortoise.rerank import get_scorer
+    from tortoise.rerank import get_scorer, rerank_pool
 
     # ⛔ PIN THE THREADS BEFORE THE FIRST SCORE, and record the pin.
     # Measured on this box (`tools/rerank_calibration_12297.py` docstring): the
@@ -598,12 +598,51 @@ def _rerank_arm(
             "1's MAXIMUM window (15), and the pool-40 arm of this same run "
             "returns every one of them, which is why 40 reaches 300/300"),
     }
-    pairs_scored = 0
-    score_s = 0.0
+    # ⛔ THE ORDER IS PRODUCED BY THE SHIPPED FUNCTION, NOT BY A COPY OF IT.
+    # This arm used to sort the scores itself and reorder EVERY row, including a
+    # textless one — and an empty passage outranks an unrelated real one, so the
+    # arm credited the reranker with a promotion `rerank_pool` structurally
+    # refuses (measured: a textless gold moved to rank 3 in the arm where the
+    # product leaves it in its slot), and counted a pair the product never
+    # scores. Both arms below therefore call ``rerank_pool`` with the ``scorer``
+    # seam, and the timing proxy wraps the scorer so ``ms_per_pair`` still
+    # describes ONE ``score()`` call per mention.
+
+    class _Timed:
+        def __init__(self, inner) -> None:
+            self.inner = inner
+            self.seconds = 0.0
+            self.pairs = 0
+
+        def score(self, query, texts):
+            t0 = time.perf_counter()
+            out = self.inner.score(query, texts)
+            self.seconds += time.perf_counter() - t0
+            self.pairs += len(texts)
+            return out
+
+    timed = _Timed(scorer)
+
+    def _shipped_order(query: str, rows: list[dict], width: int) -> list[str] | None:
+        """Ids in the SHIPPED post-rerank order, or None when it degraded."""
+        cands = [{"id": r["id"], "content": r.get("name") or ""} for r in rows]
+        out_rows, stats = rerank_pool(
+            query, cands, text_key="content", pool=width,
+            enabled=True, model=model, scorer=timed)
+        if not stats.get("applied"):
+            return None
+        # The proxy's count and the product's own disclosure must agree; a
+        # divergence means this instrument is measuring a different call.
+        if timed.pairs != stats.get("scored"):
+            raise AssertionError(
+                f"the timed scorer saw {timed.pairs} pairs but rerank_pool "
+                f"reported {stats.get('scored')}")
+        return [r["id"] for r in out_rows]
+
     for pool in pools:
         key = str(pool)
-        row_exact = {"mentions": 0, "pairs_scored": 0}
-        row_variant = {"pairs": 0}
+        row_exact = {"mentions": 0, "pairs_scored": 0, "rerank_degraded": 0}
+        row_variant = {"pairs": 0, "rerank_degraded": 0}
         for name_k in ("before", "after"):
             row_exact[f"recall_{top_k}_{name_k}"] = 0
             row_exact[f"ndcg{ndcg_k}_{name_k}"] = 0.0
@@ -619,20 +658,18 @@ def _rerank_arm(
             if not rows:
                 row_exact["mentions"] += 1
                 continue
-            names = [(r.get("name") or "") for r in rows]
-            t0 = time.perf_counter()
-            scores = scorer.score(row["name"], names)
-            score_s += time.perf_counter() - t0
-            pairs_scored += len(names)
-            order = sorted(range(len(rows)), key=lambda i: (-scores[i], i))
+            before_pairs = timed.pairs
+            after_ids = _shipped_order(row["name"], rows, pool)
+            if after_ids is None:
+                row_exact["rerank_degraded"] += 1
+                continue
 
             row_exact["mentions"] += 1
-            row_exact["pairs_scored"] += len(names)
+            row_exact["pairs_scored"] += timed.pairs - before_pairs
             gold = row["id"]
             rank_before = next(
                 (i for i, r in enumerate(rows) if r["id"] == gold), None)
-            rank_after = next(
-                (i for i, r in enumerate(order) if rows[r]["id"] == gold), None)
+            rank_after = (after_ids.index(gold) if gold in after_ids else None)
             for name_k, rank in (("before", rank_before), ("after", rank_after)):
                 if rank is not None and rank < top_k:
                     row_exact[f"recall_{top_k}_{name_k}"] += 1
@@ -651,18 +688,14 @@ def _rerank_arm(
                 if not vrows:
                     row_variant["pairs"] += 1
                     continue
-                vnames = [(r.get("name") or "") for r in vrows]
-                t0 = time.perf_counter()
-                vscores = scorer.score(surface, vnames)
-                score_s += time.perf_counter() - t0
-                pairs_scored += len(vnames)
-                vorder = sorted(
-                    range(len(vrows)), key=lambda i: (-vscores[i], i))
+                vafter = _shipped_order(surface, vrows, pool)
+                if vafter is None:
+                    row_variant["rerank_degraded"] += 1
+                    continue
                 row_variant["pairs"] += 1
                 vb = next((i for i, r in enumerate(vrows)
                            if r["id"] == gold), None)
-                va = next((i for i, r in enumerate(vorder)
-                           if vrows[r]["id"] == gold), None)
+                va = vafter.index(gold) if gold in vafter else None
                 for name_k, rank in (("before", vb), ("after", va)):
                     if rank is not None and rank < top_k:
                         row_variant[f"in_window_{top_k}_{name_k}"] += 1
@@ -687,6 +720,8 @@ def _rerank_arm(
             100.0 * row_variant[f"in_window_{top_k}_after"] / vn, 1)
         out[key] = {"exact": row_exact, "variant": row_variant}
 
+    pairs_scored = timed.pairs
+    score_s = timed.seconds
     out["latency"] = {
         "pairs_scored": pairs_scored,
         "score_s": round(score_s, 3),

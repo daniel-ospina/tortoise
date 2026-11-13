@@ -271,10 +271,29 @@ def test_text_field_per_graph_label(entity_type, label, expected):
 
 def test_unknown_label_has_no_text_field():
     """An unmapped label degrades rather than scoring a property that is not
-    that node's text — a wrong field would yield a confident, meaningless order."""
+    that node's text — a wrong field would yield a confident, meaningless order.
+
+    ⛔ ``== {}`` ALONE IS NOT A CHECK ON THE EARLY RETURN: the fetch also returns
+    ``{}`` from its own ``except Exception``, so a graph that makes it CRASH is
+    indistinguishable from one that is never queried (measured). The graph here
+    records calls, and the assertion is that it was never asked.
+    """
     assert sdk_mod._rerank_text_field("point", "Session") is None
-    assert sdk_mod._fetch_rerank_pool_texts(object(), "point", "Session", "id",
-                                            ["a"]) == {}
+
+    class _Recording:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def query(self, cypher, params=None):
+            self.calls.append(cypher)
+            return type("R", (), {"result_set": []})()
+
+    graph = _Recording()
+    assert sdk_mod._fetch_rerank_pool_texts(
+        graph, "point", "Session", "id", ["a"]) == {}
+    assert graph.calls == [], (
+        "an unmapped label still queried the graph, so the empty result came "
+        f"from a failure rather than from the field check: {graph.calls}")
 
 
 class _FakeGraph:
@@ -878,40 +897,110 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # cannot quietly inherit a re-picked page. The behaviour above is the
     # assertion; this stops the sweep from being silently shrunk.
     #
-    # ⛔ TWO HALVES, because a substring scan of a FILE is not a check on a
-    # CALL SITE. The first version only scanned five external files, and it was
-    # measured that deleting ``_rerank_candidates=False`` from any of the EIGHT
-    # call sites inside ``tortoise/sdk.py`` — including ``recall_state``'s page,
-    # which a driven ``limit=3`` read shows literally moving — left the whole
-    # suite green. The in-sdk sites are enumerated from the AST, so a NINTH
-    # caller added without the kwarg reds here rather than shipping.
+    # ⛔ EVERY SITE IN `tortoise/` *AND* THE EXTERNAL FILES, BY AST — because
+    # both weaker forms were measured green over a real defect:
+    #   * a FILE-SCOPED SUBSTRING missed the call sites inside `tortoise/sdk.py`
+    #     (deleting `_rerank_candidates=False` from any of the eight left the
+    #     whole suite green, and a driven `limit=3` read shows `recall_state`'s
+    #     page literally moving);
+    #   * `ast.Call` nodes with `func.attr == "tortoise_fts_query"` missed the
+    #     sites that hand the BOUND METHOD to a helper — `mcp_server.py`'s
+    #     `_safe(_get_org_sdk().tortoise_fts_query, …)` — so
+    #     `tortoise_suggest_entry_points` (default `limit=5`, no leg trace) was
+    #     re-picking WHICH ENTITIES RESOLVE with nothing to disclose it;
+    #   * and one external file has TWO sites, so `"kwarg" in src` passed with
+    #     one of them removed (`tools/ask_pool_admission_probe.py`).
     import ast as _ast
     import pathlib as _pl
+
     root = _pl.Path(__file__).resolve().parent.parent
+
+    #: Sites that INTENTIONALLY run the lever. Everything else must opt out.
+    runs_the_lever = {
+        ("ask_lane.py", "run_ask_lane"):
+            "the ask lane — reaches the same read with a relevance order, no "
+            "recency and a non-empty question; priced as NOT calibrated in the "
+            "brief's §5, i.e. disclosed by the document rather than skipped",
+        ("extractor_v2.py", "_fts_rows"):
+            "the capture noun prior — KEEPS the rerank under its own "
+            "OVERRIDES: record (#8487/#12297), measured recall@3 delta",
+        ("hosted_api.py", "search"): "user search — the surface §5 prices",
+        ("selfhost_api.py", "search"):
+            "user search, self-hosted — the same read, so the same "
+            "authorisation to run it",
+        ("mcp_server.py", "tortoise_query"): "user search (MCP text route)",
+        ("mcp_server.py", "tortoise_search"): "user search (MCP)",
+    }
+    # ⛔ NO ROW FOR ``volunteer_context``. It binds the read as ``_search_fn=`` and
+    # the opt-out rides in its ``_search_kwargs`` — MEASURED to matter: before
+    # that seam was added, the armed gate re-picked 12 of the 18 ids at the
+    # volunteer resolve limit while this census called it intentional. A seam is
+    # not an exemption; it must carry the flag, and ``_sites`` reads it.
+
+    def _sites(path: _pl.Path) -> list[tuple[str, bool]]:
+        """(enclosing function, opted-out?) for every mention of the read."""
+        tree = _ast.parse(path.read_text())
+        out: list[tuple[str, bool]] = []
+        for node in _ast.walk(tree):
+            if not (isinstance(node, _ast.Attribute)
+                    and node.attr == "tortoise_fts_query"):
+                continue
+            # the CALL the mention feeds: either it IS the callee, or it is an
+            # argument (``_safe(sdk.tortoise_fts_query, …)``)
+            call = None
+            for c in _ast.walk(tree):
+                if not isinstance(c, _ast.Call):
+                    continue
+                # the mention may be the callee, a positional argument
+                # (``_safe(sdk.tortoise_fts_query, …)``) or a KEYWORD VALUE
+                # (``_search_fn=sdk.tortoise_fts_query``)
+                if (c.func is node or node in c.args
+                        or any(node is k.value for k in c.keywords)):
+                    call = c
+                    break
+            opted_out = bool(call) and any(
+                k.arg == "_rerank_candidates" for k in call.keywords)
+            if call is not None and not opted_out:
+                # a read BOUND as a seam (``_search_fn=sdk.tortoise_fts_query``):
+                # the flag rides in the adjacent ``_search_kwargs`` dict, so the
+                # call itself carries no keyword for it
+                opted_out = any(
+                    k.arg == "_search_kwargs"
+                    and "_rerank_candidates" in _ast.unparse(k.value)
+                    for k in call.keywords)
+            owner = ""
+            for fn in _ast.walk(tree):
+                if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and any(
+                        m is node for m in _ast.walk(fn)):
+                    owner = fn.name
+                    break
+            out.append((owner, opted_out))
+        return out
+
+    scanned: list[str] = []
+    for path in sorted((root / "tortoise").glob("*.py")):
+        for owner, opted_out in _sites(path):
+            scanned.append(f"tortoise/{path.name}:{owner}")
+            if opted_out:
+                continue
+            assert (path.name, owner) in runs_the_lever, (
+                f"tortoise/{path.name}:{owner}'s read does not opt out of the "
+                "rerank and is not on the intentional list — with the gate "
+                "armed it re-picks which rows survive limit, undisclosed")
+    # non-vacuous: the enumeration must have found the surface it claims to
+    assert len(scanned) >= 16, scanned
+
     for rel in ("battery/runner/setup.py", "tools/why_layer_rate.py",
                 "tools/longmem_eval/retrieve.py", "tools/fusion_formula_ab.py",
                 "tools/ask_pool_admission_probe.py",
                 "benchmarks/run_report.py", "benchmarks/load_test.py"):
-        src = (root / rel).read_text()
-        assert "_rerank_candidates=False" in src, (
-            f"{rel} reads the rerankable page without opting out — with the "
-            "gate armed its page composition moves and a membership probe "
-            "returns a false diagnosis")
-
-    tree = _ast.parse((root / "tortoise" / "sdk.py").read_text())
-    sites = [n for n in _ast.walk(tree)
-             if isinstance(n, _ast.Call)
-             and getattr(n.func, "attr", None) == "tortoise_fts_query"]
-    assert len(sites) >= 8, (
-        f"the AST found {len(sites)} in-sdk call sites; the sweep enumerated 8, "
-        "so either a caller is missing from this check or the read was renamed")
-    offenders = [
-        n.lineno for n in sites
-        if not any(k.arg == "_rerank_candidates" for k in n.keywords)
-    ]
-    assert not offenders, (
-        "these in-sdk call sites read the rerankable page WITHOUT opting out, "
-        f"so the armed gate re-picks their page: lines {offenders}")
+        found = _sites(root / rel)
+        assert found, f"{rel} no longer reads the rerankable page — check the pin"
+        for owner, opted_out in found:
+            assert opted_out, (
+                f"{rel}:{owner} reads the rerankable page without opting out — "
+                "with the gate armed its page composition moves and a "
+                "membership probe returns a false diagnosis")
 
     # ⛔ AND THE CENSUS MUST SEE THE SEAM. A read bound as ``_search_fn=`` (the
     # volunteer pipeline does exactly that) is not an ``ast.Call`` on
@@ -919,6 +1008,7 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # armed gate re-picked that pool — measured: 12 of 18 ids replaced at the
     # volunteer resolve limit. Every ``_search_fn=`` binding must carry its
     # opt-out in the adjacent ``_search_kwargs``.
+    tree = _ast.parse((root / "tortoise" / "sdk.py").read_text())
     seams = [n for n in _ast.walk(tree)
              if isinstance(n, _ast.keyword) and n.arg == "_search_fn"
              and getattr(n.value, "attr", None) == "tortoise_fts_query"]
