@@ -524,3 +524,64 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
 
     sdk.update_entity("ev-9649-prov", status="archived")
     assert sdk.get_entity("ev-9649-prov")["status"] == "archived"
+
+
+def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
+    """Review round 3, P2: the status arm must key on the RESOLVED address.
+
+    The guard learned to resolve `eventId`/`url`, but the vocabulary check, the
+    declared transition and the `status`-drop from `props` were still gated on
+    `MATCH (n:Point {id:$id})`. On a `:Point:Event` addressed by its `eventId`
+    that read found no Point, so `status='archived'` and `status='garbage'` both
+    LANDED and the key rode into the `:Event` arm, which journalled `restatus`
+    against `label='Event'` — a record no fold can apply (a live write that makes
+    `rebuild_all` refuse). Measured at `a35a3973b7`.
+    """
+    sdk, events = env
+    pid = _live(sdk)
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$eid",
+        params={"id": pid, "eid": "evt-hybrid-9649"})
+
+    with pytest.raises(ValueError, match="transition"):
+        sdk.update_entity("evt-hybrid-9649", status="archived")
+    with pytest.raises(ValueError, match="Invalid status"):
+        sdk.update_entity("evt-hybrid-9649", status="garbage")
+    assert _row(sdk, pid)["status"] == "live", (
+        "a refused hybrid status write must not touch the row")
+
+    sdk.update_entity("evt-hybrid-9649", status="retracted")
+    assert _row(sdk, pid)["status"] == "retracted"
+    recs = _mutations(events, pid)
+    assert recs, "the declared transition must be journaled against the POINT id"
+    assert all(r.get("label") == "Point" for r in recs), (
+        f"a restatus record must name the label the node replays as: {recs}")
+    assert _mutations(events, "evt-hybrid-9649") == [], (
+        "nothing may be journalled against the ADDRESS the caller typed")
+
+
+def test_a_source_keyed_by_id_is_not_blocked_by_a_hybrid_point_url(env):
+    """Review round 3, P2: primary first, secondary only on a miss.
+
+    The `:Source` arm resolves `id` first and consults `url` only on a miss, so a
+    `:Point:Source{url:<X>}` is untouched by `update_entity(<X>, …)` when a
+    `:Source{id:<X>}` exists. The guard's unqualified url arm refused that healthy
+    write and blamed a Point the caller never addressed (AX rule 2).
+    """
+    sdk, _ = env
+    sdk._get_proj().g.query("MERGE (s:Source {id:'X-9649'}) SET s.url='healthy-src'")
+    sdk._get_proj().g.query(
+        "CREATE (n:Point:Source {url:'X-9649', status:'superseded', "
+        "validTo:'2020-01-01T00:00:00Z'})")
+    hybrid = sdk._get_proj().g.query(
+        "MATCH (n:Point:Source) WHERE n.url=$u RETURN n.status",
+        params={"u": "X-9649"}).result_set
+
+    sdk.update_entity("X-9649", status="retired")
+    assert sdk._get_proj().g.query(
+        "MATCH (s:Source {id:'X-9649'}) RETURN s.status",
+    ).result_set == [["retired"]]
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point:Source) WHERE n.url=$u RETURN n.status",
+        params={"u": "X-9649"}).result_set == hybrid, (
+        "the hybrid Point the write could not reach must be untouched")

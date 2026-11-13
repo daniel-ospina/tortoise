@@ -47111,6 +47111,7 @@ class TortoiseSDK:
         _lifecycle_fields = sorted(
             ({"status"} if "status" in props else set())
             | (_TEMPORAL_RESTAMP_PROPS & set(props)))
+        _lifecycle_ids: list = []
         if _lifecycle_fields:
             # ── #9649 review F1: resolve the ADDRESS before the verdict ─────────
             # This door binds a Point by `id`, by `eventId` AND by `url` — the
@@ -47141,16 +47142,38 @@ class TortoiseSDK:
             # an id-less `:Point:Source`/`:Point:Event` came back as `[]`, which
             # read as "no Point addressed" and let `status='live'` through
             # (measured: a superseded id-less Point resurrected).
+            # ⛔ Review F3-2: PRIMARY FIRST, secondary only on a miss — the order
+            # the write itself resolves in (`_entity_identity_probes()`; a
+            # `:Source` arm tries `id` and falls back to `url`). Matching `url`
+            # unconditionally refused a healthy `update_entity(<:Source id>, …)`
+            # because an unrelated `:Point:Source` carried that value as its url
+            # (measured: the row the caller named was never written and the
+            # refusal blamed a Point it never addressed — AX rule 2).
             _addressed = proj.g.query(
                 "MATCH (n:Point) WHERE n.id = $id "
                 "OR (n:Event AND n.eventId = $id) "
-                "OR (n:Source AND n.url = $id) "
-                "RETURN sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
+                "RETURN count(n) AS hits, "
+                "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
                 "collect(DISTINCT n.id) AS ids",
                 params={"id": id_val}).result_set
-            _idless, _addressed_ids = _addressed[0] if _addressed else (0, [])
+            _hits, _idless, _addressed_ids = _addressed[0] if _addressed else (0, 0, [])
+            if not _hits:
+                # The `:Source` arm consults `url` only when nothing matched by
+                # `id`, so the url arm of this read asks the same question.
+                _source_by_id = proj.g.query(
+                    "MATCH (n:Source {id:$id}) RETURN count(n)",
+                    params={"id": id_val}).result_set[0][0]
+                if not _source_by_id:
+                    _by_url = proj.g.query(
+                        "MATCH (n:Point:Source) WHERE n.url = $id "
+                        "RETURN count(n) AS hits, "
+                        "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
+                        "collect(DISTINCT n.id) AS ids",
+                        params={"id": id_val}).result_set
+                    _hits, _idless, _addressed_ids = (
+                        _by_url[0] if _by_url else (0, 0, []))
             _lifecycle_ids = [i for i in (_addressed_ids or ()) if i]
-            if _idless:
+            if _hits and _idless:
                 # An id-less Point (url/eventId only) cannot be handed to the
                 # id-keyed instrument, so terminality cannot be checked. Fail
                 # CLOSED: a resurrection is the harm #9649 exists to stop, and no
@@ -47180,12 +47203,23 @@ class TortoiseSDK:
                         f"accepted on it."
                     ) from None
         if "status" in props:
-            _pt_hits, _pt_statuses = proj.g.query(
-                "MATCH (n:Point {id:$id}) RETURN count(n), "
-                "collect(DISTINCT n.status)",
-                params={"id": id_val},
-            ).result_set[0]
-            if _pt_hits:
+            # ⛔ Review F3-1: this arm is keyed on the ADDRESS the guard resolved,
+            # not on `{id: $id}`. With `eventId`/`url` addressing, a `{id:$id}`
+            # read found no Point, so BOTH the vocabulary check and the declared
+            # transition were skipped AND `status` was never dropped from
+            # `props` — the sibling arm then wrote it and journalled `restatus`
+            # against `:Event`/`:Source`, a record no fold can apply (#9649's
+            # fail-open class, and a live write that makes `rebuild_all` refuse).
+            # Measured: `status='archived'` landed on a `:Point:Event` addressed
+            # by its eventId, journalled as `label='Event'`.
+            _pt_statuses: tuple = ()
+            if _lifecycle_ids:
+                _pt_statuses = tuple(proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "RETURN collect(DISTINCT n.status)",
+                    params={"ids": _lifecycle_ids},
+                ).result_set[0][0])
+            if _pt_statuses:
                 _status = props["status"]
                 if (not isinstance(_status, str)
                         or _status not in POINT_STATUS_VALUES):
@@ -47273,13 +47307,18 @@ class TortoiseSDK:
                 # arm, cannot journal a second `restatus` against a label this
                 # node cannot replay as.
                 _wrote = proj.g.query(
-                    "MATCH (n:Point {id:$id}) SET n += $s RETURN count(n)",
-                    params={"id": id_val, "s": {"status": _status}},
+                    "MATCH (n:Point) WHERE n.id IN $ids SET n += $s "
+                    "RETURN count(n)",
+                    params={"ids": _lifecycle_ids, "s": {"status": _status}},
                 ).result_set
                 if _wrote and _wrote[0][0]:
-                    self._journal_entity_mutation(
-                        "Point", id_val, "restatus",
-                        state={"status": _status})
+                    # Journaled against the POINT id the node replays as, once
+                    # per resolved id (#3311's label rule) — never against the
+                    # address the caller typed.
+                    for _lifecycle_id in _lifecycle_ids:
+                        self._journal_entity_mutation(
+                            "Point", _lifecycle_id, "restatus",
+                            state={"status": _status})
                 props = {k: v for k, v in props.items() if k != "status"}
 
         # #1423 (review P1): the `status` guard above is POINT-gated (its
