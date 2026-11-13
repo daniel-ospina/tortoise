@@ -200,9 +200,12 @@ def _unscoped_heading_forms(doc: str,
        blockquote line is a break, and refusing those was the over-block half of
        round 20 (`---` between changelog entries red the guard).
 
-    The INVERSE hazard — a `## `-prefixed line inside a fenced block truncates a
-    section — is fail-closed (every §-scoped pin here is a presence assertion, so
-    it reds loudly) and is deliberately not refused.
+    The INVERSE hazard — a `## `-prefixed line inside a FENCED block truncates a
+    section the document continues — is NOT fail-closed, contrary to what this
+    docstring said before round 21: a presence pin can be satisfied from text
+    BEFORE the truncation while the section's real text after it is never read
+    (measured, M-7). It is refused by its own arm, and so is the INDENTED-code
+    form of the same shape, which the parser does not even render as a heading.
     """
     readable = readable or _READABLE_HEADING
     lines = doc.splitlines()
@@ -235,7 +238,13 @@ def _unscoped_heading_forms(doc: str,
                     "through it")
     rendered = set(_rendered_heading_lines(doc, skip))
     for i, line in enumerate(lines):
-        if readable.match(line) and i > skip and i not in rendered:
+        # ⛔ NOT `readable.match(line)`: `_scope_slice`'s terminator is `^## `
+        # (and `^#{2,3} ` for a level-3 scope) whatever the heading SAYS, so a
+        # fenced `## Restated finding` truncates a scope just as a fenced
+        # `## 3. Results` does. Anchoring on the readable forms left the
+        # non-numbered case uncovered (measured: the truncated §2 still
+        # satisfied nothing, but the guard did not say why).
+        if re.match(r"^#{1,6}(?:[ \t]|$)", line) and i > skip and i not in rendered:
             # ⛔ THE INVERSE (round 21): a line that LOOKS like a readable opener
             # but which the parser does not render as a heading — `## ` inside a
             # fenced block — TERMINATES a scope the document continues, so a
@@ -246,6 +255,18 @@ def _unscoped_heading_forms(doc: str,
             flag(i, "looks like a readable section opener but is not a heading "
                     "CommonMark renders (a `## ` inside a fenced block, say) — it "
                     "TRUNCATES the preceding section's scope")
+        elif re.match(r"^(?: {4,}|\t| {1,3}\t)#{1,6}(?:[ \t]|$)", line):
+            # ⛔ INDENTED CODE, the arm the docstring used to call fail-closed
+            # (#12349 round 21, P2). 4+ spaces or a tab makes the line an indented
+            # code block: the parser renders no heading, so the inverse arm above
+            # does not see it, and `_scope_slice` matches no boundary either — the
+            # preceding § absorbs everything after it. Measured: falsify §2 and
+            # restate the truth under `    ## Restated finding` and the guard +
+            # reuse pins stayed green; a FENCED block, by contrast, is caught by
+            # the inverse arm.
+            flag(i, "is a `#` run inside an INDENTED CODE BLOCK (4+ spaces or a "
+                    "tab) — the parser renders no heading and `_scope_slice` sees "
+                    "no boundary, so the PRECEDING section's scope runs past it")
         elif (not readable.match(line)
                 and re.match(rf"^{_BLOCK_PREFIX}#{{1,6}}\s?\d+(?:\.\d+)*\.\s",
                              line)):
@@ -1198,7 +1219,12 @@ _READABLE_HEADING = re.compile(r"^(?:# [^#\s].*|## \d+\. .*|### \d+\.\d+ .*)$")
 # The container prefixes a block can sit behind — blockquote and list markers,
 # nested in any order (CommonMark 5.1/5.2). `_scope_slice` anchors at column 0, so a
 # section opened behind ANY of them is invisible to it.
-_BLOCK_PREFIX = r"(?: {0,3}(?:>[ \t]?|[-*+][ \t]+|\d+\.[ \t]+))* {0,3}"
+# ⛔ `\d+[.)]`, not `\d+\.`: CommonMark 5.2's ordered-list marker is "a
+# sequence of 1-9 arabic digits, followed by either a `.` character or a `)`
+# character". A `)` item is invisible to `_scope_slice`, so a section opened
+# behind one leaks exactly like the `-`/`*`/`+`/`>` cases (measured: falsify
+# §2, restate under `1) <h2>…</h2>` -> 101 green before this line).
+_BLOCK_PREFIX = r"(?: {0,3}(?:>[ \t]?|[-*+][ \t]+|\d+[.)][ \t]+))* {0,3}"
 
 
 def test_the_brief_uses_only_heading_forms_the_scope_helper_can_see(
@@ -1255,6 +1281,10 @@ LOOKALIKE_BUT_UNREADABLE = [
     "<h2>3. Results</h2>",              # raw HTML heading at column 0
     "> <h2>3. Results</h2>",             # … behind a blockquote marker
     "- <h2>3. Results</h2>",             # … inside a list item
+    "1) <h2>3. Results</h2>",           # … inside a `)`-marked ordered list item
+    "1) ##3. Results",                  # `)`-marked item, no space after the run
+    "    ## 3. Results",                # INDENTED CODE: renders nothing, bounds nothing
+    "\t## 3. Results",                  # … tab-indented
 ]
 
 
