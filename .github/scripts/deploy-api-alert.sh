@@ -598,7 +598,7 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
             # full (`tail -c` output also has NULs stripped by the substitution above, so a
             # length check here would under-report the bytes actually read).
             echo
-            echo "_(only the report's LAST 6000 bytes are shown — its own size could not be measured, or was not comparable, and the gate prints the actionable block last; the full text is in the run link above)_"
+            echo "_(only the report's LAST 6000 bytes are shown — its own size was not used (it could not be measured, or it was longer than the 18 digits this guard will compare), and the gate prints the actionable block last; the full text is in the run link above)_"
           fi
           if [ "$squeeze_incomplete" = "1" ]; then
             echo
@@ -608,7 +608,7 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
             # failing is NOT the comparison saying "no loss": a report whose cut split a
             # character is exactly the input this arm sees, and `wc` may be the broken tool.
             echo
-            echo "_(whether the excerpt is byte-identical to the report could NOT be measured — the length comparison did not resolve to a number it could compare (no count, or one too long to compare), so a dropped character cannot be ruled out and the excerpt may be shorter than the report; the full text is in the run link above)_"
+            echo "_(whether the excerpt is byte-identical to the report could NOT be measured — the length comparison was not made, because the count was not one this guard will compare (no count, or longer than 18 digits), so a dropped character cannot be ruled out and the excerpt may be shorter than the report; the full text is in the run link above)_"
           fi
         fi
       else

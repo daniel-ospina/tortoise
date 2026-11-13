@@ -1260,7 +1260,7 @@ assert_contains "$WC_OVERFLOW_BODY" "could NOT be measured" "case 17p: and it is
 
 # A 19-DIGIT count that is INSIDE int64 (`1e18`) is a number the guard still declines (its bound is
 # a LENGTH bound, deliberately conservative). That is over-disclosure, never a hidden loss — but the
-# sentences must describe it: "could not be measured, or was not comparable". A prose-only fact, so
+# sentences must describe it: "could not be measured, or longer than the 18-digit bound". A prose-only fact, so
 # this row pins the STATE handling (no diagnostic, one issue filed, same sentence), not the wording.
 WC_INRANGE_DIR="$FIX/bin-wc-inrange"
 mkdir -p "$WC_INRANGE_DIR"
@@ -1278,7 +1278,7 @@ assert_eq "$(count_creates)" "1" "case 17p: a 19-digit in-range count still file
 assert_not_contains "$OUT" "integer expression expected" "case 17p: and it emits no arithmetic diagnostic"
 WC_INRANGE_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
 assert_contains "$WC_INRANGE_BODY" "could NOT be measured" "case 17p: and the guard's conservative answer is DECLARED, not silent"
-assert_contains "$WC_INRANGE_BODY" "or was not comparable" "case 17p: and the window names BOTH reasons a size is not used"
+assert_contains "$WC_INRANGE_BODY" "longer than the 18 digits this guard will compare" "case 17p: and the window names the guard's LENGTH BOUND, not a comparability it did not test"
 
 reset_case
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
