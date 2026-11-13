@@ -12858,10 +12858,13 @@ def _session_index_rows_without_graph(
 #: team info` retries for exactly this reason) — so EACH leg gets ONE bounded
 #: retry rather than reporting a waking service as a broken credential.
 #: ⛔ Worst case for the SOCKET timeouts is 5 + 30 + 10 + 30 = 75 s, and only when
-#: the network is timing out on both legs. An outer watchdog that sizes itself
-#: from this comment must use 75, not 45: a 45 s cap pre-empts the `/health` retry
-#: and reproduces the "cold box reported as a broken endpoint" failure this whole
-#: retry exists to prevent (fresh review of this change caught the arithmetic).
+#: the network is timing out on both legs. An outer watchdog must size itself at
+#: **105 s**, not 45 and not 75: the deadline is checked BETWEEN reads, so one
+#: `read1` already blocked runs to its own socket bound (up to 30 s) past the
+#: budget, and DNS/connect are not covered at all. A 45 s cap pre-empts the
+#: `/health` retry and reproduces the "cold box reported as a broken endpoint"
+#: failure this whole retry exists to prevent. The budget below is what stops the
+#: CUMULATIVE drift; it is not a hard interrupt (fresh review round 16).
 #: ⚠️ Those are per-`recv` bounds, NOT a wall-clock cap on their own: a server
 #: that drips bytes just slowly enough keeps one `read()` alive past them. That is
 #: why the body is read in CHUNKS against a deadline (`_read_capped`) under the
@@ -13159,7 +13162,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         v = float(value)
         return f"{v:.0f}" if v.is_integer() else f"{v:.1f}"
 
-    def _read_capped(resp, cap: int, deadline: float) -> bytes:
+    def _read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
         """Read at most `cap` bytes, stopping when `deadline` passes.
 
         ⛔ `urlopen(timeout=…)` is a PER-RECV bound, not a wall-clock one: a
@@ -13176,21 +13179,26 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         reader = getattr(resp, "read1", None) or resp.read
         while total < cap:
             if time.monotonic() >= deadline:
-                break
+                # ⛔ CUT is REPORTED, never silent: a body truncated by the
+                # deadline is an UNREAD verdict, and a silent break here made a
+                # `degraded` /health read ✅ and a healthy /v1/team read ❌
+                # (fresh review round 16 — the two false verdicts this reader
+                # could produce).
+                return b"".join(chunks), True
             # ⛔ A read error PROPAGATES: "the body could not be READ" is a
             # distinct verdict from "the body carried no status", and swallowing
             # it here made a stalled-but-200 `/health` read as green again —
             # the exact arm round 13 added. The callers already handle it.
             chunk = reader(min(4096, cap - total))
             if not chunk:
-                break
+                return b"".join(chunks), False
             # A reader that IGNORES `n` (a test double, a custom transport, a
             # proxy shim) would otherwise append the same bytes on every pass
             # until the cap — duplicating the body instead of bounding it.
             chunk = chunk[: cap - total]
             chunks.append(chunk)
             total += len(chunk)
-        return b"".join(chunks)
+        return b"".join(chunks), False
 
     #: `/health`'s verdict notes, populated in place after the reachability read.
     #: Declared HERE (before the helpers) so `_budget_spent_row` closes over the
@@ -13235,7 +13243,11 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             # buffered whole into a memory-tight box's RSS (fresh review round 3
             # — `read()` then `len()` bounds the terminal, not the process).
             try:
-                raw_health = _read_capped(resp, _DOCTOR_BODY_CAP, deadline)
+                raw_health, _cut = _read_capped(resp, _DOCTOR_BODY_CAP, deadline)
+                if _cut:
+                    health_read_error = (
+                        f"the body was CUT at the {_fmt_bound(deadline - started)}s"
+                        " deadline before it completed")
                 if isinstance(raw_health, bytes) and raw_health:
                     parsed_health = _json.loads(raw_health.decode("utf-8", "replace"))
                     if isinstance(parsed_health, dict):
@@ -13372,12 +13384,13 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     # ── the authenticated read: the ONLY thing that proves the key ──
     team_code: int | None = None
     team_body = ""
+    team_cut = False
     reach_error: str | None = None
     team_first_bound = 0.0
     team_retry_bound = 0.0
 
     def _team_request(timeout: float, deadline: float) -> None:
-        nonlocal team_code, team_body
+        nonlocal team_code, team_body, team_cut
         req = Request(f"{api_url}/v1/team",
                       headers={"Authorization": f"Bearer {api_key}"})
         try:
@@ -13385,14 +13398,17 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                 team_code = getattr(resp, "status", None) or resp.getcode()
                 # Bounded at the read (see the `/health` note above): a proxy
                 # echoing a large body must not be buffered whole.
-                team_body = _read_capped(resp, _DOCTOR_BODY_CAP,
-                                         deadline).decode("utf-8", "replace")
+                raw_team, team_cut = _read_capped(resp, _DOCTOR_BODY_CAP, deadline)
+                team_body = raw_team.decode("utf-8", "replace")
         except HTTPError as exc:
             team_code = exc.code
             try:
-                team_body = (_read_capped(exc, _DOCTOR_BODY_CAP,
-                                          deadline).decode("utf-8", "replace")
-                             if exc.fp else "")
+                if exc.fp:
+                    raw_team, team_cut = _read_capped(exc, _DOCTOR_BODY_CAP,
+                                                      deadline)
+                    team_body = raw_team.decode("utf-8", "replace")
+                else:
+                    team_body = ""
             except (OSError, http.client.HTTPException):
                 team_body = ""
 
@@ -13515,6 +13531,13 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             if isinstance(value, str) and value.strip():
                 identity = field
                 break
+        if team_cut and identity is None:
+            results.append(_combine("⚠️",
+                            f"{health_part}; the `/v1/team` reply was CUT before "
+                            f"it completed ({_printable(body[:160]) if body else 'no bytes'})"
+                            ". The credential is UNPROVEN rather than wrong — "
+                            "re-run, or use `--offline`"))
+            return
         if identity is None:
             results.append(_combine("❌",
                             f"{health_part}; /v1/team answered "

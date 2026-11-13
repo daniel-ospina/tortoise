@@ -1805,6 +1805,86 @@ class TestDoctorHostedCredential:
         assert "health check FAILED" in out, out[-800:]
         assert "Onboarding complete." not in out, out[-800:]
 
+    def test_a_body_cut_by_the_deadline_is_unread_never_green(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A `/health` body CUT by the deadline is UNREAD — not "no status".
+
+        The chunked reader stops between reads, and a silent stop left
+        `health_status = None` with no error recorded, so a `degraded` body cut at
+        the deadline rendered `✅ … /health 200` and `All checks passing!` (fresh
+        review round 16 — the round-13 class re-entered through the deadline).
+        """
+        from tortoise import __main__ as _m
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        class _Drip(_FakeResponse):
+            """Yields one byte per call, so the leg deadline cuts it."""
+
+            def read(self, n=None):
+                return self._buf.read(1)
+
+            def read1(self, n=None):
+                return self.read(n)
+
+        monkeypatch.setattr(_m, "_DOCTOR_HEALTH_TIMEOUT_S", 0.001)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _Drip(200, b'{"status":"degraded"}') if url.endswith("/health")
+            else _FakeResponse(200, b'{"org_id":"org-9"}')))
+        db_path = str(tmp_path / "cut-health.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor cut health seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "✅" not in hosted, hosted
+        assert "All checks passing" not in out, out[-1200:]
+
+    def test_a_v1_team_reply_cut_by_the_deadline_is_unproven_not_a_broken_key(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A 2xx whose body was CUT is not a captive portal — it is unproven.
+
+        Before the flag existed, a cut 2xx reached the no-identity arm and printed
+        `❌ … Check your TORTOISE_API_URL` with a fragment of the user's own body
+        as "evidence" — a healthy setup graded red (fresh review round 16).
+        """
+        from tortoise import __main__ as _m
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        calls = {"n": 0}
+
+        class _CutTeam(_FakeResponse):
+            """First call returns a partial JSON body; the next returns b""."""
+
+            def read(self, n=None):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return b'{"org_id":'
+                return b""
+
+            def read1(self, n=None):
+                return self.read(n)
+
+        # A deadline that has already passed cuts after the first chunk.
+        monkeypatch.setattr(_m, "_DOCTOR_TOTAL_BUDGET_S", 0.0)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}') if url.endswith("/health")
+            else _CutTeam(200)))
+        db_path = str(tmp_path / "cut-team.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor cut team seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "❌" not in hosted, hosted
+        assert "CUT" in hosted or "UNPROVEN" in hosted or "UNGRADED" in hosted, hosted
+
 
 class TestDoctorPath:
     def test_doctor_path_resolves_and_runs(self, clear_db_env, tmp_path, capsys):
