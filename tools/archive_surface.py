@@ -99,6 +99,22 @@ Exit 0 = clean. Exit 1 = violations (printed one per line). Exit 2 = usage/refus
 
 from __future__ import annotations
 
+import sys
+
+# #5128 (the repo's entry-point contract): refuse a <3.12 interpreter HERE, before the rest of the
+# imports, so a stale local `python3` fails LOUDLY with a remedy instead of with whichever 3.12-only
+# construct happens to trip first — this module imports `tomllib` (3.11+), so an unguarded import
+# block raises ImportError before this guard could ever run and the operator gets an UNATTRIBUTED
+# traceback. `tests/test_entry_point_python_guard.py` asserts structurally that this guard precedes
+# every other import and behaviourally that it names the floor, the interpreter it got, and the
+# invocation that works.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/archive_surface.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/archive_surface.py check`"
+    )
+
 import argparse
 import ast
 import fnmatch
@@ -106,17 +122,9 @@ import hashlib
 import json
 import re
 import subprocess
-import sys
 import tomllib
 from functools import cache
 from pathlib import Path
-
-if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
-        f"tools/archive_surface.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/archive_surface.py check`"
-    )
 
 ROOT = Path(__file__).resolve().parent.parent
 ARCHIVE_DIR = ROOT / "archive"

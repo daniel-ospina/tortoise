@@ -121,8 +121,8 @@ from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
-    entity_create_lock, resolve_document_target_id,
-    resolve_entity_id_same_entity)
+    ambiguous_holder_ids as _ambiguous_holder_ids, entity_create_lock,
+    resolve_document_target_id, resolve_entity_id_same_entity)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
@@ -5734,6 +5734,223 @@ def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     # this function's docstring says it fixes.
     from tortoise.entity_identity import _live_holders_same_entity
     return list(_live_holders_same_entity(g, label, name, any_status=True)[0])
+
+
+#: The ONE spelling of the guard override token in this module. It is compared
+#: here (to decide whether `intent` is a control or a data property) and in
+#: `kind_guards.resolve` (to decide whether to suppress a redirect); re-spelling
+#: it in a third place is how the two would drift.
+_KIND_GUARD_INTENT_AS_DECLARED = "as_declared"
+
+
+def _graph_installed_namespaces(sdk) -> frozenset[str] | None:
+    """This graph's INSTALLED pack namespaces, for the kind-guard path (#12060 R2).
+
+    A thin pass-through to ``pack_state.graph_installed_namespaces`` — the ONE
+    reader of "which packs does this graph have" — so the guard path cannot
+    mint a second answer to it, and ``kind_guards`` needs no ``pack_state``
+    import at module scope (it is stdlib-only on purpose).
+
+    ``None`` keeps its documented meaning: the graph has no ``:PackInstall``
+    records, so the catalog union applies and every namespace counts as
+    available (#2714 indicator 3). A read that RAISES is handled by the caller
+    (``kind_guards.resolve`` abstains and the write proceeds unchanged) —
+    an outage must never look like "no packs installed" *and* must never
+    refuse a write.
+    """
+    from tortoise.pack_state import graph_installed_namespaces
+
+    return graph_installed_namespaces(sdk)
+
+
+def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
+                      installed_provider=None,
+                      ambiguous_target=None) -> tuple[str, object | None]:
+    """Resolve and APPLY the per-kind guard to an entity write (#12060).
+
+    Returns ``(layer, decision)`` — the layer the write should now use, and the
+    ``kind_guards.GuardDecision`` (``None`` when nothing could be computed).
+    On a redirect this MUTATES ``props``: every entity-layer kind spelling the
+    write carried is removed and the target kind is declared under the target
+    layer's canonical prop, so the fold writes the routed property and no stale
+    ``subject_kind``/``objectKind`` rides along (the same discipline
+    ``_kind_layer_note`` applies on its own routing path — extended here to a
+    NIL/blank spelling, because a ``subjectKind='other'`` must not ride along
+    onto a ``:WorkItem``).
+
+    ``declaredKind``/``declaredLayer``/``kindRedirectRule`` are recorded on the
+    node (R5) so an override, a replay or a later audit can restore what the
+    caller asked for AND attribute the change to the rule that made it — a
+    payload that only lives in one response is not durable, and a redirect
+    nobody can attribute is the PostgreSQL "surprising interpretation" failure
+    with better manners.
+
+    Returns the decision unchanged when the guard only ABSTAINED or the caller
+    OVERRODE it: in both cases the write must land exactly as declared.
+
+    ``ambiguous_target`` is a probe ``(label) -> bool`` the caller supplies,
+    answering "would a create on that label refuse because 2+ LIVE entities
+    already hold this name?". It is consulted ONLY when the guard moves the
+    write to the other entity label, which is the one way a guard can reach a
+    refusal the caller never asked for.
+    """
+    from tortoise.kind_guards import (
+        SKIP_TARGET_LABEL_AMBIGUOUS,
+        abstain,
+        resolve,
+        subject_only_prop_abstention,
+    )
+    from tortoise.kind_layers import KIND_PROP
+    from tortoise.pack_state import _KIND_PROP_SPELLINGS
+
+    named = _named_layer_kinds(props)
+    declared = next((kind for _layer, _spelling, kind in named), None)
+    # ⛔ TWO DISAGREEING SPELLINGS OF ONE PROPERTY ARE NEVER REWRITTEN.
+    # `objectKind="core:organization"` beside `object_kind="core:team"` is a
+    # write that already names two kinds; the router one function down REFUSES to
+    # pick one (it reports instead, "nothing is dropped, nothing is rewritten"),
+    # and the guard runs FIRST — so rewriting here would silently discard the
+    # other value and pre-empt the router's own report. Hand the write back
+    # untouched and let that path say what it says today.
+    if len({kind for _layer, _spelling, kind in named}) > 1:
+        return t, None
+    decision = resolve(name, t, declared, intent=intent,
+                       installed_provider=installed_provider)
+    # `changed` is the ONE question this door asks of a decision — did it move
+    # the write? — so the check lives there rather than re-deriving it from
+    # `kind is not None` (a decision can carry a kind the write must NOT apply).
+    if not decision.changed:
+        return t, decision
+
+    # ⛔ A REDIRECT MUST NOT TURN A LEGAL WRITE INTO A REFUSAL (#1934) — the
+    # rule `_kind_layer_note` applies three lines below, applied one step
+    # earlier because the guard is what moved the write. The Subject door
+    # validates props the Object door does not, so an object→subject redirect
+    # carrying an Object-only value would RAISE where the same write succeeded
+    # before the guard existed. MEASURED: a pack guard redirecting to a §5
+    # Subject kind raised `ValueError: Invalid status 'active' for a :Subject`,
+    # and the same redirect carrying `roleHolder` raised one prop later. Both
+    # arms live in `kind_guards.subject_only_prop_abstention`, handed
+    # `_SUBJECT_STATUS_VALUES` — the ONE declaration of that lifecycle — so the
+    # guard cannot disagree with this door about what is legal.
+    if decision.layer == "subject" and t != "subject":
+        _illegal = subject_only_prop_abstention(decision, props, t, _SUBJECT_STATUS_VALUES)
+        if _illegal is not None:
+            return t, _illegal
+
+    # ⛔ THE OTHER WAY A REDIRECT CAN REFUSE A LEGAL WRITE: IDENTITY.
+    # The guard moves the write to the OTHER entity label, and entity identity
+    # is LABEL-SCOPED, so two live carriers of the name on the TARGET label —
+    # legal, and perfectly resolvable on the label the caller chose — make the
+    # door's `resolve_or_mint` raise `AmbiguousEntityName` (route-then-refuse,
+    # #3633). MEASURED (round-2 review P1): two `:Object`s named
+    # `daniel-ospina/agent-infra` plus a `create_subject(...)` of that name
+    # raised where the same write succeeds unguarded AND on `origin/main` — a
+    # refusal invented entirely by the guard, which #1934 and this feature's
+    # defining rule forbid. The probe is READ-ONLY and reuses the ONE identity
+    # predicate (`entity_identity.is_ambiguous`); a probe that fails is ignored
+    # (#1934: nothing here may fail a write).
+    if decision.layer != t and ambiguous_target is not None:
+        _target_label = _ENTITY_LAYER_LABEL.get(decision.layer)
+        try:
+            _would_refuse = bool(_target_label) and bool(
+                ambiguous_target(_target_label))
+        except Exception as _probe_exc:  # noqa: BLE001, RUF100 — never fails a write
+            _logger.warning(
+                "create_entity: the guard's target-label identity probe failed "
+                "(%s: %s) — the redirect is applied unprobed.",
+                _probe_exc.__class__.__name__, _probe_exc)
+            _would_refuse = False
+        if _would_refuse:
+            return t, abstain(decision, SKIP_TARGET_LABEL_AMBIGUOUS, layer=t)
+
+    _entity_props = {KIND_PROP["subject"], KIND_PROP["object"]}
+    for spelling, canonical in _KIND_PROP_SPELLINGS.items():
+        if canonical in _entity_props:
+            props.pop(spelling, None)
+    props[decision.prop] = decision.kind
+    # ⛔ PLAIN ASSIGNMENT, not `setdefault`: these three ARE the durable record of
+    # what the guard did — what the caller asked for and which rule moved it. A
+    # caller-supplied value (reachable through any props bag) must not be able to
+    # disagree with the reply, or an audit reads a forged attribution: measured,
+    # `create_subject("issue:a/b#1", declaredKind="core:role",
+    # kindRedirectRule="forged-rule")` stored BOTH forged values beside a reply
+    # that said `from.kind: None`.
+    for _record_key in ("declaredKind", "declaredLayer", "kindRedirectRule"):
+        props.pop(_record_key, None)
+    if decision.declared_kind is not None:
+        props["declaredKind"] = decision.declared_kind
+    props["declaredLayer"] = decision.declared_layer
+    # The rule id rides the node, not only the reply: a redirect that lived only
+    # in one response would be a silent mutation whose cause nobody could name
+    # after the process that minted it is gone (the counters are in-process).
+    # This is what makes the record ATTRIBUTABLE and therefore reversible — see
+    # `kind_guards`' "What the external pass changed".
+    if decision.rule:
+        props["kindRedirectRule"] = decision.rule
+    return decision.layer, decision
+
+
+def _kind_guard_payloads(decision) -> dict:
+    """The #12060 AX fields for a write reply — one shape, one field per outcome.
+
+    ⛔ ADDITIVE ONLY. A caller that ignores these loses nothing but the notice;
+    nothing here blocks, and nothing here changes what was stored (#1934). The
+    fields are top-level so a client branches on DATA, never on prose:
+    ``kind_redirect`` / ``kind_redirect_skipped`` / ``kind_guard_overridden``.
+    A degraded redirect carries BOTH ``kind_redirect`` (to the fallback) and
+    ``kind_redirect_skipped`` (the target it could not use), so the two facts
+    are never conflated.
+    """
+    if decision is None:
+        return {}
+    out: dict = {}
+    if getattr(decision, "redirect", None):
+        out["kind_redirect"] = decision.redirect
+    if getattr(decision, "skipped", None):
+        out["kind_redirect_skipped"] = decision.skipped
+    if getattr(decision, "overridden", None):
+        out["kind_guard_overridden"] = decision.overridden
+    return out
+
+
+def _landed_entity_facts(reply: dict | None, door_layer: str,
+                         declared_kind: str | None) -> tuple[str, str | None]:
+    """The ``(layer, kind)`` an ENTITY write actually LANDED with (#12060 F1).
+
+    Two things can move an entity write away from what the caller asked for, and
+    BOTH report the move in the reply: the per-kind guard (#12060) re-labels it,
+    and ``_kind_layer_note`` (#9964) routes it by the kind it names. A caller
+    that keeps its own PRE-WRITE guess therefore acts on a belief the graph
+    contradicts — which is exactly what the capture spine did: it suppressed the
+    claim→entity edge for any name it believed was a Subject, while
+    ``bind_point_subjects`` can only bind a name that IS one, so after a
+    subject→object redirect the claim lost its edge on EITHER channel (#1370
+    skip + nothing to bind). MEASURED on the cohort this feature exists for:
+    ``daniel-ospina/agent-infra`` declared ``core:naturalPerson`` redirects to a
+    ``:Object`` / ``core:Project``, and the claim kept no edge at all.
+
+    Reads the REPLY, never the graph: ``kind_redirect.to`` for an applied guard
+    redirect, else the ``kind_layer_routed`` advisory for a kind-driven
+    re-route, else the caller's own declaration (a write that did not move lands
+    where it asked). An abstained/overridden guard carries no ``kind_redirect``
+    — by design, the write must land as declared — so it correctly falls
+    through.
+    """
+    _redirect = (reply or {}).get("kind_redirect")
+    if isinstance(_redirect, dict):
+        _to = _redirect.get("to") or {}
+        _layer = _to.get("layer")
+        if _layer in _ENTITY_LAYER_LABEL:
+            return _layer, _to.get("kind") or declared_kind
+    for _note in (reply or {}).get("advisories") or []:
+        if not isinstance(_note, dict) or _note.get("code") != "kind_layer_routed":
+            continue
+        _actual = _note.get("actual") or ()
+        _layer = _actual[0] if _actual else None
+        if _layer in _ENTITY_LAYER_LABEL:
+            return _layer, _note.get("kind") or declared_kind
+    return door_layer, declared_kind
 
 
 def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
@@ -17762,6 +17979,15 @@ class TortoiseSDK:
         # wrote, so the S5 Job 1 relation leg can resolve a stated endpoint
         # name to the node it denotes (see the write leg below).
         entity_index: dict[str, list[tuple[str, str | None]]] = {}
+        # #12060 (review F1): every layer this capture's entity writes actually
+        # LANDED on, by name. `subject_entity_names` above is seeded from the
+        # payload's PRE-WRITE kind (an entity write can fail before any fact
+        # exists, and that provisional mark is the pre-existing behaviour), and
+        # then CORRECTED from this map — a guard redirect that moves a write to
+        # the other entity label changes which channel may carry the claim's
+        # edge, and the two consumers below (the claim attachment and the merge
+        # union) must ask the graph's answer, not the payload's guess.
+        _landed_layers: dict[str, set[str]] = {}
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
@@ -17792,8 +18018,21 @@ class TortoiseSDK:
                 # different kinds (an ambiguity it must refuse, not resolve —
                 # Layer-1 identity is `(name, kind)`, #11235).
                 _node_id = str((_written or {}).get("node", {}).get("id") or "")
+                # #12060 (review F1): take the belief from what LANDED, not from
+                # the pre-write guess above. Both redirect doors (the per-kind
+                # guard, and `_kind_layer_note`'s kind-driven re-route) report
+                # the move in the reply this call already holds.
+                _landed_layer, _landed_kind = _landed_entity_facts(
+                    _written, "subject" if _is_subject else "object", _ekind)
+                _landed_layers.setdefault(name, set()).add(_landed_layer)
                 if _node_id:
-                    entity_index.setdefault(name, []).append((_node_id, _ekind))
+                    # The LANDED kind, not the declared one: the node carries the
+                    # redirected kind, and Layer-1 identity is `(name, kind)`
+                    # (#11235) — the relation leg below resolves graph ids from
+                    # this index, so a stale kind here would plan an edge from a
+                    # kind the node does not carry.
+                    entity_index.setdefault(name, []).append(
+                        (_node_id, _landed_kind))
             except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
                 # old `except: pass` was indicator-4 hygiene — a swallowed
                 # create_entity failure silently stranding an Object a
@@ -17808,6 +18047,17 @@ class TortoiseSDK:
                 # pre-existing Objects.
                 entity_failures.append(
                     f"{type(exc).__name__}: entity write failed for {name}: {exc}")
+        for _ln, _llayers in _landed_layers.items():
+            # A name is a Subject for the consumers below only if a write for it
+            # LANDED as one. Monotonic per write, so a payload that names one
+            # entity twice under two kinds keeps the Subject when one landed
+            # there; a name whose only successful write was redirected AWAY from
+            # the subject label is dropped, which is what restores the
+            # claim→entity edge (#12060 review F1).
+            if "subject" in _llayers:
+                subject_entity_names.add(_ln)
+            else:
+                subject_entity_names.discard(_ln)
         if entity_failures:
             warnings.extend(entity_failures)
             warnings.append(
@@ -33737,7 +33987,18 @@ class TortoiseSDK:
         # `affected` by `graph_ep_reachable` is WRONG: on a pass with
         # affected=3, window_reachable=4, graph_ep_reachable=8 the record
         # carries `coverage=0.75` while that division reads 0.375 for a pass
-        # that consumed its whole window.
+        # that consumed its whole window (an ILLUSTRATION of the misreading, not
+        # a pinned fixture — the measured case is the test cited below).
+        #
+        # ⛔ And it is not a CONSERVATIVE denominator either: the graph
+        # population can be SMALLER than the window's, because operator-less
+        # claims are in the window (`_trivial_stamp`) but not in
+        # `ep_reachable_claims`. Measured on
+        # `test_an_operator_less_pass_does_not_report_full_coverage`:
+        # `affected=5, window_reachable=5, graph_ep_reachable=3`, so that
+        # division would read `5/3 = 1.67` — over 100% coverage for a pass that
+        # consumed its whole window. Published here so a reader can compare the
+        # pass's radius with the graph's — never divided into `affected`.
         reachable = out.get("ep_reachable_claims")
         if reachable is not None:
             last["graph_ep_reachable"] = int(reachable)
@@ -33844,9 +34105,26 @@ class TortoiseSDK:
           ``IMPL|NAND`` edge to a live epistemic endpoint. Its OWN
           ``count(DISTINCT n)``, never ``_edged_claim_ids()``: that query is
           label-blind (``epistemic_disjunction`` admits Point|Subject|Object|
-          Event), so reusing it here would put a ``:Point`` numerator over a
-          wider denominator and yield ``belief_coverage_pct > 1`` and a
-          NEGATIVE ``no_belief`` (measured: 5.0 / -8.0).
+          Event), so a belief count taken over that wider epistemic population
+          — once the ``IMPL|NAND`` requirement is dropped too, which is what the
+          cited measurement does (its 10 baselined claims are operator-less) —
+          put over this ``:Point``-scoped denominator mixes a WIDER numerator
+          into a NARROWER denominator: the direction that yields
+          ``belief_coverage_pct > 1`` and a NEGATIVE ``no_belief`` (measured:
+          5.0 / -8.0). ⛔ #12138 §2: this bullet used to call the label-blind set
+          a "wider denominator", which is the OTHER mistake and the one the
+          ranges cannot see (a wider denominator lowers the ratio and raises
+          ``no_belief``, both in range — see the no-clamp note below), and it
+          then still credited that number to ``_edged_claim_ids``' own
+          population, where the ratio is ``0/2 = 0.0`` — in range. (That
+          measurement's 2-chain carries NO baseline, which is what leaves the
+          wider numerator at 10; baseline its head the way the suite helper
+          ``_chain`` does and the same arithmetic reads 11 over 2 — ``5.5`` /
+          ``-9.0`` — with ``1/2 = 0.5`` here instead. Both variants' *ratios* are
+          in range (the scope-mix pairs themselves are not, which is the point);
+          #12138 §2.) The two directions
+          and the two populations are distinct; only the scope mix produces the
+          5.0 / -8.0 pair.
         - ``belief_present`` — the SAME population, counted through the shared
           presence predicate (`ep_has_belief_cypher`, #11702) rather than a
           private ``IS NOT NULL``: a stored (0,0) pair is not a belief and a
@@ -33951,14 +34229,20 @@ class TortoiseSDK:
         # silently corrected into a plausible "fully covered" (#12116 review
         # C-P3: a clamp is the opposite of the asserted invariant the comment
         # claimed). ⛔ #12138 §2 — only ONE direction is visible that way: a
-        # NARROWER (or label-blind) denominator lets the numerator exceed it,
-        # so `no_belief` goes negative or `belief_coverage_pct` exceeds 1. A
+        # NARROWER denominator, or a label-blind NUMERATOR over one, lets the
+        # numerator exceed it, so `no_belief` goes negative or
+        # `belief_coverage_pct` exceeds 1. A
         # WIDER denominator keeps BOTH in range (`belief_present` fixed over a
-        # larger denominator ⇒ the ratio falls and `no_belief` rises; measured:
-        # denominator +4 ⇒ pct 0.2, no_belief +4), so the ranges cannot see it.
+        # larger denominator ⇒ the ratio falls and `no_belief` rises; measured on
+        # the pinned fixture, `belief_present=1`: a denominator 4→5 moves `pct`
+        # 0.25→0.2 and `no_belief` 3→4 — absolute values, not a delta), so the
+        # ranges cannot see it.
         # What reddens on an inflated denominator is the counts pinned against
         # independent queries in `tests/test_11823_propagation_cap_signal.py`
-        # (`test_counts_match_an_independent_query`).
+        # (`test_counts_match_an_independent_query`), and, from a different
+        # angle, `test_an_edged_but_unreachable_claim_is_not_invisible`
+        # (measured: a reach query missing the far-endpoint live filter reddens
+        # BOTH, so naming one alone overstated the coverage).
         no_belief = reachable - belief_present
         unclassified = points_edged - reachable
         return {
@@ -35442,7 +35726,8 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         # The anchors are dream_all's own scan (drafts included; the closure
-        # seed applies the live predicate).
+        # SEED applies the draft-only filter, not the full liveness one — see
+        # `_window_closure`'s deliberate-asymmetry note, #12138 §7).
         rows = proj.g.query(
             "MATCH (n:Point) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
@@ -35464,10 +35749,17 @@ class TortoiseSDK:
 
         ⚠️ #11823: this query is **label-blind** — ``epistemic_disjunction``
         admits ``Point|Subject|Object|Event`` — so it is NOT the denominator for
-        a ``:Point``-scoped belief count. Mixing the two populations yields
-        ``belief_coverage_pct > 1`` and a negative ``no_belief``; the health
-        block's own denominator is a separate, ``:Point``-scoped
-        ``count(DISTINCT n)`` in :meth:`_propagation_counts`.
+        a ``:Point``-scoped belief count. ⛔ #12138 §2: the reason is the
+        POPULATION, not a visible range violation — this set is a SUPERSET of
+        the ``:Point``-scoped reach, so as a denominator it is WIDER, which
+        lowers the ratio and raises ``no_belief``, both still in range and
+        therefore invisible to the ranges the health block asserts (see R10 in
+        the #11823 plan). The ``belief_coverage_pct > 1`` / NEGATIVE ``no_belief``
+        pair belongs to the opposite scope mix — a label-blind NUMERATOR over a
+        ``:Point``-scoped denominator (measured: 5.0 / -8.0 at 10 beliefs over 2
+        point claims) — and this docstring previously attributed it to this,
+        wider, direction. The health block's own denominator is a separate,
+        ``:Point``-scoped ``count(DISTINCT n)`` in :meth:`_propagation_counts`.
         """
         proj = self._get_proj()
         edged_rows = proj.g.query(
@@ -47410,7 +47702,8 @@ class TortoiseSDK:
         return bool(total)
 
     def create_entity(self, type: str, name: str, *, is_episodic: bool | None = None,
-                       _server_id: str | None = None, **props) -> dict:
+                       _server_id: str | None = None, intent: str | None = None,
+                       **props) -> dict:
         """Create an entity — consolidated surface (epic #888 W2, PR #912).
 
         ``type`` routes to the right entity kind:
@@ -47447,6 +47740,15 @@ class TortoiseSDK:
         only on another AXIS (an Event kind at an entity door) is reported as
         ``kind_other_layer`` and the write lands as asked (warn-not-block,
         #1934). ``kind_layers`` is the one authority for both answers.
+
+        #12060 — THE KIND GUARD runs first: a name that matches a declared
+        common confusion is filed at its right kind/layer and the reply carries
+        ``kind_redirect`` (what changed, the rule id, the exact override, how to
+        undo). ``intent="as_declared"`` settles the name instead: the write
+        lands exactly as asked and the reply carries ``kind_guard_overridden``,
+        so a guard that is WRONG becomes countable. A guard whose target is not
+        resolvable here ABSTAINS — the write is unchanged and
+        ``kind_redirect_skipped`` says why; nothing is ever refused (#1934).
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #8171 (review P1/P2): the ref must be shape-checked BEFORE any write
@@ -47464,6 +47766,50 @@ class TortoiseSDK:
                 "'_server_id' is a server-managed field and cannot be set "
                 "via props.")
         t = (type or "").strip().lower()
+        # ── #12060: the KIND GUARD — redirect a mis-filed write, never refuse ──
+        # Runs BEFORE the kind<->layer routing below, because a guard decides
+        # WHICH KIND (and therefore which layer) the write belongs at, while
+        # `_kind_layer_note` only checks that the kind and the door agree. After
+        # the guard has rewritten the kind, the router sees a consistent write
+        # and stays silent — one decision, taken once.
+        #
+        # ⛔ PRECEDENCE (owner, #12060): the guard runs on rows that are ALREADY
+        # decided to be entities. This is the entity WRITE door, so it is only
+        # reached by a caller that made that decision; the extractor's capture
+        # spine reaches it after its own is-this-an-entity judgement, and the
+        # claim path (where a mention is recorded without minting) never reaches
+        # it at all. A guard here can therefore never redirect something that
+        # should never have existed — see `kind_guards`' module docstring.
+        #
+        # Fail-open (#1934): a guard that raised would refuse a write that
+        # landed before it existed, so every failure degrades to "no guard".
+        _guard = None
+        # ⛔ ONLY THE EXACT TOKEN IS A CONTROL; every other value stays a PROP.
+        # `intent` is a plausible data key (the battery envelopes carry one), and
+        # this door is reached by `**(props or {})` from the MCP tools and the
+        # ingest payloads — so making the name unconditionally reserved would
+        # SILENTLY DROP a legitimate property and neither store nor report it.
+        # Anything that is not `"as_declared"` is therefore put straight back
+        # where it came from, which makes this change byte-identical to the old
+        # behaviour for every existing caller (and, unlike a reserved-name
+        # refusal, it can never refuse a write — #1934).
+        if intent is not None and not (
+                isinstance(intent, str)
+                and intent.strip().lower() == _KIND_GUARD_INTENT_AS_DECLARED):
+            props.setdefault("intent", intent)
+            intent = None
+        try:
+            t, _guard = _apply_kind_guard(
+                t, name, props, intent,
+                installed_provider=lambda: _graph_installed_namespaces(self),
+                ambiguous_target=lambda _label: bool(_ambiguous_holder_ids(
+                    self._get_proj().g, _label, name)))
+        except Exception as _guard_exc:  # noqa: BLE001, RUF100 — never refuses a write
+            _logger.warning(
+                "create_entity: the kind guard could not be resolved (%s: %s) — "
+                "the write proceeds UNGUARDED and nothing is refused (#1934).",
+                type(_guard_exc).__name__, _guard_exc)
+            _guard = None
         # ── #9964: the KIND decides the layer, then REPORT the disagreement ───
         # One authority answers which layer a kind is declared on; a kind that
         # belongs exclusively to the other entity layer ROUTES this write there
@@ -47870,7 +48216,47 @@ class TortoiseSDK:
         # advisory used to claim "no data was lost" in exactly that case; probe
         # for the twin so it can name both ids instead. READ-ONLY and fail-open
         # (#1934): a probe that failed must never refuse a write that landed.
-        if _layer_note and _layer_note.get("code") == "kind_layer_routed":
+        # ⛔ THE GUARD PATH CROSSES LABELS BY DESIGN, so it needs the SAME twin
+        # probe the router does — and it had none (round-2 review P2): with a
+        # `:Subject` of the name already present, a guard redirect re-filed the
+        # write to `:Object`, the graph held the name under BOTH labels, and the
+        # reply carried NO advisory while the AX block said `undo: none`. The
+        # router's disclosure is suppressed here because the guard runs FIRST and
+        # leaves it a consistent write, so nothing else in this method would
+        # report the split. Reuses `_kind_layer_advisory`'s renderer (one wording)
+        # by shaping the note it expects; `_layer_note` wins when both exist,
+        # because a router note means the guard did not decide this write.
+        # ⚠️ `t` is already the REDIRECTED layer at this point (the guard's
+        # return value is what the door below writes), so the label the caller
+        # asked for is `_guard.declared_layer` — comparing against `t` here
+        # would ask whether the guard changed the layer, and it always has by
+        # definition.
+        if (_guard is not None and _layer_note is None and _guard.kind
+                and _guard.layer != _guard.declared_layer):
+            _guard_peer_label = _ENTITY_LAYER_LABEL.get(_guard.declared_layer)
+            _guard_written_id = node.get("id") or node.get("eventId")
+            try:
+                _guard_peer = next(
+                    (i for i in all_name_holder_ids(
+                        self._get_proj().g, _guard_peer_label, name)
+                     if i and i != _guard_written_id), None
+                ) if _guard_peer_label else None
+            except Exception as _guard_peer_exc:  # noqa: BLE001, RUF100 — advisory only
+                _logger.warning(
+                    "create_entity: the guard split probe failed (%s: %s) — the "
+                    "redirect is reported without it.",
+                    _guard_peer_exc.__class__.__name__, _guard_peer_exc)
+                _guard_peer = None
+            if _guard_peer:
+                _layer_note = {
+                    "code": "kind_layer_routed",
+                    "kind": _guard.kind,
+                    "layer": _guard.declared_layer,
+                    "actual": [_guard.layer],
+                    "split_peer_id": _guard_peer,
+                }
+        if (_layer_note and _layer_note.get("code") == "kind_layer_routed"
+                and not _layer_note.get("split_peer_id")):
             _written_id = node.get("id") or node.get("eventId")
             # `all_name_holder_ids` takes a LABEL and refuses anything else, so
             # map the note's LAYER through the one map instead of re-spelling.
@@ -47892,6 +48278,7 @@ class TortoiseSDK:
                 _layer_note = {**_layer_note, "split_peer_id": _split_peer}
         return {
             "node": node,
+            **_kind_guard_payloads(_guard),
             "nudges": self._nudge_candidates(
                 name, exclude_ids=[node.get("id") or node.get("eventId")]),
             **_merge_advisories(
@@ -48197,10 +48584,18 @@ class TortoiseSDK:
         _adv = result.get("advisories")
         if _adv:
             node["advisories"] = _adv
+        # #12060: the alias doors must surface the kind-guard AX fields too —
+        # the same P2 the advisories above exist for (the alias unwrapped
+        # ``result["node"]`` and DROPPED every top-level key). Additive: with no
+        # guard outcome the flat node is byte-identical to before.
+        for _key in ("kind_redirect", "kind_redirect_skipped",
+                     "kind_guard_overridden"):
+            if result.get(_key):
+                node[_key] = result[_key]
         return node
 
     def create_subject(self, name: str, subjectKind: str | None = None,
-                       **props) -> dict:
+                       *, intent: str | None = None, **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2.
 
         #9964: the KIND decides the layer. An ``objectKind``-declared kind
@@ -48227,11 +48622,22 @@ class TortoiseSDK:
         subjectKind = named_kind(subjectKind)
         if subjectKind is not None:
             props["subjectKind"] = subjectKind
+        # ⛔ BUILD THE BAG, never `intent=intent, **props`: `props` is the caller's
+        # bag after `_coerce_props`, which flattens the documented
+        # `props={"k": v}` convention — so a caller whose DATA carries an
+        # `intent` key would hit "got multiple values for keyword argument
+        # 'intent'" AT THE RELAY, one frame before `create_entity` can put the
+        # value back (the #2296 relay-collision class, reopened by adding a
+        # parameter and not a strip). An explicit `intent` argument wins; a
+        # non-token one is restored as a prop by `create_entity` itself.
+        _kw = dict(props)
+        if intent is not None:
+            _kw["intent"] = intent
         return self._flat_entity_result(
-            self.create_entity("subject", name, **props))
+            self.create_entity("subject", name, **_kw))
 
     def create_object(self, name: str, objectKind: str | None = None,
-                      **props) -> dict:
+                      *, intent: str | None = None, **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2.
 
         #9964: the KIND decides the layer. ``create_object(name,
@@ -48244,6 +48650,11 @@ class TortoiseSDK:
         ``objectKind`` defaults to ``None`` (**absent**, not ``"other"**) since
         #9572 — the Object twin of ``create_subject``'s fabricated default.
         Blank is absent here too (#9572 review P2) — ``named_kind``.
+
+        #12060: the same kind guard as ``create_subject`` — an undeclared-kind
+        write whose name matches a declared common confusion is filed at its
+        right kind/layer with ``kind_redirect`` on the node; ``intent=
+        "as_declared"`` keeps it as asked and records the override.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
@@ -48253,8 +48664,11 @@ class TortoiseSDK:
         objectKind = named_kind(objectKind)
         if objectKind is not None:
             props["objectKind"] = objectKind
+        _kw = dict(props)  # the same relay-collision guard as create_subject
+        if intent is not None:
+            _kw["intent"] = intent
         return self._flat_entity_result(
-            self.create_entity("object", name, **props))
+            self.create_entity("object", name, **_kw))
 
     def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
                       _server_id: str | None = None, **props) -> dict:

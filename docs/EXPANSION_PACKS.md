@@ -69,7 +69,22 @@ ontology:
     - id: ruleLifecycle
       steps: [rule, rationale, ruleRevised]
       enforcement: warn      # warn | retry (block is reserved)
+  guards:                    # OPTIONAL — per-kind write redirects (#12060), see below
+    - kind: contract
+      layer: object
+      onConfusion:
+        - when: nameMatches
+          pattern: '^CONTRACT-[0-9]+$'
+          redirect: contract
+          fallback: core:WorkItem     # REQUIRED, and it must be a CORE kind
+          reason: 'a CONTRACT-<n> handle is this pack''s contract kind'
   memory_granularity: 'Durable: ... Ephemeral: ...'   # UNDER ontology: (top-level is ignored)
+
+# ⛔ TOP-LEVEL, not inside `ontology:` — the registry reads `raw["depends_on"]`,
+# and `ontology.depends_on` is SILENTLY IGNORED (there is no unknown-key check for
+# the `ontology:` block, so a misplaced dependency validates clean and then fails
+# the guard's own target-closure error with no explanation).
+depends_on: []               # namespaces this pack may reference — and may redirect to
 
 extraction:
   active: true
@@ -116,6 +131,98 @@ is not a subclass parent.
 `equivalentTo` is what links two packs that declare the same name in the *same*
 category. `decision` is core-owned on two axes (point **and** event), so a collision
 error names every owner.
+
+## Per-kind write guards — redirect a mis-filed write (#12060)
+
+> ⛔ **Self-hosted only, today.** A guard is compiled from the process
+> FILESYSTEM catalog, so a **hosted** (graph-native) tenant pack cannot use one:
+> `validate_manifest` refuses an `ontology.guards` block that it would install
+> and never read, with that limitation named. Everything below about a
+> **pack-declared** guard describes an install under `TORTOISE_PACKS_DIR`, where
+> `tortoise pack validate` is the gate. The **core** table is always in force, on
+> both surfaces — a hosted write still gets the issue-identifier redirect.
+
+A **guard** is a deterministic, token-free redirect for a write that is filed on
+the wrong *kind*. Measured before it existed: the hosted graphs held 453 nodes
+named `issue:<repo>#<n>` stored as `:Subject` — GitHub issue identifiers filed as
+entities, invisible to every work-item read and permanent, because `rebuild_all`
+does not repair an existing graph (#2489).
+
+```yaml
+ontology:
+  guards:
+    - kind: contract            # the kind this guard is about (bare = yours)
+      layer: object             # must be the layer that kind is declared on
+      onConfusion:
+        - when: nameMatches     # nameMatches (regex) | nameStartsWith (literal)
+          pattern: '^CONTRACT-[0-9]+$'
+          redirect: contract    # core | your namespace | a pack in depends_on
+          fallback: core:WorkItem   # REQUIRED — must be a CORE kind
+          reason: 'a CONTRACT-<n> handle is this pack''s contract kind'
+```
+
+**Three outcomes, and none of them is a refusal.** A guard either redirects
+(the node is written to the right kind/layer and the reply carries
+`kind_redirect`), abstains (the write proceeds unchanged and the reply carries
+`kind_redirect_skipped`), or says nothing. ⛔ A write must never fail because of
+a guard: pack installation is a deliberate, rare, per-graph act and a write is
+hot-path and mostly unrelated to it. A guard may never refuse a case whose right
+home is known — that rule is the point of the feature, and it is also a recorded
+owner decision about this write path (#1934, warn-not-block).
+
+**The AX contract.** A redirect tells the caller *what changed*, *why* (a stable
+rule id), *the exact override*, and *how to undo* — as data, never as English:
+
+```json
+{"kind_redirect": {
+   "from":     {"kind": "core:naturalPerson", "layer": "subject"},
+   "to":       {"kind": "core:Project",       "layer": "object"},
+   "rule":     "repo-slug-is-not-a-person",
+   "reason":   "owner/name names a repository, and a repository is not a person",
+   "override": "intent=\"as_declared\"",
+   "undo":     "none — the node was created at the redirected layer; ...",
+   "degraded": false,
+   "message":  "redirected: Subject (core:naturalPerson) → Object (core:Project) ..."}}
+```
+
+The caller always wins when it says so: `intent="as_declared"` suppresses the
+redirect for that write and the reply carries `kind_guard_overridden`, so a guard
+that is **wrong** becomes countable instead of arguable. The node keeps
+`declaredKind`, `declaredLayer` and `kindRedirectRule`, so an override, a replay
+or a later audit can restore and attribute what happened.
+
+**Cross-pack targets (R1-R3).** A `redirect` must name a **core kind**, a kind in
+**your own namespace**, or a kind in a pack named in **`depends_on`** — never a
+kind you merely know exists, because the catalog is a superset of what any one
+graph can legally write (#5163). `tortoise pack validate` refuses a guard that
+breaks that, and refuses a guard with no CORE `fallback`:
+
+```text
+$ tortoise pack validate packs/mypack
+  ✗ mypack:
+      ontology.guards[0].onConfusion[0].redirect: 'other:thing' targets namespace
+      'other', which this pack neither owns nor declares in depends_on — either
+      add the dependency or redirect to a core kind (R1/R3)
+```
+
+**A guard must be about a kind a door can WRITE.** Two kind axes name no layer,
+so a `layer` claimed for a kind they alone own could not be verified against
+anything: `documentKinds` (a `:Source` genre, D10) and `actionKinds` (ONTOLOGY
+v3.0 dissolved Action — it names a declared kind, never a node label).
+`tortoise pack validate` refuses a guard on a kind declared only on either axis;
+declare the kind on the axis whose layer it really has.
+
+**A missing target makes the guard abstain at write time — never reject.** If
+`depends_on`'s pack is not installed in the graph being written to (uninstalled
+after install, drift, a catalog/installed mismatch), the guard degrades to its
+declared core `fallback`; failing that it leaves the write completely unchanged
+and reports `kind_redirect_skipped: {rule, target, reason}`. Counters by
+`(rule, from → to, accepted | overridden | skipped)` are readable through
+`tortoise.monitoring.kind_guard_counts()`.
+
+**Optional.** A manifest with no `guards:` behaves exactly as it did before this
+feature. `packs/_template/manifest.yaml` carries the shape so a new pack starts
+with it.
 
 ## Declaring a per-kind stage pipeline (#2792)
 
@@ -779,11 +886,18 @@ A chain is an ordered kind path the extractor respects when connecting `about_en
 | Self-host | `TORTOISE_PACKS_DIR` (filesystem) | `tortoise pack new` / `pack validate` (CLI) |
 | Hosted | `POST /v1/packs/manifests` / `tortoise_pack_install` (MCP) | same manifest format; ontology-only v1 (no connectors/tools) |
 
-Both surfaces run the same shared validator. A pack that validates locally installs on either.
-**One declared exception:** `statuses`/`folds` (#2729) are a filesystem-catalog surface — the fold
-index is compiled from the process catalog, which a graph-native tenant manifest never enters — so
-the hosted install route **refuses** them with an error naming the limitation instead of accepting a
-declaration that would be inert.
+Both surfaces run the same shared validator. A pack that validates locally installs on either,
+except where a declaration is compiled from the **filesystem catalog** — a graph-native tenant
+manifest never enters it, so the hosted install route **refuses** such a declaration with an error
+naming the limitation instead of accepting one that would be inert. **Two declared exceptions:**
+
+| Declaration | Issue | Why it cannot work on hosted |
+|---|---|---|
+| `statuses`/`folds` | #2729 | the fold index is compiled from the process catalog |
+| `ontology.guards` | #12060 | the write-time guard table is compiled from the process catalog |
+
+Both are refused at **install**, not at write, because acceptance is the signal the declaration will
+work.
 
 ## Reserved namespaces
 
