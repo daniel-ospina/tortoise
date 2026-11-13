@@ -5366,20 +5366,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             #   for c in $(git log --reverse --format=%h -- tests/test_7949_capstone_measure.py); do
             #     git show $c:tests/test_7949_capstone_measure.py \
             #       | rg -o '"[0-9]{4}", "- test_pack_logic_writeprobe_11083.py"'; done | sort -u
-            # Every repair of the pin itself that has LANDED on `main` — a commit
+            # The repairs of the pin itself — a commit that has LANDED on `main`
             # whose row value was PRESENT at its parent, DISAGREED with the entry's
-            # line THERE, and AGREED at itself:
-            # `a7139b663d25` -> 9714, `eb27f96d3ecd` -> 9906, `63f725cca168` -> 9933,
-            # `23f80aef6a55` -> 9934, `e59e60769287` -> 9973
+            # line THERE, and AGREED at itself — enumerated, never counted: a count
+            # here rots the moment the next one lands, and the next one is this PR's
+            # own commit. `a7139b663d25` -> 9714, `eb27f96d3ecd` -> 9906,
+            # `63f725cca168` -> 9933, `23f80aef6a55` -> 9934, `e59e60769287` -> 9973
             # (`git show <c>:tests/… | rg -o '"[0-9]{4}", "- test_pack_logic_writeprobe_11083.py"'`
             # reproduces each — a pattern that omits the `"[0-9]{4}", ` part
             # prints only the filename and no number; the repair PROOF is against
-            # the PARENT, `<c>^`, whose row disagreed with the entry). ⛔ BOTH
-            # clauses are load-bearing: `174af52d20` (this PR's own commit — wrong
-            # at its parent, right at itself) and `3557a476e1` (the row's FIRST
-            # appearance, whose parent carries no row at all) each satisfy a looser
-            # "parent disagreed" reading, so a predicate omitting PRESENT or LANDED
-            # enumerates SEVEN, not five. The enumeration is also
+            # the PARENT, `<c>^`, whose row disagreed with the entry). ⛔ Shapes that
+            # satisfy a LOOSER reading are excluded on purpose: the row's FIRST
+            # appearance (`3557a476e1`), whose parent carries no row at all, and
+            # this PR's own commit (`174af52d20`), which is still wrong at its
+            # parent and right at itself but is not on `main` yet — so PRESENT and
+            # LANDED are both load-bearing, and the list is to be RE-DERIVED with
+            # the predicate above rather than trusted for its length. The
+            # enumeration is also
             # posted on #9158, the tracker entry for the class. The
             # mover here is `f1f74135a15b` (#12302): +14 lines into
             # `config/ci-surfaces.yml` above the entry, of which TWELVE are prose
