@@ -12914,6 +12914,36 @@ _HOSTED_KEY_PREFIXES = ("tt_", "tk_")
 _OAUTH_ONLY_KEY_PREFIX = "oat_"
 
 
+def _doctor_response_socket(resp) -> object | None:
+    """The socket behind a `urllib` reply, or None when there is not one.
+
+    ⛔ WALK the `fp` chain, do not assume one hop (fresh review round 19). An
+    `HTTPResponse` is `resp.fp` (BufferedReader) → `.raw` (SocketIO) → `._sock`,
+    but an `HTTPError` sets `self.fp` to the **`HTTPResponse` itself**, so a
+    one-hop lookup returns None for the third call site — the error body read —
+    and silently disarms the watchdog exactly where the reply is server-chosen
+    (measured: a 500 whose chunk-size line dripped under the socket bound blocked
+    for 10.05 s against a 0.5 s deadline, and did not return at all while the
+    drip continued). A body read with no watchdog is the single-call spin this
+    reader exists to close, so the chain is walked rather than guessed.
+
+    Bounded at four hops on purpose: a test double wrapping `io.BytesIO` has no
+    socket anywhere (None, which is the documented no-watchdog path), and an
+    unbounded walk over an arbitrary object graph is not something a diagnostic
+    should do on the way to printing a row.
+    """
+    node = resp
+    for _ in range(4):
+        if node is None:
+            return None
+        sock = getattr(getattr(node, "raw", None), "_sock", None)
+        if sock is not None:
+            return sock
+        node = getattr(node, "fp", None)
+    return None
+
+
+
 def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
     """Read at most `cap` bytes, stopping when `deadline` passes.
 
@@ -12925,95 +12955,137 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
     was true on paper only (fresh review round 15). Reading in chunks and
     checking the deadline between them makes the bound real, and the cap
     still bounds the memory.
+
+    ⛔ AND the between-calls deadline check is not a wall clock either (round 19):
+    it bounds the NUMBER of `read1` calls, not the time inside one. On a chunked
+    body `read1` → `_read1_chunked` → `_get_chunk_left` → `fp.readline(_MAXLINE+1)`
+    loops on `recv` until a NEWLINE arrives, so a server that drips the chunk-size
+    line just under the socket bound keeps ONE call alive indefinitely — measured
+    on this box: one `read1(4096)` took 12.01 s against a 0.5 s per-recv bound
+    (x24) and the deadline check ran zero times. A proxy or CDN normalises a reply
+    to chunked, so that is the LIVE shape, not a corner. The deadline therefore
+    arms a watchdog that `shutdown()`s the underlying socket: the blocked
+    `readline` returns, the read fails as a read error, and the callers' existing
+    "the body could not be READ" arm reports it as an unread body rather than
+    hanging the diagnostic (`close()` alone does not reliably wake a blocked recv;
+    `shutdown()` does). The socket is found by WALKING the `fp` chain
+    (`_doctor_response_socket`), because an `HTTPError` puts the `HTTPResponse` one
+    hop deeper than a 2xx reply does.
+
+    A response with no resolvable socket (a test double, a transport shim) simply
+    gets no watchdog: the between-calls check still applies, and the cap still
+    bounds the memory.
+
     """
+    import socket
+    import threading
     import time
 
-    chunks: list[bytes] = []
-    total = 0
-    # ⛔ A body without `read1` is read ONE byte per call: `read(n)` blocks until
-    # `n` bytes or EOF, so a chunk-sized fallback would put the leg's deadline
-    # back where the chunking exists to remove it.
-    reader = getattr(resp, "read1", None) or (lambda n: resp.read(min(n, 1)))
-    while total < cap:
+    sock = _doctor_response_socket(resp)
+    watchdog: threading.Timer | None = None
+    if sock is not None:
+        def _interrupt() -> None:
+            # `close()` alone does not reliably wake a blocked recv on Linux.
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+
+        watchdog = threading.Timer(max(0.0, deadline - time.monotonic()),
+                                   _interrupt)
+        watchdog.daemon = True
+        watchdog.start()
+    try:
+
+
+        chunks: list[bytes] = []
+        total = 0
+        # ⛔ A body without `read1` is read ONE byte per call: `read(n)` blocks until
+        # `n` bytes or EOF, so a chunk-sized fallback would put the leg's deadline
+        # back where the chunking exists to remove it.
+        reader = getattr(resp, "read1", None) or (lambda n: resp.read(min(n, 1)))
+        while total < cap:
+            if time.monotonic() >= deadline:
+                # ⛔ CUT is REPORTED, never silent: a body truncated by the
+                # deadline is an UNREAD verdict, and a silent break here made a
+                # `degraded` /health read ✅ and a healthy /v1/team read ❌
+                # (fresh review round 16 — the two false verdicts this reader
+                # could produce).
+                #
+                # ...but only when the body is genuinely incomplete. The check
+                # runs BEFORE the EOF probe, so a body whose last chunk arrived
+                # exactly at the boundary (or a fixed-length body fully read)
+                # would otherwise be reported CUT and downgrade a healthy ✅ to a
+                # "we stopped early" ⚠️ — a false claim about the body (fresh
+                # review round 17). `HTTPResponse.length` is the remaining
+                # declared length: 0 means COMPLETE. `None` (chunked, no
+                # Content-Length) stays an honest "unknown, so assume cut".
+                # ⛔ `HTTPResponse.length` is the remaining DECLARED length; an
+                # `HTTPError` carries no `length` of its own — its `fp` does. Reading
+                # the attribute off the error itself made every cut 4xx look cut even
+                # when it had completed (fresh review round 19).
+                length_owner = resp
+                if getattr(length_owner, "length", None) is None:
+                    inner = getattr(resp, "fp", None)
+                    if inner is not None and getattr(inner, "length", None) is not None:
+                        length_owner = inner
+                complete = getattr(length_owner, "length", None) == 0
+                return b"".join(chunks), not complete
+            # ⛔ A read error PROPAGATES: "the body could not be READ" is a
+            # distinct verdict from "the body carried no status", and swallowing
+            # it here made a stalled-but-200 `/health` read as green again —
+            # the exact arm round 13 added. The callers already handle it.
+            chunk = reader(min(4096, cap - total))
+            if not chunk:
+                # ⛔ EOF is NOT automatically a COMPLETE body: `read1` returns `b""`
+                # on a premature close instead of raising `IncompleteRead` (declared
+                # 200, closed after 10, `length == 190`, no exception), so a
+                # truncated reply would report "not cut" and reach the captive-portal
+                # arm — the false red the flag removes, on a different trigger.
+                # `length` is the bytes still OWED; `None` (chunked) means the stream
+                # itself declared its end.
+                outstanding = getattr(resp, "length", None)
+                if outstanding is None:
+                    inner = getattr(resp, "fp", None)
+                    outstanding = getattr(inner, "length", None)
+                return b"".join(chunks), outstanding not in (None, 0)
+            # A reader that IGNORES `n` (a test double, a custom transport, a
+            # proxy shim) would otherwise append the same bytes on every pass
+            # until the cap — duplicating the body instead of bounding it.
+            chunk = chunk[: cap - total]
+            chunks.append(chunk)
+            total += len(chunk)
+        # ⛔ The CAP is a truncation trigger too (fresh review round 20): exiting here
+        # means `total == cap`, and if the response still OWES bytes the body is as
+        # cut as a deadline stop — a 2xx fragment then parsed to `identity is None`
+        # and read `❌ … captive portal … Check your TORTOISE_API_URL` on a HEALTHY
+        # setup (and a cut 403 lost its `error_code`). The cap needs no slow network,
+        # so it was the easiest trigger to hit.
+        outstanding = getattr(resp, "length", None)
+        if outstanding is None:
+            inner = getattr(resp, "fp", None)
+            outstanding = getattr(inner, "length", None)
+        if outstanding is not None:
+            # A declared length settles it: `0` means complete, anything else means
+            # the cap cut us short.
+            return b"".join(chunks), outstanding != 0
+        # ⛔ No declared length (chunked / close-delimited) carries NO information at
+        # the cap: it is equally "the stream ended exactly at cap" and "there is
+        # more". One bounded probe byte decides it — reading `None` as "cut" (round
+        # 21) downgraded a healthy body that ended exactly at the cap, and reading it
+        # as "complete" (round 20) put a fragment in front of the no-identity arm
+        # (round 22).
         if time.monotonic() >= deadline:
-            # ⛔ CUT is REPORTED, never silent: a body truncated by the
-            # deadline is an UNREAD verdict, and a silent break here made a
-            # `degraded` /health read ✅ and a healthy /v1/team read ❌
-            # (fresh review round 16 — the two false verdicts this reader
-            # could produce).
-            #
-            # ...but only when the body is genuinely incomplete. The check
-            # runs BEFORE the EOF probe, so a body whose last chunk arrived
-            # exactly at the boundary (or a fixed-length body fully read)
-            # would otherwise be reported CUT and downgrade a healthy ✅ to a
-            # "we stopped early" ⚠️ — a false claim about the body (fresh
-            # review round 17). `HTTPResponse.length` is the remaining
-            # declared length: 0 means COMPLETE. `None` (chunked, no
-            # Content-Length) stays an honest "unknown, so assume cut".
-            # ⛔ `HTTPResponse.length` is the remaining DECLARED length; an
-            # `HTTPError` carries no `length` of its own — its `fp` does. Reading
-            # the attribute off the error itself made every cut 4xx look cut even
-            # when it had completed (fresh review round 19).
-            length_owner = resp
-            if getattr(length_owner, "length", None) is None:
-                inner = getattr(resp, "fp", None)
-                if inner is not None and getattr(inner, "length", None) is not None:
-                    length_owner = inner
-            complete = getattr(length_owner, "length", None) == 0
-            return b"".join(chunks), not complete
-        # ⛔ A read error PROPAGATES: "the body could not be READ" is a
-        # distinct verdict from "the body carried no status", and swallowing
-        # it here made a stalled-but-200 `/health` read as green again —
-        # the exact arm round 13 added. The callers already handle it.
-        chunk = reader(min(4096, cap - total))
-        if not chunk:
-            # ⛔ EOF is NOT automatically a COMPLETE body: `read1` returns `b""`
-            # on a premature close instead of raising `IncompleteRead` (declared
-            # 200, closed after 10, `length == 190`, no exception), so a
-            # truncated reply would report "not cut" and reach the captive-portal
-            # arm — the false red the flag removes, on a different trigger.
-            # `length` is the bytes still OWED; `None` (chunked) means the stream
-            # itself declared its end.
-            outstanding = getattr(resp, "length", None)
-            if outstanding is None:
-                inner = getattr(resp, "fp", None)
-                outstanding = getattr(inner, "length", None)
-            return b"".join(chunks), outstanding not in (None, 0)
-        # A reader that IGNORES `n` (a test double, a custom transport, a
-        # proxy shim) would otherwise append the same bytes on every pass
-        # until the cap — duplicating the body instead of bounding it.
-        chunk = chunk[: cap - total]
-        chunks.append(chunk)
-        total += len(chunk)
-    # ⛔ The CAP is a truncation trigger too (fresh review round 20): exiting here
-    # means `total == cap`, and if the response still OWES bytes the body is as
-    # cut as a deadline stop — a 2xx fragment then parsed to `identity is None`
-    # and read `❌ … captive portal … Check your TORTOISE_API_URL` on a HEALTHY
-    # setup (and a cut 403 lost its `error_code`). The cap needs no slow network,
-    # so it was the easiest trigger to hit.
-    outstanding = getattr(resp, "length", None)
-    if outstanding is None:
-        inner = getattr(resp, "fp", None)
-        outstanding = getattr(inner, "length", None)
-    if outstanding is not None:
-        # A declared length settles it: `0` means complete, anything else means
-        # the cap cut us short.
-        return b"".join(chunks), outstanding != 0
-    # ⛔ No declared length (chunked / close-delimited) carries NO information at
-    # the cap: it is equally "the stream ended exactly at cap" and "there is
-    # more". One bounded probe byte decides it — reading `None` as "cut" (round
-    # 21) downgraded a healthy body that ended exactly at the cap, and reading it
-    # as "complete" (round 20) put a fragment in front of the no-identity arm
-    # (round 22).
-    if time.monotonic() >= deadline:
-        return b"".join(chunks), True
-    # ⛔ The probe is ONE byte (its wait and its allocation must not scale with
-    # the cap), and a probe that RAISES is not caught: "the body could not be
-    # READ" is a distinct verdict from "it was cut", and the callers already
-    # report read errors as such. Collapsing the two diagnosed a stall or a
-    # premature close as "too big / too slow" (fresh review round 23).
-    probe = reader(1)
-    return b"".join(chunks), bool(probe)
+            return b"".join(chunks), True
+        # ⛔ The probe is ONE byte, and a probe that RAISES is not caught: "the
+        # body could not be READ" is a distinct verdict from "it was cut", and the
+        # callers already report read errors as such. Collapsing the two
+        # diagnosed a stall or a premature close as "too big / too slow" (fresh
+        # review round 23).
+        probe = reader(1)
+        return b"".join(chunks), bool(probe)
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
+
 
 
 def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> None:

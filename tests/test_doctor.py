@@ -259,6 +259,172 @@ def _assert_retry_widens(attempts: list[int], first: int, retry: int) -> None:
         "the retry re-introduces the cold-start failure it exists to prevent")
 
 
+class TestDoctorReadCappedIsAWallClock:
+    """The body read promises a WALL CLOCK, and only a real socket can test it.
+
+    Every other drip test in this file models the drip at the `read1` boundary —
+    one slow CALL at a time — which is the shape the between-calls deadline
+    check already handles. The LIVE shape is different: on a CHUNKED body one
+    `read1` loops inside `http.client` for the chunk-size line
+    (`_read_next_chunk_size` → `fp.readline`), so the drip happens INSIDE a
+    single call, where no Python-level check can run. Measured before the
+    watchdog: one `read1(4096)` held for 12.01 s against a 0.5 s per-recv bound
+    (x24), and it never returned at all while the drip continued — a proxy or
+    CDN normalises a reply to chunked, so this is the ordinary path, not a
+    corner. `_doctor_read_capped` therefore `shutdown()`s the socket at the
+    deadline.
+    """
+
+    def _drip_chunk_size_server(self, drip_gap: float, bytes_to_drip: int,
+                                status: int = 200):
+        """A chunked response whose CHUNK-SIZE LINE arrives one byte at a time.
+
+        No newline is ever sent, so the chunk-size `readline` cannot complete —
+        the exact shape that outlives a per-`recv` socket bound. Returns
+        `(port, listening_socket)`; the caller closes it.
+
+        `status` exists because the SAME shape reaches the reader through two
+        different objects: a 2xx arrives as an `HTTPResponse` and a 4xx/5xx as an
+        `HTTPError` whose `fp` is that `HTTPResponse` — one hop deeper, which is
+        where a one-hop socket lookup silently disarmed the watchdog.
+        """
+        import socket
+        import threading
+        import time
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+
+        def serve() -> None:
+            try:
+                conn, _ = srv.accept()
+            except OSError:      # listening socket closed by the test
+                return
+            try:
+                conn.recv(65536)
+                reason = {200: b"OK", 500: b"Internal Server Error"}[status]
+                conn.sendall(b"HTTP/1.1 " + str(status).encode() + b" " +
+                             reason + b"\r\n"
+                             b"Transfer-Encoding: chunked\r\n"
+                             b"Content-Type: application/json\r\n\r\n")
+                for _ in range(bytes_to_drip):
+                    conn.sendall(b"a")
+                    time.sleep(drip_gap)
+            except OSError:      # the watchdog shut the socket down
+                pass
+            finally:
+                conn.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        return srv.getsockname()[1], srv
+
+    def test_a_chunked_body_dripping_inside_one_read1_stops_at_the_deadline(
+            self):
+        """Without the watchdog this test does not fail fast — it HANGS.
+
+        200 bytes at 0.05 s each is ~10 s of headroom against a 0.5 s bound: a
+        reader that only checks the deadline between calls returns 0 times, so
+        the wall clock assertion is what fails. Verified by mutation (watchdog
+        disarmed): elapsed 10.1 s > the 6 s ceiling below.
+
+        ⛔ A real `http.client.HTTPResponse`, not `urlopen`: this module's
+        autouse fixture replaces `urlopen` with a fail-loudly stub (a suite must
+        never dial a third party), and the shape under test is the transport's,
+        not urllib's.
+        """
+        import http.client
+        import time
+
+        from tortoise import __main__ as cli
+
+        bound = 0.5
+        port, srv = self._drip_chunk_size_server(drip_gap=0.05,
+                                                 bytes_to_drip=200)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=bound)
+        try:
+            conn.request("GET", "/v1/team")
+            resp = conn.getresponse()
+            started = time.monotonic()
+            outcome = "returned"
+            cut = False
+            try:
+                body, cut = cli._doctor_read_capped(
+                    resp, cli._DOCTOR_BODY_CAP, started + bound)
+                outcome = f"returned {len(body)} bytes cut={cut}"
+            except (OSError, http.client.HTTPException) as exc:
+                # An interrupted read is a READ ERROR, which the callers already
+                # report as an unread body — never as a complete one.
+                outcome = f"raised {type(exc).__name__}"
+            elapsed = time.monotonic() - started
+        finally:
+            conn.close()
+            srv.close()
+
+        assert elapsed < 6.0, (
+            f"one read1 against a {bound} s deadline took {elapsed:.2f} s "
+            f"({outcome}) — the drip is inside a single call, so a "
+            "between-calls deadline check cannot bound it")
+        assert outcome.startswith("raised") or cut, (
+            f"the interrupted body was reported COMPLETE ({outcome})")
+
+    def test_an_http_error_body_is_bounded_the_same_way(self):
+        """The THIRD call site reads an `HTTPError`, not an `HTTPResponse`.
+
+        `urllib.error.HTTPError.__init__` sets `self.fp = fp` and that `fp` IS
+        the `HTTPResponse`, so `getattr(resp.fp, "raw", None)` is None and a
+        one-hop socket lookup never arms the watchdog here — measured on this
+        shape: 10.05 s against a 0.5 s deadline, and no return at all while the
+        drip continued. A 4xx/5xx whose body is server-chosen is exactly what the
+        captive-portal/proxy case produces, so this site cannot be the unarmed
+        one.
+
+        The `HTTPError` is constructed around a REAL `HTTPResponse` rather than
+        built by `urlopen`: this module's autouse fixture replaces `urlopen` with
+        a fail-loudly stub, and the object graph (not urllib's dispatch) is what
+        the socket walk has to get right.
+        """
+        import http.client
+        import time
+        import urllib.error
+
+        from tortoise import __main__ as cli
+
+        bound = 0.5
+        port, srv = self._drip_chunk_size_server(drip_gap=0.05,
+                                                 bytes_to_drip=200, status=500)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=bound)
+        try:
+            conn.request("GET", "/v1/team")
+            raw = conn.getresponse()
+            error = urllib.error.HTTPError(
+                f"http://127.0.0.1:{port}/v1/team", raw.status, raw.reason,
+                raw.headers, raw)
+            assert isinstance(error.fp, http.client.HTTPResponse), (
+                "the shape this test exists for: HTTPError.fp IS the response")
+            started = time.monotonic()
+            outcome = "returned"
+            cut = False
+            try:
+                body, cut = cli._doctor_read_capped(
+                    error, cli._DOCTOR_BODY_CAP, started + bound)
+                outcome = f"returned {len(body)} bytes cut={cut}"
+            except (OSError, http.client.HTTPException) as exc:
+                outcome = f"raised {type(exc).__name__}"
+            elapsed = time.monotonic() - started
+        finally:
+            conn.close()
+            srv.close()
+
+        assert elapsed < 6.0, (
+            f"one HTTPError body read against a {bound} s deadline took "
+            f"{elapsed:.2f} s ({outcome}) — the socket walk missed the "
+            "HTTPError → HTTPResponse hop, so no watchdog was armed")
+        assert outcome.startswith("raised") or cut, (
+            f"the interrupted body was reported COMPLETE ({outcome})")
+
+
 class TestDoctorHostedCredential:
     """#11912: `doctor` must be able to see the hosted half of the product.
 
