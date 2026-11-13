@@ -275,7 +275,9 @@ required** — the freeze keeps the code, the map records the departure, and nei
 record: a map entry with no frozen code deletes a method that no other gate compares against
 the archive (`archive_surface.py check` iterates the archive manifest, so an unfrozen method is
 invisible to it), and a frozen method with no map entry leaves a caller with a bare
-`AttributeError` (which `check` reds from its own side). A
+`AttributeError` (which `check` reds from its own side). The ONE exception is a **stated
+rename**, which keeps no code by design: its record is the map entry plus
+`--allow-removal <symbol> --allow-removal-reason <why>`. A
 `RETIRED_USE_INSTEAD` entry is **not** a route for a removal, and the refusal no longer pretends
 it is: with the declaration still live the symbol is RETIRED rather than removed (it is still
 served, and the baseline's `retired:` half is compared), and with the declaration gone the map

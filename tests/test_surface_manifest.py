@@ -508,7 +508,7 @@ def _load_guard():
     return mod
 
 
-REMOVAL_WAYS_HEAD = "Account for the rows above reported as missing a record"
+REMOVAL_WAYS_HEAD = "Account for the rows above reported as missing a record by exactly one of:"
 
 
 def _load_manifest_tool():
@@ -5232,6 +5232,48 @@ def test_cut_REFUSES_a_dropped_sdk_method_recorded_in_the_MAP_but_NOT_archived(
     assert rc == 1, f"a freeze without the map entry was accepted as the record:\n{out}"
     assert "archived but absent from RETIRED_SDK_METHODS" in out, out
     assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+
+def test_the_MAP_HALF_has_a_printed_route_it_can_actually_use(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """A frozen-but-unrecorded SDK method was told to run a command that refuses.
+
+    The block's only route was the freeze, and `archive_symbol` raises "is already archived"
+    for exactly the shape `incomplete-record` describes — so the operator's one runnable
+    follow-up failed, and the action actually needed (add the name to the map) was named
+    nowhere in the refusal. The routes now include it, and `SDK_PAIR_RULE` no longer says a
+    freeze is mandatory a few lines above the rename remedy that clears the same shape without
+    one (review of PR #12313, round 16).
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:backfill_sources", "method": "backfill_sources"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": {("sdk-method", "backfill_sources")},
+            "forward_raw": set(),
+            "sdk_retired": set(),
+        },
+    )
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "archived but absent from RETIRED_SDK_METHODS" in out, out
+    # The missing half has its own printed route, and that route says not to re-freeze.
+    map_route = sm.REMOVAL_WAYS[1]
+    assert map_route in out, "the map half has no printed route:\n" + out
+    assert "sdk_retired.py" in map_route and "already archived" in map_route, map_route
+    # And the pair rule is qualified, so it does not contradict the rename remedy beside it.
+    assert "STATED RENAME" in sm.SDK_PAIR_RULE, sm.SDK_PAIR_RULE
 
 
 def test_a_STATED_RENAME_clears_the_SDK_map_ONLY_half(monkeypatch, tmp_path, derived_baseline, capsys):

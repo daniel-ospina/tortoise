@@ -2142,6 +2142,10 @@ REMOVAL_WAYS = (
     "without the map entry strips the caller with a bare `AttributeError` instead of a "
     "recorded departure (the freeze and the map entry are ONE record, and `CONTRIBUTING.md` "
     "says so)",
+    "for an `sdk-method` whose code is ALREADY frozen, the missing half is the MAP: add the "
+    "name to `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` in `tortoise/sdk_retired.py` — do "
+    "NOT re-run `archive`, which refuses a symbol it has already archived (\"is already "
+    "archived\"), so the freeze bullet above cannot clear that shape",
 )
 
 # ⛔ THE MAP IS **NOT** A ROUTE ON ITS OWN, and advertising it as one was a hole, not a
@@ -2153,9 +2157,10 @@ REMOVAL_WAYS = (
 # entry, exit 0, baseline rewritten).
 SDK_PAIR_RULE = (
     "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` is NOT a route on its own: it records the "
-    "departure but keeps no code, and removed code is what the #11609 ruling archives. For an "
-    "SDK method, freeze it AND record it — the two halves are ONE record and this cut "
-    "requires BOTH."
+    "departure but keeps no code, and removed code is what the #11609 ruling archives. A "
+    "REMOVAL of an SDK method therefore needs BOTH halves — freeze it AND record it; they are "
+    "ONE record. A STATED RENAME is the one shape that needs no freeze, because a rename "
+    "keeps no code by design: its record is the map entry plus the override."
 )
 
 # ⛔ `RETIRED_USE_INSTEAD` IS NOT A ROUTE HERE, and listing it as one sent lanes to a dead end.
@@ -2829,8 +2834,8 @@ def cmd_cut(args: argparse.Namespace) -> int:
             # route is not available for it"), which made the heading contradict the text two
             # lines up. So the heading is scoped to the rows that actually need a record
             # (review of PR #12313, round 15).
-            print("  Account for the rows above reported as missing a record — each such "
-                  "line says which half is missing — by exactly one of:")
+            print("  Account for the rows above reported as missing a record by exactly "
+                  "one of:")
             for way in REMOVAL_WAYS:
                 print(f"    - {way}")
             print(f"  {SDK_PAIR_RULE}")
