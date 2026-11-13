@@ -3293,7 +3293,17 @@ def search_graph(sdk, embed_list: dict, story: str, *,
 
     Returns:
         {"mode": str, "degraded": bool, "reason": str|None,
-         "entities": [{id, name, kind}], "points": [{id, content, kind}],
+         "entities": [{id, name, kind}],
+         "entities_unresolved": [str]  # #12296: spellings the D-1 fold WITHHELD
+                                       # (present only on that PARTIAL exit). A
+                                       # caller that reads `entities` alone sees
+                                       # no trace of them — an EMPTY set when
+                                       # every row was withheld, and otherwise a
+                                       # set that looks complete while silently
+                                       # omitting them — and either way reads
+                                       # measured absence, which §4.4 I1 makes
+                                       # license a CREATE.
+         "points": [{id, content, kind}],
          "events": [{id, content, kind}], "queries_run": int,
          "query_coverage": {"derived"|"ran"|"failed": {leg: int}},
          "query_results": {"ran": [key], "failed": [key]}}
@@ -9579,16 +9589,31 @@ def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | Non
     # folds or aliases to the ref made the set ambiguous and a supersession that
     # previously landed was DROPPED (the entity that should be retired stayed
     # live), while nothing about the ref's own spelling had changed.
-    named = [e for e in entities if _norm(e.get("name", "")) == _norm(ref)]
+    # ⛔ The KIND filter belongs to EACH rung, not to the merged result: applied
+    # after the ladder, one same-spelling row of a DIFFERENT kind emptied the name
+    # rung's survivors, so the fold/alias fallback was never consulted and a
+    # `supersedes` ref that resolves through an alias was DROPPED — the same
+    # defect, through a narrower door. `_find_existing_entity` gates each of its
+    # first FOUR rungs — name-exact, name-bare, alias-exact, alias-bare — on kind
+    # per rung for this reason; its FINAL rung (`aliased_any`) is deliberately
+    # kind-AGNOSTIC (#11653: kind-gating every alias rung fell through to a CREATE
+    # for a survivor whose kind is `other`/empty/different). THIS function does not
+    # adopt that last rung: a kind-mismatched alias target still resolves to None
+    # rather than retiring an entity of another kind. Recorded as a residual, not a
+    # precedent, so the next reader does not "align" the two.
+    def _same_kind(e: dict) -> bool:
+        return (not kind
+                or _norm_kind(e.get("kind", "")) == _norm_kind(kind))
+
+    named = [e for e in entities
+             if _norm(e.get("name", "")) == _norm(ref) and _same_kind(e)]
     if not named:
         named = [e for e in entities
-                 if normalize_entity_name(e.get("name", "")) == want
-                 or _alias_hit_for(want, e.get("aliases"))]
-    matches = [e for e in named
-               if (not kind
-                   or _norm_kind(e.get("kind", "")) == _norm_kind(kind))]
-    if len(matches) == 1:
-        return matches[0]
+                 if (normalize_entity_name(e.get("name", "")) == want
+                     or _alias_hit_for(want, e.get("aliases")))
+                 and _same_kind(e)]
+    if len(named) == 1:
+        return named[0]
     return None  # 0 or >1 → caller warns, never guesses
 
 
@@ -15251,8 +15276,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     #: Spellings the D-1 fold WITHHELD (a dangling `resolved_from`, a corrupt
     #: chain). They are not absent — they are unreadable — so they are HELD below
     #: rather than left to read as measured absence, and the pass still runs even
-    #: when the fold withheld every row (an empty candidate set must not turn a
-    #: partial lookup into a create window).
+    #: when the fold withheld every row: an empty candidate set from THIS cause
+    #: must not turn a partial lookup into a create window. Scope: the fold's own
+    #: withholding exit only. Any OTHER raise inside `_current_entity_priors`
+    #: (e.g. a failed `_entity_facts` read) still leaves `entities == []` with no
+    #: unresolved key — the general S3-lookup PARTIAL arm is #10998's row.
     _unresolved_names = [str(n).strip()
                          for n in (search or {}).get("entities_unresolved") or []
                          if str(n or "").strip()]
@@ -15302,15 +15330,23 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # #12296: the fold withheld these spellings, so their identity was
                 # never resolved — HOLD them (never create). Same disposition the
                 # facts-reader failure gets, for the same reason.
-                _held_names = {str(h.get("name") or "").strip()
+                # ⛔ Compare FOLDS, not spellings: a mention that RESOLVED can be
+                # spelled differently from the withheld graph row (`The Team` vs
+                # `the team`), and an exact-string test then appended a hold for a
+                # name that was resolved — a loss recorded under I2 that did not
+                # occur, contradicting `resolve_entities`' own invariant that a
+                # resolved name is never also reported held.
+                _resolved_folds = {_norm(str(k))
+                                   for k in (res.get("map") or {})}
+                _held_names = {_norm(str(h.get("name") or ""))
                                for h in resolution_held}
                 for _name in _unresolved_names:
-                    if _name in res.get("map", {}) or _name in _held_names:
+                    if _norm(_name) in _resolved_folds or _norm(_name) in _held_names:
                         continue
                     resolution_held.append({
                         "name": _name, "kind": "",
                         "reason": HOLD_DISAMBIGUATION_UNDECIDED, "vetoes": []})
-                    _held_names.add(_name)
+                    _held_names.add(_norm(_name))
                 # (the `entity_identity_held` census class is bumped ONCE for the
                 # run, at the shared site after this try/except — §4.4's *"recorded
                 # loudly, never only in `warnings`"* — so a run that both resolved
@@ -15339,12 +15375,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # created every spelling the D-1 fold refused to resolve — the
                 # duplicate the fold exists to prevent, reached by a raising
                 # resolver. Nothing resolved here, so no `map` filter is needed.
-                resolution_held.extend(
-                    {"name": n, "kind": "",
-                     "reason": HOLD_DISAMBIGUATION_UNDECIDED, "vetoes": []}
-                    for n in _unresolved_names
-                    if all(str(h.get("name") or "").strip() != n
-                           for h in resolution_held))
+                # De-duped on the FOLD, as on the success arm: the same
+                # withholding can be named twice in two spellings, and one hold per
+                # fold — not per spelling — is the invariant both arms share.
+                _held_folds_on_failure = {_norm(str(h.get("name") or ""))
+                                          for h in resolution_held}
+                for _name in _unresolved_names:
+                    if _norm(_name) in _held_folds_on_failure:
+                        continue
+                    resolution_held.append({
+                        "name": _name, "kind": "",
+                        "reason": HOLD_DISAMBIGUATION_UNDECIDED, "vetoes": []})
+                    _held_folds_on_failure.add(_norm(_name))
                 # (the census class is bumped once, at the shared site below —
                 # not here: a second bump on the same run double-counts)
     # One census bump for the run, on BOTH arms: the resolver's own holds and the

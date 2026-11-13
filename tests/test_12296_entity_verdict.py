@@ -1173,7 +1173,10 @@ class TestTheResolverBands:
                        lambda sdk, embed_list, story, **kw: {
                            "entities": [], "points": [], "events": [],
                            "degraded": False,
-                           "entities_unresolved": ["the team"]})
+                           # two spellings of ONE fold: the hold is per fold, so a
+                           # fold-equal duplicate must not become a second hold
+                           # (the failure arm de-dupes on `_norm` like the other).
+                           "entities_unresolved": ["the team", "The Team"]})
             out = _v2.extract_session_v2(
                 _M(), [{"role": "user", "content": "the team shipped."}],
                 session_id="s1")
@@ -1181,6 +1184,34 @@ class TestTheResolverBands:
             "the team"], out.get("resolution_held")
         assert [e["name"] for e in out["payload"]["entities"]] == [], (
             out["payload"]["entities"])
+
+    def test_a_different_kind_name_hit_does_not_block_the_alias_fallback(
+            self, sdk_factory):
+        """Kind belongs to EACH rung (round-26 review, P2).
+
+        Applied to the merged result, a same-spelling row of a DIFFERENT kind
+        emptied the name rung's survivors and the fold/alias fallback was never
+        consulted — so `supersedes: "The Team"` resolved to nothing while a
+        same-kind row carried that spelling as an alias, and the supersession was
+        DROPPED (the entity that should be retired stayed live). `_find_existing_entity`
+        tests kind per rung for exactly this reason (its final alias rung excepted,
+        #11653).
+        """
+        sdk = sdk_factory()
+        _merged_pair(sdk)                       # "the team" -> "Acme Holdings"
+        _create_object(sdk, "obj-other", "The Team", kind="core:project")
+        folded = v2._current_entity_priors(
+            sdk, [{"id": "obj-carrier", "name": "the team", "kind": "core:plan"},
+                  {"id": "obj-other", "name": "The Team", "kind": "core:project"}],
+            {"obj-carrier": "Object", "obj-other": "Object"})
+        hit = v2._resolve_superseded("The Team", {"entities": folded},
+                                    kind="core:plan")
+        assert hit is not None and hit["id"] == "obj-survivor", (hit, folded)
+        # …and a same-KIND name tie is still an ambiguity, never a guess
+        tie = [{"id": "n1", "name": "The Team", "kind": "core:plan"},
+               {"id": "n2", "name": "the team", "kind": "core:plan"}]
+        assert v2._resolve_superseded("The Team", {"entities": tie},
+                                     kind="core:plan") is None, tie
 
     def test_a_supersedes_ref_spelled_as_the_merged_variant_still_resolves(
             self, sdk_factory):
@@ -1553,6 +1584,124 @@ class TestTheResolverBands:
             "resolve_entities — the D-1 second door is open for every search "
             "table built by another caller")
         assert isinstance(seen["facts"], dict), seen
+
+    def test_the_orchestrator_holds_a_withheld_spelling_the_resolver_called_new(
+            self, monkeypatch):
+        """The CONSUMER half of the withheld-spelling hold (round-26 review, P2).
+
+        `test_a_withheld_spelling_is_held_rather_than_read_as_absent` pins the
+        PRODUCER — that `search_graph` names what the fold withheld. But the only
+        code that turns that key into a hold is the orchestrator loop, and deleting
+        it left both tests green while the defect returned: `entities == []`, the
+        D3 pass runs, the resolver declares the name NEW, and the entity is
+        CREATED. So the loop needs its own red.
+
+        The model here declares `new: ["Acme"]` on purpose — the strongest form. A
+        withheld spelling is unreadable, not absent, so even a resolver that would
+        mint it must not be allowed to: §4.4 I1 licenses a create only from a
+        lookup that SUCCEEDED.
+        """
+        embed = {"entities": [{"name": "Acme", "kind": "core:organisation"}],
+                 "events": [],
+                 "points": [{"content": "Acme signed the deal",
+                             "pointKind": "statement",
+                             "about_entities": ["Acme"]}],
+                 "operators": [], "chain_notes": [],
+                 "link_before_create": []}
+        empty_gaps = {"entities": [], "events": [], "points": [],
+                      "operators": [], "chain_notes": [],
+                      "link_before_create": []}
+
+        def responder(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "Acme signed the deal."
+            if "GRAPH MAPPER" in system:
+                return json.dumps(embed)
+            if "GAP REVIEWER" in system:
+                return json.dumps(empty_gaps)
+            if "ENTITY RESOLUTION" in system:
+                return json.dumps({"resolutions": [], "new": ["Acme"]})
+            raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+        class _M:
+            def complete(self, *, system: str, user: str):
+                return responder(system, user)
+
+        monkeypatch.setattr(
+            v2, "search_graph",
+            lambda sdk, embed_list, story, **kw: {
+                "entities": [],                          # every row withheld
+                # …and NAMED — twice, in two spellings: the hold de-dupes on FOLDS,
+                # so a fold-equal duplicate must not become a second hold (round-27
+                # review: this arm was untested and reverting it stayed green).
+                "entities_unresolved": ["Acme", "acme"],
+                "points": [], "events": [], "degraded": False})
+        out = v2.extract_session_v2(
+            _M(), [{"role": "user", "content": "Acme signed the deal."}],
+            session_id="s1")
+        assert out["payload"] is not None, out
+        created = [e.get("name") for e in out["payload"].get("entities") or []]
+        assert created == [], (
+            "a withheld spelling was declared new and CREATED; the orchestrator "
+            f"did not turn `entities_unresolved` into a hold — created={created!r} "
+            f"held={out.get('resolution_held')!r}")
+        held = [h.get("name") for h in out.get("resolution_held") or []]
+        assert held == ["Acme"], (
+            "the withheld name must be HELD exactly once, never created — one hold "
+            f"per FOLD, not per spelling — held={held!r}")
+
+    def test_a_resolved_mention_is_not_also_reported_held_under_another_spelling(
+            self, monkeypatch):
+        """A hold is a RECORDED loss; `resolve_entities`' invariant says a resolved
+        name is never also reported held (round-26 review, P3).
+
+        The withheld graph row is spelled `acme` while the mention in the story
+        resolves to `Acme` (a genuine name hit against a visible candidate).
+        Compared by exact string, the de-dupe missed the match and appended a
+        `disambiguation_undecided` hold plus an `entity_identity_held` census row
+        for a run where nothing was held.
+        """
+        embed = {"entities": [{"name": "Acme", "kind": "core:organisation"}],
+                 "events": [],
+                 "points": [{"content": "Acme signed",
+                             "pointKind": "statement",
+                             "about_entities": ["Acme"]}],
+                 "operators": [], "chain_notes": [],
+                 "link_before_create": []}
+        empty_gaps = {"entities": [], "events": [], "points": [],
+                      "operators": [], "chain_notes": [],
+                      "link_before_create": []}
+
+        def responder(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "Acme signed."
+            if "GRAPH MAPPER" in system:
+                return json.dumps(embed)
+            if "GAP REVIEWER" in system:
+                return json.dumps(empty_gaps)
+            if "ENTITY RESOLUTION" in system:
+                return json.dumps({"resolutions": [], "new": []})
+            raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+        class _M:
+            def complete(self, *, system: str, user: str):
+                return responder(system, user)
+
+        monkeypatch.setattr(
+            v2, "search_graph",
+            lambda sdk, embed_list, story, **kw: {
+                "entities": [{"id": "obj-acme", "name": "Acme",
+                              "kind": "core:organisation"}],
+                "entities_unresolved": ["acme"],   # the same row, lower-cased
+                "points": [], "events": [], "degraded": False})
+        out = v2.extract_session_v2(
+            _M(), [{"role": "user", "content": "Acme signed."}],
+            session_id="s1")
+        assert out["payload"] is not None, out
+        held = [h.get("name") for h in out.get("resolution_held") or []]
+        assert held == [], (
+            "a RESOLVED mention was also reported held because the de-dupe "
+            f"compared spellings instead of folds — held={held!r}")
 
     def test_a_raising_facts_reader_still_yields_the_hold_population(
             self, monkeypatch):
