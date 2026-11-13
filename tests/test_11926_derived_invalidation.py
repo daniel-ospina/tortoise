@@ -33,6 +33,7 @@ from tortoise.derived_invalidation import (
     invalidate_stale,
     mark_definition_change,
     reconcile_goal_state_cache,
+    reconcile_goal_states,
     verdicts,
 )
 from tortoise.goal_judgement import (
@@ -1426,3 +1427,691 @@ def test_the_claim_survives_with_a_SECOND_live_judgement_taking_over_the_cache(s
     assert sdk.get_entity(g["id"])["goalState"] == "met"
     assert latest_judgement(sdk, goal_id=g["id"])["id"] == second["point_id"]
     assert sdk.get_entity(first["point_id"])["status"] == "retracted"
+
+
+# ── 9. a claim that leaves by a route the door never sees (#12336) ────────
+#
+# `invalidate_stale` enumerates LIVE claims, so a goal whose LAST claim is gone
+# is never a finding again: the door is never called, the cached word stands, and
+# nothing repairs it. The two routes that reach that state without the door are
+# a hard delete (`sdk.delete_entity`) and a retirement written out of band (a
+# direct status/lifecycle write). Both are measured below, and the repair sweep
+# is the mechanism that closes them — a sweep over GOALS, not over claims.
+
+def _derived_word_standing(sdk, goal, *, word="met"):
+    assert sdk.get_entity(goal["id"])["goalState"] == word, (
+        f"precondition: the goal must hold the derived word {word!r} — a test "
+        "that starts from a cleared cache cannot observe the defect")
+
+
+def _lagging_word(sdk, indicator, target, goal):
+    """Leave the cache on the PREVIOUS word under a live claim that says otherwise.
+
+    The shape is documented rather than invented: a flip whose ``goalState`` write
+    is refused leaves the old word in place while the claim and its IMPL arrow
+    both land (`goal_judgement._cache_then_arrow` names exactly that arm, and its
+    self-healing pass only runs when something re-derives the goal).
+    """
+    _judge(sdk, indicator, target, goal, value=9.0)
+    assert sdk.get_entity(goal["id"])["goalState"] == "met"
+    real_update = sdk.update_entity
+
+    def failing(node_id, **props):
+        if node_id == goal["id"] and "goalState" in props:
+            raise RuntimeError("cache write refused on the flip")
+        return real_update(node_id, **props)
+
+    sdk.update_entity = failing
+    try:
+        _reading(sdk, indicator, 15.0, at="2026-11-11T11:00:00Z")
+        with pytest.raises(RuntimeError):
+            judge_and_record(sdk, goal_id=goal["id"],
+                             indicator_id=indicator["id"],
+                             target=Target.from_node(target))
+    finally:
+        sdk.update_entity = real_update
+    assert sdk.get_entity(goal["id"])["goalState"] == "met", (
+        "precondition: the refused flip leaves the PREVIOUS word in the cache")
+    assert latest_judgement(sdk, goal_id=goal["id"])["judgementState"] == "unmet"
+
+
+def test_ROUTE_A_a_claim_DELETED_outright_is_invisible_to_the_sweep(sdk):
+    """THE DEFECT, measured with only the APIs that exist today (#12336).
+
+    This is not the fix's acceptance test — it is the proof that the gap is real
+    and that the whole graph is in the state #12336 describes: the claim is
+    hard-deleted (route A: purge / concurrent cleanup), `invalidate_stale` reads
+    ``scanned: 0`` with every counter zero, and the goal keeps displaying ``met``
+    with nothing live behind it. Any repair must therefore be keyed on GOALS; no
+    amount of claim-side work reaches this shape, which is why closing the
+    `alreadyRetired` bucket (#12315) does not close it.
+    """
+    i, t, g = _world(sdk, tag="route-a")
+    made = _judge(sdk, i, t, g)
+    _derived_word_standing(sdk, g)
+    sdk.delete_entity(made["point_id"])
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    assert report["scanned"] == 0, (
+        "the sweep enumerates live claims; a deleted claim is not one")
+    assert report["counts"] == {"scanned": 0, "stale": 0, "retired": 0,
+                                "alreadyRetired": 0, "gone": 0, "failed": 0,
+                                "undecidable": 0}, report["counts"]
+    # ⛔ THE HEADLINE SURVIVES: `met` with no live judgement anywhere.
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+    assert latest_judgement(sdk, goal_id=g["id"]) is None
+
+
+def test_ROUTE_B_a_claim_retired_OUT_OF_BAND_is_invisible_to_the_sweep(sdk):
+    """Route B: the claim is retracted by a direct write, not by the door."""
+    i, t, g = _world(sdk, tag="route-b")
+    made = _judge(sdk, i, t, g)
+    _derived_word_standing(sdk, g)
+    sdk.update_entity(made["point_id"], status="retracted")
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    assert report["scanned"] == 0, report
+    assert latest_judgement(sdk, goal_id=g["id"]) is None
+    assert sdk.get_entity(g["id"])["goalState"] == "met", (
+        "route B leaves the word standing exactly as route A does")
+
+
+def test_the_repair_sweep_clears_a_word_whose_claim_was_DELETED(sdk):
+    """ROUTE A, repaired: the sweep finds the goal by its WORD, not by a claim."""
+    i, t, g = _world(sdk, tag="sweep-route-a")
+    made = _judge(sdk, i, t, g)
+    _derived_word_standing(sdk, g)
+    sdk.delete_entity(made["point_id"])
+    report = reconcile_goal_states(sdk)
+    assert report["truncated"] is False, report
+    assert report["counts"]["repaired"] == 1, report
+    assert report["counts"]["cleared"] == 1, report
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word nothing backs — the #11926 headline "
+        "surviving a repair sweep that reported success")
+    record = _only([r for r in report["goals"] if r["goalId"] == g["id"]])
+    assert record["action"] == "cleared", record
+    assert record["from"] == "met", record
+
+
+def test_the_repair_sweep_clears_a_word_whose_claim_was_RETIRED_OUT_OF_BAND(sdk):
+    """ROUTE B, repaired: nobody called the door, so nothing else follows it."""
+    i, t, g = _world(sdk, tag="sweep-route-b")
+    made = _judge(sdk, i, t, g)
+    _derived_word_standing(sdk, g)
+    sdk.update_entity(made["point_id"], status="retracted")
+    report = reconcile_goal_states(sdk)
+    assert report["counts"]["repaired"] == 1, report
+    assert sdk.get_entity(g["id"]).get("goalState") is None
+
+
+def test_the_repair_sweep_MOVES_a_LAGGING_word_to_the_newest_LIVE_claim(sdk):
+    """The second shape the sweep exists for: the word is not unsupported, it is
+    OLD. A flip whose cache write was refused leaves the PREVIOUS word under a
+    live claim (`goal_judgement._cache_then_arrow` documents exactly this), and
+    no later pass revisits the goal — so the sweep must move the word forward to
+    the newest live judgement, not merely clear unsupported ones.
+
+    ⚠️ This test's `rewritten` count is NOT its discriminating power: the door
+    re-derives the same word, so it reaches `rewritten` even from a wrong
+    `expected` (measured against the `expected = None` mutation by a reviewer). The
+    MAPPING leg is the dry-run twin, which reports `would-clear` instead of
+    `would-rewrite` when the sweep stops computing it. What this test pins is the
+    pair the sweep REPORTS — `from`/`to` are its own computation, so a sweep that
+    could not say what it moved away from would fail here.
+    """
+    i, t, g = _world(sdk, tag="sweep-lagging")
+    _lagging_word(sdk, i, t, g)
+    report = reconcile_goal_states(sdk)
+    assert report["counts"]["rewritten"] == 1, report
+    assert report["counts"]["cleared"] == 0, report
+    assert sdk.get_entity(g["id"])["goalState"] == "unmet", (
+        "the cache still names the superseded claim")
+    record = _only([r for r in report["goals"] if r["goalId"] == g["id"]])
+    assert (record["from"], record["to"], record["action"]) == (
+        "met", "unmet", "rewritten"), record
+
+
+def test_the_repair_sweep_leaves_a_CONSISTENT_goal_alone_and_writes_NOTHING(sdk):
+    """Idempotence, and the difference between "repaired" and "was already
+    right": a sweep that re-writes every goal it sees journals a revision per
+    goal per run and reports work it did not do."""
+    i, t, g = _world(sdk, tag="sweep-consistent")
+    _judge(sdk, i, t, g)
+    _derived_word_standing(sdk, g)
+    writes: list[tuple[str, dict]] = []
+    real_update = sdk.update_entity
+
+    def counting(node_id, **props):
+        writes.append((node_id, dict(props)))
+        return real_update(node_id, **props)
+
+    sdk.update_entity = counting
+    try:
+        report = reconcile_goal_states(sdk)
+    finally:
+        sdk.update_entity = real_update
+    assert report["counts"]["repaired"] == 0, report
+    assert report["counts"]["consistent"] == 1, report
+    assert [w for w in writes if w[0] == g["id"]] == [], (
+        f"the sweep wrote to an already-correct goal: {writes}")
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+
+
+@pytest.mark.parametrize("word", ["active", "blocked", "guideline",
+                                  "superseded", "abandoned"])
+def test_a_goal_whose_word_THIS_ENGINE_never_wrote_is_not_even_a_CANDIDATE(
+        sdk, word):
+    """The reconcile's own rule, applied at the SWEEP's door: only a word
+    `record_judgement` can write is a cache of a judgement. A human-set word is
+    not a candidate at all, so a stale sweep cannot erase a decision nobody
+    measured — and `superseded`/`abandoned` (the RETIRED_GOAL_STATES) are
+    lifecycle decisions, not derived cache values."""
+    _i, _t, g = _world(sdk, tag=f"sweep-human-{word}")
+    sdk.update_entity(g["id"], goalState=word)
+    report = reconcile_goal_states(sdk)
+    assert report["counts"]["scanned"] == 0, report
+    assert report["counts"]["repaired"] == 0, report
+    assert sdk.get_entity(g["id"])["goalState"] == word
+
+
+def test_a_LEGACY_goal_POINT_is_NOT_swept_COUNTED_and_the_reason_is_pinned(sdk):
+    """THE BOUNDARY THAT MAKES THE REPAIR DURABLE, not a missing feature.
+
+    `goalState` IS carried by legacy `:Point` goals (`projection/entities.py`
+    declares the prop for the point write path, #7856), so this shape looks like
+    the obvious second half of the sweep — and writing it is WRONG. The generic
+    POINT branch of `sdk.update_entity` journals only the annotator dims and
+    `mentions` (its own SCOPE note), so a `goalState` clear there is live-only.
+    MEASURED on this lane with the durability harness (`check_consistency` +
+    `rebuild_all`), one goal of each label: the OBJECT repair left
+    `ok=True/divergence=None` and stayed cleared after a rebuild, while the POINT
+    repair left `ok=False`, `divergence='unrecorded-mutation'`, and the rebuild
+    restored `met` — a sweep that reports `cleared` every pass of a
+    repair-then-rebuild loop, and that reds the journal/projection parity blaming
+    a rogue writer it is itself.
+
+    ⛔ SO IT IS DECLINED **AND COUNTED**: `counts.notDurable` is what keeps a sweep
+    over unrepairable words distinguishable from a sweep over an empty graph — the
+    same rule `counts.failed` keeps for a reconcile that did not run. THIS PIN
+    FAILS WHENEVER `:Point` is re-added to the scan, with or without a durable
+    point write: it distinguishes the label, not the durability. When the point
+    `goalState` write becomes journalled (#4094's class), replace this pin with the
+    Point arm of the durability test — that is the property the sweep actually
+    needs, and it is asserted there for the labels that have it.
+    """
+    point = sdk.create_point("goal", "legacy goal [sweep-point]",
+                             goalState="met")
+    assert sdk.get_entity(point["id"])["goalState"] == "met", (
+        "precondition: a legacy goal Point can hold the word")
+    report = reconcile_goal_states(sdk)
+    assert report["counts"]["scanned"] == 0, report
+    assert report["counts"]["repaired"] == 0, report
+    assert report["counts"]["notDurable"] == 1, (
+        "the declined population must be COUNTED, or `scanned: 0` reads as a "
+        f"clean graph while the word stands: {report}")
+    assert report["notDurableReason"], (
+        "a counter with no stated meaning is a counter a consumer ignores")
+    assert sdk.get_entity(point["id"])["goalState"] == "met", (
+        "the sweep wrote an UNJOURNALLED prop on a Point: the next rebuild "
+        "reverts it and check_consistency blames a rogue writer — see the "
+        "constant's block in tortoise/derived_invalidation.py")
+
+
+def test_the_OBJECT_repair_is_JOURNALLED_so_a_rebuild_cannot_revert_it(tmp_path):
+    """`derived = replay(journal)` must hold AFTER a repair — the same durability
+    gate the retirement path carries, applied to the cache write (#12336).
+
+    This is the test that WOULD have caught the legacy-Point mistake: it asserts
+    the repair is journal-clean and SURVIVES a rebuild, which the Point arm cannot
+    do. Without it the sweep's success is only ever a live-graph illusion on any
+    label whose prop write is unwrapped by a replay fold.
+    """
+    import os
+
+    from tortoise.config import is_db_uri
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events"
+    events.mkdir()
+    log = str(events / "events.jsonl")
+    namespace = (f"test_suite_{os.urandom(4).hex()}"
+                 if is_db_uri(os.environ.get("TORTOISE_DB_URI")) else None)
+    durable = TortoiseSDK(str(tmp_path / "durable.db"), namespace=namespace,
+                          event_log_path=log)
+    try:
+        i, t, g = _world(durable, tag="sweep-durable")
+        made = _judge(durable, i, t, g)
+        durable.delete_entity(made["point_id"])
+        assert durable.get_entity(g["id"])["goalState"] == "met"
+        before = _records(events)
+        report = reconcile_goal_states(durable)
+        assert report["counts"]["cleared"] == 1, report
+        # ⛔ THE JOURNAL RECORD IS THE EVIDENCE, not `check_consistency`: measured
+        # on this lane, an UNJOURNALLED clear of this exact prop still reads
+        # `ok=True / divergence=None` (the first call re-baselines the mutated
+        # graph, and `goalState` is not in the baseline digest's entity field set),
+        # so a `check_consistency` leg here can never fail and would be a
+        # decoration. The record is what survives a rebuild, and the rebuild below
+        # is what proves it.
+        new = _records(events)[len(before):]
+        mutated = [r for r in new
+                   if r.get("type") == "EntityMutated"
+                   and (r.get("state") or {}).get("goalState", "absent") is None]
+        assert mutated, (
+            "the cache repair left NO replayable record carrying goalState — a "
+            f"rebuild would resurrect the word. new records: {new}")
+        assert mutated[-1].get("id") == g["id"], mutated[-1]
+        durable._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        assert durable.get_entity(g["id"]).get("goalState") is None, (
+            "a rebuild resurrected the word the sweep cleared")
+    finally:
+        durable.close()
+
+
+def test_the_NON_OBJECT_repair_is_JOURNALLED_too(tmp_path):
+    """The durability property is asserted for the WHOLE swept population, not
+    only the label the defect was found on (#12412 review, cycle 3).
+
+    The sweep's inclusion rule is "every label except `:Point`", justified by the
+    claim that those labels' `goalState` writes are journalled — and the suite
+    pinned that for `:Object` alone. A reviewer MEASURED the gap: making the
+    non-Point journal arm drop `goalState` for `label != 'Object'` left the whole
+    section-9 suite GREEN while every non-Object repair became live-only — the
+    exact repair-then-rebuild loop the `:Point` exclusion exists to prevent,
+    unpinned one label over. `:Subject` is the reachable non-Object case (the
+    entity door routes a `subject` kind there by itself), so it is the one this
+    asserts.
+    """
+    import os
+
+    from tortoise.config import is_db_uri
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events"
+    events.mkdir()
+    log = str(events / "events.jsonl")
+    namespace = (f"test_suite_{os.urandom(4).hex()}"
+                 if is_db_uri(os.environ.get("TORTOISE_DB_URI")) else None)
+    durable = TortoiseSDK(str(tmp_path / "durable-subject.db"),
+                          namespace=namespace, event_log_path=log)
+    try:
+        subject = durable.create_subject("team probe [sweep-durable-subject]")
+        durable.update_entity(subject["id"], goalState="met")
+        before = _records(events)
+        report = reconcile_goal_states(durable)
+        assert report["counts"]["cleared"] == 1, report
+        mutated = [r for r in _records(events)[len(before):]
+                   if r.get("type") == "EntityMutated"
+                   and r.get("id") == subject["id"]
+                   and (r.get("state") or {}).get("goalState", "absent") is None]
+        assert mutated, (
+            "the repair of a non-Object goal left no replayable record carrying "
+            f"goalState, so a rebuild reverts it. new records: "
+            f"{_records(events)[len(before):]}")
+        durable._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        assert durable.get_entity(subject["id"]).get("goalState") is None, (
+            "a rebuild resurrected the word the sweep cleared on a :Subject")
+    finally:
+        durable.close()
+
+
+def test_a_second_sweep_is_a_NO_OP(sdk):
+    """Idempotence at the SWEEP level, not only at the door's: once repaired the
+    goal holds no derived word, so it is not even a candidate — the next pass
+    reports nothing to do instead of re-clearing or re-journalling it."""
+    i, t, g = _world(sdk, tag="sweep-idempotent")
+    made = _judge(sdk, i, t, g)
+    sdk.delete_entity(made["point_id"])
+    assert reconcile_goal_states(sdk)["counts"]["cleared"] == 1
+    second = reconcile_goal_states(sdk)
+    assert second["counts"]["scanned"] == 0, second
+    assert second["counts"]["repaired"] == 0, second
+    assert sdk.get_entity(g["id"]).get("goalState") is None
+
+
+def _records(events):
+    """Every journalled record in order — the durability surface a rebuild replays."""
+    import json
+    return [json.loads(line) for line in
+            (events / "events.jsonl").read_text().splitlines() if line.strip()]
+
+
+def test_a_goal_on_a_NON_OBJECT_label_is_swept_too(sdk):
+    """The exclusion is ONE label, not a whitelist of labels (#12336 review
+    cycle 2, P1).
+
+    A `:Subject` goal takes an engine-written `goalState` through the JOURNALLED
+    entity surface, and MEASURED it survives a rebuild — so it is a repairable
+    candidate like any other, and an `:Object`-only scan reported `scanned: 0`
+    over it: a clean summary over a stale word, the exact false PASS this module
+    refuses. The entity door routes a `subject` kind to `:Subject` by itself, so
+    this shape is reachable without anyone typing a label.
+    """
+    subject = sdk.create_subject("team probe [sweep-subject]")
+    sdk.update_entity(subject["id"], goalState="met")
+    assert sdk.get_entity(subject["id"])["goalState"] == "met"
+    report = reconcile_goal_states(sdk)
+    assert report["counts"]["scanned"] == 1, (
+        "the sweep reported a clean scan over a non-:Object goal holding a "
+        f"derived word: {report}")
+    assert report["counts"]["cleared"] == 1, report
+    assert sdk.get_entity(subject["id"]).get("goalState") is None
+    assert report["counts"]["notDurable"] == 0, report
+    assert report["notDurableReason"] is None, (
+        "the reason is emitted only when the counter is non-zero — a payload "
+        "that carries a reason on a clean sweep trains a consumer to ignore it")
+    assert report["counts"]["unaddressable"] == 0, report
+
+
+def test_a_goal_with_no_ID_cannot_be_repaired_and_is_COUNTED_not_dropped(sdk):
+    """The second declined population, and the reason it is a COUNTER (#12412
+    review, cycle 3): the scan matches on the word, but the entity surface can
+    only address a node by `id`.
+
+    Reachability is narrow — the `:Source` write surface refuses `goalState`, so
+    only a raw or legacy write produces the shape — which is exactly why a silent
+    `if row[0]` filter would never be noticed: the payload would be byte-identical
+    to an empty graph's while the word stood.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (n:Object {goalState:'met', url:'https://example.test/no-id'})")
+    report = reconcile_goal_states(sdk)
+    assert report["counts"]["scanned"] == 0, report
+    assert report["counts"]["unaddressable"] == 1, (
+        f"the sweep matched a candidate it silently dropped: {report}")
+    standing = sdk._get_proj().g.query(
+        "MATCH (n:Object {url:'https://example.test/no-id'}) RETURN n.goalState"
+    ).result_set
+    assert standing and standing[0][0] == "met", standing
+
+
+def test_a_CAPPED_window_with_a_dropped_row_still_reports_TRUNCATED(sdk):
+    """The two disclosures must compose (#12412 review, cycle 4, measured).
+
+    `truncated` was computed AFTER the identity filter, so a scan whose window was
+    capped and whose overflow row happened to be the unaddressable one reported
+    `truncated: False` — an exhaustive-looking payload over goals never fetched,
+    which is the #11823 class this module exists to close. The count of
+    unaddressable candidates is window-scoped by nature; the flag is what says the
+    window itself was capped, so the flag has to read the UNFILTERED rows.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (n:Object {goalState:'met', url:'https://example.test/cap-no-id'})")
+    for n in range(2):
+        i, t, g = _world(sdk, tag=f"sweep-cap-{n}")
+        made = _judge(sdk, i, t, g)
+        sdk.delete_entity(made["point_id"])
+    report = reconcile_goal_states(sdk, limit=2)
+    assert report["counts"]["scanned"] == 2, report
+    assert report["truncated"] is True, (
+        "a capped scan reported itself exhaustive because the row it dropped was "
+        f"the unaddressable one: {report}")
+
+
+def test_the_repair_sweep_dry_run_writes_nothing_and_names_what_it_would_clear(sdk):
+    i, t, g = _world(sdk, tag="sweep-dry-run")
+    made = _judge(sdk, i, t, g)
+    sdk.delete_entity(made["point_id"])
+    report = reconcile_goal_states(sdk, dry_run=True)
+    assert report["dryRun"] is True, report
+    assert report["counts"]["repaired"] == 0, report
+    assert report["counts"]["wouldRepair"] == 1, report
+    assert sdk.get_entity(g["id"])["goalState"] == "met", (
+        "a dry run wrote to the cache")
+    record = _only([r for r in report["goals"] if r["goalId"] == g["id"]])
+    assert record["action"] == "would-clear", record
+
+
+def test_the_repair_sweep_discloses_its_own_BOUND(sdk):
+    """A capped scan that reads complete is the #11823 defect class this module
+    exists to close, so the sweep reports `truncated` rather than a total that
+    looks exhaustive."""
+    for n in range(2):
+        i, t, g = _world(sdk, tag=f"sweep-bound-{n}")
+        made = _judge(sdk, i, t, g)
+        sdk.delete_entity(made["point_id"])
+    report = reconcile_goal_states(sdk, limit=1)
+    assert report["counts"]["scanned"] == 1, report
+    assert report["truncated"] is True, (
+        "the scan hit its cap and did not say so")
+
+
+def test_a_failed_reconcile_is_REPORTED_and_the_rest_of_the_sweep_survives(sdk):
+    """A sweep is a sequence of independent writes: one goal's refused write is
+    recorded on THAT goal, and the other goals still get repaired. And — the rule
+    the module already applies to `counts.failed` — a sweep may not read clean
+    while a goal still shows a derived word."""
+    worlds = []
+    for n in range(2):
+        i, t, g = _world(sdk, tag=f"sweep-fail-{n}")
+        made = _judge(sdk, i, t, g)
+        sdk.delete_entity(made["point_id"])
+        worlds.append(g)
+    doomed = worlds[0]["id"]
+    real_update = sdk.update_entity
+
+    def failing(node_id, **props):
+        if node_id == doomed:
+            raise RuntimeError("transient write failure")
+        return real_update(node_id, **props)
+
+    sdk.update_entity = failing
+    try:
+        report = reconcile_goal_states(sdk)
+    finally:
+        sdk.update_entity = real_update
+    assert report["counts"]["failed"] == 1, report
+    assert report["counts"]["repaired"] == 1, report
+    failed = _only([r for r in report["goals"] if r.get("error")])
+    assert failed["goalId"] == doomed, failed
+    assert "transient write failure" in failed["error"], failed
+    assert sdk.get_entity(worlds[1]["id"]).get("goalState") is None, (
+        "one refused write discarded another goal's repair")
+    assert sdk.get_entity(doomed).get("goalState") == "met", (
+        "the module's own rule is that a sweep may not read clean while a goal "
+        "still displays a word it could not repair — so the failed goal's word "
+        "must still be standing here, and the caller has to see it")
+
+
+def test_a_word_a_HUMAN_sets_mid_sweep_is_PRESERVED_and_reported(sdk):
+    """The scan and the reconcile are two reads, so a human write can land
+    between them. The candidate set was chosen by the WORD that stood at scan
+    time; by the time the cache is repaired the word may be a decision nobody
+    measured, and clearing it would erase that decision. It is reported rather
+    than silently skipped — a sweep may not read clean over a goal it declined to
+    touch."""
+    i, t, g = _world(sdk, tag="sweep-human-race")
+    made = _judge(sdk, i, t, g)
+    sdk.delete_entity(made["point_id"])
+    real_get = sdk.get_entity
+
+    def racing(node_id):
+        if node_id == g["id"]:
+            return {"id": node_id, "objectKind": "goal", "goalState": "blocked"}
+        return real_get(node_id)
+
+    writes: list[tuple[str, dict]] = []
+    real_update = sdk.update_entity
+
+    def counting(node_id, **props):
+        writes.append((node_id, dict(props)))
+        return real_update(node_id, **props)
+
+    sdk.get_entity = racing
+    sdk.update_entity = counting
+    try:
+        report = reconcile_goal_states(sdk)
+    finally:
+        sdk.get_entity = real_get
+        sdk.update_entity = real_update
+    assert report["counts"]["preserved"] == 1, report
+    assert report["counts"]["repaired"] == 0, report
+    assert report["counts"]["cleared"] == 0, report
+    record = _only([r for r in report["goals"] if r["goalId"] == g["id"]])
+    assert record["action"] == "preserved", record
+    assert [w for w in writes if w[0] == g["id"]] == [], (
+        f"the sweep wrote over the word it reported as preserved: {writes}")
+
+
+def test_a_goal_DELETED_mid_sweep_is_reported_GONE_not_repaired(sdk):
+    """The same two-read window, the other outcome: there is no node to point at
+    anything, so the sweep must report `gone` rather than a `cleared` that landed
+    nowhere (a write to a missing id is a silent no-op)."""
+    i, t, g = _world(sdk, tag="sweep-gone-race")
+    made = _judge(sdk, i, t, g)
+    sdk.delete_entity(made["point_id"])
+    real_get = sdk.get_entity
+
+    def vanishing(node_id):
+        if node_id == g["id"]:
+            return {}
+        return real_get(node_id)
+
+    sdk.get_entity = vanishing
+    try:
+        report = reconcile_goal_states(sdk)
+    finally:
+        sdk.get_entity = real_get
+    assert report["counts"]["gone"] == 1, report
+    assert report["counts"]["repaired"] == 0, report
+    record = _only([r for r in report["goals"] if r["goalId"] == g["id"]])
+    assert record["action"] == "gone", record
+
+
+def test_a_dry_run_over_a_LAGGING_word_reports_would_rewrite_and_writes_nothing(sdk):
+    """`would-rewrite` is a documented outcome of the preview and it had no test:
+    a dry run over the CLEAR shape proves only half the preview. The two shapes
+    differ in what the caller is told it will do, and a consumer that branches on
+    `action` would read a lagging goal as 'nothing to do' shape if the clear arm
+    were the only one exercised."""
+    i, t, g = _world(sdk, tag="sweep-dry-run-rewrite")
+    _lagging_word(sdk, i, t, g)
+    writes: list[tuple[str, dict]] = []
+    real_update = sdk.update_entity
+
+    def counting(node_id, **props):
+        writes.append((node_id, dict(props)))
+        return real_update(node_id, **props)
+
+    sdk.update_entity = counting
+    try:
+        report = reconcile_goal_states(sdk, dry_run=True)
+    finally:
+        sdk.update_entity = real_update
+    assert report["counts"]["wouldRepair"] == 1, report
+    assert report["counts"]["repaired"] == 0, report
+    record = _only([r for r in report["goals"] if r["goalId"] == g["id"]])
+    assert record["action"] == "would-rewrite", record
+    assert (record["from"], record["to"]) == ("met", "unmet"), record
+    assert [w for w in writes if w[0] == g["id"]] == [], (
+        f"a dry run wrote to the cache: {writes}")
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+
+
+def test_a_DOOR_reported_reconcile_error_is_a_FAILED_goal_not_a_clean_one(sdk):
+    """The door REPORTS a reconcile it could not run (`checked: False` + `error`,
+    because its own `get_entity` raised) instead of raising. The sweep must fold
+    that into `counts.failed` rather than counting the goal as repaired: the word
+    is still standing, so a sweep that called it clean is the false PASS this whole
+    module is about.
+
+    ⚠️ SCOPE, so this test is not read as more than it is: a door that RAISED here
+    would land the goal in the same `failed` bucket through the sweep's own catch-
+    all, so this test does NOT discriminate report-vs-raise (verified: making the
+    door re-raise leaves it green). What it pins is that the door's reported
+    failure is not swallowed into `repaired`/`cleared`, and that the goal is
+    repairable once the read works again.
+    """
+    i, t, g = _world(sdk, tag="sweep-door-error")
+    made = _judge(sdk, i, t, g)
+    sdk.delete_entity(made["point_id"])
+    real_get = sdk.get_entity
+
+    def failing(node_id):
+        if node_id == g["id"]:
+            raise RuntimeError("transient read failure")
+        return real_get(node_id)
+
+    sdk.get_entity = failing
+    try:
+        report = reconcile_goal_states(sdk)
+    finally:
+        sdk.get_entity = real_get
+    assert report["counts"]["failed"] == 1, report
+    assert report["counts"]["repaired"] == 0, report
+    assert report["counts"]["cleared"] == 0, report
+    record = _only([r for r in report["goals"] if r["goalId"] == g["id"]])
+    assert record["action"] == "failed", record
+    assert "transient read failure" in record["error"], record
+    # the repair route still works once the read does
+    reconcile_goal_state_cache(sdk, g["id"])
+    assert sdk.get_entity(g["id"]).get("goalState") is None
+
+
+def test_a_FAILED_standing_claim_read_is_a_FAILED_goal_and_the_sweep_carries_on(sdk):
+    """The FIRST error arm, distinct from the door's: if the read that decides
+    what the word SHOULD be cannot run, the sweep must not guess (a guess would
+    either clear a supported word or rewrite a correct one) and must not abandon
+    the remaining goals."""
+    import tortoise.derived_invalidation as _mod
+
+    worlds = []
+    for n in range(2):
+        i, t, g = _world(sdk, tag=f"sweep-read-fail-{n}")
+        made = _judge(sdk, i, t, g)
+        sdk.delete_entity(made["point_id"])
+        worlds.append(g)
+    doomed = worlds[0]["id"]
+    original = _mod.latest_judgement
+
+    def failing(sdk_, *, goal_id=None, indicator_id=None, target_id=None):
+        if goal_id == doomed:
+            raise RuntimeError("standing-claim read failed")
+        return original(sdk_, goal_id=goal_id, indicator_id=indicator_id,
+                        target_id=target_id)
+
+    _mod.latest_judgement = failing
+    try:
+        report = reconcile_goal_states(sdk)
+    finally:
+        _mod.latest_judgement = original
+    assert report["counts"]["failed"] == 1, report
+    assert report["counts"]["repaired"] == 1, report
+    failed = _only([r for r in report["goals"] if r.get("error")])
+    assert failed["goalId"] == doomed, failed
+    assert "standing-claim read failed" in failed["error"], failed
+    assert sdk.get_entity(doomed)["goalState"] == "met", (
+        "the sweep GUESSED at a word whose deciding read failed")
+    assert sdk.get_entity(worlds[1]["id"]).get("goalState") is None, (
+        "one failed read discarded another goal's repair")
+
+
+def test_a_reconcile_that_NEVER_RAN_is_a_FAILED_goal_never_a_repair(sdk):
+    """The door answers `checked: False` (with a `reason`, no `error`) when it was
+    handed no goal id. Unreachable from the scan here — the candidate read keeps
+    only rows carrying an id — so this pins the RULE rather than a live path: a
+    reconcile that did not run must never be counted as one that did, because the
+    word is still standing and a sweep that books it as `rewritten` is the false
+    PASS this whole module is about."""
+    import tortoise.derived_invalidation as _mod
+
+    i, t, g = _world(sdk, tag="sweep-never-ran")
+    made = _judge(sdk, i, t, g)
+    sdk.delete_entity(made["point_id"])
+    original = _mod.reconcile_goal_state_cache
+
+    def not_run(sdk_, goal_id):
+        return {"checked": False,
+                "reason": "no goalId was supplied to the reconcile"}
+
+    _mod.reconcile_goal_state_cache = not_run
+    try:
+        report = reconcile_goal_states(sdk)
+    finally:
+        _mod.reconcile_goal_state_cache = original
+    assert report["counts"]["failed"] == 1, report
+    assert report["counts"]["repaired"] == 0, report
+    assert report["counts"]["rewritten"] == 0, report
+    record = _only([r for r in report["goals"] if r["goalId"] == g["id"]])
+    assert record["action"] == "failed", record
+    assert "no goalId was supplied" in record["error"], record
+    assert sdk.get_entity(g["id"])["goalState"] == "met"

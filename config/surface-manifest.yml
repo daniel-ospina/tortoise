@@ -2241,7 +2241,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_analyze
-  served_from: tortoise/mcp_server.py:458b130d9130fe45
+  served_from: tortoise/mcp_server.py:d01328faeb18c368
   served_attributes: 0b934dac2f43c7b6
   family: reasoning
   family_rank: 3
