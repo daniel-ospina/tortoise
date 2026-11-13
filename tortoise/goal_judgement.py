@@ -915,25 +915,33 @@ def _newest_first_key(reading: Reading) -> tuple[int, Any, str]:
     unparseable as-of cannot PROVE it is recent, so it must never displace a
     dated one. ``reading_id`` is the tie-break (the ``e.id DESC`` the query
     itself used to carry), so equal instants keep a total order **when the
-    readings carry ids** and two reads of an unchanged graph agree.
+    readings carry DISTINCT ids** and two reads of an unchanged graph agree.
 
-    ⛔ NOT TOTAL IN ONE REACHABLE CORNER, stated rather than implied: two
-    readings at the same instant that BOTH lack a ``reading_id`` (an
-    outside-written event carries no ``id`` property — see
-    ``test_a_reading_whose_event_carries_no_id_still_orders_without_raising``)
-    produce IDENTICAL keys, because ``str(reading_id or "")`` maps "absent" and
-    "empty" to the same value. ``sorted(..., reverse=True)`` then falls back to a
-    stable sort over ``rows``, which is ``id(e)`` ASCENDING — the OPPOSITE
-    direction to the ``e.id DESC`` the pre-fix query carried. The result is still
-    deterministic (two reads of an unchanged graph agree, which is the property
-    that keeps a judgement reproducible), but it is NOT the documented direction,
-    and this is the honest scope of the claim. It is left as prose rather than
-    repaired in the key because the two rows are indistinguishable by every field
-    this read exposes AND name the same instant, so no order between them is
-    more correct than the other; what would have been false is saying the
-    direction holds. A key that also carried ``id(e)`` would restore the
-    documented direction, and that is a behaviour change with its own pin, not a
-    docstring correction.
+    ⛔ NOT TOTAL, stated rather than implied: the tie-break is a STRING, so two
+    readings at the same instant fall back to a stable sort over ``rows`` —
+    ``id(e)`` ASCENDING, the OPPOSITE direction to the ``e.id DESC`` the pre-fix
+    query carried — whenever their ids are equal AS STRINGS. TWO reachable
+    shapes:
+
+      * **no ``reading_id`` at all.** An outside-written event carries no ``id``
+        property, and ``str(reading_id or "")`` maps "absent" and "empty" to
+        the same value (see
+        ``test_a_reading_whose_event_carries_no_id_still_orders_without_raising``);
+      * **two distinct readings sharing one ``e.id``.** Legitimate, and the
+        reason no Python de-duplication is layered on this read at all (see the
+        projection note below ``cypher``): ``str`` of the shared id is ONE value,
+        so both rows land on the same key.
+
+    The result is still deterministic — two reads of an unchanged graph agree,
+    which is the property that keeps a judgement reproducible — but it is NOT
+    the documented direction, and that is the honest scope of the claim. It is
+    left as prose rather than repaired in the key because the two rows name the
+    SAME instant, so both orderings answer "newest first" equally: the defect is
+    the DIRECTION claim, not a wrong answer. A key that also carried ``id(e)``
+    would restore the documented direction, and that is a behaviour change with
+    its own pin — ``id(e)`` semantics differ across the v4/v6 cores (the hazard
+    recorded on ``hosted_backup.py`` and quoted below), so it is not a docstring
+    correction.
     """
     from .search_engine import _created_sort_key
 

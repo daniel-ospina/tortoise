@@ -299,6 +299,101 @@ def test_the_read_pages_rather_than_relying_on_one_result_set(sdk, monkeypatch):
     assert [r.value for r in latest_readings(sdk, mixed["id"], limit=2)] == [9.0, 8.0]
 
 
+def test_the_disclosed_page_query_count_holds_at_n_zero_and_an_exact_multiple(
+    sdk, monkeypatch
+):
+    """The COST SENTENCE in ``latest_readings.__doc__`` is pinned, not just stated.
+
+    ⛔ WHY THIS EXISTS. That sentence has already been wrong once: it claimed
+    ``limit=1`` costs ``ceil(N / _READINGS_PAGE_SIZE)`` page queries, which is
+    ``0`` for an indicator with no readings — while the loop always issues ONE
+    page query (the first comes back empty and ends it). Nothing pinned it, so
+    the only query-count assertion in this file (``len(page_calls) == 3`` in
+    ``test_the_read_pages_rather_than_relying_on_one_result_set``) covers ONE
+    non-zero, non-multiple ``N``: the pre-fix wording could be restored with all
+    tests green, which is exactly how it drifted in the first place.
+
+    The two arms here are the two clauses the sentence names and that no other
+    test reaches:
+
+      * ``N = 0`` -> ONE page query (not zero). Measured: batch 2, no readings,
+        the loop asks once, gets an empty page, breaks;
+      * ``N`` an EXACT MULTIPLE of the page size -> ONE MORE than ``N / batch``,
+        because a full page never ends the loop. Measured: ``N = 2`` at batch 2
+        takes 2 page queries (the full page, then the empty tail).
+
+    The aggregate ``count(e)`` is asked exactly once in both arms, which is the
+    other half of the sentence's arithmetic.
+
+    ⚠️ THE TWO ARMS ABOVE PIN THE BEHAVIOUR AND PROVE THE SENTENCE; they do not
+    pin the sentence, and this file has already paid for that difference once.
+    So the last assertion below is a POSITIVE clause pin on the correction
+    itself — deliberately narrow, because an allowlist over prose over-fits (an
+    honest reword reds), which is why the disclosure test next door uses a
+    denylist instead. Here the clause names a measured number with an executable
+    peer in this very test, so pinning it is what stops the pre-fix wording
+    coming back under a green suite.
+    """
+    import tortoise.goal_judgement as gj
+
+    calls: list[str] = []
+    real_g = sdk._get_proj().g
+
+    class _Counting:
+        def query(self, cypher, **kwargs):
+            calls.append(cypher)
+            return real_g.query(cypher, **kwargs)
+
+    monkeypatch.setattr(gj, "_READINGS_PAGE_SIZE", 2)
+    monkeypatch.setattr(sdk._get_proj(), "g", _Counting(), raising=False)
+
+    def _counts() -> tuple[int, int]:
+        pages = len([c for c in calls if "LIMIT $batch" in c])
+        counts = len([c for c in calls if "RETURN count(e)" in c])
+        calls.clear()
+        return pages, counts
+
+    # (1) N = 0 — an indicator nothing was ever measured about. The answer is
+    # `[]`, and the read still costs ONE page query: `ceil(0 / 2) == 0` would
+    # make the disclosed count false at the one N where it is most visible.
+    empty = _indicator(sdk, "paging-empty")
+    assert latest_readings(sdk, empty["id"]) == []
+    assert _counts() == (1, 1), (
+        "an indicator with no readings must take exactly 1 page query and 1 "
+        "count query — 0 page queries is impossible (the loop always asks) and "
+        "is what the docstring's original ceil(N / page) claim asserted"
+    )
+
+    # (2) N = 2 at a page size of 2 — an EXACT multiple, the `+1` clause. The
+    # full page cannot end the loop, so the empty tail costs a second query.
+    exact = _indicator(sdk, "paging-exact")
+    _reading(sdk, exact, 1.0, at="2026-11-12T01:00:00Z")
+    _reading(sdk, exact, 2.0, at="2026-11-12T02:00:00Z")
+    assert [r.value for r in latest_readings(sdk, exact["id"])] == [2.0, 1.0]
+    assert _counts() == (2, 1), (
+        "2 readings at a page size of 2 is an EXACT MULTIPLE, so the read takes "
+        "2 page queries (the full page, then the empty tail) and 1 count — "
+        "dropping the '+1 when N is an exact multiple' clause makes that"
+    )
+
+    # The correction itself, pinned: the docstring must keep naming the empty
+    # case, because that is the clause the pre-fix sentence got wrong and the
+    # only one a reader with an unmeasured indicator needs.
+    doc = gj.latest_readings.__doc__ or ""
+    # Whitespace-normalised first: the clause wraps across a newline in the
+    # source, so a raw substring test would red for the line length rather than
+    # for the claim.
+    flat = " ".join(doc.split())
+    assert "ONE page query when there is nothing to read" in flat, (
+        "`latest_readings.__doc__` no longer discloses that an indicator with no "
+        "readings still costs ONE page query. The pre-fix sentence read "
+        "`ceil(N / _READINGS_PAGE_SIZE)` page queries, which is 0 at N = 0 and "
+        "is false — the loop always asks once. If you reworded the clause, say "
+        "the same thing: the empty read costs one page query plus the one "
+        "aggregate count, and the two arms above are the measurement."
+    )
+
+
 def test_a_negative_limit_is_refused_rather_than_silently_sliced(sdk):
     """A negative bound is a caller error, not a bound.
 
