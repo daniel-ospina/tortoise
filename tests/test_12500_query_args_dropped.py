@@ -327,3 +327,93 @@ def test_the_tag_arm_message_names_the_precedence_that_blocks_pass_text(stub) ->
     assert _is_refusal(result), "no refusal to read a message off"
     assert "tag=" in result["error"], result["error"]
     assert "drop tag=" in result["error"], result["error"]
+
+
+@pytest.mark.parametrize("entity_type", ["document", "event", "session"])
+def test_the_text_arm_REFUSES_a_floor_it_cannot_apply(stub, entity_type) -> None:
+    """`text=` applies the floor to POINT rows only (#12500 round-3 P1).
+
+    The fts leg compares `min_confidence` against EP belief under
+    `entity_type == "point"` (`sdk.py:43206` — `ep` is `None` for every other
+    type, and the branch is gated on it), so a non-Point read passed the floor
+    straight through: measured at the tool boundary,
+    `text="…", entity_type="document", min_confidence=0.9` returned the
+    0.1-belief rows, and the same read at 0.0 returned the identical page —
+    silently wrong, on the very arm the other refusals tell callers to use.
+
+    Fails if `text and min_confidence and entity_type != "point"` is missing from
+    the guard (`_is_refusal` false), or if it is widened to the Point arm
+    (`test_the_text_arm_still_APPLIES_them` covers that side).
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(text="anything", entity_type=entity_type,
+                            min_confidence=_CONFIDENCE_FLOOR)
+
+    assert _is_refusal(result), (
+        f"text= with entity_type={entity_type!r} accepted a floor that this arm "
+        f"cannot apply to a single row, and served: {result!r}"
+    )
+    assert "point" in result["error"], result["error"]
+
+
+def test_the_text_arm_floor_message_offers_a_route_that_terminates(stub) -> None:
+    """The route must be followable FROM here (#12500 round-3, P2 class).
+
+    "Pass text=" is a dead end on this branch — `text=` is already set, which is
+    why the call was refused. The message has to name `entity_type='point'` (or
+    say to drop the argument), and must NOT re-advise the arm the caller is
+    already on. The tag arm had exactly this defect in round 1.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(text="anything", entity_type="document",
+                            min_confidence=_CONFIDENCE_FLOOR)
+
+    assert _is_refusal(result), "no refusal to read a message off"
+    message = result["error"]
+    assert "entity_type='point'" in message, message
+    assert "pass text=" not in message, message
+
+
+def test_the_text_arm_still_applies_the_floor_to_POINTS(stub) -> None:
+    """The control for the branch above: `entity_type="point"` is the default.
+
+    Fails if the new condition is written without the `entity_type != "point"`
+    clause (over-block: the arm that DOES apply the floor gets refused) or
+    without the truthiness key (`min_confidence=0.0` is the shipped "filter off"
+    default and must stay served).
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    for entity_type in ("point", None):
+        kwargs = {} if entity_type is None else {"entity_type": entity_type}
+        result = tortoise_query(text="anything", min_confidence=_CONFIDENCE_FLOOR,
+                                **kwargs)
+
+        assert not _is_refusal(result), (
+            f"refused the arm that CAN apply the floor (entity_type={entity_type!r}):"
+            f" {result}"
+        )
+        fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+        assert fts and fts[-1][3]["min_confidence"] == _CONFIDENCE_FLOOR
+
+
+def test_the_message_agrees_in_number_with_the_arguments_it_names(stub) -> None:
+    """Two named arguments must not ship "min_confidence and order_by IS" (r3 P2).
+
+    Measured on a real call before the fix:
+    `tortoise_query(tag="pricing", min_confidence=0.9, order_by="confidence")`
+    answered "min_confidence and order_by is not applied …". The message IS this
+    PR's deliverable and it is read on the error path.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    two = tortoise_query(tag="pricing", min_confidence=_CONFIDENCE_FLOOR,
+                         order_by="confidence")
+    one = tortoise_query(tag="pricing", min_confidence=_CONFIDENCE_FLOOR)
+
+    assert _is_refusal(two) and _is_refusal(one)
+    assert " and " in two["error"], two["error"]
+    assert " are not applied" in two["error"], two["error"]
+    assert " is not applied" in one["error"], one["error"]

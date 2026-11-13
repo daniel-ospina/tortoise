@@ -3944,9 +3944,12 @@ def tortoise_query(kind: str | None = None,
       (default 100 — see the #10602 note below). `min_confidence` and `order_by`
       are REFUSED on this arm rather than dropped (#12500): both structural arms
       read through sdk.paginated_query, which declares neither, so an accepted
-      value used to be discarded and rows the caller excluded came back. They
-      are applied on the text= arm only (the fts leg); structural filtering by
-      confidence is Phase 2 in the hybrid-search plan, not a shipped feature.
+      value was discarded and rows the caller excluded came back. They
+      are applied on the text= arm for `entity_type="point"` (the fts leg
+      compares the floor against EP belief, and only a Point carries one — a
+      non-Point `entity_type` REFUSES a floor for the same reason); structural
+      filtering by confidence is Phase 2 in the hybrid-search plan, not a
+      shipped feature.
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
       REFUSES kind/min_confidence/order_by and `filters=` (see the tag= bullet
@@ -4103,10 +4106,12 @@ def tortoise_query(kind: str | None = None,
     # semantics define the falsy values as ABSENT — the `text=` call below
     # normalises with `min_confidence or 0.0` and `order_by or "relevance"`, and
     # the sibling `#12455` guard two blocks down keys on `if filters and …` for
-    # the same reason. A client that serialises its own defaults
-    # (`min_confidence=0.0`, `order_by=""`, `kind=""`) was getting a refusal on
-    # every structural read where the answer had always been CORRECT — a floor of
-    # 0.0 excludes nothing and an empty order string asks for none.
+    # the same reason. A client that serialises its own defaults was getting a
+    # refusal where the answer had always been CORRECT — `min_confidence=0.0` and
+    # `order_by=""` on every structural AND tag read, and `kind=""` on the tag arm
+    # (measured: the `is not None` mutant serves `kind=""` alone and refuses
+    # `tag="t", kind=""`). A floor of 0.0 excludes nothing; an empty order names
+    # none.
     _unapplied: list[str] = []
     if tag is not None or not text:
         # Both structural arms share `paginated_query`.
@@ -4118,26 +4123,56 @@ def tortoise_query(kind: str | None = None,
         # Tag mode reads EVERY kind of tagged Point, so a named kind narrows
         # nothing while looking like it did.
         _unapplied.append("kind")
+    if text and min_confidence and entity_type != "point":
+        # The `text=` arm forwards the floor to the SDK's fts leg, which compares
+        # it against EP belief under `entity_type == "point"` (sdk.py:43206 —
+        # `ep` is None for every other type, and the branch is gated on it), so a
+        # non-Point read passed the floor straight through and every row came
+        # back. Round-3 P1, measured at the tool boundary:
+        # `text="…", entity_type="document", min_confidence=0.9` returned the
+        # 0.1-belief rows, and the same read at 0.0 returned the identical page.
+        # That is the #6146 class this guard exists for, on the very arm the
+        # refusal above tells callers to use.
+        _unapplied.append("min_confidence")
     if _unapplied:
-        _arm = "tag=" if tag is not None else "structural"
         _named = " and ".join(_unapplied)
+        # Agreement in number: two named arguments shipped as "min_confidence and
+        # order_by IS not applied" (round-3 P2, measured on a real call).
+        _verb = "are" if len(_unapplied) > 1 else "is"
+        # The explanation and the route BOTH have to describe the arm that
+        # answered. "Pass text=" was the round-1 dead end on the tag arm (`tag=`
+        # takes precedence, so the caller re-reads the same sentence), and it
+        # would be a second dead end here — the text= arm is refused precisely
+        # when text= is already set.
+        if tag is not None:
+            _arm = "tag="
+            _why = ("tag mode reads a tag and nothing else, so it cannot apply a "
+                    "confidence floor or an ordering")
+            _route = (f"To use {'them' if _verb == 'are' else 'it'}, drop tag= and "
+                      f"pass text= — tag= takes precedence, so keeping it re-reads "
+                      f"this same arm")
+        elif text:
+            _arm = "text="
+            _why = (f"the text= arm compares the floor against EP belief and only "
+                    f"Point rows carry one, while entity_type={entity_type!r} "
+                    f"selects non-Point rows — so no row could ever be excluded")
+            _route = ("To have the floor applied, pass entity_type='point'; "
+                      "otherwise drop min_confidence for this read")
+        else:
+            _arm = "structural"
+            _why = ("the structural arms read through sdk.paginated_query, which "
+                    "takes no confidence floor and no ordering")
+            _route = (f"To use {'them' if _verb == 'are' else 'it'}, pass text= — "
+                      f"the floor and the ordering are applied on that arm")
         _extra = (
             " Tag mode also reads every kind of tagged Point, so a named `kind` "
             "narrows nothing." if "kind" in _unapplied and tag is not None else ""
         )
-        # The tag arm answer over `text=`, so "pass text=" alone is a dead end
-        # there: `tag=` takes precedence and the caller loops on the same message
-        # (round-1 P2, measured). Name what has to be dropped as well.
-        _route = ("drop tag= and pass text= to use them"
-                  if tag is not None else "pass text= to use them")
         return _SafeError({"error": (
-            f"{_named} is not applied on the {_arm} arm (#12500): the structural "
-            f"arms read through sdk.paginated_query, which takes no confidence floor "
-            f"and no ordering, and tag mode reads a tag and nothing else — so these "
-            f"arguments used to be dropped silently and the caller got rows they "
-            f"excluded, or an order they did not ask for.{_extra} They ARE applied "
-            f"on the text= arm (the fts leg), which tag= takes precedence over — so "
-            f"{_route}, or drop {_named} for this read."
+            f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. The "
+            f"argument used to be dropped silently, so the caller got rows they "
+            f"excluded, or an order they did not ask for.{_extra} {_route}, or drop "
+            f"{_named} for this read."
         )})
     # ── #12455: `filters=` was ACCEPTED on the `text=` and `tag=` arms and DROPPED
     # `filters` is a STRUCTURAL-path argument. `text=` forwards
