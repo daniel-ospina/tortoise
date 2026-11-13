@@ -46,7 +46,10 @@ sentence alone M3 **passes**, and the instruction that follows is *"proceed stra
 
 * with the query terms held constant, BM25 buys **+1.33 pts** (p = 0.34) overall, **+1.15 pts**
   (p = 0.73) on the subset where the control holds, and **+0.00 pts at k=15 with ZERO discordant
-  pairs**. The two scorers rank these documents identically;
+  pairs**. ⚠️ Zero *discordance* is about the **window**, not the **order**: of the 228 names both arms
+  find inside k=15, **45 rank differently** (mean rank when found 1.452 vs 1.285, largest move 5 places —
+  `m3-000014` goes 1 → 6). What the control rules out is BM25 buying *recall*; it does not say the two
+  scorers order documents the same way, and an earlier cut of this sentence did;
 * the same **+25.00 pts is recovered inside the current index** (0.9633, **zero** regressions), by
   adding the `_`-preserving runs of the query as OR alternatives — the `#8933` additive pattern;
 * the cause is measured and is ours: **RediSearch treats `_` as a word character; `sparse.py` splits on
@@ -151,8 +154,15 @@ document frequencies) and queries `WHERE name ||| <terms> ORDER BY paradedb.scor
 through `recency_tie_clause`, whose id key is **DESC on every label**; the Postgres arm therefore orders
 `id DESC` too. The first version of this harness ordered `id` **ASC** — the opposite direction — and it
 moved the deployable arm from **0.9700 to 0.9633** at k=3, which is exactly the boundary effect the
-requirement exists to prevent. ⚠️ Declared residual: the *recency* component is not modelled on either
-side (the fixture carries no comparable timestamp), so for :Object the clause collapses to the id key.
+requirement exists to prevent. ⚠️ Declared residual: the *recency* half is controlled on **one side
+only**. The arm writes through the real projection, so every `:Object` row does carry `createdAt`
+(`tortoise/projection/entities.py` — `o.createdAt=coalesce($ca, $now)` on create) and the shipped leg's
+recency key is **live**; the Postgres arm has no timestamp column at all. The two orders agree here
+**only because the sweep writes in ascending id order**, which makes `createdAt DESC` emit the same
+sequence as `id DESC` — a coincidence of write order, not a controlled match, and the one place where a
+change to the write loop would diverge the tie orders with nothing in this lane's numbers to show it. An
+earlier cut of this paragraph said no comparable timestamp existed and that the key collapsed to the id
+key on both sides; that was wrong about the shipped side and is corrected here.
 
 **Where the control breaks — stated, not hidden.** C2 is *"BM25 instead of TF-IDF"*, a **scorer**
 change, so the primary arm hands Postgres **our production term set** rather than its own analyser's. But
@@ -301,9 +311,17 @@ exactly the shapes it was built for, and neither a new scorer nor a new store is
 > p < 0.05. **FAIL otherwise** — including a tie, and including a gain carried by pairs where the two
 > arms agree.
 
-The rule was written into `tools/m3_fts_leg_recall.py` before the 300-name measurement existed, and the
-artifact carries it verbatim on every run. **Result: FAIL** — on the full arm (+1.33 pts, p = 0.344) and
-on the tokens-controlled subset (+1.15 pts, p = 0.727).
+The rule is the harness's `DECISION_RULE` constant (`tools/m3_fts_leg_recall.py:158`) and the artifact
+carries it verbatim, so it cannot be re-chosen per run without editing two places — the test asserts that
+byte-equality rather than the label. ⚠️ **What that does not prove:** the harness, the artifact and this
+brief landed in **one commit**, so the *ordering* — that the constant existed before the 300-name run —
+is not checkable from this repository. The repo's own executable form of that claim
+(`tools/capstone_preregistration_check.py`) requires an evidence log that **predates** the registration,
+and this lane has none. Stated rather than implied: the rule is fixed and carried; its chronology is the
+lane's assertion.
+
+**Result: FAIL** — on the full arm (+1.33 pts, p = 0.344) and on the tokens-controlled subset (+1.15 pts,
+p = 0.727).
 
 ⛔ **This is the harness's rule, and it is narrower than `#12298`'s own falsifier sentence.** §0 states
 both readings; the reason the narrower one decides is §4.2, not the word FAIL.
@@ -334,10 +352,16 @@ production figure, and the weighting has to respect the decomposition in §3.3:
 | everything else | the remainder | assumed 0 | 0, declared |
 
 So the honest statement is: **`share(snake_case) × +91.8 pts`**, with `share(snake_case)` **unmeasured**.
-A loose **upper bound is ≤ 9.0 % × 91.8 ≈ +8.3 pts**, and there is **no measured lower bound** — the
-earlier draft of this section multiplied the 2.2 % `#n` share by the whole class delta and produced a
-"+1.6 pts floor" from a sub-class whose measured effect is **zero**. That was wrong and is corrected
-here. The 29–38 % of names in the residual rows are **assumed** Δ = 0; nothing measured them.
+The 9.0 % "contains a code token" share bounds **that one term**: `0.09 × 91.8 ≈ +8.3 pts`. It is **not**
+an upper bound on the composite — the path row is a *second* positive term (`share(path) × 26.7`,
+excluded only because its share is unrecorded), so any non-zero path share adds on top of it. There is
+**no measured lower bound** — the earlier draft of this section multiplied the 2.2 % `#n` share by the
+whole class delta and produced a "+1.6 pts floor" from a sub-class whose measured effect is **zero**.
+That was wrong and is corrected here. The remainder of the name population — everything outside the
+definite, `#n` and code-token rows — is **assumed** Δ = 0; nothing measured it, and the table does not
+pin its share either: the rows above sum to 73.5 % (62.3 + 2.2 + 9.0), i.e. **26.5 %**, before any
+overlap between the audit's own rows is accounted for. An earlier draft printed "29–38 %" for that
+remainder without a derivation; it is removed rather than re-guessed.
 
 ### 4.4 Contradiction test — what this does NOT do
 
@@ -362,8 +386,11 @@ here. The 29–38 % of names in the residual rows are **assumed** Δ = 0; nothin
 * **The `snake_case` and path class shares.** Neither is recorded anywhere; §4.3 says so rather than
   assuming one, and the residual class share is assumed Δ = 0.
 * **Index-time tokenization** is each engine's own and was not controlled (only query-side terms were).
-* **The recency component of the tie rule** — the id key is matched (DESC/DESC); no comparable timestamp
-  exists in the fixture, so the recency half collapses to the id key on both sides.
+* **The recency half of the tie rule.** The *id* key is matched (DESC/DESC) and pinned at the harness's
+  own SQL. The recency key is **not** controlled: the shipped leg reads a live `createdAt DESC` (the
+  projection stamps it on create), the Postgres arm has no timestamp, and the two orders agree **only
+  because the sweep writes in ascending id order**. Change that write order and they diverge with
+  nothing in this lane's numbers to show it.
 * **The single-leg floor arm** (requirement 4) — not exercised; recorded in `threshold_arm` (§2).
 * **A SPLADE encoder's cost on CPU.** ⛔ **Not measured, deliberately.** The issue's overhead item sits
   after "if M3 passes"; this lane does not proceed to SPLADE (§0). The literature range (≈100–300 ms per

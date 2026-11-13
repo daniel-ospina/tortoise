@@ -42,6 +42,7 @@ reinvented).
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import re
 from pathlib import Path
@@ -361,11 +362,30 @@ def test_compare_counts_discordant_pairs(tool_mod) -> None:
 
 # ── 4. the artifact, and the brief against it ──────────────────────────────
 
-def test_artifact_carries_the_pre_registered_rule(artifact) -> None:
-    """The rule was fixed before the numbers; a reader can check it in the file."""
+def test_artifact_carries_the_rule_as_the_harness_constant(
+        tool_mod, artifact, brief_text) -> None:
+    """The rule is a CONSTANT in the harness and travels verbatim into the artifact.
+
+    ⚠️ What this proves: the rule cannot be re-chosen per run — the artifact's
+    `decision_rule` is byte-identical to `DECISION_RULE` in the harness, so a
+    different rule has to be edited in two places, and the brief quotes the same
+    operative clauses.
+
+    ⛔ What it does NOT prove, and the earlier cut of this test implied it did:
+    that the constant existed BEFORE the 300-name run. Harness, artifact and
+    brief landed in ONE commit, so the ordering is a claim about the lane's
+    process, not a fact this repository can check — the repo's own executable
+    form of that claim (`tools/capstone_preregistration_check.py`) needs an
+    evidence log that predates the registration, which this lane does not have.
+    """
+    assert artifact["decision_rule"] == tool_mod.DECISION_RULE
     assert artifact["decision_rule"].startswith("PASS iff")
     assert artifact["primary_k"] == 3
     assert artifact["verdict"]["rule"] == artifact["decision_rule"]
+    for clause in ("strictly greater", "exact two-sided McNemar", "p < 0.05"):
+        assert clause in artifact["decision_rule"], clause
+        assert clause in brief_text, (
+            f"the brief no longer quotes the rule's own clause {clause!r}")
 
 
 def test_artifact_population_is_the_committed_pin(artifact, population) -> None:
@@ -498,12 +518,57 @@ def test_degenerate_rows_are_identical_across_the_two_postgres_arms(artifact) ->
         f"declared break is no longer what the artifact says it is")
 
 
-def test_the_tie_rule_is_matched(artifact) -> None:
-    """Requirement 6: both stores break score ties the same way (id DESC)."""
+def test_the_tie_rule_is_matched(tool_mod, artifact, brief_text) -> None:
+    """Requirement 6: the id tie key is DESC on both stores — pinned at the SQL.
+
+    ⚠️ The artifact's `engine` note is PROSE beside the SQL, not the SQL itself,
+    so the id key is asserted against the harness SOURCE as well; otherwise a
+    query change could diverge from the note with this test green.
+    """
+    src = inspect.getsource(tool_mod)
+    assert "ORDER BY s DESC, id DESC LIMIT %s" in src, (
+        "the Postgres arm's ORDER BY moved — re-check the tie rule before "
+        "trusting the artifact's engine note")
+    assert "ORDER BY paradedb.score(id) DESC, " in src
     for arm in ("postgres_bm25/tokens", "postgres_bm25/native"):
         assert "id DESC" in artifact["arms"][arm]["engine"], (
             f"{arm} does not state the tie key it ordered by")
     assert "DESC on every label" in artifact["verdict"]["requirements"]["6_tie_rule"]
+
+    # ⚠️ The RECENCY half is not controlled, and its mechanism is checkable: the
+    # projection stamps `createdAt` ON CREATE, so the shipped leg's recency key
+    # is live while the Postgres arm has no timestamp — the two orders agree only
+    # because the sweep writes in ascending id order.
+    entities = (REPO_ROOT / "tortoise" / "projection" / "entities.py").read_text(
+        encoding="utf-8")
+    assert "o.createdAt=coalesce($ca, $now)" in entities, (
+        "the :Object upsert no longer stamps createdAt on create — the brief's "
+        "declared residual for the recency half is now wrong")
+    assert "ascending id order" in brief_text
+
+
+def test_the_scorers_do_not_rank_identically(artifact, brief_text) -> None:
+    """§0's zero-discordance result is about the WINDOW, not the order.
+
+    ⛔ The first cut of the brief read "zero discordant pairs at k=15" as "the
+    two scorers rank these documents identically", and the artifact refutes it:
+    a name can sit inside the window on both arms and still move five places.
+    """
+    shipped = artifact["arms"]["falkordb_tfidf"]["ranks"]
+    tokens = artifact["arms"]["postgres_bm25/tokens"]["ranks"]
+    both = [q for q in shipped if shipped[q] is not None and tokens[q] is not None]
+    moved = [q for q in both if shipped[q] != tokens[q]]
+    assert len(both) == 228, len(both)
+    assert len(moved) == 45, (len(moved), sorted(moved)[:5])
+    assert max(abs(shipped[q] - tokens[q]) for q in moved) == 5
+    assert (shipped["m3-000014"], tokens["m3-000014"]) == (1, 6)
+    assert artifact["arms"]["falkordb_tfidf"]["recall_by_k"]["15"][
+        "mean_rank_when_found"] > artifact["arms"]["postgres_bm25/tokens"][
+        "recall_by_k"]["15"]["mean_rank_when_found"]
+    # and the brief must state it — the false reading must not come back.
+    assert "rank these documents identically" not in brief_text
+    assert "45 rank differently" in brief_text
+    assert "1.452 vs 1.285" in brief_text
 
 
 def test_the_threshold_arm_is_recorded_as_not_exercised(artifact) -> None:
