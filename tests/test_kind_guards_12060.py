@@ -2770,24 +2770,30 @@ depends_on: []
 
 def test_the_folded_subject_set_is_re_derived_after_the_correction(
         sdk, monkeypatch):
-    """#12341: the folded subject set must track the LANDED layer, not the payload kind.
+    """#12341: the folded set must be derived from the LANDED layers, not the payload kind.
 
-    ⛔ The direction matters, and this is the shape a first attempt missed. A
-    `core:naturalPerson` name IS a declared Subject kind, so it is seeded into
-    `subject_entity_names_folded`; a CORE guard then redirects the write to
-    `:Object`/`core:Project`, and the `#12060` correction loop DISCARDS the name
-    from `subject_entity_names` while the pre-write folded key survives. The claim
-    then names the same entity in a fold-equal spelling, so a stale folded set makes
-    `_subject_fold_only` TRUE and narrows the `aboutObject` probe to
-    `o.name = $exact` — a spelling no node carries — and the edge is LOST silently
-    (no warning, no `skipped` entry).
+    ⛔ The ORDER is the subject here, and that is why this pin is shaped the way it
+    is. A `core:naturalPerson` name enters `subject_entity_names` (it IS a declared
+    subject kind) and a CORE guard then redirects the write to `:Object`/
+    `core:Project`; the `#12060` correction loop sees the landed layer and DISCARDS
+    the name. A comprehension placed ABOVE that loop therefore retains a folded key
+    for a name that is no longer a Subject, and a claim naming the same entity in a
+    fold-equal spelling ("DANIEL-OSPINA/AGENT-INFRA") then makes `_subject_fold_only`
+    TRUE — narrowing the `aboutObject` probe to `o.name = $exact`, a spelling no node
+    carries — and the edge is LOST silently.
 
-    Measured: with the re-derive, the edge is written; deleting the twelve lines that
-    rebuild `subject_entity_names_folded` reds exactly this test (`[]`), and
-    disabling the narrowing on top of the mutant makes it green again — i.e. the
-    stale key's narrowing is the cause, not another route. A control with the
-    EXACT spelling writes the edge under both code shapes, which is why this is an
-    exactness question and not a blanket skip.
+    ⚠️ CORRECTED (review round 24). An earlier version of this docstring, the commit
+    body and the #12341 closure claimed that DELETING the re-derive reds this test.
+    It does not, and it cannot: with the comprehension gone the folded set is empty,
+    `_subject_fold_only` is False, and the widened probe runs — measured, deleting
+    it leaves this file at 101 passed. What this test pins is the POSITION of the
+    derive (moving it above the correction loop: `1 failed`), and the ABSENCE of the
+    derive is pinned elsewhere, by
+    `tests/test_subject_binding_1370.py::TestCaptureSeam::test_a_fold_variant_of_a_subject_kind_name_skips_the_fold_only_carrier`
+    (`assert 1 == 0`, measured) — which only became discriminating once the redundant
+    seed `add` in the entity loop was removed (with the seed present it masked the
+    missing re-derive, which is exactly why the ten-file sweep in #12341 was
+    1036-green). Both directions are pinned; neither is pinned by this test alone.
     """
     import tortoise.extractor_v2 as ev2
 

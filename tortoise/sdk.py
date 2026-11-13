@@ -18004,8 +18004,9 @@ class TortoiseSDK:
                 # derived once, AFTER the `#12060` landed-layer correction below,
                 # because a guard redirect moves a name between the entity labels
                 # and the derived set must follow the write that LANDED. Maintaining
-                # it here as well was a dead store — written once per payload
-                # entity, then discarded before its only reader — and a trap: a
+                # it here as well was a dead store — written once per
+                # SUBJECT-KIND payload entity, then discarded before its only
+                # reader — and a trap: a
                 # later reader would take the seed as load-bearing and try to
                 # delta-maintain it, which cannot express "another name still holds
                 # this folded key".
