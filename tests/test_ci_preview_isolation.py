@@ -771,11 +771,12 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         raise
 
     # Job A: a real tree (a supervisor + two children, like wrangler + workerd).
-    # ⛔ JOB A'S OWN SPAWN IS A LEAK PATH TOO (#12227 review cycle 6). It runs BEFORE the
-    # `try:` below, so a failure in ANY of the three asserts that shape the tree leaks the
-    # supervisor, its two children AND the peer decoy — three 120 s processes in their own
-    # sessions — which the comment above used to claim "the later `finally` still reaps on
-    # the rest". It did not. This guard covers exactly that window; the `finally` below
+    # ⛔ JOB A'S OWN SPAWN IS A LEAK PATH TOO (#12227 review cycle 6). UNTIL CYCLE 10 IT
+    # RAN BEFORE THE `try:` below, so a failure in ANY of the three asserts that shape the
+    # tree leaked the supervisor, its two children AND the peer decoy — three 120 s
+    # processes in their own sessions — which the comment above used to claim "the later
+    # `finally` still reaps on the rest". It did not. This guard covers exactly that
+    # window; the `finally` below
     # covers everything from ITS `try:` onward — which is why `stop-all` is the first
     # statement inside it and nothing sits between the two arms. A double reap is a
     # suppressed no-op.
@@ -974,8 +975,8 @@ def test_a_raising_ps_poll_still_reaps_the_peer_decoy(
     was inside a `try:`, so a raise from `ps` left a 120 s `workerd` alive, reparented to
     pid 1.
 
-    Moving the poll back outside the guard leaves the REST of this file GREEN (measured:
-    43 passed) — nothing else injects a failure from the `ps` call, because the raising
+    Moving the poll back outside the guard leaves the REST of this file green — nothing
+    else injects a failure from the `ps` call, because the raising
     `_script` arm in `test_a_raising_stop_all_...` never reaches it. So the guard was
     unpinned while its own comment claimed nothing between the spawn and its reaper is
     unguarded; this pins it by raising from the poll ONLY and asserting the decoy is gone.

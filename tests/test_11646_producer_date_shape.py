@@ -828,17 +828,26 @@ def test_the_zone_child_gets_the_parents_sys_path_not_just_the_repo_root() -> No
     # resolution order, so a dedupe that sorts — or that moves an entry — changes WHICH
     # module a child resolves, and NO assertion above can see it: first-position,
     # membership and uniqueness all survive a pure reordering. ⚠️ The mutant must leave
-    # those three untouched and must ACTUALLY REORDER the tail, so it either keeps
-    # `repo_root` FIRST and reverses/sorts the rest — or it is not a falsifier at all:
+    # those three untouched and must ACTUALLY REORDER the tail — so it keeps the helper's
+    # `list(dict.fromkeys(...))` dedupe AND keeps `repo_root` first, reordering only the
+    # rest:
     #
-    #     [repo_root, *reversed([p for p in sys.path if p and p != repo_root])]
+    #     list(dict.fromkeys([repo_root,
+    #                         *reversed([p for p in sys.path if p and p != repo_root])]))
     #
+    # ⛔ KEEP THE DEDUPE. Dropping it from the mutant is not a simplification: pytest's
+    # `sys.path` on this repo already carries `<repo>/tests` TWICE, so a bare
+    # `[repo_root, *reversed(...)]` reds `assert len(entries) == len(set(entries))` at the
+    # uniqueness arm above and the ORDER assert is never reached — measured (`1 failed`,
+    # on `assert 8 == 7`). That is the same trap this paragraph exists to name, and it was
+    # wrong in an earlier cut of this very comment.
     # ⛔ VERIFY THE MUTANT CHANGED `entries` BEFORE TRUSTING A GREEN RUN. `sorted(...)` over
     # a tail that is ALREADY non-decreasing is the IDENTITY — the mutant asserts nothing,
     # passes, and a reader concludes the order arm is unpinned; `reversed(...)` below is a
     # no-op in the mirror case (an already-reverse-sorted tail), which is the strictly less
     # likely shape but the same trap. A mutant that leaves its input unchanged is not a
-    # falsifier, whichever way it is spelled.
+    # falsifier, whichever way it is spelled, and a mutant that trips a DIFFERENT arm proves
+    # nothing about this one.
     # ⛔ And `sorted({p for p in sys.path if p})` with NO `repo_root` prefix does NOT
     # isolate this assertion at all: it reds `entries[0] == repo_root` whenever some
     # `sys.path` entry sorts before the repo root — a macOS `/Library/Frameworks/...`
