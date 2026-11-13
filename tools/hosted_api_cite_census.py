@@ -10,7 +10,7 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 23502
+    uv run python tools/hosted_api_cite_census.py --pivot 23667
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
@@ -136,7 +136,7 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site —
 #: and that pin is what reds when a forward merge grows the module, which is the
 #: remedy this constant relies on rather than a hand sweep.
-DEFAULT_PIVOT = 23502
+DEFAULT_PIVOT = 23667
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"

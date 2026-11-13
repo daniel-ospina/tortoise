@@ -1,0 +1,5690 @@
+{
+ "arms": {
+  "midspan": {
+   "_found_after": 301,
+   "_found_before": 301,
+   "_rank_sum_after": 302,
+   "_rank_sum_before": 4594,
+   "gained": 165,
+   "lost": 0,
+   "mean_rank_after": 1.0,
+   "mean_rank_before": 15.26,
+   "mrr_after": 300.5,
+   "mrr_before": 44.06865079365083,
+   "mrr_mean_after": 0.7512,
+   "mrr_mean_before": 0.1102,
+   "ndcg10_after": 300.6309297535714,
+   "ndcg10_before": 65.28820279919597,
+   "ndcg_mean_after": 0.7516,
+   "ndcg_mean_before": 0.1632,
+   "pool_absent": 99,
+   "queries": 400,
+   "recall_at_10_after": 301,
+   "recall_at_10_before": 136,
+   "recall_pct_after": 75.2,
+   "recall_pct_before": 34.0
+  },
+  "prefix": {
+   "_found_after": 271,
+   "_found_before": 271,
+   "_rank_sum_after": 272,
+   "_rank_sum_before": 4465,
+   "gained": 165,
+   "lost": 0,
+   "mean_rank_after": 1.0,
+   "mean_rank_before": 16.48,
+   "mrr_after": 270.5,
+   "mrr_before": 36.14960317460319,
+   "mrr_mean_after": 0.6763,
+   "mrr_mean_before": 0.0904,
+   "ndcg10_after": 270.6309297535714,
+   "ndcg10_before": 52.049593752900435,
+   "ndcg_mean_after": 0.6766,
+   "ndcg_mean_before": 0.1301,
+   "pool_absent": 129,
+   "queries": 400,
+   "recall_at_10_after": 271,
+   "recall_at_10_before": 106,
+   "recall_pct_after": 67.8,
+   "recall_pct_before": 26.5
+  }
+ },
+ "config": {
+  "cut": 10,
+  "loadavg_1m": 14.0,
+  "model": "cross-encoder/ms-marco-MiniLM-L6-v2",
+  "pool_scored": 40,
+  "pool_scored_is_wired_default": true,
+  "pool_size": null,
+  "retrieval_limit": 40,
+  "torch_threads": 1,
+  "model_provenance": "recorded after the run: this artifact predates the harness recording the RESOLVED id (it wrote `args.model`, which is None unless --model is passed), so the field read `null`. The id here is what `fused_rerank_model()` resolves on this box with `TORTOISE_FUSED_RERANK_MODEL` unset \u2014 the same id the sibling noun-path artifact records by name for the same model. That env knob was not set for this run, so the scorer loaded this id. NO MEASURED VALUE changed; `tools/rerank_calibration_12297.py` now resolves the id ONCE and uses it for both the load and the report, so a future run records what it actually loaded even when the knob is set."
+ },
+ "corpus": {
+  "dir": "/home/cmux/.tortoise/session-events",
+  "elapsed_s": 2785.3,
+  "graph": "rerank12297_1794530438_106980",
+  "passages": 400,
+  "population_digest": "ba6699b97f026982"
+ },
+ "declared_query_construction": {
+  "rules": [
+   "prefix",
+   "midspan"
+  ],
+  "span_words": 8,
+  "why": "no fixed user-search query set exists on this box; the corpus's question-shaped turns are conversational follow-ups with no standalone referent. Queries are built from their own gold passage \u2014 declared, and NOT an estimate of production search quality."
+ },
+ "issue": 12297,
+ "latency": {
+  "device": "cpu (this box has no GPU)",
+  "ms_per_pair": 85.227,
+  "ms_per_query": 3357.0,
+  "pairs_scored": 31511,
+  "score_s": 2685.59
+ },
+ "measured_at": "2026-11-13T01:27:03Z",
+ "per_query": [
+  {
+   "gold": "rp-12297000000",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 15,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000000",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000001",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000001",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000002",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000002",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000003",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000003",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000004",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000004",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000005",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000005",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000006",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000006",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000007",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000007",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000008",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000008",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000009",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000009",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000010",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000010",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000011",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000011",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 29,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000012",
+   "pool": 18,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000012",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 15,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000013",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000013",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000014",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000014",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000015",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 39,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000015",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000016",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000016",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000017",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 24,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000017",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000018",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000018",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000019",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 37,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000019",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000020",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000020",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000021",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 28,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000021",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000022",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000022",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000023",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000023",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000024",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 30,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000024",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000025",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 22,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000025",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000026",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 39,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000026",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000027",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000027",
+   "pool": 25,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000028",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 19,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000028",
+   "pool": 31,
+   "rank_after": 0,
+   "rank_before": 19,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000029",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000029",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000030",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 24,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000030",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000031",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000031",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000032",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000032",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000033",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 10,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000033",
+   "pool": 31,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000034",
+   "pool": 29,
+   "rank_after": 0,
+   "rank_before": 10,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000034",
+   "pool": 39,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000035",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000035",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000036",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000036",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000037",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000037",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000038",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000038",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000039",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000039",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000040",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000040",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000041",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000041",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000042",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000042",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000043",
+   "pool": 33,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000043",
+   "pool": 29,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000044",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000044",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000045",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000045",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000046",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 39,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000046",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000047",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000047",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 29,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000048",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 20,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000048",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000049",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000049",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000050",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000050",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000051",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000051",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000052",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000052",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000053",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000053",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000054",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000054",
+   "pool": 13,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000055",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000055",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000056",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 39,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000056",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000057",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000057",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000058",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 39,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000058",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000059",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000059",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000060",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000060",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 24,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000061",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 39,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000061",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000062",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000062",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000063",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000063",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000064",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000064",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000065",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000065",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000066",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000066",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 39,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000067",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000067",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000068",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000068",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000069",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000069",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000070",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000070",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000071",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000071",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000072",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000072",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000073",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 34,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000073",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 29,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000074",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000074",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 36,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000075",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000075",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000076",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 28,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000076",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 28,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000077",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000077",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000078",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 31,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000078",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 19,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000079",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000079",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 34,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000080",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000080",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000081",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000081",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000082",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000082",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000083",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000083",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000084",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000084",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 34,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000085",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000085",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000086",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 34,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000086",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000087",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000087",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000088",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000088",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000089",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000089",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000090",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 19,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000090",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000091",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000091",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000092",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 30,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000092",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000093",
+   "pool": 40,
+   "rank_after": 1,
+   "rank_before": 19,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000093",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000094",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000094",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000095",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000095",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000096",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000096",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000097",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000097",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000098",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000098",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000099",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 39,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000099",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000100",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000100",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000101",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000101",
+   "pool": 25,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000102",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 15,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000102",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000103",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000103",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000104",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000104",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000105",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 10,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000105",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000106",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000106",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000107",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000107",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000108",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000108",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000109",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000109",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000110",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000110",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000111",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000111",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000112",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000112",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 23,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000113",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 19,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000113",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000114",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000114",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000115",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000115",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 37,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000116",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000116",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000117",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000117",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000118",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 36,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000118",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000119",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000119",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000120",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000120",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000121",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 22,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000121",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 29,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000122",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000122",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000123",
+   "pool": 18,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000123",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000124",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000124",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 15,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000125",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000125",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000126",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000126",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000127",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 15,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000127",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000128",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000128",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000129",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000129",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000130",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000130",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000131",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000131",
+   "pool": 12,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000132",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000132",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000133",
+   "pool": 30,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000133",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 36,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000134",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000134",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000135",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000135",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000136",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000136",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000137",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000137",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000138",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000138",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000139",
+   "pool": 36,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000139",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000140",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000140",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 20,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000141",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000141",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000142",
+   "pool": 23,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000142",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000143",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000143",
+   "pool": 15,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000144",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000144",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000145",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000145",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000146",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000146",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000147",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000147",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 24,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000148",
+   "pool": 8,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000148",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 29,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000149",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000149",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000150",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000150",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000151",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000151",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000152",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 29,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000152",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000153",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000153",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 38,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000154",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000154",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000155",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000155",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000156",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 20,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000156",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000157",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000157",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000158",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000158",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000159",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000159",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000160",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000160",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000161",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000161",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000162",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000162",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000163",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000163",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000164",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000164",
+   "pool": 34,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000165",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000165",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000166",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000166",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000167",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000167",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 19,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000168",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000168",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000169",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000169",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000170",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000170",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000171",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 22,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000171",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000172",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000172",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000173",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000173",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000174",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000174",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000175",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000175",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000176",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000176",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 30,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000177",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000177",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000178",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000178",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000179",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000179",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 28,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000180",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 15,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000180",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 30,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000181",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000181",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000182",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000182",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000183",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000183",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 22,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000184",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 19,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000184",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000185",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 36,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000185",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000186",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000186",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 30,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000187",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000187",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000188",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000188",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000189",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000189",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000190",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000190",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 20,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000191",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000191",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 28,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000192",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000192",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000193",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000193",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000194",
+   "pool": 24,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000194",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000195",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000195",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000196",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 15,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000196",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000197",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000197",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000198",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000198",
+   "pool": 35,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000199",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000199",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000200",
+   "pool": 13,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000200",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000201",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000201",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000202",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000202",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000203",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000203",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000204",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000204",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000205",
+   "pool": 23,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000205",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000206",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000206",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000207",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000207",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000208",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000208",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000209",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000209",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000210",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000210",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 23,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000211",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000211",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000212",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000212",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 34,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000213",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000213",
+   "pool": 12,
+   "rank_after": 0,
+   "rank_before": 10,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000214",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000214",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000215",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000215",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000216",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000216",
+   "pool": 19,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000217",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000217",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000218",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000218",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000219",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000219",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000220",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000220",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 30,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000221",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000221",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000222",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000222",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000223",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000223",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000224",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000224",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000225",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000225",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000226",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000226",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000227",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 30,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000227",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000228",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000228",
+   "pool": 22,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000229",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000229",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000230",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000230",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 28,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000231",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000231",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000232",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000232",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000233",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000233",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000234",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000234",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000235",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000235",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000236",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000236",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000237",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000237",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000238",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000238",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000239",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000239",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 39,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000240",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000240",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000241",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 20,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000241",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 20,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000242",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000242",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000243",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000243",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000244",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000244",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000245",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000245",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000246",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000246",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000247",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000247",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000248",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000248",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000249",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000249",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000250",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000250",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000251",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000251",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000252",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000252",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 23,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000253",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000253",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000254",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000254",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000255",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000255",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000256",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000256",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000257",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000257",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000258",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000258",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000259",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000259",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000260",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000260",
+   "pool": 31,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000261",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 20,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000261",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000262",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 10,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000262",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000263",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000263",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000264",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000264",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000265",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000265",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000266",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000266",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000267",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000267",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000268",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000268",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000269",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000269",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 28,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000270",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000270",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000271",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000271",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000272",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000272",
+   "pool": 28,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000273",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000273",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000274",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000274",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000275",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 15,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000275",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000276",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000276",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000277",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 24,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000277",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 10,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000278",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000278",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000279",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000279",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000280",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000280",
+   "pool": 40,
+   "rank_after": 1,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000281",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000281",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000282",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000282",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000283",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000283",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000284",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000284",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 34,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000285",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000285",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000286",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000286",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000287",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000287",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000288",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 36,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000288",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000289",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000289",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000290",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000290",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000291",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000291",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000292",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000292",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000293",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 23,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000293",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000294",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000294",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000295",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000295",
+   "pool": 34,
+   "rank_after": 0,
+   "rank_before": 22,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000296",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000296",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000297",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000297",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 28,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000298",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000298",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000299",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000299",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000300",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000300",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000301",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000301",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000302",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 20,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000302",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000303",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000303",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000304",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000304",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000305",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000305",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 22,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000306",
+   "pool": 32,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000306",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000307",
+   "pool": 37,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000307",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000308",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000308",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000309",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 34,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000309",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000310",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000310",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000311",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000311",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000312",
+   "pool": 32,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000312",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000313",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000313",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000314",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 29,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000314",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 34,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000315",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 29,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000315",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000316",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000316",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000317",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000317",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000318",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000318",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000319",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000319",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000320",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000320",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000321",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000321",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000322",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000322",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000323",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 23,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000323",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 19,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000324",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000324",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000325",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 28,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000325",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000326",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000326",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000327",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 38,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000327",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000328",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 31,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000328",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 15,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000329",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 10,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000329",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000330",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000330",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000331",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 20,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000331",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 30,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000332",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000332",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 16,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000333",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000333",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 15,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000334",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 31,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000334",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000335",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 15,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000335",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000336",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000336",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000337",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 10,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000337",
+   "pool": 23,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000338",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000338",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000339",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000339",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000340",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000340",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 39,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000341",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 39,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000341",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000342",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 29,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000342",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 23,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000343",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000343",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000344",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 33,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000344",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000345",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000345",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000346",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 13,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000346",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000347",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 21,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000347",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000348",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000348",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 0,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000349",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000349",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000350",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 23,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000350",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000351",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000351",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000352",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000352",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 14,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000353",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000353",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000354",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 10,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000354",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000355",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000355",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 11,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000356",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000356",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000357",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000357",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000358",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000358",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000359",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 29,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000359",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000360",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 28,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000360",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000361",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 32,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000361",
+   "pool": 17,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000362",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000362",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000363",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000363",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000364",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000364",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000365",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000365",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 34,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000366",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000366",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000367",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 10,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000367",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000368",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000368",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000369",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000369",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000370",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000370",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000371",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000371",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000372",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000372",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000373",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000373",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000374",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000374",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000375",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000375",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000376",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000376",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000377",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 23,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000377",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 4,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000378",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 24,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000378",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000379",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000379",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 10,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000380",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000380",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000381",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000381",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000382",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000382",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 29,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000383",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000383",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 35,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000384",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 5,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000384",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 23,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000385",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000385",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 25,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000386",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 38,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000386",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 37,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000387",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 24,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000387",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000388",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000388",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 7,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000389",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 1,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000389",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000390",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000390",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000391",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 12,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000391",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000392",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 2,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000392",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000393",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 19,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000393",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 8,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000394",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000394",
+   "pool": 40,
+   "rank_after": null,
+   "rank_before": null,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000395",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 6,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000395",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 26,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000396",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 20,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000396",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 9,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000397",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 23,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000397",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 27,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000398",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 3,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000398",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 18,
+   "rule": "midspan"
+  },
+  {
+   "gold": "rp-12297000399",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 28,
+   "rule": "prefix"
+  },
+  {
+   "gold": "rp-12297000399",
+   "pool": 40,
+   "rank_after": 0,
+   "rank_before": 17,
+   "rule": "midspan"
+  }
+ ],
+ "surface": "user search (fused point read)"
+}

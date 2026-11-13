@@ -4352,7 +4352,7 @@ def test_row_one_is_PARTIAL_because_ONE_writer_embeds_outside_the_gate(
     outside-gate writer holds the row **while the product does not name it**.
     The injected writer here is UNDECLARED on purpose (the register is empty),
     so this falsifier keeps its teeth; the DECLARED direction — the same writer,
-    named — is `test_a_named_ungated_writer_is_the_accepted_exception_reading_b`
+    named — is `test_a_named_UNGATED_writer_is_the_accepted_exception_reading_b`
     below. Dropping `undeclared` from the verdict reds this test.
     """
     _fake_rule_tree(tmp_path)
@@ -5532,6 +5532,48 @@ def _byref_sdk_source() -> str:
         "    def lambda_default_is_the_enclosing_scope(self):\n"
         "        f = lambda v=_review_pool: v\n"
         "        return f()\n"
+        # ⛔ `#12020` round 8 cycle 6 (P3): the LAMBDA BODY is its own scope too, and the walk
+        # descended into it — a walrus INSIDE a lambda landed in the METHOD's shadow set and
+        # suppressed a genuine by-reference mention further down (the under-report direction). `dis`
+        # confirms `lambda: (x := 1)` binds `x` as the lambda's own fast local.
+        "    def walrus_inside_a_LAMBDA_does_not_shade_the_body(self):\n"
+        "        f = lambda: (_review_pool := 1)\n"
+        "        return _safe(_review_pool)\n"
+        # ⛔ …but a lambda's DEFAULTS are evaluated in the ENCLOSING scope, so a walrus there DOES
+        # bind in the method (`symtable`: this method's locals include `_review_pool`, the lambda's
+        # do not) — the mention after it is not a reach. Pinned because the body fix skipped the
+        # whole `ast.Lambda` node and silently turned this arm into an over-report.
+        "    def walrus_in_a_LAMBDA_DEFAULT_named_like_an_entrant(self):\n"
+        "        f = lambda v=(_review_pool := 1): v\n"
+        "        return _safe(_review_pool)\n"
+        # ⛔ and the lambda BODY's own walrus shadows INSIDE the lambda, so a mention of that name
+        # later IN THE SAME LAMBDA is the lambda's binding, not the method's (`#12182` review P3:
+        # parameters were threaded and body targets were not, which published a spurious caveat).
+        "    def mention_inside_a_LAMBDA_after_its_own_walrus_named_like_an_entrant(self):\n"
+        "        f = lambda: (_safe((_review_pool := 1)), _safe(_review_pool))\n"
+        "        return f()\n"
+        # ⛔ …and a NESTED lambda is its own scope AGAIN, so a walrus in the INNER body must not
+        # suppress the OUTER lambda's mention of the method's binding — nor the method's own. Without
+        # this arm, descending into a nested lambda body left every other test green while dropping
+        # a real reach (the under-report direction), which the sibling comment above says is the
+        # dangerous one.
+        "    def nested_lambda_body_does_not_shade_the_enclosing_lambda(self):\n"
+        "        f = lambda: (lambda: (_review_pool := 1), _safe(_review_pool))\n"
+        "        return f()\n"
+        # ⛔ …and a COMPREHENSION's walrus binds in the scope that CONTAINS the comprehension — here
+        # that is the lambda, not the method — so a comprehension inside a lambda body must still be
+        # walked and its targets attributed to the LAMBDA. Skipping comprehensions inside the lambda
+        # body published the outer mention as a reach (the cry-wolf direction), and nothing reds.
+        "    def comprehension_inside_a_lambda_body_shadows_only_the_lambda(self):\n"
+        "        f = lambda: ([(_review_pool := i) for i in range(3)], _safe(_review_pool))\n"
+        "        return f()\n"
+        # ⛔ A KEYWORD-ONLY default is still a DEFAULT: `lambda *, v=(_p := 1): v` evaluates it in
+        # the enclosing scope exactly as a positional one does, and the walk has two separate lists
+        # (`defaults` and `kw_defaults`). Dropping the second left every other test green while
+        # publishing a spurious reach — so both lists are pinned, one arm each.
+        "    def walrus_in_a_KEYWORD_ONLY_LAMBDA_DEFAULT_named_like_an_entrant(self):\n"
+        "        f = lambda *, v=(_review_pool := 1): v\n"
+        "        return _safe(_review_pool)\n"
         # ── `#11397` review: `*. __class__` is only the ENCLOSING class when the base is an
         # in-module receiver; a foreign object's class is not this module's method.
         "    def foreign_dunder_class_receiver(self, other):\n"
@@ -5619,6 +5661,16 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
               # in the enclosing scope, so it is a reach too.
               "lambda_param_does_not_shade_the_body",
               "lambda_default_is_the_enclosing_scope",
+              # ⛔ and the lambda BODY is its own scope: a walrus there is the lambda's local, so a
+              # mention of the same name in the enclosing method is still a reach (round 8 cycle 6).
+              "walrus_inside_a_LAMBDA_does_not_shade_the_body",
+              # ⛔ and a NESTED lambda body is a third scope: the inner walrus is the INNER lambda's,
+              # so the outer lambda's mention is still a reach into the method.
+              "nested_lambda_body_does_not_shade_the_enclosing_lambda",
+              # ⛔ and a comprehension inside a lambda body binds in the LAMBDA (its containing
+              # scope), which is NOT the method — so the mention after it is the lambda's binding,
+              # not a reach. This arm asserts the NEGATIVE direction: skipping comprehensions inside
+              # a lambda body published it as a reach (cry-wolf), which nothing else reds.
               # ⛔ `#12020` round 6 review (P3): `type(self)` is the receiver spelled through the
               # type — the positive half of the pair whose NEGATIVE (`type(other)`) is asserted
               # beside `other.__class__` above.
@@ -5737,6 +5789,15 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
                       "nested_def_name_named_like_an_entrant",
                       "match_pattern_named_like_an_entrant",
                       "del_binding_named_like_an_entrant",
+                      # ⛔ and a lambda DEFAULT binds in the METHOD (`symtable`), unlike its BODY.
+                      "walrus_in_a_LAMBDA_DEFAULT_named_like_an_entrant",
+                      # ⛔ and the KEYWORD-ONLY spelling of the same rule (a separate list in the walk).
+                      "walrus_in_a_KEYWORD_ONLY_LAMBDA_DEFAULT_named_like_an_entrant",
+                      # ⛔ a comprehension walrus inside a lambda binds in the LAMBDA, so a mention
+                      # after it is the lambda's binding — not a method reach (the NEGATIVE half).
+                      "comprehension_inside_a_lambda_body_shadows_only_the_lambda",
+                      # ⛔ a mention of the lambda's OWN walrus target, later in the SAME lambda.
+                      "mention_inside_a_LAMBDA_after_its_own_walrus_named_like_an_entrant",
                       # …and the boundary of the `cls` receiver: a plain parameter named `cls`
                       # on a method whose FIRST argument is `self` is a foreign object, not the
                       # class — only the classmethod's own first parameter is the class receiver.
@@ -8338,60 +8399,105 @@ def test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING():
             graph.delete()
 
 
-def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
-    """#9314 — a duplicated literal key collapses BEFORE any code can see it.
+# ── the census half's duplicate-key detector (`#12182` review cycle 7, P2) ────────────────────────
+def test_the_census_has_no_DUPLICATE_dict_key_in_its_source() -> None:
+    """`WRITER_CENSUS` / `CENSUS_EVIDENCE` / `WRITER_LABEL_OVERRIDES` must not declare a key twice.
 
-    `WRITER_CENSUS` and `CENSUS_EVIDENCE` are dict literals, so Python keeps the
-    LAST binding and the earlier row is dead: the RUNTIME object cannot report the
-    duplicate, because it never saw one (`census_evidence_violations()` compares
-    key SETS, which are already collapsed). `#11996` landed exactly that pair in
-    both dicts, and these DICT duplicates were caught only by `ruff`'s `F601` —
-    post-merge, on the merge ref every open PR inherits.
+    ⛔ WHY THIS EXISTS, NOT AS ADVICE BUT AS A DETECTOR (`#12182` review cycle 7, P2). The register
+    half catches a duplicate itself: `load()` raises `DuplicateWriterDeclaration`, and because
+    `EMBED_WRITER_CLASSES = load(_DECLARATIONS)` runs at import, a merged tree carrying two entries
+    for one key cannot even be imported. Measured on PR #12182: `main`'s `#12016` and that branch each
+    added a `tortoise.sdk::create_source` declaration, both branches were green, and the forward merge
+    produced a duplicate that the guard rejected at import — the failure was CAUGHT only there.
 
-    So this pin is re-derived from the SOURCE AST and runs in the pytest lane,
-    which is the half the lint job cannot cover. `load()` in
-    `tortoise/embed_writer_register.py` already fails loud on the register's
-    tuple-of-pairs for the same reason; the dicts here had no equivalent.
+    The census half has no such guard. A dict literal accepts a repeated key silently and keeps the
+    LAST entry, so the same merge shape here does not fail — it quietly selects one of two
+    contradicting reasons, and `WRITER_CENSUS`'s class is what row-2 scoring reads (`bypass` /
+    `real_bypasses`). Measured: appending a second `create_source` row still imports, still has 23
+    keys (re-read at this tree, `#12182` cycle 9 — the figure read 22 on the tree that authored the
+    sentence, and `main`'s merge has added rows since), and leaves the census↔evidence key-set
+    equality green, with the appended — false — prose as the survivor.
 
-    ⛔ `main` was red from TWO causes at `9828250732`, and this pin closes the
-    second: the register's duplicate raised at import (so this whole file could not
-    even collect), while the dict duplicates here were caught only by `ruff`'s
-    `F601` after the merge — never in the pytest lane.
+    Read from SOURCE, not from the imported dicts: the import has already collapsed a duplicate, so
+    the evidence it could report is gone by the time this test could look at it.
     """
-    src = (probe.REPO_ROOT / "tools/dod_5090_probe.py").read_text(encoding="utf-8")
+    import ast
+
+    src = Path(probe.__file__).read_text(encoding="utf-8")
     tree = ast.parse(src)
-
-    wanted = {"WRITER_CENSUS", "CENSUS_EVIDENCE"}
-    keys_by_dict: dict[str, list[str]] = {}
-    for stmt in tree.body:
-        name: str | None = None
-        value = None
-        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-            name, value = stmt.target.id, stmt.value
-        elif (
-            isinstance(stmt, ast.Assign)
-            and len(stmt.targets) == 1
-            and isinstance(stmt.targets[0], ast.Name)
-        ):
-            name, value = stmt.targets[0].id, stmt.value
-        if name in wanted and isinstance(value, ast.Dict):
-            keys_by_dict[name] = [
-                ast.literal_eval(k) for k in value.keys if k is not None
-            ]
-
-    assert set(keys_by_dict) == wanted, (
-        "the declarations this pin reads were renamed or stopped being a dict "
-        f"literal — found {sorted(keys_by_dict)}, wanted {sorted(wanted)}. "
-        "Re-derive the pin rather than deleting it")
-    for name, keys in keys_by_dict.items():
-        assert len(keys) >= 10, (
-            f"{name} parsed to {len(keys)} literal keys — too few to be the real "
-            "table, so this pin would pass vacuously")
+    wanted = {"WRITER_CENSUS", "CENSUS_EVIDENCE", "WRITER_LABEL_OVERRIDES"}
+    seen: dict[str, list[str]] = {}
+    # ⛔ MODULE TOP LEVEL ONLY (`tree.body`), NOT `ast.walk`. These three tables are module-level
+    # declarations, so a top-level scan is both sufficient and the only scope where "the table" is a
+    # single object: a walk also visits a same-named literal inside a function, and that literal is
+    # not the table.
+    # ⚠️ What this scope is NOT: a duplicate fail-open fix. `assert not dupes` below fires PER
+    # VISITED NODE, so a duplicate in the real table reds whether or not a decoy literal exists —
+    # re-measured on the pre-`tree.body` version: real duplicate plus a 23-key decoy → RED, not
+    # clean. `seen` is last-wins, so a decoy CAN shadow the TRAILING checks that read it — the
+    # key-count comparison against the runtime dict AND the per-literal key floors below — while a
+    # decoy naming a table ABSENT from the top level also satisfies the vacuity `set(seen) == wanted`.
+    # Narrowing the scan removes that window; it does not close a duplicate fail-open, because there
+    # was none. What a walk DOES get wrong in the other direction: a 5-key function-local literal
+    # bearing the same name FALSE-BLOCKS on the floors below (measured), so the narrowing is not
+    # cosmetic either.
+    # ⚠️ And this is a DIRECTIVE, not a pin: restoring `ast.walk` leaves this file GREEN (measured),
+    # so nothing reds if a later lane widens it back. Re-derive the reason before changing the scope.
+    for node in tree.body:
+        if not isinstance(node, ast.AnnAssign | ast.Assign):
+            continue
+        targets = [node.target] if isinstance(node, ast.AnnAssign) else list(node.targets)
+        names = [t.id for t in targets if isinstance(t, ast.Name) and t.id in wanted]
+        if not names or not isinstance(node.value, ast.Dict):
+            continue
+        # ⛔ A key that is NOT a string literal (an alias like `_ALIAS_KEY = "…"` used as a key, a
+        # splat, any computed expression) must FAIL here rather than be filtered out. Filtering made
+        # the same name declared twice under one literal and once behind the alias collapse to "no
+        # duplicate" in BOTH checks below — the alias is skipped, and the literal-vs-runtime count
+        # still agrees, because the runtime dict collapses identically. Measured on a copy of this
+        # tree (`#12182` cycle 10): `_ALIAS_KEY = "tortoise.api::_emit"` plus `_ALIAS_KEY: (…)` in
+        # `WRITER_CENSUS` stayed GREEN here while `main`'s dropped `#9314` pin, which called
+        # `ast.literal_eval`, raised on the same file. That is the one shape where this detector was
+        # NARROWER than the pin it replaced: fail on it, never re-filter it.
+        keys: list[str] = []
+        for k in node.value.keys:
+            assert isinstance(k, ast.Constant) and isinstance(k.value, str), (
+                f"{names[0]} carries a key that is not a string LITERAL ({type(k).__name__}). This "
+                "pin reads literal keys, so an aliased or computed key is invisible to it — and a "
+                "duplicate hidden behind one is exactly the fail-open this detector exists to stop "
+                "(#9314). Spell the key as a literal, or re-derive the detector")
+            keys.append(k.value)
         dupes = sorted({k for k in keys if keys.count(k) > 1})
         assert not dupes, (
-            f"{name} declares {dupes} more than once. Python keeps the LAST "
-            "binding, so the earlier row is DEAD — an active override, not a "
-            "harmless no-op (#9314, measured on #11996)")
+            f"{names[0]} declares the same key more than once: {dupes}. A dict literal keeps the "
+            "LAST silently, so the earlier entry's reason is discarded with nothing red — which is "
+            "how a forward merge picks the wrong copy. Delete the stale row and say in a comment "
+            "which one survived and why")
+        seen[names[0]] = keys
+    # A vacuous pass is the failure mode of a source-reading test: if none of the three literals was
+    # found AT TOP LEVEL, nothing was checked. All three exist there today, so a MISS means a table
+    # was moved into a scope this detector no longer reads — re-derive it deliberately, do not widen
+    # it back to `ast.walk` (a decoy literal would then also feed `seen`, masking the vacuity check
+    # below and the floor/count assertions that read it, and a smaller one would false-block on the
+    # floors).
+    assert set(seen) == wanted, (
+        f"these census dict literals were not found in {probe.__file__}: "
+        f"{sorted(wanted - set(seen))} — the detector checked nothing for them")
+    # …and a literal found with a HANDFUL of keys is the same vacuity one level down: the walk above
+    # would happily report "no duplicates" over a population that is not the real table. The floors
+    # are well under the measured sizes (23 / 24 / 1 at this tree) on purpose — this is a
+    # still-the-real-table check, not a pin on a count that moves with every merge.
+    floors = {"WRITER_CENSUS": 10, "CENSUS_EVIDENCE": 10, "WRITER_LABEL_OVERRIDES": 1}
+    thin = {n: len(keys) for n, keys in seen.items() if len(keys) < floors[n]}
+    assert not thin, (
+        f"these census literals parsed to fewer literal keys than the real tables carry: {thin} "
+        f"(floors {floors}) — the detector would be checking a fragment, not the table")
+    # …and the collapsed dict the rest of the probe actually uses must still agree on size, so a
+    # delete-one-of-two edit cannot silently shrink the population instead of de-duplicating it.
+    for name in sorted(wanted):
+        assert len(seen[name]) == len(getattr(probe, name)), (
+            f"the {name} literal and the imported dict disagree on their key count — a literal key "
+            "is being shadowed by something other than a duplicate")
 # ── #12265 (root: #9314) — a duplicated declaration key is a SILENT loser ────
 #
 # `#11996` landed two duplicate `"tortoise.sdk::create_source"` rows in

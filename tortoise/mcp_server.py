@@ -3759,6 +3759,94 @@ def _public_filters(filters: Any) -> dict:
     return {k: v for k, v in filters.items() if k not in PRIVATE_FILTER_KEYS}
 
 
+#: #12372 — where to enumerate each entity type, once `tortoise_query`'s
+#: structural/tag arms have refused it. EVERY entry either completes in one
+#: call, or states the bound it hits and where the layer's SIZE comes from —
+#: because a remedy that answers `[]` (no conditions) or a `limit`-truncated
+#: bare list is the same false PASS this guard removes, one level down:
+#: `run_structural_query` returns `[]` when it has no conditions
+#: (`tortoise/search_engine.py`, the `if not conditions` gate records
+#: `reason="empty_results"`), and `tortoise_search` slices at `limit`
+#: (default 10) with no total in the response. `operator` is the one type whose
+#: bare search REACHES its layer directly (the leg appends
+#: `n.is_operator = true`) — but through a status-filtered view, and only for
+#: operators stated that way — and even that needs `limit` raised, which is why
+#: the generic advice looked plausible when this was written.
+_ENTITY_TYPE_REMEDY: dict[str, str] = {
+    "operator": (
+        "Enumerate it with tortoise_search(entity_type='operator', "
+        "limit=10000) — one call at the SDK's maximum. That tool has no "
+        "offset walk and slices at `limit` (default 10), so a limit-less "
+        "call answers a SILENTLY TRUNCATED layer, and a layer above 10,000 "
+        "rows has no single-call read. It answers the CURRENT VIEW, not the "
+        "label: the structural leg is status-filtered "
+        "(`search_engine._STATUS_FILTERED_LABELS` includes `Point`), so a "
+        "terminally-stated operator is not returned. A short answer therefore "
+        "has NAMED causes — that status filter, and operators carrying only "
+        "`op_type`, which this leg cannot see although "
+        "tortoise_graph_overview(section='structure').operators counts them "
+        "over EVERY status — and a SILENT one: the leg has a 500 ms driver "
+        "budget and a circuit breaker, and on either it answers [] with no "
+        "field reporting it."),
+    "event": (
+        "Enumerate it with tortoise_get_entity(None, type='events', "
+        "limit=...) — reconcilable against the graph's own Event count — "
+        "but it DEFAULTS TO 20 and answers a bare list with no total, so a "
+        "limit-less call returns a SILENTLY TRUNCATED window: pass the "
+        "limit you need. Or tortoise_search(entity_type='event', "
+        "kind=<eventKind>, limit=10000) — one kind per call, which also "
+        "slices at `limit` (default 10, no total) — and that arm carries the "
+        "structural leg's SILENT causes too: a 500 ms driver budget and a "
+        "circuit breaker, either of which answers [] with no field reporting "
+        "it."),
+    "source": (
+        "Enumerate it with tortoise_graph_overview(section='sources') — it "
+        "lists every provenance Source with its point count, in one call."),
+    "document": (
+        "No bulk listing: tortoise_search(entity_type='document', "
+        "kind=<documentKind>, limit=10000) answers ONE kind at a time and "
+        "slices at `limit` (default 10, no total). D10 retires :Document — a "
+        "document IS a :Source — so the layer is counts.Source in "
+        "tortoise_graph_overview(section='status') MINUS the provenance "
+        "Sources that section 'sources' lists: those are the "
+        "`documentKind IS NULL` complement (`sdk.list_sources`), and "
+        "counts.Source is the union of both. A gap against that partition has "
+        "NAMED causes (the kinds you did not name) and a SILENT one: the leg "
+        "has a 500 ms driver budget and a circuit breaker, and on either it "
+        "answers [] with no field reporting it."),
+    "object": (
+        "No bulk listing — and none is planned (#12378 keeps these as counts): "
+        "tortoise_search(entity_type='object', kind=<objectKind>, "
+        "limit=10000) answers ONE kind at a time, slices at `limit` (default "
+        "10, no total) and reads the CURRENT VIEW — a terminal-status Object "
+        "is excluded (`search_engine._STATUS_FILTERED_LABELS`) — so a gap "
+        "against counts.Object in tortoise_graph_overview(section='status') "
+        "has NAMED causes (that status filter, and the kinds you did not "
+        "name) and a SILENT one: the leg has a 500 ms driver budget and a "
+        "circuit breaker, and on either it answers [] with no field "
+        "reporting it."),
+    "subject": (
+        "No bulk listing — and none is planned (#12378 keeps these as counts): "
+        "tortoise_search(entity_type='subject', kind=<subjectKind>, "
+        "limit=10000) answers ONE kind at a time, slices at `limit` (default "
+        "10, no total) and reads the CURRENT VIEW — a terminal-status Subject "
+        "is excluded (`search_engine._STATUS_FILTERED_LABELS`) — so a gap "
+        "against counts.Subject in tortoise_graph_overview(section='status') "
+        "has NAMED causes (that status filter, and the kinds you did not "
+        "name) and a SILENT one: the leg has a 500 ms driver budget and a "
+        "circuit breaker, and on either it answers [] with no field "
+        "reporting it."),
+}
+
+#: #12372 — the remedy for a vocabulary member that arrives without an entry: a
+#: refusal, never a `KeyError` out of the tool body (the docstring promises a
+#: structured error dict for validation violations, and only a test — not the
+#: code — would otherwise stand between the two).
+_ENTITY_TYPE_REMEDY_FALLBACK = (
+    "No bulk enumeration is known for this entity type yet; its size is in "
+    "tortoise_graph_overview.")
+
+
 # ⚠️ DOC NOTE (#10063) — the docstring below opens with "structural exact-match
 # retrieval", and since #10063's fix that phrase is very slightly NARROW for
 # exactly two keys: `extractedFrom` / `extractedFromAll` answer through a UNION
@@ -3791,7 +3879,10 @@ def tortoise_query(kind: str | None = None,
       (default 100 — see the #10602 note below).
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
-      ignores kind/filters/min_confidence/entity_type/order_by.
+      ignores kind/filters/min_confidence/order_by; a non-Point `entity_type`
+      is REFUSED there (and on the structural arms) rather than dropped —
+      those arms read the Point label only, and the refusal names the
+      per-type enumerator to use instead (#12372).
     - Pagination: pass offset=/limit= (or 1-based page=). When offset=/page= is
       set, returns {results, total, hasMore} (previously
       tortoise_paginated_query); a plain list is returned otherwise. `limit`
@@ -3826,6 +3917,73 @@ def tortoise_query(kind: str | None = None,
             filters.pop("include_retracted")
     paginated = offset is not None or page is not None
     eff_limit = limit if limit is not None else (20 if paginated else 100)
+    # ── #12372: `entity_type` was DROPPED on every arm except `text=` ────────
+    # The signature has always taken `entity_type`, but only the `text=` arm
+    # forwarded it (into `sdk.tortoise_fts_query`, which honours it). The tag
+    # arm documents that it ignores the argument; the paginated arm and the
+    # plain structural arm call `sdk.paginated_query(kind, skip, limit, …)`,
+    # which has no `entity_type` parameter at all — it is a Point reader by
+    # construction (`MATCH (n:Point) …`). Measured against live-v4 on
+    # 2026-11-13: `entity_type="operator", offset=0, limit=5` answered
+    # `{total: 15842, …points…}` — byte-identical to `entity_type="point"` —
+    # for a layer that is 3,727 rows (`structure.operators`), with `total` and
+    # `hasMore` shaped as if they described the REQUESTED population. That is a
+    # false PASS on a read instrument (#6146): the wrong answer is
+    # indistinguishable from the right one.
+    #
+    # So the arms that cannot serve a non-Point type now REFUSE, above the
+    # branch so they refuse BEFORE any read (a guard placed after the read
+    # would still pay it, and could still serve it on an error path).
+    # `entity_type="point"` — the default — is what these arms actually serve
+    # and stays served; the `text=` arm keeps its forward unchanged, because
+    # the fts leg DOES honour the argument (refusing it here would be a false
+    # block on a combination that works).
+    if entity_type in (None, ""):
+        # ONE spelling, one meaning (#12372 review P2). A JSON payload with a
+        # missing key hands us `None`, and `""` is the same caller intent. The
+        # structural arms used to serve both as Points while the `text=` arm
+        # passed the RAW value to the SDK, whose `tortoise_fts_query` refuses it
+        # (`ValueError`, sdk.py:40829) — one argument value answering two
+        # different ways depending on which arm a caller happened to use.
+        # Resolved HERE, above every arm, so all of them see one value.
+        entity_type = "point"
+    # The vocabulary refusal is the OWNER's (tortoise/security.py), and it is
+    # asked ONCE, above every arm — a per-arm copy is how one invalid value ends
+    # up with two different messages (`text=` used to surface the SDK's own
+    # re-typed copy from sdk.py:40830 while the structural arms surfaced this
+    # one), and a second copy of the message is what drifts. `point` is a
+    # member, so the served path cannot be blocked here.
+    from tortoise.security import validate_entity_type
+
+    try:
+        validate_entity_type(entity_type)
+    except ValueError as exc:
+        return _SafeError({"error": str(exc)})
+    # A blank `text` is classified by the legs as "no query" (`query.strip()` in
+    # `tortoise/search_engine.py`), so the structural leg fires with NO condition
+    # and answers `[]` with `reason="empty_results"` — an empty result
+    # indistinguishable from a complete one. Refuse that shape for a non-point
+    # type, with three bounds that keep it exactly as wide as the problem:
+    #   * `not kind` (not `kind is None`): the leg's own predicate is truthiness,
+    #     so `kind=""` leaves it conditionless too;
+    #   * EXCEPT `operator`, whose leg appends its own condition
+    #     (`n.is_operator = true`) and therefore really does answer;
+    #   * and never for a non-str `text`: refusing that is the SDK's job, and
+    #     `.strip()` here would raise out of the tool body instead of returning
+    #     the structured error the docstring promises.
+    _blank_text = (
+        isinstance(text, str) and not text.strip() and not kind
+        and entity_type != "operator"
+    )
+    if entity_type != "point" and (tag is not None or not text or _blank_text):
+        return _SafeError({"error": (
+            f"entity_type={entity_type!r} is not served on this path: "
+            f"tortoise_query's structural and tag arms read the Point label "
+            f"only, and this argument used to be dropped silently (#12372), "
+            f"answering the Points population as if it were the requested "
+            f"one. {_ENTITY_TYPE_REMEDY.get(entity_type, _ENTITY_TYPE_REMEDY_FALLBACK)} "
+            f"For a structural Point read, omit entity_type or pass 'point' "
+            f"(its default).")})
     if tag is not None:
         # #7983: record what this call SERVES — the page delivered from the
         # post-filter list (at most `limit`), for a paginated or un-paginated
@@ -4147,10 +4305,22 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
 
     Uses hybrid search (tortoise_fts_query) for semantic entity resolution.
     Falls back to string match (CONTAINS) if hybrid search unavailable.
-    Returns [{id, name, kind, confidence}] sorted by confidence DESC.
+    Returns [{id, name, kind, confidence}] in the read's own (relevance) order;
+    the ``suggest_entry_points`` FALLBACK sorts the match by confidence DESC.
     """
     try:
-        results = _safe(_get_org_sdk().tortoise_fts_query, query, kind=kind_filter, limit=limit)
+        # #12297: THE RETURNED PAGE **IS** THE RESOLUTION RESULT SET, at
+        # ``limit`` default 5 — far inside the shipped pool width of 40 — so an
+        # armed rerank changes WHICH entities resolve rather than merely their
+        # order, and there is no ``leg_trace`` here to disclose it: the
+        # "membership probe reading a page smaller than the pool width" class
+        # this PR's own docstring defines. ⛔ This function does NOT sort (it
+        # returns ``_safe(...)``'s list as-is, see the return below); the
+        # confidence-DESC sort lives in the SDK lane it mirrors,
+        # ``sdk.suggest_entry_points``, which opts out for its own reason.
+        results = _safe(_get_org_sdk().tortoise_fts_query, query,
+                        kind=kind_filter, limit=limit,
+                        _rerank_candidates=False)
         # #3926: a _safe failure is an _SafeError (never a list), so the
         # list check alone is the failure gate — a row whose props carry a
         # user key named "error" must still resolve.

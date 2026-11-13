@@ -786,6 +786,23 @@ _FOREIGN_KIND_PAYLOAD = {
     "operators": [], "chain_notes": [], "link_before_create": [],
 }
 
+#: A fold-equivalent VARIANT of a subject-kind name ("the acme corp" vs the
+#: declared Subject "Acme Corp"); the narrowed probe must not attribute a
+#: fold-only Object carrier.
+_FOLD_VARIANT_PAYLOAD = {
+    "entities": [
+        {"name": "Acme Corp", "kind": "organization", "lifecycle": "created",
+         "supersedes": None, "note": None},
+    ],
+    "events": [],
+    "points": [{
+        "content": "the fold-variant mention shipped", "pointKind": "statement",
+        "about_entities": ["the acme corp"],
+        "slots": {},
+    }],
+    "operators": [], "chain_notes": [], "link_before_create": [],
+}
+
 #: Case-only divergence (F6): subject entity "The Team" and a legitimately
 #: cased Object "the team"; the exact-name skip must NOT drop the latter.
 _CASE_PAYLOAD = {
@@ -917,6 +934,34 @@ class TestCaptureSeam:
         assert proj.g.query(
             "MATCH (:Point)-[:aboutObject]->(:Object {name:'the team'}) "
             "RETURN count(*)").result_set[0][0] == 1
+
+    def test_a_fold_variant_of_a_subject_kind_name_skips_the_fold_only_carrier(
+            self, journal_sdk, monkeypatch):
+        """#12120 review round 3: the subject-channel NARROWING, capture side.
+
+        The probe below is fold-wide, so when the reference only FOLD-equals a
+        declared subject-kind name, a fold-only Object carrier must not be
+        attributed (the un-gated `aboutObject` edge the `#1370`/`#4934` rule
+        forbids). An EXACT-name carrier still is — that is
+        `test_case_only_mismatch_still_gets_its_about_object_edge` above, which
+        this narrowing must keep green.
+        """
+        import tortoise.sdk as sdk_mod
+        monkeypatch.setattr(sdk_mod, "_V2SessionMock", _make_slots_mock(
+            _FOLD_VARIANT_PAYLOAD))
+        sdk, _ = journal_sdk
+        proj = sdk._get_proj()
+        proj.g.query(
+            "MERGE (o:Object {name:'Acme Corp'}) "
+            "SET o.objectKind='core:plan', o.canonical_name='acme corp'")
+        r = sdk._capture_session(CONV, session_id="s1370-foldvariant")
+        assert r["ok"] is True, r
+        n = proj.g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object {name:'Acme Corp'}) "
+            "RETURN count(*)").result_set[0][0]
+        assert n == 0, (
+            "a fold-only spelling of a subject-kind name wrote the un-gated "
+            f"aboutObject edge ({n})")
 
     def test_capture_object_slot_confidence_survives_the_legacy_edge(
             self, journal_sdk):

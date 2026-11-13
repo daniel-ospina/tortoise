@@ -449,7 +449,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:843`: `E
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
 (`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:3032-3057`,
-reached from the capture path at `sdk.py:19262` (`proj.link_source_to_event(source_key,
+reached from the capture path at `sdk.py:19340` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
 
@@ -497,7 +497,7 @@ does not re-emit the pre-amendment figure as if it were this run's — and it sa
 
 ⛔ **E3's Point denominator mixes classes that CANNOT derive, and the figure is taken over the
 writer class — not over the link.** Of the 338 `Point` nodes: **159 mechanical turn rows**
-(`_write_capture_turns`, `_TURN_WRITE_CYPHER` at `sdk.py:2593`, wired only by `CONTAINS`),
+(`_write_capture_turns`, `_TURN_WRITE_CYPHER` at `sdk.py:2594`, wired only by `CONTAINS`),
 **141 extraction claims**, **29 operator Points** and **9 other Points** — each class read off the
 property its **writer** stamps (`is_episodic`, `is_operator`, an `extractedFrom` edge), none
 hand-typed, and each printed with its own anchored count.
@@ -1225,7 +1225,7 @@ steps unobserved and refused at G5 for EVERY input. That was a property of the c
 not of §4.4 or of the pipeline: the steps' surfaces are BUILT unconditionally, and the surface the
 probe was handed did not say so. The drop was one layer ABOVE the extractor — it builds
 `result["vet"]` and `result["classify_later"]`, and the SDK's meta fold
-(`tortoise/sdk.py:18864`, `"stats": _capture_stats_with_step_witness(out, len(extracted))` inside
+(`tortoise/sdk.py:18942`, `"stats": _capture_stats_with_step_witness(out, len(extracted))` inside
 `_extract_session_v2`) forwarded `stats` and `error_census` only.
 
 **#9116 LANDED that seam** — `_capture_step_witness` (``tortoise/sdk.py``) copies each stage's own

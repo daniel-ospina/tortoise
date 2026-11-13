@@ -2232,12 +2232,31 @@ def test_the_derivation_is_pinned_to_the_folds_own_lifecycle_writes():
     )
     # Subject: `commit_ops` builds ONE state map carrying both keys, and the
     # generic `SET s += $s` fold applies it atomically.
+    #
+    # ⛔ THE VALUE IS AN IDENTIFIER, NOT A LITERAL NAME (conflict-sweep lane F).
+    # This pin used to spell `supersededBy": supersedes_by`, and #12120
+    # deliberately changed that value to `_stored_successor` — the successor's
+    # STORED spelling rather than the record's, so every RAW name-keyed reader
+    # (audit 4b/4c, assembly's visible-successor probe, the renderer) can resolve
+    # it. The property this pin exists for is "both keys in ONE map", which the
+    # change preserves; spelling the old variable made the pin fail on a correct
+    # fix, which is a stale pin rather than a regression.
     ops = (REPO_ROOT / "tortoise" / "commit_ops.py").read_text()
     assert re.search(
-        r'state = \{"status": "superseded", "supersededBy": supersedes_by,', ops
+        r'state = \{"status": "superseded", "supersededBy": \w+[,\n]', ops
     ), (
         "`commit_ops._apply_subject_supersession` no longer journals status and "
         "supersededBy in ONE state map — the Subject derivation lost its carrier"
+    )
+    # …and the #12120 half, pinned separately so it cannot silently revert: the
+    # value must be the STORED spelling, not the record's.
+    assert re.search(
+        r'state = \{"status": "superseded", "supersededBy": _stored_successor,',
+        ops,
+    ), (
+        "`_apply_subject_supersession` stopped recording the SUCCESSOR's stored "
+        "spelling (#12120) — raw name-keyed readers of `supersededBy` can no "
+        "longer resolve it"
     )
     # The MUTATION path is the record's second writer, and it is the one that
     # produces `superseded_at` with NO `superseded_by` (an id-only event). Pin
