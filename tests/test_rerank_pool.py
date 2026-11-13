@@ -459,9 +459,29 @@ def test_an_opted_in_rerank_that_could_not_read_its_texts_says_so(
     assert entries[0][rerank.RERANK_UNSCORED_KEY] > 0
 
 
+def test_a_read_with_no_text_property_says_that_instead_of_blaming_the_read(
+        sdk, monkeypatch):
+    """``no_text_field`` is DEFENSIVE (every accepted ``entity_type`` has a
+    declared property today), so it is exercised here by patching the resolver —
+    otherwise the arm is silently dead and the next label that lacks a field
+    reports "the read broke" when the truth is "there is nothing to score"."""
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    _seed(sdk, 3)
+    monkeypatch.setattr(sdk_mod, "_rerank_text_field", lambda *a, **k: None)
+    trace: list[dict] = []
+    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=3,
+                           leg_trace=trace)
+    entry = _rerank_entries(trace)[0]
+    assert entry["reason"] == "no_text_field" and entry["ran"] is False
+    assert entry[rerank.RERANK_UNSCORED_KEY] > 0
+
+
 def test_a_degraded_scorer_reports_every_candidate_unscored(sdk, monkeypatch):
     """A rerank that ORDERED NOTHING left the whole pool unscored — reporting
-    ``unscored: 0`` there is the same false all-clear as the pre-fix applied arm."""
+    ``unscored: 0`` there is the same false all-clear as the pre-fix applied arm.
+
+    ``rerank_pool`` is the WIDTH BOUND, so it still reads 40 here: the bound
+    applied, nothing scored under it."""
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     _inject(RuntimeError("model unavailable"), monkeypatch)
     _seed(sdk, 4)

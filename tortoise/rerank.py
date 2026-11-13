@@ -100,9 +100,14 @@ DEFAULT_FUSED_RERANK_POOL = 40
 #: the ``leg="rerank"`` entry. Additive keys, the #4999 ``mechanism`` precedent:
 #: the cap is reported ALONGSIDE the leg verdict, never through ``degraded``
 #: (which in a leg trace means "a retrieval leg did not run", #8487 review P1).
-#: ``rerank_pool`` is how many leading candidates were SCORED; rows past it keep
-#: their retrieval order and can never be promoted, so a caller that opted in
-#: must be able to tell "the reranker decided" from "it never saw that row".
+#: ``rerank_pool`` is the WIDTH BOUND APPLIED — the most candidates that COULD
+#: have been scored — not the number that were. ``rerank_scored`` is that count
+#: and ``rerank_unscored`` is the pool minus it, so on a degraded arm the triple
+#: reads ``pool=40, scored=0, unscored=len(pool)``: the bound is still the bound,
+#: nothing was scored under it. Read the key as the cap, never as an achievement.
+#: Rows past the width keep their retrieval order and can never be promoted, so a
+#: caller that opted in must be able to tell "the reranker decided" from "it
+#: never saw that row".
 RERANK_POOL_KEY = "rerank_pool"
 RERANK_SCORED_KEY = "rerank_scored"
 RERANK_UNSCORED_KEY = "rerank_unscored"

@@ -203,8 +203,12 @@ phantom filename they could.
 
 ## 6. Latency, at the real pool size, on CPU
 
-Measured over **39,930 pairs** in the arm-4 run, torch intra-op threads pinned to
-**1**:
+Measured over **39,930 pairs** in the arm-4 run (torch intra-op threads pinned to
+**1**). The count is the arm's own arithmetic, so it is checkable against §2/§3:
+**300 mentions × (15 + 40) = 16,500** exact-arm pairs + **426 variants × (15 + 40)
+= 23,430** variant pairs, recorded in `arms.rerank.latency.pairs_scored` beside
+`score_s` and the per-pair mean — the three reconcile (`5.179 ms × 39,930 =
+206.8 s`). It is the 300-mention sample, not the 1,000-name population.
 
 | | |
 |---|---|

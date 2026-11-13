@@ -41612,6 +41612,12 @@ class TortoiseSDK:
                 # did nothing" indistinguishable from "the flag was never set".
                 # #8487's ``valid_time`` leg records ``state_read_failed`` for
                 # exactly this case; this is the same rule.
+                # ``no_text_field`` is DEFENSIVE, not reachable today: every
+                # ``entity_type`` this method accepts has a declared text
+                # property, so an unmapped label can only arrive with a future
+                # one. It is kept because the honest failure to report then is
+                # "this read has no property to score", not "the read broke",
+                # and a unit test exercises the arm so it cannot rot silently.
                 _rr_stats = {
                     "applied": False,
                     "degrade_reason": (
