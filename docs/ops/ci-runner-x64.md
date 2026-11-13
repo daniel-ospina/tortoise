@@ -297,16 +297,16 @@ only leg whose pin is about speed, and the mitigation buys it nothing (above):
   check catches it), and a suite that resolves without this major — the `=on` routing drift that can
   put an unexpected box here is #10289.
 
-  The step also undoes its own apt configuration: it writes its OWN files —
-  `/etc/apt/sources.list.d/tortoise-12051-pgdg.list` and `/etc/apt/keyrings/tortoise-12051-pgdg.asc` — and an
-  `EXIT` trap removes exactly those plus the `mktemp`'d key file. ⚠️ STEP-PRIVATE ON PURPOSE: keying removal
-  on "did it pre-exist" inverted it (an operator `pgdg.list` lost its key). ⚠️ TWO LIMITS, because the trap is
-  not a restore: it removes apt CONFIGURATION only, so the installed `postgresql-client-16` and its dependency
-  closure STAY on the box, and a later job keeps a pg16 client available; and a box that ALREADY configures
-  PGDG is reused, not duplicated (a second stanza with a different `Signed-By` makes apt refuse the whole
-  list). That stanza is TRUSTED AS-IS: an unreadable `Signed-By` reds the `apt-get update` guard, NOT the
-  ORIGIN check, and nothing self-heals — the box stays red until repaired. The trap exists because the job is
-  POOL-ELIGIBLE: a leftover sources file changes apt resolution for every later job on the box.
+  The step also undoes its own apt configuration: an `EXIT` trap removes the
+  `/etc/apt/sources.list.d/pgdg.list` entry, its keyring and the `mktemp`'d key file — but ONLY the
+  ones this step created (a pre-existing operator file at that path is NOT deleted). ⚠️ Two limits,
+  stated because the trap is not a restore: a pre-existing sources file's CONTENTS are replaced by this
+  step's line (the `tee` truncates, so only its existence survives), and the installed
+  `postgresql-client-16` plus its dependency closure STAY on the box, so a later job on it keeps a
+  pg16 client available. The trap exists because
+  the job is POOL-ELIGIBLE, and a leftover sources file changes apt resolution for every later job on
+  the same box; outliving its keyring, it would turn the next job's `apt-get update` into the very
+  soft failure the ORIGIN check exists to catch.
 
 These are **accepted costs of the temporary mitigation, stated as costs**, and all nine revert with
 it. If the mitigation becomes permanent, the scoping fix is to put the starved required legs on a
@@ -981,7 +981,7 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5318`) buys no landing:
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5288`) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a

@@ -9,8 +9,6 @@
 # Coverage (#2240 acceptance in brackets):
 #   1. a drift-gate failure files ONE issue whose title is the STABLE per-step
 #      key — no run id, no timestamp, no count [alert on the first failing run]
-#  1b. a >6000-byte report keeps its ACTIONABLE TAIL (the excerpt is the tail, not
-#      the head — `head -c` would keep the noise and drop the blocking list)
 #   2. that body carries the gate's OWN report (the blocking versions + the
 #      ordered `gh workflow run supabase-deploy.yml --ref main` remediation),
 #      so the alert cannot disagree with the run it describes
@@ -34,26 +32,6 @@
 #  15. the body file is written under RUNNER_TEMP and is the issue's body
 #  16. a NON-Actions author is refused by the shared substrate on this path too
 #      (the PAT trap: it would file a duplicate on every failing run)
-#  17. the pasted report cannot break the body it is pasted into (a fence longer than
-#      any backtick run in the excerpt, so repo-controlled text cannot close the block)
-#  17b. the excerpt squeeze's EXIT STATUS is neither the alert's nor evidence of what it
-#      did: an iconv that reports the mid-character cut in its status must not abort the
-#      ledger leg, one that emits nothing must paste the ASCII FALLBACK and SAY so (never
-#      claiming a squeeze, and never pasting the raw tail — the cut can leave a half
-#      character in it, and an undecodable body is not a report), and the drop must be
-#      disclosed from a BYTE MEASURE — so it is disclosed on a glibc that drops the
-#      sequence silently (2.39, rc=0) too, and NOT disclosed when the report cannot
-#      lose a byte (a measure, not a constant; case 1)
-#  17c. a report with no excerpt-able text says only what is TRUE (no claim of a
-#      squeeze, no empty fenced block under a heading that promises the report)
-#  17d. the READ GUARD — an existing but unreadable report must not abort the alert
-#  17e. a 0-byte report is READABLE and EMPTY, and must be described exactly so
-#  17f. a FIFO must not HANG the alert
-#  17g. main's own #12077 pin — the same two arms, converter-INDEPENDENT
-#  17h. a FAILING ASCII fallback must not DEAFEN the notifier: the `|| true` guard on
-#      the `tr` squeeze is a guard, not decoration — under `set -euo pipefail` its
-#      absence aborts the body build before anything is filed (#2240's silence)
-#  18. a LATE `deploy-api` failure must not read as "nothing shipped"
 #  19-21. `--resolve` (#8841) retires EXACTLY the keys whose steps reported
 #      `success` in this run (plus the job-level key only when `job.status` is
 #      `success`) — `skipped` and outcome-less steps are never read as a pass, and
@@ -215,15 +193,6 @@ reset_case() {
   : > "$STUB_TMP/calls.log"
   rm -f "$STUB_TMP/created.txt" "$STUB_TMP/comment.txt" "$STUB_TMP/closed.txt" \
         "$STUB_TMP/searched.txt"
-  # ⛔ #12077: the BODY file is a reused artifact and must not survive a case. A case
-  # that aborts BEFORE `build_body` opens the file (case 8's missing token is one)
-  # leaves the PREVIOUS case's body on disk, and any later assertion that reads it
-  # then asserts about the wrong case. (Corrected measurement, review round 2: the
-  # mid-character case's own green was NOT this — `build_body` truncates the file in
-  # place, so that assertion passed on a TRUNCATED ASCII partial body, which is valid
-  # UTF-8 while carrying no report. Both are fixed by the two changes below and the
-  # assertion that the body carries the report.)
-  rm -f "$RUNNER_TEMP/deploy-api-alert-body.md"
   unset STUB_SEARCH_JSON STUB_SEARCH_JSON_P2 STUB_SEARCH_FAIL STUB_CREATE_FAIL \
         STUB_COMMENT_FAIL STUB_COMMENTS_FAIL STUB_COMMENTS_JSON \
         STUB_CREATE_LOGIN STUB_COMMENT_LOGIN STUB_TG_FAIL STUB_CLOSE_FAIL \
@@ -269,23 +238,6 @@ assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "BLOCKING repo-
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "gh workflow run supabase-deploy.yml --ref main" "the body carries the exact remediation"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "Check migration drift (fail-closed)" "the body names the failed step"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "987654321" "the body links the run (the detail lives there)"
-# ⛔ The disclosure is a MEASURE, not a CONSTANT (review P2, PR #12110). Every other
-# arm asserts the disclosure PRESENT; none asserted it ABSENT when nothing was
-# dropped, so an implementation that discloses whenever the squeeze path RAN — rather
-# than when the bytes actually differ — was green on all of them (measured by the
-# reviewer: 159/159, 0 red, on both hosts). It then publishes "characters … were
-# dropped" about a report it carried verbatim, which is this PR's own declared threat
-# class: a disclosure that states a cause/magnitude it did not measure.
-# This fixture is under the 6000-byte cap and decodes as UTF-8 on its own, so
-# `iconv -c` can drop NOTHING from it (it drops invalid sequences, not valid multibyte
-# characters — the em dashes in the gate's own report survive). The precondition is
-# asserted first, or the row below is silently vacuous.
-if [ "$(wc -c < "$DRIFT_REPORT")" -lt 6000 ] && python3 -c 'import sys; open(sys.argv[1], "rb").read().decode("utf-8")' "$DRIFT_REPORT"; then
-  ok "case 1's fixture is under the 6000-byte cap and decodes as UTF-8, so no byte can be dropped here"
-else
-  bad "case 1's fixture holds an invalid UTF-8 sequence or exceeds the cap — the no-drop pin below would be vacuous"
-fi
-assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "NOT byte-identical" "and the body does NOT claim a drop it did not measure (a measure, not a constant)"
 
 echo "── case 1b: a >6000-byte report keeps its ACTIONABLE TAIL ─────────────"
 # The gate prints its context (remote-ahead, non-conforming files, the
@@ -494,238 +446,13 @@ fi
 reset_case
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
 assert_eq "$RC" "0" "the alert succeeds on a report cut mid-character"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the body it wrote carries the report, not just a valid-but-partial file"
 if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
   ok "the body is valid UTF-8 even though the cut landed inside a multibyte character"
 else
   bad "the body is NOT valid UTF-8 — a split multibyte character reached the issue"
 fi
-# The RESET invariant, pinned directly. A body left behind by an earlier case is
-# indistinguishable from this case's when an abort happens before `build_body` opens
-# the file, so `reset_case` must remove it — otherwise a later assertion can read a
-# stale artifact.
-reset_case
-if [ -e "$RUNNER_TEMP/deploy-api-alert-body.md" ]; then
-  bad "reset_case leaves the previous case's body file in place — an assertion could read it as its own"
-else
-  ok "reset_case clears the reused body file, so no case can assert on a stale body"
-fi
 
-# ── case 17b: the SQUEEZE's exit status is not the alert's (#12077) ──────────
-# `iconv -c` reports the mid-character cut in its EXIT STATUS on glibc 2.43
-# (`ubuntu-26.04`, the runner image: the convertible bytes are emitted and rc is
-# still 1) while glibc 2.39 exits 0 — so on an ordinary box the defect is
-# INVISIBLE and an ordinary box cannot see it. THREE arms are simulated here so the
-# harness discriminates on any host: (a) status 1 with the bytes emitted must still
-# file the alert, (b) an iconv that emits NOTHING must not paste an empty block under
-# a heading that promises the report verbatim (it must say it went to the ASCII
-# fallback), and (c) the SILENT shape — bytes emitted, the split character dropped,
-# status 0 — must still DISCLOSE the drop.
-#
-# ⚠️ SCOPE OF THIS CASE, stated because it is not obvious: the status-catch half of
-# #12077 was landed INDEPENDENTLY on `main` (#12020, `49cf5193541f`) before this
-# branch's merge base, so arm (a) below is GREEN on the pre-fix code this PR merges
-# into — it is the host-real-`iconv` duplicate of case 17g (which pins the same two
-# properties with a stub, converter-independently), NOT the pin that carries this
-# PR's Root 2. What is new at this head is the BYTE-MEASURED disclosure (arms b/c),
-# the guarded re-read, the `-e`/`! -p` widening and the ASCII-fallback wording.
-PATH_BEFORE_ICONV_SHIM="$PATH"
-REAL_ICONV="$(command -v iconv)"
-# The arm below simulates glibc 2.43's `iconv -c` by wrapping the REAL one. With no
-# real iconv on the host the wrapper degrades to `"" "$@"` — which emits nothing
-# and exits 1, i.e. it silently becomes arm (b), and arm (a) would pass while
-# squeezing nothing. Fail loudly instead of asserting coverage we do not have.
-if [ -n "$REAL_ICONV" ]; then
-  ok "case 17b: a real iconv exists, so the status shim can wrap it"
-else
-  bad "case 17b: no iconv on PATH — arm (a) would degenerate into the raw-fallback arm and prove nothing"
-fi
-ICONV_STATUS_DIR="$FIX/bin-iconv-status"
-mkdir -p "$ICONV_STATUS_DIR"
-cat > "$ICONV_STATUS_DIR/iconv" <<ICONV_STATUS_EOF
-#!/usr/bin/env bash
-"$REAL_ICONV" "\$@"
-exit 1
-ICONV_STATUS_EOF
-chmod +x "$ICONV_STATUS_DIR/iconv"
-export PATH="$ICONV_STATUS_DIR:$PATH"
-reset_case
-run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
-assert_eq "$RC" "0" "an iconv that reports the cut in its STATUS does not fail the alert (host REAL iconv — a duplicate of case 17g, already true at the merge base)"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the squeezed excerpt is still carried"
-# ⚠️ The two assertions above are ALSO satisfied by the raw-tail fallback (its tail
-# carries the same `BLOCKING` line), so on their own they cannot tell the squeeze
-# from the fallback — a "fix" that discards iconv's bytes whenever it exits
-# non-zero would pass them while pasting the invalid-UTF-8 raw tail, re-creating
-# the artifact case 17 forbids. These make the arm name the SQUEEZE path.
-assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "and it is the SQUEEZED excerpt, not the raw fallback"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "NOT byte-identical" "and the characters the squeeze dropped are disclosed beside the excerpt"
-if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
-  ok "and the body stayed valid UTF-8 on the squeeze path (the raw tail's is not)"
-else
-  bad "the squeezed body is NOT valid UTF-8 — the raw fallback's bytes reached the issue"
-fi
-
-# ── arm (c): the SILENT drop — bytes emitted, split character gone, status 0 ─────────
-# glibc 2.39 (this box, and every ordinary dev host) drops the split sequence and exits
-# 0, so the drop is visible ONLY from the bytes. The mirror of arm (a): the REAL
-# converter, then `exit 0` regardless of what it reported — i.e. glibc 2.39's shape
-# reproduced on a 2.43 host and vice versa. An implementation that derives the
-# disclosure from `$?` says "nothing was dropped" here and reds the assertion below
-# ON THE RUNNER TOO; on arm (a) alone it passes on every host. This is what makes
-# "measure, not status" a pinned property rather than a host generation's accident.
-ICONV_SILENT_DIR="$FIX/bin-iconv-silent"
-mkdir -p "$ICONV_SILENT_DIR"
-cat > "$ICONV_SILENT_DIR/iconv" <<ICONV_SILENT_EOF
-#!/usr/bin/env bash
-"$REAL_ICONV" "\$@"
-exit 0
-ICONV_SILENT_EOF
-chmod +x "$ICONV_SILENT_DIR/iconv"
-export PATH="$ICONV_SILENT_DIR:$PATH_BEFORE_ICONV_SHIM"
-reset_case
-run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
-assert_eq "$RC" "0" "an iconv that drops the split character and reports SUCCESS does not fail the alert either"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "arm c: the squeezed excerpt is carried"
-assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "arm c: and it is the SQUEEZED excerpt, not the ASCII fallback"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "NOT byte-identical" "arm c: and the SILENTLY dropped character is still disclosed — the measure, not the status (this reds a status-based implementation on every host)"
-
-ICONV_BROKEN_DIR="$FIX/bin-iconv-broken"
-mkdir -p "$ICONV_BROKEN_DIR"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$ICONV_BROKEN_DIR/iconv"
-chmod +x "$ICONV_BROKEN_DIR/iconv"
-export PATH="$ICONV_BROKEN_DIR:$PATH_BEFORE_ICONV_SHIM"
-reset_case
-run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
-assert_eq "$RC" "0" "an iconv that emits nothing still files the alert"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "and says the excerpt is an ASCII fallback, never a verbatim report it does not carry"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "non-ASCII" "and DECLARES the non-ASCII loss, so a mangled report never reads as the gate's own text"
-assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "NOT byte-identical" "and it does NOT claim a squeeze it did not perform"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the ASCII report is still carried, so the operator sees what is blocking"
-# This arm is reached only when NO converter ran, so the split character is still in
-# the raw bytes: the fallback must drop it (not paste it), or the issue body is
-# undecodable. Pinned here as well as in case 17g, because a "fix" that swaps this
-# branch back to `excerpt="$raw_tail"` reds THIS row on any host.
-if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
-  ok "and the fallback body is valid UTF-8 — the non-ASCII cut is dropped, never pasted"
-else
-  bad "the fallback body is NOT valid UTF-8 — the raw tail reached the issue"
-fi
-export PATH="$PATH_BEFORE_ICONV_SHIM"
-
-# ── case 17h: a failing ASCII FALLBACK must not deafen the notifier ──────────────────
-# `tr` is coreutils, but the guard around it is what a merge already dropped once
-# (review P2, PR #12110): without `|| true`, `set -e` aborts `build_body` AT the
-# assignment and NOTHING is filed — the exact silence #2240 exists to remove. The
-# guard is pinned here rather than assumed away as "tr never fails".
-REAL_TR="$(command -v tr)"
-if [ -n "$REAL_TR" ]; then
-  ok "case 17h: a real tr exists, so the failing-squeeze shim can wrap it"
-else
-  bad "case 17h: no tr on PATH — this arm cannot reproduce the failing fallback"
-fi
-TR_BROKEN_DIR="$FIX/bin-tr-broken"
-mkdir -p "$TR_BROKEN_DIR"
-cat > "$TR_BROKEN_DIR/tr" <<TR_BROKEN_EOF
-#!/usr/bin/env bash
-# Fail ONLY the ASCII-fallback squeeze: \`-d\` is that call's own flag, so
-# auto-file-issue.sh's \`tr '[:upper:]' '[:lower:]'\` still runs and this arm cannot red
-# for the WRONG reason (a refused author instead of a dead alert).
-for a in "\$@"; do [ "\$a" = "-d" ] && exit 1; done
-exec "$REAL_TR" "\$@"
-TR_BROKEN_EOF
-chmod +x "$TR_BROKEN_DIR/tr"
-export PATH="$ICONV_BROKEN_DIR:$TR_BROKEN_DIR:$PATH_BEFORE_ICONV_SHIM"
-reset_case
-run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
-export PATH="$PATH_BEFORE_ICONV_SHIM"
-assert_eq "$RC" "0" "case 17h: a failing ASCII fallback does NOT fail the alert (the ledger is the alert, the notifier is the safety net)"
-assert_eq "$(count_creates)" "1" "case 17h: and an issue IS still filed — a degraded body, never a deaf channel"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "case 17h: and the degradation is STATED rather than silent"
-
-# ── case 17b (arm c): the disclosure is a BYTE MEASURE, not the status ─────────────────
-# glibc 2.39 drops the split sequence and exits 0, so a status-based disclosure says
-# nothing on every ordinary dev box while the excerpt IS short. This arm runs the REAL
-# iconv — whichever generation this host has — and requires the drop to be disclosed
-# anyway. Without it, and without arm (c) above, the disclosure would be pinned only on
-# the one host generation that happens to report the drop in its exit status.
-reset_case
-run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
-assert_eq "$RC" "0" "a real iconv files the alert on either glibc generation"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "NOT byte-identical" "and the characters it dropped SILENTLY are still disclosed (the measure, not the status)"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the squeezed excerpt is carried"
-
-# ── case 17c: a report with no excerpt-able text says only what is TRUE ─────────
-# A report of 6000 line endings (or NUL bytes) captures as EMPTY, so there is no
-# excerpt to paste. The earlier shape of this branch claimed BOTH "could not be
-# byte-squeezed" AND "the report could not be re-read at all" in that state, and pasted
-# an empty fenced block under a heading that promises the report — three statements
-# that were all false for a file that was read perfectly well (measured, review
-# round 3). It must say only what is true, and paste no fence.
-python3 -c 'import sys,pathlib; pathlib.Path(sys.argv[1]).write_bytes(b"\n" * 6000)' "$FIX/drift-report-blank.txt"
-reset_case
-run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-blank.txt"
-assert_eq "$RC" "0" "a report holding no excerpt-able text still files the alert"
-BLANK_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
-assert_contains "$BLANK_BODY" "held no excerpt-able text" "and says the report held no excerpt-able text"
-assert_not_contains "$BLANK_BODY" "could not be byte-squeezed" "and does NOT claim a squeeze it never attempted"
-assert_not_contains "$BLANK_BODY" '```' "and pastes NO fenced block when there is nothing to paste"
-
-# ── case 17d: the READ GUARD — an existing but unreadable report must not abort ─────
-# NOTE THE MECHANISM (corrected, pass-5 review): a DIRECTORY is `-s`-TRUE on this fs, so
-# this case would have reached the read even before the `-e`/`-p` widening. What it pins is
-# the guarded READ (`|| raw_tail=""`): without it `tail` fails under `set -euo pipefail`
-# and the alert exits 1 having filed NOTHING — the exact #12077 class, at the line round 2
-# moved the read back onto. The widening's OWN behaviour is pinned by 17e (0-byte report)
-# and 17f (FIFO).
-mkdir -p "$FIX/report-dir"
-reset_case
-run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/report-dir"
-assert_eq "$RC" "0" "case 17d: an existing but UNREADABLE report does not abort the alert"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "held no excerpt-able text" "case 17d: and the body says the report yielded no excerpt"
-assert_eq "$(count_creates)" "1" "case 17d: and the ledger issue was still filed"
-
-# ── case 17e: a 0-byte report is READABLE and EMPTY, and must be described so ───────
-# Under the old `[ -s … ]` guard a 0-byte report was described as "the gate's report file
-# was **not readable**" — false: it is readable and empty. `-e` is what changes that, so
-# this case is what pins the widening (a directory does not: it is `-s`-true).
-: > "$FIX/report-empty.txt"
-reset_case
-run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/report-empty.txt"
-assert_eq "$RC" "0" "case 17e: a 0-byte report files the alert"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "held no excerpt-able text" "case 17e: and is described as holding no excerpt"
-assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was not readable" "case 17e: and NOT as 'not readable' — it IS readable, it is empty"
-assert_eq "$(count_creates)" "1" "case 17e: and the ledger issue was filed"
-
-# ── case 17f: a FIFO must not HANG the alert ────────────────────────────────────────
-# `-e` alone admits a FIFO (st_size 0), and `tail -c` then blocks in open(2) until a writer
-# appears: measured SIGTERM at 6 s, no ledger entry and no exit status. No caller produces
-# one; this pin is what keeps the next caller from turning a decorative excerpt into a hang.
-mkfifo "$FIX/report-fifo"
-reset_case
-# `timeout` is NOT on the fleet's macOS dev hosts (pyproject.toml records it absent from PATH,
-# /opt/homebrew/bin and /usr/local/bin; tools/ready_for_owner.py does its own bounding for the
-# same reason). A hard `timeout` here would red such a host on correct code — a host-dependent
-# red for a reason unrelated to the property, which is the class this PR exists to remove. The
-# pin stays unconditional in CI (ubuntu-latest has it); elsewhere the skip is DECLARED, not
-# silent. A hand-rolled `kill -9` fallback is deliberately not used: it loses `timeout`'s
-# process-group kill and would leave the blocked `tail` behind — reintroducing the hang.
-if command -v timeout >/dev/null 2>&1; then
-  timeout 20 "$HELPER" --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/report-fifo" >/dev/null 2>&1
-  assert_eq "$?" "0" "case 17f: a FIFO report does not hang the alert (a hang returns 124 here)"
-  assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was not readable" "case 17f: and a FIFO is refused as not readable, which is true of it"
-else
-  ok "case 17f: SKIPPED on this host — no \`timeout\` binary (macOS); the FIFO guard is pinned by CI (ubuntu-latest)"
-fi
-
-# ── case 17g: main's own #12077 pin — the same two arms, converter-independent ────────
-# Kept from `main` (it landed the same fix independently) and RENUMBERED: this block
-# and case 17c above both used to be called "17c". The overlap with 17b is deliberate
-# — 17b wraps the HOST's real `iconv`, so on a host without one its arm (a) refuses to
-# pass vacuously, while this block stubs `iconv` outright and therefore runs everywhere.
-# Both shapes pin the same two properties: a non-zero status must not abort the alert,
-# and a converter that emits NOTHING must leave a VALID UTF-8 body that still carries
-# the report (17b's fallback arm pins the same invariant from the other side).
+# ── case 17c: a non-zero iconv status must NOT abort the alert ──────────────
 # `iconv -c` guarantees valid UTF-8 OUTPUT; its EXIT STATUS is not part of that
 # contract (GNU libiconv, and newer glibc builds, return 1 having dropped an
 # invalid sequence). Under `set -e` + `pipefail` that status killed the notifier

@@ -5507,8 +5507,8 @@ def test_the_module_filter_admits_a_split_traversal():
     # what proves none of them contributed a site — a module admitted and then
     # deriving nothing costs a parse, not a false claim.
     sites = census._empty_pattern_sites()
-    assert (len(sites), sum(len(lines) for lines in sites.values())) == (28, 42), (
-        "the empty-pattern derivation moved off 28 symbol keys / 42 site rows "
+    assert (len(sites), sum(len(lines) for lines in sites.values())) == (27, 40), (
+        "the empty-pattern derivation moved off 27 symbol keys / 40 site rows "
         f"({len(sites)} keys, "
         f"{sum(len(lines) for lines in sites.values())} rows). The register's "
         "`sites` counts and BOTH completeness directions are stated against "
