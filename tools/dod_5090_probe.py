@@ -2407,26 +2407,44 @@ _SHELL_BARE_EXPORT = re.compile(
 _SHELL_ASSIGN = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=")
 _SHELL_ALLEXPORT = re.compile(r"^\s*set\s+-[a-zA-Z]*a[a-zA-Z]*\s*$")
 
-#: `unset NAME`, `unset -v NAME`, and the multi-name form. `unset` is a shell
-#: BUILTIN, so it is matched CASE-SENSITIVELY — `UNSET` is a different (nonexistent)
-#: command, unlike the Dockerfile instructions, which are case-insensitive.
-_SHELL_UNSET = re.compile(r"^\s*unset[ \t]+(?:-v[ \t]+)?(?P<names>[^#]*?)\s*(?:#.*)?$")
+#: `unset NAME`, `unset -v NAME`, the multi-name form, and an OPTION CLUSTER. `unset` is
+#: a shell BUILTIN, so it is matched CASE-SENSITIVELY — `UNSET` is a different
+#: (nonexistent) command, unlike the Dockerfile instructions, which are case-insensitive.
+_SHELL_UNSET = re.compile(
+    r"^\s*unset[ \t]+(?P<opts>(?:-[a-zA-Z]+[ \t]+)*)(?P<names>[^#]*?)\s*(?:#.*)?$")
 
 
-def _shell_line_unsets(line: str, flag: str) -> bool:
-    """Does ``line`` REMOVE ``flag`` from the shell's environment?
+def _shell_unset_target(line: str, flag: str) -> str | None:
+    """What does this `unset` do to ``flag``?  ``value`` / ``other`` / ``unknown`` / None.
 
     ⛔ A shell `unset FLAG` is the shell channel's DISARMING direction, and it matched
     NOTHING here: it is not an assignment (`_assigned_value` returns `None` for it), so
     it fell through every bucket and vanished, leaving an earlier `export FLAG=1`
     standing — `export FLAG=1` then `unset FLAG` read the file `ON`. The compose
     value-less spelling has been reported since this PR's compose reader landed; the
-    shell channel, which this PR ADDS, did not (fresh review of PR #12474, P2, measured).
+    shell channel, which this PR ADDS, did not (fresh review of PR #12474, P2).
+
+    ``None`` = not an `unset` at all. ``other`` = an `unset` that does not remove THIS
+    variable, so it must not disarm — which is why the OPTION CLUSTER is consumed rather
+    than read as a name (`-f` unsets a FUNCTION and `-n` a NAMEREF; neither removes a
+    variable binding, and reading `-f` as a name made `unset -f FLAG` disappear the arm,
+    the fail-CLOSED direction). ``unknown`` = a COMPUTED name (`unset "$FLAG"`) that
+    this walk cannot resolve: unknown, never silently "no unset" — the same doctrine
+    `_resolved_assignment` applies to an assignment (fresh review of PR #12474, P3).
     """
     match = _SHELL_UNSET.match(line)
     if not match:
-        return False
-    return any(word.strip("'\"") == flag for word in match.group("names").split())
+        return None
+    names = match.group("names").split()
+    if not names:
+        return None
+    if re.search(r"-[a-zA-Z]*[fn]", match.group("opts") or ""):
+        return "other"
+    if any(word.strip("'\"") == flag for word in names):
+        return "value"
+    if any("$" in word for word in names):
+        return "unknown"
+    return "other"
 
 
 def _shell_exported_names(text: str) -> set[str] | None:
@@ -2971,15 +2989,33 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 # `ON` with `measured: True` and nothing reported it (fresh review of PR
                 # #12474, P2, measured). Reported in `unset_declarations` exactly as the
                 # compose value-less spelling is, so the direction is visible, not just
-                # scored. ⛔ BEFORE the exported-assignment gate, which `continue`s on any
-                # line that is not an export and would swallow this one.
-                if shell_exports is not None and _shell_line_unsets(line, flag):
-                    unset_declarations.append(
-                        f"{posix}:{number}: {line.strip()[:90]}")
-                    decisions.append((False,
-                                      f"{posix}: {line.strip()[:90]}",
-                                      f"{posix}:{number}: {line.strip()[:90]}"))
-                    continue
+                # scored.
+                # ⛔ The channel test is the FILE, not `shell_exports`: that value is
+                # `None` for a `set -a` (allexport) script as well as for a non-shell
+                # file, so keying the arm on it made every allexport entrypoint skip the
+                # arm and keep the earlier `export` standing — the same fail-open, still
+                # open, on the shape the reader explicitly models (fresh review of PR
+                # #12474, P2). ⛔ And BEFORE the exported-assignment gate, which
+                # `continue`s on any line that is not an export and would swallow this.
+                if posix.endswith(".sh"):
+                    target = _shell_unset_target(line, flag)
+                    if target == "value":
+                        unset_declarations.append(
+                            f"{posix}:{number}: {line.strip()[:90]}")
+                        decisions.append((False,
+                                          f"{posix}: {line.strip()[:90]}",
+                                          f"{posix}:{number}: {line.strip()[:90]}"))
+                        continue
+                    if target == "unknown":
+                        # A computed name (`unset "$FLAG"`) may or may not be this flag:
+                        # UNKNOWN holds the file UNMEASURED rather than leaving an arm.
+                        indeterminate.append(
+                            f"{posix}:{number}: {line.strip()[:90]}")
+                        surface_indeterminate.append(posix)
+                        decisions.append((None,
+                                          f"{posix}: {line.strip()[:90]}",
+                                          f"{posix}:{number}: {line.strip()[:90]}"))
+                        continue
                 if (shell_exports is not None
                         and not _shell_line_is_exported(line, flag, shell_exports)):
                     if _assigned_value(line, flag) is not None:
@@ -3034,6 +3070,16 @@ def flag_in_shipped_configs(flag: str) -> dict:
                         and _is_unset_declaration(line, flag)):
                     unset_declarations.append(
                         f"{posix}:{number}: {line.strip()[:90]}")
+                    # ⛔ A LAST-WINS decision, exactly like the shell arm: a value-less
+                    # compose entry UNSETS the variable, so a declaration that comes
+                    # AFTER a truthy one leaves the container DISARMED. Reporting it
+                    # without scoring it meant `environment: [- FLAG=1, - FLAG]` read the
+                    # file `ON` — the compose spec's own semantics, read the wrong way,
+                    # and the asymmetry the shell arm had just been fixed for (fresh
+                    # review of PR #12474, P3, measured).
+                    decisions.append((False,
+                                      f"{posix}: {line.strip()[:90]}",
+                                      f"{posix}:{number}: {line.strip()[:90]}"))
                     continue
                 value = _assigned_value(line, flag)
                 if value is None:
@@ -3076,10 +3122,16 @@ def flag_in_shipped_configs(flag: str) -> dict:
                             disarming_assignments.append(
                                 earlier + " (shadowed by a later truthy value)")
                 else:
-                    disarming_assignments.append(
-                        plain_text + (" (OVERRIDES an earlier truthy value)"
-                                      if any(t is True for t, _h, _l in decisions[:-1])
-                                      else ""))
+                    # ⛔ A value-less entry / `unset` is ALREADY named by
+                    # `unset_declarations` (same `path:line: text` shape). Appending it here
+                    # too published ONE line as two different claims — "1 declaration(s) with
+                    # no value UNSET it AND 1 value(s) leave it OFF" — a heading-count
+                    # defect in the note a reader trusts (fresh review of PR #12474, P2).
+                    if plain_text not in unset_declarations:
+                        disarming_assignments.append(
+                            plain_text + (" (OVERRIDES an earlier truthy value)"
+                                          if any(t is True for t, _h, _l in decisions[:-1])
+                                          else ""))
         if not present:
             state = "ABSENT"
         elif surface_hits:
@@ -3255,7 +3307,7 @@ def per_file_scope_note(deployment: dict) -> str:
     if unsets or overrides:
         parts = []
         if unsets:
-            parts.append(f"{unsets} compose declaration(s) with no value UNSET it")
+            parts.append(f"{unsets} declaration(s) with no value UNSET it")
         if overrides:
             parts.append(f"{overrides} value(s) leave it OFF — the LAST of them by compose "
                          "override or by FILE order (an earlier truthy assignment does not "
@@ -3385,9 +3437,12 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
         f"indeterminate assignments: {shipped.get('indeterminate') or 'none'}; "
         f"assignments a deployed process never reads: "
         f"{shipped.get('outside_runtime') or 'none'}; "
-        # ⛔ The DISARMING direction, named: a value-less compose `environment:` entry
-        # UNSETS the variable, which this per-file reading does not model.
-        f"compose declarations that UNSET it: "
+        # ⛔ The DISARMING direction, named: a value-less `environment:` entry (compose)
+        # or an `unset` (shell) UNSETS the variable, and this per-file reading models it
+        # as the LAST word. ⛔ NOT "compose": both channels append here, and a label that
+        # named one of them published a shell line as "compose declarations that UNSET
+        # it" — a diagnostic naming a neighbour's state (fresh review of PR #12474, P2).
+        f"declarations that UNSET it: "
         f"{shipped.get('unset_declarations') or 'none'}; "
         f"values that OVERRIDE it OFF: "
         f"{shipped.get('disarming_assignments') or 'none'}; "

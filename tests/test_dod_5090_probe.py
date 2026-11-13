@@ -3399,7 +3399,7 @@ def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
         {**shipped["deployment"], "unset_declarations": [], "disarming_assignments": []})
     assert "DISARMS it" not in empty, empty
     note = _gate_note(shipped)
-    assert "compose declarations that UNSET it: ['docker-compose.yml:" in note, note
+    assert "declarations that UNSET it: ['docker-compose.yml:" in note, note
     # ⛔ …and the EXPLICIT-FALSE override is the other disarming direction: compose
     # `environment:` OVERRIDES the image's `ENV`, so a `"0"` here disarms a deployment
     # whose image arms it — and calling the file merely "silent" steered a reader to
@@ -3657,6 +3657,102 @@ def test_a_shell_UNSET_disarms_the_file_and_is_REPORTED(tmp_path, monkeypatch):
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["per_surface"]["entrypoint"]["state"] == "ON", (
         shipped["per_surface"]["entrypoint"])
+
+
+#: The shapes `unset` has to classify, and the reading each one must produce. The
+#: CONTROLS are half the table on purpose: an arm that disarms on `unset OTHER` is a
+#: different defect from one that misses `unset FLAG`, and only a two-sided pin sees it.
+_UNSET_SHAPES = [
+    # (script body after a truthy arm, expected entrypoint state, why)
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE\n", "OFF", "the plain form"),
+    ("export TORTOISE_EMBED_GATE=1\nunset -v TORTOISE_EMBED_GATE\n", "OFF", "-v is variables"),
+    ("export TORTOISE_EMBED_GATE=1\nunset A B TORTOISE_EMBED_GATE\n", "OFF", "multi-name"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE # off\n", "OFF", "trailing comment"),
+    # ⛔ `set -a` (allexport) returns `None` from `_shell_exported_names`, so keying the
+    # arm on that value skipped every allexport entrypoint and kept the earlier `export`
+    # standing — the same fail-open (fresh review of PR #12474, P2).
+    ("set -a\nexport TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE\n", "OFF",
+     "allexport entrypoint"),
+    ("set -a\nTORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE\n", "OFF",
+     "allexport, bare assignment"),
+    # ⛔ An OPTION CLUSTER must not be read as a name: `-f` unsets a FUNCTION and `-n` a
+    # NAMEREF, so neither removes the variable and neither may disarm (fail-CLOSED).
+    ("export TORTOISE_EMBED_GATE=1\nunset -f TORTOISE_EMBED_GATE\n", "ON", "-f is a function"),
+    ("export TORTOISE_EMBED_GATE=1\nunset -n TORTOISE_EMBED_GATE\n", "ON", "-n is a nameref"),
+    # …CONTROLS: another name, a longer name the flag PREFIXES, and a non-builtin word.
+    ("export TORTOISE_EMBED_GATE=1\nunset OTHER_VAR\n", "ON", "a different name"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE_EXTRA\n", "ON", "a PREFIX"),
+    ("export TORTOISE_EMBED_GATE=1\nunsetfv TORTOISE_EMBED_GATE\n", "ON", "not an unset"),
+    ("export TORTOISE_EMBED_GATE=1\nUNSET TORTOISE_EMBED_GATE\n", "ON",
+     "UNSET is not a builtin"),
+    # ⛔ A COMPUTED name resolves to something the walk cannot read, so the file is
+    # UNMEASURED — never silently "no unset", which is what a bare `word == flag` test
+    # produced for `unset "$FLAG"` (fresh review of PR #12474, P3).
+    ('export TORTOISE_EMBED_GATE=1\nunset "$FLAG"\n', "UNMEASURED", "computed name"),
+    ("export TORTOISE_EMBED_GATE=1\nunset ${OTHER}\n", "UNMEASURED", "computed name"),
+]
+
+
+def test_every_unset_SHAPE_is_classified_and_the_controls_do_not_disarm(
+        tmp_path, monkeypatch):
+    """One row per `unset` shape, both directions — the arm must not over- or under-reach.
+
+    ⛔ Measured (fresh review of PR #12474, P2/P3): the first arm keyed its channel test
+    on `shell_exports is not None`, which is `None` for an ALLEXPORT script too, so every
+    `set -a` entrypoint skipped it; read any option token as a NAME, so `unset -f FLAG`
+    (a FUNCTION) vanished the arm; and silently ignored a computed name, so
+    `unset "$FLAG"` fell into no bucket at all. Each row below was measured against that
+    arm before it was fixed.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    wrong: list[str] = []
+    for body, expected, why in _UNSET_SHAPES:
+        (tmp_path / "entrypoint.sh").write_text(
+            "#!/bin/bash\n" + body, encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        actual = shipped["per_surface"]["entrypoint"]["files"]["entrypoint.sh"]["state"]
+        if actual != expected:
+            wrong.append(f"{why}: expected {expected}, read {actual} ({body!r})")
+    assert not wrong, (
+        "an `unset` shape is classified wrongly — a MISS leaves an earlier arm standing "
+        "(fail-OPEN) and an over-reach disarms on a name that is not the flag:"
+        + "\n  " + "\n  ".join(wrong))
+
+
+def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, monkeypatch):
+    """A compose value-less entry UNSETS the variable, so a later one must win.
+
+    ⛔ Measured (fresh review of PR #12474, P3): the compose arm reported the unset and
+    `continue`d WITHOUT a decision, so `environment: [- FLAG=1, - FLAG]` read the file
+    `ON` — the compose-spec semantics read the wrong way, and exactly the asymmetry the
+    shell arm had just been fixed for. The reverse order is the control: the later truthy
+    value genuinely decides.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    environment:\n"
+        "      - TORTOISE_EMBED_GATE=1\n"
+        "      - TORTOISE_EMBED_GATE\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["docker-compose.yml"]["state"] == "OFF", (
+        shipped["per_surface"]["docker-compose.yml"])
+    # …the unset line is REPORTED (its own bucket) and NOT double-counted as a second
+    # "value that leaves it OFF" — one line published as two claims was the defect.
+    assert any("TORTOISE_EMBED_GATE" in entry
+               for entry in shipped["unset_declarations"]), shipped["unset_declarations"]
+    assert not shipped["disarming_assignments"], shipped["disarming_assignments"]
+
+    # …and the reverse order leaves the arm standing.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    environment:\n"
+        "      - TORTOISE_EMBED_GATE\n"
+        "      - TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["docker-compose.yml"]["state"] == "ON", (
+        shipped["per_surface"]["docker-compose.yml"])
 
 
 def test_the_LEGACY_ENV_space_form_is_a_deployment_hit(tmp_path, monkeypatch):
@@ -8922,7 +9018,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `210 + 1` and `209 + 2` at THIS tree, both equal to the `211` the pin re-derives
+    count: `212 + 1` and `211 + 2` at THIS tree, both equal to the `213` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
