@@ -511,9 +511,12 @@ def _unserved_vector_reason(label: str) -> str:
 #: ⚠️ `hosted_backup` REPORTS THE SAME SPELLING, not the same sentence: it builds an
 #: edge entry as `<relationship:TYPE>` too, so one defect has ONE vocabulary for its
 #: KEYS. Its `restore_graph` drop warning now says "unserved target(s)" and its REMEDY
-#: clause is target-aware — a relabel repairs a node's vector, and no relabel can repair
-#: an edge's, so an edge-only drop says exactly that (`#12015` review round 3). The
-#: `restore_backup`/`_require_served_restore_labels` messages keep their own wording.
+#: clause is target-aware — a relabel makes a `:Document` NODE served so a re-embed lands
+#: where the read path serves it (the vector itself is already deleted, and only a
+#: re-embed replaces it), while for an edge NO relabel can reach the dropped vector and
+#: no product read path queries one, so an edge-only drop says the drop is FINAL
+#: (`#12015` reviews rounds 3-10). The `restore_backup`/`_require_served_restore_labels`
+#: messages keep their own wording.
 #: The key format itself has ONE owner since this review —
 #: :func:`relationship_target` / :data:`RELATIONSHIP_TARGET_PREFIX`.
 

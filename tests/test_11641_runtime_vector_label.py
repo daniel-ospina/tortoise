@@ -1951,6 +1951,9 @@ def test_the_drop_warning_names_a_remedy_that_EXISTS_for_the_target(tmp_path, ca
                          if "dropped" in r.getMessage())
     assert node_msg, "an authorised NODE drop logged nothing"
     assert "nodes kept so a relabel migration makes them SERVED" in node_msg, node_msg
+    assert "GONE" in node_msg and "re-embed" in node_msg, (
+        "the `:Document` arm must say the dropped vector is gone and that a re-embed "
+        "replaces it: " + node_msg)
 
     # ⛔ THE MIXED ARM (review round 5): when ONE run drops a node's vector AND an edge's,
     # the line must carry BOTH remedies — reverting this arm to the node-only sentence red
@@ -2133,6 +2136,9 @@ def test_a_NON_Document_unserved_label_gets_no_relabel_promise(tmp_path, caplog)
         + msg)
     assert "SET n:Source" in msg, (
         "the non-destructive label ADD is the route that DOES reach it: " + msg)
+    assert "the `url` a Source resolves by" in msg, (
+        "a `:Source` resolves by `url`, so the label ADD must say which identity the "
+        "re-embedded vector needs: " + msg)
 
 
 def test_the_mixed_remedy_does_not_name_edges_that_are_not_there(tmp_path, caplog) -> None:

@@ -1392,13 +1392,17 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         result["dropped_edge_endpoints"] = missing_endpoints
     if dropped_vectors:
         # Only reachable with allow_unserved_vectors=True — same rule: the strict
-        # path raised before any node was created. Reported, never silent, and what
-        # SURVIVES differs by target — so the REMEDY half must differ too. A node keeps
-        # its label, so a relabel migration repairs its vector; a RELATIONSHIP has no
-        # label at all, so no relabel can ever repair that one and only an explicit
-        # property clear removes it (`#12015` review round 3: this clause said "nodes
-        # kept so a relabel migration can repair them" over an edge-only drop, naming a
-        # repair that cannot exist for the object that actually survived).
+        # path raised before any node was created. Reported, never silent.
+        # ⛔ WHAT SURVIVES DIFFERS BY TARGET, AND SO DOES WHAT CAN BE DONE ABOUT IT — and
+        # neither half is "repair the vector": the vector is ALREADY STRIPPED above, by
+        # the time this line is composed. A node keeps its label (or can be given one), so
+        # a relabel makes the NODE served and a RE-EMBED then lands where the read path
+        # serves it; a RELATIONSHIP has no label at all and no product read path queries a
+        # relationship vector, so that drop is FINAL. (`#12015` reviews rounds 3-10: this
+        # block said "a node keeps its label, so a relabel migration repairs its vector"
+        # and "only an explicit property clear removes it" — both false for the reason
+        # above, which is why the arms below name a re-embed and a label ADD rather than a
+        # vector repair.)
         # ⚠️ Logged as well as returned, exactly as `dropped_edges` is: a caller that reads only
         # `counts["nodes"]/["edges"]` would otherwise lose real vectors with nothing in the log.
         node_targets = [t for t in dropped_vector_labels
@@ -1454,9 +1458,10 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
             # 400 lines up. Do not offer a served-edge route the product does not implement.
             parts.append(
                 "edges kept — a relationship carries NO label at all, so NO relabel can "
-                "reach the dropped vector, and nothing in the product queries a "
-                "relationship vector: that drop is FINAL (re-ingest the source if the "
-                "vector is needed)")
+                "reach the dropped vector, nothing in the product queries a relationship "
+                "vector, and no shipped writer can put one back (this change declines a "
+                "relation vector at BOTH projection doors, so a re-ingest cannot restore "
+                "it either): that drop is FINAL")
         remedy = "; ".join(parts)
         logger.warning(
             "restore_graph: dropped %d vector(s) on unserved target(s) %s — "
