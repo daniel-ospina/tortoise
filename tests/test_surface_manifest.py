@@ -5319,6 +5319,46 @@ def test_an_SDK_rename_with_NO_map_entry_is_refused_so_the_CALLER_fails_closed(
     # that needs no freeze — see `test_a_STATED_RENAME_clears_the_SDK_map_ONLY_half`.
 
 
+def test_the_rename_remedy_does_not_claim_to_be_the_whole_record_for_an_SDK_method():
+    """The closing rename line and the flag's help must not promise what the code refuses.
+
+    `cut` prints "A genuine RENAME … passes `--allow-removal`" over a refusal whose cause can
+    be the MISSING SDK map entry — a shape the override does not clear (the row above says so:
+    "`--allow-removal` states the rename but a caller of the old name needs the fail-closed
+    `AttributeError` the map raises"). The operator has already typed the flag, so a closing
+    line naming only the flag reads as "your remedy did not work", which is the moment a
+    hand-spliced baseline looks reasonable — the #12327 hole the same paragraph warns against.
+    The `--help` text had the same over-claim ("with no archive or retirement record … a
+    genuine rename") while `removal_report` refuses an SDK method that has no map entry even
+    WITH the flag (review of PR #12313, round 20).
+    """
+    import inspect
+
+    sm = _load_manifest_tool()
+    parser_source = inspect.getsource(sm.main)
+    assert "--allow-removal" in parser_source
+    # Non-vacuity: the wording is IN the source we are grading, and the flag really refuses.
+    problems, accounting = sm.removal_report(
+        {("ghost_method", "sdk")},
+        set(),
+        {"archived": set(), "forward_raw": set(), "sdk_retired": set(), "sdk_renamed": set()},
+        allowed={"sdk:ghost_method"},
+    )
+    assert len(problems) == 1 and problems[0].kind == "no-record", problems
+    assert accounting == {}, accounting
+    assert "has no departure record" in str(problems[0]), problems[0]
+    # The remedy the parser ADVERTISES names the map entry as still required.
+    assert "an SDK method still needs its" in parser_source, parser_source[:200]
+    # ⛔ AND NOT AN ASSERTION THAT CANNOT FAIL. `assert "<the old phrase>" not in
+    # parser_source` looked like the natural counterpart and is inert: the old wording was
+    # split across two adjacent literals, so the joined phrase never appears in the SOURCE and
+    # the assert could not red on a revert (measured, review of PR #12313, round 20). The
+    # positive assertion above is the discriminator: it reds when the help text is reverted.
+    # ...and the printed closing line no longer calls the flag the record on its own.
+    cut_source = inspect.getsource(sm.cmd_cut)
+    assert "that is the record TOGETHER WITH its" in cut_source, "the SDK qualifier is missing"
+
+
 def test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES():
     """CONTRIBUTING must not list `RETIRED_USE_INSTEAD` as a removal source.
 

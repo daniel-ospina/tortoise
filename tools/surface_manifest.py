@@ -2926,9 +2926,17 @@ def cmd_cut(args: argparse.Namespace) -> int:
             # the rename remedy under a mixed refusal prescribed a flag that changes nothing
             # for the row it appears to address (review of PR #12313, round 12).
             if all(p.kind == "no-record" for p in problems):
+                # ⛔ "PASS IT" IS NOT THE WHOLE RECORD FOR AN SDK METHOD, and saying so here
+                # was the same over-claim this line was introduced to fix, one surface over:
+                # for an SDK rename the override only ACCOUNTS the departure — the map entry is
+                # what keeps a caller from meeting a bare `AttributeError` — so a refusal whose
+                # cause is the missing map entry must not close by prescribing the flag alone
+                # the operator has already typed (review of PR #12313, round 20).
                 print("  A genuine RENAME (the old name is gone by design) passes "
-                      "`--allow-removal <symbol> --allow-removal-reason <why>`; it is logged "
-                      "in the cut output and belongs in the PR body.")
+                      "`--allow-removal <symbol> --allow-removal-reason <why>`; for an SDK "
+                      "method that is the record TOGETHER WITH its `RETIRED_SDK_METHODS` / "
+                      "`REMOVED_SDK_METHODS` entry (the row above says which half is missing). "
+                      "It is logged in the cut output and belongs in the PR body.")
             return 1
         print(f"::error::cut refused this removal: {len(problems)} problem(s)")
         print("REFUSED — each line names what is wrong, and the record it names is the "
@@ -4001,8 +4009,10 @@ def main() -> int:
         default=[],
         metavar="[tool:|sdk:]SYMBOL",
         help=(
-            "permit ONE named symbol to disappear from the baseline with no archive or "
-            "retirement record (a genuine rename). Repeatable, requires "
+            "permit ONE named symbol to disappear from the baseline with no archive "
+            "record (a genuine rename); an SDK method still needs its "
+            "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` entry, which is what records the "
+            "departure for a caller. Repeatable, requires "
             "--allow-removal-reason, and logged in the cut output (#12237). A bare SYMBOL "
             "waives whichever surface this cut removes it from, and is refused if that is "
             "BOTH — name the surface as `tool:SYMBOL` / `sdk:SYMBOL` when the same name is "
