@@ -1071,7 +1071,7 @@ steps:
     - step: S2.3
       condition: >-
         the S2 map left at least one candidate's kind missing or `unclassified`, so
-        `_collect_classify_items` (tortoise/extractor_v2.py:11940, `def _collect_classify_items`) had an item to hand the classifier;
+        `_collect_classify_items` (tortoise/extractor_v2.py:12772, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
         the run's own classify surface reads enabled=true with empty s2/union, the receipt's
@@ -1200,7 +1200,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11940-11962` (`_collect_classify_items`, the collector's item set), `:14359` and `:14512` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:12772-12794` (`_collect_classify_items`, the collector's item set), `:15191` and `:15344` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -2163,9 +2163,9 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 ### 11.1 The finding, and what it is not
 
-`_collect_classify_items` (`tortoise/extractor_v2.py:11940-11962`) collects only candidates whose kind
+`_collect_classify_items` (`tortoise/extractor_v2.py:12772-12794`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:14359` (the S2 pass) and `:14512` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:15191` (the S2 pass) and `:15344` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -2209,7 +2209,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:14372`, `classify(S2) failed` / `:14523`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:15204`, `classify(S2) failed` / `:15355`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
@@ -2716,19 +2716,22 @@ to answer.
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file, and the bundle README's present-tense digest with it.
-- **This entry was LIVE for the merged tree until §10.31** — §10.31 is its successor for the rest
-  of the `+83` block (§10.30 declared that work a follow-up; §10.31 discharges it). The three
-  numbers THIS entry owns — `:10619`, `:14359`, `:14512` — are unchanged and still live, so it is
-  not superseded on them.
+- **This entry was LIVE for the merged tree until §10.31**, and is superseded on ALL of its own
+  numbers by §10.32 — not because they were wrong, but because they were measured at `b6a630d` and
+  a later rebase+merge (`bb88463894f5`, onto `main` `ca74f2375ef4`) moved every one of them. The
+  three numbers it owns, `:10619`/`:14359`/`:14512`, were correct at that head; §10.32 re-derives
+  them for the shipping tree (`:11451`/`:15191`/`:15344`).
 
 ### 10.31 — §10.30's declared follow-up: `_collect_classify_items`, the fail-open pair, and §9/§11's carriers (2026-11-13, `#12295`)
 
 > **A successor entry, not an edit to §10.30.** §10.30 closed by declaring its own scope
 > (*"the pin's cite, and the two gate lines this entry names — nothing else … Those are carried as
 > a follow-up rather than widened into this commit"*) and by stating it has no successor. Its
-> numbers — `:10619`, `:14359`, `:14512` — are **unchanged and still correct**; this entry does not
-> supersede them, it discharges the follow-up §10.30 named, which is why the two gate lines are not
-> restated here (§10.30 owns them). What was deferred is exactly what §10.30 listed:
+> numbers — `:10619`, `:14359`, `:14512` — were correct at `b6a630d`; this entry does not supersede
+> them, it discharges the follow-up §10.30 named, which is why the two gate lines are not restated
+> here (§10.30 owns them). ⛔ §10.32 supersedes THIS entry's numbers too: the `+83` it measured was
+> the branch's own, and the rebase+merge onto `main` `ca74f2375ef4` then moved them again. What was
+> deferred is exactly what §10.30 listed:
 > `_collect_classify_items`, the two fail-open `except` arms, and the §9 row / §11.1 / §11.3
 > carriers that quote them.
 
@@ -2759,5 +2762,43 @@ to answer.
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file, and the bundle README's present-tense digest with it.
+### 10.32 — the rebase+merge onto `main` `ca74f2375ef4`: every §10.29–§10.31 cite re-derived (2026-11-13, `#12295`)
+
+> **A successor entry, not an edit to §10.30 or §10.31.** Both are faithful records of the head they
+> measured; re-numbering either in place would be the false record §10.19/§10.22/§10.24 forbid. This
+> entry supersedes both on every number they own, and is the newest entry, so the live-cite pins read
+> IT.
+
+- **Why it exists.** `#12304` was `CONFLICTING`, was rebased and then merged onto `main`
+  `ca74f2375ef4` (`bb88463894f5`). Main had itself moved these lines (`#12348`'s rewrite of
+  `extractor_v2.py`, then `#12426`/`#12481`/`#12268`), so the `+83` band §10.30/§10.31 measured is no
+  longer the shift this tree carries. The deferral §10.30 declared and §10.31 claimed to discharge
+  did NOT survive that: `tests/test_7949_capstone_measure.py::
+  test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has` and
+  `::test_the_newest_change_control_entry_describes_the_shipped_tree` both red on the head §10.31
+  claimed to discharge. A follow-up recorded as done while the pin that reads it is red is a false
+  claim, so the numbers are re-derived here instead of restated.
+- **New values — each MEASURED at `bb88463894f5` by opening the line, not by adding an offset:**
+  `_collect_classify_items` at `:12772`, its extent `:12772-12794` (`def` to `return items`); the two
+  `if items:` gates at `:15191` (the S2 pass) and `:15344` (the post-S4 pass); the two fail-open
+  `except` arms at `:15204` (`classify(S2) failed`) and `:15355` (`classify(union) failed`); and the
+  `#10360` read-back the pin opens, `_value_fidelity_judged = _state_value_verbatim_enforced()`, at
+  `:11451`.
+- **Verified by content, not arithmetic.** `:12772` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12794` is `return items`;
+  `:15204`/`:15355` are the two `except` arms whose appended warnings literally name
+  `classify(S2) failed` / `classify(union) failed` (a THIRD `except Exception as e:  # never block
+  capture (P1)` at `:14902` is the S2.2 arm-restore path and is NOT one of these two, which is why
+  the number is confirmed by the warning text and not by the `except` line, byte-identical across
+  all three); `:11451` carries the receiving variable `_value_fidelity_judged`, not the `def`
+  (`:5793`) and not the `armed =` site (`:5883`).
+- **Carriers updated, all LIVE:** §11's `steps:` condition, §9's provenance row, and §11.1's and
+  §11.3's prose — the four `_live_blocks` carriers the pin binds. §10.29's, §10.30's and §10.31's own
+  bodies are NOT touched: they are change-control history, `_without_change_history` strips them, and
+  they stay as the record of what each head measured.
+- **What moved: citations and nothing that is a protocol value.** No metric, denominator, threshold,
+  class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4 denominator are the
+  ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for *any*
+  edit to this file, and the bundle README's present-tense digest with it.
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
   supersede marker.

@@ -79,10 +79,15 @@ Zep/Graphiti (`graphiti_core/utils/maintenance/dedup_helpers.py`, read at
    applies to kinds. ⛔ **The ``E`` fold is non-injective too, and it DOES attach
    alone.** The NON-INJECTIVITY is ``#12047``'s and is inherited (``key_of`` IS
    the stored ``canonical_name`` key); the ATTACH is CREATED here, by the folded
-   rung this PR adds to ``extractor_v2._find_by_folded_key`` — on ``origin/main``
-   ``_find_existing_entity`` has only the ``exact`` and ``bare`` arms, both
-   ``_norm``-keyed, so ``_find_existing_entity([{"id": "o1", "name": "C#", "kind": "core:other"}],
-   "C++", "core:other")`` returns ``(None, "none")`` there. :func:`key_of` collapses punctuation, so
+   rung this PR adds to ``extractor_v2._find_by_folded_key``. On ``origin/main`` the ladder is six rungs —
+   ``named_exact``, ``named_bare``, ``aliased_exact``, ``aliased_bare`` and the
+   kind-agnostic ``aliased_any`` (#12296 D-1) — and the distinction that matters is
+   WHAT each compares: the NAME rungs are ``_norm``-keyed (whitespace collapse +
+   lowercase), and the ALIAS rungs are folded but match only a spelling a merge
+   RECORDED in that row's ``aliases[]``. Neither can bind an arbitrary folded
+   variant, so ``_find_existing_entity([{"id": "o1", "name": "C#", "kind": "core:other"}],
+   "C++", "core:other")`` returns ``(None, "none")`` there: ``C++`` carries no alias
+   record, and this PR's folded rung is what newly attaches it. :func:`key_of` collapses punctuation, so
    ``C++``, ``C#`` and ``C``
    all fold to ``c`` (likewise ``.NET``/``NET``, ``50%``/``50``), and a capture
    window holding exactly one of them binds the other —
@@ -311,8 +316,13 @@ def block_keys(name: object, *, key: str | None = None) -> tuple[str, ...]:
     is carried by ``E`` alone)), ``T`` a
     per-token prefix (word order and transposition), ``S`` an LSH shingle band
     (typo/separator classes FTS cannot reach), and the ``E``/``B`` attach keys. A
-    low-entropy name blocks on ``E``/``P``/``T`` only: its shingle set is noise,
-    which is the cost Zep's gate exists to avoid.
+    low-entropy name still blocks on the attach keys (``E`` and, for every
+    non-empty name, ``B``) plus ``P``/``T`` where their OWN floors are met — and it
+    never blocks on ``S``, because its shingle set is noise, which is the cost
+    Zep's gate exists to avoid. ⛔ Neither the attach keys nor ``T`` are gated by
+    entropy: ``block_keys('aaa')`` is ``('E:aaa', 'B:aaa', 'P:aaa', 'T:aaa')``, and
+    ``block_keys('aa aa')`` carries no ``T`` at all (``T`` needs a token of at least
+    ``MIN_BLOCK_CHARS``).
     """
     keys = list(attach_keys(name, key=key))
     key = key if key is not None else key_of(name)
