@@ -446,6 +446,18 @@ def test_the_completeness_claim_cannot_survive_a_skipped_block(report):
         f"the largest block ({stats['max_block_size']}) exceeds the cap "
         f"({stats['query_candidate_cap']}) — the cap fired, so the published "
         "completeness is deflated")
+    #: And the cap the artifact names must be the one the MODULE enforces: the
+    #: key-set guard below catches a renamed field, not a retuned constant, so a
+    #: tightened `MAX_BLOCK_SIZE` would leave the brief quoting "the 200 cap"
+    #: against a cap the shipped code no longer honours.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from tortoise.entity_blocking import MAX_BLOCK_SIZE
+
+    assert stats["query_candidate_cap"] == MAX_BLOCK_SIZE, (
+        f"the artifact was measured against a cap of "
+        f"{stats['query_candidate_cap']} while the shipped module enforces "
+        f"{MAX_BLOCK_SIZE} — the brief's \"against the 200 cap\" then describes a "
+        "bound the code no longer applies")
     text = BRIEF.read_text()
     assert f"`max_block_size` **{stats['max_block_size']}**" in text, (
         "the brief does not quote the artifact's max_block_size")
@@ -513,7 +525,7 @@ def test_the_provenance_note_states_no_count_it_cannot_sustain(report):
     review round 25). The range is a base-moved range, so a number in that
     position moves with every commit that lands: the ABSENCE is what is pinned.
     """
-    pattern = re.compile(r"\b\d+-commit\b")
+    pattern = re.compile(r"\b\d+-commit\b|\b\d+\s+commits?\b")
     for name, blob in (("code_head_note", report["code_head_note"]),
                        ("research-brief.md", BRIEF.read_text())):
         hit = pattern.search(blob)
@@ -521,3 +533,124 @@ def test_the_provenance_note_states_no_count_it_cannot_sustain(report):
             f"{name} states a commit count ({hit.group(0)!r}) that the note's own "
             "disclaimer forbids — the range is base-moved, so the number is "
             "stale as soon as the next commit lands")
+
+
+def test_every_figure_the_brief_quotes_is_bound_to_the_artifact(report):
+    """Table-driven: every MEASUREMENT figure the brief attributes to the artifact
+    must be bound, so an artifact mutation cannot leave the prose standing.
+
+    ⛔ This test exists because rounds 24, 25 and 26 each found the SAME defect one
+    figure at a time: the brief quotes a number, and no assertion reads it, so the
+    artifact can be mutated while the brief's claim stands. Round 26's audit
+    enumerated the survivors — the FTS completeness column and its numerators, the
+    arm tables' cells outside the hand-picked needles, the run-identity block, and
+    the two sentences that name a pair count at a window (``202 at k=3 instead of
+    409``). Measured green before this test, each with the file fully passing:
+    ``in_window["3"]`` 409->421 TOGETHER WITH ``pair_completeness["3"]``
+    0.9692->0.9976 (the falsifier's headline answer), ``variant["15"].attached``
+    212->213, ``in_window_not_attached`` 202->203, ``prior_on_norm_only.minted``
+    422->400 and ``.rate`` 1.0->0.9, per-class ``in_window`` 175->170 / 21->20 /
+    11->10 / 23->24, ``in_multikey_block`` 180->181 / 30->29, per-class
+    ``attached_folded`` 11->12 / 179->180 (breaking the 386 decomposition),
+    ``exact_by_class.definite`` 179->178, ``corpus.sample`` 300->400,
+    ``corpus.files`` 18->19, ``window_modes.hybrid`` 4388->4000, and
+    ``legs_seen.structural`` True->False.
+    """
+    text = BRIEF.read_text()
+    arms = report["arms"]
+    blocking = arms["blocking"]
+    pool = blocking["fts_only"]
+    pairs = blocking["pairs"]
+    ks = sorted(int(k) for k in pool["pair_completeness"])
+
+    #: §3.1's completeness COLUMN and its NUMERATORS. Pinning only their mutual
+    #: arithmetic (`pc == in_window/pairs`) leaves both free to move together,
+    #: which is exactly how the falsifier's 0.9692 answer could be rewritten.
+    for k in ks:
+        if pool["pair_completeness"][str(k)] != 1.0:
+            assert _quotes(text, pool["pair_completeness"][str(k)]), (
+                f"the brief does not quote the artifact's k={k} pair completeness "
+                f"({pool['pair_completeness'][str(k)]})")
+    #: The brief quotes a NUMERATOR only for the production window, so pin that
+    #: one by name and the rest of the column by the shape it must have.
+    prod_k = str(arms["duplicate_rate"]["window_k"])
+    assert f"({pool['in_window'][prod_k]}/{pairs})" in text, (
+        f"the brief does not quote the artifact's k={prod_k} numerator "
+        f"({pool['in_window'][prod_k]}/{pairs})")
+    counts = [pool["in_window"][str(k)] for k in ks]
+    assert counts == sorted(counts), (
+        f"a wider FTS window cannot contain fewer pairs, measured {counts} at "
+        f"k={ks} — the brief's per-k column is no longer a window sweep")
+    assert counts[-1] == pairs, (
+        f"the widest window holds {counts[-1]} of {pairs}, so the table's 1.0000 "
+        "row is not the whole population")
+
+    #: The run-identity block, quoted EXACTLY — a backticked token cannot be
+    #: satisfied by a truncated one, which the old bare-substring needles allowed.
+    corpus = report["corpus"]
+    for label, needle in (
+        ("corpus.graph", f"`{corpus['graph']}`"),
+        ("corpus.population_digest", f"`{corpus['population_digest']}`"),
+        ("corpus.elapsed_s", f"{corpus['elapsed_s']} s"),
+        ("corpus.files", f"{corpus['files']} harvested session files"),
+        ("corpus.sample", f"sample {corpus['sample']}"),
+        ("corpus.sample_by_class", "definite {definite} / ident {ident} / "
+                                  "path {path}".format(**corpus["sample_by_class"])),
+        ("retrieval.window_modes.hybrid",
+         f"{report['retrieval']['window_modes']['hybrid']} windows"),
+    ):
+        assert needle in text, (
+            f"the brief does not quote {label} as the artifact holds it "
+            f"({needle!r})")
+    assert corpus["sample"] == sum(corpus["sample_by_class"].values()), (
+        "the stratified sample's class split does not add up to the sample size "
+        f"({corpus['sample_by_class']} vs {corpus['sample']})")
+    assert report["retrieval"]["legs_seen"]["structural"] is True, (
+        "the brief contrasts this run as `legs_seen.structural` `true` here")
+    assert "`legs_seen.structural` is `false` there, `true` here" in text, (
+        "the brief no longer states the structural-leg contrast this run rests on")
+
+    #: The duplicate-rate table: the two control arms the ablation's verdict
+    #: depends on (only the shipped arm had assertions).
+    for arm in ("prior_off", "prior_on_norm_only"):
+        assert arms["duplicate_rate"][arm]["minted"] == pairs, (
+            f"the {arm} arm did not mint every pair — the brief's `422` is false")
+        assert arms["duplicate_rate"][arm]["rate"] == 1.0, (
+            f"the {arm} arm's rate is not 1.0 — the brief's `1.0000` is false")
+
+    #: §3.3's per-class table: pin each row's first three cells (the claim cells
+    #: the prose reads), then the COLUMN totals, so no single cell can move without
+    #: breaking a total or a row.
+    by_class = arms["variant_by_class"]
+    for cls, rows in by_class.items():
+        row = rows["3"]
+        assert f"| {cls} | {row['pairs']} | {row['in_window']} |" in text, (
+            f"the brief does not tabulate the artifact's {cls} row at k=3")
+    assert sum(r["3"]["pairs"] for r in by_class.values()) == pairs
+    assert sum(r["3"]["in_window"] for r in by_class.values()) == pool["in_window"]["3"], (
+        "the per-class in-window column does not sum to the FTS window's k=3 count")
+    assert (sum(r["3"]["in_multikey_block"] for r in by_class.values())
+            == pairs), (
+        "the per-class blocker column does not sum to the whole pair population, "
+        "so the brief's claim that the blocker reaches all 422 is false")
+    assert (sum(r["3"]["attached"] for r in by_class.values())
+            == arms["duplicate_rate"]["prior_on_shipped_folded"]["attached"]), (
+        "the per-class attached column does not sum to the shipped arm's attached")
+    assert (sum(r["3"]["attached_folded"] for r in by_class.values())
+            == arms["variant"]["3"]["attached_folded"]), (
+        "the per-class attached_folded column does not sum to the variant arm's "
+        "attached_folded, so the brief's 386 decomposition is broken")
+
+    #: The two sentences that name a pair count AT A WINDOW.
+    variant = arms["variant"]
+    assert f"{variant['15']['attached']} at `k=15`" in text, (
+        "the brief does not quote the artifact's k=15 attached count")
+    assert (f"{variant['3']['in_window_not_attached']} at `k=3` instead of "
+            f"{variant['3']['in_window']}") in text, (
+        "the brief does not quote the artifact's k=3 in-window-but-unattached "
+        "count against its in-window count")
+
+    #: The `exact` arm's class figure the brief contrasts with #11901.
+    exact = arms["exact_by_class"]["definite"]["3"]
+    assert f"definite class {exact['in_window']}/{exact['n']} here" in text, (
+        "the brief does not quote the artifact's exact-arm definite class figure")
