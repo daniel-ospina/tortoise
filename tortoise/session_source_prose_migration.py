@@ -1563,6 +1563,20 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # bound exists to prevent, reached through the one branch that returns early.
     # ORDER is the fix; the acceptance itself is right (#11536 round 8) for every
     # number the index can hold.
+    #
+    # ⚠️ AND AFTER THE MOVE THIS BRANCH IS A **BACKSTOP**, NOT THE FIX (#12368
+    # review round 4, P3 — a claim correction, no behaviour change). The move made
+    # it DECISION-EQUIVALENT TO DELETING IT: a differential over 154,678 shapes
+    # (exhaustive length 1-4 over `[0-9]`, `[0-9_]`, `[0-9,.-%()]`, `[0-9ab_]`,
+    # `[0-9٤٨]`, plus 4,000 random lengths 1-200) against the same module with these
+    # ten lines deleted found **0 decision differences**, and deleting them leaves
+    # 185 tests green. Everything that reaches here is either under the bound (so
+    # the later `build_or_query` backstop accepts it anyway) or is a shape the
+    # escape set refuses. It is kept because the `#11536` round-9 P0 it was written
+    # for must not be able to re-open silently: it is the explicit statement of
+    # "a bare number is probe-able", and the next edit to the branches above it is
+    # what decides whether it is live again. ⛔ Do not read it as the active guard —
+    # `escape_redisearch_literal` and the `build_or_query` backstop below are.
     if len(runs) == 1 and runs[0].isdigit() and token.lower() == runs[0]:
         # A bare number — the TOKEN is the run, with no punctuation around it.
         # ⛔ ``token.lower() == runs[0]`` IS THE GUARD, not a formality (#11536
