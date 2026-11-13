@@ -1126,9 +1126,17 @@ def latest_readings(
     # and 2-vs-1 on a single-object one), so it is not a stable discriminator —
     # `count(r)` and an edge-derived projection are. What makes the cursor safe
     # is therefore narrower and checkable: distinct events have distinct
-    # `id(e)`, so a duplicate row costs at most a repeated MEASUREMENT, never a
-    # distinct reading skipped across a page boundary — `>= last + 1` advances
-    # past every copy of the last event.
+    # `id(e)`, and `>= last + 1` advances past EVERY copy of the last event, so
+    # a duplicate can never be left behind to be counted twice. ⛔ It can,
+    # however, be SKIPPED: when a duplicate group straddles a page boundary the
+    # second copy is never collected, so the row count comes back SHORT of
+    # `count(e)` and the truncation guard below fires on a graph that is not
+    # truncated (measured, page size 2, rows ascending `2,3,3,4`: page 1 is full
+    # at `[2,3]`, `cursor = 4` skips the second `3`, so 3 of 4 rows are
+    # collected). The rows it costs are COPIES of an event already returned,
+    # never a distinct reading — which is why that refusal is a false positive,
+    # and why its cause is named in the error instead of being left to a re-run
+    # that re-raises deterministically (#12511).
     #
     # ⛔ WHAT IS **NOT** SAFE: a repeated row means a `dwell` of N can be
     # satisfied by ONE measurement counted N times, and the shipped projection
@@ -1209,8 +1217,8 @@ def latest_readings(
         # incomplete set. Refuse rather than answer from the part that arrived.
         raise RuntimeError(
             f"latest_readings read {len(rows)} of {expected} rows for indicator "
-            f"{indicator_id!r} — a page came back short of {batch}. FOUR causes, "
-            "with three remedies: a server-side RESULTSET_SIZE pinned below "
+            f"{indicator_id!r} — a page came back short of {batch}. FIVE causes, "
+            "with four remedies: a server-side RESULTSET_SIZE pinned below "
             "_READINGS_PAGE_SIZE (lower the constant below the cap), or the "
             "matched set SHRANK after the count was taken — a concurrent DELETE "
             "of a reading the count had already seen, OR a concurrent UPDATE that "
@@ -1224,8 +1232,14 @@ def latest_readings(
             "cause is not a retry problem: the node the caller asked about is "
             "gone or renamed, and a re-run does not raise — the count is 0 too, "
             "so it answers an EMPTY reading set about a node that is no longer "
-            "the one asked for. Observe that rather than retry. A CREATE that "
-            "lands mid-read is NOT among the four: it either reuses "
+            "the one asked for. Observe that rather than retry — OR the graph "
+            "carries a DUPLICATED ``o.id`` (two ``:Object`` nodes sharing "
+            "the indicator's id, each wired to the same events): a duplicate "
+            "group that straddles a page boundary has its second copy "
+            "skipped, so the count is SHORT by copies that were never a "
+            "distinct reading. That cause is deterministic — a re-run raises "
+            "identically — and its root is tracked as #12511. A CREATE that "
+            "lands mid-read is NOT among the five: it either reuses "
             "an id already paged past (count unchanged) or appends one (count "
             "short by nothing). Which rows a truncated tail costs is "
             "whatever currently holds the highest live ids (``id(e)`` is creation "
