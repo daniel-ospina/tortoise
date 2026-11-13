@@ -236,9 +236,10 @@ class TestTheListingDoorTeachesTheSameWay:
             detail = _detail(r)
             assert detail["error_code"] == "GRAPH_LISTING_VIA_SESSION", detail
             # The remedy must name what EXISTS. A first draft said no key-driven
-            # route returns a graph id; `GET /v1/team/keys` does (and the SDK's
-            # `list_memory_graphs` lists the account's graphs), so this pins the
-            # truthful remedy rather than the convenient one.
+            # route returns a graph id, and a second named a control-plane SDK
+            # call a hosted builder cannot use — `GET /v1/team/keys` and the MCP
+            # tool `tortoise_list_graphs` are the routes that actually answer, so
+            # this pins the truthful remedy rather than the convenient one.
             assert ORG_ENDPOINT in detail["message"], detail
             assert "/v1/team/keys" in detail["message"], detail
             assert "tortoise_list_graphs" in detail["message"], detail

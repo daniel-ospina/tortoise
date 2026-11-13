@@ -26444,10 +26444,12 @@ def _provision_refusal(error_code: str, message: str) -> HTTPException:
 
     ONE shape for every refusal on this path — `{error_code, message}`, the
     `GRAPH_SCOPED_TEAM_SURFACE` convention (#2114, ``_reject_graph_bound_org_
-    surface``) — so a credential-scope refusal never grows a second style. The
-    endpoint and the scope are the two facts a builder cannot infer, so every
-    message below spells both out verbatim from ``_PROVISION_ENDPOINT`` /
-    ``_PROVISION_SCOPE``: the teaching text and the route cannot drift apart.
+    surface``) — so a credential-scope refusal never grows a second style. Every
+    provisioning message names the endpoint verbatim from ``_PROVISION_ENDPOINT``
+    and — where the gap IS the scope — the scope from ``_PROVISION_SCOPE``, so the
+    teaching text and the route cannot drift apart. (The listing refusal is the
+    exception that proves the rule: its remedy is an id-recovery path, not a
+    scope, so naming `graphs:create` there would be a second false claim.)
 
     Always 403, and deliberately the SAME 403 for a valid key and a garbage
     `tt_` string: the refusal is about the DOOR, never about whether the

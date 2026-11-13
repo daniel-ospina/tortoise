@@ -22,12 +22,13 @@ endpoint nor the missing scope.
 
 > **Canonical terms.** **Organisation account** is defined in
 > `docs/ONTOLOGY.md` §5 (Core Kind Vocabulary, the account-layer note) and, with
-> the tenancy vocabulary this guide uses — **memory graph**, **credential** — in
-> `docs/registry-graph-schema.md` ("Definitions — account layer vs in-graph
-> Subjects"). An **organisation account** is the billing and plan boundary; it
-> owns many **memory graphs**; a **credential** (API key) authenticates to an
-> account or to one graph. The mid tier is called **Builder** in the product and
-> `pro` in the API (#12444) — they are the same plan.
+> the account-vs-subject distinction, in `docs/registry-graph-schema.md`
+> ("Definitions — account layer vs in-graph Subjects"), whose schema is where the
+> `Graph` and scoped `APIKey` rows live. In this guide: an **organisation account**
+> is the billing and plan boundary; it owns many **memory graphs**; a
+> **credential** (API key) authenticates to an account or to one graph. The mid
+> tier is called **Builder** in the product and `pro` in the API (#12444) — they
+> are the same plan.
 
 ---
 
