@@ -624,15 +624,21 @@ def _walk_own_scope(root: ast.AST):
     the population (see `_locally_bound` for the measured A/B).
 
     ⛔ NAMED RESIDUAL, NOT CLOSED HERE (`#12317`): a walrus in a nested `def`/`lambda` DEFAULT binds
-    in the ENCLOSING scope (PEP 572; `symtable` puts it in this writer's locals), so `_shadowed_names`
-    walks those defaults — this walk does not, and it is the reader that feeds `_locally_bound` →
-    `_keep_shadowed_aliases`. Measured at this head: `_enc` bound by `from … import encode_for_row as
+    in the ENCLOSING scope (PEP 572; `symtable` puts it in this writer's locals), and this walk skips
+    `args` for every nested scope node — so it never sees that rebind, and it is the reader that feeds
+    `_locally_bound` → `_keep_shadowed_aliases`. ⛔ Do NOT read the sibling mention walk as covering
+    this: the coverage is SPLIT, not one-sided. `_shadowed_names` walks a **lambda's** defaults
+    unwidened, so for that spelling the two walks genuinely disagree (measured: the same shape is a
+    suppressed by-reference mention THERE and an unseen rebind HERE); for a nested **`def`/`class`**
+    default BOTH walks are blind — the def/class branch records only the NAME and `continue`s before
+    any default walk — so there the two AGREE, and a fix for this issue must not assume the mention
+    walk already handles it. Measured at this head: `_enc` bound by `from … import encode_for_row as
     _enc` then REBOUND in `f = lambda v=(_enc := print): v` leaves the writer **`gated`** (outside
     `NEEDS_A_DECLARATION`, i.e. HIDDEN) while never reaching the gate, whereas the equivalent plain
     rebind drops the writer from the census entirely. It is PRE-EXISTING on `main` `f33f5e2c32`
-    (measured identical there), and closing it means walking the DEFAULTS of every nested
-    `def`/`class`/`lambda` — a wider change than this PR's subject, hence the issue rather than a
-    silent third asymmetry. Do not read `_shadowed_names`' default rule as covering this reader.
+    (measured identical there, on both the lambda-default and def-default spellings), and closing it
+    means walking the DEFAULTS of every nested `def`/`class`/`lambda` — a wider change than this
+    PR's subject, hence the issue rather than a silent third asymmetry.
     """
     stack: list[ast.AST] = [root]
     while stack:
