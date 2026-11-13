@@ -132,10 +132,11 @@ classified). The gate's own match is a dict **literal** carrying a constant
 KEYLESS plain dict — or with an `error` key built any other way (`dict(error=…)`,
 a key assigned after construction, an unpack, a conditional) — would be invisible
 to it and to a `status` filter alike; no served tool
-answers that way at this writing — the last one (`tortoise_pack_install`'s
+answers that way at this writing — the last one that did (`tortoise_pack_install`'s
 rejected manifest, `{"installed": false, "validation_errors": [...]}`) is
-answered as an `_SafeError` too. Otherwise: do not read a `status` filter as
-"the retrieval answered".
+**ARCHIVED by #11609 batch 1**, so there is no live referent left at all, and it
+was answered as an `_SafeError` while it was still served. Otherwise: do not read
+a `status` filter as "the retrieval answered".
 
 **`recall_returned` is a RETURN, not an answer.** Since #3675 the
 `mcp_tool_call` props carry `result_count` — the number of items the call
