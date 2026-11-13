@@ -33847,6 +33847,35 @@ class TortoiseSDK:
             alarm_reason = "silent_no_op"
         elif backlog > 0 and last_output == 0:
             alarm_reason = "zero_output_with_backlog"
+        elif stamp_error is not None:
+            # #12099 (the per-call half of #11823) — the "could not read it" pole
+            # of `BOUNDED-OPERATION-CONTRACT.md` §1a (`0`, `"empty"` and "I
+            # could not read it" must never become one answer). The pair read
+            # FAILED, so `coverage` above is the `0.0` FALLBACK, not a reading,
+            # and `zero_coverage_with_backlog` would assert a measurement that
+            # never happened.
+            #
+            # SCOPE: this arm closes the FAILED-READ pole only, not §1a for this
+            # field. Two residuals stay open on #12099 and are deliberately not
+            # touched here: (a) an EMPTY denominator (`_coverage_ratio`'s `0/0`
+            # → `0.0`) is still labelled as a measured zero — the "empty" pole;
+            # and (b) this arm is unreachable while `last_pass_output == 0`, i.e.
+            # on ANY instance that has served no pass — `GET /v1/dream/health`'s
+            # per-request SDK, and an embedded SDK before its first pass — where
+            # the `zero_output_with_backlog` arm ABOVE wins. (b) is a CONDITION,
+            # not a surface: fixing only the hosted door would leave it intact on
+            # embedded (measured: identical output before and after this change).
+            #
+            # The VERDICT is unchanged on purpose: an unreadable coverage over a
+            # live backlog still alarms (fail-loud), and `coverage_pct` keeps its
+            # pre-existing `0.0` because that number FEEDS this alarm — moving it
+            # to `None` would disarm the term the alarm exists for. Only the
+            # REASON stops claiming the zero was read; the WHY travels beside it
+            # on `propagation.unavailable` in this same record (that field
+            # conflates a failed stamp read with a failed census read where
+            # coverage WAS measured, so it cannot answer "was the alarm's input
+            # measured" — which is why the reason token is the right home).
+            alarm_reason = "coverage_unavailable"
         else:
             alarm_reason = "zero_coverage_with_backlog"
         state = self.dream_health_state()
