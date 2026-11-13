@@ -2465,26 +2465,30 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             if k_to < k_from:
                 count8 += 1
                 if len(issues8) < SAMPLE_LIMIT:
-                    # #7819: the repair differs by LIFECYCLE. A terminal claim's
-                    # temporal record is frozen by the shared guard, so naming
-                    # `tortoise_update_point` there would prescribe a call that
-                    # always raises; say what the state IS instead.
+                    # #7819/#9649: the repair differs by LIFECYCLE. A terminal
+                    # claim's temporal record is frozen by the shared guard, so
+                    # naming a call that rewrites it would prescribe one that
+                    # always raises.
                     #
-                    # ⛔ The refusal is the DOOR's, not the SDK's: name
-                    # `tortoise_update_point` and never "through the SDK".
-                    # `update_entity`'s Point arms write caller props with no
-                    # lifecycle guard and no window validator (#9649), so a
-                    # window re-stamp is still reachable there on a dead claim —
-                    # claiming otherwise in a HIGH finding would hand the
-                    # operator a second unexecutable statement.
+                    # ⛔ Since **#9649** the freeze is SDK-WIDE, not per-door:
+                    # `update_entity`'s Point arms consult the same guard for
+                    # `status` and every `_TEMPORAL_RESTAMP_PROPS` member, so the
+                    # `update_entity` window re-stamp this text used to leave open
+                    # is refused too. The text therefore says "through the SDK"
+                    # — the claim the pre-#9649 text was forbidden to make
+                    # because it was false. ⚠️ It names the doors for the reader
+                    # and never PRESCRIBES one: a `tortoise_update_point(...)`
+                    # call here would be the unexecutable repair the pre-#7819
+                    # text handed out.
                     if is_terminal_status(w_status, bool(w_outdated)):
                         _fix = (
-                            f"Not repairable through tortoise_update_point: "
-                            f"point {wid} is a terminal claim, whose temporal "
-                            "record that verb refuses (#7819) — the window "
-                            "stays as stored (a retroactive correction is "
-                            "#5362, not shipped; the unguarded update_entity "
-                            "door is #9649)"
+                            f"Not repairable through the SDK: point {wid} is a "
+                            "terminal claim, whose temporal record every "
+                            "lifecycle door refuses (`tortoise_update_point` "
+                            "#7819, `update_entity` #9649) — the window stays as "
+                            "stored, which keeps this finding HIGH on every "
+                            "re-audit. A retroactive correction is #5362 (not "
+                            "shipped)."
                         )
                     else:
                         _fix = (f"Repair the window: tortoise_update_point("

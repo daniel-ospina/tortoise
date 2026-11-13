@@ -4600,10 +4600,21 @@ CROSS_LENS_ANN_TOP_K = 20
 # undermine the cost contract entirely).
 CROSS_LENS_ANN_TOP_K_MAX = 100
 
-# #432: declarative spec for the retract/supersede transition guards. NOT
-# consulted by update_point per-call (update_point only promotes draft→live);
-# every claim transition is observable via a Task 3 emit hook, and no
-# transition can slip through update_point unemitted.
+# #432: declarative spec for the Point lifecycle — ONTOLOGY §5's transition
+# table in code (``tests/test_claim_lifecycle.py`` cross-checks the pair, so a
+# map that drifted from the doc, or a doc that drifted from the map, reds).
+# NOT consulted by update_point per-call (update_point only promotes
+# draft→live; every claim transition is observable via a Task 3 emit hook, and
+# no transition can slip through update_point unemitted).
+# ⛔ IT IS CONSULTED, for the transition question, by `_update_entity`'s Point
+# `status` arm (#9649) — the generic tenant door, which had no transition check
+# at all: `update_entity(superseded_point, status='live')` resurrected a dead
+# claim and `status='archived'` minted a status ONTOLOGY declares reserved.
+# What that door consults is the DECLARED TARGET SET for a stored status — never
+# terminality, which stays in the shared predicate (#2498's
+# `live.is_terminal_status`, which also covers `deprecated` and the legacy
+# `outdated=true` flag, neither of which is a key here). A stored status with no
+# entry here (NULL/legacy) defers rather than being guessed at.
 _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     # P2 (code-review): guards allow draft→retracted/superseded (a draft point
     # can be terminal before ever going live); keep the declarative spec
@@ -46766,6 +46777,64 @@ class TortoiseSDK:
                     props, label=_carrier_label, surface="update_entity",
                     stored_status=_carrier_rows[0][0])
                 break
+        # ── #9649: this door consults the lifecycle guard (#2498/#7819) ───────
+        # Measured on the pre-change tree (issue #9649, comment `6839154493`, at
+        # `origin/main` = `f33f5e2c32`): `supersede_point(old, new)` followed by
+        # `update_entity(old, status='live')` was ACCEPTED, leaving `status='live'`
+        # beside `outdated=true` and a CLOSED `validTo` — a dead claim resurrected
+        # by one call and incoherent on every read surface (`_terminal_excluded`
+        # stops excluding it, so belief takes it back); and
+        # `update_entity(terminal, validTo=…)` rewrote the window the supersession
+        # had closed. Every call site of `_assert_lifecycle_guard` sat ~24 000
+        # lines above this method, so neither arm consulted it.
+        #
+        # SCOPE — the one #7819 established for the sibling door, for the same
+        # recorded reason (#3305): a content/metadata revision of a terminal
+        # claim stays legal here (the revision is the newer same-id writer and the
+        # replay fold is built for it), while a LIFECYCLE write — `status`, or any
+        # `_TEMPORAL_RESTAMP_PROPS` member — is refused. A blanket terminal
+        # refusal would reverse #3305 through this door, which is why the guard is
+        # not asked to refuse `name`/`content`.
+        #
+        # PLACEMENT — ahead of the Point `status` arm below, which is this
+        # method's FIRST write and its `restatus` journal: a refusal after it would
+        # tell the caller the call failed while the status had already landed and
+        # been journaled (the atomicity rule #9287/#10192 state for the sibling
+        # gate). It runs after the refusals above, so a call refused for its
+        # vocabulary or its carrier is still reported as itself.
+        #
+        # `missing_ok=True` is load-bearing: this method is the documented tenant
+        # route onto EVERY label, so an absent or non-Point id must stay a no-op
+        # rather than become `No point <id>` (#10119's absent contract; the
+        # `:Subject`/`:Object` arms below serve those ids). `allow_operator=True`
+        # matches `update_point` (#7819): this door writes operator points too, and
+        # the guard still refuses a TERMINAL operator.
+        #
+        # The refusal is re-raised HERE rather than taken from the guard verbatim
+        # (#10183, AX rule 2): the guard's message names the dead state but not the
+        # FIELDS this call asked for, and its repair is generic across doors. One
+        # instrument still answers terminality; only the wording is local. The
+        # `except` cannot catch an absent/operator verdict — `missing_ok=True` and
+        # `allow_operator=True` leave terminality as the guard's only raise.
+        _lifecycle_fields = sorted(
+            ({"status"} if "status" in props else set())
+            | (_TEMPORAL_RESTAMP_PROPS & set(props)))
+        _verdict = None
+        if _lifecycle_fields:
+            try:
+                _verdict = self._assert_lifecycle_guard(
+                    id_val, method="update_entity", missing_ok=True,
+                    allow_operator=True)
+            except ValueError as _terminal_refusal:
+                raise ValueError(
+                    f"update_entity refused {_lifecycle_fields} on a dead "
+                    f"claim: {_terminal_refusal}. A terminal Point's status and "
+                    f"validity window are one-way (#2498) — mint a new Point "
+                    f"for the corrected claim and supersede this one with "
+                    f"`supersede_point(dead_id, new_id)`; do not re-status a "
+                    f"dead one. Content and metadata revisions are still "
+                    f"accepted on it."
+                ) from None
         if "status" in props:
             _pt_hits = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN count(n)",
@@ -46781,6 +46850,59 @@ class TortoiseSDK:
                     raise ValueError(
                         f"Invalid status {_status!r}. "
                         f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
+                    )
+                # ── #9649: the DECLARED transition, from `_ALLOWED_TRANSITIONS` ──
+                # The vocabulary check above asks whether `_status` is a Point
+                # status word; it never asked whether the ROW may become it. That
+                # map is ONTOLOGY §5's Point-lifecycle table and
+                # `tests/test_claim_lifecycle.py` cross-checks it against the doc —
+                # and before this call it had no production reader at all, which is
+                # why the architecture doc could cite it and still call it inert.
+                # It is consulted for the TRANSITION question it declares, and only
+                # for a stored status it knows: a NULL/legacy status (a `None` key
+                # is not in the map) defers, so a legacy point that never got a
+                # status can still be given one (the CLI backfill's own route to
+                # `live`), and an identical status is not a transition at all.
+                # ⚠️ The #2498 residual ONTOLOGY §5 records — a flag-dead point
+                # (`outdated=true` with a NULL status) given `status='live'` — is
+                # NOT carried over to this door: the guard above runs first and it
+                # reads the legacy flag, so that shape is REFUSED here (pinned by
+                # `test_the_legacy_outdated_flag_alone_makes_the_point_dead`). The
+                # residual stays where §5 puts it, on `update_point`'s promote arm.
+                # The TERMINAL half is already answered above by the shared guard,
+                # which also covers what the map cannot (`deprecated`, the legacy
+                # `outdated=true` flag, an operator fan-out) — that is why this
+                # check never re-derives terminality from an empty target set.
+                _stored = (_verdict or {}).get("status")
+                _declared = (_ALLOWED_TRANSITIONS.get(_stored)
+                             if isinstance(_stored, str) else None)
+                if (_declared is not None and _status != _stored
+                        and _status not in _declared):
+                    _declared_text = ", ".join(
+                        sorted(_declared)) or "nothing — it is terminal"
+                    # AX rule 2's third part (#10183): a route the caller can
+                    # actually take. The DECLARED targets are named, the two
+                    # verbs that reach them are named where they exist, and the
+                    # mint-and-supersede route covers the case the status itself
+                    # was wrong. `archived` gets its own sentence because it is
+                    # *"reserved — no v1 write path"* on a Point (ONTOLOGY §5),
+                    # so naming it in a transition list would advertise a write
+                    # the model does not offer.
+                    _reserved = (
+                        " `archived` is reserved on Points (ONTOLOGY §5: no v1 "
+                        "write path) — `retract_point(...)` is the SDK route to "
+                        "retirement."
+                        if _status == "archived" else "")
+                    raise ValueError(
+                        f"update_entity refused the status transition "
+                        f"{_stored!r} -> {_status!r} on Point {id_val!r}: "
+                        f"ONTOLOGY §5's Point lifecycle declares "
+                        f"{_stored!r} -> {{{_declared_text}}}, so {_status!r} is "
+                        f"not a declared transition from {_stored!r} through "
+                        f"this door.{_reserved} Use a declared transition, or — "
+                        f"if the claim itself changed — mint a new Point and "
+                        f"supersede this one with "
+                        f"`supersede_point({id_val!r}, <new_id>)`."
                     )
                 # Write FIRST, journal SECOND, gated on the write having
                 # MATCHED (a missed/no-op write must never leave a phantom
