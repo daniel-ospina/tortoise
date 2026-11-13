@@ -177,11 +177,21 @@ def test_the_declines_artifact_carries_the_invariants():
         # per-predicate count, so a double-append cannot hide
         assert len([e for e in arms["gate_gated_names"]
                     if p in e["predicates"]]) == g["gated"], p
-        # the pooled population is the sample, and every gated name is accounted
-        # for exactly once per window (`unreachable_regardless` is absent from
-        # this pre-split artifact and 0-valued after it, so both shapes pass)
-        assert arms["pooled_gate"][p]["15"]["gated"] == g["gated"], p
+        # the pooled population is the sample — UNLESS the run disclosed that it
+        # is not. `_pooled_coverage.truncated` is the instrument's own supported
+        # state (a wider `--sample`, fewer `--captures`), and a truncated run is
+        # self-consistent: its pooled `gated` is a SUBSET of the arm's. Asserting
+        # equality unconditionally would false-red a legitimate re-run and push
+        # the next lane to edit either the artifact or this guard.
+        truncated = arms.get("pooled_coverage", {}).get("truncated", False)
         for k, cell in arms["pooled_gate"][p].items():
+            if truncated:
+                assert cell["gated"] <= g["gated"], (p, k, cell)
+            else:
+                assert cell["gated"] == g["gated"], (p, k, cell)
+            # every gated name is accounted for exactly once per window
+            # (`unreachable_regardless` is absent from this pre-split artifact
+            # and 0-valued after it, so both shapes pass)
             assert (cell["rescued_by_union"] + cell["lost"]
                     + cell.get("unreachable_regardless", 0)) == cell["gated"], (p, k)
 
