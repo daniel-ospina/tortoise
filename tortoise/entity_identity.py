@@ -141,21 +141,20 @@ class NonFoldedEntry(NamedTuple):
     # reads the shape must not assume the first:
     #  (a) the GONE-SURVIVOR arms — every holder is a carrier of ONE merged entity
     #      whose survivor is deleted (`_ref_is_one_gone_entity` and the `if not
-    #      by_name` twins, four of the five sites). ⛔ Those four answer by ENTITY
-    #      COUNT (review round 25): two DISTINCT entities holding the ref keep
+    #      by_name` twins, four of the five sites); `candidate_ids` is the carrier
+    #      list there, always two or more ids. ⛔ Those four answer by ENTITY COUNT
+    #      (review round 25): two DISTINCT entities holding the ref keep
     #      `"ambiguous-name"`, because telling a consumer to fix ONE dangling
     #      pointer where the graph holds two is the same false repair this note
     #      exists to prevent. So "ONE merged entity" is a PRECONDITION of the
     #      shape on all four, not a description of whatever reaches them.
-    #  (b) the ID-LESS-TARGET arms — a resolved target that carries no id, so the
-    #      journaled fold cannot address it (`commit_ops` id-less Object arm,
-    #      `entity_identity._refuse`'s twin here).
+    #  (b) the ID-LESS arms — a single resolved holder that carries no id, so the
+    #      journaled fold cannot address it (`commit_ops` id-less Object arm;
+    #      `_record_unaddressable` here, which records `["<id-less>"]`).
     # They differ in cause, not in shape: in both the name cannot be addressed
-    # one-of-them, so neither may be silently picked. ⛔ `candidate_ids` does NOT
-    # tell them apart: four sites record a plain carrier list, and the id-less one
-    # records `('<id-less>',)` when the id is NULL but `('',)` when it is the empty
-    # string — indistinguishable from a carrier list. The cause must be taken from
-    # the call site.
+    # one-of-them, so neither may be silently picked. ⛔ The placeholder HAPPENS to
+    # separate them today, but that is incidental, not a contract — take the cause
+    # from the call site, never from these fields.
 
 
 _non_folded: list[NonFoldedEntry] = []
