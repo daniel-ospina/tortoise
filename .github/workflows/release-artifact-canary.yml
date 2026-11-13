@@ -81,12 +81,17 @@ jobs:
         run: |
           set -o pipefail
           rc=0
-          # 3 runner calls (venv, pip, `tortoise init`) x 300 s fits inside this job's
-          # 20 min budget; the tool's 600 s default does not (3 x 600 s reaches the job
-          # timeout, which kills the run BEFORE the report, the transcript and the
-          # "what a red means" step are written — #12363 review B3).
+          # BUDGET ARITHMETIC, stated so it can be checked (a comment is what drifted
+          # here already): index mode spends `--fetch-timeout` TWICE (the engine and
+          # client index reads) and `--timeout` THREE times (venv, pip, `tortoise init`),
+          # so the reachable worst case is 2x60 + 3x300 = 1020 s against this job's
+          # 1200 s. Both budgets must be passed: a single `--timeout` bounded the fetches
+          # too, which made the worst case 5x300 = 1500 s — the job timeout, which kills
+          # the run BEFORE the report, the transcript and the "what a red means" step
+          # (#12363 review B3, corrected in cycle 2).
           python tools/published_artifact_canary.py \
             --timeout 300 \
+            --fetch-timeout 60 \
             --summary-file "$GITHUB_STEP_SUMMARY" \
             --transcript-dir "$RUNNER_TEMP/canary" || rc=$?
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"

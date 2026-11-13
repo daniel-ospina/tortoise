@@ -66,6 +66,7 @@ does no I/O, so the verdict logic is testable offline; the impure half
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import subprocess
@@ -101,7 +102,10 @@ _STRIPPED_ENV_PREFIXES = ("TORTOISE_", "FALKORDB_", "REDIS_")
 #: TREE instead of the artifact under test — the #2204 shape (``grep -c makedirs``:
 #: 1 in the tree, 0 in the 0.2.0 wheel) would report PASS. ``VIRTUAL_ENV``/
 #: ``PIP_TARGET``/``PIP_PREFIX`` do the same by redirecting the install or the
-#: interpreter. Same reasoning as the prefix list above, one layer lower.
+#: interpreter, and the pip INDEX variables choose WHICH INDEX the install resolves
+#: from: on a box with a mirror configured, the canary would grade the mirror's copy
+#: instead of what PyPI serves. Same reasoning as the prefix list above, one layer
+#: lower. (``PIP_DISABLE_PIP_VERSION_CHECK`` is NOT here — the tool sets it itself.)
 _STRIPPED_ENV_NAMES = (
     "PYTHONPATH",
     "PYTHONHOME",
@@ -109,6 +113,11 @@ _STRIPPED_ENV_NAMES = (
     "VIRTUAL_ENV",
     "PIP_TARGET",
     "PIP_PREFIX",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "PIP_NO_INDEX",
+    "PIP_CONFIG_FILE",
+    "PIP_FIND_LINKS",
 )
 
 #: Index readings, so "this project does not exist" and "I could not reach the
@@ -442,6 +451,13 @@ def fetch_index(package: str, timeout: float) -> tuple[dict[str, Any] | None, st
     except urllib.error.HTTPError as exc:
         state = INDEX_ABSENT if exc.code in (404, 410) else INDEX_UNREADABLE
         return None, f"HTTP {exc.code} from {url}", state
+    except http.client.HTTPException as exc:
+        # NOT an OSError: `IncompleteRead` / `BadStatusLine` are raised out of
+        # `read()`/`getresponse()` and are not wrapped in URLError on 3.12. Left
+        # uncaught, a truncated body escaped `fetch_index`, the run exited 1 with a
+        # traceback and NO report — which the workflow's own summary then presents as
+        # "a release is owed" (#12363 review B2-1).
+        return None, f"{type(exc).__name__} reading {url}: {exc}", INDEX_UNREADABLE
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         return None, f"{type(exc).__name__} fetching {url}: {exc}", INDEX_UNREADABLE
     try:
@@ -533,8 +549,14 @@ def install_and_run(
                 Arm(
                     "engine-init",
                     FAIL,
-                    f"`pip install {spec}` from the index failed (exit "
-                    f"{installed.returncode}) — users cannot even install it",
+                    (
+                        f"the BUILT wheel {wheel.name} failed to install (exit "
+                        f"{installed.returncode}) — the artifact about to be "
+                        f"uploaded is not installable"
+                        if wheel is not None
+                        else f"`pip install {spec}` from the index failed (exit "
+                        f"{installed.returncode}) — users cannot even install it"
+                    ),
                 ),
                 "\n".join(transcript),
             )
@@ -556,8 +578,13 @@ def install_and_run(
             Arm(
                 "engine-init",
                 FAIL,
-                f"`tortoise init` exits {swept.returncode} on a clean machine with "
-                f"{spec} from the index (see the transcript)",
+                (
+                    f"`tortoise init` exits {swept.returncode} on a clean HOME with "
+                    f"the BUILT wheel {wheel.name} (see the transcript)"
+                    if wheel is not None
+                    else f"`tortoise init` exits {swept.returncode} on a clean machine "
+                    f"with {spec} from the index (see the transcript)"
+                ),
             ),
             "\n".join(transcript),
         )
@@ -596,7 +623,14 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="write the install/run transcript here (evidence for a red)",
     )
-    parser.add_argument("--timeout", type=float, default=600.0, help="per command, seconds")
+    parser.add_argument("--timeout", type=float, default=600.0, help="per COMMAND budget, seconds")
+    parser.add_argument(
+        "--fetch-timeout",
+        type=float,
+        default=60.0,
+        help="per index FETCH budget, seconds (bounded separately: `--timeout` bounds "
+        "the venv/pip/init commands, and a caller budgeting a CI job needs both)",
+    )
     parser.add_argument(
         "--wheel",
         default=None,
@@ -627,8 +661,12 @@ def main(argv: list[str] | None = None) -> int:
         engine_doc, engine_error, engine_state = None, "", INDEX_OK
         client_doc, client_error, client_state = None, "", INDEX_OK
     else:
-        engine_doc, engine_error, engine_state = fetch_index(args.engine_package, args.timeout)
-        client_doc, client_error, client_state = fetch_index(args.client_package, args.timeout)
+        engine_doc, engine_error, engine_state = fetch_index(
+            args.engine_package, args.fetch_timeout
+        )
+        client_doc, client_error, client_state = fetch_index(
+            args.client_package, args.fetch_timeout
+        )
 
     init_arm: Arm | None = None
     transcript = ""
