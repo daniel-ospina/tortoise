@@ -54,6 +54,8 @@ from collections import Counter
 from pathlib import Path
 from typing import ClassVar
 
+from tortoise.sparse import UNDERSCORE_ENV
+
 import pytest
 from markdown_it import MarkdownIt
 
@@ -926,7 +928,8 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     ("capstone_verdict_check", "capstone_verdict_check"),
     ("lease_until", "lease_until"),
 ])
-def test_the_shipped_tokenizer_splits_the_run_the_index_keeps(name: str, run: str) -> None:
+def test_the_shipped_tokenizer_splits_the_run_the_index_keeps(
+        name: str, run: str, monkeypatch) -> None:
     """The measured defect, in the code rather than in prose.
 
     RediSearch treats ``_`` as a word character, so the index's term for
@@ -945,6 +948,13 @@ def test_the_shipped_tokenizer_splits_the_run_the_index_keeps(name: str, run: st
     """
     from tortoise.sparse import build_or_query, tokenize_sparse_query
 
+    # ⛔ PIN THE SHIPPED STATE, do not read it from the ambient shell (#12368
+    # review, P2). This module's own documented remedy for the in-place arm is
+    # `TORTOISE_UNDERSCORE_TERMS=0`, and every assertion here is about the
+    # SHIPPED (ON) leg — so an operator following that advice redded six tests.
+    # MEASURED before this pin: `TORTOISE_UNDERSCORE_TERMS=0` +
+    # "in_place_arm or shipped_tokenizer or identifier_class" -> 6 failed.
+    monkeypatch.setenv(UNDERSCORE_ENV, "1")
     assert tokenize_sparse_query(name, keep_numeric=False,
                                  keep_identifiers=False) == name.split("_"), (
         f"{name!r}: the tokenizer's split changed — re-measure #12298")
@@ -955,7 +965,8 @@ def test_the_shipped_tokenizer_splits_the_run_the_index_keeps(name: str, run: st
         f"is unretrievable by its own name again")
 
 
-def test_the_identifier_class_cannot_match_its_own_node(tool_mod) -> None:
+def test_the_identifier_class_cannot_match_its_own_node(tool_mod,
+                                                monkeypatch) -> None:
     """The finding in one line: no emitted term WAS the index's term — now one is.
 
     ⛔ ``#12368`` appended the ``_``-preserving composite as a further OR
@@ -963,6 +974,13 @@ def test_the_identifier_class_cannot_match_its_own_node(tool_mod) -> None:
     multi-term query (not a fallback to the raw name). Both halves stay asserted:
     a change that dropped the split terms would still red here.
     """
+    # ⛔ PIN THE SHIPPED STATE, do not read it from the ambient shell (#12368
+    # review, P2). This module's own documented remedy for the in-place arm is
+    # `TORTOISE_UNDERSCORE_TERMS=0`, and every assertion here is about the
+    # SHIPPED (ON) leg — so an operator following that advice redded six tests.
+    # MEASURED before this pin: `TORTOISE_UNDERSCORE_TERMS=0` +
+    # "in_place_arm or shipped_tokenizer or identifier_class" -> 6 failed.
+    monkeypatch.setenv(UNDERSCORE_ENV, "1")
     from tortoise.sparse import build_or_query
 
     for name in ("web_search", "verified_files", "py_compile"):
@@ -1561,7 +1579,7 @@ def test_the_degenerate_branch_is_declared_not_hidden(tool_mod, artifact) -> Non
 
 
 def test_the_in_place_arm_COLLAPSED_into_the_shipped_one_and_both_say_so(
-        tool_mod, population, brief: str) -> None:
+        tool_mod, population, brief: str, monkeypatch) -> None:
     """#12368 review, P2: the recovery arm is no longer an independent arm.
 
     `falkordb_tfidf__tokens_fixed` asks whether the shipped index recovers the name
@@ -1571,6 +1589,13 @@ def test_the_in_place_arm_COLLAPSED_into_the_shipped_one_and_both_say_so(
     that in the committed artifact (a run taken BEFORE the tail existed), so
     without this pin a re-run would publish `in-place recovery = 0` as a finding.
     """
+    # ⛔ PIN THE SHIPPED STATE, do not read it from the ambient shell (#12368
+    # review, P2). This module's own documented remedy for the in-place arm is
+    # `TORTOISE_UNDERSCORE_TERMS=0`, and every assertion here is about the
+    # SHIPPED (ON) leg — so an operator following that advice redded six tests.
+    # MEASURED before this pin: `TORTOISE_UNDERSCORE_TERMS=0` +
+    # "in_place_arm or shipped_tokenizer or identifier_class" -> 6 failed.
+    monkeypatch.setenv(UNDERSCORE_ENV, "1")
     from tortoise.sparse import build_or_query
 
     names = [r["name"] for r in population["names"]]

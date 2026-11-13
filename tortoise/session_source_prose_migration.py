@@ -1470,8 +1470,25 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # input, so the probe would match on any one of them", which is false: there
     # are no OR terms. Round 6 fixed only the ≥2-segment case and its own prose
     # over-claimed as a result.
-    deferred = "_" in token and not any(
-        not (ch.isalnum() or ch == "_") for ch in token)
+    # ⛔ AND IT NOW COVERS EVERY `_`-CARRYING TOKEN, PUNCTUATED OR NOT (#12368
+    # review, P1 — a FALSE BLOCK, MEASURED with the production Cypher and a DECOY).
+    # The old predicate was "has `_` AND no other separator", so `a_bc.` fell to the
+    # run-count branch and was refused with "a token carrying any other separator
+    # cannot address ONE indexed term at all" — while `build_or_query('a_bc.')` is
+    # `a_bc.|a_bc` and BOTH alternatives address the single index term `a_bc`.
+    # MEASURED, one `:Object` per shape in its own graph, the emitted string issued
+    # through the production `queryNodes` Cypher (`_fts_cypher`, which does NOT
+    # re-build — `run_fts_query` does, and feeding it an already-emitted string is
+    # what produced a false "over-match" reading during this round): `a_bc.`,
+    # `x_axis.`, `2_a.` and `a_b.` return ONLY their own record, while a decoy
+    # carrying the bare words is proven reachable by its own query. So the refusal
+    # was a false block, and the deferral now sends them to the index-term
+    # comparison below, which is the component that can answer the question.
+    # ⛔ NOT a licence for a multi-term token: `snake_case,` and `web_search.` reach
+    # that comparison and are REFUSED there (their alternatives address `snake`,
+    # `case` and `snake_case`) — the widening moves the decision, it does not relax
+    # it.
+    deferred = "_" in token
     # ⛔ …BUT NOT THE LONE `_` (#12368 review, P1 — a FALSE PASS the deferral
     # above opened, measured against a live lane). ``deferred`` admits EVERY
     # ``_``-only token, and ``build_or_query('_') == '_'`` with ``_`` outside the

@@ -3142,17 +3142,27 @@ def test_a_PUNCTUATED_underscore_token_is_a_probe_because_the_read_addresses_ONE
         term and the record's own name returns it. The index splits every
         alternative on its own separators; that is precisely the sense the raw
         string comparison was blind to.
-    (2) MEASURED, live, not inferred: one `:Object` per shape written through the
-        real projection, the background index cycle awaited (`CALL db.indexes()`
-        numDocuments), then queried by its OWN name through `run_fts_query` on
-        FalkorDB 4.20.6 — `a_.`, `a_!`, `.a_`, `_a.` and `a_..` each returned their
-        own record. So refusing them was a false block, the class this guard has
-        now repaired four times. ⛔ AND THE DECOY HALF MATTERS AS MUCH (`#12368`
-        review, P2): reachability alone does not prove a probe is clean, so each
-        shape was ALSO measured against a decoy carrying the bare word (`zz a zz`)
-        — none of them returns it, while `a_bc.` and `ab._` DO return their decoy
-        and are therefore over-matches (the first is refused for that reason, the
-        second is tracked as #12535).
+    (2) MEASURED, live, not inferred: one `:Object` per shape in ITS OWN graph,
+        the background index cycle awaited (`CALL db.indexes()` numDocuments), then
+        the emitted string issued through the PRODUCTION Cypher on FalkorDB 4.20.6 —
+        `a_.`, `a_!`, `.a_`, `_a.` and `a_..` each returned their own record. So
+        refusing them was a false block, the class this guard has now repaired
+        five times.
+        ⛔ **THE DECOY HALF AND THE PROBE METHOD, because both were got wrong here**
+        (`#12368` review, P1). Reachability alone does not prove a probe is clean:
+        each shape was ALSO measured against a decoy carrying the bare word
+        (`zz a zz`), with a POSITIVE CONTROL that the decoy is indexed (query `a`
+        and see it come back). And the emitted string must be issued through the
+        Cypher directly — `run_fts_query` **re-builds** through `build_or_query`,
+        so passing it an already-emitted `'a_bc.|a_bc'` re-parses it into
+        `'bc|bc|a_bc'` and the bare `bc` matches the decoy. That artifact produced
+        a false "over-match" for `a_bc.` in an earlier round of this branch; with
+        the Cypher, `a_bc.`, `x_axis.`, `2_a.`, `a_b!`, `a_bc/` and `a_b_c.` return
+        ONLY their own record — they are clean probes, and refusing them was a
+        false block fixed in `probe_phrase_rejection`'s deferral. The REAL
+        over-match class is a `_` adjacent to a separator on either side (`ab._`,
+        `x1&_`, `2._`, `_&x1`) where the QUERY parser drops the `_`: those DO return
+        the decoy and are tracked as #12535.
     (3) REACHABLE: such a token is exactly what an operator copies out of prose.
     (4) AND THE OVER-MATCH CLASS STAYS REFUSED — pinned, so a future widening
         cannot swallow it: `web_search` emits `search|web|web_search` (three index
@@ -3171,7 +3181,11 @@ def test_a_PUNCTUATED_underscore_token_is_a_probe_because_the_read_addresses_ONE
     """
     from tortoise.session_source_prose_migration import probe_phrase_rejection
 
-    for accepted in ("a_.", "a_!", ".a_", "_a.", "a_..", "friday."):
+    for accepted in ("a_.", "a_!", ".a_", "_a.", "a_..", "friday.",
+                     # the punctuated `_`-run: one index term either way, so these
+                     # are probes — the deferral widening that made them so is the
+                     # P1 fix, and they are REFUSED on the pre-fix tree
+                     "a_bc.", "x_axis.", "2_a.", "a_b!", "a_bc/", "a_b_c."):
         assert probe_phrase_rejection(accepted) is None, (
             f"{accepted!r} was refused — every alternative the read emits "
             f"addresses the ONE index term this token denotes, so it is a probe "
