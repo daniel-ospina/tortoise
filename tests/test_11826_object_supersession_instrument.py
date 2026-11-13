@@ -260,8 +260,14 @@ def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
     # ⛔ The repair must not send the reader to a node that does not exist, and it
     # must name the step that DOES exist (name the successor).
     assert "successor named by its supersededBy" not in issue.fix, issue.fix
-    assert "No :Object answers the successor name" in issue.fix, issue.fix
-    assert "If a Subject or Point carries that name" in issue.fix, issue.fix
+    # ⛔ This fixture writes NO ``supersededBy`` at all, so the fix must not assert a
+    # successor NAME it does not carry ("No :Object answers the successor name this one
+    # carries" — the old needle, which pinned the false lead) and must not offer the
+    # "if a Subject or Point carries that name" escape for a name that does not exist
+    # (#12210 review, P3).
+    assert "carries NO successor name" in issue.fix, issue.fix
+    assert "the successor name this one carries" not in issue.fix, issue.fix
+    assert "If a Subject or Point carries that name" not in issue.fix, issue.fix
     assert "'supersededBy': '<the successor name>'" in issue.fix, issue.fix
     # The door's own signature form (props as ONE dict), pinned again here because
     # this arm is new: a keyword spelling raises TypeError at the caller.
@@ -2544,7 +2550,10 @@ def test_an_id_less_neutral_row_is_told_to_delete(sdk):
                  if i.node_id == "PolicyV1")
     fix = issue.fix
     assert "No id-keyed repair is possible" in fix, fix
-    assert "re-point this IMPL input onto that successor" not in fix, (
+    # ⛔ The needle has to be the phrase the arm emits for ONE carrier: "that
+    # successor" is emitted only for a 0- or ≥2-carrier row, so on this fixture the
+    # old needle could never match (a blind assertion) (#12210 review, P3).
+    assert "re-point this IMPL input onto the successor ('PolicyV2')" not in fix, (
         "a neutral edge transfers nothing, so the instruction is DELETE: " + fix)
     assert "delete this edge: §3.1's disposition here is DROP" in fix, fix
 
@@ -2711,7 +2720,10 @@ def test_an_id_less_flowing_row_also_routes_the_destination(sdk):
     assert "No id-keyed repair is possible" in fix, fix
     assert "NOT the one it names ('PolicyV2')" in fix, (
         "an archived successor is not a destination EP reads: " + fix)
-    assert "onto that successor" not in fix, fix
+    # ⛔ Same blind-needle class: with ONE carrier the arm never emits "that
+    # successor" — the phrase it would emit if the routing regressed is the named
+    # destination below (#12210 review, P3).
+    assert "onto the successor ('PolicyV2')" not in fix, fix
 
 
 def test_an_id_less_direct_row_is_called_an_edge_not_an_input(sdk):

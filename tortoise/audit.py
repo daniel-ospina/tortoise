@@ -1788,9 +1788,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # never did (measured ``confidences {}`` before, ``effective_n 2.5255``
                 # after the prescribed repair), so "the same posteriors" contradicted
                 # the same sentence's "would establish one" (#12210 review, P2).
-                # ⛔ THREE-WAY. A NEITHER-arm row gets NO parenthetical: its
-                # ``_dropped_input`` already emitted ``effective_n 2.5255`` earlier in
-                # this same string, so a second copy quoted one measurement twice
+                # ⛔ THREE-WAY, ONE FIGURE. A NEITHER-arm row gets a parenthetical that
+                # states the OUTCOME and NOT the figure, because its ``_dropped_input``
+                # already emitted ``effective_n 2.5255`` earlier in this same string:
+                # quoting the number twice is what the review rejected, not restating
+                # the result (the sibling draft-row test pins this phrase)
                 # (#12210 review, P3). A refused SUPERSEDED endpoint never carried
                 # belief, so "the same posteriors" is false there; every other row
                 # keeps it.
@@ -2070,10 +2072,18 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # resolvable — told the reader to DELETE, so two rounds of advice
             # disagreed (#12111 review round 22).
             fix = (
-                f"No :Object answers the successor name this one carries, so there "
-                f"is no Object to re-point this {s['edge_type']} "
-                f"{'input' if s['is_operator'] else 'edge'} onto: "
-                f"name the successor — "
+                ((f"No :Object answers the successor name this one carries, so "
+                  f"there is no Object to re-point this {s['edge_type']} "
+                  f"{'input' if s['is_operator'] else 'edge'} onto: ")
+                 if bool(s["sup_sb"]) else
+                 # ⛔ A row with NO ``supersededBy`` at all (reachable: a bare
+                 # ``status='superseded'`` write) carries no successor NAME, and the
+                 # old lead asserted one while the same finding's ``detail`` said
+                 # "(none)" (#12210 review, P3).
+                 (f"This Object carries NO successor name, so there is no Object to "
+                  f"re-point this {s['edge_type']} "
+                  f"{'input' if s['is_operator'] else 'edge'} onto: "))
+                + f"name the successor — "
                 f"tortoise_update_entity({q}, {{'supersededBy': "
                 f"'<the successor name>'}}) — then "
                 + ("delete this edge: §3.1's disposition here is DROP, and a "
@@ -2092,10 +2102,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     f"re-point the "
                     f"{'edge' if not s['is_operator'] else 'input'} onto it and "
                     f"delete the edge into {q}"))
-                + ". If a Subject or Point carries that name, "
-                + ("delete the edge and wire the support through a node EP reads, "
-                   "not by re-attaching it" if neutral else
-                   "re-point onto THAT node instead and delete this edge")
+                + ("" if not bool(s["sup_sb"]) else
+                   ". If a Subject or Point carries that name, "
+                   + ("delete the edge and wire the support through a node EP reads, "
+                      "not by re-attaching it" if neutral else
+                      "re-point onto THAT node instead and delete this edge"))
                 + ". "
                 # ⛔ ONE source for the archive clause (``_archive_clause``): the
                 # mechanism is a property of the ROW — a DIRECT edge assembles no
@@ -2165,11 +2176,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "No edge rewrite ALONE repairs this: EP builds NO factor in either "
                 "arm (the operator arm needs the :Point LABEL and "
                 "(``is_operator = true`` or an ``op_type``), the direct-edge arm "
-                "refuses an operator-shaped endpoint). The flag is only HALF the "
-                # ⛔ On a NEUTRAL row the instruction is DELETE, so the "flag is only
-                # HALF the repair — {shape call} AND …" frame asserted a write the same
-                # string then says is not required (#12210 review, P3).
-                + ("" if neutral else f"repair — {_shape_repair} AND ")
+                "refuses an operator-shaped endpoint). "
+                # ⛔ The "flag is only HALF the repair — {shape call} AND …" frame is for
+                # rows whose repair is a WRITE. On a NEUTRAL row the instruction is
+                # DELETE, and the same string then says the shape is NOT required to
+                # delete — emitting the frame there produced "The flag is only HALF the
+                # this edge is '-' (neutral)…" (last round removed only its tail)
+                # (#12210 review, P3).
+                + ("" if neutral else f"The flag is only HALF the repair — "
+                    f"{_shape_repair} AND ")
                 + ("this edge is "
                    f"{_quoted(s['direction'])} (neutral), so a moved edge would "
                    "transfer nothing either: DELETE it instead — §3.1's disposition "
