@@ -4721,10 +4721,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("16833", "if vet_enabled and embed_list:"),
-            ("16834", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("14404", "if vet_enabled and complete_list:"),
-            ("14405", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("17894", "if vet_enabled and embed_list:"),
+            ("17895", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("15367", "if vet_enabled and complete_list:"),
+            ("15368", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its lines of keys (13526-13528) close on
         # line 13529 — DERIVED by content, not by arithmetic: `result["vet"] = {`
@@ -4736,8 +4736,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # which is why every ASSERTED number in this table is verified by
         # content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("14640", 'result["classify_later"] = {'),
-            ("14650", 'result["vet"] = {'),
+            ("15701", 'result["classify_later"] = {'),
+            ("15711", 'result["vet"] = {'),
         )),
         # ⛔ THE CLASSIFY SWITCH ITSELF (the rebase onto `a1dff7cec8` re-staled it).
         # `#11509` added this bare continuation to the probe's docstring with
@@ -4750,7 +4750,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # this head before the fix: `:12898` is `# the additive keys feed the
         # harness's per-question integrity (M4).`
         ("probes/capstone_measure.py", "is different code", (
-            ("13789", "classify_later = kind_classifier is not None or "
+            ("14752", "classify_later = kind_classifier is not None or "
                       "_classify_later_enabled()"),
         )),
         # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). A `+33`
@@ -4775,34 +4775,34 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # this head. A comment asserts nothing, so read the anchors from the row,
         # never from this prose.
         ("docs/00_index.md", "fail-open `except` at", (
-            ("14289", "except Exception as e:  # never block capture (P1)"),
-            ("14440", "except Exception as e:  # never block capture (P1)"),
+            ("15252", "except Exception as e:  # never block capture (P1)"),
+            ("15403", "except Exception as e:  # never block capture (P1)"),
         )),
-        # ⛔ #10988's `:10441` (A4's attribution). The cite is a BARE continuation —
-        # `extractor_v2.py:10447-10450`; `:10441` is the EMPTY-kind default only — so
+        # ⛔ #10988's `:11404` (A4's attribution). The cite is a BARE continuation —
+        # `extractor_v2.py:11410-11413`; `:11404` is the EMPTY-kind default only — so
         # `_BUNDLE_CITE`, which requires a cite to NAME ITS FILE, cannot see it. Without
-        # this row the sentence's `:10441` half has no reader at all, and the claim it
+        # this row the sentence's `:11404` half has no reader at all, and the claim it
         # makes (that an empty `pointKind` — not the vocabulary repair — is what the
         # `or "statement"` default serves) is exactly the half a re-derivation would move.
-        ("probes/capstone_measure.py", "`:10441` is the", (
-            ("10441", 'pkind = str(p.get("pointKind", "")).strip() or "statement"'),
+        ("probes/capstone_measure.py", "`extractor_v2.py:11410-11413`; `:11404` is the", (
+            ("11404", 'pkind = str(p.get("pointKind", "")).strip() or "statement"'),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("13824", "if not edus:"),
-            ("13855", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("14787", "if not edus:"),
+            ("14818", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("13855", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("14818", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("13823", "edus = _edus_from_conversation(conversation)"),
+            ("14786", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("14650", 'result["vet"] = {'),
-            ("14654", ("exact", "}")),
+            ("15711", 'result["vet"] = {'),
+            ("15715", ("exact", "}")),
         )),
         # ⛔ The SAME two blocks as the probe's `_pass_ran` docstring names them
         # (#11517 review, finding 3). It said the flag-OFF surfaces live at
@@ -4827,12 +4827,12 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # measured by content on the rebased tree, not by arithmetic); `:12975` and
         # `:12979` sit ABOVE the guard and did not move.
         ("probes/capstone_measure.py", "so an acceptance test of", (
-            ("13851", '"classify_later": {"enabled": classify_later,'),
-            ("13855", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
-            ("14640", 'result["classify_later"] = {'),
-            ("14646", ("exact", "}")),
-            ("14650", 'result["vet"] = {'),
-            ("14654", ("exact", "}")),
+            ("14814", '"classify_later": {"enabled": classify_later,'),
+            ("14818", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("15701", 'result["classify_later"] = {'),
+            ("15707", ("exact", "}")),
+            ("15711", 'result["vet"] = {'),
+            ("15715", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
@@ -4899,10 +4899,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # return it names, while every gate reported OK. Two rows because the
         # claim wraps over two lines and a row scopes to ONE line.
         ("README.md", "i.e. BEFORE the", (
-            ("13820", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
+            ("14783", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
         )),
         ("README.md", "early return (`", (
-            ("13824", "if not edus:"),
+            ("14787", "if not edus:"),
         )),
         # ⛔ THE LITERAL THE SENTENCE QUOTES, on its OWN row because the claim
         # wraps: `:15589` was left pointing inside `_arm_extract`'s
@@ -4912,7 +4912,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # the content this row holds, so a re-derivation that moves the number
         # off the early return reds instead of drifting silently.
         ("README.md", '"s2": {}, "union": {}}', (
-            ("13855", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("14818", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ⛔ The #2684 row's cite (#10833 review, P2): the fold rewrote a CORRECT
         # `5042-5043` into `4948-4949` — inside `_refuse_rewritten_value`, an
@@ -4926,20 +4926,20 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # the bare one sat in no row, which is how a `+N` insert left it on a
         # docstring in an unrelated helper while every neighbour moved.
         ("README.md", "on its fail-open path", (
-            ("13549", "except Exception as e:  # noqa: BLE001, RUF100"),
-            ("13552", '"(fail-open)"], {}'),
+            ("14512", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("14515", '"(fail-open)"], {}'),
         )),
         # ⛔ AND THE PROBE'S OWN COPY (#10997 review round 5, P2): the same range
         # is baked into `_IDLE_CITES["vet"]`, i.e. into the cause a future run
         # PRINTS to a reader — and it sat on a line the neighbouring row does not
         # scope to, so a move would ship a stale number in machine-emitted prose.
         ("probes/capstone_measure.py", "on its fail-open path", (
-            ("13549", "except Exception as e:  # noqa: BLE001, RUF100"),
-            ("13552", '"(fail-open)"], {}'),
+            ("14512", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("14515", '"(fail-open)"], {}'),
         )),
         ("docs/00_index.md", "refuses a value-free point at", (
-            ("5589", "if not _carries_value(content, quote):"),
-            ("5590", "return None"),
+            ("5999", "if not _carries_value(content, quote):"),
+            ("6000", "return None"),
         )),
         # ⛔ THE S5 CONNECT CALL, IN BOTH DOCUMENTS (#11368 rebase review, P2). The
         # `+74` re-derivation matched `execute_embed` by SYMBOL and landed on its
@@ -4949,13 +4949,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # cannot see it, and no row scoped to it — which is exactly the invisibility
         # this pin exists for. Both rows hold the CALL, not the definition.
         ("README.md", "gap filler", (
-            ("15567", "result = execute_embed(complete_list, search, "
+            ("15615", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ...and the probe's own copy of the same number, which sits in prose a
         # reader is sent to rather than in a table.
         ("probes/capstone_run.py", "ONE cite per symbol", (
-            ("15567", "result = execute_embed(complete_list, search, "
+            ("15615", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ⛔ The S1 row's CALL SITE, held on its own row (#11517 rebase review).
@@ -4971,7 +4971,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
             # qualifier insert above the call, so the number is re-derived from
             # the tree each time rather than carried from the round that added
             # the row (the row's INTENT is unchanged: pin the CALL).
-            ("17761", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
+            ("17809", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
         )),
         # ⛔ THE FIVE REMAINING BARE STEP CITES ON THE SAME FIVE-LINE CLAIM, and
         # the reason `test (f)` went red on this branch (#11517 review round 5,
@@ -4991,17 +4991,17 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # sentence takes three rows rather than one — the same reason the
         # `README.md` "i.e. BEFORE the" claim above takes two.
         ("probes/capstone_run.py", "(S2.1,", (
-            ("17793", "embed_list = run_s2(model, story, master,"),
-            ("17847", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("17841", "embed_list = run_s2(model, story, master,"),
+            ("17895", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
         )),
         ("probes/capstone_run.py", "_apply_classify_kinds`` (S2.3,", (
-            ("15192", "out = kind_classifier.classify_items(items)"),
-            ("15193", '_apply_classify_kinds(embed_list, out["assignments"])'),
+            ("15240", "out = kind_classifier.classify_items(items)"),
+            ("15241", '_apply_classify_kinds(embed_list, out["assignments"])'),
         )),
         ("probes/capstone_run.py", "(S3,", (
-            ("15209", "search = search_graph(sdk, embed_list, story, "
+            ("15257", "search = search_graph(sdk, embed_list, story, "
                       "session_id=session_id)"),
-            ("15230", "s4 = run_s4(model, story, search, embed_list, master,"),
+            ("15278", "s4 = run_s4(model, story, search, embed_list, master,"),
         )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
@@ -5153,21 +5153,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whole sentence's three numbers, so a re-derivation of one cannot leave
         # its neighbours behind the way it did at `a08f7bce3d`.
         ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
-            # 17974 -> 18728 -> 18743: #12060 and then #9649's reviewed guard add
-            # their own lines to sdk.py above this call,
+            # 17974 -> 18728: #12060 adds its own lines to sdk.py above this call,
             # and every forward merge of `origin/main` (`1f28d107cf`, `c7499ac7a7`
             # carrying #12112/#12111, then `9828250732`) moved the region again, so
             # every number in this table moved with them. Re-derived off THIS merged
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("18822", "relation_write = apply_relation_edges("),
+            ("19009", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("18821", "from tortoise.relation_write import apply_relation_edges"),
+            ("19008", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18809", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18996", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5177,8 +5176,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("9954", "subject_binding_available,"),
-            ("10007", "and not subject_binding_available(graph):"),
+            ("10064", "subject_binding_available,"),
+            ("10117", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6607", "def subject_binding_available(graph) -> bool:"),
@@ -5187,13 +5186,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("9954", "subject_binding_available,"),
-            ("10007", "and not subject_binding_available(graph):"),
+            ("10064", "subject_binding_available,"),
+            ("10117", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18469", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18656", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
@@ -5232,11 +5231,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("16345", "The v2 path reports"),
-            ("16346", '"extraction_mode": "llm:<route>"'),
+            ("16455", "The v2 path reports"),
+            ("16456", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         ("04-plan.md", "operator / label path", (
-            ("25189", "declared = declared_relation_predicates()"),
+            ("25393", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
@@ -5356,28 +5355,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # re-derived from THIS merged tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
-            # the merge: 9714 -> 9951 -> 9973 -> 10019 is the number's own trail,
-            # and only the last of those describes a tree that adds BOTH parents.
-            # Measured values, not a delta: 9943 at `9828250732`, 9949 at
-            # `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24e4`, 9987 at
-            # the `main` tip `abf186f1109a`, 10005 at this branch alone
-            # (`d036b9859960`), and 10019 merged. ⛔ `9951` is in that list only
-            # because this row printed it — it was a predicted merge-tree value
-            # (9943 + 8), never a line any commit on `main` carried. The deltas
-            # are just where the registrations landed: `main` adds +78 above the
-            # entry by its tip 87c07462a8 (9943 -> 10021: +44 across four landing
-            # PRs at `ba84fbfabf`/`e200623286`/`cd22562c24`/`f1f74135a1`, then +34
-            # across `ea2c41a696`/`a53ba8cf53`/`73c479ce40`) and this branch adds
-            # +13 (a `core:` registration block plus a `slow_files:` row; its
-            # 1-line `durations:` addition falls below the entry), so a row sitting
-            # BELOW every insertion moves by the whole +91: 9943 + 91 = the 10034
-            # this row prints. ⛔ Re-derive on the merged tree — a parent's
-            # PREDICTION is not a value: `main` wrote 10019 into this row from its
-            # own tip and three landings had moved it before the merge. The
-            # `core:` sub-key reads 2235 at 9828250732 and 2236 on the merged tree
-            # (+1, `main`'s own registration above it); `sdk:` moves 8268 -> 8310
-            # (+8 this branch, +34 `main`).
-            ("10034", "- test_pack_logic_writeprobe_11083.py"),
+            # The value this row pins is MEASURED on the tree that merges, never
+            # predicted: `10076` at the merge of `main` `ca74f2375e` into this branch
+            # (`awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
+            # config/ci-surfaces.yml`), which is also what `main`'s tip reads — so the
+            # row and the base agree instead of the row carrying a branch-only offset.
+            # ⛔ The earlier trail (9943 -> 9973 -> 9987 -> 10005 -> "10019 merged")
+            # was PREDICTED arithmetic, not measurement: a predicted merge-tree value
+            # is what #11837's review removed from this file, and the prediction went
+            # stale the moment `main` moved again. Do not restore it; re-measure.
+            ("10172", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
@@ -11799,7 +11786,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "a base in parentheses is still a BASE — the false block main's shape produced")
     assert _cite_qualifiers("`:12929` at\n**`a1dff7cec8`**") == [("12929", "a1dff7cec8")], (
         "§2's own spelling wraps the base in a newline and bold — typography, not the claim")
-    assert _cite_qualifiers("the comment at :11362 and 40 lines") == [], (
+    assert _cite_qualifiers("the comment at :11410 and 40 lines") == [], (
         "a BARE cite has no qualifier — it is the grammar gap stated beside the arm, not a hit")
     assert _cite_qualifiers(":9021 (see the note above)") == [], (
         "an ordinary PARENTHESISED ASIDE after a cite is not a qualifier — only a CLOSED,"
@@ -11889,10 +11876,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # ⛔ RE-DERIVED for `#11002`'s rebase, not offset by hand: this branch inserts
     # above BOTH anchors (the G5 record at the module head and the `run_s1`
     # emphasis seam), so the schema line moved `:1720` → `:1764` and the comment
-    # `:10891` → `:11362` — the same **+15** §10.15 records for the collector.
+    # `:10891` → `:11410` — the same **+15** §10.15 records for the collector.
     # Measured off the MERGED tree (`grep -n 'hasPart' tortoise/extractor_v2.py`
-    # → `:1764`, `grep -n 'nothing in this tree consumes'` → `:11362`).
-    assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1771`" in text, (
+    # → `:1764`, `grep -n 'nothing in this tree consumes'` → `:11410`).
+    assert "`hasPart`" in text and "`tortoise/extractor_v2.py:1773`" in text, (
         "the record must cite the relations schema where `hasPart` is spelled")
     # ⛔ THE ADJACENCY IS DELIBERATELY NOT PINNED — recorded here, which is what the review of
     # the forward merge (#11519) asked for as the alternative to restoring it. Three forms were
@@ -11946,10 +11933,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert all("[^[:alnum:]_]" in _c and "[^[:alnum:]_.]" not in _c for _c in _all_a1), (
         "EVERY statement of the A1 proof command must use the non-dot-excluding class — a "
         f"`[^[:alnum:]_.]` copy is blind to a receiver-qualified call (found {_all_a1})")
-    assert "hasPart" in ext[1771 - 1] and '"predicate":' in ext[1771 - 1], (
-        f"extractor_v2.py:1771 reads {ext[1771 - 1].strip()[:90]!r}, not the schema "
+    assert "hasPart" in ext[1773 - 1] and '"predicate":' in ext[1773 - 1], (
+        f"extractor_v2.py:1773 reads {ext[1773 - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")
-    assert "`extractor_v2.py:11524`" in text, (
+    assert "`extractor_v2.py:12487`" in text, (
         "the record must cite the comment that says nothing consumes the channel")
     # The SAME line is cited a SECOND time as a bare `:11524`, inside the
     # reproduction block's comment. A bare cite carries no file token, so the
@@ -11962,7 +11949,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # for `both now read`, the `# §0/§2` heading and `MENTIONS`. The prose above carries the
     # PREFIXED form `extractor_v2.py:11524`; this is the only statement without a file token,
     # so exactly one bare occurrence is the claim.
-    assert re.findall(r"(?<!extractor_v2\.py):11524", text) == [":11524"], (
+    assert re.findall(r"(?<!extractor_v2\.py):12487", text) == [":12487"], (
         "the reproduction block must state the live number `:11524` exactly once as a BARE "
         "cite — re-stale it and this record's only reproduction path points at a dead line")
     # ⛔ DIRECTION FLIPPED with the correction this arm forced. The comment at this line used to
@@ -11971,8 +11958,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # arm was pinning a falsehood into the live tree. It now asserts the corrected sentence AT THE
     # SAME LINE (the block's line count was held at 13 so every cite below keeps its number) and that
     # the retracted sentence is gone from the file entirely.
-    assert "result[\"relations\"]" in ext[11524 - 1], (
-        f"extractor_v2.py:11524 reads {ext[11524 - 1].strip()[:90]!r} — the record's three-hit grep "
+    assert "result[\"relations\"]" in ext[12487 - 1], (
+        f"extractor_v2.py:12487 reads {ext[12487 - 1].strip()[:90]!r} — the record's three-hit grep "
         "is scoped to this channel, so the line it names must still carry the token")
     # The block is READ AS ONE PROSE UNIT: it wraps mid-sentence, so a literal phrase match would
     # pin the line breaks rather than the claim (measured: `IS consumed` spans two comment lines).
@@ -11980,7 +11967,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # `ext[a:b]` reads the wrong lines the moment the block moves (and a merge that moves it
     # silently turns this arm into a scan of whatever now sits at those offsets). Start at the
     # last `── S5 Job 1` heading at or above the cited line, end at the first non-comment line.
-    _citer = 11524 - 1                      # 0-based index of the cited line
+    _citer = 12487 - 1                      # 0-based index of the cited line
     _head = max(i for i in range(_citer + 1) if "── S5 Job 1" in ext[i])
     _tail = next(i for i in range(_citer, len(ext)) if not ext[i].strip().startswith("#"))
     _s5 = " ".join(line.strip().lstrip("#").strip() for line in ext[_head:_tail])
@@ -12055,7 +12042,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # this bundle's recurring defect, so the tail is named, not counted) — including arms that need
     # no history at all.
     live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
-    assert live_mentions == [9487, 9505, 9512, 9892], (
+    assert live_mentions == [10449, 10467, 10474, 10854], (
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
         "four the record quotes — an insertion above them moves the quote; re-derive "
         "the record's block (its `create_operator` line AND this list) rather than the list")
@@ -12389,7 +12376,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # not a base ([])" — naming the OPPOSITE defect — because its lookahead excludes only a
         # base that STARTS WITH A DIGIT.
         # ⚠️ Still not seen here: a cite with NO qualifier at all (`:13011` alone) — the block as
-        # shipped carries `:11362` that way (a live cite, correctly), so a no-bare-number rule
+        # shipped carries `:11410` that way (a live cite, correctly), so a no-bare-number rule
         # would false-block on the record itself. That is the same grammar gap as §2, one line up.
         if _is_repro_block:
             _quals = _cite_qualifiers(_region)

@@ -338,10 +338,13 @@ the falsifier for the PLANTED property set, without which reverting that derivat
 (`#11415`/`#11455` landed it; no sha is restated here, for the reason the paragraph
 below gives about branch heads), which SCORES the `#11455` clause itself (`test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool`
 — reverting `on_by_default = deployment["on"]` to the any-surface bool left every other row-1 test
-green, so the artefact `#11086` item 4 is ticked on was pinned nowhere), and one by `#12284`
-(`test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently` — `#9314`'s missing
-pytest-lane catcher: a duplicated literal key in `WRITER_CENSUS`/`CENSUS_EVIDENCE` collapses
-before any code can see it, so only `ruff`'s `F601` caught `#11996`'s pair, post-merge), and three by
+green, so the artefact `#11086` item 4 is ticked on was pinned nowhere), and one by
+`#12182`'s duplicate-key detector for the CENSUS half
+(`test_the_census_has_no_DUPLICATE_dict_key_in_its_source` — the register half refuses a duplicate at
+import via `load()`, while a dict literal here accepted one silently and kept the LAST entry. That is
+the shape `#11996` actually left on `main`, where only `ruff`'s `F601` saw it post-merge, and which
+`#12284` then had to de-duplicate; this tree's detector is the pytest-lane catcher `#9314` was missing),
+and three by
 `#12015` (the EDGE
 doors: a relationship has no label at all, so the projection's edge writer can store a vector nothing
 can query — and the row could not see it, because the node measurement only ever asked about labels.
