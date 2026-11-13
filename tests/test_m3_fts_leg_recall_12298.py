@@ -477,9 +477,13 @@ def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact, brief_text
     assert primary["mcnemar_p_two_sided"] > 0.05, (
         "the scorer control is now significant — re-run and re-decide")
     assert artifact["verdict"]["M3"] == "FAIL"
-    # ⛔ The issue's OWN falsifier sentence is satisfied by the deployable arm.
-    # The brief must present BOTH readings; this pin makes the second one
-    # impossible to drop when the first is quoted.
+    # ⛔ The closing condition in the issue's OWN falsifier sentence is NOT
+    # triggered — a deployable BM25-in-Postgres beats the current scorer —
+    # which is why M3's own rule can still say FAIL here. The brief must
+    # present BOTH readings; this pin makes the second one impossible to
+    # drop when the first is quoted. ⛔ Do NOT write "the falsifier is
+    # satisfied": quote-mined, that says the leg is CLOSED, the opposite of
+    # what this assertion exists for.
     subset = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
     assert subset["n"] < artifact["sample"], (
         "the tokens control is only real on the non-degenerate queries; the "
@@ -1054,7 +1058,20 @@ def test_the_degraded_leg_refusal_is_WIRED_at_every_shipped_leg_call(tool_mod) -
         assert prior, (
             f"`_refuse_degraded_legs` at line {refusal.lineno} has no measured "
             "`run_fts_query` call before it")
-        want = traces[max(prior)]
+        owner = max(prior)
+        want = traces[owner]
+        # ⛔ INSIDE THE SAME BLOCK, not merely after the call (#12349 review
+        # cycle 7): moving the refusal out of the loop body left 299 of 300
+        # measured reads unguarded and the pairing check GREEN. A refusal that
+        # belongs to a measured call comes before the NEXT measured call — i.e.
+        # between the call that wrote the trace and the one after it.
+        nxt = [ln for ln in traces if ln > owner]
+        if nxt:
+            assert refusal.lineno < min(nxt), (
+                f"`_refuse_degraded_legs` at line {refusal.lineno} comes AFTER "
+                f"the next measured `run_fts_query` call at line {min(nxt)} — it "
+                "has been hoisted out of the loop body, so the reads between "
+                "them are unguarded")
         assert first.id == want, (
             f"`_refuse_degraded_legs` at line {refusal.lineno} refuses on "
             f"{first.id!r} but the leg wrote its trace to {want!r} — the refusal "
