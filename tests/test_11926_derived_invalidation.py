@@ -2161,9 +2161,15 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
     cache_doc = " ".join((di.reconcile_goal_state_cache.__doc__ or "").lower().split())
     assert "archived sweep retires them together" in cache_doc, (
         "the archived-goal bullet must say WHY the last-claim shape cannot recur here")
-    assert "no later pass able to repair it" not in cache_doc, (
-        "the old inference is exactly what the sweep removed: a goal IS revisited "
-        "through any other live claim")
+    # ⛔ PER-OCCURRENCE, not a literal ban: round 29 defeated a `not in` with a
+    # one-word insertion ("no later pass IS able to repair the word") and with a
+    # paraphrase — the SAME false inference, different words. Every occurrence of
+    # the phrase must be the qualified one.
+    for _m in re.finditer(r"no later pass", cache_doc):
+        assert cache_doc[_m.start():].startswith(
+            "no later pass revisiting that goal once its last live claim is gone"), (
+            f"only the QUALIFIED 'no later pass' may stand: "
+            f"{cache_doc[_m.start():][:120]!r}")
 
     # ⛔ ADJACENCY, not co-presence: the 27th-round version asserted the two
     # phrases separately, so an absolute with the qualifier parked in an
@@ -2174,10 +2180,15 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
             "claim") in helper, (
         "an UNQUALIFIED 'no automatic path repairs it' is false while the goal "
         "still holds a live claim: that claim going stale reconciles the word")
-    assert helper.count("no automatic path repairs it") == 1, (
-        "EXACTLY ONE 'no automatic path repairs it' may stand, and it must be the "
-        "qualified one — the positive assertion above cannot see a SECOND "
-        "absolute appended after it")
+    # ⛔ Per-occurrence again: a count on the exact string misses "no automatic
+    # path EVER repairs it" (round 29's A.6a mutant), which asserts the same
+    # false absolute. The only two admissible forms are the qualified rule and
+    # the rhetorical "'No automatic path' is not 'no repair'" that quotes it.
+    for _m in re.finditer(r"no automatic path", helper):
+        _tail = helper[_m.start():]
+        assert (_tail.startswith(
+                    "no automatic path repairs it once the goal holds no other live claim")
+                or _tail.startswith('no automatic path" is not')), _tail[:120]
 
     # The arm COMMENT is the site a maintainer reads while editing exactly that
     # arm, and the one that has regressed twice — pin it at source level, because
@@ -2188,3 +2199,8 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
     assert ("no automatic path repairs it later once the goal holds no other live "
             "claim") in norm, (
         "the absent-arm comment must keep the qualifier IN the sentence")
+    assert norm.count("no automatic path") == 1, (
+        "EXACTLY ONE 'no automatic path' may stand anywhere in `invalidate` — the "
+        "adjacency assertion above finds the arm comment, but cannot see a SECOND "
+        "absolute planted in another comment of the same function (round 29's "
+        "A.6c/A.6d)")
