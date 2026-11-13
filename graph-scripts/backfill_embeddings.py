@@ -530,16 +530,17 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     never computes embeddings and never writes.
 
     "Text-less" is taken from ``_label_branches``' predicate, so wherever a
-    surface declares a ``text_pred`` the count and the live pass cannot DRIFT
-    apart WITHIN that surface: they read the surface's ONE predicate (a bare
+    surface declares a ``text_pred`` the two passes cannot read DIFFERENT
+    predicates within that surface — they read the surface's ONE (a bare
     ``IS NOT NULL`` counted rows the live pass skipped because ``''`` is
-    non-NULL in Cypher — #5126, #12489). ⚠️ Only the Point surface additionally
+    non-NULL in Cypher — #5126, #12489). ⚠️ That is a claim about the PREDICATE,
+    not about agreement: the live guard is still stricter wherever the Cypher
+    construct and Python disagree (residual (b)) and type-strict (residual (c)),
+    so the counts CAN and do differ on those rows. Only the Point surface also
     derives ``text_expr`` AND ``text_pred`` from ONE constant
     (``_POINT_EMBEDDING_TEXT_EXPR``), so only there does an edit to the
-    expression move both keys; Document's two keys are separate literals and
-    can still be edited apart. And no ``text_pred`` makes the Cypher construct
-    semantically EQUAL to the Python guard — see residual (b).
-    Residual, recorded rather than silently over-reported, in TWO parts:
+    expression move both keys; Document's two keys are separate literals.
+    Residual, recorded rather than silently over-reported, in THREE parts:
     (a) a surface with only a bare property still uses ``IS NOT NULL``, so a
     *non-empty-check* miss is limited to an EMPTY or whitespace-only value on
     those surfaces; (b) even a ``text_pred`` surface is not perfectly aligned with
@@ -548,7 +549,7 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     on this surface: four Points whose ``content`` was ``"\\t"``, ``"\\u00a0"``,
     ``"\\u2003"``, ``"\\t \\t"`` gave ``dry_total=4`` against ``updated=0,
     skipped=4``. Pre-existing as a CLASS (the pre-fix bare ``IS NOT NULL``
-    counted the same four), but #12489 WIDENS the population: a ``embeddingText``
+    counted the same four), but #12489 WIDENS the population: an ``embeddingText``
     whose whitespace `trim()` does not strip (tab / NBSP / em-space) over a
     non-empty ``content`` now takes this skip path, where the pre-fix expression
     embedded ``content`` (measured: dry 1 / updated 0 with the fix, dry 1 /
@@ -556,7 +557,29 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     passes instead (`trim()` does strip a space, so the predicate is false and
     the dry run never counts it) — a silent miss the dry run does not report at
     all; the CASE is still faithful there (Python ``or`` also treats ``" "`` as
-    text), the divergence is this same pre-existing live-guard class.
+    text), the divergence is this same pre-existing live-guard class. (c) TYPE:
+    the predicate calls ``trim()``, which is TYPE-STRICT. Two classes, and they
+    diverge DIFFERENTLY:
+      - a non-``str`` ``content`` (int/list/dict) was ALREADY fatal to the live
+        pass — pre-fix it was selected by ``n.content`` and killed at
+        ``text.strip()``, and now it dies earlier, inside the collecting select.
+        It additionally makes ``--dry-run`` raise ``Type mismatch: expected
+        String or Null but was Integer``. ⚠️ REACHABLE: ``api.EventAPI.add_point``
+        stores whatever ``content`` it is handed — ``_point`` copies it verbatim
+        with no type check — so a non-``str`` ingest payload produces exactly
+        this row. That is the hand-edited/foreign-data class
+        ``projection/entities.py`` names for ``content`` (#2958). No SDK door
+        does this (``create_point``/``update_point`` refuse a non-``str``).
+      - a non-``str`` ``embeddingText`` over a ``str`` ``content`` is the one
+        NEW failure: the pre-fix expression was ``n.content``, so that row
+        embedded NORMALLY; the CASE now selects the non-string and BOTH passes
+        raise ``Type mismatch`` (the live one inside the select, before
+        ``text.strip()`` is reached). It fails CLOSED — an abort, never a
+        silent wrong vector — and nothing can write the row: the composer
+        returns a ``str`` for every arm, and a caller-supplied ``embeddingText``
+        is refused by ``_sanitize_props``.
+    Hardening this (a predicate or a live guard that skips non-``str`` text) is
+    NOT done here: it widens the change past "which text is embedded".
     """
     g = db.select_graph(graph_name)
     total = 0
