@@ -104,33 +104,61 @@ def _annotation_kind(ann) -> str | None:
     return None
 
 
-def _passthrough_method(name: str) -> str | None:
-    """The SDK method a wrapper RETURNS UNCHANGED, or None.
+#: The two statement shapes that RETURN the SDK value unwrapped. Both are
+#: "pass-throughs" and both owe their SDK method's declared type; a wrapper in
+#: any other shape is reshaping and keeps its own annotation. Two shapes exist
+#: because both are idiomatic here and a guard that saw only the first would be
+#: SILENT (not merely narrow) about the second — a review round measured
+#: exactly that: `return _safe(_get_org_sdk().m, …)` was seen, while the
+#: equivalent `rows = _safe(_get_org_sdk().m, …); return rows` was skipped and
+#: the wrapper therefore escaped the guard with no offender and no change to the
+#: `checked` floor.
+def _tail_name(node) -> str | None:
+    """The last name of a call target — `_safe` and `ms._safe` both resolve to
+    `_safe`, because a module-qualified call is the same pass-through."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
 
-    Only a pass-through wrapper has to declare its SDK method's type. A wrapper
-    that reshapes the result is entitled to a different annotation — measured:
-    ``tortoise_recall`` returns a ``dict`` (``{"mode", "results"}``) although
-    ``TortoiseSDK.recall_state`` returns a list, and it is correct. Recognising
-    the pass-through by its AST keeps the guard from demanding a rewrite of
-    every reshaping tool.
-    """
-    try:
-        src = textwrap.dedent(inspect.getsource(getattr(ms, name)))
-    except (OSError, TypeError):
-        return None
-    body = [n for n in ast.parse(src).body[0].body
-            if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
-    if len(body) != 1 or not isinstance(body[0], ast.Return):
-        return None
-    val = body[0].value
-    if not (isinstance(val, ast.Call) and getattr(val.func, "id", None) == "_safe" and val.args):
+
+def _sdk_method_called_by(val) -> str | None:
+    """The `<m>` in `_safe(_get_org_sdk().<m>, …)`, or None."""
+    if not (isinstance(val, ast.Call) and _tail_name(val.func) == "_safe" and val.args):
         return None
     first = val.args[0]
     if (isinstance(first, ast.Attribute)
             and isinstance(first.value, ast.Call)
-            and getattr(first.value.func, "id", None) == "_get_org_sdk"):
+            and _tail_name(first.value.func) == "_get_org_sdk"):
         return first.attr
     return None
+
+
+def _passthrough_of(fn) -> str | None:
+    """The SDK method a wrapper RETURNS UNCHANGED, or None (see above)."""
+    try:
+        src = textwrap.dedent(inspect.getsource(fn))
+    except (OSError, TypeError):
+        return None
+    body = [n for n in ast.parse(src).body[0].body
+            if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
+    # shape A — one statement, returning the call itself:
+    if len(body) == 1 and isinstance(body[0], ast.Return):
+        return _sdk_method_called_by(body[0].value)
+    # shape B — bind it, then return the binding as the LAST statement:
+    if (len(body) == 2
+            and isinstance(body[0], ast.Assign)
+            and isinstance(body[1], ast.Return)
+            and isinstance(body[1].value, ast.Name)):
+        bound = {t.id for t in body[0].targets if isinstance(t, ast.Name)}
+        if body[1].value.id in bound:
+            return _sdk_method_called_by(body[0].value)
+    return None
+
+
+def _passthrough_method(name: str) -> str | None:
+    return _passthrough_of(getattr(ms, name))
 
 
 # ── 1. THE GUARD: a list-returning SDK method needs the wrap envelope ─────
@@ -290,3 +318,34 @@ async def test_a_safe_failure_is_not_demoted_into_the_success_payload(
     assert payload.get("error"), f"{name} lost the failure message: {payload!r}"
     # `_safe` answers a raising SDK with its own error dict; the SDK's message survives.
     assert "db down" in str(payload), payload
+
+
+def test_the_passthrough_recogniser_sees_both_idiomatic_shapes():
+    """A guard that recognises only ONE way of writing a pass-through is not
+    narrow, it is silent: the unrecognised wrapper leaves the population with no
+    offender and no change to the `checked` floor, so a `-> dict` over a
+    list-returning SDK method ships through it. Measured in a review round on
+    this very file. Both shapes are pinned here, and both reshape shapes are
+    pinned OUT, because over-recognising would flag the legitimate reshaping
+    tools (`tortoise_recall`) and force a rewrite of working code."""
+    def one_statement(topic):
+        return ms._safe(ms._get_org_sdk().belief_timeline, topic)  # pragma: no cover
+
+    def bound_then_return(topic):
+        rows = ms._safe(ms._get_org_sdk().belief_timeline, topic)  # pragma: no cover
+        return rows  # pragma: no cover
+
+    def enveloped(topic):
+        rows = ms._safe(ms._get_org_sdk().belief_timeline, topic)  # pragma: no cover
+        if isinstance(rows, dict):
+            return rows  # pragma: no cover
+        return {"result": rows}  # pragma: no cover
+
+    def reshaped(topic):
+        return {"mode": "state", "rows": ms._safe(  # pragma: no cover
+            ms._get_org_sdk().belief_timeline, topic)}
+
+    assert _passthrough_of(one_statement) == "belief_timeline"
+    assert _passthrough_of(bound_then_return) == "belief_timeline"
+    assert _passthrough_of(enveloped) is None
+    assert _passthrough_of(reshaped) is None
