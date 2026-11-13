@@ -1,7 +1,6 @@
 # MEMORY.md — coding gotchas
 
-Raw things that bite mid-code. Not an implementation log, not a docs index.
-Format: `[category]: [what broke] → [root cause] → [the fix]`. Cap: strictly UNDER 150 lines, checked as `len(lines) < 150`, so 149 is the LARGEST legal size — and `tests/test_memory_md_hygiene.py::test_memory_md_stays_under_the_line_cap` reds the required `test` lane at 150, so retire a row before you add one.
+Raw things that bite mid-code. Not an implementation log, not a docs index. Format: `[category]: [what broke] → [root cause] → [the fix]`. Cap: strictly UNDER 150 lines, checked as `len(lines) < 150`, so 149 is the LARGEST legal size — and `tests/test_memory_md_hygiene.py::test_memory_md_stays_under_the_line_cap` reds the required `test` lane at 150, so retire a row before you add one.
 
 [env]: `uv run python /tmp/probe.py` from a worktree imported `tortoise` from a **different worktree** → the shared `.venv` has an editable install, and `uv run` without `--no-sync` re-resolves it → always `PYTHONPATH=$PWD uv run --no-sync python ...`, and print `tortoise.__file__` to confirm before trusting any result.
 [test]: A perf assertion on wall-clock time in a shared docker FalkorDB measured every *concurrently running* suite, not the code under test → flaky by construction → assert a **count** of operations instead (wrap `proj.g` in a proxy exposing `query()` and count Cypher round-trips), with a generous hang-backstop only as a safety net.
