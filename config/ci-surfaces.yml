@@ -1619,6 +1619,20 @@ surfaces:
   # are `api` for the same reason. Measured after the fix: `select(
   # ['tortoise/quota.py'])` → this file selected.
   - test_11892_health_quota.py
+  # #12407 (PR #12428), DUAL-REGISTERED with `core` for the same reason as the
+  # #11892 row above, and measured with `select()` rather than assumed (#12368
+  # review, P2). The file guards three modules — `tortoise/config.py`,
+  # `tortoise/dotenv_file.py` and `tortoise/__main__.py` — and the third does NOT
+  # reach `core`:
+  #   select(['tortoise/config.py'])    -> surfaces=['core'] n=846 selected=True
+  #   select(['tortoise/dotenv_file.py'])-> surfaces=['core'] n=846 selected=True
+  #   select(['tortoise/__main__.py'])  -> surfaces=['api']  n=385 selected=False
+  # so a `core`-only row ran this file ZERO times on a diff to the CLI it is
+  # mostly about (`tortoise config show` / `tortoise doctor` — the two-entry-point
+  # divergence answer, and the credential-never-printed and
+  # report-does-not-mutate rules, all live in `__main__.py`). Hermetic: a
+  # `tmp_path` `.env` only, no DB, no graph, no network, no model call.
+  - test_env_file_divergence.py
   - test_quota.py
   # #8906: the points gate must count the graph the request WRITES. Every pin
   # lives in `tortoise/hosted_api.py` (`_check_org_limit`'s `sdk` threading + the

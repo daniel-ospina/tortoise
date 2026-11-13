@@ -1306,12 +1306,16 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
      "`tortoise/sparse.py:662`"),
     ("tortoise/sparse.py", 72, "DEFAULT_MAX_OR_TERMS = 12",
      "`tortoise/sparse.py:72`"),
-    # ⛔ The degenerate branch is the `return`, NOT the enclosing `def`: the row
-    # cited 505 (the function header) for a statement 85 lines below it. #12360/
-    # #12368 moved it to 931 (two `return escape_redisearch_literal(query)` lines
-    # now exist and `next()` takes the FIRST, at `max_terms < 1`).
-    ("tortoise/sparse.py", 931, "return escape_redisearch_literal(query)",
-     "`sparse.py:931`"),
+    # ⛔ The degenerate branch is the branch, NOT the `max_terms < 1` guard that
+    # shares its `return` and NOT the enclosing `def`: the row cited 505 (the
+    # function header) for a statement 85 lines below it, and then 931 — the
+    # `max_terms < 1` return — which is a DIFFERENT branch whose behaviour the row
+    # does not describe (#12368 review, P2). The symbol is the `if`, because two
+    # `return escape_redisearch_literal(query)` lines exist and `next()` takes the
+    # FIRST; pinning the guard makes the lookup unique and still reds if the branch
+    # moves or is deleted.
+    ("tortoise/sparse.py", 932, "if degenerate and not composites:",
+     "`sparse.py:932`"),
     ("tortoise/search_engine.py", 2800, "def run_fts_query(",
      "`tortoise/search_engine.py:2800`"),
     ("tortoise/search_engine.py", 3008, "CALL db.idx.fulltext.queryNodes",
@@ -1551,6 +1555,39 @@ def test_the_degenerate_branch_is_declared_not_hidden(tool_mod, artifact) -> Non
     # on this row. The census above is the `#12349` measurement, taken before that
     # tail existed (a re-run reads 125, one row fewer); see the brief's §3.4.
     assert tool_mod.arm_terms("web_search") == ("search web web_search", False)
+
+
+def test_the_in_place_arm_COLLAPSED_into_the_shipped_one_and_both_say_so(
+        tool_mod, population, brief: str) -> None:
+    """#12368 review, P2: the recovery arm is no longer an independent arm.
+
+    `falkordb_tfidf__tokens_fixed` asks whether the shipped index recovers the name
+    with the `_`-preserving terms ADDED. Since `build_or_query` emits the composite
+    itself, the terms it would add are already there: MEASURED here, 0 of the 300
+    population names differ, so the arm re-reads the shipped leg. Nothing reds on
+    that in the committed artifact (a run taken BEFORE the tail existed), so
+    without this pin a re-run would publish `in-place recovery = 0` as a finding.
+    """
+    from tortoise.sparse import build_or_query
+
+    names = [r["name"] for r in population["names"]]
+    differing = [n for n in names
+                 if tool_mod.recovery_query(n) != build_or_query(n)]
+    assert len(names) == 300 and not differing, (
+        f"the recovery arm differs on {len(differing)} of {len(names)} names — it "
+        "is independent again, so RE-MEASURE M3 and rewrite this pin and §3.4 "
+        "rather than deleting them")
+    # …and the run must refuse to publish that collapse as a measurement.
+    with pytest.raises(SystemExit) as exc:
+        tool_mod.assert_terms_match(names)
+    assert "recovery arm is IDENTICAL" in str(exc.value), (
+        "`assert_terms_match` must REFUSE a run whose recovery arm collapsed "
+        f"into the shipped one (got {exc.value})")
+    # …and the record says it, in the § the mechanism lives in.
+    _only_claim(
+        _scoped(brief, "3.4").replace("**", "").replace("`", ""),
+        "the two arms are one measurement",
+        "§3.4's recovery-arm collapse disclosure")
 
 
 def test_degenerate_rows_are_identical_across_the_two_postgres_arms(artifact) -> None:

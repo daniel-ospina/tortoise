@@ -3133,6 +3133,41 @@ def test_a_NUMBER_and_an_ACCENTED_word_are_probes_a_STOPWORD_is_not():
             f"{refused!r} was accepted — the read does not send it as one term")
 
 
+def test_a_PUNCTUATED_underscore_token_is_a_probe_because_the_read_addresses_ONE_term():
+    """#12368 review, P2: the backstop compared RAW ALTERNATIVES, not INDEX TERMS.
+
+    (1) FAILS on the pre-fix tree. `probe_phrase_rejection('a_.')` refused with
+        "the read expands it into several terms ('a_.|a_')" — while BOTH
+        alternatives reduce to the SAME index term `a_`, so the read addresses ONE
+        term and the record's own name returns it. The index splits every
+        alternative on its own separators; that is precisely the sense the raw
+        string comparison was blind to.
+    (2) MEASURED, live, not inferred: one `:Object` per shape written through the
+        real projection, the background index cycle awaited (`CALL db.indexes()`
+        numDocuments), then queried by its OWN name through `run_fts_query` on
+        FalkorDB 4.20.6 — `a_.`, `a_!`, `.a_`, `_a.` and `a_..` each returned their
+        own record. So refusing them was a false block, the class this guard has
+        now repaired four times.
+    (3) REACHABLE: such a token is exactly what an operator copies out of prose.
+    (4) AND THE OVER-MATCH CLASS STAYS REFUSED — pinned, so a future widening
+        cannot swallow it: `web_search` emits `search|web|web_search` (three index
+        terms, only one of which is the token), `abc_def` emits `abc|def|abc_def`,
+        `cafécafé` emits `caf|caf` where the index holds `cafécafé`, and
+        `überüber`/`testétest` are the same shape.
+    """
+    from tortoise.session_source_prose_migration import probe_phrase_rejection
+
+    for accepted in ("a_.", "a_!", ".a_", "_a.", "a_..", "friday."):
+        assert probe_phrase_rejection(accepted) is None, (
+            f"{accepted!r} was refused — every alternative the read emits "
+            f"addresses the ONE index term this token denotes, so it is a probe "
+            f"(MEASURED live: it returns its own record)")
+    for refused in ("web_search", "abc_def", "cafécafé", "überüber", "testétest"):
+        assert probe_phrase_rejection(refused), (
+            f"{refused!r} was accepted — the read OR-joins terms this token is "
+            f"not, so the probe would match on any one of them")
+
+
 def test_a_NUMBER_probe_is_EXPLAINED_by_a_numeric_lexicon(monkeypatch):
     """#11536 review round 10, P1: the sibling predicate kept the QUERY tokeniser.
 

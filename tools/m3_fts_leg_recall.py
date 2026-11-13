@@ -419,6 +419,19 @@ def assert_terms_match(queries: list[str]) -> dict:
     Returns the terms-mode census (how many queries ride the ordinary OR union
     and how many are DEGENERATE), because that split is a property of the
     measurement a reader is owed, not a footnote — see :func:`arm_terms`.
+
+    ⛔ **AND IT REFUSES WHEN THE RECOVERY ARM HAS COLLAPSED INTO THE SHIPPED ONE**
+    (``#12368`` review, P2). ``falkordb_tfidf__tokens_fixed`` is the arm that asks
+    *“can the shipped index recover the name with the ``_``-preserving terms
+    added?”* — and once ``build_or_query`` emits the composite itself, the terms it
+    would add are ALREADY in the shipped query, so ``recovery_query(q)`` returns
+    ``build_or_query(q)`` verbatim. MEASURED on the committed population: **0 of
+    300** names differ, i.e. the arm is the shipped leg measured twice. Nothing
+    reds on that — the artifact is a record of a run taken BEFORE the tail existed
+    — but a RE-RUN would silently publish “in-place recovery = 0” and the reader
+    would take it for a finding. So the census now counts the differing rows and
+    the run refuses at zero, naming the way to keep the arm independent (run the
+    shipped arm with ``TORTOISE_UNDERSCORE_TERMS=0``).
     """
     from tortoise.sparse import (
         build_or_query,
@@ -426,6 +439,7 @@ def assert_terms_match(queries: list[str]) -> dict:
     )
     bad: list[tuple[str, str, str]] = []
     degenerate_n = 0
+    recovery_independent_n = 0
     for q in queries:
         terms, degenerate = production_terms(q)
         degenerate_n += int(degenerate)
@@ -434,14 +448,25 @@ def assert_terms_match(queries: list[str]) -> dict:
                     else "|".join(terms))
         if rebuilt != expected:
             bad.append((q, expected, rebuilt))
+        recovery_independent_n += int(recovery_query(q) != rebuilt)
     if bad:
         raise SystemExit(
             "REFUSED: the controlled token set does not reproduce "
             f"build_or_query for {len(bad)} of {len(queries)} queries "
             f"(first: {bad[0]!r}) — a tokenizer control that has drifted "
             "measures the wrong thing.")
+    if recovery_independent_n == 0:
+        raise SystemExit(
+            "REFUSED: the recovery arm is IDENTICAL to the shipped arm on all "
+            f"{len(queries)} queries — `build_or_query` now emits the "
+            "`_`-preserving composites itself (#12360), so the terms the "
+            "recovery arm would add are already there and the two arms are one "
+            "measurement. Run the shipped arm with "
+            "TORTOISE_UNDERSCORE_TERMS=0 to keep them distinct, and say so in "
+            "the brief before publishing a re-run.")
     return {"queries": len(queries), "degenerate": degenerate_n,
-            "tokens_controlled": len(queries) - degenerate_n}
+            "tokens_controlled": len(queries) - degenerate_n,
+            "recovery_independent": recovery_independent_n}
 
 
 def arm_terms(q: str) -> tuple[str, bool]:
@@ -518,6 +543,15 @@ def recovery_query(query: str) -> str:
     The recovery terms are computed from the SANITISED QUERY, never from
     ``build_or_query``'s output: the output has already split ``web_search`` into
     ``web``/``search``, so reading it back would recover nothing.
+
+    ⛔ **IT IS NOW A NO-OP, AND THAT IS A MEASURED FACT** (``#12368`` review, P2).
+    ``recovery_terms`` returns the ``_``-preserving composite, and since ``#12360``
+    ``build_or_query`` emits that composite itself — so ``extra`` is empty and this
+    returns ``build_or_query(query)`` verbatim for **all 300** population names
+    (measured). The in-place arm and the shipped arm are therefore ONE arm on this
+    code. :func:`assert_terms_match` refuses a run where zero queries differ, and
+    the ship-state fix is to run the SHIPPED arm with
+    ``TORTOISE_UNDERSCORE_TERMS=0``; the brief's §3.4 records it.
     """
     from tortoise.sparse import build_or_query
 

@@ -242,12 +242,26 @@ the index itself:
 
 | emitted shape | parsed | matched |
 |---|---|---|
-| `web_search` (the composite) | yes | yes |
+| `web_search` (the composite) | yes | yes — the index returns the record it names |
 | `a_` (trailing underscore) | yes | yes — the index holds `a_` |
 | `__a` (leading underscores) | yes | yes — the index holds `__a` |
-| `_menu` (run after a unicode break) | yes | no (harmless: an OR alternative that cannot match) |
-| `a__b` (double underscore: the tail emits the composite as the ONLY term, so the bytes are the raw text) | yes | no |
-| 48×`a` (no `_`, so the run never qualifies; the emitted query is the escaped literal) | yes | no |
+| `_menu` (leading underscore) | yes | yes — the index holds `_menu` |
+| `a__b` (double underscore: the tail emits the composite as the ONLY term, so the bytes are the raw text) | yes | yes — the index holds `a__b` |
+| 48×`a` (no `_`, so the run never qualifies; the emitted query is the escaped literal) | yes | yes — an escaped literal is a literal |
+
+⛔ **This table was RE-MEASURED, and three of its `matched` cells said `no` when the answer is yes**
+(`#12368` review, P2). The old cells were read off the population census — “did this shape return one of
+those 300 names” — which cannot answer the parser-safety question the column is under; the question is
+“does the emitted string address the record it names”. The method now stated with the numbers: one fresh
+`Object` named **exactly** the shape, the background index cycle awaited, then the **emitted string** and
+the **shape as an operator would type it** each issued through the real `run_fts_query` against a live
+FalkorDB 4.20.6 lane — every row returns its own record both ways.
+
+And one shape the tail does NOT emit, kept because the old row conflated it with `_menu`:
+
+| shape | tail output | parsed | matched |
+|---|---|---|---|
+| `café_menu` (an underscore run after a **unicode break**) | `[]` — the abutment rule drops it, so the emitted query is `menu|caf` | yes | **no** — and the reason is the abutment rule, not the parser: the bytes `menu|caf` do not spell the name. This is the shape the previous row's label described while its claim was about `_menu`, which does emit and does match. |
 | `search\|web\|web_search` (the full union) | yes | yes |
 
 Nothing in the emitted alphabet can be a metacharacter: `underscore_run_terms` only ever emits

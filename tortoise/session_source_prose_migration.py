@@ -1734,11 +1734,38 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # terms) and the doubled-fragment class.
     alternatives = {t.lower() for t in built.split("|")}
     if alternatives != {token.lower()}:
-        return (f"the read expands it into several terms ({built!r}) — either "
-                f"the identifier mechanism (a digit/dash run), the #12360 "
-                f"`_`-composite tail (`TORTOISE_UNDERSCORE_TERMS`), or the "
-                f"ASCII tokeniser splitting an accented word; pass the plain "
-                f"token")
+        # ⛔ A RAW-STRING COMPARISON IS NOT AN INDEX-TERM COMPARISON (#12368 review,
+        # P2 — a false BLOCK, MEASURED on a live lane). The index splits every
+        # alternative on its own separators, so two alternatives can address the
+        # SAME term: ``build_or_query('a_.') == 'a_.|a_'``, and both alternatives
+        # reduce to the term ``a_``. MEASURED — one ``:Object`` per shape written
+        # through the real projection, index cycle awaited, then queried by its own
+        # name through ``run_fts_query``: ``a_.``, ``a_!``, ``.a_``, ``_a.`` and
+        # ``a_..`` EACH return their own record. Refusing them was a false block of
+        # the class this guard has repaired three times, and the refusal's own
+        # reason ("the read expands it into several terms") is false about INDEX
+        # terms: there is ONE.
+        #
+        # So the question is the one the guard means: does the emitted set address
+        # the ONE index term the token itself denotes? Both directions stay pinned —
+        # ``cafécafé`` (``caf|caf``; the token's term is ``cafécafé``), ``überüber``,
+        # ``testétest``, and ``web_search`` (whose alternative terms are ``search``,
+        # ``web`` AND the composite) still refuse, because their alternative terms
+        # are not the token's.
+        # ⚠️ This also makes the ``friday.`` shape the paragraph above always claimed
+        # was accepted ACTUALLY accepted: ``runs`` for it is ``['friday']`` and the
+        # read sends ``friday``, so the alternative terms equal the token's. It was
+        # refused before this change, which is why that claim was false.
+        token_terms = {r.lower() for r in runs}
+        alternative_terms: set[str] = set()
+        for alternative in alternatives:
+            alternative_terms |= {r.lower() for r in _indexed_term_runs(alternative)}
+        if not (len(token_terms) == 1 and alternative_terms == token_terms):
+            return (f"the read expands it into several terms ({built!r}) — either "
+                    f"the identifier mechanism (a digit/dash run), the #12360 "
+                    f"`_`-composite tail (`TORTOISE_UNDERSCORE_TERMS`), or the "
+                    f"ASCII tokeniser splitting an accented word; pass the plain "
+                    f"token")
     return None
 
 

@@ -120,7 +120,7 @@ contain):
 | the query builder | `tortoise/sparse.py:793` `build_or_query` | OR-union of `tokenize_sparse_query` terms, then the #8933 alias/phrase tail, then the #12360 `_`-preserving composite tail, deduped against the originals |
 | the tokenizer | `tortoise/sparse.py:662` `tokenize_sparse_query` | splits on **every** `[^a-z0-9]` (`_SPLIT_RE` at `:67`) — **including `_`** |
 | the query term cap | `tortoise/sparse.py:72` `DEFAULT_MAX_OR_TERMS = 12` | 12 terms, longest-first |
-| the degenerate branch | `sparse.py:931` — `return escape_redisearch_literal(query)` | when ≤1 token survives, the whole query is the **escaped raw string** |
+| the degenerate branch | `sparse.py:932` — `if degenerate and not composites:` → `return escape_redisearch_literal(query)` | when ≤1 token survives, the whole query is the **escaped raw string** (⛔ NOT the `max_terms < 1` guard two lines above, whose `return` is byte-identical) |
 | the leg | `tortoise/search_engine.py:2800` `run_fts_query`, Cypher at `:3008-3017` | `CALL db.idx.fulltext.queryNodes('Object', $query) … ORDER BY score DESC, <recency tie> LIMIT` |
 | the tie key | `search_engine.py:2642` `recency_tie_clause` | `coalesce(<recency>,'') DESC, coalesce(<id>,'') DESC` — the **id key is DESC on every label** |
 | the score discard | `tortoise/search_engine.py:4514` `for rank, (pid, _score) in enumerate(ranked)` | **why this is a recall question** |
@@ -312,6 +312,17 @@ that class's 72 misses at k=3 come back non-empty and simply omit the target.
 > composite. The harness's `terms_census` is likewise the `#12349` reading — a re-run reads 125
 > degenerate rows rather than 126, the one row being `in_progress`, whose emitted bytes are identical
 > either way (its flag moves because the leg now hands over a term list of one).
+>
+> ⛔ **AND THE HARNESS'S IN-PLACE ARM COLLAPSES INTO THE SHIPPED ONE.** `falkordb_tfidf__tokens_fixed`
+> exists to ask whether the shipped index recovers the name with the `_`-preserving terms ADDED — and on
+> this code the terms it would add are already in the shipped query, so the two arms are one measurement:
+> measured, `recovery_query(q) == build_or_query(q)` for **all 300** population names, i.e. the in-place
+> column of §4.2 is a re-reading of the shipped column and not an independent arm. The artifact above is
+> a record of a run taken BEFORE the tail existed, so its two columns really were distinct; a RE-RUN on
+> this code would publish `in-place recovery = 0` as if it were a finding. `assert_terms_match` therefore
+> REFUSES a re-run whose recovery arm differs on zero queries, and the way to keep the arms distinct is
+> to score the shipped arm with `TORTOISE_UNDERSCORE_TERMS=0` — which is the same switch that makes the
+> before/after measurable on one path.
 
 ### 3.5 The `#8933` identifier fixture — requirement 5, and the shipped leg FAILS it
 
