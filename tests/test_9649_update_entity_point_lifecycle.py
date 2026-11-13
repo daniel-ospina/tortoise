@@ -251,9 +251,19 @@ def test_probe_2_a_retracted_point_refuses_the_window_too(env):
 # ══════════════════════════════════════════════════════════════════════
 
 def test_the_refusal_carries_the_three_parts(env):
-    """that it refused · exactly what failed · exactly what to do."""
+    """that it refused · exactly what failed · exactly what to do.
+
+    Review round 12c: part 3 must be **performable**, not merely named. This
+    refusal fires only for a claim the guard already found TERMINAL, and
+    ``supersede_point`` refuses a terminal SOURCE — so the old
+    ``supersede_point(dead_id, new_id)`` sentence prescribed a call that always
+    raises, and ``assert "supersede_point" in text`` (this test's previous form)
+    was satisfied by exactly that unperformable sentence. It now asserts the
+    route that exists (``create_point``) AND runs the negative control that
+    makes the assertion non-vacuous.
+    """
     sdk, _ = env
-    old, _new = _superseded(sdk)
+    old, new = _superseded(sdk)
 
     with pytest.raises(ValueError) as exc:
         sdk.update_entity(old, status="live")
@@ -264,11 +274,19 @@ def test_the_refusal_carries_the_three_parts(env):
     # 2. exactly what failed — the dead state and the fields asked for
     assert "superseded" in text, f"the found state is missing: {text!r}"
     assert "status" in text, f"the refused field is missing: {text!r}"
-    # 3. exactly what to do — the replacement route, named with its call
-    assert "supersede_point" in text, (
-        f"the repair must name supersede_point: {text!r}")
-    assert "new Point" in text or "new point" in text, (
-        f"the repair must say the claim is re-minted, not re-statused: {text!r}")
+    # 3. exactly what to do — a route that can actually be taken
+    assert "create_point(" in text, (
+        f"the repair must name the route that exists (mint the corrected "
+        f"claim): {text!r}")
+    assert "supersede this one with" not in text, (
+        f"the refusal must not tell the caller to supersede a claim it has "
+        f"just called terminal — `supersede_point` refuses a terminal SOURCE, "
+        f"so that prescription cannot be run: {text!r}")
+
+    # ...and the assertion above is not vacuous: superseding the dead id really
+    # does raise, which is WHY the old prescription was wrong.
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.supersede_point(old, new)
 
 
 # ══════════════════════════════════════════════════════════════════════

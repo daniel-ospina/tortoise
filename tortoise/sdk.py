@@ -47618,18 +47618,33 @@ class TortoiseSDK:
                         allow_operator=True,
                         refuse_event_terminalization=False)
                 except ValueError as _terminal_refusal:
+                    # ⛔ Review round 12c (AX rule 2, #10183): the repair must be
+                    # PERFORMABLE, and `supersede_point(dead_id, …)` is not. This
+                    # arm fires only when the guard reported a TERMINAL marker, so
+                    # the claim it tells the caller to supersede is by construction
+                    # dead — and `supersede_point` runs the same guard on its
+                    # SOURCE and refuses it (#2498: terminalization is one-way).
+                    # Measured: `supersede_point(<superseded>, <fresh>)` raises
+                    # `already terminal`, and so does every other door
+                    # (`update_point`, `retract_point`, `invalidate_point`). The
+                    # route that EXISTS is minting the corrected claim: a new
+                    # Point stands as current on its own, with no supersession
+                    # needed (and none possible) on the dead one.
                     raise ValueError(
                         f"update_entity refused {_lifecycle_fields} on a dead "
-                        f"claim: {_terminal_refusal}. A terminal Point's status and "
-                        f"validity window are one-way (#2498) — mint a new Point "
-                        f"for the corrected claim and supersede this one with "
-                        f"`supersede_point(dead_id, new_id)`; do not re-status a "
-                        f"dead one. Content and metadata revisions are still "
-                        f"accepted on it: a read-modify-write that echoed the "
-                        f"window back with the fields it changed should re-send "
-                        f"the call WITHOUT the temporal fields (`validFrom`, "
-                        f"`validTo`, their precision markers, `expiredAt`, "
-                        f"`when`), and the revision lands."
+                        f"claim: {_terminal_refusal}. A terminal Point's status "
+                        f"and validity window are one-way (#2498): no SDK door "
+                        f"re-livens a dead claim or re-stamps its window — not "
+                        f"this one, and not `supersede_point`, which refuses a "
+                        f"terminal SOURCE for the same reason. Mint the corrected "
+                        f"claim with `create_point(...)`; it stands as current on "
+                        f"its own, and the dead one keeps its recorded window. Do "
+                        f"not re-status a dead one. Content and metadata "
+                        f"revisions are still accepted on it: a read-modify-write "
+                        f"that echoed the window back with the fields it changed "
+                        f"should re-send the call WITHOUT the temporal fields "
+                        f"(`validFrom`, `validTo`, their precision markers, "
+                        f"`expiredAt`, `when`), and the revision lands."
                     ) from None
         # ⛔ A REFUSAL MUST NOT COST A WRITE (#12222, review cycle 10 P1). The
         # rename-ambiguity guard lives BELOW, inside its lock and ahead of the
