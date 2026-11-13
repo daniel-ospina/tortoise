@@ -1141,7 +1141,10 @@ class TestTheResolverBands:
                        lambda sdk, embed_list, story, **kw: {
                            "entities": [], "points": [], "events": [],
                            "degraded": False,
-                           "entities_unresolved": ["the team"]})
+                           # two spellings of ONE fold: the hold is per fold, so a
+                           # fold-equal duplicate must not become a second hold
+                           # (the failure arm de-dupes on `_norm` like the other).
+                           "entities_unresolved": ["the team", "The Team"]})
             out = _v2.extract_session_v2(
                 _M(), [{"role": "user", "content": "the team shipped."}],
                 session_id="s1")
