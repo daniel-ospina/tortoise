@@ -4272,6 +4272,31 @@ jobs:
       # residual: the base copy of a tool cannot yet contain the rule being added).
       - name: The baseline's recorded cut commit resolves
         run: python3 tools/surface_manifest.py check --provenance-strict
+      # ── THE ARCHIVE'S RESTORE ANCHORS MUST BE PROVABLE (#11609) ─────────────────
+      # `archive/` keeps removed code so a removal can be undone, and every entry cites
+      # the commit on the DEFAULT BRANCH that held it (not the batch PR's HEAD, which a
+      # squash merge orphans). The ordinary `archive_surface.py check` runs in the `test`
+      # job, which checks out at `fetch-depth: 1` — where the anchored commit is an absent
+      # ancestor by construction, so the anchor arm says nothing and proves nothing. That is the #9075/#11057 shape exactly: a gate that runs only where it
+      # cannot answer is a no-op gate, and before this step NO workflow invoked the strict
+      # form at all (measured: `rg -- '--anchors'` outside the tool → no match).
+      # This job already pays for `fetch-depth: 0`, which is what the proof NEEDS.
+      # `verify-anchors` imports no `tortoise`; the `check` beside it does, which is why this
+      # job's `pip install -e .` stays.
+      # ⚠️ ACCEPTED RESIDUAL — THE SAME ONE THE STEP ABOVE NAMES, NOT A PINNED COUNTERPART.
+      # Like the cut-commit step, this runs the CHECKOUT'S OWN `tools/archive_surface.py`, so a
+      # PR that rewrites the verifier in the same commit that rewrites `archive/MANIFEST.json`
+      # is graded by its own grader. `tools/surface-guard.py` has a pinned copy for exactly
+      # that reason; the archive verifier does not yet, because pinning it means pinning the
+      # manifest format too (the pinned copy would read a format it does not know). Filed as
+      # part of #11609's batch 1 rather than half-done here — do NOT read this green as
+      # tamper-resistant until the pin lands.
+      - name: The archive's restore anchors resolve and hold their frozen bodies
+        # `--require-entries` too: with no entries every other arm is silent, so an emptied
+        # manifest must be a RED in the job that runs on every PR — not a vacuous OK.
+        run: |
+          python3 tools/archive_surface.py verify-anchors
+          python3 tools/archive_surface.py check --require-entries
       # ── PIN THE TOOLING TO THE BASE REF (#4606) ───────────────────────────
       # The step below would otherwise run the CHECKOUT'S OWN copy, so a PR
       # could add a surface tool and stub the gate out in the same commit: the
@@ -4801,58 +4826,88 @@ jobs:
           # `pg_dump`/`pg_restore`. It is deliberately outside this list: this list is about
           # GETTING a client onto the leg, that one is about the client it GOT.
           # ⛔ THE BOX IS POOL-ELIGIBLE, SO WHAT THIS STEP ADDS TO APT IS REMOVED AGAIN.
-          # /etc/apt/sources.list.d/pgdg.list changes apt resolution for EVERY later job on the
-          # same box, and a leftover sources file is worse than none once this step's keyring is
-          # gone: an unverifiable key turns the next job's `apt-get update` into exactly the SOFT
-          # failure the ORIGIN check below exists to catch. Registered BEFORE the first write so a
-          # failure anywhere later still cleans up, and the SOURCE is removed FIRST so there is no
-          # window in which it outlives the key that signs it. `${key_file:-}` because the trap can
-          # fire before that mktemp call, where `set -u` in the trap would itself abort.
-          # ⛔ OWN ONLY WHAT THIS STEP WROTE. A pool box may ALREADY carry an operator's
-          # `apt.postgresql.org.asc` — created by PGDG's own manual procedure, at exactly
-          # this path — so an unconditional `rm` would DELETE state this job never created,
-          # on any later failure and not just the success path (MEASURED: with an operator
-          # file planted and the key fetch forced to fail, an unconditional trap removed it).
-          # ⚠️ The flag decides REMOVAL only: the `tee` below REPLACES a pre-existing sources
-          # file's contents (it does not append), so what the trap restores is the FILE's
-          # existence, not its contents.
-          had_sources=0
-          if [ -e /etc/apt/sources.list.d/pgdg.list ]; then had_sources=1; fi
-          had_keyring=0
-          if [ -e /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc ]; then had_keyring=1; fi
-          trap 'if [ "${had_sources:-0}" = 0 ]; then sudo rm -f /etc/apt/sources.list.d/pgdg.list || true; fi; if [ "${had_keyring:-0}" = 0 ]; then sudo rm -f /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc || true; fi; sudo rm -f "${key_file:-}" || true' EXIT
-          # ⚠️ `mktemp`, not a fixed `/tmp/pgdg.asc`: this job is pool-eligible and `curl -o`
-          # FOLLOWS symlinks, so a co-tenant could pre-create that path and redirect this write.
-          key_file="$(mktemp)"
-          if ! curl -fsSL -o "$key_file" https://www.postgresql.org/media/keys/ACCC4CF8.asc; then
-            echo "::error::could not FETCH the PGDG signing key (ACCC4CF8.asc) [$identity] — the client this drill needs comes from apt.postgresql.org, so without the key nothing can be installed and BOTH provisioned servers are pg16 (#12051). Either this runner cannot reach www.postgresql.org (egress/DNS/503), or curl/ca-certificates are not installed on it — test with 'command -v curl' before chasing the firewall."
-            exit 1
+          # A leftover sources file is worse than none once this step's keyring is gone: an
+          # unverifiable key turns the next job's `apt-get update` into exactly the SOFT
+          # failure the ORIGIN check below exists to catch. Registered BEFORE the first write so
+          # a failure anywhere later (including the key fetch) still cleans up, and the SOURCE is
+          # removed FIRST so there is no window in which it outlives the key that signs it.
+          # `${key_file:-}` because the trap can fire before that mktemp call, where `set -u`
+          # in the trap would itself abort.
+          # ⛔ AND IT OWNS ONLY STEP-PRIVATE PATHS, so the trap is UNCONDITIONAL. Keying removal
+          # on "did it pre-exist" is measurably wrong in one direction: a box carrying an
+          # operator `sources.list.d/pgdg.list` but NO keyring at the shared path
+          # (`had_sources=1`, `had_keyring=0` — PGDG's legacy `trusted.gpg.d` install) has its
+          # file REWRITTEN to point at the keyring, which the trap then deletes — leaving
+          # exactly the unverifiable source this block exists to prevent. So the keyring and the
+          # list are this step's OWN names: they cannot collide with an operator's, are never
+          # derived from someone else's, and are removed unconditionally. ⚠️ An existing
+          # `pgdg.list`/`pgdg.asc` is left COMPLETELY untouched — not truncated, not deleted.
+          # Every removal carries `|| true`: `errexit` IS in force inside an EXIT trap, so one
+          # failing `rm` would red a step that SUCCEEDED and skip the rest of the cleanup.
+          trap 'sudo rm -f /etc/apt/sources.list.d/tortoise-12051-pgdg.list || true; sudo rm -f /etc/apt/keyrings/tortoise-12051-pgdg.asc || true; sudo rm -f "${key_file:-}" || true' EXIT
+          # ⛔ REUSE AN EXISTING PGDG STANZA — NEVER ADD A SECOND ONE. apt keys a source on
+          # its URI+SUITE and refuses the WHOLE source list when two stanzas for the same
+          # suite carry DIFFERENT `Signed-By` values:
+          #   E: Conflicting values set for option Signed-By regarding source … <codename>-pgdg: … != …
+          #   E: The list of sources could not be read.
+          # MEASURED on ubuntu-24.04 (apt 2.8.4) with an operator stanza whose `Signed-By`
+          # DIFFERS from this step's — the shared `postgresql-common/pgdg` keyring (PGDG's own
+          # documented procedure) as a one-line `pgdg.list`, and as a deb822 `pgdg.sources`:
+          # `apt-get update` exits 100, so the guard below would red a CORRECT box — a
+          # regression, on exactly the pool-box class this cleanup exists for. ⚠️ What is NOT
+          # a conflict, and must not be reported as one: a stanza with NO `signed-by` at all
+          # (PGDG's legacy `trusted.gpg.d` install) — MEASURED rc 0 with only
+          # `W: Target Packages … is configured multiple times`, on apt 2.8.4 (24.04), 3.1.6
+          # (25.10) and 3.2.1 (26.04). It is reused anyway: its index is the same one this step
+          # would add, and REUSING needs no judgement about which operator shape is on the box.
+          # On such a box the operator's stanza already provides the index, so this step adds
+          # nothing; the ORIGIN check below still proves apt.postgresql.org lists this major.
+          # ⚠️ THE PROBE READS ONLY WHAT apt ACTUALLY READS: the legacy single file, and
+          # `sources.list.d/*.list` / `*.sources`. A recursive grep also matches the BACKUP
+          # names apt ignores (`pgdg.list.save`, `pgdg.list.distUpgrade` — ordinary apt/dpkg
+          # operations), taking this branch on a box with NO usable PGDG source, adding
+          # nothing, and redding at the ORIGIN check. ⚠️ STATED LIMITS: (i) a disabled
+          # (`Enabled: no`) or `Types: deb-src` paragraph still counts — that needs a
+          # parser, and the red is a NAMED one at the ORIGIN check. (ii) A REUSED STANZA IS
+          # TRUSTED AS-IS: if its `Signed-By` key is unreadable, the red lands on the
+          # `apt-get update` guard below and NOTHING SELF-HEALS — this step owns only its own
+          # pair, so the box stays red until it is repaired (main's merged trap can leave it).
+          if grep -qE -e '^[[:space:]]*deb[[:space:]][^#]*apt\.postgresql\.org' -e '^[[:space:]]*URIs:[[:space:]]*[^#]*apt\.postgresql\.org' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null; then
+            echo "apt.postgresql.org is already configured on this box [$identity] — reusing that stanza rather than adding a second one for the same suite (a duplicate with a different Signed-By makes apt refuse the whole source list, #12051)."
+          else
+            # ⚠️ `mktemp`, not a fixed `/tmp/pgdg.asc`: this job is pool-eligible and `curl -o`
+            # FOLLOWS symlinks, so a co-tenant could pre-create that path and redirect this write.
+            key_file="$(mktemp)"
+            if ! curl -fsSL -o "$key_file" https://www.postgresql.org/media/keys/ACCC4CF8.asc; then
+              echo "::error::could not FETCH the PGDG signing key (ACCC4CF8.asc) [$identity] — the client this drill needs comes from apt.postgresql.org, so without the key nothing can be installed and BOTH provisioned servers are pg16 (#12051). Either this runner cannot reach www.postgresql.org (egress/DNS/503), or curl/ca-certificates are not installed on it — test with 'command -v curl' before chasing the firewall."
+              exit 1
+            fi
+            # The keyring's DIRECTORY is created here rather than assumed: `/etc/apt/keyrings` is
+            # the modern location but not every image carries it, so `install -m 0644` below would
+            # fail `No such file or directory` — unnamed, one line before the guard.
+            sudo install -d /etc/apt/keyrings
+            sudo install -m 0644 "$key_file" /etc/apt/keyrings/tortoise-12051-pgdg.asc
+            # ⛔ THE SOURCE IS GUARDED, not just the variable it sets. `.` on a box with no
+            # readable /etc/os-release aborts under `set -e` with bash's own text (`No such file
+            # or directory`) and NO `::error::` — the unnamed-abort class every other line here
+            # replaces. Guarding the source also makes the codename guard below reachable on such
+            # a box, so the two states keep two distinct messages.
+            if ! . /etc/os-release; then
+              echo "::error::/etc/os-release on this runner cannot be READ [$identity] — the PGDG suite name is derived from its VERSION_CODENAME, so the pg16 client this drill needs cannot be installed (#12051). A Debian/Ubuntu box always carries it; a non-apt-derived image does not."
+              exit 1
+            fi
+            # ⛔ `${VERSION_CODENAME}` IS CHECKED, not left to `set -u`: an unbound-variable abort
+            # at the sources line is exactly the unnamed failure the repo-setup guards (the key
+            # fetch above and the `apt-get update` below) exist to replace,
+            # and a box whose os-release carries no codename is a state this step can NAME.
+            if [ -z "${VERSION_CODENAME:-}" ]; then
+              echo "::error::/etc/os-release on this runner carries no VERSION_CODENAME [$identity] — the PGDG suite name cannot be derived, so the pg16 client this drill needs cannot be installed (#12051). A Debian/Ubuntu box always sets it; a non-apt-derived image does not."
+              exit 1
+            fi
+            echo "deb [signed-by=/etc/apt/keyrings/tortoise-12051-pgdg.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/tortoise-12051-pgdg.list >/dev/null
           fi
-          # The keyring's DIRECTORY is created here rather than assumed: PGDG publishes it inside
-          # `postgresql-common`, which a bare runner image does not carry, so `install -m 0644`
-          # below would fail `No such file or directory` — unnamed, one line before the guard.
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo install -m 0644 "$key_file" /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
-          # ⛔ THE SOURCE IS GUARDED, not just the variable it sets. `.` on a box with no
-          # readable /etc/os-release aborts under `set -e` with bash's own text (`No such file
-          # or directory`) and NO `::error::` — the unnamed-abort class every other line here
-          # replaces. Guarding the source also makes the codename guard below reachable on such
-          # a box, so the two states keep two distinct messages.
-          if ! . /etc/os-release; then
-            echo "::error::/etc/os-release on this runner cannot be READ [$identity] — the PGDG suite name is derived from its VERSION_CODENAME, so the pg16 client this drill needs cannot be installed (#12051). A Debian/Ubuntu box always carries it; a non-apt-derived image does not."
-            exit 1
-          fi
-          # ⛔ `${VERSION_CODENAME}` IS CHECKED, not left to `set -u`: an unbound-variable abort
-          # at the sources line is exactly the unnamed failure the repo-setup guards (the key
-          # fetch above and the `apt-get update` below) exist to replace,
-          # and a box whose os-release carries no codename is a state this step can NAME.
-          if [ -z "${VERSION_CODENAME:-}" ]; then
-            echo "::error::/etc/os-release on this runner carries no VERSION_CODENAME [$identity] — the PGDG suite name cannot be derived, so the pg16 client this drill needs cannot be installed (#12051). A Debian/Ubuntu box always sets it; a non-apt-derived image does not."
-            exit 1
-          fi
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           if ! sudo apt-get update -qq; then
-            echo "::error::apt-get update FAILED after the PGDG source was added (suite ${VERSION_CODENAME:-unknown}-pgdg) [$identity] — the repository or its signing key did not resolve, so the pg16 client this drill needs cannot be installed, and BOTH provisioned servers are pg16 (#12051). Check the key at /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc, the suite name derived from /etc/os-release, and network egress."
+            echo "::error::apt-get update FAILED [$identity] — a PGDG source or its signing key did not resolve, so the pg16 client this drill needs cannot be installed, and BOTH provisioned servers are pg16 (#12051). Check the apt.postgresql.org stanza apt is actually using (this step adds /etc/apt/sources.list.d/tortoise-12051-pgdg.list plus /etc/apt/keyrings/tortoise-12051-pgdg.asc ONLY when the box had no PGDG source of its own, so on a box that already had one neither file exists), and network egress."
             exit 1
           fi
           # ⛔ THE ORIGIN IS THE FACT; A BARE PROBE'S EXIT STATUS IS NOT. `apt-get update`
@@ -4890,7 +4945,7 @@ jobs:
           # i.e. the guard ABOVE, so the old `--repair-labels` advice here was advice that
           # could not change apt's answer.
           if ! apt-cache policy postgresql-client-16 2>/dev/null | grep -F 'apt.postgresql.org' >/dev/null; then
-            echo "::error::apt.postgresql.org did not SUPPLY postgresql-client-16 for this codename [$identity] — either its index never LOADED (apt-get update only WARNS and exits 0 on a DNS/egress/5xx failure, and a failed fetch leaves the PREVIOUS lists in place — so a row can still appear from a STALE index; look for 'W: Some index files failed to download' above) or the suite '${VERSION_CODENAME:-unknown}-pgdg' carries no such package. BOTH provisioned servers are pg16 and the client major is part of the artifact's contract (#12051), so this drill cannot fall back to the image's own archive client. Check 'apt-cache policy postgresql-client-16': apt.postgresql.org must list this major."
+            echo "::error::apt.postgresql.org did not SUPPLY postgresql-client-16 for this codename [$identity] — either its index never LOADED (apt-get update only WARNS and exits 0 on a DNS/egress/5xx failure, and a failed fetch leaves the PREVIOUS lists in place — so a row can still appear from a STALE index; look for 'W: Some index files failed to download' above) or the PGDG suite this box's stanza lists carries no such package. BOTH provisioned servers are pg16 and the client major is part of the artifact's contract (#12051), so this drill cannot fall back to the image's own archive client. Check 'apt-cache policy postgresql-client-16': apt.postgresql.org must list this major."
             exit 1
           fi
           if ! sudo apt-get install -y --no-install-recommends postgresql-client-16; then
