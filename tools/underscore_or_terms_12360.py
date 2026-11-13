@@ -534,7 +534,8 @@ def measure_declared_user_search(ctx: dict) -> dict:
     * It **cannot** report a recall@k GAIN, because none of these queries is
       identifier-shaped (`_`-carrying), so the mechanism has nothing to recover
       — and that is the CORRECT result: the change is byte-identical for every
-      query without an inner `_`. A recall number here would be a score over
+      query carrying NO `_` at all (a run with a LEADING/TRAILING `_` also
+      fires, so such a query is not a control case). A recall number here would be a score over
       labels this lane does not hold.
     * It **can** report, and does, the thing that matters for that surface: the
       two arms return the **identical ordered id list** for every query, on both

@@ -670,7 +670,9 @@ def build_or_query(
     expansion — original query tokens are capped at ``max_terms`` FIRST
     (their slots are reserved), then the expansion tail fills ONLY the
     remaining budget up to ``DEFAULT_MAX_EXPANSION_TERMS`` extra terms
-    (bounded raise: 12 + 8 = 20 max). Option (i)+(ii) of the scoping
+    (bounded raise: 12 originals + 8 expansion — the pass's TOTAL bound, with
+    the three additive tails counted, is the 44 stated below). Option (i)+(ii)
+    of the scoping
     package: reserve-original-slots (a longer injected alias can NEVER
     displace a shorter ORIGINAL query token — the regression guard) + a
     bounded max-terms raise on the ask lane only (the search lane passes

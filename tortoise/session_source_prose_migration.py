@@ -1350,8 +1350,10 @@ def _indexed_term_runs(text: str) -> list[str]:
     'café_menu')` returns a record named ``café_menu`` as ONE term). Splitting it
     is still right for THIS function's caller, because the question the probe
     guard asks is *"does one typed token become several QUERY terms?"* — and
-    since #12360 an inner ``_`` does exactly that (``a_bc`` ->
-    ``bc|a_bc``, the composite riding as an extra OR alternative). So the runs
+    since #12360 an inner ``_`` does exactly that (``web_search`` ->
+    ``search|web|web_search``, the composite riding as an extra OR alternative).
+    ⚠️ NOT every inner ``_``: where the plain tokens all die (``a_bc``) the read
+    sends the escaped literal alone, exactly as before. So the runs
     are the QUERY's runs, not the index's, for this one character; the refusal
     message says which of the two reasons fired.
     """
