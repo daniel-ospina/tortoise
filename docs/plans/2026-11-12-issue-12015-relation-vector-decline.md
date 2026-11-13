@@ -152,7 +152,7 @@ both; two edges aggregate; empty plan reports nothing.
 ```text
 uv run python tools/test_lane.py run -- tests/test_cache_projection.py \
     tests/test_dod_5090_probe.py tests/test_9556_record_restore_verb.py -q
-→ 326 passed, 1 skipped
+→ 327 passed, 1 skipped
 
 uv run python tools/test_lane.py run -- tests/test_cache_projection_live.py \
     tests/test_record_serve.py tests/test_reconciliation.py \
