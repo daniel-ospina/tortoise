@@ -521,10 +521,22 @@ def _refuse_degraded_legs(trace: list[dict], query: str) -> None:
     measurement's alarm for the direction that would otherwise flatter a
     *conclusion*: a wedged FalkorDB collapsing the shipped baseline to ~0 turns
     a non-result into a spectacular PASS.
+    ... an ABSENT trace is a refusal too (review r5): the repo's own
+    ``declared_degraded_read`` / ``require_hybrid_read`` treat an empty trace as
+    ``leg_trace_unavailable`` and fail closed for exactly this reason — a future
+    exit branch that forgets to ``_record`` would otherwise sail through a guard
+    that only ever looked for BAD entries. Every ``return []`` in
+    ``run_fts_query`` records first today; this keeps that a requirement rather
+    than an accident.
     """
-    bad = [e for e in trace
-           if isinstance(e, dict) and e.get("leg") == "fts"
-           and (e.get("degraded") or not e.get("ran"))]
+    entries = [e for e in trace
+               if isinstance(e, dict) and e.get("leg") == "fts"]
+    if not entries:
+        raise SystemExit(
+            f"REFUSED: the shipped FTS leg left NO trace entry for {query!r} — "
+            "an absent trace is not a clean read; the leg's own account is "
+            "required before its empty result may be counted as a miss.")
+    bad = [e for e in entries if e.get("degraded") or not e.get("ran")]
     if bad:
         raise SystemExit(
             f"REFUSED: the shipped FTS leg did not run cleanly for {query!r} "
@@ -665,7 +677,15 @@ def arm_falkordb(rows: list[dict], graph_name: str, namespace: str,
                 out = _fts_cypher(proj.g, sent, kk)
             else:
                 sent = build_or_query(q)
-                out = run_fts_query(proj.g, q, entity_type="object", limit=kk)
+                # ⛔ The fixture rows are requirement 5 — the DoD's correctness
+                # gate and the lane's headline result — so the same degraded-
+                # read refusal applies here: without it, a breaker trip during
+                # THIS loop publishes "the shipped leg cannot reach this name"
+                # for a read that never ran.
+                trace = []
+                out = run_fts_query(proj.g, q, entity_type="object", limit=kk,
+                                    leg_trace=trace)
+                _refuse_degraded_legs(trace, q)
             ids = [pid for pid, _s in out]
             ranks_by_k[kk] = ids.index(fid) + 1 if fid in ids else None
         fx.append({"id": fid, "stored": stored, "query": query, "gates": why,

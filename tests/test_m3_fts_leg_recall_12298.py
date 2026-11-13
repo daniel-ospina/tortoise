@@ -989,10 +989,16 @@ def test_a_degraded_shipped_leg_is_a_REFUSAL_not_a_miss(tool_mod) -> None:
     tool_mod._refuse_degraded_legs(
         [{"leg": "fts", "ran": True, "degraded": False,
           "reason": "empty_results", "count": 0}], "web_search")
-    # a vector leg's entry is not this guard's business
-    tool_mod._refuse_degraded_legs(
-        [{"leg": "vector", "ran": True, "degraded": True,
-          "reason": "no_query_vector", "count": 0}], "web_search")
+    # ⛔ An ABSENT fts entry is a refusal too (`leg_trace_unavailable` is the
+    # repo's own fail-closed reading of an empty trace): the guard must not
+    # accept "no account" as "a clean read". A vector-only trace is that case.
+    with pytest.raises(SystemExit) as err:
+        tool_mod._refuse_degraded_legs([], "web_search")
+    assert "NO trace entry" in str(err.value)
+    with pytest.raises(SystemExit):
+        tool_mod._refuse_degraded_legs(
+            [{"leg": "vector", "ran": True, "degraded": True,
+              "reason": "no_query_vector", "count": 0}], "web_search")
 
 
 def test_brief_production_estimate_rederives_from_the_per_class_cells(
@@ -1022,7 +1028,6 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     snake_delta = (hit(fixed, snake) - hit(shipped, snake)) / len(snake) * 100
     assert len(snake) == 73
     assert round(snake_delta, 1) == 91.8, snake_delta
-    assert "91.8" in brief_text
 
     # The sentence the table's remainder rests on, arithmetic included. The
     # shares are read from the rows the brief prints them in: the definite cell,
@@ -1040,3 +1045,16 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     assert round(total, 1) == 73.5
     assert round(100 - total, 1) == 26.5
     assert "73.5 %" in brief_text and "26.5 %" in brief_text
+
+    # ⛔ The Δ COLUMN, in its own cells — a whole-document `"91.8" in brief` is a
+    # substring that §3.4's sentence and `share × 91.8` both satisfy, so the two
+    # figures §4.3 is actually quoted from could be falsified with the pin green
+    # (measured by mutation on the previous cut: 26.7→26.6 and 91.8→81.8 both
+    # passed).
+    assert round(_num(table[2][2].split("pts")[0]), 1) == round(snake_delta, 1), (
+        f"§4.3 `snake_case` Δ cell {table[2][2]!r} vs re-derived {snake_delta:.1f}")
+    assert round(_num(table[3][2]), 1) == round(path_delta, 1), (
+        f"§4.3 path Δ cell {table[3][2]!r} vs re-derived {path_delta:.1f}")
+    assert _num(table[1][2]) == 0.0, (
+        f"§4.3 `#n` row claims a non-zero effect: {table[1][2]!r} — the "
+        "measured effect on that sub-class is zero")
