@@ -765,9 +765,13 @@ class TestResolutionNarrative:
                                    "points": [], "events": []},
                                   model=model, narrative=self.STORY)
         assert res["map"]["Mike"]["id"] == "obj_michael"
+        # #12296: the record carries the BAND it reached. The shape grew on
+        # purpose — a reader no longer has to infer "merge" from the presence of
+        # a resolution, and a future `review`/`new` record has a stated place.
         assert res["records"] == [{"name": "Mike",
                                     "resolves_to": "obj_michael",
-                                    "mode": "llm"}]
+                                    "mode": "llm",
+                                    "band": "merge"}]
         assert not res["warnings"]
         assert "Kaironis" in model.prompts[0]
 

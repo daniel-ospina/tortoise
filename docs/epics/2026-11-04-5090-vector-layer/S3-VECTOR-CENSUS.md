@@ -321,10 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 183 collected, 182 passed, 1 skipped
+                                 # this tree: 187 collected
+                                 # (docker lane: 186 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **183 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **187 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -333,8 +334,9 @@ close review findings on that change: the falsifier for the probe's DIRECT-WRITE
 guard on a node the CALLER builds, which the probe had not measured — the pin that a record label
 with no `KEY_PROPERTY` HOLDS the row instead of taking the whole report down with a `KeyError`, and
 the falsifier for the PLANTED property set, without which reverting that derivation to the literal
-`embedding` red no row at all), seven by `#11455` (all seven are row-1 shipped-default tests), and one by this PR's round-9 fresh review,
-which SCORES the `#11455` clause itself (`test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool`
+`embedding` red no row at all), seven by `#11455` (all seven are row-1 shipped-default tests), and one by the round-9 fresh review ON `#11455`'s change
+(`#11415`/`#11455` landed it; no sha is restated here, for the reason the paragraph
+below gives about branch heads), which SCORES the `#11455` clause itself (`test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool`
 — reverting `on_by_default = deployment["on"]` to the any-surface bool left every other row-1 test
 green, so the artefact `#11086` item 4 is ticked on was pinned nowhere), and one by `#12284`
 (`test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently` — `#9314`'s missing
@@ -346,8 +348,26 @@ can query — and the row could not see it, because the node measurement only ev
 One pin measures the edge doors on the fixed tree, the second is the falsifier that empties the decline
 and watches row 2 go `NOT MET`, and the third pins the PROBED POPULATION as drop-derived rather than
 input-derived, so an arm that stops planting cannot still report full coverage — measured UNPINNED:
-the input-derived variant left the split unmoved)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 = 183`). ⚠️ No figure here names what `main` collects TODAY:
+the input-derived variant left the split unmoved), and four by `#12265`'s generalisation of the same
+pin (`test_the_duplicate_key_detector_catches_a_duplicate`,
+`test_no_module_declares_the_same_dict_key_twice`,
+`test_the_scan_REPORTS_a_duplicate_it_finds` and
+`test_the_scan_root_is_the_REPO_not_the_process_cwd` — the detector's own RED case, the scan over
+`tortoise/`, `tools/` and `tests/`, the RED arm driven over a planted tree (a duplicate must be NAMED
+with its file and both line numbers, an unparseable module must be named rather than skipped green,
+and a clean module must contribute nothing), and the `chdir` falsifier for the scan's root (which
+`c423d40973` hoisted into `_guard_root()` so a `Path.cwd()` regression reds instead of passing) —
+and the scan's reach is deliberately not "repo-wide" and
+asserts no repo-wide file count: it pins only a per-root floor (`_MIN_MODULES`: 100 / 50 / 500) so a
+renamed or vanished root fails instead of narrowing silently (`battery/`, `graph-scripts/`, `docs/`,
+`eval/` and several smaller roots sit outside the three it walks, and a file count there has already
+gone stale once), so the four make a silently-shadowed declaration key a PYTEST red on any tree that
+holds both rows AND whose diff selects this file, including the MERGE tree, where the duplicate is
+actually born and where
+`main-lint.yml`'s ruff gate (`#2174`) only reds it after the fact; the scan also found the live
+`# noqa: F601` duplicate in `tests/test_commit_schema.py`, which the census-scoped pin cannot see —
+and which lint itself does NOT catch, because the suppression is on the repeated line)
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 = 187`). ⚠️ No figure here names what `main` collects TODAY:
 which of those additions are already merged moves with `main`, so any "`main` at N" would be a moving
 reference this paragraph forbids — the total is bound to THIS TREE alone): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
@@ -363,7 +383,10 @@ itself (every other `partial`-hold fixture injects the sentinel string, so nothi
 derivation to `PARTIAL_LABEL_PREFIX` — see the note below), and one added by `#11437` that drives
 the residual pin's polarity as an executor over its own row set rather than a table in a message —
 and
-reads 182 passed, 1 skipped on the docker lane at this head. The
+reads `185 passed, 1 skipped` on the docker lane at `eee465029a` — a SHA-bound reading on
+purpose: the split is the one figure here that no pin covers (the count above re-derives
+itself, and adding a test moves the split without reddening anything), so it is stated
+against the commit that measured it and never as "at this head". The
 skip is the `<3.12` re-derive. The three `main` reds this row recorded for a day are CLEARED:
 `#12045`'s undeclared `tortoise.api::_emit` / `tortoise.api::_verify_record_vector_width` writers were
 the width verifier and a docstring-quoted call, and `#12042` (`b367c54214a2`) CLASSED both
@@ -378,11 +401,15 @@ these nodeids red again at `origin/main` `edcac493a5` (measured there: `3 failed
 A branch sha is a moving tree — the same discipline the paragraph below already imposes on the
 population COUNT — so the claim is bound to the tree it was measured on, and this PR carries the
 declaration that clears it.
-⛔ The SPLIT is lane-bound, and the same tree reads **181 passed, 2 skipped** under
+⛔ The SPLIT is lane-bound, and the same tree at `eee465029a` reads **184 passed, 2 skipped**
+under
 `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
-`tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies. Both splits add
-to the same `183` the pin re-derives, so **neither is a stale figure**: a carve-out run that
-"corrects" 182/1 to 181/2 rewrites a true record into a false one, and the pin deliberately does
+`tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
+LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
+skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
+collected count — `186 passed, 1 skipped` and `185 passed, 2 skipped` here, both adding to the same `187` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+`186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
+"corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
 head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is

@@ -125,12 +125,19 @@ def test_valid_status_is_journaled_against_point_and_survives_rebuild(env):
     is re-materialized as ``:Point`` (no production path mints the second
     label), so ``rebuild_all`` refuses with ``state-op-miss`` and the status
     reverts. Journaling against ``:Point`` is what makes the change durable.
+
+    ⚠️ #9649: the fixture moved from ``archived`` to ``live`` because
+    ``archived`` is not a DECLARED transition from ``draft``
+    (``_ALLOWED_TRANSITIONS['draft']`` is ``{live, retracted, superseded}``;
+    ONTOLOGY §5 records ``archived`` as *"reserved — no v1 write path"*), so the
+    generic door now refuses it. The property this test owns is the LABEL the
+    record names, not the value.
     """
     sdk, events = env
     pid = _multilabel_point(sdk)
 
-    sdk.update_entity(pid, status="archived")
-    assert _status(sdk, pid) == "archived"
+    sdk.update_entity(pid, status="live")
+    assert _status(sdk, pid) == "live"
 
     recs = _mutations(events, pid)
     assert [r["op"] for r in recs] == ["restatus"], \
@@ -138,10 +145,10 @@ def test_valid_status_is_journaled_against_point_and_survives_rebuild(env):
     assert recs[0]["label"] == "Point", (
         "the record must name the label the node replays as; a record against "
         "the sibling :Object label cannot fold and fails the rebuild")
-    assert recs[0]["state"] == {"status": "archived"}
+    assert recs[0]["state"] == {"status": "live"}
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-    assert _status(sdk, pid) == "archived", (
+    assert _status(sdk, pid) == "live", (
         "the status change did not survive rebuild_all (defect 2)")
 
 
@@ -158,7 +165,7 @@ def test_reference_fold_agrees_with_the_journaled_point_status(env):
 
     sdk, events = env
     pid = _multilabel_point(sdk)
-    sdk.update_entity(pid, status="archived")
+    sdk.update_entity(pid, status="live")   # #9649: a DECLARED transition
 
     result = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
     assert result["ok"], (
@@ -177,6 +184,16 @@ def test_status_write_after_supersede_wins_on_rebuild(env):
     while live and the chronological ``apply()``/``check_consistency`` arm kept
     it. The point-side twin of the #4743 Object re-fold: the re-fold must run
     AFTER the point sweep and be gated on the supersede's journal seq.
+
+    ⚠️ **#9649: this shape is no longer MINTABLE through a live door.**
+    ``update_entity`` refuses a lifecycle write on a terminal Point, because a
+    ``superseded`` claim has no outgoing transition (``_ALLOWED_TRANSITIONS`` /
+    ONTOLOGY §5) and re-statusing it resurrected a dead claim beside its closed
+    window. The journal shape still EXISTS — every graph written before #9649
+    holds it — and the fold-ordering property below is unchanged, so the
+    fixture is built the way a pre-#9649 writer left it: the graph value AND the
+    ``restatus`` record. This remains a REPLAY pin; the door's refusal is pinned
+    in ``tests/test_9649_update_entity_point_lifecycle.py``.
     """
     from tortoise.consistency import check_consistency
 
@@ -186,7 +203,13 @@ def test_status_write_after_supersede_wins_on_rebuild(env):
     new = sdk.create_point("statement", "new claim", dedup=False,
                            status="live")["id"]
     sdk.supersede_point(old, new)
-    sdk.update_entity(old, status="archived")
+    # The pre-#9649 live write, reproduced: graph first, record second (this
+    # door's own order), with the refusal replaced by the write it used to do.
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status=$st",
+        params={"id": old, "st": "archived"})
+    sdk._journal_entity_mutation("Point", old, "restatus",
+                                 state={"status": "archived"})
     assert _status(sdk, old) == "archived"
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -209,10 +232,12 @@ def test_supersede_after_status_write_still_ends_superseded(env):
     """
     sdk, events = env
     old = sdk.create_point("statement", "old claim", dedup=False,
-                           status="live")["id"]
+                           status="draft")["id"]
     new = sdk.create_point("statement", "new claim", dedup=False,
                            status="live")["id"]
-    sdk.update_entity(old, status="draft")   # non-terminal: supersede is legal
+    # #9649: a DECLARED transition (draft → live). The pre-#9649 fixture used
+    # live → draft, which ONTOLOGY §5 does not declare and the door now refuses.
+    sdk.update_entity(old, status="live")
     sdk.supersede_point(old, new)
     assert _status(sdk, old) == "superseded"
 
@@ -225,12 +250,16 @@ def test_supersede_after_status_write_still_ends_superseded(env):
 def test_supersede_status_then_delete_rebuild_does_not_miss(env):
     """The re-fold must not manufacture a fold-miss for a deleted Point.
 
-    ``create -> supersede -> update(status) -> delete``: the delete folds
+    ``create -> supersede -> restatus -> delete``: the delete folds
     inline, so by the time the point re-fold runs the node is gone. Re-folding
     the status op then can only emit a spurious ``state-op-miss`` and fail the
     run (``NonFoldedEventsError``) for a journal every engine replays
     correctly — the same round-6 trap the Object re-fold's existence guard
     exists for. Pins that guard.
+
+    ⚠️ #9649: the middle write is journalled directly, as a pre-#9649 writer
+    left it — the live door now refuses a lifecycle write on a terminal Point.
+    The node is deleted before the rebuild, so no graph value needs reproducing.
     """
     sdk, events = env
     old = sdk.create_point("statement", "old claim", dedup=False,
@@ -238,7 +267,8 @@ def test_supersede_status_then_delete_rebuild_does_not_miss(env):
     new = sdk.create_point("statement", "new claim", dedup=False,
                            status="live")["id"]
     sdk.supersede_point(old, new)
-    sdk.update_entity(old, status="archived")
+    sdk._journal_entity_mutation("Point", old, "restatus",
+                                 state={"status": "archived"})
     sdk.delete(old)
 
     # Must not raise: the deleted Point's later status op is legitimately
@@ -252,15 +282,18 @@ def test_supersede_status_then_delete_rebuild_does_not_miss(env):
 
 # ── The vocabulary values stay writable (owner ruling) ───────────────────
 
-@pytest.mark.parametrize("good", ["draft", "live", "outdated", "archived"])
+@pytest.mark.parametrize("good", ["draft", "live"])
 def test_vocabulary_values_are_accepted_and_journaled(env, good):
     """The fix must refuse only NON-vocabulary values.
 
     The owner's state-model ruling on #3311 (comment 6091597170) requires
-    ``draft`` to remain an explicit, honoured choice, and #2977 records
-    ``update_entity(<:Point:Object>, status='draft'|'outdated')`` as a working
-    public call. A tightening to ``update_point``'s draft→live rule would be a
-    behaviour change, not this fix.
+    ``draft`` to remain an explicit, honoured choice. A tightening to
+    ``update_point``'s draft→live rule would be a behaviour change, not this fix.
+
+    ⚠️ #9649: the parametrization narrowed to the transitions ONTOLOGY §5
+    DECLARES from ``draft`` (``live``). ``archived`` and ``outdated`` are still
+    vocabulary values — the status door must accept the WORD and refuse only
+    the TRANSITION — so the test below pins that separation instead of losing it.
     """
     sdk, events = env
     pid = _multilabel_point(sdk)
@@ -272,6 +305,33 @@ def test_vocabulary_values_are_accepted_and_journaled(env, good):
         "a sibling-label record cannot replay; this assertion makes the test "
         "discriminate the fix from the old :Object record")
     assert recs[0]["state"] == {"status": good}
+
+
+@pytest.mark.parametrize("word", ["outdated", "archived"])
+def test_an_undeclared_transition_is_refused_as_a_TRANSITION(env, word):
+    """#9649: a vocabulary word the lifecycle does not allow from ``draft``.
+
+    The refusal must be about the TRANSITION — the word IS legal Point
+    vocabulary, and ONTOLOGY §5 declares neither ``draft -> outdated`` nor
+    ``draft -> archived`` (``archived`` is *"reserved — no v1 write path"*;
+    ``outdated`` is written only by ``invalidate_point``/``supersede_point``).
+    Refusing it as a bad WORD would be a regression of this issue's defect 1.
+    """
+    sdk, events = env
+    pid = _multilabel_point(sdk)
+    before = _mutations(events, pid)
+
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(pid, status=word)
+    text = str(exc.value)
+    assert "transition" in text.lower(), (
+        f"the refusal must be about the transition, not the vocabulary: {text!r}")
+    assert "Invalid status" not in text, (
+        f"{word!r} IS Point vocabulary — refusing it as a bad word would be a "
+        f"regression of #3311's fix: {text!r}")
+    assert _status(sdk, pid) == "draft"
+    assert _mutations(events, pid) == before, (
+        "a refused transition must not be journaled")
 
 
 # ── Acceptance 4: the dedicated point guard is untouched ─────────────────

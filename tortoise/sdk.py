@@ -107,6 +107,7 @@ from .validity import (  # #2350: the ONE home for the precision PROP NAMES
     FROM_PRECISION_PROP,
     TO_PRECISION_PROP,
 )
+from .live import lifecycle_props_by_rendering, keys_rendering_as  # #9649 review 13: shape-independent presence
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
@@ -128,7 +129,7 @@ from .live import is_terminal_status  # #2498 shared terminal predicate (Python 
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
-from .live import status_as_reported  # #9974 R1 absent-status rendering (shared with live.py)
+from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -4600,10 +4601,25 @@ CROSS_LENS_ANN_TOP_K = 20
 # undermine the cost contract entirely).
 CROSS_LENS_ANN_TOP_K_MAX = 100
 
-# #432: declarative spec for the retract/supersede transition guards. NOT
-# consulted by update_point per-call (update_point only promotes draft→live);
-# every claim transition is observable via a Task 3 emit hook, and no
-# transition can slip through update_point unemitted.
+# #432: declarative spec for the Point lifecycle — ONTOLOGY §5's transition
+# table in code, PLUS one code-review decision the doc does not carry: a DRAFT
+# may terminalize before it is ever live (``draft -> retracted/superseded``), so
+# the map is a SUPERSET of §5's `draft` row and an exact match of its `live`
+# row. ``tests/test_claim_lifecycle.py`` cross-checks the terminal words and the
+# doc's declared transitions; the `draft` widening is pinned there as the #432
+# decision, not as doc↔map equality.
+# NOT consulted by update_point per-call (update_point only promotes
+# draft→live; every claim transition is observable via a Task 3 emit hook, and
+# no transition can slip through update_point unemitted).
+# ⛔ IT IS CONSULTED, for the transition question, by `_update_entity`'s Point
+# `status` arm (#9649) — the generic tenant door, which had no transition check
+# at all: `update_entity(superseded_point, status='live')` resurrected a dead
+# claim and `status='archived'` minted a status ONTOLOGY declares reserved.
+# What that door consults is the DECLARED TARGET SET for a stored status — never
+# terminality, which stays in the shared predicate (#2498's
+# `live.is_terminal_status`, which also covers `deprecated` and the legacy
+# `outdated=true` flag, neither of which is a key here). A stored status with no
+# entry here (NULL/legacy) defers rather than being guessed at.
 _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     # P2 (code-review): guards allow draft→retracted/superseded (a draft point
     # can be terminal before ever going live); keep the declarative spec
@@ -8117,12 +8133,41 @@ def _item_prop_at_depth(item: dict, key: str, depth: int) -> tuple[bool, object]
     for _ in range(depth):
         if not isinstance(cur, dict):
             return False, None
-        if key in cur:
-            return True, cur.get(key)
+        declares, value = _item_rendered_prop(cur, key)
+        if declares:
+            return True, value
         cur = cur.get("props")
     if not isinstance(cur, dict):
         return False, None
-    return key in cur, cur.get(key)
+    return _item_rendered_prop(cur, key)
+
+
+def _item_rendered_prop(scope: dict, key: str) -> tuple[bool, object]:
+    """PRESENCE + value for ``key`` in one scope, reading keys the way the WRITER
+    renders them (#11825 review cycle 6, P1).
+
+    ``if key in scope`` hashes the literal name, so a ``str`` SUBCLASS whose
+    ``__str__`` returns ``key`` (or a ``bytes`` key the driver decodes to it) is
+    invisible to a Phase-1 reader while the writer files it under that name —
+    measured: a rendered-alias ``outdated`` key passed Phase 1 and the entity
+    write then refused mid-write, after the earlier items committed.
+
+    ⛔ LAST match wins, not first, within a scope: `_coerce_props` merges with
+    ``props.update``-style ordering, so a later key that renders to the same name
+    is the one the writer keeps — which is also the arm's rule, and the two must
+    agree or Phase 1 reports clean for a bundle the door refuses.
+    """
+    from .live import _event_state_key_names
+
+    found, value = False, None
+    for raw, candidate in scope.items():
+        # ⛔ BOTH renderings, the same union the write door asks
+        # (`_event_state_key_names`): Phase 1 reading one renderer while the door
+        # reads two is how a rendered-alias `outdated` key was refused mid-write
+        # after the earlier items committed (measured, review cycle 8, P1).
+        if key in _event_state_key_names(raw):
+            found, value = True, candidate
+    return found, value
 
 
 def _item_effective_status(item: dict, depth: int = 1) -> object:
@@ -8277,8 +8322,13 @@ def _item_flatten_depth(item: dict, section: str) -> int:
     """How many times the item's write door applies ``_coerce_props``."""
     if section == "points":
         return _POINT_ITEM_FLATTEN_DEPTH
-    return _ENTITY_ITEM_FLATTEN_DEPTH.get(
-        str(item.get("type") or "").strip().lower(), 1)
+    # ⛔ The DEPTH is a function of the label the WRITER resolves, so it reads the
+    # type by the same rule every other arm does (#11825 review cycle 11, P1).
+    # While this line rendered, the arms above could read the status at depth 1
+    # while the writer folded 2: `{"type": Lie("subject"), "props": {"props":
+    # {"status": "dead"}}}` measured TEN violations' worth of difference — Phase 1
+    # returned [] and `ingest` raised in step 3 with the point already committed.
+    return _ENTITY_ITEM_FLATTEN_DEPTH.get(_item_type_text(item), 1)
 
 
 def _status_is_evaluable(value: object) -> bool:
@@ -8410,6 +8460,44 @@ def _endpoint_is_terminal(info: dict) -> bool:
     )
 
 
+def _type_text(value: object) -> str:
+    """An item's `type` or a door's `type=` argument: content, lowercased.
+
+    ⛔ ONE primitive for BOTH sides of the seam, because the two were reading the
+    same value by different rules and `#11825` review cycle 12 measured the
+    consequence: `class LieStrip(str)` whose `strip()` returns `"event"` with
+    content `"object"` was an `:Object` to every Phase-1 arm (which ask
+    ``_item_type_text``) and an `:Event` to `ingest` (whose read called the
+    SUBCLASS's `strip`) — so the bundle passed validation and step 3 raised
+    with the point already committed.
+
+    ⛔ Why the explicit `str.*` calls: ``str.__str__(value)`` returns a PLAIN
+    ``str`` carrying the CONTENT (verified: no ``__str__`` override is consulted),
+    and the base ``strip``/``lower`` are then called explicitly rather than as
+    bound methods, so an override of EITHER cannot change the answer. Calling
+    ``value.strip()`` was the defect — it is a virtual dispatch, not the writer's
+    rule.
+    """
+    if not isinstance(value, str):
+        return ""
+    return str.lower(str.strip(str.__str__(value)))
+
+
+def _item_type_text(item: dict) -> str:
+    """The item's `type` as its WRITER reads it: content, lowercased.
+
+    ⛔ One rule, applied by EVERY Phase-1 arm that asks what an item IS: content,
+    then lowercase, implemented once in `_type_text` (`:8447`) — which this
+    delegates to, and whose explicit `str.strip`/`str.lower` BASE calls mean no
+    overridden `strip`/`lower` or `__str__` can change the answer. An arm that
+    compared `str(item.get("type") or "")` was asking a DIFFERENT question (the
+    `__str__` rendering), so a subclass whose content is a real label and whose
+    `__str__` differs passed Phase 1 and step 3 then raised with the point items
+    already committed — the #2422/#7925 partial-mutation class, review 10.
+    """
+    return _type_text(item.get("type"))
+
+
 _ENTITY_ITEM_LABELS = {"subject": "Subject", "object": "Object",
                        "event": "Event", "document": "Source"}
 
@@ -8469,8 +8557,7 @@ def _bundle_entity_name_outcomes(
     for item in bundle.get("entities") or []:
         if not isinstance(item, dict):
             continue
-        elabel = _ENTITY_ITEM_LABELS.get(
-            str(item.get("type") or "").strip().lower())
+        elabel = _ENTITY_ITEM_LABELS.get(_item_type_text(item))
         name = item.get("name")
         if elabel not in ("Subject", "Object") \
                 or not isinstance(name, str) or not name:
@@ -10239,9 +10326,9 @@ class UnapprovedKindNamespace(ValueError):
 #: ``outdated`` is absent because ``_sanitize_props`` already refuses it as a
 #: server-managed lifecycle flag.
 #:
-#: #9649 covers the separate door ``update_entity`` opens onto the same window
-#: (its Point arms write caller props and ``status`` with a vocabulary check and
-#: no lifecycle guard, so they can also flip a ``retracted`` Point to ``live``).
+#: Since **#9649** the separate door ``update_entity`` consults the SAME guard for
+#: ``status`` and every member of this set, so a DEAD claim's window is refused on
+#: BOTH Point doors; a healthy claim's undated end is still stored here.
 #:
 #: The two precision names are the CANONICAL constants from ``validity``, never
 #: re-spelled here: a hand-written copy of a canonical declaration is how
@@ -10253,6 +10340,13 @@ _TEMPORAL_RESTAMP_PROPS = frozenset({
     "validFrom", "validTo", FROM_PRECISION_PROP, TO_PRECISION_PROP,
     "expiredAt", "when",
 })
+
+# The lifecycle fields a Point write must not move without a guarded verdict:
+# the status word plus every window field. Kept as ONE set because the guard
+# reads its subject from `lifecycle_props_by_rendering`, and the test that asks
+# "did this call ask for a lifecycle change?" must cover exactly what the
+# refusal covers (#9649 review 13).
+_GUARDED_LIFECYCLE_PROPS = frozenset({"status"}) | _TEMPORAL_RESTAMP_PROPS
 
 
 def _shape_or_refuse_caller_end(props: dict) -> dict | None:
@@ -10272,8 +10366,8 @@ def _shape_or_refuse_caller_end(props: dict) -> dict | None:
 
     ⚠️ **This binds the GUARDED caller doors only** (``create_point``,
     ``update_point``), so the refusal is not airtight and §4.7 does not claim it
-    is: ``update_entity``'s Point arms remain an unguarded route to a junk end
-    (#9649), and ``supersede_point``'s numeric-``valid_from`` kwarg is
+    is: ``update_entity``'s arms guard the lifecycle, never the SHAPER (#9202;
+    #9649 closed the dead-claim half), and ``supersede_point``'s numeric-``valid_from`` kwarg is
     deliberately exempt (it is not a caller ``validTo`` write). The shape/refuse
     rule, its vocabulary, its receipt and its count are stated HERE and in
     ``validity.read_caller_end`` rather than in the canonical ontology: they are
@@ -21574,7 +21668,9 @@ class TortoiseSDK:
                                 role: str = "point",
                                 missing_ok: bool = False,
                                 allow_operator: bool = False,
-                                refuse_terminal: bool = True) -> dict | None:
+                                refuse_terminal: bool = True,
+                                refuse_event_terminalization: bool = True,
+                                ) -> dict | None:
         """Single authoritative terminal/operator guard for point lifecycle
         transitions (#2498).
 
@@ -21638,6 +21734,58 @@ class TortoiseSDK:
             if missing_ok:
                 return None
             raise ValueError(f"No point {point_id!r}")
+        # ── #11825 → the LIFECYCLE doors: an `:Event` has no lifecycle ──
+        # The three terminalizing doors (`retract_point` / `supersede_point` /
+        # `invalidate_point`) reach this guard BEFORE any write, and each of them
+        # writes a TERMINAL status — so a node carrying BOTH `:Point` and
+        # `:Event` (`#3311`'s `retype`, migrated graphs) was terminalized here
+        # while the `update_entity` door refused the same value (measured, review
+        # cycle 11: `retract_point(<:Point:Event>)` -> `['retracted',
+        # ['Point','Event']]`). The probe below then answers "does the node THIS
+        # door writes carry `:Event` too", which is a NARROWER question than the
+        # update door's — see the block below for why the two differ on purpose.
+        #
+        # Scoped by `refuse_terminal`: that is exactly the "this door
+        # terminalizes" predicate (the docstring above defines it that way), and
+        # the one caller that passes `False` (`update_point`) writes a window or
+        # a non-terminal prop through its own policy, so an `:Event` carrying one
+        # is not this refusal's business.
+        # ⛔ The probe is `:Point:Event`, NOT the update door's OR-form, and the
+        # difference is deliberate (#11825 review cycle 12 P2): THIS guard's write
+        # surface is `MATCH (n:Point {id:$id})` (`LIFECYCLE_FANOUT_QUERY` is
+        # :Point-scoped too), so only a node carrying BOTH labels is one this door
+        # would terminalize. Measured over-block with the OR-form: `add_event(<a
+        # point's id>)` mints a SEPARATE `:Event` keyed by that id, and
+        # `retract_point(<the point>)` was then refused — "carries the :Event label"
+        # — while the `:Point` node it would write stayed `live`, with journal
+        # delta 0. `_update_entity` keeps the OR-form because ITS write reaches
+        # both nodes.
+        #
+        # ⛔ `refuse_terminal` is NOT the "this call writes a TERMINAL value"
+        # predicate, and `update_entity` is why (#9649 merge review, P1). That
+        # door asks this guard about EVERY lifecycle write it accepts — the
+        # window rewrites and the non-terminal `draft -> live` promotion
+        # included — because it delegates TERMINALITY to this one instrument.
+        # Its `:Event` half is answered at its own call site by
+        # `refuse_terminal_event_state(props, ...)`, the PROPS-AWARE predicate
+        # that knows whether the RESULT status is terminal; this arm is
+        # label-only, so firing it for that door refused `draft -> live` on a
+        # hybrid — the prop lane #2788 pins and #11825's own
+        # `test_a_non_terminal_update_still_lands_on_a_multi_label_event`
+        # requires (measured at the merge head: 1 failed). So the arm is gated
+        # on a SECOND question, defaulted on for the doors that only ever write
+        # a terminal value, and switched off by the one door that decides from
+        # its props.
+        if (refuse_terminal and refuse_event_terminalization
+                and self._get_proj().g.query(
+                "MATCH (n:Point:Event {id:$id}) RETURN count(n)",
+                params={"id": point_id},
+        ).result_set[0][0]):
+            raise ValueError(
+                f"Point {point_id!r} carries the :Event label — {method} "
+                f"cannot terminalize it: an :Event has no lifecycle, so a "
+                f"terminal status would store a value no reader names and no "
+                f"retrieval leg filters (#11825)")
         if kind == "operator" and not allow_operator:
             raise ValueError(
                 f"Point {point_id!r} is an operator — {method} is for "
@@ -24874,8 +25022,14 @@ class TortoiseSDK:
         return {"candidate_id": candidate_id, "action": "merge",
                 "candidate_type": "entity", "wired": True,
                 "deferred_to_promotion": False,
-                "survived_id": pair["survivor_id"],
-                "target_id": pair["survivor_id"],
+                "survived_id": result["survivor_id"],
+                "target_id": result["survivor_id"],
+                **({"survivor_hopped": True} if result.get("survivor_hopped") else {}),
+                # #12296: the group the candidate stood for moved with it. Additive,
+                # and absent (not 0) when nothing was re-pointed — the same rule the
+                # receipt uses everywhere else.
+                **({"dependents_repointed": result["dependents_repointed"]}
+                   if result.get("dependents_repointed") else {}),
                 "aliases": result["aliases"],
                 "method": pair["method"],
                 "similarity": pair["similarity"],
@@ -26923,8 +27077,7 @@ class TortoiseSDK:
                     "message": f"ingest: sources[{index}] requires 'sourceKind'",
                 })
         elif section == "entities":
-            _etype_v = item.get("type")
-            etype = (_etype_v if isinstance(_etype_v, str) else "").strip().lower()
+            etype = _type_text(item.get("type"))
             if not etype:
                 violations.append({
                     "section": section, "index": index,
@@ -28383,15 +28536,16 @@ class TortoiseSDK:
         # above gives the flag, and the one the sibling `:Subject` arm inside
         # the endpoint loop could never provide.
         #
-        # `:Object` and `:Event` are deliberately NOT refused: their writers do
-        # not validate, they STORE the value (measured), so a refusal here
-        # would reject bundles the writer accepts — the over-rejection class
-        # this PR already fixed once.
+        # `:Object` is deliberately NOT refused: its writer does not validate,
+        # it STORES the value (measured), so a refusal here would reject bundles
+        # the writer accepts — the over-rejection class this PR already fixed
+        # once. `:Event` is no longer in that sentence: since #11825 its door
+        # refuses the TERMINAL half, and the arm BELOW mirrors that refusal at
+        # Phase 1 for the same partial-mutation reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            if _ENTITY_ITEM_LABELS.get(
-                    str(item.get("type") or "").strip().lower()) != "Subject":
+            if _ENTITY_ITEM_LABELS.get(_item_type_text(item)) != "Subject":
                 continue
             _declares_status, own_status = _item_declared_status(
                 item, _item_flatten_depth(item, "entities"))
@@ -28407,6 +28561,149 @@ class TortoiseSDK:
                            f"refuses it mid-write, so the bundle is "
                            f"rejected at validation. Must be one of: "
                            f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}",
+            })
+        # ── #11825: the `:Event` TERMINAL half, refused at Phase 1 ──
+        # The same class as the `:Subject` vocabulary arm directly above, and
+        # for the same measured reason: `create_event` now runs
+        # `live.refuse_terminal_event_state`, so an item carrying a terminal
+        # status raises in step 3 AFTER the point items have committed. The
+        # predicate is `live.is_terminal_status` — the ONE mirror of the Cypher
+        # terminal rule — so a status added to the vocabulary moves the door and
+        # this arm together (`#2901`/`#3301`). NON-terminal statuses are NOT
+        # refused: the door accepts them and `_promote_incident_operators` reads
+        # `draft`/`live` as its gate (#7853, #10828), so refusing here would be
+        # this file's own over-rejection class. `outdated` needs no arm: the loop
+        # above already refuses it bundle-wide on ANY point or entity item.
+        # ⛔ EMITTED UNCONDITIONALLY, and the duplicate for a DIRECT-route
+        # operator connection is the accepted cost — the same bargain the
+        # `:Subject` vocabulary arm above makes. Deferring to the connection arm
+        # by OWNERSHIP was measured WRONG (review cycle 5 P1): that arm runs only
+        # for a DIRECT-route connection carrying an `operator`, so an item named
+        # by a `reify: true` or `relation: …` connection was deferred to an arm
+        # that never fired — ZERO violations, and `ingest` committed the point
+        # and then raised mid-write, which is precisely the class this arm
+        # exists to prevent. A message that repeats itself is cheaper than a
+        # bundle that half-commits.
+        for i, item in enumerate(bundle.get("entities") or []):
+            if not isinstance(item, dict):
+                continue
+            # ⛔ THE TYPE IS RESOLVED THE WAY ITS OWN WRITER RESOLVES IT — by
+            # CONTENT, not by `__str__`. `ingest` and `create_entity` route by the
+            # writer's rule — content, then lowercase — through `_type_text` /
+            # `_item_type_text` (`:8447`, `:8470`), whose explicit `str.strip` /
+            # `str.lower` calls make that answer unspoofable: `str.strip` builds a
+            # PLAIN `str` from the subclass's content, so no `__str__` is consulted
+            # anywhere on that path, and no overridden `strip`/`lower` can change it
+            # either. This arm therefore reads `str.__str__` too: asking the
+            # UNION here (as the API label arms rightly do, because the fold
+            # interpolates the label by `str()` while the journal keeps its
+            # content) made Phase 1 refuse a `content="object", __str__="event"`
+            # item that the writer files as an `:Object` — an over-block with a
+            # wrong diagnosis (measured, review cycle 9 P2). One rule per side:
+            # the LABEL is a two-renderer name, the TYPE is a content string.
+            if _ENTITY_ITEM_LABELS.get(_item_type_text(item)) != "Event":
+                continue
+            # ⛔ THE KEY AXIS, and the `None` value, are part of this arm too
+            # (review cycle 5: one P1, one P2, both measured). `_item_declared_status`
+            # reads the LITERAL name, so a `str`-subclass or `bytes` key naming
+            # `status` was invisible here while the door refused it — Phase 1 said
+            # clean, `ingest` committed the point, and step 3 then raised (the
+            # half-commit this arm exists to prevent). And `status: None` is the
+            # DOCUMENTED clear route the door accepts, so treating it as a
+            # violation was this file's own over-rejection class (#7925).
+            # `_event_state_declarations` is the same renderer-side reader the
+            # door uses, over the item and its nested `props` with the door's
+            # presence precedence.
+            # ⛔ The scope precedence is the WRITER's, not "last scope wins"
+            # (review cycle 7, P1/P2 — the first revision of this arm got it
+            # backwards, then the second removed the `break` and got it backwards
+            # the other way). `_coerce_props` fills ABSENT keys from the nested
+            # `props`, so the TOP-LEVEL key wins; an aliased top-level key does
+            # not shadow a literal nested one, because the fill is by EXACT key.
+            # Building the merged map is the only way to get all three measured
+            # shapes right — top terminal + nested live, top live + nested
+            # terminal, and aliased top + literal nested terminal.
+            # ⛔ The scope precedence is the WRITER's, and the same-name collision
+            # rule is the ENGINE's (review cycle 7). Three shapes had to be
+            # measured to get this right, and the two earlier revisions each got
+            # one wrong:
+            #   * `_coerce_props` fills ABSENT keys from the nested `props`, so the
+            #     TOP-LEVEL value of the SAME exact key wins;
+            #   * two DIFFERENT keys that both render to `status` are both written,
+            #     and the door refuses when EITHER is terminal (measured).
+            # So the map is built the way the writer builds it, and then EVERY
+            # declaration of the guarded name is evaluated — which cannot call a
+            # bundle clean that the door refuses, and does not over-reject the
+            # same-key shadowing the writer resolves.
+            from .live import _event_state_key_names
+            _scopes = []
+            _cur: object = item
+            for _ in range(_item_flatten_depth(item, "entities") or 1):
+                if not isinstance(_cur, dict):
+                    break
+                _scopes.append(_cur)
+                _cur = _cur.get("props")
+            _merged: dict = {}
+            for _scope in _scopes:                # shallow first: it WINS
+                _merged.update({k: v for k, v in _scope.items()
+                                if k not in _merged})
+            _status_values = [v for k, v in _merged.items()
+                              if "status" in _event_state_key_names(k)]
+            own_status = None
+            if not _status_values:
+                _declares_status, own_status = _item_declared_status(
+                    item, _item_flatten_depth(item, "entities"))
+                _status_values = [own_status] if _declares_status else []
+            else:
+                own_status = _status_values[-1]
+            # `status: None` is the DOCUMENTED clear route the door ACCEPTS, so it
+            # is not a violation (review cycle 5, P2).
+            _status_values = [v for v in _status_values if v is not None]
+            if not _status_values:
+                continue
+            # The TYPE dimension (review cycle 6, P1): a PERSISTABLE non-string is
+            # refused by the door, a discarded one is accepted-and-dropped.
+            from .live import _status_is_discarded_by_every_writer as _is_discarded
+            _stored_bad = [v for v in _status_values
+                           if not isinstance(v, str)
+                           and not _is_discarded(v)]
+            if _stored_bad:
+                violations.append({
+                    "section": "entities", "index": i,
+                    "message": f"ingest: entities[{i}] declares status "
+                               f"{_stored_bad[0]!r} for an :Event — `status` on "
+                               f"the node is a STRING drawn from the "
+                               f"vocabulary, or `None` to clear it, so the "
+                               f"bundle is rejected at validation rather "
+                               f"than mid-write. WHAT TO DO: pass a string "
+                               f"(the door accepts `scheduled`/`draft`/"
+                               f"`live`), or drop `status`.",
+                })
+                continue
+            # ⛔ NAME THE DECLARATION THAT FAILED, not the LAST one. The test above
+            # is an `any`, and the writer applies EVERY key of the map, so an item
+            # can declare both names — one terminal, one not. Rendering
+            # `_status_values[-1]` then indicted the LEGAL value and advised the
+            # caller to pass it, with the offending terminal declaration absent
+            # from the message (measured, review: conflict-sweep lane F — an item
+            # declaring `superseded` and `live` produced "declares status 'live' …
+            # use a non-terminal value", naming only the value that was fine).
+            _terminal_hits = [
+                v for v in _status_values
+                if isinstance(v, str) and is_terminal_status(str.__str__(v))
+            ]
+            if not _terminal_hits:
+                continue
+            violations.append({
+                "section": "entities", "index": i,
+                "message": f"ingest: entities[{i}] declares status "
+                           f"{', '.join(repr(v) for v in _terminal_hits)} for an "
+                           f":Event — an :Event "
+                           f"carries no lifecycle, so its door refuses the "
+                           f"terminal half mid-write and the bundle is rejected "
+                           f"at validation. WHAT TO DO: drop `status` from the "
+                           f"item, or use a non-terminal value (the door "
+                           f"accepts `scheduled`/`draft`/`live`).",
             })
         local: dict[str, tuple[str, dict]] = {}
         for section in ("sources", "points", "entities"):
@@ -28486,7 +28783,7 @@ class TortoiseSDK:
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            _etype = str(item.get("type") or "").strip().lower()
+            _etype = _item_type_text(item)
             _name = item.get("name")
             if _etype not in _ENTITY_LAYER_LABEL \
                     or not isinstance(_name, str) or not _name:
@@ -28552,8 +28849,7 @@ class TortoiseSDK:
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            _elabel = _ENTITY_ITEM_LABELS.get(
-                str(item.get("type") or "").strip().lower())
+            _elabel = _ENTITY_ITEM_LABELS.get(_item_type_text(item))
             if _elabel not in ("Object", "Event"):
                 continue
             if _elabel == "Event":
@@ -28609,7 +28905,7 @@ class TortoiseSDK:
                     # Subject/Object/Event entity item — the same label set the
                     # write primitives accept. An entity item typed `document`
                     # is a `:Source`, so it stays out.
-                    etype = str(item.get("type") or "").strip().lower()
+                    etype = _item_type_text(item)
                     elabel = entity_labels.get(etype)
                     # #7925 review P1: an operator-SHAPED item is not an
                     # endpoint on either route — `is_operator` rides the
@@ -28833,8 +29129,7 @@ class TortoiseSDK:
                     esection, eitem = local[v]
                     if esection != "entities":
                         continue
-                    ep_label = entity_labels.get(
-                        str(eitem.get("type") or "").strip().lower())
+                    ep_label = entity_labels.get(_item_type_text(eitem))
                     ep_name = eitem.get("name")
                 else:
                     info = node_info.get(v) or {}
@@ -28956,8 +29251,7 @@ class TortoiseSDK:
                     # route) — the graph
                     # write refuses it on presence, so a name simulation would
                     # add nothing there.
-                    elabel = entity_labels.get(
-                        str(item.get("type") or "").strip().lower())
+                    elabel = entity_labels.get(_item_type_text(item))
                     name = item.get("name")
                     if elabel not in ("Subject", "Object", "Event"):
                         continue
@@ -30352,7 +30646,17 @@ class TortoiseSDK:
           ``SUBJECT_STATUS_VALUES`` before the name merge, so an invalid value
           (outside that set, non-string, or an explicit ``null``) on ANY entity
           item is a Phase-1 violation, while ``:Object``/``:Event`` statuses
-          are stored verbatim and stay accepted. Props are read at the depth
+          are stored verbatim and stay accepted. ⛔ The ``:Event`` half of that
+          is now split, and the split is the whole point of #11825: a
+          NON-TERMINAL ``status`` (``scheduled``/``draft``/``live``) is still
+          stored verbatim, but the TERMINAL half is refused bundle-wide here
+          for exactly the reason the ``:Subject`` vocabulary is — the door
+          (``create_event`` → ``create_entity(type='event')``) runs
+          ``live.refuse_terminal_event_state``, so leaving it to step 3 means the
+          point items commit and THEN the write raises (measured: a bundle with
+          one point and one ``status='superseded'`` event returned ``[]`` here
+          and raised a bare ``ValueError`` after ``Point 1`` was written — the
+          #2422/#7925 partial-mutation class, review cycle 3 P1). Props are read at the depth
           the ITEM'S write door flattens (``_item_prop_at_depth``): TWICE for a
           ``subject``/``object``/``event`` item (step 3 relays
           ``create_subject``/``create_object``/``create_event`` →
@@ -30755,7 +31059,7 @@ class TortoiseSDK:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
-            etype = (item.pop("type", None) or "").strip().lower()
+            etype = _type_text(item.pop("type", None))
             name = item.pop("name", None)
             # Entity props that wire edges may address earlier bundle items
             # by local ref (points + entities are registered by now).
@@ -47058,13 +47362,373 @@ class TortoiseSDK:
                     props, label=_carrier_label, surface="update_entity",
                     stored_status=_carrier_rows[0][0])
                 break
-        if "status" in props:
-            _pt_hits = proj.g.query(
-                "MATCH (n:Point {id:$id}) RETURN count(n)",
+        # ── #11825: an `:Event` target, BEFORE the first write ──
+        # ⛔ THIS BLOCK MUST PRECEDE the Point status arm below, which WRITES
+        # (`SET n += $s`) and only THEN drops the key from `props`. It used to sit
+        # after that arm, so on a node carrying BOTH `:Point` and `:Event` the
+        # Point arm consumed and cleared `status` before this guard ran — the
+        # guard then saw no declaration at all and the terminal status stood.
+        # Measured (review cycle 9, P1): `update_entity(<:Point:Event>,
+        # status="superseded")` was ACCEPTED, the node ended with
+        # `status='superseded'` on an `:Event`, and the record (label="Point")
+        # replays onto that node, so live and replay agree on the half-state.
+        # This is the atomicity rule the guards beside it already state: refuse
+        # BEFORE any write, never after one.
+        #
+        # The `outdated` half of the predicate is NOT re-tested here: the
+        # ``_sanitize_props`` call at the top of this method already refuses the
+        # flag on EVERY label, so it cannot be in ``props`` by now.
+        #
+        # ⛔ The presence TEST is the helper's, not `"status" in props`: a dict
+        # lookup hashes the literal name, so a ``str`` SUBCLASS key that overrides
+        # ``__hash__`` missed it and this guard was SKIPPED for the whole write
+        # (measured at review cycle 4, after the value axis was already closed).
+        # Imported here rather than at module scope because a new import line
+        # shifts every ``sdk.py`` line the capstone documentation cites.
+        # (`lifecycle_props_by_rendering`/`keys_rendering_as` are the ONE
+        # exception: this door calls the pair in three places — the lifecycle
+        # presence test, the status drop, and the `:Subject` vocabulary arm
+        # (the entailed-echo exemption reads the mapping the first call made) —
+        # so per-call imports would put three copies of one rule in a single
+        # function, the drift this module keeps paying for. Cost paid once.)
+        from .live import declares_event_state_key
+
+        # ⛔ The reachability probe matches the label by BOTH identity keys, not
+        # by the Event primary alone. `_label_reachable_by("Event", ...)` asks
+        # `{eventId:$id}` (Event's primary) and has no secondary, so a node that
+        # carries the `:Event` LABEL while its identity sits on `id` — the
+        # `:Point:Event` shape `#3311`'s `retype` and migrated graphs produce —
+        # was invisible: the guard skipped, the Point arm wrote, and the terminal
+        # status landed on an `:Event` (measured, review cycle 10 P1: labels
+        # `['Point','Event']` with `eventId` ABSENT accepted `status='superseded'`
+        # and journaled it; the same node WITH `eventId` was refused). The probe
+        # is the sibling `#2104` guard's own text (`e.eventId = $id OR e.id = $id`
+        # a few blocks above) — one form for one question, so the two cannot
+        # disagree about which nodes are Events.
+        if declares_event_state_key(props) and proj.g.query(
+                "MATCH (e:Event) WHERE e.eventId = $id OR e.id = $id "
+                "RETURN count(e)",
                 params={"id": id_val},
-            ).result_set[0][0]
-            if _pt_hits:
-                _status = props["status"]
+        ).result_set[0][0]:
+            refuse_terminal_event_state(props, door="update_entity")
+            # ⛔ No `props` surgery here on purpose: a NON-terminal status is a
+            # legal write on an `:Event` target (#2788's prop lane), and on a
+            # multi-label node the property is shared, so there is no "Point side"
+            # to keep it away from. The guard's whole job is the TERMINAL half,
+            # and it has it — measured: dropping the key here red 9 pins that
+            # legitimately land `draft`/`live` through this door.
+
+        # ── #9649: this door consults the lifecycle guard (#2498/#7819) ───────
+        # Measured on the pre-change tree (issue #9649, comment `6839154493`, at
+        # `origin/main` = `f33f5e2c32`): `supersede_point(old, new)` followed by
+        # `update_entity(old, status='live')` was ACCEPTED, leaving `status='live'`
+        # beside `outdated=true` and a CLOSED `validTo` — a dead claim resurrected
+        # by one call and incoherent on every read surface (`_terminal_excluded`
+        # stops excluding it, so belief takes it back); and
+        # `update_entity(terminal, validTo=…)` rewrote the window the supersession
+        # had closed. Every call site of `_assert_lifecycle_guard` sat ~24 000
+        # lines above this method, so neither arm consulted it.
+        #
+        # SCOPE — the one #7819 established for the sibling door, for the same
+        # recorded reason (#3305): a content/metadata revision of a terminal
+        # claim stays legal here (the revision is the newer same-id writer and the
+        # replay fold is built for it), while a LIFECYCLE write — `status`, or any
+        # `_TEMPORAL_RESTAMP_PROPS` member — is refused. A blanket terminal
+        # refusal would reverse #3305 through this door, which is why the guard is
+        # not asked to refuse `name`/`content`.
+        #
+        # PLACEMENT — ahead of the Point `status` arm below, which is this
+        # method's FIRST write and its `restatus` journal: a refusal after it would
+        # tell the caller the call failed while the status had already landed and
+        # been journaled (the atomicity rule #9287/#10192 state for the sibling
+        # gate). It runs after the CARRIER refusal above, and AHEAD of the `status`
+        # arm's VOCABULARY check — so a bad WORD on a dead claim names the dead state.
+        #
+        # ── Review F6-5: what actually protects the ABSENT contract here ──
+        # The loop below iterates the ids the ADDRESS READ returned, so an absent or
+        # non-Point id never reaches `_assert_lifecycle_guard` at all — the loop's
+        # EMPTINESS is what keeps `update_entity('no-such-id', status=…)` a `{}`
+        # (#10119), not the parameter. `missing_ok=True` is kept because the guard's
+        # contract for a resolved id must still never turn into `No point <id>` if a
+        # row is deleted between the two reads; it is not what the absent contract
+        # rests on. `allow_operator=True` IS load-bearing (#7819): this door writes
+        # operator points too, and the guard still refuses a TERMINAL operator
+        # (pinned by `test_operator_points_keep_their_documented_lifecycle`).
+        #
+        # The refusal is re-raised HERE rather than taken from the guard verbatim
+        # (#10183, AX rule 2): the guard's message names the dead state but not the
+        # FIELDS this call asked for, and its repair is generic across doors. One
+        # instrument still answers terminality; only the wording is local. The
+        # `except` cannot catch an absent/operator verdict — `missing_ok=True` and
+        # `allow_operator=True` leave terminality as the guard's only raise.
+        _lifecycle_rendered = lifecycle_props_by_rendering(
+            props, _GUARDED_LIFECYCLE_PROPS)
+        _lifecycle_fields = sorted(_lifecycle_rendered)
+        _lifecycle_ids: list = []
+        if _lifecycle_fields:
+            # ── #9649 review F1: resolve the ADDRESS before the verdict ─────────
+            # This door binds a Point by `id`, by `eventId` AND by `url` — the
+            # three keys the padded-kind probe above documents and the per-label
+            # loop below writes through. Asking the guard about `id_val` alone
+            # measured a hole at the review head: a `:Point:Event` addressed by its
+            # `eventId` ACCEPTED `validTo`, `validFrom`, `when` and
+            # `status='live'` on a SUPERSEDED claim (window rewritten, claim
+            # resurrected), and a `:Point:Source` addressed by `url` accepted
+            # `status='live'` — the exact miss the padded-kind probe's own comment
+            # names. No production writer mints those hybrid labels (every Point
+            # writer emits `:Point`), so the shape is fixture-reachable rather
+            # than customer-reachable — but the guard's claim is "the Point the
+            # write touches", so it resolves the address instead of trusting one
+            # key of it. Terminality still comes from ONE instrument: this read
+            # only turns the address into the id that instrument takes.
+            #
+            # ⛔ Review F1-b: the secondary arms are qualified by the CO-LABEL the
+            # write needs, not by the property alone. `eventId` is a documented,
+            # WRITABLE provenance property on a plain `:Point` (#1417), and the
+            # write reaches a Point by `eventId` only through the `:Event` arm —
+            # so matching `eventId` unconditionally refused an ordinary
+            # `update_entity(<eventId of an :Event>, status=…)` because some
+            # unrelated Point carried that value as provenance (measured), and the
+            # refusal named a Point the caller never addressed (AX rule 2).
+            # ⛔ Review F1-a: `sum(CASE WHEN n.id IS NULL …)` — NOT `len(ids)` —
+            # detects the id-less Point, because Cypher's `collect` DROPS nulls:
+            # an id-less `:Point:Source`/`:Point:Event` came back as `[]`, which
+            # read as "no Point addressed" and let `status='live'` through
+            # (measured: a superseded id-less Point resurrected).
+            # ⛔ Review F3-2: PRIMARY FIRST, secondary only on a miss — the order
+            # the write itself resolves in (`_entity_identity_probes()`; a
+            # `:Source` arm tries `id` and falls back to `url`). Matching `url`
+            # unconditionally refused a healthy `update_entity(<:Source id>, …)`
+            # because an unrelated `:Point:Source` carried that value as its url
+            # (measured: the row the caller named was never written and the
+            # refusal blamed a Point it never addressed — AX rule 2).
+            # ⛔ Review F7-1/F8-1: INDEX-BACKED and ONE ROUND TRIP. A single
+            # `WHERE n.id = $id OR (n:Event AND n.eventId = $id) …` defeats the
+            # `Point(id)` range index (measured: 23.7 ms vs 0.6 ms at 60k Points),
+            # and paying that for every label's lifecycle write was the half a
+            # per-arm chain fixed while making `:Object`/`:Subject`/`:Event` writes
+            # pay 3-4 round trips instead of one. `UNION` keeps every arm on its
+            # own index and collapses them to one statement:
+            #   rank 1 = Point by `id`            (index `Point(id)`)
+            #   rank 2 = Event by `eventId`       (index `Event(eventId)`), Point only
+            #   rank 3 = Source by `id`           (index `Source(id)`) — existence only
+            #   rank 4 = Point:Source by `url`    (index `Source(url)`), read only when
+            #                                      rank 3 missed, because that is the
+            #                                      order the `:Source` write arm uses
+            # The ids from every arm that matched are UNIONED (a write can bind more
+            # than one label arm), and the rank-3 row contributes no id — it is a
+            # precedence probe, not a target.
+            _addr = {r[0]: r for r in proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN 1 AS rank, count(n) AS hits, "
+                "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
+                "collect(DISTINCT n.id) AS ids "
+                "UNION "
+                "MATCH (n:Event {eventId:$id}) WHERE n:Point RETURN 2 AS rank, "
+                "count(n) AS hits, "
+                "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
+                "collect(DISTINCT n.id) AS ids "
+                "UNION "
+                "MATCH (n:Source {id:$id}) RETURN 3 AS rank, count(n) AS hits, "
+                "0 AS idless, [] AS ids "
+                "UNION "
+                "MATCH (n:Point:Source) WHERE n.url = $id RETURN 4 AS rank, "
+                "count(n) AS hits, "
+                "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
+                "collect(DISTINCT n.id) AS ids",
+                params={"id": id_val}).result_set}
+            _hits = 0
+            _idless = 0
+            _addressed_ids: list = []
+            for _rank in (1, 2, 4):
+                if _rank == 4 and (_addr.get(3) and _addr[3][1]):
+                    continue          # `:Source` resolves `id` before `url`
+                _row = _addr.get(_rank)
+                if not _row or not _row[1]:
+                    continue
+                _hits += _row[1]
+                _idless += _row[2]
+                _addressed_ids.extend(_row[3] or ())
+            # `is not None`, not truthiness: `collect` already drops NULLs, so the
+            # only thing `if i` could filter is a FALSY non-null id (`id: 0`) — and
+            # `_lifecycle_ids` is the single gate for the guard, the vocabulary
+            # check, the transition check, the `status`-drop and the journal, so
+            # dropping such a row there fails OPEN (measured: a superseded
+            # `id: 0` Point was resurrected by `status='live'`).
+            # Two address arms can resolve the SAME id (a `:Point:Event` whose
+            # `id` and `eventId` are both the value the caller passed), and this
+            # list drives the guard loop, the write and the `restatus` journal —
+            # so it is de-duplicated ONCE, in the order the arms produced it, or
+            # one intent would append two records (`delete_point`'s own comment
+            # names that class: a second destruction record for one intent).
+            _lifecycle_ids = list(dict.fromkeys(
+                i for i in (_addressed_ids or ()) if i is not None))
+            if _hits and _idless:
+                # An id-less Point (url/eventId only) cannot be handed to the
+                # id-keyed instrument, so terminality cannot be checked. Fail
+                # CLOSED: a resurrection is the harm #9649 exists to stop, and no
+                # production writer mints such a node — `create_point` always
+                # stamps an `id`. (`sum` rather than `count(n)`: a duplicate-id
+                # fan-out must not read as id-less just because it has rows.)
+                raise ValueError(
+                    f"update_entity refused {_lifecycle_fields}: the Point bound "
+                    f"by {id_val!r} carries no `id`, so its lifecycle state "
+                    f"cannot be checked. ⛔ No SDK door can fix that for you: "
+                    f"`id` is refused as a caller prop (`_sanitize_props`,"
+                    f" `reject_id=True`), and every lifecycle verb resolves by "
+                    f"`id`, so an id-less node is unreachable to "
+                    f"`update_point`/`retract_point`/`supersede_point` until it "
+                    f"has one. Stamp the canonical `id` on the node directly and "
+                    f"re-send this call, or re-create the Point with "
+                    f"`create_point(...)`, which always stamps one."
+                )
+            # ⛔ Review F5-1: BOTH the exemption and the status arm read the row set
+            # the WRITE binds (`n.id IN $ids`), never the row set the ADDRESS
+            # matched. The secondary arms are the narrower pair: `:Event` matches
+            # `n:Event AND n.eventId = $id` and `:Source` matches `:Point:Source`,
+            # while the write binds every node carrying the resolved id — so an
+            # addressed `{live}` beside an unaddressed terminal sibling (the
+            # public duplicate-id fan-out) satisfied "every ADDRESSED row holds it"
+            # and the write resurrected the sibling. Measured on the deprecated
+            # twin of a `:Point:Event` addressed by its eventId.
+            _pt_statuses: tuple = ()
+            _bound_null_statuses = 0
+            if _lifecycle_ids:
+                _bound = proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "RETURN collect(DISTINCT n.status) AS statuses, "
+                    "sum(CASE WHEN n.status IS NULL THEN 1 ELSE 0 END) "
+                    "AS null_statuses",
+                    params={"ids": _lifecycle_ids},
+                ).result_set[0]
+                _pt_statuses = tuple(_bound[0] or ())
+                _bound_null_statuses = _bound[1]
+            # ⛔ Review F4-2: an ENTAILED status is not a lifecycle write. A
+            # generic tenant PUT is a read-modify-write — it fetches the row and
+            # sends it back with the fields it changed — so refusing
+            # `update_entity(terminal, status=<the status it already has>,
+            # content=…)` contradicted this refusal's OWN last sentence ("content
+            # and metadata revisions are still accepted on it") and turned a
+            # declared-preserved capability (#3305) into a hard error. An
+            # unchanged status cannot resurrect anything. The exemption is narrow:
+            # status is the ONLY lifecycle field supplied, EVERY bound row holds
+            # exactly that status, and none holds NULL (a NULL-status row is not
+            # "equal", it is the legacy shape the backfill route exists for).
+            # (The `"status" in _lifecycle_rendered` conjunct is REDUNDANT in
+            # situ — with no `status` the block is only reached via a temporal
+            # member, which the next clause refuses — and it is kept as
+            # defence-in-depth: it is what makes `_lifecycle_rendered["status"]`
+            # below safe to read without a guard, and, because the mapping is
+            # RENDERING-aware, it is also what tells an echo through an exotic
+            # key apart from a write that never named the field at all. A
+            # mutation that deletes it is an EQUIVALENT mutant, not a hole.)
+            _status_entailed = (
+                "status" in _lifecycle_rendered
+                and not (_TEMPORAL_RESTAMP_PROPS & set(_lifecycle_rendered))
+                and not _bound_null_statuses
+                and _pt_statuses == (_lifecycle_rendered["status"],))
+            for _lifecycle_id in (() if _status_entailed else _lifecycle_ids):
+                try:
+                    # ⛔ `refuse_event_terminalization=False` (#11825 merge): this
+                    # door writes a WINDOW or a non-terminal prop as often as it
+                    # writes a terminal status, so the guard's label-only `:Event`
+                    # arm is the wrong question here — it refused `draft -> live`
+                    # on a hybrid (the prop lane #2788 pins). The Event half is
+                    # answered ABOVE, by the props-aware
+                    # `refuse_terminal_event_state`, which refuses exactly the
+                    # TERMINAL values and lets a non-terminal one ride that lane.
+                    self._assert_lifecycle_guard(
+                        _lifecycle_id, method="update_entity", missing_ok=True,
+                        allow_operator=True,
+                        refuse_event_terminalization=False)
+                except ValueError as _terminal_refusal:
+                    # ⛔ Review round 12c (AX rule 2, #10183): the repair must be
+                    # PERFORMABLE, and `supersede_point(dead_id, …)` is not. This
+                    # arm fires only when the guard reported a TERMINAL marker, so
+                    # the claim it tells the caller to supersede is by construction
+                    # dead — and `supersede_point` runs the same guard on its
+                    # SOURCE and refuses it (#2498: terminalization is one-way).
+                    # Measured: `supersede_point(<superseded>, <fresh>)`,
+                    # `retract_point` and `invalidate_point` all raise
+                    # `already terminal`; `update_point` raises the same when the
+                    # call carries a TEMPORAL prop (`update_point(dead,
+                    # validTo=…)`) and `Illegal status transition` on its status
+                    # arm. The route that EXISTS is minting the corrected claim: a
+                    # new Point stands as current on its own, with no supersession
+                    # needed (and none possible) on the dead one.
+                    #
+                    # ⛔ Review round 12d: the denial is scoped to a RECORDED
+                    # terminal STATUS, not said absolutely. "No SDK door re-livens
+                    # a dead claim" was measured FALSE on the flag-dead shape the
+                    # same arm fires for (`status` NULL + legacy `outdated=true`):
+                    # `update_point(p, status='live')` stores `status='live'` on it,
+                    # because the promote arm's `WHERE n.status IS NULL OR … 'draft'`
+                    # does not read the flag — the residual recorded at this file's
+                    # own comment above `_promote_incident_operators`. The belief
+                    # layer still treats the node as dead (the flag), so nothing is
+                    # resurrected; the absolute sentence was just untrue.
+                    raise ValueError(
+                        f"update_entity refused {_lifecycle_fields} on a dead "
+                        f"claim: {_terminal_refusal}. A Point whose recorded "
+                        f"status is terminal has a one-way status and validity "
+                        f"window (#2498): no SDK door re-livens such a claim or "
+                        f"re-stamps its window — not this door, and not "
+                        f"`supersede_point`, which refuses a "
+                        f"terminal SOURCE for the same reason. (A point kept dead "
+                        f"by the legacy `outdated` flag ALONE is dead to the "
+                        f"belief layer all the same, and every retrieval "
+                        f"leg excludes it from current results unless an "
+                        f"audit caller opts in — its status column is not "
+                        f"what holds it there: `recall_subgraph` reports "
+                        f"`status: 'live'` and no `outdated` key for such "
+                        f"a node, so the FLAG is what keeps it dead.) Mint the corrected "
+                        f"claim with `create_point(...)`; it stands as current on "
+                        f"its own, and the dead one keeps its recorded window. Do "
+                        f"not re-status a dead one. Content and metadata "
+                        f"revisions are still accepted on it: a read-modify-write "
+                        f"that echoed the window back with the fields it changed "
+                        f"should re-send the call WITHOUT the temporal fields "
+                        f"(`validFrom`, `validTo`, their precision markers, "
+                        f"`expiredAt`, `when`), and the revision lands."
+                    ) from None
+        # ⛔ A REFUSAL MUST NOT COST A WRITE (#12222, review cycle 10 P1). The
+        # rename-ambiguity guard lives BELOW, inside its lock and ahead of the
+        # label write loop — but the Point STATUS arm below writes
+        # `SET n += $s` and journals before that guard can run. Measured on a
+        # `:Point:Object` in `draft` with a live `:Object` already holding the
+        # target name: `update_entity(<id>, status="live", name="taken-name")`
+        # raised `NameAlreadyHeld` and STILL left `status='live'` with a
+        # journaled `restatus` — a refusal that cost a write, the atomicity
+        # rule #9287/#10192 state. So the predicate is asked HERE first, before
+        # anything is written. It is a pure read; the locked call below keeps
+        # being the authoritative one under `entity_create_lock` (the #9876
+        # check-then-act), so this pre-check can only refuse EARLIER, never
+        # differently — both calls ask the same read-only question of the same
+        # graph, and the second is the one inside the critical section.
+        if isinstance(props.get("name"), str) and props["name"].strip():
+            self._refuse_ambiguous_rename(id_val, props["name"])
+
+        if "status" in _lifecycle_rendered:
+            # ⛔ Review F3-1: this arm is keyed on the ADDRESS the guard resolved,
+            # not on `{id: $id}`. With `eventId`/`url` addressing, a `{id:$id}`
+            # read found no Point, so BOTH the vocabulary check and the declared
+            # transition were skipped AND `status` was never dropped from
+            # `props` — the sibling arm then wrote it and journalled `restatus`
+            # against `:Event`/`:Source`, a record no fold can apply (#9649's
+            # fail-open class, and a live write that makes `rebuild_all` refuse).
+            # Measured: `status='archived'` landed on a `:Point:Event` addressed
+            # by its eventId, journalled as `label='Event'`.
+            # ⛔ Review F4-1: gate on the ADDRESS, never on the collected statuses.
+            # `collect` drops NULLs, so a Point whose stored status is NULL yields
+            # `()` — indistinguishable from "no Point addressed" — and gating on it
+            # skipped the vocabulary check, the transition check AND the
+            # `status`-drop: `status='garbage'` was STORED (the #3311 defect this
+            # door exists to close), a lifecycle write landed unjournalled (so
+            # `rebuild_all` reverted it), and on a multi-label node the key rode
+            # into the sibling arm and journalled `restatus` against the wrong
+            # label (which makes `rebuild_all` raise). Measured. `_lifecycle_ids`
+            # is non-empty exactly when a Point is bound.
+            _status = _lifecycle_rendered["status"]
+            if _lifecycle_ids:
                 if (not isinstance(_status, str)
                         or _status not in POINT_STATUS_VALUES):
                     # Same refusal `update_point` issues (#3311 defect 1). The
@@ -47073,6 +47737,117 @@ class TortoiseSDK:
                     raise ValueError(
                         f"Invalid status {_status!r}. "
                         f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
+                    )
+                # ── #9649: the DECLARED transition, from `_ALLOWED_TRANSITIONS` ──
+                # The vocabulary check above asks whether `_status` is a Point
+                # status word; it never asked whether the ROW may become it. That
+                # map is ONTOLOGY §5's Point-lifecycle table and
+                # `tests/test_claim_lifecycle.py` cross-checks it against the doc —
+                # and before this call it had no production reader at all, which is
+                # why the architecture doc could cite it and still call it inert.
+                # It is consulted for the TRANSITION question it declares, and only
+                # for a stored status it knows: a NULL/legacy status (a `None` key
+                # is not in the map) defers, so a legacy point that never got a
+                # status can still be given one (the CLI backfill's own route to
+                # `live`), and an identical status is not a transition at all.
+                # ⚠️ The #2498 residual ONTOLOGY §5 records — a flag-dead point
+                # (`outdated=true` with a NULL status) given `status='live'` — is
+                # NOT carried over to this door: the guard above runs first and it
+                # reads the legacy flag, so that shape is REFUSED here (pinned by
+                # `test_the_legacy_outdated_flag_alone_makes_the_point_dead`). The
+                # residual stays where §5 puts it, on `update_point`'s promote arm.
+                # The TERMINAL half is already answered above by the shared guard,
+                # which also covers what the map cannot (`deprecated`, the legacy
+                # `outdated=true` flag, an operator fan-out) — that is why this
+                # check never re-derives terminality from an empty target set.
+                #
+                # ⛔ #9649 review F2: ONE row is not the fan-out. The instrument
+                # answers TERMINALITY over every node carrying the id (#7822), and
+                # the write below binds every one of them (`SET n += $s`), so the
+                # transition question is asked per stored status. Reading a single
+                # representative let a `{draft, live}` fan-out — mintable through
+                # the public `create_point(..., id=X)` door, the shape `live.py`
+                # calls "tested, graph-reachable" — accept `-> 'draft'` and DEMOTE
+                # the live row (the representative is the sorted-first, i.e.
+                # `draft`), which is an undeclared `live -> draft` this check
+                # exists to refuse. A status with NO entry in the map (`deprecated`,
+                # a legacy spelling) still DEFERS rather than being guessed at;
+                # terminal rows never reach here — the guard above has refused them.
+                #
+                # ⚠️ RESIDUAL, REPORTED NOT FIXED HERE (#12403). A DECLARED target
+                # is a transition this door PERMITS, and the two targets `live`
+                # declares are `retracted` and `superseded` — the two a VERB owns.
+                # Writing them here sets `status` and journals `restatus` and
+                # nothing else: no `PointRetracted`/`PointSuperseded` in the
+                # `:GraphEvent` store (so a change-feed subscriber never sees the
+                # claim die — `EntityMutated` is JSONL-only, #548), no `CORRECTS`
+                # successor for `superseded` (ONTOLOGY §5 defines that state AS
+                # the replacement), and no window close or `updatedAt` stamp.
+                # Measured at this head: `update_entity(live, status='superseded')`
+                # leaves `['superseded', validTo=None]`, zero edges, and the claim
+                # out of `query()`. That is a PRE-EXISTING shape — this door always
+                # accepted the word — but this change is what makes the map its
+                # PERMISSION table, so it is recorded here rather than left for the
+                # next reader to discover. #12403 carries the three candidate fixes
+                # (refuse the terminalizing targets and name the verb; emit the
+                # claim-transition record; or keep and disclose). Do NOT read the
+                # refusal below as "the verbs are optional": it fires only for
+                # UNdeclared targets.
+                for _stored in _pt_statuses or ():
+                    if not isinstance(_stored, str) or _stored == _status:
+                        continue
+                    _declared = _ALLOWED_TRANSITIONS.get(_stored)
+                    if _declared is None or _status in _declared:
+                        continue
+                    _declared_text = ", ".join(
+                        sorted(_declared)) or "nothing — it is terminal"
+                    # AX rule 2's third part (#10183): a route the caller can
+                    # actually take. The DECLARED targets are named, the two
+                    # verbs that reach them are named where they exist, and the
+                    # mint-and-supersede route covers the case the status itself
+                    # was wrong. `archived` gets its own sentence because it is
+                    # *"reserved — no v1 write path"* on a Point (ONTOLOGY §5),
+                    # so naming it in a transition list would advertise a write
+                    # the model does not offer. For a declared target the verbs
+                    # are named too (`retract_point` / `supersede_point`) even
+                    # though this door would accept the status: they are the
+                    # routes that also journal the transition and, for
+                    # `superseded`, mint the successor (#12403).
+                    _reserved = (
+                        " `archived` is reserved on Points (ONTOLOGY §5: no v1 "
+                        "write path) — `retract_point(...)` is the SDK route to "
+                        "retirement."
+                        if _status == "archived" else "")
+                    # AX rule 2's third part, and it must be PERFORMABLE: the
+                    # prescription names the RESOLVED id, not the address the
+                    # caller typed. A `:Point:Event` addressed by its `eventId`
+                    # reaches this arm with `id_val='EVT'` while the Point's own
+                    # id is something else, and `supersede_point` resolves by
+                    # `id` only — so `supersede_point('EVT', …)` would raise
+                    # `No point 'EVT'`, an unexecutable repair in the message
+                    # this door exists to get right (#9649 review round 12).
+                    # `_lifecycle_ids` is the resolved list and is non-empty
+                    # here (this arm is inside `if _lifecycle_ids:`), so the
+                    # named id is real; the typed address is kept as a separate
+                    # clause so the caller can still recognise its own call.
+                    _named_id = _lifecycle_ids[0]
+                    _addressed_as = (
+                        "" if _named_id == id_val
+                        else f" (addressed as {id_val!r})")
+                    raise ValueError(
+                        f"update_entity refused the status transition "
+                        f"{_stored!r} -> {_status!r} on Point "
+                        f"{_named_id!r}{_addressed_as}: "
+                        f"this door's declared Point transitions from "
+                        f"{_stored!r} are {{{_declared_text}}} "
+                        f"(`_ALLOWED_TRANSITIONS` — ONTOLOGY §5's table, plus "
+                        f"#432's decision that a draft may terminalize before it "
+                        f"is ever live), so {_status!r} is not a declared "
+                        f"transition through this door.{_reserved} Use a "
+                        f"declared transition, or — "
+                        f"if the claim itself changed — mint a new Point and "
+                        f"supersede this one with "
+                        f"`supersede_point({_named_id!r}, <new_id>)`."
                     )
                 # Write FIRST, journal SECOND, gated on the write having
                 # MATCHED (a missed/no-op write must never leave a phantom
@@ -47084,14 +47859,29 @@ class TortoiseSDK:
                 # arm, cannot journal a second `restatus` against a label this
                 # node cannot replay as.
                 _wrote = proj.g.query(
-                    "MATCH (n:Point {id:$id}) SET n += $s RETURN count(n)",
-                    params={"id": id_val, "s": {"status": _status}},
+                    "MATCH (n:Point) WHERE n.id IN $ids SET n += $s "
+                    "RETURN count(n)",
+                    params={"ids": _lifecycle_ids, "s": {"status": _status}},
                 ).result_set
                 if _wrote and _wrote[0][0]:
-                    self._journal_entity_mutation(
-                        "Point", id_val, "restatus",
-                        state={"status": _status})
-                props = {k: v for k, v in props.items() if k != "status"}
+                    # Journaled against the POINT id the node replays as, once
+                    # per resolved id (#3311's label rule) — never against the
+                    # address the caller typed.
+                    for _lifecycle_id in _lifecycle_ids:
+                        self._journal_entity_mutation(
+                            "Point", _lifecycle_id, "restatus",
+                            state={"status": _status})
+                # ⛔ #9649 review 13: drop EVERY key that renders as `status`,
+                # not the literal name. `k != "status"` hashes the name, so a
+                # `str` SUBCLASS key survived the drop and the generic label-loop
+                # write below re-wrote the field — and because the guard's
+                # presence test missed the same key class, the value it re-wrote
+                # was one the guard never saw (measured: `KHash("status")`
+                # resurrected a superseded claim, window closed, zero journal
+                # delta).
+                _status_key_ids = {id(k) for k in keys_rendering_as(props, {"status"})}
+                props = {k: v for k, v in props.items()
+                         if id(k) not in _status_key_ids}
 
         # #1423 (review P1): the `status` guard above is POINT-gated (its
         # predicate is `MATCH (n:Point {id:$id})`), so a `:Subject` `status`
@@ -47108,13 +47898,14 @@ class TortoiseSDK:
         # with a status: the Point arm above already validated it against the
         # Point vocabulary and dropped the key from `props` (the Point-
         # precedence rule #3311 established).
-        if "status" in props:
+        _subject_status_rendered = lifecycle_props_by_rendering(props, {"status"})
+        if _subject_status_rendered:
             _subj_hits = proj.g.query(
                 "MATCH (n:Subject {id:$id}) RETURN count(n)",
                 params={"id": id_val},
             ).result_set[0][0]
             if _subj_hits:
-                _status = props["status"]
+                _status = _subject_status_rendered["status"]
                 if (not isinstance(_status, str)
                         or _status not in _SUBJECT_STATUS_VALUES):
                     raise ValueError(
@@ -47594,7 +48385,7 @@ class TortoiseSDK:
             raise ValueError(
                 "'_server_id' is a server-managed field and cannot be set "
                 "via props.")
-        t = (type or "").strip().lower()
+        t = _type_text(type)
         # ── #12060: the KIND GUARD — redirect a mis-filed write, never refuse ──
         # Runs BEFORE the kind<->layer routing below, because a guard decides
         # WHICH KIND (and therefore which layer) the write belongs at, while
@@ -47811,6 +48602,16 @@ class TortoiseSDK:
             if not eventKind:
                 raise ValueError(
                     "create_entity(type='event') requires eventKind")
+            # #11825: the CREATE door is the other half of the same hole. A
+            # terminal status supplied HERE lands on the new node directly (the
+            # fold's extras lane is an open prop passer-by design, #2788), and
+            # `create_event` relays through this branch, so guarding only the
+            # update door would leave the half-state one call away — measured at
+            # #11825's head: `create_entity('event', …, status='superseded')`
+            # stored it. Refused BEFORE any write or journal emission, so a
+            # refused create leaves nothing behind (the Point/Subject doors'
+            # shape, #9287/#1423).
+            refuse_terminal_event_state(props, door="create_entity(type='event')")
             # Legacy create_event about* wiring — preserved verbatim (#888 W2).
             # W5 Phase F (#2104, TOCTOU): an explicit deterministic id
             # (server-ONLY channel via the ``_server_id`` keyword — the

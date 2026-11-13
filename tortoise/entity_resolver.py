@@ -725,6 +725,99 @@ def _identity_row(graph, node_id: str, var: str, projection: str):
     return None
 
 
+def _entity_label(graph, node_id: str) -> str | None:
+    """Which identity label carries ``node_id`` — the fixed two-label probe.
+
+    Needed because ``follow_resolved_from`` is LABEL-scoped and a merge caller
+    supplies only an id. The order is ``("Object", "Subject")``, the same one
+    ``_identity_row`` uses, so the two cannot disagree about which node a
+    projection read.
+    """
+    for label in ("Object", "Subject"):
+        rows = graph.query(
+            f"MATCH (n:{label} {{id:$id}}) RETURN n.id",
+            params={"id": node_id}).result_set
+        if rows:
+            return label
+    return None
+
+
+def _survivor_fixpoint(graph, survivor_id: str) -> tuple[str, bool]:
+    """``(id, hopped)`` — the entity ``survivor_id`` finally names (#12296, M-4).
+
+    ``apply_entity_merge`` must write the redirect onto an entity that is not
+    itself retired. Writing ``candidate -> survivor`` where the survivor already
+    carries ``resolved_from`` creates a CHAIN — ``candidate -> survivor ->
+    fixpoint`` — which ``follow_resolved_from`` then collapses silently
+    (``entity_resolver.py:556-577``), so a second hop the reviewer never saw is
+    applied by every identity read from then on. `#12186` round 2 measured the
+    consequence: nothing in this tree bounds or reports chain length.
+
+    Hopping the survivor first makes the invariant hold BY CONSTRUCTION — after
+    this, no merge can create a chain of length >= 2 — which is also what makes
+    ``entity_verdict.group_join``'s ``dependents >= 1`` a reliable reading of
+    "this target is a group".
+
+    ⛔ **Hopping the SURVIVOR is only one of the two legs — and the other was
+    missing (measured: `N0 -> N1`, then `N1 -> N2` left `N0 -> N1 -> N2`, length
+    3 after one more).** A group survivor is a perfectly eligible CANDIDATE
+    (`scan_entities` keeps live nodes; its only filter is `resolved_from IS
+    NULL`), so the chain is created by retiring the *candidate*:
+
+    * a candidate that is ALREADY retired is refused — its entity is the fixpoint,
+      and merging it would write a second hop the reviewer never saw;
+    * the candidate's DEPENDENTS are re-pointed at the final survivor in the same
+      merge (path-shortening), so every edge stays one hop deep;
+    * the candidate's ``aliases[]`` are unioned into the survivor's, so a spelling
+      the group folded earlier is not stranded on a retired node — which is what
+      keeps ``entity_verdict``'s alias escape working after a group merge.
+
+    ``hopped`` is returned rather than only applied: it is the evidence that a
+    chain existed (`#12186` M-10's *reporting* half), and a caller that expected a
+    live survivor learns it was redirected rather than discovering it from a
+    later read. It is a BOOLEAN, not a hop count, on purpose:
+    ``follow_resolved_from`` already walks to a fixpoint, so counting here would
+    report the length of a chain this function deliberately does not walk. A
+    lookup that cannot resolve the label returns ``(survivor_id, False)`` — the
+    caller's own ``_identity_row`` read then raises ``No entity``, which is the
+    honest answer for an id that is not an entity.
+    """
+    label = _entity_label(graph, survivor_id)
+    if label is None:
+        return str(survivor_id), False
+    fixed = follow_resolved_from(graph, label, survivor_id)
+    # ⛔ `follow_resolved_from` STOPS on a cycle and returns `current` (its own
+    # cycle guard) — so on a cyclic `resolved_from` record the "fixpoint" it hands
+    # back is still retired, and writing `candidate -> fixed` would create the
+    # 2-hop chain this function exists to make impossible. Cannot-answer is the
+    # honest response, and `EntityScanUnavailable` is this module's contract for
+    # it. Reachable only from an out-of-band/legacy cycle: this verb cannot create
+    # one.
+    row = graph.query(
+        f"MATCH (n:{label} {{id:$id}}) RETURN n.resolved_from",
+        params={"id": str(fixed)}).result_set
+    if row and row[0] and row[0][0]:
+        raise EntityScanUnavailable(
+            f"the fixpoint for {survivor_id!r} is itself retired ({fixed!r}) — a "
+            "cyclic resolved_from record; refusing to write a 2-hop chain")
+    return str(fixed), str(fixed) != str(survivor_id)
+
+
+def _dependents_of(graph, node_id: str) -> list[str]:
+    """Ids whose ``resolved_from`` names ``node_id`` — the group it stands for.
+
+    Label-scoped on the two identity labels (this module's own rule: an unlabelled
+    ``MATCH (n) WHERE n.resolved_from = $id`` full-scans every label in the graph).
+    """
+    out: list[str] = []
+    for label in ("Object", "Subject"):
+        rows = graph.query(
+            f"MATCH (d:{label}) WHERE d.resolved_from = $id RETURN d.id",
+            params={"id": node_id}).result_set
+        out.extend(str(r[0]) for r in rows if r and r[0] is not None)
+    return out
+
+
 def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
                        method: str, similarity: float) -> dict:
     """Fold ``candidate_id`` onto ``survivor_id`` WITHOUT deleting either node.
@@ -758,6 +851,22 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     if candidate_id == survivor_id:
         raise ValueError("a merge needs two distinct entities")
     graph = sdk._get_proj().g
+    # #12296 (M-4's positive half): a merge must not CREATE a chain. Detected by
+    # hopping the survivor to its fixpoint BEFORE any write, so the redirect this
+    # function records always points at an entity that is not itself retired.
+    survivor_id, survivor_hops = _survivor_fixpoint(graph, survivor_id)
+    if str(candidate_id) == str(survivor_id):
+        raise ValueError(
+            "a merge needs two distinct entities — the requested survivor was "
+            f"itself retired and resolves onto the candidate {survivor_id!r}")
+    # The CANDIDATE side of the same invariant (see the docstring): merging a node
+    # that is already retired would write `fixpoint -> survivor` on top of the
+    # existing hop. The fixpoint is the entity; the caller's id is stale.
+    candidate_fixpoint, candidate_hops = _survivor_fixpoint(graph, candidate_id)
+    if candidate_hops or str(candidate_fixpoint) != str(candidate_id):
+        raise ValueError(
+            f"a merge needs a LIVE candidate — {candidate_id!r} was already "
+            f"retired and resolves onto {candidate_fixpoint!r}")
     # LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id` (this module's own
     # rule — an unlabelled id probe full-scans every label in the graph, and
     # `id` is a natural key on exactly two of them).
@@ -776,12 +885,23 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     elif not isinstance(aliases, (list, tuple)):
         aliases = []
     candidate = _identity_row(
-        graph, candidate_id, "c", "RETURN c.name, c.canonical_name")
+        graph, candidate_id, "c", "RETURN c.name, c.canonical_name, c.aliases")
     if candidate is None:
         raise ValueError(f"No entity {candidate_id!r}")
-    candidate_name, candidate_canonical = candidate
+    candidate_name, candidate_canonical, candidate_aliases = candidate
     folded = normalize_entity_name(candidate_canonical or candidate_name)
-    alias_list = sorted({a for a in (aliases or []) if isinstance(a, str)} | {folded})
+    # The candidate's own aliases travel with it: a group that already folded
+    # `the team` into THIS node keeps that spelling after the node itself is
+    # folded, so `entity_verdict`'s alias escape (and the by-name resolver's
+    # `$k IN n.aliases`) still answers for it.
+    if isinstance(candidate_aliases, str):
+        candidate_aliases = [candidate_aliases]
+    elif not isinstance(candidate_aliases, (list, tuple, set)):
+        candidate_aliases = []
+    alias_list = sorted(
+        {a for a in (aliases or []) if isinstance(a, str)}
+        | {a for a in candidate_aliases if isinstance(a, str)}
+        | {folded})
     # The survivor's folded key is only FILLED, never rewritten: a caller may
     # have supplied its own `canonical_name` (`_with_folded_entity_name`
     # setdefaults), and a merge has no business overwriting what the caller
@@ -804,10 +924,34 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     }
     if not candidate_canonical:
         _candidate_props["canonical_name"] = folded
+    # ⛔ Path-shortening runs BEFORE the candidate is retired, and the order is
+    # load-bearing: `update_entity` is a heavy call (per-node sanitize + money/
+    # value probes + its own reads), so a transient failure mid-loop is realistic.
+    # Re-pointing FIRST leaves an intermediate that is harmless and idempotent on
+    # a retry (dependents pointing at a live survivor); the reverse order leaves
+    # the candidate already retired while its dependents still point at it — the
+    # 2-hop chain this function exists to make impossible — and reports a landed
+    # merge as failed. The wording is exact about what is guaranteed: no chain
+    # THIS verb creates exceeds one hop (a pre-existing legacy chain is left to
+    # the fold's bounded walk, which grades cannot-answer).
+    dependents = _dependents_of(graph, candidate_id)
+    for dependent_id in dependents:
+        sdk.update_entity(dependent_id, resolved_from=survivor_id)
     sdk.update_entity(candidate_id, **_candidate_props)
-    return {"survivor_id": survivor_id, "candidate_id": candidate_id,
-            "aliases": alias_list, "method": method,
-            "similarity": round(float(similarity), 4)}
+    out = {"survivor_id": survivor_id, "candidate_id": candidate_id,
+           "aliases": alias_list, "method": method,
+           "similarity": round(float(similarity), 4)}
+    if survivor_hops:
+        # Evidence, not a warning: the merge LANDED, on the entity the graph says
+        # survives. A caller comparing this id with the one it passed can see the
+        # redirect; nothing here is silent.
+        out["survivor_hopped"] = True
+    if dependents:
+        # The group the candidate stood for moved with it. Reported for the same
+        # reason: a reviewer who merged `N1` into `N2` should be able to see that
+        # its earlier members now point at `N2`.
+        out["dependents_repointed"] = len(dependents)
+    return out
 
 
 def entity_pair_for(graph, candidate_id: str, *,

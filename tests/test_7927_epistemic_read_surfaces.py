@@ -796,34 +796,47 @@ def test_audit_records_its_split_scope_in_reachable_code():
     assert "false positive" in src and "false CLEAN" in src
 
 
-def test_why_layer_records_its_residual_where_it_will_be_edited():
-    """The why layer is STILL ``:Point``-only, deliberately — and the note has
-    to live where the next widening will actually be attempted, or it reads as
-    an accident of history and gets "harmonized" one query at a time.
+def test_why_layer_records_its_widening_and_its_remaining_residual():
+    """The why layer's ``:Point``-only scope was CLOSED by #11928 — so the pin
+    flips from "the residual is deliberate" to "the widening is deliberate, and
+    here is what it does NOT cover".
 
-    ``audit.py`` got exactly this treatment (a decision block inside
-    ``audit_graph``'s body plus the pin above); the divergence-side surface is
-    the one MORE likely to be half-widened, because ``ranking`` was widened and
-    ``why`` was not. The pin names the two facts a partial fix would miss: that
-    the scope is deliberate, and that ``_EP_CYPHER`` is the EXISTENCE ANCHOR, so
-    widening a dependent read alone is a no-op.
+    The #7927 note existed because a partial widening is invisible: ``_EP_CYPHER``
+    is the EXISTENCE ANCHOR, so widening a dependent read alone changes no
+    output. #11928 moved the anchor WITH the reads (the anchor's own legs
+    return the label RESOLUTION, which is what the dependent reads narrow on),
+    and this pin states the two facts a partial REGRESSION would miss: the
+    anchor is swept per present label, and the supersession read is still
+    ``:Point``-only because its gate is #11824's, not the why layer's.
     """
     import tortoise.why as why_mod
     src = inspect.getsource(why_mod)
-    marker = src.index("#7927 RESIDUAL")
+    marker = src.index("#11928 — THE ``:Point``-ONLY SCOPE")
     conflicts = src.index("_CONFLICTS_CYPHER = (")
-    assert marker < conflicts, "the residual note must sit above the query it governs"
+    assert marker < conflicts, "the widening note must sit above the queries it governs"
     region = src[marker:conflicts]
-    assert "DELIBERATE" in region
-    assert "_EP_CYPHER" in region, (
+    assert "EXISTENCE ANCHOR" in region, (
         "the note must name the existence anchor — without it a reader widens "
-        "the conflict read, sees no change, and widens more")
-    # And the narrow scope the note describes must still be true, or the note
-    # is stale prose claiming a residual that no longer exists.
-    assert src.count("MATCH (n:Point) WHERE n.id IN $ids") >= 5, (
-        "the why layer now has fewer Point-anchored reads than the note "
-        "describes — either it was widened (update the note and this pin) or "
-        "a read was dropped")
+        "a dependent read, sees no change, and widens more")
+    assert "#11824" in region, (
+        "the note must name what is STILL not widened (the supersession read) "
+        "and whose gate it is, or the next reader assumes it was an oversight")
+    # The mechanical facts the note describes must be true, or it is stale prose.
+    # Six anchored reads carry the template token: supports×2, conflicts, ep,
+    # tradeoffs, assessments.
+    assert src.count("MATCH (n:{label}) WHERE n.id IN $ids") >= 6, (
+        "fewer swept anchors than the note describes — a read was dropped or "
+        "un-widened; update the note and this pin together")
+    assert "MATCH (n:Point) WHERE n.id IN $ids" not in src, (
+        "a Point-only anchor survived the widening: a non-Point id would get no "
+        "block and the block would silently answer nothing")
+    # The three traps the note states are all LIVE in the reads, not just prose.
+    assert "epistemic_disjunction(" in src, "traversal positions must admit the four labels"
+    assert "epistemic_identity(" in src, (
+        "identities must coalesce(id, eventId) — a keyless :Event has no `id`")
+    assert "id(sup) <> id(n)" in src and "id(c) <> id(n)" in src, (
+        "self-reference guards must compare on the INTERNAL node id: the "
+        "coalesced identity is not unique")
 
 
 def test_audit_wiring_check_names_a_key_less_event_by_its_real_key(sdk):
