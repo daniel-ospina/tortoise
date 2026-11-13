@@ -276,7 +276,8 @@ is evaluable here; the targeted form is honoured by the merge verb
 
 **Phase 1 applies `target_retired` only.** It binds on an exactly-equal folded
 name+kind *or* on a spelling the survivor's `aliases[]` already records
-(`mode: "alias"`), and on that alias path the three SPELLING vetoes are stood
+(`mode: "alias"`), and — since `#12295` — on a folded-key equality as its LAST two
+rungs (`mode: "folded"` / `"folded_bare"`). On that alias path the three SPELLING vetoes are stood
 down on purpose: `aliases[]` is the reviewer's record that these two are one
 entity, and `kind_conflict` in particular would fire on the retired variant's kind
 namespace (`extractor_v2.py` passes `mention_is_alias` when `mode == "alias"`
@@ -286,8 +287,8 @@ On the exact/bare rungs the
 spellings are `_norm`-equal and the kind already matched, so none of the three can
 fire there either. ⛔ That `_norm` equality is #11901's decision, not an oversight:
 a surface variant (article, separator, punctuation) is deliberately INVISIBLE to
-phase 1, because the candidate-recall harness measures the fallback's contribution
-from exactly that gap (`test_the_matcher_is_norm_exact_AND_gains_the_folded_rung_12295` pins it).
+**the NAME and ALIAS arms**, because the candidate-recall harness measures the
+fallback's contribution from exactly that gap (`test_the_matcher_is_norm_exact_AND_gains_the_folded_rung_12295` pins it).
 ⛔ The fold is NOT refused as a wider comparison of THESE arms — #12295 ships it as the LAST rung
 (`_find_by_folded_key`), after every name and alias arm has declined, so the variant still binds
 only when nothing more exact claims it. What stays refused is widening the NAME arms themselves: a
