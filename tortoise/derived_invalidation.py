@@ -1084,10 +1084,13 @@ def invalidate_stale(
 
     ``counts.gone`` counts the findings whose goal NO LONGER EXISTS, so its
     ``goalState`` cache could not be reconciled: there is no node to reconcile it
-    on. THREE shapes set it, and it means the same thing in all of them — "the
+    on. FOUR shapes set it, and it means the same thing in all of them — "the
     cache could not be reconciled", never "a retirement landed": a retirement
     that DID land whose cache follow-up could not; #12315's ABSENT arm (``found:
-    False``), where no retirement was needed at all; and either ALREADY-TERMINAL
+    False``), where no retirement was needed at all; the VANISH-BEFORE-RETIREMENT
+    arm (also ``found: False``), where a retirement was ATTEMPTED and refused
+    because the claim was deleted mid-sweep — distinct from the absent arm, and
+    separated by ``detail``, not by ``found``; and either ALREADY-TERMINAL
     arm (``found: True``) whose goal has also gone, where the retirement happened
     out of band. ⛔ So ``gone`` is NOT attributable from ``retired``/``found``
     alone (measured on the third: a claim that BECOMES ``retracted`` between the
@@ -1106,13 +1109,16 @@ def invalidate_stale(
 
     In a sweep that actually retires (``dry_run=False``) every finding lands in
     **at least one** bucket — the failure #12315 records was an arm landing in
-    none. ⛔ ``counts.alreadyRetired`` names TWO distinguishable facts: a claim
-    that was FOUND and already terminal, and a claim that was NOT FOUND at all
-    (#12315's arm). ``found`` is the mechanical discriminator (``False`` on the
-    absent arm, ``True`` on the two already-terminal arms) — ``status`` is NOT:
+    none. ⛔ ``counts.alreadyRetired`` names THREE distinguishable facts: a claim
+    that was FOUND and already terminal, a claim that was NOT FOUND at all
+    (#12315's arm), and a claim that VANISHED between the read and the retirement.
+    ``found`` is the mechanical discriminator between the read arms (``True``) and
+    the two not-found arms (``False``) — ``status`` is NOT:
     a claim whose terminal predicate was the legacy ``outdated`` flag reports
     whatever its status property holds (``None``, or a stale word such as
-    ``live``), so that field cannot separate it from the absent arm. A retirement
+    ``live``), so that field cannot separate it from the absent arm. The two
+    ``found: False`` arms are separated by ``detail`` (and by ``error``'s
+    absence), not by ``found`` alone. A retirement
     that REFUSED carries ``error``, ``found: None`` and no ``cache``; ``found`` is
     present on all three shapes, so test ``found is False`` (absent arm), ``is
     True`` (read arms) or ``is None`` (refused — the sweep could not tell, so read
