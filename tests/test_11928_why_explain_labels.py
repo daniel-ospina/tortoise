@@ -235,9 +235,11 @@ def test_a_reading_event_is_explainable(sdk):
     NOTE the reading's TEXT is not asserted here — a block carries no self-entry,
     so this row would pass with ``_text_expr`` reverted to a bare ``content``.
     The text is pinned where a reading is actually NAMED as an endpoint:
-    ``test_an_operator_endpoint_written_as_an_event_is_traversed`` (support
-    chain) and ``test_a_nand_counter_claim_written_as_an_event_is_surfaced``
-    (conflicts) — both red on that mutant.
+    ``test_an_operator_endpoint_written_as_an_event_is_traversed`` — which reds
+    on that mutant. (The conflicts leg names it too, but through its own inline
+    coalesce rather than ``_text_expr``, so it has its own kill:
+    ``test_a_nand_counter_claim_written_as_an_event_is_surfaced`` reds when that
+    chain is reverted, not when ``_text_expr`` is.)
     """
     indicator, _target, _goal = _world(sdk, tag="ev")
     reading = _reading(sdk, indicator, 12.0, at="2026-11-11T10:00:00Z")
@@ -480,11 +482,25 @@ def test_a_non_epistemic_endpoint_is_not_traversed(sdk):
             "CREATE (d)-[:IMPL]->(t)", params={"t": claim["id"]})
     g.query("MATCH (s:Source {id:'SRC-1'}), (t) WHERE t.id = $t "
             "CREATE (s)-[:NAND]->(t)", params={"t": claim["id"]})
+    # AND THE OPERATOR LEG, which is a different read with its own disjunction:
+    # a `:Document` wired as an operator's INPUT source at idx 0. Deleting
+    # `epistemic_disjunction('sup')` from `_SUPPORT_OP_CYPHER` left this file
+    # fully green (measured), because every operator fixture used a Point source.
+    g.query("CREATE (d2:Document {id:'DOC-2', name:'a document', title:'Doc2'})")
+    g.query("CREATE (op2:Point {id:'OP-2', is_operator:true, status:'live', "
+            "pointKind:'operator'})")
+    g.query("MATCH (d:Document {id:'DOC-2'}), (o:Point {id:'OP-2'}) "
+            "CREATE (d)-[:INPUT {idx:0}]->(o)")
+    g.query("MATCH (o:Point {id:'OP-2'}), (t) WHERE t.id = $t "
+            "CREATE (o)-[:IMPL {idx:1}]->(t)", params={"t": claim["id"]})
 
     block = assemble_why_blocks(sdk._get_proj(), [claim["id"]])[claim["id"]]
     chain_ids = {e["point_id"] for e in block["support_chain"]}
     assert "DOC-1" not in chain_ids, (
         "a non-epistemic IMPL source was presented as a supporter: "
+        + repr(block["support_chain"]))
+    assert "DOC-2" not in chain_ids, (
+        "a non-epistemic OPERATOR INPUT source was presented as a supporter: "
         + repr(block["support_chain"]))
     nand_ids = {n["point_id"] for n in
                 (block.get("conflicts") or {}).get("nands") or []}
@@ -533,11 +549,17 @@ def test_a_derived_claim_that_is_not_a_judgement_is_not_an_assessment(sdk):
     assert block["support_chain"][0]["point_id"] == derived["id"]
 
     # AND THE OTHER CONJUNCT: `claimClass = 'derived'`. A `judgementState` alone
-    # is not a verdict either — `goal_judgement` records a shape that carries
-    # `judgementState`/`goalId` on a NON-derived claim, and presenting that as
-    # the goal's verdict is the same defect from the other side. Measured: the
-    # assertions above stay green with `claimClass` dropped from the
-    # discriminator.
+    # is not a verdict either, and presenting such a claim as the goal's verdict
+    # is the same defect from the other side. ⚠️ The shape is SDK-REACHABLE, not
+    # writer-produced: `record_judgement` always passes
+    # `claim_class="derived"` (`goal_judgement.py`), so no in-repo writer mints a
+    # non-derived claim carrying `judgementState` — `sdk.create_point(...,
+    # judgementState=...)` does, and the read must not be fooled by it. The
+    # conjunct matters because the SIBLING reader discriminates on
+    # `judgementState` ALONE (`goal_judgement.latest_judgement`), so dropping
+    # `claimClass` here would make this read disagree with the writer's own
+    # contract. Measured: the assertions above stay green with `claimClass`
+    # dropped from the discriminator.
     other = _world(sdk, tag="nonderived")[2]
     stamped = sdk.create_point("statement", "a non-derived claim with a state",
                                judgementState="met")
@@ -759,3 +781,12 @@ def test_the_enriched_item_and_ask_entry_carry_the_assessment(sdk, monkeypatch):
     assert isolated is not None and isolated["assessment"] == [
         {"judgement_id": recorded["point_id"]}], (
         "an assessment-only item was dropped by the projection gate: " + repr(isolated))
+    # AND THE WIRE PROJECTION. `volunteer.why_entry` is the ONE shape `/v1/context`
+    # and the pushed envelope serve; deleting its assessment line left every
+    # volunteer test and this whole file green (measured, review round 7).
+    from tortoise.volunteer import why_entry
+
+    block = assemble_why_blocks(sdk._get_proj(), [goal["id"]])[goal["id"]]
+    wire = why_entry(block)
+    assert wire["assessment"] == block["assessment"], (
+        "the wire why-entry dropped the assessment dimension: " + repr(wire))
