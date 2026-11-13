@@ -5346,7 +5346,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # carries EIGHT hunks (zero deletions) — these five above the entry and
             # three `durations:` rows below it, which do not move the pin. Re-derive
             # the SUM of the hunks above the entry, never one.
-            ("9987", "- test_pack_logic_writeprobe_11083.py"),
+            # …and **10000** on this branch's tree merged with `main`: #9649 adds
+            # +13 of its own above the entry (+8 at its `core` registration block,
+            # +5 for the `slow_files` row, +1 durations row below it), which
+            # `main`'s 9987 cannot cover.
+            ("10000", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (

@@ -915,8 +915,14 @@ def test_a_declared_terminalizing_transition_carries_none_of_the_verbs_effects(e
     assert "EntityMutated" in kinds, (
         f"the restatus journal is what the door does write: {sorted(kinds)}")
     # 2. no successor edge, and the claim really does leave belief.
+    # ⛔ INCOMING, not outgoing (review round 12): the SDK spells the edge
+    # `MERGE (a)-[:CORRECTS]->(b)` with `a` = the CORRECTING point, so a
+    # superseded node has ZERO OUTGOING edges whether or not a successor
+    # exists — an outgoing count is unfalsifiable in the direction that
+    # matters, and a future fix minting `(new)-[:CORRECTS]->(old)` would
+    # leave it green. ONTOLOGY §5 defines the state by the edge INTO it.
     assert sdk._get_proj().g.query(
-        "MATCH (:Point {id:$id})-[r:CORRECTS]->() RETURN count(r)",
+        "MATCH (:Point {id:$id})<-[r:CORRECTS]-() RETURN count(r)",
         params={"id": pid}).result_set[0][0] == 0, (
         "#12403: a successor-less `superseded` is the shape ONTOLOGY §5 forbids")
     assert sdk.query("claim that will be retired") in ([], None), (
@@ -926,12 +932,23 @@ def test_a_declared_terminalizing_transition_carries_none_of_the_verbs_effects(e
     assert after["validTo"] == before["validTo"], after
 
     # ...and the VERB, on the same shape, does all three (the contrast the
-    # residual rests on — non-vacuity: this half must PASS).
+    # residual rests on — non-vacuity: this half must PASS). `supersede_point`,
+    # not `retract_point`: an earlier version of this contrast used the retract
+    # verb, which mints NO `CORRECTS` edge, so the residual's most consequential
+    # half — the missing successor — had no verb-side demonstration at all.
     other = _live(sdk, "claim retired through the verb")
-    sdk.retract_point(other, valid_to="2030-01-01T00:00:00Z")
-    assert _row(sdk, other)["validTo"] == "2030-01-01T00:00:00Z"
+    succ = _live(sdk, "its successor")
+    sdk.supersede_point(other, succ)
+    assert _row(sdk, other)["status"] == "superseded"
+    assert _row(sdk, other)["validTo"] is not None, (
+        "the verb closes the superseded claim's window")
     kinds = {json.loads(line).get("type") for line in
              (events / "events.jsonl").read_text(encoding="utf-8").splitlines()
              if line.strip() and json.loads(line).get("id") == other}
-    assert "PointRetracted" in kinds, (
+    assert "PointSuperseded" in kinds, (
         f"the verb must journal the claim transition: {sorted(kinds)}")
+    assert sdk._get_proj().g.query(
+        "MATCH (:Point {id:$id})<-[r:CORRECTS]-() RETURN count(r)",
+        params={"id": other}).result_set[0][0] == 1, (
+        "the verb mints the successor edge the generic door omits — this is the "
+        "half that makes the residual matter")
