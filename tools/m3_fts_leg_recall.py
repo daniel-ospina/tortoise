@@ -193,6 +193,19 @@ DECISION_RULE = (
 )
 
 
+def m3_passes(primary: dict) -> bool:
+    """Apply :data:`DECISION_RULE` to the primary comparison's k=3 cell.
+
+    ⛔ A FUNCTION so the PREDICATE is testable, not only the rule TEXT. The rule
+    is pinned byte-identical to the artifact, but that pins PROSE: a re-run could
+    publish ``M3: PASS`` on a tie (``>`` → ``>=``), on a reversed inequality, or at
+    p = 0.5, while the artifact still carried the stricter rule verbatim (#12349
+    review cycle 11 — all three were measured green before this existed).
+    """
+    return (primary["b_recall"] > primary["a_recall"]
+            and primary["mcnemar_p_two_sided"] < 0.05)
+
+
 #: The ``#8933`` IDENTIFIER FIXTURE — #12186 round 3's requirement 5, and it is a
 #: **correctness** gate, not a quality one. ``to_tsvector`` cannot reproduce
 #: ``ERR-4032 -> err4032`` *plus* the adjacency phrase, so a candidate engine that
@@ -1099,8 +1112,7 @@ def run(args: argparse.Namespace) -> int:
 
         primary = art["comparisons"][
             "falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
-        passed = (primary["b_recall"] > primary["a_recall"]
-                  and primary["mcnemar_p_two_sided"] < 0.05)
+        passed = m3_passes(primary)
         art["verdict"] = {
             "rule": DECISION_RULE,
             "primary_arm": "postgres_bm25/tokens",

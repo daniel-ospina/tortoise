@@ -1506,21 +1506,8 @@ def test_the_reuse_count_guard_is_wired(tool_mod) -> None:
         "match would also accept the block commented out or under `if False:`")
 
 
-def test_the_fixture_rows_are_inserted_after_the_sweep_and_then_waited(tool_mod) -> None:
-    """The #8933 fixture read must run on a COMPLETE index, and never feed the sweep.
-
-    ⛔ This is the lane's headline result — "the shipped leg cannot reach
-    `abc_def`" — so its two orderings are load-bearing and neither was pinned.
-    Measured at this head (#12349 review cycle 10): DELETING the second
-    `_wait_indexed(proj, len(rows) + len(FIXTURES))` left 65 passed, so the
-    fixture ranks could be read against an index FalkorDB has not caught up on
-    yet — which books a present name as unreachable, i.e. publishes a FALSE
-    capability failure. Separately, HOISTING the fixture upserts above the
-    recall sweep also left 65 passed, which runs the sweep over 305 documents
-    while `index_numDocuments` still records the first wait's 300: a
-    contaminated population with nothing in the artifact able to show it (the
-    very confound §3.5 and `measurement_notes` disclose).
-    """
+def _control_flow(tool_mod) -> list[str]:
+    """The ordered load-bearing control flow of `arm_falkordb`, as markers."""
     import ast
 
     tree = ast.parse(TOOL.read_text())
@@ -1528,47 +1515,150 @@ def test_the_fixture_rows_are_inserted_after_the_sweep_and_then_waited(tool_mod)
                if isinstance(n, ast.FunctionDef) and n.name == "arm_falkordb"), None)
     assert fn is not None, "arm_falkordb is the measurement's sweep"
 
-    def _for_over(name):
-        return [n for n in ast.walk(fn)
-                if isinstance(n, ast.For) and isinstance(n.iter, ast.Name)
-                and n.iter.id == name]
+    def mark(stmt):
+        src = ast.unparse(stmt)
+        if isinstance(stmt, ast.For) and isinstance(stmt.iter, ast.Name):
+            if stmt.iter.id == "rows":
+                if "run_fts_query" in src or "_fts_cypher" in src:
+                    return "sweep"
+                if "_upsert_object" in src:
+                    return "upsert_population"
+            if stmt.iter.id == "FIXTURES":
+                return ("upsert_fixtures" if "_upsert_object" in src
+                        else "fixture_query")
+        if (isinstance(stmt, ast.If) and isinstance(stmt.test, ast.Name)
+                and stmt.test.id == "stale"):
+            return ("stale_refusal"
+                    if any(isinstance(b, ast.Raise) for b in stmt.body)
+                    else "stale_refusal_NEUTERED")
+        if isinstance(stmt, ast.If) and isinstance(stmt.test, ast.Compare):
+            ops = {type(o).__name__ for o in stmt.test.ops}
+            if "total" in ast.unparse(stmt.test) and ops == {"NotEq"}:
+                return ("count_guard"
+                        if any(isinstance(b, ast.Raise) for b in stmt.body)
+                        else "count_guard_NEUTERED")
+        if isinstance(stmt, ast.Assign) and "_wait_indexed" in src:
+            return ("wait_population" if "FIXTURES" not in src
+                    else "wait_population_BAD")
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            name = getattr(stmt.value.func, "id", None)
+            if name == "verify_cypher_parity":
+                return "verify_cypher_parity"
+            if name == "_wait_indexed":
+                return ("wait_fixtures" if "FIXTURES" in src
+                        else "wait_fixtures_BAD")
+            if name == "run_fts_query" and "warm" in src:
+                return "warm"
+        return None
 
-    # ⛔ Identified by WHAT THEY DO, not by position. `for row in rows` appears
-    # TWICE in this function — the population upsert (~:593) and the recall sweep
-    # (~:649) — so a positional read picks the wrong one and the pin goes green
-    # on a hoisted fixture loop (measured: the first version of this pin did
-    # exactly that). The sweep is the one that queries the leg; the fixture
-    # upsert is the one that writes, and `for ... in FIXTURES` also appears
-    # twice (the upsert, then the fixture QUERY loop), so it is the
-    # `_upsert_object` one.
-    sweeps = [n for n in _for_over("rows")
-              if any(isinstance(c, ast.Call)
-                     and (getattr(c.func, "id", None) in ("run_fts_query", "_fts_cypher"))
-                     for c in ast.walk(n))]
-    upserts = [n for n in _for_over("FIXTURES")
-               if any(isinstance(c, ast.Call)
-                      and getattr(c.func, "attr", None) == "_upsert_object"
-                      for c in ast.walk(n))]
-    assert sweeps, "the recall sweep (a `for row in rows` that queries the leg) is gone"
-    assert upserts, "the #8933 fixture upsert loop is gone"
+    return [m for m in (mark(s) for s in fn.body) if m]
 
-    sweep_line = min(n.lineno for n in sweeps)
-    upsert_line = min(n.lineno for n in upserts)
-    assert upsert_line > sweep_line, (
-        f"the fixture upserts (line {upsert_line}) run BEFORE the recall sweep "
-        f"(line {sweep_line}) — the sweep then runs over 305 documents while "
-        "`index_numDocuments` still records the first wait's 300")
 
-    waits = [c for c in ast.walk(fn)
-             if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "_wait_indexed"]
-    after = [c for c in waits if c.lineno > upsert_line]
-    assert after, (
-        "there is no `_wait_indexed(...)` after the fixture upserts — the "
-        "fixture query can then run against an index FalkorDB has not finished "
-        "building, booking a present name as a capability failure")
-    assert any(any("FIXTURES" in ast.unparse(a) for a in c.args) for c in after), (
-        "the post-fixture wait does not cover the fixture rows — it must "
-        "expect `len(rows) + len(FIXTURES)` documents")
+def test_the_harness_control_flow_is_pinned_as_a_sequence(tool_mod) -> None:
+    """`arm_falkordb`'s load-bearing order, asserted as ONE sequence.
+
+    ⛔ Why a SEQUENCE and not nine little tests. Every line below is a place
+    where deleting or neutralising it publishes a wrong-but-plausible number, and
+    each prior review round found one more of them: the pre-sweep wait, then
+    `verify_cypher_parity`, then the stale-name refusal, then the fixture
+    upsert/wait order. Pinning them individually is an unbounded job — you can
+    always find another deletable line — so the SURFACE is declared here once:
+    the ordered set of markers. Deleting ANY of them, reordering ANY two, or
+    neutering a `raise` changes this list.
+
+    What each marker buys, in the direction that would otherwise flatter a
+    conclusion:
+      * `warm` + `wait_population` — a sweep over a partially built `Object`
+        index books present names as misses, understating the SHIPPED baseline;
+      * `verify_cypher_parity` — the recovery arm's Cypher must reproduce
+        `run_fts_query`, or the "+25.00 pts recoverable in place" headline
+        measures a replica nobody checked (and its anti-vacuity refusal must
+        survive);
+      * `sweep` before `upsert_fixtures` — the fixture rows must not enter the
+        population the sweep is scored on (the 305-vs-300 confound, §3.5);
+      * `wait_fixtures` — the fixture ranks must be read on a COMPLETE index,
+        or a present name is booked as a capability FAILURE — the DoD's own
+        gate;
+      * `stale_refusal` / `count_guard` — a reused graph must be refused, not
+        measured.
+    """
+    expected = [
+        "upsert_population",      # write the 300 names
+        "stale_refusal",          # refuse a graph whose stored names differ
+        "count_guard",            # refuse a graph carrying extra rows
+        "warm",                   # pay the cold full-scan cost once
+        "wait_population",        # the index must be COMPLETE for 300 documents
+        "verify_cypher_parity",   # the recovery arm's replica must match the leg
+        "sweep",                  # score the population
+        "upsert_fixtures",        # only AFTER the sweep
+        "wait_fixtures",          # and wait for THOSE to be indexed
+        "fixture_query",          # then read the #8933 fixture ranks
+    ]
+    observed = _control_flow(tool_mod)
+    assert observed == expected, (
+        "`arm_falkordb`'s load-bearing control flow changed. Expected "
+        f"{expected}, observed {observed}. Every entry is a step whose removal "
+        "publishes a wrong-but-plausible number (see this test's docstring); a "
+        "genuine reordering needs this list updated in the same commit, and a "
+        "`_NEUTERED`/`_BAD` marker means a guard kept its shape but lost its "
+        "refusal.")
+
+
+def test_the_decision_predicate_applies_the_rule_not_just_its_text(tool_mod) -> None:
+    """`m3_passes` must implement `DECISION_RULE` — pinning the TEXT is not it.
+
+    ⛔ The artifact carries `DECISION_RULE` verbatim and the pin asserts that
+    byte-equality, which proves the rule was not reworded. It does NOT prove the
+    code APPLIES it: before `m3_passes` existed the predicate was inline, and
+    flipping `>` to `>=` (PASS on a tie), reversing the inequality, or widening
+    `< 0.05` to `< 0.5` all left the suite green (#12349 review cycle 11). The
+    rule says a TIE fails, so that is the case this pins hardest.
+    """
+    passes = tool_mod.m3_passes
+    assert passes({"a_recall": 0.70, "b_recall": 0.75,
+                   "mcnemar_p_two_sided": 0.01}) is True, (
+        "a strictly better arm at p<0.05 must PASS")
+    assert passes({"a_recall": 0.70, "b_recall": 0.70,
+                   "mcnemar_p_two_sided": 0.01}) is False, (
+        "a TIE must FAIL — DECISION_RULE says 'including a tie'")
+    assert passes({"a_recall": 0.75, "b_recall": 0.70,
+                   "mcnemar_p_two_sided": 0.01}) is False, (
+        "a worse arm must FAIL — the inequality is not reversible")
+    assert passes({"a_recall": 0.70, "b_recall": 0.75,
+                   "mcnemar_p_two_sided": 0.05}) is False, (
+        "p must be strictly below 0.05 — `<=` would admit the boundary")
+    assert passes({"a_recall": 0.70, "b_recall": 0.95,
+                   "mcnemar_p_two_sided": 0.5}) is False, (
+        "a big delta with p=0.5 must still FAIL — the gain has to be "
+        "distinguishable from coin-flipping on the discordant pairs")
+
+
+def test_the_tokenizer_control_refusal_is_wired(tool_mod) -> None:
+    """`run` must pass the WHOLE population through `assert_terms_match`.
+
+    ⛔ The harness calls the tokenizer control "verified, never assumed", and
+    `terms_census` — which §2's census pin reads — is that call's RESULT.
+    Replacing the call with a literal dict left the suite green, so the
+    self-check could be dropped and the census fabricated (#12349 review cycle
+    11). The gate is the call, so the call is what is pinned.
+    """
+    import ast
+
+    tree = ast.parse(TOOL.read_text())
+    run_fn = next((n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == "run"), None)
+    assert run_fn is not None, "the harness entry point `run` is gone"
+    calls = [c for c in ast.walk(run_fn) if isinstance(c, ast.Call)
+             and getattr(c.func, "id", None) == "assert_terms_match"]
+    assert calls, (
+        "`assert_terms_match` is not called from `run` — the controlled term "
+        "set is then unverified and `terms_census` can be fabricated")
+    assert any("rows" in ast.unparse(a) for c in calls for a in c.args), (
+        "the tokenizer control must be run over the POPULATION, not a sample")
+    assert any("terms_census" in ast.unparse(s)
+               and "assert_terms_match" in ast.unparse(s)
+               for s in ast.walk(run_fn)), (
+        "the control's return value must BE the recorded `terms_census`")
 
 
 def test_brief_states_what_the_reuse_guards_actually_do(brief_text) -> None:
