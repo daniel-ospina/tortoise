@@ -472,10 +472,12 @@ def test_none_result_set_means_not_measured():
     `_NoneGraph` beside the module-scope `_NoneCatalogueGraph`, so two copies of
     one fake could drift apart — and the local copy DID: it appended to
     `self.calls` on every query and then delegated, double-counting any
-    non-catalogue query. The single behaviour this test relies on is the one
-    `_NoneCatalogueGraph` exists to carry: the engine ANSWERS, and the answer's
-    `result_set` is `None`. The empty-catalogue arm stays a DIFFERENT answer,
-    reached through `_bare([])` in `test_empty_result_set_means_measured_and_empty`.
+    non-catalogue query. The TWO things this test relies on are what
+    `_NoneCatalogueGraph` carries: the engine ANSWERS with `result_set is None`,
+    and that catalogue call is recorded in `.calls` — the `db.indexes()`
+    assertion below reads that recording, and without it `is None` would prove
+    nothing. The empty-catalogue arm stays a DIFFERENT answer, reached through
+    `_bare([])` in `test_empty_result_set_means_measured_and_empty`.
 
     ⛔ The "lane must have RUN" assertion is what makes this able to fail: on a
     VIRGIN projection `_bare()` already leaves `_vector_indexed_labels` as
@@ -702,14 +704,17 @@ def test_a_store_with_no_gap_does_not_warn(caplog):
 
 # ── #11087 (S4): the contract is reported POSITIVELY ──────────────────────
 #
-# The pin above is unchanged in SUBSTANCE (plan §6.1) — "no gap ⇒ no gap
-# report" still holds — but its CAPTURE LEVEL is INFO, not WARNING. #11660
-# review F1 moved the ARMED (retired) gap report to a retirement INFO; the
-# UNARMED report keeps its WARNING, which is the split `_gap_level()` above
-# reads from `vector_index_retired()`. The header said "captures at WARNING"
-# over a pin that no longer takes one, which is the same defect class this
-# file's sibling pins were fixed for (#11660 review F1 raised their capture
-# level): it sends the next reader to check the wrong half.
+# The pin above is unchanged in SUBSTANCE — "no gap ⇒ no gap report" still
+# holds, and that substance sentence is the only part of plan §6.1 cited here —
+# but its CAPTURE LEVEL is INFO, not WARNING. ⛔ Do NOT follow §6.1 as a clean
+# record: its `logging.WARNING` sentence is STALE (the pin was already INFO on
+# main via #11660 review F1, 583c19a25a9b), so only that substance survives,
+# not the sentence. That same F1 moved the ARMED (retired) gap report to a
+# retirement INFO; the UNARMED report keeps its WARNING, which is the split
+# `_gap_level()` above reads from `vector_index_retired()`. The header said
+# "captures at WARNING" over a pin that no longer takes one, which is the same
+# defect class this file's sibling pins were fixed for (#11660 review F1 raised
+# their capture level): it sends the next reader to check the wrong half.
 #
 # What #11087 ends is the SILENCE — the same store must now report the
 # serves/indexes pair at INFO, and so must a store that HAS a gap (which also
