@@ -6,15 +6,16 @@ HOW TO RUN THE TESTS THAT GUARD THIS DOCUMENT
 ``tests/test_candidate_recall_11901.py`` needs no graph, but every ``pytest`` run
 in this repo needs the lane's DB seam (epic #1647 P4), so a bare
 ``uv run pytest`` reports one ERROR per collected test from
-``tests/_embedded.py`` (29 at this head) — that is the
-repo's gate, not these tests. Use either form:
+``tests/_embedded.py`` — that is the repo's gate, not these tests, and the count
+is whatever this file currently collects, so it is not restated here. Use either
+form:
 ::
 
     uv run python tools/test_lane.py run -- tests/test_candidate_recall_11901.py -q
     TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_candidate_recall_11901.py -q
 
-WHAT THIS MEASURES, AND WHY THE THREE ARMS ARE MEASURED SEPARATELY
----------------------------------------------------
+WHAT THIS MEASURES, AND WHY THE ARMS ARE MEASURED SEPARATELY
+-----------------------------------------------------------
 Every capture derives one ``object`` query per extracted entity name and feeds
 it to the hybrid read at ``limit=3`` (``extractor_v2._derive_queries`` ->
 ``_fts_rows`` -> ``sdk.tortoise_fts_query`` -> ``search_engine.degradation_chain``).
