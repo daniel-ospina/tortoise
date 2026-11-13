@@ -167,6 +167,11 @@ class TestTheGuardClaimsOneCredentialClassOnly:
         try:
             r = tc.post("/v1/graphs", json={"org_id": tid, "name": "x"})
             assert r.status_code == 401, r.text
+            # The contract is the STATUS **and** the detail: this arm must take
+            # the unchanged `get_current_user` path verbatim. A status-only
+            # assertion stays green if the new refusal shape ever leaks here
+            # (measured: 401 {"detail": "Missing session token"}).
+            assert r.json()["detail"] == "Missing session token", r.text
         finally:
             gen.close()
 

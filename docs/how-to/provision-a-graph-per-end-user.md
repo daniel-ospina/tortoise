@@ -251,7 +251,7 @@ answers a key without `graphs:delete` with `403 "Missing graphs:delete scope"`
 | `PROVISION_VIA_ORG_ENDPOINT` | called `POST /v1/graphs` with an API key (the session alias) | call `POST /v1/organizations/{org_id}/graphs`, §2 |
 | `PROVISION_REQUIRES_ORG_KEY` | called the provisioning door with a **minted** key | provision from the account-level key; §4 |
 | `PROVISION_SCOPE_REQUIRED` | called it with an account key that lacks `graphs:create` | mint/grab a key carrying `graphs:create`, §1 |
-| `GRAPH_LISTING_VIA_SESSION` | called `GET /v1/graphs` with an API key | keep `graph.id` from the 201, or recover it from `GET /v1/team/keys` / the MCP tool `tortoise_list_graphs`, §2 |
+| `GRAPH_LISTING_VIA_SESSION` | called `GET /v1/graphs` with an API key | keep `graph.id` from the 201, or recover the **id** from `GET /v1/team/keys` (§2); the MCP tool `tortoise_list_graphs` lists graph **names**, not ids |
 | `GRAPH_SCOPED_TEAM_SURFACE` | a minted key touching a team/account surface | expected — the key is graph-scoped, §3 |
 | `402` + `X-Upgrade-CTA: pro` | the account is `free`/`anon` | upgrade to Builder (`pro`), §1 |
 | `409` + `X-Graph-Quota: n/max` | the graph quota is full | `solo` holds 1 custom graph; upgrade, or delete a graph |
