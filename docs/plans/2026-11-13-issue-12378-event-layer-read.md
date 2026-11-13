@@ -1,5 +1,5 @@
 <!-- research-path: issue #12378 comment carrying `<!-- research: v1 -->` (posted 2026-11-13) -->
-<!-- plan-review: cycles=3, status=pending, version=2.3.0 -->
+<!-- plan-review: cycles=3, status=capped, version=2.3.0 -->
 
 # #12378 — read the Event layer the way the operator layer is now read
 
@@ -121,9 +121,15 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
    read. The refusal says exactly that: a size bound on ONE response, raise it
    deliberately if the layer legitimately outgrew it.
 2. Content lane: `content := name`, fallbacks `title` then `subject`; rows carrying
-   none are COUNTED on `read_note` (they share one content-addressed key, so the
-   duplicate fold reports them and the count explains it). **Test:**
-   `test_an_events_text_is_its_name_with_title_and_subject_fallbacks`.
+   none are COUNTED on `read_note`. ⚠️ Round-2 correction: the note says only what is
+   TRUE — those rows are keyed `node_type:kind:sha`, so **same-kind** ones share a
+   `stable_key` in `--rows`, and **no duplicate claim is made for them** (`classify_event`
+   takes no `duplicate_of`/`keeper_id`, every Event arm is `undecidable`, `Decision` has
+   no duplicate field). A first draft claimed the plan's duplicate fold reported them;
+   measured, it never does. **Test:**
+   `test_an_events_text_is_its_name_with_title_and_subject_fallbacks` +
+   `test_an_event_with_no_text_is_counted_on_the_report` (which reds if the false claim
+   returns).
 
    ⚠️ **`classify_event` is NOT unchanged** (round-1 correction): it tested the session
    kinds case-SENSITIVELY against lower-case `agentSession`, while the write path stores
@@ -151,8 +157,13 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
 
 ## Rounds
 
-**Rounds:** 2 (verifiers: 1 per round, class: code) — round 1 returned 5 issues; all were
-verified against source and fixed, and round 2 re-checked the amended plan.
+**Rounds:** 3 (verifiers: 1 per round, class: code) — round 1 returned 5 issues, round 2
+returned 6 (two of them round-1 fixes that had only half-landed), and round 3 returned 4,
+all documentation/arithmetic. Every finding was verified against source before being
+applied. ⚠️ **Disclosure: the tier's cycle cap for `standard` is 3, so the round-3 fixes
+have NO fourth confirmation round at this gate** — the fixes are pinned by tests that
+red when reverted, and the change goes to the code-review gate (a separate, fresh
+budget) at the final head. This gate exits CAPPED, not clean.
 
 ### Review Scope Contract
 **Class:** code

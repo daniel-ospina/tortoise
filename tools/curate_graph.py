@@ -710,9 +710,11 @@ class MCPReader:
             # still the difference between a reader that understood the layer and one that
             # silently collapsed it, so it travels on the artifact.
             self._note(f"{empty_text} of {len(raw)} Event rows carry no name/title/subject "
-                       "and therefore an empty text: they share one content-addressed "
-                       "`stable_key` in `--rows` (no duplicate claim is made for them — "
-                       "every Event decision is `undecidable`, and nothing is carried)")
+                       "and therefore an empty text: rows of the SAME KIND among them share "
+                       "one content-addressed `stable_key` in `--rows` (the key is "
+                       "`node_type:kind:sha`, so the sharing is per-kind, not per-layer; no "
+                       "duplicate claim is made for them — every Event decision is "
+                       "`undecidable`, and nothing is carried)")
         return out, reported
 
     def _get_entities(self, limit: int) -> Any:

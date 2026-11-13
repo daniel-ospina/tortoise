@@ -4382,8 +4382,18 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         "a paragraph still says the omission is deliberate")
     # ...and the spelling-invariance claim must match the classifier (case-folded since
     # #12378): "compare the EXACT `row.kind`" is now true for `classify_source` only.
-    assert "compare the EXACT" not in doc, (
-        "the doc still says classify_event compares row.kind exactly; it case-folds now")
+    assert "compare the EXACT" not in doc or "classify_source` compares the" in doc, (
+        "the doc must attribute the EXACT comparison to classify_source only")
+    # ⛔ The POPULATION ARITHMETIC, which the phrase pin could not see (round-3 review):
+    # the doc's stated enumerable population must equal the sum of the class table, and
+    # reading the Event layer moved it by 4,670. Assert the SUM, not a number copied by
+    # hand, so a future layer that is read without updating this line reds here.
+    parts = (15_842, 1_578, 3_727, 4_670)          # points + sources + operators + events
+    assert f"{sum(parts):,}" in doc, (
+        f"the doc must state the enumerable population as {sum(parts):,} "
+        "(points+sources+operators+events) now that the Event layer is read")
+    assert "21,147 enumerable" not in doc, (
+        "the doc still calls 21,147 the enumerable population; the Event layer is read")
     # ...and the row records the change rather than dropping the subject.
     assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (
         "the Event row must say it IS enumerated now, and cite #12378")
