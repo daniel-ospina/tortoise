@@ -932,16 +932,25 @@ def run(args: argparse.Namespace) -> int:
                 continue
             for k in KS:
                 merged: dict[str, dict] = {}
-                kept: dict[str, dict] = {}
+                #: per PREDICATE, the ids the gate would leave in place — built
+                #: from exactly the names that predicate keeps, so neither
+                #: column is measured against the other's set.
+                kept: dict[str, dict[str, dict]] = {
+                    p: {} for p in ("shipped", "zep_full_name")}
                 for row in group:
                     rows_here = window(row["name"], k)
                     for r in rows_here:
                         if r["id"] and r["id"] not in merged:
                             merged[r["id"]] = r
-                    if (_name_carries_signal(row["name"])
-                            and _has_high_entropy(row["name"].lower().strip())):
+                    for p, _keeps in (
+                            ("shipped", _name_carries_signal(row["name"])),
+                            ("zep_full_name", _has_high_entropy(
+                                row["name"].lower().strip()))):
+                        if not _keeps:
+                            continue
                         for r in rows_here:
-                            kept[r["id"]] = r
+                            if r["id"]:
+                                kept[p][r["id"]] = r
                 size = len(merged)
                 pooled[k]["captures"] += 1
                 pooled[k]["set_sum"] += size
@@ -957,7 +966,7 @@ def run(args: argparse.Namespace) -> int:
                         if not is_gated:
                             continue
                         pooled_gate[p]["gated"] += 1
-                        if row["id"] in kept:
+                        if row["id"] in kept[p]:
                             pooled_gate[p]["rescued_by_union"] += 1
                         else:
                             pooled_gate[p]["lost"] += 1
