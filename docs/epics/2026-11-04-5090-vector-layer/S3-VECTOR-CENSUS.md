@@ -321,7 +321,8 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 186 collected, 185 passed, 1 skipped
+                                 # this tree: 186 collected
+                                 # (docker lane at `eee465029a`: 185 passed, 1 skipped)
 ```
 
 (115 collected before #11088's round 7; the file collects **186 in the tree this document sits in** —

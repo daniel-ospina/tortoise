@@ -8047,12 +8047,12 @@ def test_the_census_doc_collects_what_the_file_collects():
     statements = [int(n) for n in re.findall(r"this tree: (\d+) collected", text)]
     statements += [int(n) for n in
                    re.findall(r"collects \*\*(\d+) in the tree", text)]
-    # ⛔ The arithmetic total is written ``(`122 + … = 183`)`` — a BACKTICK follows the
+    # ⛔ The arithmetic total is written ``(`122 + … = 186`)`` — a BACKTICK follows the
     # digits, never a paren (`#12015` review MEASURED the first spelling: it matched
     # nothing, and a dead arm shrinks to the arms that still match, so `= 999` stayed
     # green while the comment claimed all three were pinned).
     statements += [int(n) for n in re.findall(r"= (\d+)`", text)]
-    # The splits paragraph's `to the same `183` the pin re-derives` clause — the fourth
+    # The splits paragraph's `to the same `186` the pin re-derives` clause — the fourth
     # statement of the same figure, and the one an earlier revision of this pin missed.
     statements += [int(n) for n in
                    re.findall(r"to the same `(\d+)` the pin re-derives", text)]
@@ -8504,12 +8504,17 @@ _MIN_MODULES = {"tortoise": 100, "tools": 50, "tests": 500}
 class _JoinedKey:
     """An F-STRING dict key, compared by the source CPython will compile.
 
-    Two byte-identical f-string keys are ONE key at runtime however complex the
-    expression is (shown by `ruff`'s `F601`, measured: `{f"a": 1, f"a": 2}` and
-    `{f"{x}": 1, f"{x}": 2}`), and the placeholder-free form is constant-folded by
-    CPython, so it collides with itself for the same reason a `Constant` does.
-    `ast.unparse` normalises quoting, so `f"a"` and `f'a'` are one key here as they
-    are at runtime.
+    Two byte-identical f-string keys are ONE key at runtime for any referentially
+    transparent expression (shown by `ruff`'s `F601`, measured: `{f"a": 1, f"a": 2}`
+    and `{f"{x}": 1, f"{x}": 2}`), and the placeholder-free form is constant-folded
+    by CPython, so it collides with itself for the same reason a `Constant` does.
+    ⛔ The transparency qualifier is MEASURED, not caution: `c = iter(["a", "b"]);
+    D = {f"{next(c)}": 1, f"{next(c)}": 2}` builds `{'a': 1, 'b': 2}` — two DISTINCT
+    keys — while this arm reports a duplicate. That is a false RED, never a false
+    PASS, and `ruff 0.16.4 --select F601` flags the same shape (verified), so the
+    guard is not weaker than the lint it backs; skipping impure JoinedStrs would
+    diverge from the oracle, so the residual is stated instead. `ast.unparse`
+    normalises quoting, so `f"a"` and `f'a'` are one key here as they are at runtime.
 
     It is deliberately NOT equal to a plain `Constant`: `{f"a": 1, "a": 2}` IS one
     key at runtime, but proving that needs evaluation — the guess this function
@@ -8594,8 +8599,10 @@ def _duplicate_constant_key_sites(
     Only LITERAL keys can be compared without evaluating anything: a computed key
     (`SOME_NAME`) is not a declaration this can read, and guessing would report a
     duplicate that is not one. An F-STRING key is the one exception, and it is not a
-    guess: two byte-identical f-string sources are ONE key whatever the expression is
-    (`_JoinedKey`), which is also exactly what `ruff`'s `F601` reports. `**splat` in a
+    guess: two byte-identical f-string sources are ONE key for a referentially
+    transparent expression (`_JoinedKey`; an impure one is a stated false-RED residual
+    there, and `ruff` shares it), which is also exactly what `ruff`'s `F601` reports.
+    `**splat` in a
     literal parses as a `None` entry in
     `node.keys`, not a Constant, so it is skipped rather than mistaken for the key
     `None`; `_constant_key_value` recurses through tuple and signed-numeric literals
@@ -8683,7 +8690,8 @@ def test_the_duplicate_key_detector_catches_a_duplicate():
     # `[]` where `ruff --select F601` reported a duplicate, so the guard was WEAKER than
     # the lint it backstops — a false PASS on the one shape whose only other catcher can
     # be a `noqa` marker on the survivor. Two byte-identical f-string sources are one
-    # key whatever the expression is, so comparing the compiled source is evidence, and
+    # key for a referentially transparent expression, so comparing the compiled source
+    # is evidence, and
     # `ast.unparse` normalises the quoting (`f"a"` and `f'a'` are one key, as at runtime).
     assert _duplicate_constant_key_sites('D = {f"a": 1, f"a": 2}\n') == [
         (1, 1, "f-string key f'a'")]
@@ -8696,6 +8704,14 @@ def test_the_duplicate_key_detector_catches_a_duplicate():
     # (`ruff` reports neither — measured, so this is not a hole of the guard's own).
     assert _duplicate_constant_key_sites('D = {f"{x}": 1, f"{y}": 2}\n') == []
     assert _duplicate_constant_key_sites('D = {f"a": 1, "a": 2}\n') == []
+    # ⛔ The one direction this arm gets WRONG, pinned so the wording cannot drift back
+    # to "whatever the expression is": an IMPURE expression is re-evaluated per key, so
+    # two byte-identical sources build two DISTINCT keys — and this reports a duplicate.
+    # It is a false RED, not a false PASS, and `ruff --select F601` flags the same shape
+    # (verified), so the guard stays no weaker than the oracle it backstops.
+    assert _duplicate_constant_key_sites(
+        'D = {f"{next(c)}": 1, f"{next(c)}": 2}\n') == [
+        (1, 1, "f-string key f'{next(c)}'")]
 
 
 def _duplicate_key_report(violations: list[str]) -> str:
