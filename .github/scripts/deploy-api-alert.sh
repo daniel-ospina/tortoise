@@ -450,7 +450,11 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # '\n\n\xff'` → `iconv -c` rc 0 emitting `0a 0a`, capture `[]`. All three causes named
           # before this round are FALSE there — the host's converter worked — so the parenthetical
           # now enumerates the blank-line case as well. Case 17n drives it with the REAL converter,
-          # because a shim is what hid this state from 17l's arm.
+          # because every earlier case that reached this sentence used a stub that emits NOTHING
+          # (17b arm b, 17i, 17m) or an all-undecodable tail (17l) — only the real converter makes
+          # "present, succeeds, and emits the tail's line breaks" true. (A forwarding shim that
+          # passes the real converter's output through DOES reach it too; what none of the
+          # emit-nothing stubs can do is produce it.)
           if [ -n "$excerpt" ]; then
             echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
           else

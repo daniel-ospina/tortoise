@@ -68,6 +68,9 @@
 #      everything, and the state sentence names that cause instead of blaming the host
 #  17m. the ASCII fallback's own stderr diagnostic is suppressed too — `tr` shares the
 #      notifier's job, so its complaint must not read as a second failure
+#  17n. a tail whose only ASCII is LINE BREAKS is a FOURTH cause of an empty excerpt — the
+#      converter is present and succeeds and the shell strips its trailing newlines, so the
+#      body must name that cause instead of blaming the converter (#12200, round 8)
 #  18. a LATE `deploy-api` failure must not read as "nothing shipped"
 #  19-21. `--resolve` (#8841) retires EXACTLY the keys whose steps reported
 #      `success` in this run (plus the job-level key only when `job.status` is
@@ -890,8 +893,8 @@ assert_not_contains "$BIGTAIL_BODY" '```' "case 17k: and it pastes no fenced blo
 # records for this whole harness.
 
 # ── case 17n: a tail whose only ASCII is LINE BREAKS — the converter worked (round 8)
-# The fourth cause of an empty excerpt, and the one a SHIM can never produce: `iconv` is present
-# and succeeds, emitting the tail's line breaks; the shell's command substitution strips
+# The fourth cause of an empty excerpt, and the one NO EMIT-NOTHING STUB can reach: `iconv` is
+# present and succeeds, emitting the tail's line breaks; the shell's command substitution strips
 # TRAILING newlines, so the capture is empty, and `tr` keeps the same `0a 0a` and is stripped the
 # same way. Measured on the real converter: `printf '\n\n\xff'` → `iconv -c` rc 0 emitting
 # `0a 0a`, capture `[]`. Before round 8 every named cause blamed the converter here — a host
