@@ -284,6 +284,14 @@ def test_a_degraded_arm_is_refused_and_says_so():
     for read_side in sorted(cal.READ_SIDE_DEGRADES):
         assert cal.rerank_degrade_refusal(
             {"applied": False, "degrade_reason": read_side}) is None, read_side
+    # ⛔ AND THE GATE STATE IS *NOT* ONE OF THEM. ``"disabled"`` is not a read
+    # outcome: ``score_pool`` forces ``enabled=True`` so it is unreachable today,
+    # and tolerating it made the guard FAIL OPEN the day that call site stopped
+    # forcing the gate — every query of a gate-off run would be counted as a read
+    # skip and the artifact would ship unmixed before-only figures unrefused.
+    assert cal.rerank_degrade_refusal(
+        {"applied": False, "degrade_reason": "disabled"}) is not None, (
+        "a gate-off run must be refused, not counted as a read-side skip")
     # …and the read-side skip must still be COUNTED, or the tolerance becomes a
     # silent hole. Pinned on the pure helper: "the increment statement exists"
     # stayed green when the guard was inverted so the counter could never fire

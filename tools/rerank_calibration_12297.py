@@ -215,7 +215,16 @@ def _arm_block() -> dict:
 #: ``_ndcg(None)`` is 0, and the block counts ``pool_absent``. Refusing on them
 #: would abort a ~46-minute run over a single query whose derived text matched
 #: nothing, and would blame the reranker for what the read returned.
-READ_SIDE_DEGRADES = frozenset({"disabled", "empty_pool", "empty_query"})
+#: ⛔ ``"disabled"`` is NOT a member: it is a GATE state, not a read outcome, and
+#: this set exists to say "the read handed the scorer nothing" — the reason the
+#: instrument may count rather than abort. ``score_pool`` forces ``enabled=True``
+#: (a calibration run measures the lever, it does not ask whether it is armed), so
+#: the member was unreachable — and it was the FAIL-OPEN member: the day that call
+#: site stopped forcing the gate, every query of a gate-off run would carry
+#: ``"disabled"``, be tolerated as a read outcome, and emit an artifact of unmixed
+#: before-only figures with no refusal at all. A dead member that would invert the
+#: guard if it ever lived is worse than no member.
+READ_SIDE_DEGRADES = frozenset({"empty_pool", "empty_query"})
 
 
 def score_pool(query: str, rows: list[dict], *, model: str,
