@@ -4996,40 +4996,64 @@ def _org_quota_block(sdk=None) -> dict:
     ``change_feed``, ``record``, ``build`` and ``wait_bound_breaches``, and the
     same reason ``record``'s cumulative counters do not degrade it (#10185).
     """
-    from tortoise.quota import org_quota_state
     try:
+        # ⛔ INSIDE the try (fresh review of #12426, P2): every other import here
+        # is guarded, and this one sat outside — so with the module broken, the
+        # ModuleNotFoundError escaped and `health` propagated an exception instead
+        # of answering with the documented `unknown` block. The except branch
+        # below therefore builds its dict BY HAND: the quota module may be exactly
+        # what failed.
         from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id, _current_org_limits
+        from tortoise.quota import (
+            count_resource_now,
+            org_quota_state,
+            quota_state_refused,
+            run_bounded_quota_state,
+        )
+        # ⛔ ContextVars are PER-THREAD, so they are read HERE on the request
+        # thread and the values (not the vars) are handed to the worker.
         org_id = _current_org_id.get()
         if not org_id or org_id == SELFHOST_ORG_ID:
             # stdio/operator/selfhost: no tenant registry, so the gate is a no-op.
             # Reported as `not_applicable`, NEVER as `open` (#11892).
             return org_quota_state(None, "points", sdk=sdk)
-        limits = _current_org_limits.get()
-        try:
-            if limits is None:
-                from tortoise.quota import resolve_org_limits
-                limits = resolve_org_limits(org_id)
-            else:
-                # ⛔ THE SAME AUGMENTATION `_enforce_quota` APPLIES, for the same
-                # reason: this lane's ContextVar dict carries no allowance keys,
-                # and the gate's allowance check reads the CARRIED dict. Omitting
-                # it made the report say `open` while every write was refused by
-                # a fault in that very read (fresh review of #12426).
-                limits = _carry_allowances(limits, "points")
-        except Exception as exc:  # noqa: BLE001, RUF100 — the write gate refuses here
-            # A raise from this resolution IS a refusal in the write path
-            # (`_enforce_quota` turns it into ``QuotaCheckError``, which `_safe`
-            # surfaces as a structured error), so the honest state is `closed`
-            # with the fault named — not `open`, and not `unknown`: we did
-            # measure what the gate does with these limits.
-            return {"resource": "points", "state": "closed",
-                    "points_used": None, "points_limit": None,
-                    "points_remaining": None,
-                    "error": f"the limits could not be resolved/carried for "
-                             f"this request ({type(exc).__name__}: "
-                             f"{str(exc)[:160]}), and the write gate refuses in "
-                             f"that state"}
-        return org_quota_state(limits, "points", sdk=sdk)
+        carried = _current_org_limits.get()
+
+        def _compute() -> dict:
+            """Resolve/carry + measure — ALL of it, on the bounded worker.
+
+            ⛔ The resolution is I/O too (registry `MATCH (:Team)`, or a PostgREST
+            GET), so leaving it on the `health` thread contradicted the bounded
+            tail this tool documents — the class `probe_db`/
+            `_bounded_graph_size` exist to keep off it (fresh review of #12426).
+            """
+            limits = carried
+            try:
+                if limits is None:
+                    from tortoise.quota import resolve_org_limits
+                    limits = resolve_org_limits(org_id)
+                else:
+                    # ⛔ THE SAME AUGMENTATION `_enforce_quota` APPLIES: this
+                    # lane's ContextVar dict carries no allowance keys, and the
+                    # gate's allowance check reads the CARRIED dict. Omitting it
+                    # made the report say `open` while every write was refused by
+                    # a fault in that very read (fresh review of #12426).
+                    limits = _carry_allowances(limits, "points")
+            except Exception as exc:  # noqa: BLE001, RUF100 — the gate refuses here
+                # A raise from this resolution IS a refusal in the write path
+                # (`_enforce_quota` turns it into ``QuotaCheckError``), so the
+                # honest state is `closed` with the fault named.
+                return quota_state_refused(
+                    "points",
+                    f"the limits could not be resolved/carried for this request "
+                    f"({type(exc).__name__}: {str(exc)[:160]}), and the write "
+                    f"gate refuses in that state")
+            # ⛔ INLINE count: we are ALREADY on the single-slot worker, so a
+            # nested submit would queue behind our own call and deadlock.
+            return org_quota_state(limits, "points", sdk=sdk,
+                                   count_runner=count_resource_now)
+
+        return run_bounded_quota_state(_compute)
     except Exception as exc:  # noqa: BLE001, RUF100 — health must answer, always
         # Same shape as every other unmeasurable arm: `unknown` + None values +
         # a reason. NOT `open` and NOT zeros — see org_quota_state's docstring.

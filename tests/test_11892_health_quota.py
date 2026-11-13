@@ -525,3 +525,108 @@ def test_health_still_answers_when_the_quota_read_explodes(tmp_path, monkeypatch
     assert report["quota"]["points_used"] is None
     assert report["quota"]["error"]
     sdk.close()
+
+
+# ── the BLOCK-level half of the allowance fix (mutation-verified gap) ──────
+
+
+def test_health_reports_closed_when_the_CARRIED_limits_arm_a_dimension(
+        tmp_path, monkeypatch):
+    """⛔ THE mutation a review found: delete the `_carry_allowances` call and the
+    whole suite stayed green at 41 passed.
+
+    The carry is what puts a configured dimension INTO the limits dict the gate
+    (and therefore this report) evaluates, so without it the block published
+    `open` for a tenant whose every write was refused. Arm a dimension through
+    the real seam (`_carry_allowances` → `carry_resolved_allowances` → resolver)
+    and assert the BLOCK — not just `org_quota_state` — says `closed`.
+    """
+    sdk = _sdk(tmp_path / "carry.db", "carry", points=1)
+    _wire_health(monkeypatch, sdk, {"org_id": "team11892", "max_points": 25_000})
+    import tortoise.mcp_server as mcp
+
+    # The resolver supplies a configured (and BLOCKED, i.e. unreadable) allowance.
+    monkeypatch.setattr(mcp, "_carry_allowances",
+                        lambda limits, resource: {**limits,
+                                                  "max_graph_storage_mb": 10})
+    import tortoise.allowance_gate as ag
+
+    monkeypatch.setattr(ag, "enforce_allowances",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            QuotaCheckError("dimension 'graph_storage' is BLOCKED")))
+    from tortoise.mcp_server import tortoise_health
+
+    report = tortoise_health()
+    assert report["quota"]["state"] == "closed", (
+        "a carried allowance that refuses the write must not read as open")
+    assert report["status"] == "ok"  # still reported, never folded
+    sdk.close()
+
+
+def test_health_reports_closed_when_the_carry_itself_raises(tmp_path, monkeypatch):
+    """A control-plane fault in the carry is a refusal, not `unknown`."""
+    sdk = _sdk(tmp_path / "carryboom.db", "carryboom", points=1)
+    _wire_health(monkeypatch, sdk, {"org_id": "team11892", "max_points": 25_000})
+    import tortoise.mcp_server as mcp
+
+    monkeypatch.setattr(mcp, "_carry_allowances",
+                        lambda limits, resource: (_ for _ in ()).throw(
+                            QuotaCheckError("allowances could not be resolved")))
+    from tortoise.mcp_server import tortoise_health
+
+    report = tortoise_health()
+    assert report["quota"]["state"] == "closed"
+    assert "could not be resolved/carried" in report["quota"]["error"]
+    sdk.close()
+
+
+def test_the_whole_block_runs_on_the_bounded_worker(tmp_path, monkeypatch):
+    """⛔ Resolving the limits is I/O too — it must NOT run on the health thread.
+
+    `resolve_org_limits` opens a registry SDK and runs a `MATCH (:Team)` with no
+    timeout, so bounding only the count left an unbounded read on a tool whose
+    contract is "always answers". Assert the resolver executes on the quota
+    worker, and that a resolver that never returns still yields a report inside
+    the budget.
+    """
+    import threading
+
+    import tortoise.quota as quota_mod
+    from tortoise.mcp_server import tortoise_health
+
+    sdk = _sdk(tmp_path / "bound.db", "bound", points=1)
+    # No carried limits → the block must resolve them itself.
+    _wire_health(monkeypatch, sdk, None)
+    seen = {}
+
+    def _slow_resolve(org_id):
+        seen["thread"] = threading.current_thread().name
+        return {"org_id": org_id, "max_points": 25_000}
+
+    monkeypatch.setattr(quota_mod, "resolve_org_limits", _slow_resolve)
+    monkeypatch.setattr(quota_mod, "_count_resource", lambda *a, **k: 1)
+    quota_mod.reset_quota_state_worker()
+    report = tortoise_health()
+    assert report["quota"]["state"] == "open"
+    assert seen["thread"] != threading.current_thread().name, (
+        "the limits resolution must not run on the request thread")
+
+    # …and a resolver that never returns still yields a report INSIDE the budget
+    # (the claim this test's name makes; fresh review of #12426, round 3).
+    import time
+
+    def _never(org_id):
+        time.sleep(1.0)
+        return {"org_id": org_id, "max_points": 25_000}
+
+    monkeypatch.setattr(quota_mod, "resolve_org_limits", _never)
+    monkeypatch.setattr(quota_mod, "QUOTA_STATE_TIMEOUT", 0.05)
+    started = time.monotonic()
+    slow = tortoise_health()
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.9, f"health blocked {elapsed:.2f}s on an unbounded resolve"
+    assert slow["quota"]["state"] == "unknown"
+    assert slow["quota"]["points_used"] is None
+    assert "budget" in slow["quota"]["error"]
+    sdk.close()
+    quota_mod.reset_quota_state_worker()

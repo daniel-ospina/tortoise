@@ -1505,8 +1505,90 @@ QUOTA_STATE_TIMEOUT = 3.0
 QUOTA_STATE_WORKER_NAME = "tortoise-quota-state-worker"
 
 
+def quota_state_unavailable(resource: str, reason: str,
+                            *, state: str = "unknown") -> dict:
+    """The ONE unmeasured shape: every number ``None``, a named reason.
+
+    Module-level so every arm — inside ``org_quota_state``, the bounded runner,
+    and ``mcp_server``'s block — builds the SAME shape. ⛔ ``None``, never ``0``
+    (#3253 / #9548): an unread counter and a zero are different facts.
+    """
+    return {"resource": resource, "state": state, "points_used": None,
+            "points_limit": None, "points_remaining": None, "error": reason}
+
+
+def quota_state_refused(resource: str, reason: str) -> dict:
+    """The ONE fail-closed-REFUSAL shape: ``closed``, numbers unknown, reason set.
+
+    Used when the gate refuses before measuring anything (a missing/unreadable
+    limit, an allowance seam that refuses or cannot be read, a limits resolution
+    that raises). The gate really would refuse in these states, so ``closed`` is
+    measured rather than inferred — and ``unknown`` stays reserved for this
+    report's own inability to finish.
+    """
+    return {"resource": resource, "state": "closed", "points_used": None,
+            "points_limit": None, "points_remaining": None, "error": reason}
+
+
+def count_resource_now(org_id: str, resource: str, sdk=None, **_) -> int:
+    """``_count_resource`` INLINE — for callers already on the bounded worker.
+
+    ⛔ A nested ``daemon_worker(...).submit`` inside the single-slot worker would
+    queue behind the OUTER call that is occupying the only slot, i.e. deadlock
+    until the budget expires. So a caller that bounds the WHOLE computation
+    (``run_bounded_quota_state``) passes this as ``count_runner``.
+    """
+    return _count_resource(org_id, resource, sdk=sdk)
+
+
+def run_bounded_quota_state(compute, resource: str = "points",
+                            *, timeout: float | None = None) -> dict:
+    """Run a WHOLE quota-state computation on the dedicated worker, bounded.
+
+    Why this exists rather than only bounding the count: resolving/carrying the
+    limits is also I/O — ``resolve_org_limits`` opens a registry SDK and runs a
+    ``MATCH (:Team)`` query with no timeout in registry mode, and a PostgREST GET
+    in Supabase mode. Leaving that on the ``health`` request thread reproduced the
+    class ``probe_db``/``_bounded_graph_size`` exist to keep OFF this tool (fresh
+    review of #12426: the tool's own new docstring claimed a bounded tail while
+    this read was unbounded). ``compute`` must therefore do its own counting
+    INLINE (``count_runner=count_resource_now``).
+
+    Never raises: a budget overrun (the worker abandoned, it is a daemon), a
+    backlog refusal, or an unexpected failure all return the ``unknown`` shape —
+    ``health`` must always answer (#2850).
+    """
+    from tortoise.monitoring import daemon_worker
+
+    budget = QUOTA_STATE_TIMEOUT if timeout is None else timeout
+    try:
+        future = daemon_worker(QUOTA_STATE_WORKER_NAME).submit(compute)
+    except Exception as exc:  # noqa: BLE001, RUF100 — backlog full must not raise
+        return quota_state_unavailable(
+            resource, f"the quota-state worker refused the submission "
+                      f"({type(exc).__name__}: {str(exc)[:120]})")
+    try:
+        return future.result(timeout=budget)
+    except TimeoutError:
+        # The wait can expire AFTER the computation landed (#11962): the future,
+        # not the clock, is the only witness that it ran.
+        if future.done() and not future.cancelled():
+            if future.exception() is None:
+                return future.result()
+            return quota_state_unavailable(
+                resource, f"the quota-state computation failed "
+                          f"({type(future.exception()).__name__})")
+        return quota_state_unavailable(
+            resource, f"the quota-state computation did not finish inside its "
+                      f"{budget}s budget")
+    except Exception as exc:  # noqa: BLE001, RUF100 — health must always answer
+        return quota_state_unavailable(
+            resource, f"the quota-state computation failed "
+                      f"({type(exc).__name__}: {str(exc)[:160]})")
+
+
 def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
-                    *, timeout: float | None = None) -> dict:
+                    *, timeout: float | None = None, count_runner=None) -> dict:
     """Report the ENFORCED quota boundary WITHOUT raising (#11892 option 3).
 
     Returns ``{"resource", "state", "points_used", "points_limit",
@@ -1565,20 +1647,17 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
     ``state``.
 
     ``timeout`` bounds the COUNT (default ``QUOTA_STATE_TIMEOUT``) on its own
-    daemon worker. Never raises: 'health must always answer' is the contract this
+    daemon worker — unless ``count_runner`` is supplied, which is what a caller
+    that already bounds the WHOLE computation passes (``count_resource_now``), so
+    the count does not nest a second submission into the single-slot worker.
+    Never raises: 'health must always answer' is the contract this
     exists to serve, so every failure arm is a returned dict, not an exception.
     """
     def _unavailable(reason: str, state: str = "unknown") -> dict:
-        return {"resource": resource, "state": state,
-                "points_used": None, "points_limit": None,
-                "points_remaining": None, "error": reason}
+        return quota_state_unavailable(resource, reason, state=state)
 
     def _refused(reason: str) -> dict:
-        """``closed`` by a FAIL-CLOSED arm: the numbers are `None` because the
-        gate refuses before it measures anything, and ``error`` names the check."""
-        return {"resource": resource, "state": "closed", "points_used": None,
-                "points_limit": None, "points_remaining": None,
-                "error": reason}
+        return quota_state_refused(resource, reason)
 
     # ── 0. THIS FUNCTION'S OWN INPUTS. "Never raises" is a promise `health`
     # depends on, so a caller-supplied shape it cannot read is an `unknown`, not
@@ -1672,8 +1751,8 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
         return {"resource": resource, "state": "open", "points_used": None,
                 "points_limit": None, "points_remaining": None, "error": None}
     try:
-        used = _bounded_resource_count(org_id, resource, sdk=sdk,
-                                       timeout=timeout)
+        runner = count_runner or _bounded_resource_count
+        used = runner(org_id, resource, sdk=sdk, timeout=timeout)
     except TimeoutError as exc:
         # OUR budget, not the gate's: `enforce_org_limit` has no count timeout, so
         # from here its answer is genuinely unknown (it may still land).
