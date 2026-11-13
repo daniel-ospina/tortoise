@@ -556,10 +556,23 @@ def test_the_docstring_discloses_the_cap_and_claims_no_complete_set():
             "full history",
             "whole history",
             "entire history",
+            # MEASURED gaps (cycle 8): six more wordings that survived the list
+            # above when appended as a later paragraph.
+            "every reading about",
+            "all readings about",
+            "the complete history",
+            "every measurement about",
+            "in full",
+            "no reading is omitted",
         )
         if p in low
     ]
     assert not pasted, (
         f"a COMPLETE-set claim reappeared in the docstring ({pasted}); the "
-        "summary rule alone cannot see a claim pasted into a later paragraph"
+        "summary rule alone cannot see a claim pasted into a later paragraph. "
+        "⚠️ This list is an ENUMERATION and will never be complete — a new "
+        "wording of the same claim can evade it. It is fail-closed on every "
+        "spelling measured so far (14 of them); the direction to extend is this "
+        "tuple, and the direction to distrust is a green run over a REWORDED "
+        "docstring."
     )

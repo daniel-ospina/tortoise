@@ -965,17 +965,26 @@ def latest_readings(
     vocabulary for a machine reading is a downstream wave (#11081), and this
     module must not become the thing that decides it.
 
-    ⛔ THE RESULT IS ONE INDICATOR'S READINGS; THE PLAN IS NOT ANCHORED ON IT. The
+    ⛔ THE RESULT IS ONE INDICATOR'S READINGS; NO PLAN ARM IS ANCHORED ON IT. The
     query is ``MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator``, and
-    ``(o)`` carries no label, so ``o.id`` cannot be index-anchored: MEASURED on
-    the lane with ``GRAPH.EXPLAIN``, BOTH the page query and the ``count(e)``
-    guard start with ``Node By Label Scan | (e:Event)`` (the page arm at
-    ``Node By Label and ID Scan``) and only then filter ``o.id``. Every page, and
-    the guard, therefore touches the graph's whole ``:Event`` label — so this read
-    is NOT a bounded subgraph in plan terms, and the cost below is per PAGE, not
-    per page-worth-of-rows. Fixing that needs an anchored pattern (or an index the
-    schema cannot express for an unlabelled ``(o)``) and is filed as **#12351**;
-    the correctness fix in this function does not depend on it.
+    ``(o)`` carries no label, so ``o.id`` cannot be index-anchored. MEASURED on
+    the lane with ``GRAPH.EXPLAIN`` (core ``42006``), the leaf depends on whether
+    an ``eventKind`` predicate is present — and NONE of the three is a bounded
+    subgraph:
+
+    * PAGE arm, either way: ``Node By Label and ID Scan | (e:Event)`` — the
+      ``id(e) >= $cursor`` predicate anchors the label, then ``o.id`` is filtered.
+    * ``count(e)`` guard WITH a kind: ``Node By Label Scan | (e:Event)``.
+    * ``count(e)`` guard WITHOUT a kind (``event_kind=None`` / ``""``):
+      ``All Node Scan | (o)`` → ``Conditional Traverse | (o)->(e:Event)`` — it
+      touches EVERY node in the graph, not only the ``:Event`` label.
+
+    So every page scans the whole ``:Event`` label, and the guard scans either
+    that label or the entire node set: the cost below is per PAGE, not per
+    page-worth-of-rows, and an ``event_kind=None`` caller pays the worst arm.
+    Fixing that needs an anchored pattern (or an index the schema cannot express
+    for an unlabelled ``(o)``) and is filed as **#12351**; the correctness fix in
+    this function does not depend on it.
 
     The rows are fetched by KEYSET PAGES on ``id(e)`` (see
     :data:`_READINGS_PAGE_SIZE`) rather than in one query, so a server-side
