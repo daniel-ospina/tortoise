@@ -666,10 +666,24 @@ class MCPReader:
             # SHRANK between the count and this read is a CORRECT read being refused, and
             # both are reachable on a live graph: `counts.Event` is fed by
             # `index_sessions`, and `:Event` nodes are deleted by the hosted entity-delete
-            # path. The resolution is identical in either direction — a fresh count that
-            # equals the rows read proves this read is the whole layer as it now is — so
-            # re-counting only the growth side left the mirror-image false block in place
-            # (PR-review cycle 2).
+            # path. Equality with a fresh count accepts, in either direction.
+            #
+            # ⚠️ WHAT THAT PROVES, exactly — the assumption is worth stating because a
+            # comment claiming more than the code proves is this file's own recurring
+            # defect. Acceptance means: the request (`reported + 1`) was at least the true
+            # size (so a short response cannot have been cut), AND the layer did not change
+            # AGAIN between this read and the re-read. A change confined to the first
+            # window is RESOLVED here, not refused.
+            #
+            # ⚠️ The GROWTH direction is therefore bounded at exactly +1: the request only
+            # had one row of headroom, so a layer that gained two or more Events (an
+            # `index_sessions` sweep) returns `reported + 1` rows and the re-count reports
+            # a higher number — refused, not accepted. That is fail-CLOSED and diagnosable
+            # (re-run the census), and it is stated rather than left to be discovered; a
+            # re-issued read sized to the fresh count would remove the block at the cost of
+            # a third request window whose own staleness would need the same treatment.
+            # The SHRINK direction has no such bound: `reported + 1 > len(raw)` proves the
+            # response was whole for any magnitude.
             fresh = _node_count(self.counts(), "Event")
             if fresh is not None and fresh == len(raw):
                 self._note(
@@ -682,12 +696,12 @@ class MCPReader:
                     f"the Event layer read {len(raw)} rows but counts.Event reports {reported} "
                     "— refusing a layer two surfaces disagree about. Both count `:Event` with "
                     "the same predicate, so the difference is one of: a genuinely partial / "
-                    "clamped read; another writer's Event created — or one deleted — "
-                    "between the status read and this read (the count is re-read "
-                    "immediately before this call to keep that window to two requests, and "
-                    "a DISAGREEMENT is re-counted a second time before refusing — the "
-                    f"re-read reported {fresh!r}, not {len(raw)}); or a `counts` section "
-                    "that is itself stale, or scoped to a different graph")
+                    "clamped read; a change between the status read and this read that "
+                    "was TOO LARGE for the request's one row of headroom, or that happened "
+                    "AGAIN between this read and the re-read (a DISAGREEMENT is re-counted "
+                    f"once before refusing — the re-read reported {fresh!r}, not "
+                    f"{len(raw)}); or a `counts` section that is itself stale, or scoped "
+                    "to a different graph")
         empty_text = 0
         out: list[C.Row] = []
         for r in raw:

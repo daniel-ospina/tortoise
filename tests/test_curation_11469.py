@@ -4123,8 +4123,13 @@ def test_the_event_layer_is_no_longer_claimed_unreadable():
 def test_an_events_text_is_its_name_with_title_and_subject_fallbacks():
     """An Event's text is `name`; a meeting persists `title`. Content-address on either.
 
-    `Row.stable_key` is content-addressed for this class, so an empty text folds every
-    such row onto one keeper — the trap the operator layer was fixed for.
+    `Row.stable_key` is content-addressed for this class, so rows sharing an empty text do
+    share one keeper. ⚠️ Do not describe that as the operator layer's trap: there the
+    defect was a false duplicate CLAIM (one row reported as the other's duplicate, which
+    the report then contradicted). Event duplicates are withheld outright — `classify()`
+    passes `duplicate_of` only to `classify_point` — so on this class the shared keeper is
+    invisible in the report and is not a false claim. What matters here is only that the
+    text is `name`-derived rather than empty, which is what the assertions below pin.
     """
     mod = _tool_module()
     reader = mod.MCPReader(_event_surface(), None)
@@ -4431,6 +4436,13 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         "the plan's wiring row still prescribes the clamped limit the code removed")
     assert "min(reported + 1" not in plan.split("NOT capped")[0], (
         "the plan still describes the clamped request as the implementation")
+    # The plan must not describe the re-count as growth-only either: since the symmetric
+    # fix, a SHRINK with an agreeing fresh count is accepted, and the growth-only wording
+    # states the opposite of the code for the mirror direction (PR-review cycle 3).
+    assert "growth direction is re-counted" not in plan, (
+        "the plan still describes the re-count as growth-only")
+    assert "Growth is tolerated only up to **+1**" in plan, (
+        "the plan does not state the growth direction's +1 bound")
 
     # ...and the row records the change rather than dropping the subject.
     assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (

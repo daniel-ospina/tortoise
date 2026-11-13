@@ -293,12 +293,16 @@ verification pass** (the second full walk plus the two page re-reads), which is 
 schedule against: the hosted endpoint can answer `429 Too Many Requests` part-way. The run then fails loudly rather than reporting a partial census (the reader raises), and
 nothing is written — but a production run should be scheduled rather than fired in parallel with a
 busy fleet. A 429 arriving as an MCP error result is a `CurationRefused` ⇒ **rc 3** with the reason on stderr (see the exit-code table); a DB fault or a timeout that is not shaped as a refusal raises ⇒ rc 1.
-**+1 call since 2026-11-13 for `inventory`, +2 for `plan`:** the operator layer is read in a single
+**+1 call for `inventory` / +2 for `plan` since 2026-11-13, and +2 MORE for BOTH verbs since
+#12378:** the operator layer is read in a single
 `tortoise_search(entity_type="operator")` call that returns all 3,727 rows at once (measured 1m57s for
 a full `inventory --no-verify-read` over 15,842 points + 3,727 operators + 1,578 sources), and `plan`
 additionally reads `graph_overview(section="structure")` — the count it reconciles against — which
-`inventory` was already reading (~70 calls for a default `plan`, ~40 for
-`inventory --no-verify-read` — 34 of them the point walk plus its page re-reads).
+`inventory` was already reading. The Event layer adds a **fresh `status` read plus one
+`get_entity(type="events")`** to EACH verb (a design choice: the count is re-read immediately before
+the rows so the refusal's two-request window is true, rather than reused from before the point walk)
+over **4,670 more rows** (~72 calls for a default `plan`, ~42 for `inventory --no-verify-read` —
+34 of them the point walk plus its page re-reads).
 
 ## Why this pass has not written anything yet (three blockers, all measured)
 

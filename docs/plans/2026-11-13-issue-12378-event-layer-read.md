@@ -125,10 +125,15 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
    `min(reported + 1, EVENT_READ_CEILING)` ate the headroom exactly AT it, so a layer
    reporting 10,000 that had grown to 10,050 returned 10,000 rows == the count and was
    filed `events_reconciled: True` with 50 rows unread.
-   ⛔ And the **growth direction is re-counted once** before refusing (finding 6):
-   `counts.Event` is fed by `index_sessions`, so a layer one row larger than the count is
-   a CORRECT read and refusing it is a false block. A fresh count equal to the rows
-   accepts (and says so on `read_note`); anything else still refuses.
+   ⛔ And a disagreement in **EITHER direction is re-counted once** before refusing
+   (finding 6, made symmetric in PR-review cycle 2): `counts.Event` is fed by
+   `index_sessions` (growth) and `:Event` is deleted by the hosted entity-delete path
+   (shrink), so a layer that changed between the two requests is a CORRECT read and
+   refusing it is a false block. A fresh count equal to the rows accepts in either
+   direction (and says so on `read_note`); anything else still refuses.
+   ⚠️ Growth is tolerated only up to **+1** — the request is sized `reported + 1`, so a
+   sweep that added two or more Events in that window still refuses (fail-closed,
+   diagnosable by re-running). Shrink has no such bound.
 2. Content lane: `content := name`, fallbacks `title` then `subject`; rows carrying
    none are COUNTED on `read_note`. ⚠️ Round-2 correction: the note says only what is
    TRUE — those rows are keyed `node_type:kind:sha`, so **same-kind** ones share a
