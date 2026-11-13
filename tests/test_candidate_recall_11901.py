@@ -1231,9 +1231,14 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
         # therefore REAL and 8x larger here, which is exactly why the frozen
         # control sits beside it: `arms["variant"]["3"]["attached_norm_only"]` is
         # 1, i.e. pre-#12295 behaviour, recomputed in the same run.
-        # Still discriminating: inverting the per-PAIR accumulator reports every
-        # NON-binding pair (27-8=19 shipped, 18-8=10 zep); accumulating it per
-        # (pair x k) over-reports it 4x (32).
+        # ⛔ Still discriminating, and these two figures are MEASURED by mutation
+        # (mutation applied to `run()`, this single test re-run, the tool restored
+        # by `cp` with `git diff --quiet` confirming a clean tree):
+        #   inverting the per-PAIR accumulator  -> 28  (= 36 pairs - 8 that attach;
+        #       the inverted loop walks EVERY pair, gated or not, so the arithmetic
+        #       is NOT `gated_pairs - 8`, which is what this comment first claimed)
+        #   accumulating it per (pair x k)      -> 32  (= 4 windows x 8)
+        # Both red `would_attach_before_any_k == 8`; neither equals 8.
         assert vg["would_attach_before"] == 8, (p, vg)
         assert vg["would_attach_before_any_k"] == 8, (p, vg)
         assert arms["variant"]["3"]["attached_norm_only"] == 1, arms["variant"]

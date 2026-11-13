@@ -580,6 +580,117 @@ def test_the_scan_reports_its_largest_block_and_caps_NOTHING(monkeypatch):
     assert stats["max_block_size"] == n      # reported, not capped
 
 
+def test_sibling_spellings_of_ONE_entity_surface_as_a_refused_TIE(monkeypatch):
+    """Pins the DECLARED cost of the per-block settle, in the fail-CLOSED direction.
+
+    ⛔ This is the residual `entity_resolver.entity_candidates` documents twice
+    (its "the difference is deliberate" note above `emitted`, and the "AND ONE
+    ARM CAN MAKE A ROW UNMERGEABLE" block): with several spellings of ONE entity,
+    the newest candidates gain a second 1.0 row against a SIBLING duplicate and
+    come out ``ambiguous``/``tied_with``. Measured on four spellings of one entity
+    (all folding to ``plan doc``): o2 merges cleanly into o1, o3/o4 do not, and
+    ``entity_pair_for`` — the function ``approve_merge`` applies — RAISES on both.
+
+    ⛔ Why that is the right direction and not a bug to fix: a candidate that
+    folds identically to two carriers is indistinguishable at this layer from a
+    candidate that folds identically to two DIFFERENT entities, and the second
+    case is the declared `E`-fold residual (``C++``/``C#``/``C``). Merging one of
+    those is a FALSE MERGE — invisible, and the failure `#2730` §6.7 traded away
+    for cheap false splits. Reviewers saw this row and proposed hoisting
+    ``settled`` out of the block loop; measured, that collapses the two-carrier
+    tie to a clean row (``test_the_per_block_settle_is_what_keeps_a_TWO_CARRIER_tie_VISIBLE``
+    pins why it is refused). A lane that wants the mergeability back is REOPENING
+    #2730 §6.7, not fixing a regression — say so in the issue, do not flip it here.
+    """
+    from tortoise import entity_resolver
+
+    ents = [
+        _entity("o1", "the plan doc", kind="core:other"),
+        _entity("o2", "plan doc", kind="core:other",
+                created="2026-01-02T00:00:00Z"),
+        _entity("o3", "plan_doc", kind="core:other",
+                created="2026-01-03T00:00:00Z"),
+        _entity("o4", "plan-doc", kind="core:other",
+                created="2026-01-04T00:00:00Z"),
+    ]
+    assert {e["folded"] for e in ents} == {"plan doc"}, (
+        "the four spellings no longer share one fold — this fixture is not measuring "
+        "the sibling-duplicate class")
+    _stub_scan(monkeypatch, ents)
+    rows = entity_resolver.entity_candidates(None, include_semantic=False, limit=None)
+    by_id = {r["id"]: r for r in rows}
+
+    assert by_id["o2"]["ambiguous"] is False, by_id["o2"]
+    assert entity_resolver.entity_pair_for(None, "o2")["survivor_id"] == "o1"
+
+    for cid, tied in (("o3", ["o2"]), ("o4", ["o2", "o3"])):
+        row = by_id[cid]
+        assert row["ambiguous"] is True, (
+            f"{cid} is no longer reported as a tie: {row} — the per-block settle was "
+            "hoisted, which hides the two-CARRIER tie too (see the sibling test)")
+        assert row["tied_with"] == tied, row
+        assert row["existing_id"] == "o1", row
+        try:
+            entity_resolver.entity_pair_for(None, cid)
+        except ValueError as exc:
+            assert "refusing to guess" in str(exc), exc
+        else:  # pragma: no cover - the failure this pin exists for
+            raise AssertionError(
+                f"{cid} resolved to a single survivor — `approve_merge` would fold one "
+                "of several spellings of ONE entity on a guess")
+
+
+def test_the_per_block_settle_is_what_keeps_a_TWO_CARRIER_tie_VISIBLE(monkeypatch):
+    """The tie must survive across BLOCKS, or the `E`-fold residual becomes a merge.
+
+    ``C++`` / ``C#`` / ``C`` are three DIFFERENT entities that fold to one key
+    (`#12295`'s third declared residual). They land in more than one block, and
+    ``settled`` is re-initialised per block, so ``C`` is compared against BOTH
+    carriers and comes out ``ambiguous`` — ``entity_pair_for`` refuses, which is
+    the only safe answer.
+
+    ⛔ MEASURED, and this is why the reviewer-proposed fix is refused: hoisting
+    ``settled`` beside ``emitted`` (one line, scan scope) settles ``C`` against the
+    first carrier it meets, and the SAME fixture then reads ``o3 -> o1,
+    ambiguous False`` with ``entity_pair_for('o3') -> 'o1'`` — i.e. ``approve_merge``
+    would fold ``C`` into ``C++`` while ``C#`` exists. That is a false merge, so the
+    fix that buys back the sibling-duplicate mergeability
+    (``test_sibling_spellings_of_ONE_entity_surface_as_a_refused_TIE``) spends the
+    declared residual to get it. This test reds if anyone hoists it.
+    """
+    from tortoise import entity_resolver
+
+    ents = [
+        _entity("o1", "C++", kind="core:other"),
+        _entity("o2", "C#", kind="core:other", created="2026-01-02T00:00:00Z"),
+        _entity("o3", "C", kind="core:other", created="2026-01-03T00:00:00Z"),
+    ]
+    assert {e["folded"] for e in ents} == {"c"}, (
+        "the fold no longer collides here — invariant 3's residual is stale")
+    #: The collision is only VISIBLE across blocks: with a single block the
+    #: per-block settle inside one block would hide it too. Asserted so a future
+    #: single-key blocker cannot quietly turn this fixture into a tautology.
+    assert len(BlockIndex.from_rows(ents).blocks()) > 1, (
+        "this fixture must span more than one block, or it cannot distinguish the "
+        "per-block settle from a scan-scope one")
+    _stub_scan(monkeypatch, ents)
+    rows = entity_resolver.entity_candidates(None, include_semantic=False, limit=None)
+    by_id = {r["id"]: r for r in rows}
+
+    assert by_id["o3"]["ambiguous"] is True, (
+        f"`C` is no longer a tie against BOTH carriers: {by_id['o3']} — a hoisted "
+        "`settled` would let approve_merge fold `C` into `C++`")
+    assert by_id["o3"]["tied_with"] == ["o2"], by_id["o3"]
+    try:
+        entity_resolver.entity_pair_for(None, "o3")
+    except ValueError as exc:
+        assert "refusing to guess" in str(exc), exc
+    else:  # pragma: no cover - the false merge this pin exists for
+        raise AssertionError(
+            "`C` resolved to ONE survivor while `C#` is a different entity — the "
+            "declared E-fold residual just became a false merge")
+
+
 def test_the_fold_collision_is_a_declared_residual_not_a_regression():
     """Pins the THIRD declared residual: `E` is non-injective and attaches alone.
 

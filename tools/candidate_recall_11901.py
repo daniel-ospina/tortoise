@@ -1153,9 +1153,6 @@ def run(args: argparse.Namespace) -> int:
         #: COST side of pair completeness (a blocker can reach 1.0 by proposing
         #: everything, which is the number a lone recall figure hides).
         blocked_sizes: dict[int, list[int]] = {k: [] for k in KS}
-        #: (row, surface) pairs the blocker's cost figure is computed over —
-        #: materialised so `reduction_ratio` is computed by its one helper.
-        _mk_mentions: list[tuple[dict, str]] = []
         #: #12294, variant arm: what the gate removes from the pair population.
         #: ``gated_pairs`` counts the gated MENTIONS in this arm, at
         #: ``_GATE_KS[0]`` only (the denominator is ``pairs`` at the SAME window,

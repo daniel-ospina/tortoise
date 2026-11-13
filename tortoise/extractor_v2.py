@@ -5795,11 +5795,19 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     non-injective key is for, and a leading ``#`` is NOT one of them: the fold
     already absorbs it (``#12295`` and ``12295`` both fold to ``12295``, so that
     class travels the ordinary ``E`` key — see
-    ``entity_blocking.py``'s `key_of` note). What IS non-injective is a path
-    BASENAME, and in THIS path a basename never decides at all: this caller does
-    not pass ``complete=True``, and ``attach_matches`` refuses a basename
-    candidate on anything less than a complete population with exactly one
-    carrier. ``name`` is never rewritten; the key is derived for the comparison
+    ``entity_blocking.py``'s `key_of` note). ⛔ The NON-injective classes are
+    both real, and only ONE of them is held by an ambiguity rule: a path
+    BASENAME never decides on THIS path at all (this caller does not pass
+    ``complete=True``, and ``attach_matches`` refuses a basename candidate on
+    anything less than a complete population with exactly one carrier), while the
+    ``E`` FOLD is non-injective, DOES attach alone, and is the class this rung
+    newly binds — ``C++``, ``C#`` and ``C`` all fold to ``c``, so a capture window
+    holding exactly one of them binds the other (measured:
+    ``_find_existing_entity([{id:"obj-csharp", name:"C#"}], "C++")`` returns
+    ``("obj-csharp", "folded")``; pinned at
+    ``tests/test_12295_entity_blocking.py`` and declared as invariant 3 in
+    ``entity_blocking.py``). Do NOT read this rung as safe-except-basenames.
+    ``name`` is never rewritten; the key is derived for the comparison
     and discarded.
     """
     norm_name = _norm(name)
