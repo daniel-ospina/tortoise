@@ -80,6 +80,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # #9018: the alert legs (`.github/scripts/published-artifact-alert.sh` →
+      # `auto-file-issue.sh`) reach the repo through `gh`, so this job needs it. Without
+      # this step a pool runner that ships no `gh` fails the ALERT step with 127 and the
+      # durable record this workflow exists to leave is never filed. Declared here AND in
+      # `tests/test_runner_tool_contract.py`'s `GH_JOBS`: the scanner reads the workflow
+      # TEXT, so once the `gh` call lives behind a script it no longer sees the
+      # requirement — the declaration is what keeps that blind spot from reading as
+      # coverage (#12363 review round 6).
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       # No `uv`, no project install: the tool is stdlib-only on purpose, so this job
       # measures the PUBLISHED dependency graph and never the repo's own environment.
       - name: Smoke the published artifact (documented first command, clean HOME)

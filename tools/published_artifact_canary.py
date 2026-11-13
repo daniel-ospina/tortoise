@@ -65,12 +65,34 @@ does no I/O, so the verdict logic is testable offline; the impure half
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below. `from datetime import UTC`
+# is 3.11+-only, so on an older interpreter it would raise ImportError and the failure
+# would read as "this tool is broken" rather than "your interpreter is too old". Same
+# shape (D9) as every other `tools/` entry point; the class-level pin is
+# `tests/test_entry_point_python_guard.py` (#12363 review round 6).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # The path is SPELLED OUT, not taken from `__file__`: the class-level pin compiles
+    # and execs this node on its own, with no module globals, so `__file__` would raise
+    # NameError instead of the refusal.
+    print(
+        f"published-artifact-canary (tools/published_artifact_canary.py): requires "
+        f"Python >= 3.12 (got {sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/published_artifact_canary.py`",
+        file=sys.stderr,
+    )
+    # ⛔ 2, not `collision_preflight`'s 3: both consumers branch on `exit_code == 2` to
+    # render "a DETECTOR outage is not a release signal". An exit 3 would be published as
+    # "the artifact is broken — cut a release", which is the mis-routing this tool exists
+    # to prevent.
+    raise SystemExit(2)
+
 import argparse
 import http.client
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -571,6 +593,16 @@ def _clean_env(home: Path) -> dict[str, str]:
     }
     env["HOME"] = str(home)
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    # ⛔ DO NOT DELETE. `--isolated` does NOT close the config-file class: it skips the
+    # USER config, but a GLOBAL `/etc/pip.conf` still loads (measured: `pip config debug
+    # --isolated` lists `/etc/pip.conf` and no `user:`), and its `extra-index-url` MERGES
+    # with the CLI `--index-url` — so a mirror can satisfy the requirement and this gate
+    # reports PASS over bytes PyPI never served. `os.devnull` is the documented kill
+    # switch: pip's `Configuration._load_config_files` early-returns for EVERY kind when
+    # the ENV entry is devnull, and `iter_config_files` reads `PIP_CONFIG_FILE` OUTSIDE
+    # its `isolated` guard, which is precisely why this works where the flag does not
+    # (#12363 review round 6).
+    env["PIP_CONFIG_FILE"] = os.devnull
     # A fresh, empty database dir is the whole point: the documented path under
     # test is the FIRST run on a machine that has never run tortoise.
     env.pop("XDG_CONFIG_HOME", None)
