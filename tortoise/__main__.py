@@ -12930,7 +12930,10 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
 
     chunks: list[bytes] = []
     total = 0
-    reader = getattr(resp, "read1", None) or resp.read
+    # ⛔ A body without `read1` is read ONE byte per call: `read(n)` blocks until
+    # `n` bytes or EOF, so a chunk-sized fallback would put the leg's deadline
+    # back where the chunking exists to remove it.
+    reader = getattr(resp, "read1", None) or (lambda n: resp.read(min(n, 1)))
     while total < cap:
         if time.monotonic() >= deadline:
             # ⛔ CUT is REPORTED, never silent: a body truncated by the
@@ -12964,7 +12967,18 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
         # the exact arm round 13 added. The callers already handle it.
         chunk = reader(min(4096, cap - total))
         if not chunk:
-            return b"".join(chunks), False
+            # ⛔ EOF is NOT automatically a COMPLETE body: `read1` returns `b""`
+            # on a premature close instead of raising `IncompleteRead` (declared
+            # 200, closed after 10, `length == 190`, no exception), so a
+            # truncated reply would report "not cut" and reach the captive-portal
+            # arm — the false red the flag removes, on a different trigger.
+            # `length` is the bytes still OWED; `None` (chunked) means the stream
+            # itself declared its end.
+            outstanding = getattr(resp, "length", None)
+            if outstanding is None:
+                inner = getattr(resp, "fp", None)
+                outstanding = getattr(inner, "length", None)
+            return b"".join(chunks), outstanding not in (None, 0)
         # A reader that IGNORES `n` (a test double, a custom transport, a
         # proxy shim) would otherwise append the same bytes on every pass
         # until the cap — duplicating the body instead of bounding it.
@@ -13254,6 +13268,18 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         v = float(value)
         return f"{v:.0f}" if v.is_integer() else f"{v:.1f}"
 
+    def _reason_text(reason: object) -> str:
+        """The scrubbed reason — or its TYPE when the exception stringifies empty.
+
+        `http.client.RemoteDisconnected()` (the peer accepted and closed without
+        a response) has `str() == ""`, so the row rendered a dangling em dash on
+        the first attempt (`cannot reach … — .`) and an empty parenthesis on a
+        retry (`… timed out at 5s ().`): a diagnostic that carries no diagnosis,
+        on a common proxy/restart shape (fresh review round 18).
+        """
+        return (_printable(_scrub(str(reason), api_url, api_key))
+                or type(reason).__name__)
+
     def _retry_wait_claim(reason: object, silent: str, refused: str,
                           failed: str) -> str:
         """What a retry row may CLAIM about the retry (fresh review rounds 16/17).
@@ -13273,7 +13299,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         Only `ConnectionRefusedError` is a refusal; the rest say the retry
         FAILED, and the scrubbed reason carries what actually happened.
         """
-        scrubbed = _printable(_scrub(str(reason), api_url, api_key))
+        scrubbed = _reason_text(reason)
         if _is_timeout_reason(reason):
             return f"{silent} ({scrubbed})"
         if isinstance(reason, ConnectionRefusedError):
@@ -13328,10 +13354,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                     health_read_error = (
                         f"the body was CUT at the {_fmt_bound(deadline - started)}s"
                         " deadline before it completed")
-                # A CUT body is PARTIAL by definition: parsing it would only
-                # overwrite the cut verdict with a JSONDecodeError and lose the
-                # "CUT at the deadline" fact this row exists to carry.
-                if not _cut and isinstance(raw_health, bytes) and raw_health:
+                elif isinstance(raw_health, bytes) and raw_health:
                     parsed_health = _json.loads(raw_health.decode("utf-8", "replace"))
                     if isinstance(parsed_health, dict):
                         candidate_status = parsed_health.get("status")
@@ -13389,7 +13412,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             # fragments, the one rule #5109 established for this file.
             results.append(("Hosted", "⚠️",
                             f"cannot reach {base} — "
-                            f"{_printable(_scrub(str(reason), api_url, api_key))}"
+                            f"{_reason_text(reason)}"
                             ". The credential is UNGRADED (nothing was asked of "
                             "it) — check https://api.premiselabs.co/health or your "
                             "TORTOISE_API_URL, then `tortoise config show`"
@@ -13504,7 +13527,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     except (OSError, http.client.HTTPException, ValueError) as exc:
         reason = getattr(exc, "reason", None) or exc
         if not _is_timeout_reason(reason):
-            reach_error = _printable(_scrub(str(reason), api_url, api_key))
+            reach_error = _reason_text(reason)
         else:
             # Cold start, not a broken credential: retry once, bounded.
             _team_retry_budget = _leg_budget(_DOCTOR_TEAM_RETRY_TIMEOUT_S)
@@ -13576,6 +13599,27 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         return
 
     if team_code == 401:
+        # ⛔ AN `oat_` TOKEN IS NOT A BROKEN KEY (fresh review at `0604e2f015`).
+        # The env-only gate refuses to PROBE one, but two other routes reach this
+        # arm with an OAuth token — an explicit `TORTOISE_API_URL`, and a STORE
+        # file holding one — and both graded `❌ … Re-mint it: tortoise signup
+        # (new team)` + exit 1 for a WORKING setup. REST `/v1/*` accepts keys and
+        # JWTs only: `oat_` access tokens are MCP-only
+        # (`docs/adr/ADR-010-auth-planes-session-agent-key.md:62-64`), and the
+        # server enforces it (`tortoise/hosted_api.py` rejects any Bearer that is
+        # not `API_KEY_PREFIXES`, so `/v1/team` never resolves one). The 401 is
+        # therefore the EXPECTED answer, not a verdict on the credential — and
+        # "refused the STORED key" is false for an env-supplied one either way.
+        if api_key.startswith(_OAUTH_ONLY_KEY_PREFIX):
+            results.append(_combine("⚠️",
+                            f"{health_part}; /v1/team 401 — this is an `oat_` "
+                            "OAuth access token, which REST `/v1/*` does not "
+                            "accept by design (ADR-010: `oat_` tokens are "
+                            "MCP-only), so the 401 is expected and the token is "
+                            "NOT proven broken. Use it against the MCP endpoint, "
+                            "or store a `tt_` key with `tortoise signup` if you "
+                            "want the REST verdict"))
+            return
         results.append(_combine("❌",
                         f"{health_part}; /v1/team 401 Invalid API key — "
                         f"{base} refused the stored key. Re-mint it: `tortoise "

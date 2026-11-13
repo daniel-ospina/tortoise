@@ -1175,12 +1175,21 @@ class TestDoctorHostedCredential:
                           api_url="https://api.example.test")
         seen_health: list[str] = []
 
+        from urllib.error import URLError
+
         def handler(url, req):
             if url.endswith("/health"):
                 seen_health.append(url)
                 if len(seen_health) == 1:
                     raise TimeoutError("timed out")
-                raise ConnectionRefusedError("[Errno 111] Connection refused")
+                # ⛔ The WRAPPED shape `urlopen` actually raises on the wire: a
+                # refusal arrives as `URLError(ConnectionRefusedError(...))`, and
+                # `isinstance(URLError(...), ConnectionRefusedError)` is False —
+                # so the bucket is only right because of the caller's `.reason`
+                # unwrap. Injecting the bare exception let that unwrap be deleted
+                # with the suite green (fresh review round 18).
+                raise URLError(ConnectionRefusedError(
+                    "[Errno 111] Connection refused"))
             return _FakeResponse(200, b'{"org_id":"org-r"}')
 
         _stub_hosted(monkeypatch, handler)
@@ -1197,6 +1206,9 @@ class TestDoctorHostedCredential:
         assert "refused on retry" in hosted, hosted
         assert "and none in" not in hosted, hosted
         assert "Connection refused" in hosted, hosted
+        # The FIRST bound, not the retry's: naming the 30 s retry bound here
+        # would report a wait the reader cannot map to an attempt (round 14).
+        assert "timed out at 5s" in hosted, hosted
         assert rc == 0, out[-800:]
 
     def test_a_refused_team_retry_is_not_reported_as_a_wait(
@@ -1218,7 +1230,9 @@ class TestDoctorHostedCredential:
             seen_team.append(url)
             if len(seen_team) == 1:
                 raise TimeoutError("timed out")
-            raise ConnectionRefusedError("[Errno 111] Connection refused")
+            from urllib.error import URLError
+            raise URLError(ConnectionRefusedError(
+                "[Errno 111] Connection refused"))
 
         _stub_hosted(monkeypatch, handler)
         db_path = str(tmp_path / "team-refused-retry.db")
@@ -1238,8 +1252,10 @@ class TestDoctorHostedCredential:
         assert "and none in" not in hosted, hosted
         assert rc == 0, out[-800:]
 
+    @pytest.mark.parametrize("leg,first_bound", [("health", "5s"), ("team", "10s")])
     def test_a_non_refusal_retry_failure_is_not_called_a_refusal(
-            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+            self, leg, first_bound, clear_db_env, tmp_path, capsys, monkeypatch,
+            _hermetic_hosted_identity):
         """A DNS/TLS/closed-connection failure is not the endpoint REFUSING.
 
         Splitting the world into "timeout" and "refused" replaced one
@@ -1248,8 +1264,55 @@ class TestDoctorHostedCredential:
         and the row's remedy then blames the endpoint/proxy while the real cause
         needs a different fix (fresh review round 17). Only
         `ConnectionRefusedError` is a refusal.
+
+        Parametrised over BOTH legs, and each leg asserts the FIRST bound in the
+        sentence: the `failed=` strings were the other unpinned half — a row
+        claiming "timed out at 30s" shipped with the suite green (round 18).
         """
         import socket
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url="https://api.example.test")
+        seen: list[str] = []
+
+        def handler(url, req):
+            is_health = url.endswith("/health")
+            if (leg == "health") != is_health:
+                return (_FakeResponse(200, b'{"status":"ok"}') if is_health
+                        else _FakeResponse(200, b'{"org_id":"org-g"}'))
+            seen.append(url)
+            if len(seen) == 1:
+                raise TimeoutError("timed out")
+            raise socket.gaierror(-2, "Name or service not known")
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / f"dns-retry-{leg}.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, f"doctor dns retry {leg} seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert len(seen) == 2, f"the {leg} retry must still be attempted"
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "the retry failed" in hosted, hosted
+        assert "refused on retry" not in hosted, hosted
+        assert "Name or service not known" in hosted, hosted
+        assert f"timed out at {first_bound}" in hosted, hosted
+        assert rc == 0, out[-800:]
+
+    def test_an_empty_reason_names_the_exception_type(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """`RemoteDisconnected` stringifies EMPTY — the row must still say what.
+
+        A peer that accepts and closes without a response raises
+        `http.client.RemoteDisconnected` whose `str()` is `''` (verified against
+        the real `urllib`), so the row rendered `cannot reach … — .` on the first
+        attempt and `… timed out at 5s ().` on a retry: a diagnostic carrying no
+        diagnosis, on a common proxy/restart shape (fresh review round 18).
+        """
+        import http.client
 
         _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
                           api_url="https://api.example.test")
@@ -1260,23 +1323,22 @@ class TestDoctorHostedCredential:
                 seen_health.append(url)
                 if len(seen_health) == 1:
                     raise TimeoutError("timed out")
-                raise socket.gaierror(-2, "Name or service not known")
-            return _FakeResponse(200, b'{"org_id":"org-g"}')
+                raise http.client.RemoteDisconnected()
+            return _FakeResponse(200, b'{"org_id":"org-e"}')
+
 
         _stub_hosted(monkeypatch, handler)
-        db_path = str(tmp_path / "dns-retry.db")
+        db_path = str(tmp_path / "empty-reason.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
-        _seed_db(db_path, "doctor dns retry seed")
+        _seed_db(db_path, "doctor empty reason seed")
 
-        rc = _run_doctor([])
+        _run_doctor([])
         out = capsys.readouterr().out
 
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1500:]
-        assert "the retry failed" in hosted, hosted
-        assert "refused on retry" not in hosted, hosted
-        assert "Name or service not known" in hosted, hosted
-        assert rc == 0, out[-800:]
+        assert "RemoteDisconnected" in hosted, hosted
+        assert "()" not in hosted, hosted
 
     def test_control_bytes_in_api_url_cannot_forge_a_row(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -1714,10 +1776,23 @@ class TestDoctorHostedCredential:
             def __init__(self, data: bytes, sink: list):
                 super().__init__(data)
                 self._sink = sink
+                self.served = 0
 
             def read(self, n=-1):
                 self._sink.append(None if n is None or n < 0 else n)
-                return super().read(n)
+                data = super().read(n)
+                self.served += len(data)
+                return data
+
+            def read1(self, n=-1):
+                # The error-body leg reaches this stream through
+                # `HTTPError.__getattr__ → fp`, so a recorder on `read` alone saw
+                # NOTHING of the leg the cap is asserted on (fresh review round
+                # 18).
+                self._sink.append(None if n is None or n < 0 else n)
+                data = super().read1(n)
+                self.served += len(data)
+                return data
 
         class _BoundedResponse(_FakeResponse):
             def read(self, n=None):
@@ -1734,6 +1809,12 @@ class TestDoctorHostedCredential:
                 # `_read_capped` prefers `read1`; record through it as well.
                 return self.read(n)
 
+        # A body LARGER than the cap on the ERROR leg: the cap has to CUT it, not
+        # merely bound each call. `all(0 < n <= 65536)` passed for a 1-byte chunk
+        # loop, a cap raised to 10 MB and a cap lowered to 1 alike (fresh review
+        # round 18).
+        error_stream = _BoundedStream(b"x" * (65536 + 4096), caps_seen)
+
         def handler(url, req):
             if url.endswith("/health"):
                 return _BoundedResponse(200, b'{"status":"ok"}')
@@ -1741,8 +1822,7 @@ class TestDoctorHostedCredential:
             # that answers 4xx with a large page is the exact case the cap exists
             # for, and it was unpinned.
             from urllib.error import HTTPError
-            raise HTTPError(url, 400, "Bad Request", {},
-                            _BoundedStream(b"x" * 100, caps_seen))
+            raise HTTPError(url, 400, "Bad Request", {}, error_stream)
 
         _stub_hosted(monkeypatch, handler)
         db_path = str(tmp_path / "bounded.db")
@@ -1752,13 +1832,19 @@ class TestDoctorHostedCredential:
         _run_doctor([])
         out = capsys.readouterr().out
 
-        # Every read must be BOUNDED (a positive int <= the cap): the reader now
-        # walks the body in chunks so a dripping proxy cannot hold a started leg
-        # open, which is why an exact call-size list is the wrong assertion.
+        # Every read must be BOUNDED (a positive int, at most one chunk): the
+        # reader walks the body in chunks so a dripping proxy cannot hold a
+        # started leg open, which is why an exact call-size list is the wrong
+        # assertion. 4096 is the chunk size; asserting against the CAP alone let a
+        # 1-byte-per-call loop pass.
         assert caps_seen, caps_seen
-        assert all(isinstance(n, int) and 0 < n <= 65536 for n in caps_seen), (
+        assert all(isinstance(n, int) and 0 < n <= 4096 for n in caps_seen), (
             "an unbounded read() reached the wire on some leg — the body cap is "
             f"not applied: {sorted(set(caps_seen))[:8]}")
+        # …and the CAP itself is exact and pinned to its documented value: a body
+        # larger than it is cut AT it. Nothing else in the tree names 65536, so
+        # without this a cap of 10 MB reads as green.
+        assert error_stream.served == 65536, error_stream.served
         hosted = _row(out, "Hosted")
         # → API error 400 (the error-body read is the third capped read)
         assert hosted is not None and "❌" in hosted, out[-1200:]
@@ -2072,12 +2158,156 @@ class TestDoctorHostedCredential:
 
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1200:]
-        # The CUT itself must be reported — the parse error from a partial body
-        # would also say "could not be read", which is why the first version of
-        # this test pinned nothing (fresh review round 19).
-        assert "CUT at the" in hosted, hosted
+        # ⛔ "CUT" SPECIFICALLY: the `or "could not be read"` alternative was
+        # satisfied by the PRE-EXISTING JSON-decode arm (a drip-cut body fails
+        # `_json.loads` whether or not the cut block exists), so deleting the
+        # round-16 block left the suite green.
+        assert "CUT" in hosted, hosted
         assert "✅" not in hosted, hosted
         assert "All checks passing" not in out, out[-1200:]
+
+    def test_a_short_body_is_not_read_as_a_captive_portal(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A body that CLOSES EARLY is truncated, not "no team identity".
+
+        EOF is not proof of completeness: a declared `Content-Length` that never
+        arrives (a proxy cutting the stream, a reset after the headers) made the
+        reader report a COMPLETE body, so a healthy key fell into the
+        "answered 200 but with no team identity … a captive portal also returns
+        200" arm — `❌` + exit 1 for a flaky TRANSPORT, with a remedy blaming the
+        user's own endpoint (fresh review of the delta).
+        """
+
+        class _ShortBody(_FakeResponse):
+            """Declares 60 bytes, delivers 11, then closes."""
+
+            def __init__(self):
+                super().__init__(200, b'{"org_id":')
+
+            @property
+            def length(self):
+                # The shape `http.client` exposes: bytes still to come.
+                return max(0, 60 - self._buf.tell())
+
+            def read1(self, n: int = -1):
+                chunk = self._buf.read(n)
+                return chunk
+
+            def read(self, n: int = -1):
+                return self._buf.read(n)
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}') if url.endswith("/health")
+            else _ShortBody()))
+        db_path = str(tmp_path / "short-body.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor short body seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "no team identity" not in hosted, hosted
+        assert "captive portal" not in hosted, hosted
+        assert "CUT" in hosted or "UNPROVEN" in hosted or "UNREAD" in hosted, hosted
+        assert "❌ Hosted" not in out, out[-1200:]
+        assert rc == 0, "a truncated transport is not a broken credential"
+
+    def test_a_complete_body_at_the_deadline_boundary_is_not_reported_as_cut(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A COMPLETED body is not "CUT" — the round-17 check, pinned.
+
+        The deadline is consulted before the EOF probe, so a body whose last chunk
+        arrives at the boundary (or a fixed-length body fully read) would be
+        reported CUT and downgrade a healthy `✅` to a "we stopped early" `⚠️`.
+        `HTTPResponse.length == 0` is what distinguishes it; deleting that check
+        left the whole module green because no test double carried `length`.
+        """
+
+        import time as _time
+
+        from tortoise import __main__ as _m
+
+        class _CompleteAtTheBoundary(_FakeResponse):
+            """The WHOLE body arrives late, in one read, with `length == 0`.
+
+            That is the shape the round-17 check exists for: the loop's next
+            deadline test fires AFTER every declared byte has arrived, so the
+            deadline has passed while the body is COMPLETE. `length == 0` is what
+            says so; without it the row would be downgraded to "stopped early".
+            """
+
+            @property
+            def length(self):
+                return 0
+
+            def read1(self, n: int = -1):
+                _time.sleep(0.30)  # past the 0.25 s floor
+                return self._buf.read(n)
+
+            def read(self, n: int = -1):
+                return self.read1(n)
+
+        monkeypatch.setattr(_m, "_DOCTOR_HEALTH_TIMEOUT_S", 0.001)  # → 0.25 floor
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _CompleteAtTheBoundary(200, b'{"status":"degraded"}')
+            if url.endswith("/health")
+            else _FakeResponse(200, b'{"org_id":"org-c"}')))
+        db_path = str(tmp_path / "exact-body.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor exact body seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "CUT" not in hosted, hosted
+        assert "UNREAD" not in hosted, hosted
+        # The body's OWN verdict survives — proof it was read, not assumed.
+        assert "degraded" in hosted, hosted
+        assert "/v1/team accepted" in hosted, hosted
+
+    def test_an_oat_token_in_the_env_with_an_explicit_url_is_not_a_broken_key(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The `oat_` 401 must not read as a revoked key — on EVERY route to it.
+
+        The env-only gate refuses to probe an `oat_` identity, but an explicit
+        `TORTOISE_API_URL` (or a store file) skips that gate and probes, and REST
+        `/v1/*` answers 401 to an OAuth token BY DESIGN (ADR-010: `oat_` tokens
+        are MCP-only). That read `❌ … Re-mint it: tortoise signup (new team)` +
+        exit 1 for a working setup — the exact false FAIL the gate exists to
+        prevent, one environment variable away (fresh review of the delta).
+        """
+        from urllib.error import HTTPError
+
+        monkeypatch.setenv("TORTOISE_API_KEY", "oat_" + "b2c3d4e5f6a7" * 3)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise HTTPError(url, 401, "Invalid API key", {}, None)
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "oat-401.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor oat 401 seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "401" in hosted, hosted
+        assert "OAuth" in hosted and "MCP" in hosted, hosted
+        # The remedies that would be WRONG for this family.
+        assert "tortoise signup (new team)" not in hosted, hosted
+        assert "❌ Hosted" not in out, out[-1200:]
+        assert rc == 0, "an MCP-only token is not a failed REST credential"
 
     def test_a_v1_team_reply_cut_by_the_deadline_is_unproven_not_a_broken_key(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
@@ -2292,6 +2522,155 @@ class TestDoctorHostedCredential:
         assert hosted is not None, out[-1200:]
         assert "CUT" in hosted, hosted
         assert "❌" not in hosted, hosted
+
+    def test_a_cut_body_is_reported_even_when_the_prefix_parses(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A cut must be reported even when the bytes read so far are VALID JSON.
+
+        The other cut tests drip a body that is cut into INVALID JSON, so the
+        `JSONDecodeError` arm satisfies them and they stay green if the
+        cut-report block is deleted. This one delivers a COMPLETE, valid
+        `{"status":"ok"}` and then keeps the stream open (trailing whitespace
+        keeps the JSON parseable, and the fake declares bytes still owed), so the
+        cut FLAG is the only thing that can downgrade the ✅ (fresh review round
+        18).
+
+        The drip is bounded (five bytes, then EOF) so a regression that disarms
+        the deadline finishes in ~0.6 s and fails on the verdict instead of
+        hanging.
+        """
+        import time as _time
+
+        from tortoise import __main__ as _m
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        class _TrailingSpaceDrip(_FakeResponse):
+            """Whole body, then one space per 120 ms, then EOF."""
+
+            _drips = 0
+
+            @property
+            def length(self):
+                # Bytes still OWED: the declared body is bigger than what arrived,
+                # which is #12398's dripping shape. Without this the round-18
+                # `length == 0` branch correctly reads the stop as completion.
+                return max(0, 5 - self._drips)
+
+            def read1(self, n=None):
+                body = super().read(n)
+                if body:
+                    return body
+                if self._drips >= 5:
+                    return b""
+                self._drips += 1
+                _time.sleep(0.12)
+                return b" "
+
+        # 0.26 s is above `_leg_budget`'s 0.25 s floor, so this is the bound the
+        # leg actually uses — and the drip crosses it.
+        monkeypatch.setattr(_m, "_DOCTOR_HEALTH_TIMEOUT_S", 0.26)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _TrailingSpaceDrip(200, b'{"status":"ok"}') if url.endswith("/health")
+            else _FakeResponse(200, b'{"org_id":"org-9"}')))
+        db_path = str(tmp_path / "cut-valid.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor cut valid seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "CUT" in hosted, hosted
+        assert "✅" not in hosted, hosted
+        assert "All checks passing" not in out, out[-1200:]
+
+    def test_a_body_without_read1_is_read_one_byte_per_call(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A response with no `read1` must not swallow the wall-clock bound.
+
+        `HTTPResponse.read(n)` blocks until `n` bytes or EOF, so a chunk-sized
+        fallback (`getattr(resp, "read1", None) or resp.read`) cannot reach the
+        deadline until a whole chunk has arrived — the unbounded wait the chunked
+        reader exists to remove. Real urllib responses expose `read1`, so this is
+        latent rather than live; it is pinned because the fallback is one edit
+        away from being the whole mechanism (fresh review round 18).
+
+        The fake ACCEPTS one byte per call and refuses anything wider with an
+        `AssertionError`, which `doctor`'s own `except Exception` renders as a ❌
+        "could not run" row — so a regression fails the verdict assertion loudly
+        instead of being swallowed into a pass.
+        """
+        import time as _time
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        requested: list[int] = []
+
+        class _NoRead1(_FakeResponse):
+            """Only `read(n)`; a read wider than one byte would block."""
+
+            read1 = None
+
+            def read(self, n=-1):
+                requested.append(n)
+                assert n == 1, (
+                    f"read({n}) on a body without read1 blocks past the deadline "
+                    "— the fallback must read one byte per call")
+                _time.sleep(0.002)
+                return super().read(1)
+
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _NoRead1(200, b'{"status":"ok"}') if url.endswith("/health")
+            else _NoRead1(200, b'{"org_id":"org-9","tier":"anon"}')))
+        db_path = str(tmp_path / "noread1.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor no read1 seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "✅" in hosted, hosted
+        assert "could not run" not in hosted, hosted
+        assert requested and set(requested) == {1}, sorted(set(requested))[:5]
+        assert rc == 0, hosted
+
+    def test_an_early_close_with_bytes_outstanding_is_a_cut_body(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """EOF is not automatically a COMPLETE body.
+
+        `HTTPResponse.read1` returns `b""` on a premature close instead of raising
+        `IncompleteRead` (measured: `Content-Length: 200`, connection closed after
+        10 bytes, `resp.length == 190`, no exception), so a truncated reply used
+        to report `cut=False` and reach the ❌ captive-portal arm — the same false
+        red the cut flag removed, on a different trigger. `resp.length`
+        distinguishes them: non-zero means bytes are still owed (fresh review round
+        18).
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        class _ShortResponse(_FakeResponse):
+            """Serves 10 bytes of a body whose `Content-Length` promised 200."""
+
+            length = 190
+
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}') if url.endswith("/health")
+            else _ShortResponse(200, b'{"org_id":')))
+        db_path = str(tmp_path / "short-body.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor short body seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "❌" not in hosted, hosted
+        assert "CUT" in hosted, hosted
+        assert "no team identity" not in hosted, hosted
 
 
 class TestDoctorPath:
