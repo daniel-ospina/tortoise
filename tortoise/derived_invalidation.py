@@ -478,6 +478,12 @@ def invalidation_for(
             indicator_id=indicator_id, target_id=target_id,
         ))
 
+    #: Set when a SCOPE dimension (goal / target / indicator) cannot be decided.
+    #: Like :data:`undecidable_definition` below, it is reported only when no
+    #: DEFINITE finding exists — a claim whose bar has visibly moved is stale
+    #: whether or not the claim also fails to name its indicator.
+    undecidable_scope: str | None = None
+
     # 1. the GOAL. A judgement is a claim ABOUT a goal; once the commitment is
     #    retired there is nothing for it to be about.
     #    ⛔ A claim that NAMES no goal is UNDECIDABLE, never `goal-retired`:
@@ -488,36 +494,56 @@ def invalidation_for(
     #    target, and it is needed here for the SAME reason (a corrupt or
     #    partial claim, not a graph change).
     if not goal_id:
-        return Verdict(judgement_id=judgement_id, undecidable=(
+        undecidable_scope = (
             "the judgement names no goal, so there is no commitment whose "
-            "retirement could retire it"))
-    goal = reader.get(goal_id)
-    if goal is None:
-        return Verdict(judgement_id=judgement_id, undecidable=(
-            f"the goal {goal_id!r} could not be read, so whether it is retired "
-            "is unknown"))
-    retired = _retirement(goal, goal=True)
-    if retired:
-        return _verdict("goal-retired", f"the goal {goal_id!r} is retired — {retired}")
+            "retirement could retire it")
+        goal = None
+    else:
+        goal = reader.get(goal_id)
+        if goal is None:
+            undecidable_scope = (
+                f"the goal {goal_id!r} could not be read, so whether it is "
+                "retired is unknown")
+        else:
+            retired = _retirement(goal, goal=True)
+            if retired:
+                return _verdict("goal-retired",
+                                f"the goal {goal_id!r} is retired — {retired}")
 
     # 2. the TARGET. A retired target cannot be the bar anything is judged against.
     #    ⛔ A claim that NAMES no target is undecidable rather than stale: the
     #    writer has required `targetId` since #11965, so an unnamed one is a
     #    legacy shape, and retiring it here would turn a writer-side fix into a
     #    mass retirement on a technicality.
+    #
+    #    ⛔ AND ALL FOUR OF THESE ARE **DEFERRED**, NOT RETURNED. An unnamed or
+    #    unreadable dimension is an ABSENCE of evidence; the bar check below is
+    #    evidence. Returning here let an unnamed `indicatorId` — the pre-#11965
+    #    shape this file's own comment says an unscoped sweep meets — SHIELD a
+    #    claim whose bar had visibly moved, so a stale claim survived a target
+    #    revision and the goal kept reading `met`. MEASURED (review cycle 7):
+    #    judgementState=`met`, `indicatorId` removed, `threshold 10.0 -> 8.0`
+    #    (so `9.0 <= 8.0` is false) -> verdict `undecidable (names no
+    #    indicator)`, `invalidation: None`. Only DEFINITE findings (a retired
+    #    input, a derived-before-the-boundary claim, a revised bar) return early;
+    #    the deferred strings are reported at the end, when nothing definite was
+    #    found. No retirement is added by this ordering.
     if not target_id:
-        return Verdict(judgement_id=judgement_id, undecidable=(
+        undecidable_scope = undecidable_scope or (
             "the judgement names no target, so its bar cannot be compared with "
-            "the target that replaced it"))
-    target = reader.get(target_id)
-    if target is None:
-        return Verdict(judgement_id=judgement_id, undecidable=(
-            f"the target {target_id!r} could not be read, so whether it is "
-            "retired is unknown"))
-    retired = _retirement(target)
-    if retired:
-        return _verdict("target-retired",
-                        f"the target {target_id!r} is retired — {retired}")
+            "the target that replaced it")
+        target = None
+    else:
+        target = reader.get(target_id)
+        if target is None:
+            undecidable_scope = undecidable_scope or (
+                f"the target {target_id!r} could not be read, so whether it is "
+                "retired is unknown")
+        else:
+            retired = _retirement(target)
+            if retired:
+                return _verdict("target-retired",
+                                f"the target {target_id!r} is retired — {retired}")
 
     # 3. the INDICATOR (the definition's home).
     #    ⛔ The same unnamed guard, and this one is REACHABLE from real data:
@@ -526,18 +552,21 @@ def invalidation_for(
     #    stored the prop only for a truthy id), which is exactly what an unscoped
     #    repair sweep meets.
     if not indicator_id:
-        return Verdict(judgement_id=judgement_id, undecidable=(
+        undecidable_scope = undecidable_scope or (
             "the judgement names no indicator, so there is no definition whose "
-            "change could retire it (a pre-#11965 claim)"))
-    indicator = reader.get(indicator_id)
-    if indicator is None:
-        return Verdict(judgement_id=judgement_id, undecidable=(
-            f"the indicator {indicator_id!r} could not be read, so whether it is "
-            "retired is unknown"))
-    retired = _retirement(indicator)
-    if retired:
-        return _verdict("indicator-retired",
-                        f"the indicator {indicator_id!r} is retired — {retired}")
+            "change could retire it (a pre-#11965 claim)")
+        indicator = None
+    else:
+        indicator = reader.get(indicator_id)
+        if indicator is None:
+            undecidable_scope = undecidable_scope or (
+                f"the indicator {indicator_id!r} could not be read, so whether "
+                "it is retired is unknown")
+        else:
+            retired = _retirement(indicator)
+            if retired:
+                return _verdict("indicator-retired",
+                                f"the indicator {indicator_id!r} is retired — {retired}")
 
     # 4. the DEFINITION. The boundary is an INSTANT, so it is comparable with the
     #    instant this judgement was derived at — the one case where the graph
@@ -647,15 +676,23 @@ def invalidation_for(
 
     # 5. the BAR. The judgement copied the comparator/threshold/dwell it was
     #    derived under, so a revision is a plain comparison — no history needed.
-    if not isinstance(target, dict):  # pragma: no cover - guarded above
-        return Verdict(judgement_id=judgement_id, undecidable="the target could not be read")
-    moved = _drift(judgement, target)
+    #    SKIPPED only when the target could not be read at all; an unreadable
+    #    target is already reported through ``undecidable_scope``.
+    moved = _drift(judgement, target) if isinstance(target, dict) else None
     if moved:
         return _verdict("target-revised",
                         f"the target {target_id!r} was revised — {moved}")
 
+    # ⛔ NOTHING DEFINITE FIRED, so now the deferred answers are reported —
+    # DEFINITION first, because a boundary that cannot be compared is a fact about
+    # THIS claim's own history, while an unnamed/unreadable dimension is a fact
+    # about the claim's shape (or a transient read). A repair sweep that retries
+    # gets the same answer either way; naming the more specific one is what makes
+    # the report actionable.
     if undecidable_definition is not None:
         return Verdict(judgement_id=judgement_id, undecidable=undecidable_definition)
+    if undecidable_scope is not None:
+        return Verdict(judgement_id=judgement_id, undecidable=undecidable_scope)
     return Verdict(judgement_id=judgement_id)
 
 
@@ -738,7 +775,7 @@ def invalidate(
         )
     status = claim.get("status")
     if (isinstance(status, str) and status in TERMINAL_EXCLUDED_STATUSES) or \
-            claim.get("outdated") is True:
+            bool(claim.get("outdated")):
         return {"invalidated": False, "judgementId": judgement_id,
                 "alreadyRetired": True, "status": status,
                 "reason": invalidation.reason,
@@ -755,11 +792,13 @@ def invalidate(
         # outcome; anything else keeps its original trace.
         after = _read_claim(sdk, judgement_id)
         after_status = after.get("status") if isinstance(after, dict) else None
-        if isinstance(after_status, str) and after_status in TERMINAL_EXCLUDED_STATUSES:
+        after_flag = bool(after.get("outdated")) if isinstance(after, dict) else False
+        if (isinstance(after_status, str)
+                and after_status in TERMINAL_EXCLUDED_STATUSES) or after_flag:
             return {"invalidated": False, "judgementId": judgement_id,
                     "alreadyRetired": True, "status": after_status,
                     "reason": invalidation.reason,
-                    "detail": f"already terminal ({after_status})"}
+                    "detail": f"already terminal ({after_status or 'outdated'})"}
         raise exc
 
     try:

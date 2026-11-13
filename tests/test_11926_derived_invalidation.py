@@ -303,7 +303,7 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_the_recall_lane(sdk, ret
     made = _judge(sdk, i, t, g)
     node = {"target": t, "indicator": i, "goal": g}[retire]
     sdk.update_entity(node["id"], status="outdated")
-    # the premise, asserted rather than assumed: the read surfaces already agree
+    # the write landed; this assertion is what the sweep will read back
     assert sdk.get_entity(node["id"])["status"] == "outdated"
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation.reason == reason, v.invalidation
@@ -371,6 +371,50 @@ def test_the_LEGACY_outdated_FLAG_retires_an_input(sdk):
     assert invalidate_stale(sdk, goal_id=g["id"])["counts"]["retired"] == 1
     assert sdk.get_entity(made["point_id"])["status"] == "retracted"
 
+
+
+def test_a_definite_bar_revision_OUTRANKS_an_undecidable_scope(sdk):
+    """⛔ REVIEW P2, reproduced. An absent dimension is an ABSENCE of evidence; a
+    bar that has visibly moved is evidence.
+
+    The three scope guards used to RETURN ``undecidable`` before the bar check ran,
+    so an unnamed `indicatorId` — the pre-#11965 shape this module's own comment
+    says an unscoped repair sweep meets — SHIELDED a claim whose bar had moved:
+    measured, `judgementState=met`, indicator removed, `threshold 10.0 -> 8.0` (so
+    `9.0 <= 8.0` is false) → ``undecidable (names no indicator)``, `invalidation`
+    ``None``, claim live, goal still reading ``met``. #11926's headline, on the one
+    population the guard's own comment names.
+
+    Ordering is the whole fix: only a DEFINITE finding may return early. This test
+    asserts the definite one WINS, and (the other half) that a claim with nothing
+    definite still reports undecidable rather than being retired on a technicality.
+    """
+    i, t, g = _world(sdk, tag="scope-outranked")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+    # the pre-#11965 shape: a claim carrying a goal and a bar, but no indicator id
+    sdk._get_proj().g.query(
+        "MATCH (p:Point) WHERE p.id = $id REMOVE p.indicatorId",
+        params={"id": made["point_id"]},
+    )
+    assert "indicatorId" not in sdk.get_entity(made["point_id"])
+    # nothing definite yet: the missing scope is undecidable, NOT a retirement
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation is None
+    assert "names no indicator" in v.undecidable
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    assert report["counts"]["retired"] == 0
+    assert sdk.get_entity(made["point_id"])["status"] == "live"
+
+    # now the BAR moves: a definite finding, and it must not be shielded
+    sdk.update_entity(t["id"], threshold=8.0)
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation is not None, (
+        "an unplaceable scope shielded a claim whose bar visibly moved: "
+        f"{v.undecidable}")
+    assert v.invalidation.reason == "target-revised"
+    assert invalidate_stale(sdk, goal_id=g["id"])["counts"]["retired"] == 1
+    assert sdk.get_entity(made["point_id"])["status"] == "retracted"
 
 
 # ── 4b. an UNNAMED scope is undecidable, never a retirement ──────────────
