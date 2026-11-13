@@ -197,6 +197,27 @@ DISCARD_ENTRY_FAILED = "entry_failed"
 #: The spool's own `entries/` listing cannot be read — every capture is invisible.
 DISCARD_SPOOL_UNREADABLE = "spool_unreadable"
 DISCARD_CORRUPT = "corrupt_entry"
+#: The META could not be READ: EACCES/EACCES-adjacent I/O refusals (``EIO``,
+#: ``EISDIR``, ``ESTALE``) or an ``ENOENT`` that raced another drain's unlink.
+#: We never saw the bytes, so we know nothing about whether they are valid
+#: (#11802).
+#:
+#: Distinct from ``DISCARD_CORRUPT``, which now means only "the bytes were read
+#: and are not a usable meta". The two used to share one ``except OSError`` /
+#: ``except JSONDecodeError`` arm, and the shared arm reported a READ refusal as
+#: "meta is not valid JSON" — a statement about bytes the process never opened —
+#: then quarantined the turn log and unlinked the meta.
+#:
+#: This arm RECORDS and KEEPS (``retained: True``): the meta and its turn log
+#: stay where they are and the next drain retries. A read refusal is a property
+#: of WHO IS ASKING, not of the entry — the same file is often perfectly
+#: readable a second later or by another uid — so destroying it turns a
+#: permission mismatch into permanent loss. The meta is also the only copy of
+#: the ``session_id``/``client_captured_at`` that anchor the ``AgentSession``
+#: Event (``docs/ONTOLOGY.md`` §5, content-addressed ``eventId``) and of the
+#: retry state, so removing it makes the entry unfilable by any verb
+#: (``_quarantine_log`` says so itself).
+DISCARD_META_UNREADABLE = "meta_unreadable"
 #: A filesystem error while writing the spool — recorded, never silent.
 DISCARD_WRITE_FAILED = "spool_write_failed"
 #: A PERMANENT HTTP refusal (4xx). The entry is RECORDED and KEPT (#7708): the
@@ -239,7 +260,12 @@ RETAINED_DISCARD_REASONS = frozenset(
      # An over-bound entry is now RECORDED + KEPT (terminal) instead of unlinked,
      # so it is not a loss either — the same instrument rule: the ledger must not
      # report a destroyed capture when the turn log is still on disk.
-     DISCARD_ENTRY_TOO_LARGE})
+     DISCARD_ENTRY_TOO_LARGE,
+     # A meta we could not READ is recorded and KEPT (#11802): nothing was read,
+     # concluded, quarantined or unlinked, so the entry survives to retry. The
+     # arm also writes `retained: True` on the record — this membership is the
+     # reading for a record that carries no flag (an older leg's line).
+     DISCARD_META_UNREADABLE})
 
 
 def is_lost_discard(record: dict) -> bool:
@@ -923,6 +949,30 @@ def _read_refusal_stamps(root: Path) -> list[dict]:
     return [parsed] if "session_id" in parsed else []
 
 
+def _stem_set_stamp(stems: list[str]) -> str:
+    """A stable dedupe stamp for a SET of names (#11802).
+
+    ``_entries_dir_stamp`` answers "is this refusal verdict still true?", so it
+    deliberately includes ``entries/`` mtime — which ANY write to the directory
+    moves. That is right for an admission refusal and wrong for a set of
+    unreadable files: a turn writes a new (readable) meta, the mtime moves, and a
+    dir-stamp key therefore suppresses nothing on exactly the per-turn path the
+    dedupe exists for. This stamp changes only when the SET changes.
+
+    The TS leg's ``stemSetStamp`` produces the SAME string, so the two legs —
+    which share one spool root and one ledger — dedupe each other's records
+    rather than each writing its own -- for every entry EITHER leg writes, whose
+    stem is an `entry_key()` hex digest. Scope, stated because it is not the whole
+    directory: both sort the stem list (Python by code point, JS by UTF-16 code
+    unit) and the scan does not filter names to key shape, so a foreign or
+    hand-placed file whose ordering differs between the two sorts yields two
+    digests, and the legs then record one line each for the same set. Cost, never
+    correctness: the retention decision is per entry, not per digest.
+    """
+    digest = hashlib.sha256("\n".join(stems).encode("utf-8")).hexdigest()[:16]
+    return f"set:{digest}"
+
+
 def _entries_dir_stamp(root: Path) -> str:
     """A cheap fingerprint of the spool state a refusal was measured against.
 
@@ -1062,6 +1112,7 @@ def _record_refusal(
     bounds: Bounds | None = None,
     projected_bytes: int | None = None,
     replaces_session_id: str | None = None,
+    stamp: str | None = None,
 ) -> dict:
     """Record a REFUSAL once per (session, reason, spool state).
 
@@ -1090,7 +1141,7 @@ def _record_refusal(
     fingerprint: dict = {
         "session_id": key[0],
         "reason": key[1],
-        "entries_stamp": _entries_dir_stamp(root),
+        "entries_stamp": stamp if stamp is not None else _entries_dir_stamp(root),
         # The verdict's INPUTS, alongside its key. `_admission_saturated` reuses
         # this stamp to answer "is this refusal still true?" without a scan, and
         # that reuse is only sound for the same ceilings and a projection no
@@ -1101,12 +1152,15 @@ def _record_refusal(
         "replaces_session_id": replaces_session_id,
     }
     history = _read_refusal_stamps(root)
-    for stamp in history:
-        if (stamp.get("session_id"), stamp.get("reason")) != key:
+    # NB: the loop variable is `observed`, NOT `stamp` — `stamp` is this
+    # function's parameter and shadowing it would make any future use after this
+    # loop silently read the last history entry (review cycle 4).
+    for observed in history:
+        if (observed.get("session_id"), observed.get("reason")) != key:
             continue
-        if stamp.get("entries_stamp") != fingerprint["entries_stamp"]:
+        if observed.get("entries_stamp") != fingerprint["entries_stamp"]:
             continue
-        prior = stamp.get("record")
+        prior = observed.get("record")
         if isinstance(prior, dict):
             return prior
     full = record_discard(root, record)
@@ -1322,7 +1376,21 @@ def reset_terminal_entries(root: Path) -> int:
 
 
 def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], list[dict]]:
-    """All spool metas; malformed ones become ``corrupt_entry`` discards.
+    """All spool metas, with two DISTINCT non-meta outcomes (#11802).
+
+    - ``meta_unreadable`` — the meta could not be READ (``EACCES``/``EIO``/
+      ``EISDIR``, or an ``ENOENT`` that raced another drain's unlink). Nothing is
+      concluded about the entry and NOTHING IS DESTROYED: the record is
+      ``retained: True``, the meta and its turn log stay exactly where they are,
+      and the next drain retries.
+    - ``corrupt_entry`` — the bytes WERE read and are not a usable meta (invalid
+      JSON, valid JSON with no usable ``session_id``, or bytes that are not
+      UTF-8). This keeps the #7708 repair path: record it, quarantine the turn
+      log, remove the meta.
+
+    Sharing one repair between them reported a permission refusal as data
+    corruption and destroyed sessions the draining process was never allowed to
+    read. Pinned in BOTH directions by ``tests/test_capture_spool.py``.
 
     A meta that is valid JSON but has no usable ``session_id`` is ALSO corrupt —
     otherwise the drain crashes on `meta["session_id"]` instead of recording it.
@@ -1340,6 +1408,10 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
     """
     metas: list[dict] = []
     discards: list[dict] = []
+    # #11802 review cycle 2: an unreadable meta is STATE, not a per-turn event, so
+    # it is recorded ONCE per distinct unreadable SET (the aggregate after this
+    # loop) rather than once per file per scan.
+    unreadable: list[tuple[str, str]] = []
     d = _entries_dir(root)
     # `Path.is_dir()` is True for a mode-000 directory and `Path.glob` SWALLOWS
     # the EACCES its `scandir` hits — so the old `is_dir()` + glob returned an
@@ -1366,13 +1438,36 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
         return metas, discards
     for name in names:
         path = d / name
-        meta = None
+        # ⛔ READING and PARSING are two different diagnoses and must not share
+        # one handler (#11802). A read refusal proves we never saw the bytes; a
+        # parse failure proves we saw them and they are unusable. Collapsing
+        # them made this function report "meta is not valid JSON" about files
+        # the process never opened, and — worse — act on it destructively.
         try:
-            meta = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            # `UnicodeDecodeError` is a `ValueError`: a non-UTF-8 meta is a
-            # CORRUPT entry (recorded below), not a crash.
-            meta = None
+            raw: str | None = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            # Every errno in this arm is the same class: the entry was not read,
+            # so nothing may be concluded about it. ENOENT here is a race with
+            # another drain's unlink — wrong MOMENT, not wrong bytes.
+            # Collected, not recorded: see the aggregate after this loop.
+            if repair:
+                unreadable.append((name[: -len(".meta.json")], str(exc)))
+            continue
+        except UnicodeDecodeError as exc:
+            # The bytes were read in full; they are just not UTF-8. That is a
+            # property of the CONTENT, so it takes the corrupt path below — but
+            # the detail must SAY that, not claim a JSON failure `json.loads`
+            # never reached (the same false-reason class #11802 is about).
+            raw = None
+            decode_error: str | None = str(exc)
+        else:
+            decode_error = None
+        meta = None
+        if raw is not None:
+            try:
+                meta = json.loads(raw)
+            except json.JSONDecodeError:
+                meta = None
         if not isinstance(meta, dict) or not isinstance(meta.get("session_id"), str) \
                 or not meta["session_id"]:
             if not repair:
@@ -1382,7 +1477,9 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
                 "session_id": f"unreadable:{stem}",
                 "reason": DISCARD_CORRUPT,
                 "detail": ("meta has no usable session_id" if meta is not None
-                           else "meta is not valid JSON") + f": {path}",
+                           else (f"meta is not valid UTF-8: {decode_error}"
+                                 if decode_error is not None
+                                 else "meta is not valid JSON")) + f": {path}",
             }))
             # The corrupt META is removed (the ledger line is its evidence), but
             # the turn log is QUARANTINED, not deleted (#7708): the transcript
@@ -1394,6 +1491,65 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
                 path.unlink()
             continue
         metas.append(meta)
+    # ── #11802: ONE record per distinct unreadable SET ─────────────────────┐
+    # An unreadable meta is STATE ("these entries cannot be read by this uid"),
+    # not a per-turn event. Recorded per FILE per scan, `discarded.jsonl` grows
+    # with turns: the repairing scan also runs on the per-turn write path
+    # (`prune_spool`), and 1,356 unreadable entries is the measured population.
+    #
+    # Two things make this bounded, and the FIRST is the subtle one:
+    #  - The dedupe stamp is a digest of the unreadable STEM SET, NOT `entries/`
+    #    mtime. A turn writes a NEW (readable) meta, which moves `entries/` mtime
+    #    on every turn — so a dir-stamp key suppresses nothing on exactly the path
+    #    this exists for. The stem set is unchanged by a new session, so a steady
+    #    state is ONE line no matter how many turns pass.
+    #  - ONE aggregate per distinct SET consumes ONE slot of the (32-wide)
+    #    refusal window, so N unreadable entries in a STABLE set cost one slot,
+    #    not N. That is not the same as "cannot crowd the window": the digest is
+    #    in the pair key, so K distinct sets occupy up to K slots and can evict an
+    #    admission refusal once K approaches 32 (measured, review cycle 4). That
+    #    outcome is FAIL-SAFE — `_refused_at_current_state` misses and pays a full
+    #    scan instead of short-circuiting, and the evicted refusal simply
+    #    re-records once — so it costs work, never correctness. Stated exactly
+    #    because the invariant a reader trusts here is what decides whether the
+    #    window is safe.
+    #
+    # ⚠️ The trade, stated: the record names a COUNT and one example path, not one
+    # record per entry, so an operator holding only `discarded.jsonl` cannot
+    # enumerate all of them from the ledger — they read the count here and list
+    # `entries/` for the rest. Boundedness is worth that; an unbounded per-entry
+    # ledger is not an audit trail, it is a second problem.
+    if unreadable:
+        stems = sorted(stem for stem, _msg in unreadable)
+        stamp = _stem_set_stamp(stems)
+        _stem, example = unreadable[0]
+        discards.append(_record_refusal(
+            root,
+            {
+                # The digest is IN the pair key, not only in the stamp. Only ONE
+                # observation is remembered per (session_id, reason), so a fixed
+                # id would remember just the newest set — and an alternating set
+                # (the ENOENT race this very arm names, or real prune churn)
+                # would re-record BOTH directions on every alternation, forever.
+                # Keying on the set makes each distinct set its own pair: bounded
+                # by the 32-wide window — a set is recorded once while the number of
+                # DISTINCT unreadable sets seen inside that window stays <= 32; past
+                # that a cycling set is evicted and re-records, which costs one
+                # ledger line per scan and never correctness.
+                "session_id": f"unreadable:{stamp}",
+                "reason": DISCARD_META_UNREADABLE,
+                # RETAINED: every one of these metas AND its turn log stay on
+                # disk, unquarantined and un-unlinked, so the next drain retries.
+                # Never a loss — a read refusal is reversible (fix the
+                # permission, or run as the uid that owns the file), and each
+                # entry keeps its ONLY copy of the session id and retry state.
+                "retained": True,
+                "detail": (f"cannot read {len(unreadable)} spool meta(s): {example}"
+                           " — left in place and retryable; the bytes were never"
+                           " seen, so these are NOT corrupt entries"),
+            },
+            stamp=stamp,
+        ))
     return metas, discards
 
 

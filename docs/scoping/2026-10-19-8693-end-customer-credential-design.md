@@ -89,8 +89,8 @@ nothing cross-team is required.
   carrying `graphs:create`** (the scope check inside `hosted_api.py::create_org_graph`; the scope is
   in `hosted_api.py::_OWNER_SCOPE_ALLOWLIST`) that
   is **not** a minted child — `deleg=0` keys are rejected outright (the `delegation_depth == 0`
-  guard in `create_org_graph`, "Minted keys
-  cannot provision graphs", and the child policy cannot mint `graphs:create` at all). Handing the
+  guard in `create_org_graph`, which since #12447 answers `403
+  PROVISION_REQUIRES_ORG_KEY`, and the child policy cannot mint `graphs:create` at all). Handing the
   end-user lane that class of key is exactly the owner-class authority §3.3 property 1 refuses to
   give it. (`POST /v1/graphs`, `@app.post("/v1/graphs")`, is the session
   alias for the same provisioning service — not the only programmatic path.)
