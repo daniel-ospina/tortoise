@@ -506,8 +506,10 @@ def test_an_already_terminal_claim_reconciles_the_goal_the_CLAIM_names(sdk):
 
     The shape is real and supported (the legacy-flag pin above builds it): an
     `Invalidation(judgement_id=…)` with no `goal_id`, over a claim retired out of
-    band, so `verdicts`/`invalidate_stale` never sees it again and no automatic
-    path repairs the goal's displayed word (#12336). MEASURED by review: reading the
+    band, so `verdicts`/`invalidate_stale` never sees THAT CLAIM again — and once
+    it was the goal's last live claim, no automatic path repairs the goal's
+    displayed word (#12336); while another live claim stands, that claim's own
+    stale finding does. MEASURED by review: reading the
     id from `invalidation.goal_id` alone made this case report
     `cache.checked: False` while `goalState` still read `met` — and a skipped
     check moves neither `counts.failed` nor `counts.gone`, so the sweep read
@@ -1644,8 +1646,10 @@ def test_a_claim_that_vanishes_BEFORE_the_retirement_lands_is_alreadyRetired(
     that benign no-op as ``failed`` AND skipped the goal's reconcile, which is the
     #12336 residual this module closes for every other already-retired arm:
     measured before this round, ``goalState`` stayed ``met`` naming a claim that no
-    longer existed, and no later sweep can repair it — ``invalidate_stale`` scans
-    LIVE claims, so that goal is never a finding again.
+    longer existed, and no later sweep could repair it — ``invalidate_stale`` scans
+    LIVE claims, so a claim that is gone never becomes a finding again (another of
+    the goal's claims going stale later would reconcile the word, which is exactly
+    why this arm may not skip its own).
 
     ⚠️ ``found`` here is ``False``, not ``None``, and that is the point: ``None``
     is reserved for a re-read that could not answer (``after is None``). "Gone" is
@@ -2118,3 +2122,34 @@ def test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_
     assert sdk.get_entity(g["id"]).get("goalState") is None, (
         "the sweep's own reconcile did not clear the word the out-of-band "
         "retirement left")
+
+
+def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
+    """The absolute regressed THREE times, so pin the PROSE, not only the behaviour.
+
+    `verdicts`' cap is pinned the same way ("the docstring is the only place a
+    caller can learn …"), and here the docstrings are likewise the artifact a
+    consumer reads: the sweep's `cache` dict is not something a caller can inspect
+    for a missing repair. The behaviour is pinned by
+    `test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_left`;
+    this pins that the words still agree with it.
+    """
+    import tortoise.derived_invalidation as di
+
+    # Collapse the source line-wrapping: these are prose contracts, not layout.
+    door = " ".join((di.invalidate.__doc__ or "").lower().split())
+    assert "another of that goal's claims going stale later does repair it" in door, (
+        "the `alreadyRetired` note must say WHICH shape repairs itself")
+    assert "a goal whose last claim is gone is never a finding again" in door, (
+        "and which shape does not")
+    assert "needs no new input" in door, (
+        "the manual route must be scoped to 'no new input': a re-judge also "
+        "rewrites the word, so naming it as THE route over-claims in the other "
+        "direction")
+
+    helper = " ".join((di._reconcile_or_report.__doc__ or "").lower().split())
+    at = helper.find("no automatic path repairs it")
+    assert at != -1, "the rule itself must stay stated"
+    assert "once the goal holds no other live claim" in helper, (
+        "an UNQUALIFIED 'no automatic path repairs it' is false while the goal "
+        "still holds a live claim: that claim going stale reconciles the word")
