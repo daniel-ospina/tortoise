@@ -196,6 +196,13 @@ jobs:
       # Best-effort: a job killed before the upload has no artifact, and that is a fact the
       # body states rather than a reason to fail the report.
       - name: Fetch the canary transcript
+        # `!cancelled()`, like every other step here: the gate is stated, not inherited from
+        # the implicit `success()` that would skip the fetch whenever an earlier report step
+        # failed. A missing transcript is already harmless (`continue-on-error: true`), so
+        # this is about an explicit contract rather than a newly reachable state (#12363
+        # round 12). Pinned by
+        # `test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code`.
+        if: ${{ !cancelled() }}
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -251,7 +258,7 @@ jobs:
         # would assert "could not evaluate" about a run that evaluated fine, and — because
         # an exit-1 filing is what resolves the outage ledger — would leave that false
         # record standing (#12363 round 9). The run page still gets the explanation, via the
-        # alarm's runner-fault branch below (#12363 round 10).
+        # alarm's runner-fault branch ABOVE (#12363 rounds 10 and 12).
         if: ${{ !cancelled() && needs.canary.result != 'success' && needs.canary.outputs.exit_code != '0' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -265,7 +272,18 @@ jobs:
       # open while the artifact is green: the "ledger must not outlive its state" contract
       # this whole path cites. (#12363 round 10)
       - name: Close the alert issue on a green run
-        if: ${{ !cancelled() && (needs.canary.result == 'success' || needs.canary.outputs.exit_code == '0') }}
+        # ⛔ `exit_code == '0'` ALONE. The `needs.canary.result == 'success'` disjunct was a
+        # FALSE CLOSE: the canary step reads success whenever its last command succeeded, so
+        # a lost `exit "$rc"` (or a lost `$GITHUB_OUTPUT` write) made `result: success` true
+        # while the tool had exited 1 — and this gate then resolved the release-owed ledger
+        # over a broken artifact (#12363 round 12).
+        # The residual this leaves, stated rather than hidden: an ABSENT reading closes
+        # nothing, and it does not need to — a canary cancelled or killed before it published
+        # any verdict has not measured the artifact, so a stale open issue is the cheaper and
+        # the correct state. `outputs.exit_code` is pinned to the CANARY STEP's own output in
+        # `test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code`, because it is
+        # now the gate's only input.
+        if: ${{ !cancelled() && needs.canary.outputs.exit_code == '0' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/published-artifact-alert.sh close
