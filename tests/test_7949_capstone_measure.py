@@ -5290,7 +5290,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # own +34 was made by three commits (32 at 7535, 1 at 1039, 1 at 2237);
         # 10022 at `42409813a7` (+1 at 2237, #12348); and 10076 at the `main`
         # tip `ca74f2375e`, whose +54 came from THREE landings in FIVE hunks
-        # (12 at 1610, 7 at 2250, 8 at 6830, 5 at 9737, 22 at 7565). This
+        # ABOVE the entry (12 at 1610, 7 at 2250, 8 at 6830, 22 at 7565, 5 at
+        # 9759 — positions read off `ca74f2375e` itself, where each hunk's OWN
+        # commit would give the position in that commit's tree instead: the
+        # #9649 hunk reads 9737 under `276503dad1` and 9759 once `ca74f2375e`
+        # lands its +22 above it). The range has EIGHT hunks; the other three
+        # are `durations:`/`durations_floors:` rows BELOW the entry and do not
+        # move the pin, which is why they are not in this sum. This
         # branch adds +13 at 2258 (its own `core:` registration), so the tree
         # that adds BOTH parents reads 10089 = 10076 + 13.
         # `carve_out:` opens 9963 and `uri_requiring:` 10294 at THIS tree, so
