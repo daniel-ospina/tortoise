@@ -1685,3 +1685,225 @@ class TestCaptureSpoolHealthRow:
         assert "❌ Capture spool" in out, out
         assert "⚠️ Capture spool" not in out, out
         assert "✅ Capture spool" not in out, out
+
+
+# ── #11912 — the hosted half: `doctor` must SAY which mode this box is in ──
+# Measured on `origin/main` before this landed: a box whose stored key 401s on
+# every hosted command still printed "N pass, 0 fail" from `doctor`, because the
+# command had no credential check and no hosted check at all — `_cmd_doctor`
+# never called the resolver `config show` (#10655) already ships. A new user's
+# last onboarding step therefore certified a setup that could not make one
+# hosted call. These tests pin the three targets in #11912: a broken credential
+# is a FAILURE, "no credential" is ONE informative line, and a keyless box
+# dials NOTHING.
+class TestDoctorHostedCredentialRows:
+    """`doctor`'s Credentials + Hosted rows (#11912)."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, monkeypatch, tmp_path):
+        """Never read the developer's real stores or graph; never dial the API."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        for var in ("TORTOISE_API_KEY", "TORTOISE_API_URL", "TORTOISE_DB_URI",
+                    "TORTOISE_DB_PATH", "FALKORDB_HOST", "FALKORDB_PORT",
+                    "FALKORDB_PASSWORD"):
+            monkeypatch.delenv(var, raising=False)
+        # `DEFAULT_DB_PATH` is frozen at import time, so an isolated HOME alone
+        # would still make these tests read the developer's real embedded graph.
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(work / "doctor.db"))
+
+    # ── helpers ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _store(tmp_path, key, api_url="https://api.premiselabs.co",
+               org_id="00e8e36129794bcdb2c992ff47"):
+        import json
+        from pathlib import Path
+        path = Path(tmp_path) / ".tortoise" / "credentials.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(
+            {"api_key": key, "api_url": api_url, "org_id": org_id}))
+        path.chmod(0o600)
+        return path
+
+    @staticmethod
+    def _install(monkeypatch, *, health=200, team=200, team_body=None,
+                 health_exc=None):
+        """Fake `urllib.request.urlopen`; records every URL it is asked for."""
+        import io
+        import json as _json
+        import urllib.error
+        import urllib.request
+
+        calls: list[str] = []
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def _fake(req, timeout=None):
+            url = getattr(req, "full_url", req)
+            calls.append(url)
+            if url.endswith("/health"):
+                if health_exc is not None:
+                    raise health_exc
+                if health != 200:
+                    raise urllib.error.HTTPError(
+                        url, health, "err", {},
+                        io.BytesIO(b'{"status":"degraded"}'))
+                return _Resp(b'{"status":"ok"}')
+            if url.endswith("/v1/team"):
+                if team != 200:
+                    body = (team_body if isinstance(team_body, bytes)
+                            else _json.dumps(team_body or
+                                             {"detail": "Invalid API key"}).encode())
+                    raise urllib.error.HTTPError(url, team, "err", {},
+                                                 io.BytesIO(body))
+                return _Resp(_json.dumps(
+                    team_body or {"org_id": "agent-00e8e3", "tier": "free"}
+                ).encode())
+            raise AssertionError(f"unexpected probe URL {url}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", _fake)
+        return calls
+
+    # ── tests ──────────────────────────────────────────────────────────────
+    def test_a_revoked_key_is_a_failure_not_a_pass(
+            self, monkeypatch, tmp_path, capsys):
+        """The measured defect: `doctor` said "0 fail" while EVERY hosted
+        command 401s on the same key, in the same minute."""
+        self._store(tmp_path, "tt_" + "n" * 40)
+        calls = self._install(monkeypatch, team=401)
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert any(u.endswith("/v1/team") for u in calls), (
+            "doctor never asked the server whether the key is accepted")
+        assert rc == 1, out
+        assert "❌ Hosted" in out, out
+        assert "not valid" in out, out
+        # The remedy `team info` prints today, not a re-worded variant.
+        assert "tortoise recover" in out, out
+        assert "tortoise config show" in out, out
+
+    def test_no_credential_is_one_informative_line_and_zero_requests(
+            self, monkeypatch, tmp_path, capsys):
+        """A keyless box is a normal self-host install — and it must not dial."""
+
+        def _forbidden(*a, **k):
+            raise AssertionError("doctor dialed the network with no credential")
+
+        import urllib.request
+        monkeypatch.setattr(urllib.request, "urlopen", _forbidden)
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "no hosted credential" in out, out
+        assert "self-hosted only" in out, out
+        assert "Hosted:" not in out.replace("no hosted credential", ""), out
+        assert rc in (0, 1)   # graph rows decide; the hosted half made no claim
+
+    def test_offline_probes_nothing_but_still_names_the_credential(
+            self, monkeypatch, tmp_path, capsys):
+        """`--offline` is for the box whose NETWORK is the thing under test."""
+        self._store(tmp_path, "tt_" + "o" * 40)
+
+        def _forbidden(*a, **k):
+            raise AssertionError("--offline made a request")
+
+        import urllib.request
+        monkeypatch.setattr(urllib.request, "urlopen", _forbidden)
+
+        _run_doctor(["--offline"])
+        out = capsys.readouterr().out
+
+        assert "--offline" in out, out
+        assert "credentials.json" in out, out
+
+    def test_a_valid_key_reports_latency_and_the_team_it_belongs_to(
+            self, monkeypatch, tmp_path, capsys):
+        self._store(tmp_path, "tt_" + "v" * 40)
+        self._install(monkeypatch,
+                      team_body={"org_id": "agent-00e8e3", "tier": "free"})
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = [ln for ln in out.splitlines() if "Hosted" in ln]
+        assert hosted, out
+        assert "✅ Hosted" in hosted[0], hosted
+        assert "ms" in hosted[0], hosted            # the measured latency
+        assert "agent-00e8e3" in hosted[0], hosted  # who the key belongs to
+
+    def test_a_graph_scoped_403_is_accepted_by_design_not_a_failure(
+            self, monkeypatch, tmp_path, capsys):
+        """C5 #2114: a per-graph key MUST NOT read org info. That 403 proves
+        the key authenticated — grading it as a broken credential would send a
+        correctly-configured user to re-mint a working key."""
+        self._store(tmp_path, "tt_" + "g" * 40)
+        self._install(monkeypatch, team=403, team_body={
+            "detail": {"error_code": "GRAPH_SCOPED_TEAM_SURFACE"}})
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "❌ Hosted" not in out, out
+        hosted = next(ln for ln in out.splitlines() if "Hosted" in ln)
+        assert "graph-scoped" in hosted, hosted
+        assert "by design" in hosted, hosted
+
+    def test_the_credentials_row_names_the_store_and_never_the_key(
+            self, monkeypatch, tmp_path, capsys):
+        key = "tt_" + "s3cr3tva1ue" * 3
+        store = self._store(tmp_path, key)
+        self._install(monkeypatch)
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "credentials.json" in out, out
+        assert str(store) in out, out
+        assert "https://api.premiselabs.co" in out, out   # api_url
+        assert "00e8e36129794bcdb2c992ff47" in out, out    # org
+        assert key not in out, "the raw key reached the terminal"
+        # ...but a fingerprint does, so two keys can be told apart (#5109).
+        from tortoise.__main__ import _key_fingerprint
+        assert _key_fingerprint(key) in out, out
+
+    def test_an_unreachable_endpoint_is_named_not_swallowed(
+            self, monkeypatch, tmp_path, capsys):
+        import urllib.error
+        self._store(tmp_path, "tt_" + "u" * 40)
+        self._install(monkeypatch,
+                      health_exc=urllib.error.URLError("nodename nor servname"))
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "❌ Hosted" in out, out
+        assert "/health" in out, out
+        assert "unreachable" in out, out
+
+    def test_an_unsendable_key_fails_without_dialing(
+            self, monkeypatch, tmp_path, capsys):
+        """#5109: a CR/LF key cannot go in a header at all — and `http.client`
+        would echo it in its own refusal, so it is refused HERE."""
+        self._store(tmp_path, "tt_" + "x" * 20 + "\nInjected: 1")
+
+        def _forbidden(*a, **k):
+            raise AssertionError("doctor dialed with a key that cannot be sent")
+
+        import urllib.request
+        monkeypatch.setattr(urllib.request, "urlopen", _forbidden)
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "❌ Credentials" in out, out
+        assert "cannot be sent" in out, out

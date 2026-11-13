@@ -4455,17 +4455,28 @@ def _is_timeout_reason(reason: object) -> bool:
     return isinstance(reason, TimeoutError) or "timed out" in str(reason).lower()
 
 
-def _explain_org_info_failure(code: int, body: str, api_url: object,
-                              api_key: object = None) -> None:
-    """Turn `tortoise team info`'s failure into a remedy (never a raw code).
+def _classify_hosted_refusal(code: int, body: str, api_url: object,
+                            api_key: object = None) -> dict:
+    """Grade a `/v1/team` refusal → {state, detail, remedies}.
 
-    401 means the stored key is not valid (revoked, or minted for another host);
-    403 GRAPH_SCOPED_TEAM_SURFACE means the key is graph-bound and the refusal is
-    by design. Both are answers, and both name the next command. Anything else
-    keeps the body — an unknown failure must stay legible, not be swallowed.
+    `team info` and `doctor` answer the same question about the same refusal —
+    "is this key broken, or is the server telling me something deliberate?" — so
+    they share ONE classifier. Two copies is how a diagnostic starts disagreeing
+    with the command it is diagnosing (#11912).
+
+    States:
+      ``invalid_key``  401 — the stored key is not valid (revoked, other host).
+      ``graph_scoped`` 403 GRAPH_SCOPED_TEAM_SURFACE — the key authenticated and
+                       the refusal is BY DESIGN (C5 #2114), never a fault.
+      ``suspended``    403 SUSPENDED — an account-level decision with an appeal.
+      ``other``        anything else; the body stays legible, never swallowed.
+
+    `detail` is the sentence to print; `remedies` are the already-indented
+    follow-up lines `team info` prints today (so reusing this cannot re-word
+    them). Remediation is behaviour, not decoration: a refusal with no next
+    command is the gap #10655 closed.
     """
     import json as _json
-    import sys as _sys
 
     # `api_url` is store-supplied and NOT type-validated by the resolver; the
     # masker calls `.split()`, so coerce here rather than trap the next caller.
@@ -4512,25 +4523,50 @@ def _explain_org_info_failure(code: int, body: str, api_url: object,
         # line beside the carefully escaped URL.
         suffix = f" Appeal: {appeal_url}" if appeal_url else ""
         body_message = message[:-len(suffix)] if (suffix and message.endswith(suffix)) else message
-        print(f"Team info unavailable: {_printable(body_message)}", file=_sys.stderr)
-        if isinstance(appeal_url, str) and appeal_url:
-            print(f"   Appeal: {_printable(appeal_url)}", file=_sys.stderr)
-        return
+        return {"state": "suspended", "detail": _printable(body_message),
+                "remedies": ([f"   Appeal: {_printable(appeal_url)}"]
+                             if isinstance(appeal_url, str) and appeal_url else [])}
     if code == 403 and error_code in _ORG_INFO_REMEDIES:
-        print(f"Team info unavailable: {_ORG_INFO_REMEDIES[error_code]}",
-              file=_sys.stderr)
-        return
+        return {"state": "graph_scoped",
+                "detail": _ORG_INFO_REMEDIES[error_code], "remedies": []}
     if code == 401:
         # `api_url` is store-supplied (filesystem-controlled): mask its userinfo
         # exactly as `config show` does, and keep it on one printable line.
-        print("Team info unavailable: the stored API key at this host is not valid "
-              f"({_printable(_mask_display_target(api_url or ''))}).", file=_sys.stderr)
-        print("   Re-mint it: `tortoise signup` (new team) or `tortoise recover` "
-              "(same team, needs your st_ recovery token).", file=_sys.stderr)
-        print("   Check which store won first: `tortoise config show`.",
-              file=_sys.stderr)
+        return {
+            "state": "invalid_key",
+            "detail": ("the stored API key at this host is not valid "
+                       f"({_printable(_mask_display_target(api_url or ''))})"),
+            "remedies": [
+                "   Re-mint it: `tortoise signup` (new team) or `tortoise recover` "
+                "(same team, needs your st_ recovery token).",
+                "   Check which store won first: `tortoise config show`.",
+            ],
+        }
+    return {"state": "other", "detail": f"API error ({code}): {_printable(body[:2000])}",
+            "remedies": []}
+
+
+def _explain_org_info_failure(code: int, body: str, api_url: object,
+                              api_key: object = None) -> None:
+    """Turn `tortoise team info`'s failure into a remedy (never a raw code).
+
+    401 means the stored key is not valid (revoked, or minted for another host);
+    403 GRAPH_SCOPED_TEAM_SURFACE means the key is graph-bound and the refusal is
+    by design. Both are answers, and both name the next command. Anything else
+    keeps the body — an unknown failure must stay legible, not be swallowed.
+
+    The GRADING lives in `_classify_hosted_refusal`, which `doctor`'s Hosted row
+    reads too (#11912); this function owns only the stderr rendering.
+    """
+    import sys as _sys
+
+    verdict = _classify_hosted_refusal(code, body, api_url, api_key)
+    if verdict["state"] == "other":
+        print(verdict["detail"], file=_sys.stderr)
         return
-    print(f"API error ({code}): {_printable(body[:2000])}", file=_sys.stderr)
+    print(f"Team info unavailable: {verdict['detail']}", file=_sys.stderr)
+    for line in verdict["remedies"]:
+        print(line, file=_sys.stderr)
 
 
 ONBOARDING_PROMPT_URL = "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
@@ -12833,6 +12869,167 @@ def _session_index_rows_without_graph(
              "(see the `Graph: health` row)")]
 
 
+#: `doctor`'s hosted-probe bounds. `team info` answers with 10 s and then
+#: retries once at 30 s for a cold app; `doctor` must not park twice as long as
+#: the command whose verdict it reports, so it makes ONE attempt at the same
+#: first bound and names the cold-start possibility in the row instead of
+#: retrying. `/health` gets a tighter bound: it answers in milliseconds when the
+#: app is up (measured 173–227 ms), so a 5 s silence there is a finding, not a
+#: warm-up.
+_DOCTOR_HOSTED_TIMEOUT_S = 10.0
+_DOCTOR_HEALTH_TIMEOUT_S = 5.0
+
+
+def _probe_hosted(api_url: str, api_key: str,
+                  timeout: float = _DOCTOR_HOSTED_TIMEOUT_S) -> tuple[str, str]:
+    """Ask the hosted half whether it works → (icon, detail) for the Hosted row.
+
+    Two questions, because they fail differently and the difference is the whole
+    point (#11912): is the endpoint REACHABLE (`GET /health`, with the measured
+    latency), and is the key ACCEPTED (`GET /v1/team`). Before this, `doctor`
+    answered neither and printed "N pass, 0 fail" on a box where every hosted
+    command 401s.
+
+    A graph-scoped key's 403 is a PASS: the refusal is deliberate (C5 #2114) and
+    proves the key authenticated — grading it as broken would send a correctly
+    configured user to re-mint a working key. Any other refusal is a failure
+    carrying the same remedy `team info` prints, through the ONE classifier both
+    commands share.
+
+    Never raises: a diagnostic that crashes on the state it diagnoses is the
+    defect, not the fix. The key is scrubbed out of every message on the way out
+    (#5109 — `http.client` and hostile proxies both echo the header).
+    """
+    import time
+    import urllib.error
+    import urllib.request
+
+    base = (api_url or "").rstrip("/")
+    shown = _printable(_mask_display_target(base or "(no api_url resolved)"))
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(f"{base}/health",
+                                    timeout=min(timeout, _DOCTOR_HEALTH_TIMEOUT_S)) as resp:
+            resp.read(2048)
+    except urllib.error.HTTPError as exc:
+        return ("❌", f"{shown}/health answered {exc.code} — the endpoint is up but "
+                      "not healthy; check status.premiselabs.co or retry")
+    except Exception as exc:  # transport, bad URL, TLS, timeout
+        reason = _printable(_scrub(str(getattr(exc, "reason", None) or exc),
+                                   base, api_key))[:80]
+        return ("❌", f"endpoint unreachable at {shown}/health ({reason}) — check "
+                      "your network, TORTOISE_API_URL, or re-run with --offline "
+                      "to skip the probe")
+    health_ms = int((time.monotonic() - started) * 1000)
+
+    try:
+        req = urllib.request.Request(
+            f"{base}/v1/team", headers={"Authorization": f"Bearer {api_key}"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+        try:
+            data = __import__("json").loads(raw or b"{}")
+        except (ValueError, TypeError, RecursionError):
+            data = None
+        if not isinstance(data, dict):
+            # A 200 whose body is not an object (proxy, captive portal) is not a
+            # verified credential — `config show` refuses the same shape.
+            return ("❌", f"health OK ({health_ms} ms) but /v1/team answered a "
+                          "non-JSON-object body — a proxy or captive portal is "
+                          "in the path; check TORTOISE_API_URL")
+        org = data.get("org_id")
+        tail = f" ({_printable(org)})" if isinstance(org, str) and org else ""
+        return ("✅", f"health OK ({health_ms} ms) · key accepted{tail}")
+    except urllib.error.HTTPError as exc:
+        import http.client
+        try:
+            body = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        except (OSError, http.client.HTTPException):
+            body = ""
+        verdict = _classify_hosted_refusal(exc.code, body, base, api_key)
+        if verdict["state"] == "graph_scoped":
+            return ("✅", f"health OK ({health_ms} ms) · key accepted — graph-scoped "
+                          "key: org-level info is not readable by design, which "
+                          "is not a fault")
+        remedy = " · ".join(part.strip() for part in verdict["remedies"] if part.strip())
+        return ("❌", f"health OK ({health_ms} ms) · {verdict['detail']}"
+                      + (f" — {remedy}" if remedy else ""))
+    except Exception as exc:  # transport, timeout, bad URL
+        reason = _printable(_scrub(str(getattr(exc, "reason", None) or exc),
+                                   base, api_key))[:80]
+        return ("❌", f"health OK ({health_ms} ms) but /v1/team did not answer "
+                      f"({reason}) — the key could not be verified")
+
+
+def _doctor_hosted_rows(api_key: str | None, api_url: str | None, *,
+                        source: str | None = None, org_id: str | None = None,
+                        offline: bool = False, refused: str | None = None,
+                        degraded: str | None = None,
+                        ) -> list[tuple[str, str, str]]:
+    """The Credentials + Hosted rows — the half of the product `doctor` could
+    not see (#11912), plus the one line a keyless box gets instead.
+
+    The three states are deliberately distinguishable, because the defect was
+    that they were not:
+
+      * no credential → ONE `ℹ️` line saying so, and **no request** (a keyless
+        box is a normal self-host install, not a warning, and dialling with no
+        key is the noise #11912's third target forbids);
+      * a credential resolves → `✅ Credentials` naming the store, the masked
+        key, its fingerprint, the endpoint and the org — the "who am I and what
+        am I connected to" answer — then `✅/❌ Hosted` for whether it WORKS;
+      * a credential the resolver REFUSED (or one that cannot go in a header)
+        → `❌ Credentials` with the reason, and no probe: the request would fail
+        for a reason already known, and `http.client` would echo the key.
+
+    `--offline` keeps every row and drops only the request, for a box whose
+    NETWORK is the thing under test.
+    """
+    if refused is not None:
+        return [("Credentials", "❌", refused)]
+    if degraded is not None:
+        return [("Credentials", "⚠️", degraded)]
+    if not api_key:
+        return [("Credentials", "ℹ️",
+                 "no hosted credential — self-hosted only (the graph checks "
+                 "above are the whole story). `tortoise signup` mints one")]
+    if not _is_sendable_key(api_key):
+        return [("Credentials", "❌",
+                 "the resolved API key cannot be sent in a request header "
+                 "(not latin-1 encodable, or contains CR/LF) — re-mint it: "
+                 "`tortoise signup` (new team) or `tortoise recover`) — NOT "
+                 "probed")]
+
+    fingerprint = _publishable_fingerprint(api_key) or "withheld (key too short to digest)"
+    target = _printable(_mask_display_target(
+        api_url if isinstance(api_url, str) else str(api_url or "")))
+    detail = (f"{_printable(source or 'resolved')} — key {_mask_secret_tail(api_key)} "
+              f"fp {fingerprint}")
+    if target:
+        detail += f" · {target}"
+    if org_id:
+        detail += f" · org {_printable(org_id)}"
+    rows: list[tuple[str, str, str]] = [("Credentials", "✅", detail)]
+
+    if offline:
+        rows.append(("Hosted", "ℹ️",
+                     "not probed (--offline) — the credential resolves, so hosted "
+                     "commands will use the endpoint above; drop --offline to test it"))
+        return rows
+    raw_url = api_url if isinstance(api_url, str) else str(api_url or "")
+    if not raw_url.strip():
+        # A key with no endpoint cannot be verified at all, and pretending to
+        # probe "" would report a transport failure for a configuration bug.
+        rows.append(("Hosted", "❌",
+                     "no api_url resolved — the credential store carries none, so "
+                     "not even the endpoint is known; `tortoise signup` (or "
+                     "`tortoise init --api-key`) writes one"))
+        return rows
+    icon, why = _probe_hosted(raw_url, api_key)
+    rows.append(("Hosted", icon, why))
+    return rows
+
+
 def _cmd_doctor(args):
     """Health check — verify Tortoise setup is healthy."""
     import importlib
@@ -13073,6 +13270,47 @@ def _cmd_doctor(args):
     # state. #2204 still holds — no projection is constructed to say this.
     if not any(r[0] == "Session indexing" for r in results):
         results.extend(_session_index_rows_without_graph(_session_index_reason))
+
+    # 3.5 Credentials + Hosted (#11912) — the OTHER half of the product. Every
+    # check above speaks about the self-hosted half (local packages, local graph,
+    # local session corpus); until this block existed `doctor` had no credential
+    # check and no hosted check at all, so a box whose stored key 401s on every
+    # hosted command printed "N pass, 0 fail". `onboard` ends by running this as
+    # its completion gate, so the wizard's final verdict certified a setup that
+    # could not make one hosted call.
+    #
+    # The resolver is `config show`'s (#10655) — ASKED, never re-derived: a
+    # second implementation of the store ladder is how a reporter starts lying.
+    # The keys are read from the dict `_resolve_config_path` returns for the same
+    # reason: `org_id` lives in the FILE, and an env-supplied key has none (which
+    # is an answer, not a gap — the row says so by omitting it).
+    _offline = bool(getattr(args, "offline", False))
+    try:
+        _cfg_path, _cfg, _api_key, _api_url = _resolve_config_path()
+        results.extend(_doctor_hosted_rows(
+            _api_key, _api_url,
+            source=("env:TORTOISE_API_KEY" if (_cfg_path is None and _api_key)
+                    else (str(_cfg_path) if _cfg_path is not None else None)),
+            org_id=(_cfg or {}).get("org_id") if isinstance(_cfg, dict) else None,
+            offline=_offline))
+    except _ConfigError as exc:
+        # The resolver REFUSED a store: that is the diagnosis, and probing with
+        # no key would fail for a reason we already know.
+        _offender = exc.args[0] if exc.args else "(unknown store)"
+        _why = str(exc.__cause__) if exc.__cause__ else "api_key missing or invalid"
+        results.extend(_doctor_hosted_rows(
+            None, None, offline=_offline,
+            refused=(f"invalid config at {_offender}: "
+                     f"{_printable(_why)[:80]} — `tortoise config show` reports the "
+                     "ladder; repair or remove that store")))
+    except (OSError, RuntimeError) as exc:
+        # The environment, not a store (`Path.home()` on `HOME=~/x`, a deleted
+        # cwd). A check that could not RUN is never a PASS (#8661).
+        results.extend(_doctor_hosted_rows(
+            None, None, offline=_offline,
+            degraded=(f"credential resolver could not run: "
+                      f"{_printable(f'{type(exc).__name__}: {exc}')[:80]} — `tortoise "
+                      "config show` reports the stores it could read")))
 
     # 4.6 Session capture consent (#3615) — capture is a DATA-SHARING act and
     # requires the explicit TORTOISE_CAPTURE opt-in; a lone credential no longer
@@ -14985,6 +15223,13 @@ def main(argv: list[str] | None = None) -> int:
         "--db", default=None,
         help="Docker URI (docker://, redis://, rediss://) or embedded DB file "
              "path for the graph-health check",
+    )
+    # #11912: the hosted probe is a REQUEST, and a box whose network is the thing
+    # under test must be able to run the health check without it (target 4).
+    doctor.add_argument(
+        "--offline", action="store_true",
+        help="Skip the hosted probe — report the resolved credential and endpoint "
+             "without making any request (no network access at all)",
     )
     onboard = sp.add_parser("onboard", help="Guided onboarding: init → index → demo → doctor")
     onboard.add_argument("--path", default=None, help="Path for embedded mode")
