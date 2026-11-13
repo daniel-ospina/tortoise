@@ -1238,9 +1238,11 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
     # version are the same detector written independently, and this rebase keeps ONE of them — the
     # `#12182` one, which also covers `WRITER_LABEL_OVERRIDES` and asserts each literal's key count
     # still equals its runtime dict's. Only the NAME changed here; re-derive the pin, never cite the
-    # deleted name. ⛔ And do not RE-WIDEN that pin's source scan to `ast.walk`: it is module-top-level
-    # on purpose, because a walk visits a same-named literal anywhere and a decoy could hide a real
-    # duplicate (`#12182` rebase review, P2 — measured).
+    # deleted name. ⛔ And do not RE-WIDEN that pin's source scan to `ast.walk`: the three tables are
+    # module-level declarations, so the top level is the only scope where "the table" is a single
+    # object. (This is not a duplicate fail-open fix — the duplicate assert fires per visited node,
+    # so a decoy cannot hide one; a decoy can only shadow the trailing key-count agreement.
+    # Re-measured: a real duplicate plus a 23-key decoy still reds.)
     # Provenance and the carrier rationale are merged into this row so neither reading is lost.
     "tortoise.sdk::create_source": (
         CENSUS_EXEMPT,
