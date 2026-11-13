@@ -3222,14 +3222,21 @@ def test_a_dot_yaml_workflow_is_scanned_like_a_dot_yml_one(tmp_path):
 def test_the_enumerator_returns_every_workflow_file_github_would_run():
     """An INDEPENDENT read of the directory, not a second call to the same glob.
 
-    Compared against `iterdir()` filtered by suffix, so a typo or a dropped entry in
-    `_WORKFLOW_SUFFIXES` cannot pass by agreeing with itself — the same reason
-    `test_the_job_splitter_returns_exactly_the_jobs_yaml_declares` compares `_jobs`
-    against `yaml.safe_load` rather than against a hand-written expectation.
+    Compared against `iterdir()` filtered by a LITERAL suffix pair — not by
+    `_WORKFLOW_SUFFIXES` — so a typo or a dropped entry in the tuple cannot pass by agreeing
+    with itself, the same reason `test_the_job_splitter_returns_exactly_the_jobs_yaml_declares`
+    compares `_jobs` against `yaml.safe_load` rather than against a hand-written expectation.
+
+    The population assertion is not decoration: with an emptied or unreadable
+    `.github/workflows`, a two-sided comparison is `set() == set()` and passes while proving
+    nothing — a gate that reports OK when it examined nothing, which is the shape `#12238` is
+    about one layer up.
     """
-    on_disk = {
-        p.name for p in WORKFLOWS.iterdir() if p.is_file() and p.suffix in _WORKFLOW_SUFFIXES
-    }
+    on_disk = {p.name for p in WORKFLOWS.iterdir() if p.is_file() and p.suffix in (".yml", ".yaml")}
+    assert on_disk, (
+        f"no workflow files found in {WORKFLOWS} — this comparison is two empty sets and "
+        "proves nothing (a gate that examined nothing must not read as a pass)"
+    )
     assert {p.name for p in _workflow_paths()} == on_disk, (
         "`_workflow_paths()` does not return every workflow file in `.github/workflows` — "
         "a workflow it omits is never opened by any scan in this module (#12238)"
@@ -3244,6 +3251,16 @@ def test_no_site_re_spells_the_workflow_glob_narrowly():
     one: the one-extension glob spelling may not appear anywhere in this module — the
     enumeration derives from `_WORKFLOW_SUFFIXES` through `_workflow_paths()`. (That is also
     why this docstring does not spell it: the pin reads THIS file's source, so prose counts.)
+
+    SCOPE, so a green run is not read as more than it is: this is a pin on the GLOB IDIOM,
+    which is the idiom every site in this file used. A fourth site written without a glob at
+    all (`[p for p in WORKFLOWS.iterdir() if p.suffix == ".yml"]`) reads clean here — it is
+    out of this pin's reach by construction, and measured as such. What covers that shape is
+    `test_a_dot_yaml_workflow_is_scanned_like_a_dot_yml_one` only if the new site feeds the
+    coverage scan, so a future non-glob enumeration site is a REVIEW question, not a pinned
+    one. Stated rather than implied, because a structural pin invites exactly that
+    over-reading. The tuple itself is asserted here too (bottom), so a dropped `.yaml` reds
+    even when no site spells the glob.
     """
     source = Path(__file__).read_text()
     narrow = re.findall(r"glob\(\s*[\"']\*\.yml[\"']\s*\)", source)
