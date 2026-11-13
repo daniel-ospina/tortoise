@@ -137,14 +137,20 @@ class NonFoldedEntry(NamedTuple):
     candidate_ids: tuple
     shape: str  # "ambiguous-name" | "unaddressable-name" | "duplicate-id"
     #            | "endpoint-collision" | "no-live-holder"
-    # ⛔ `"unaddressable-name"` has TWO producers in `commit_ops`, and a consumer that
-    # reads the shape must not assume the first: the never-guess arm (several holders
-    # of one name, none addressable) and the gone-survivor arm (every holder is a
-    # carrier of ONE merged entity whose survivor is deleted — `_ref_is_one_gone_entity`,
-    # `commit_ops` review round 17/18). They differ in cause, not in shape: in both the
-    # name cannot be addressed one-of-them, so neither may be silently picked.
-    # `candidate_ids` is what tells them apart at the call site — the carriers, or the
-    # id-less placeholder.
+    # ⛔ `"unaddressable-name"` has TWO causes in `commit_ops`, and a consumer that
+    # reads the shape must not assume the first:
+    #  (a) the GONE-SURVIVOR arms — every holder is a carrier of ONE merged entity
+    #      whose survivor is deleted (`_ref_is_one_gone_entity` and the `if not
+    #      by_name` twins, four of the five sites);
+    #  (b) the ID-LESS-TARGET arms — a resolved target that carries no id, so the
+    #      journaled fold cannot address it (`commit_ops` id-less Object arm,
+    #      `entity_identity._refuse`'s twin here).
+    # They differ in cause, not in shape: in both the name cannot be addressed
+    # one-of-them, so neither may be silently picked. ⛔ `candidate_ids` does NOT
+    # tell them apart: four sites record a plain carrier list, and the id-less one
+    # records `('<id-less>',)` when the id is NULL but `('',)` when it is the empty
+    # string — indistinguishable from a carrier list. The cause must be taken from
+    # the call site.
 
 
 _non_folded: list[NonFoldedEntry] = []
