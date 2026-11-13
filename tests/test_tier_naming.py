@@ -41,6 +41,7 @@ network, ~0.1 s.
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -228,9 +229,23 @@ _BUILDER_PLAN = r"['\"`]?builder['\"`]?\s+(?:plan|tier)"
 
 #: The assertion must END its clause. Without this the patterns match the HEAD of a
 #: qualified true statement ("there is no Builder plan cheaper than Solo"), which is
-#: the cycle-2 false block. `$` inside a lookahead is the end of the STRING, which is
-#: what a line-based scan gives us.
+#: the cycle-2 false block.
 _CLAUSE_END = r"(?=\s*(?:$|[.;,)]|—|–|--|;))"
+
+#: Markdown down to prose, applied BEFORE matching. The drift has to be caught in the
+#: style the DOC ITSELF uses: this repo renders the tier as ``**Builder**`` and the
+#: paragraph this pin was written for says "the **Builder** and **Team** plans".
+#: Matching only quoted/backticked spellings missed every emphasised denial —
+#: `There is no **Builder** plan.` and `There is no [Builder](url) plan.` both passed
+#: (cycle-3 review), which is a false NEGATIVE on the exact sentence a re-edit would
+#: write in this file's own dialect.
+_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")   # [text](url) -> text
+_MD_EMPHASIS = re.compile(r"[*_`]+")                 # ** * _ __ ` -> nothing
+
+
+def _plain(sentence: str) -> str:
+    """Strip markdown emphasis and link syntax so patterns see the words."""
+    return _MD_EMPHASIS.sub("", _MD_LINK.sub(r"\1", sentence))
 
 _DENIAL_PATTERNS = (
     # "there is no 'builder' plan" — asserted, unqualified absence.
@@ -289,21 +304,64 @@ def _denial_in(sentence: str) -> bool:
     true-positive tuple left the tests green while the loop reported nothing. A pin
     whose tests can diverge from the guard is not a pin.
     """
-    if not any(pattern.search(sentence) for pattern in _DENIAL_PATTERNS):
+    if not any(pattern.search(_plain(sentence)) for pattern in _DENIAL_PATTERNS):
         return False
     return not _quotes_a_retracted_claim(sentence)
 
 
+#: A markdown block that starts a NEW block, so it is not glued onto the previous
+#: paragraph (a list item or a heading is its own unit).
+_BLOCK_START = re.compile(r"^\s*(?:[#>&\-*+|]|\d+[.)])\s")
+
+
 def _doc_sentences(text: str) -> list[tuple[int, str]]:
-    """(line number, sentence) pairs — line numbers so a failure is actionable."""
+    """(line number, sentence) pairs, with hard-wrapped paragraphs JOINED.
+
+    A markdown hard-wrap is a formatting accident, not a sentence boundary. The first
+    cut split per PHYSICAL LINE and never rejoined, so ``_CLAUSE_END``'s ``$`` meant
+    "end of this line" — and a correct, qualified statement wrapped just before its
+    qualifier was reported as a denial (cycle-3 review):
+
+        "… the fact that there is no Builder plan
+         cheaper than Solo on any surface we publish today."
+
+    That is the same false-positive class the patterns were narrowed to fix, arriving
+    through formatting, and the reported remedy (weaken a correct sentence) is worse
+    than the drift. Lines are therefore accumulated into paragraphs and split on
+    sentence punctuation; each sentence reports the line it STARTS on, which is where
+    a reader looks for it.
+    """
     out: list[tuple[int, str]] = []
+    para: list[tuple[int, str]] = []
+
+    def flush() -> None:
+        if not para:
+            return
+        joined = ""
+        starts: list[tuple[int, int]] = []   # (char offset, line number)
+        for lineno, line in para:
+            starts.append((len(joined), lineno))
+            joined += line.strip() + " "
+        for match in re.finditer(r"[^.!?]+[.!?]*", joined):
+            sentence = match.group(0).strip()
+            if not sentence:
+                continue
+            lineno = starts[0][1]
+            for offset, line_no in starts:
+                if offset <= match.start():
+                    lineno = line_no
+            out.append((lineno, sentence))
+
     for lineno, line in enumerate(text.splitlines(), start=1):
-        # Sentence boundaries inside a line; a markdown hard-wrap joins back up
-        # because the denial forms above never span a wrap in practice, and a
-        # false negative on an exotic wrap is preferable to a lint nobody trusts.
-        for sentence in re.split(r"(?<=[.!?])\s+", line):
-            if sentence:
-                out.append((lineno, sentence))
+        if not line.strip():
+            flush()
+            para = []
+            continue
+        if para and _BLOCK_START.match(line):
+            flush()
+            para = []
+        para.append((lineno, line))
+    flush()
     return out
 
 
@@ -328,6 +386,10 @@ class TestNoDocDeniesABuilderPlanExists:
             "The Builder plan exists and is called `pro`.",
             "A Builder tier exists for teams that outgrow Solo.",
             "The Builder plan and the Team plan are both unlimited.",
+            # The doc's OWN rendering style, which the lint must not punish.
+            "The **Builder** and **Team** plans are both unlimited.",
+            "**Builder *is* the `pro` tier** — the identifier is `pro`.",
+            "The **Builder** plan exists and is called `pro`.",
             # A doc recording the retraction — cue AND evidence (#12444 cited).
             "docs/product/beta-sdk-surface.md previously read 'there is no "
             "\"builder\" plan'; #12444 corrected it.",
@@ -348,6 +410,14 @@ class TestNoDocDeniesABuilderPlanExists:
             "No builder plan exists.",
             "The builder tier does not exist.",
             "Builder is not a plan.",
+            # The drift re-written in this repo's own markdown emphasis style — the
+            # style the corrected doc itself uses, so the likeliest re-edit form, and
+            # the one the first cut could not see at all (cycle-3 review).
+            "There is no **Builder** plan.",
+            "There is no *Builder* plan.",
+            "No **Builder** plan exists.",
+            "Builder is not a **plan**.",
+            "There is no [Builder](https://example.test) plan.",
         )
         for sentence in denials:
             assert _denial_in(sentence), (
@@ -374,26 +444,67 @@ class TestNoDocDeniesABuilderPlanExists:
                     f"a cue word exempted a live denial, so #12444's drift is "
                     f"re-introducible by adding one word: {dressed!r}")
 
+    def test_a_hard_wrap_is_not_a_sentence_boundary(self):
+        """The lint reads PARAGRAPHS, not physical lines (cycle-3 review).
+
+        Both halves, because one fix cannot be bought with the other: a wrap before
+        the qualifier must not invent a denial, and a wrap inside the denial must not
+        hide one.
+        """
+        qualified = (
+            "Self-hosting is free, and the hosted grid is explicit about the fact that there is\n"
+            "no Builder plan cheaper than Solo on any surface we publish today.\n")
+        for lineno, sentence in _doc_sentences(qualified):
+            assert not _denial_in(sentence), (
+                f"a hard wrap invented a denial at line {lineno}: {sentence!r}")
+
+        denial = "The old doc said there is\nno builder plan.\n"
+        assert any(_denial_in(sentence)
+                   for _, sentence in _doc_sentences(denial)), (
+            "a denial wrapped across two lines is not caught, so a re-edit can \n"
+            "reintroduce the drift by rewrapping the paragraph")
+
     def test_the_tests_assert_the_decision_not_the_patterns(self):
-        """The structural half: no test above may bypass :func:`_denial_in`.
+        """The structural half: no test in this class may bypass :func:`_denial_in`.
 
         Cycle 2 proved this matters — with the tests matching `_DENIAL_PATTERNS`
         directly and the loop applying the exemption at a separate call site,
         appending `" (stale)"` to every denial kept the tests green while the loop
         reported nothing. Assert on the decision, never on its ingredients.
+
+        An **AST walk**, not a source scan: the first cut sliced the file's text from
+        the class header to THIS method's own `def`, so (a) a test appended anywhere
+        after it escaped the guard entirely and (b) every docstring mentioning a
+        pattern name tripped it (cycle-3 review, both measured). Walking the parsed
+        class visits every test regardless of position, ignores prose, and can ban the
+        exemption's ingredients too.
         """
-        source = Path(__file__).read_text(encoding="utf-8")
-        # Scan the tests ABOVE this one (this check's own source necessarily names
-        # the ingredients it bans).
-        body = source[
-            source.index("class TestNoDocDeniesABuilderPlanExists"):
-            source.index("    def test_the_tests_assert_the_decision_not_the_patterns")]
-        bypasses = [line.strip() for line in body.splitlines()
-                    if "_DENIAL_PATTERNS" in line or "_RETRACTION_CUES" in line]
-        assert not bypasses, (
-            f"a test asserts against the lint's INGREDIENTS rather than its "
-            f"decision (`_denial_in`), so it can stay green while the guard is "
-            f"bypassed: {bypasses}")
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        cls = next(node for node in tree.body
+                   if isinstance(node, ast.ClassDef)
+                   and node.name == "TestNoDocDeniesABuilderPlanExists")
+        banned = {
+            "_DENIAL_PATTERNS",          # the raw regexes
+            "_RETRACTION_CUES",          # the exemption's cue half
+            "_RETRACTION_EVIDENCE",      # …and its evidence half
+            "_quotes_a_retracted_claim",  # …and the composed exemption
+        }
+        offenders: list[str] = []
+        for node in cls.body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if node.name == "test_the_tests_assert_the_decision_not_the_patterns":
+                continue
+            referenced = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            referenced |= {n.attr for n in ast.walk(node)
+                           if isinstance(n, ast.Attribute)}
+            hits = sorted(banned & referenced)
+            if hits:
+                offenders.append(f"{node.name} -> {hits}")
+        assert not offenders, (
+            f"test(s) assert against the lint's INGREDIENTS rather than its "
+            f"decision (`_denial_in`), so they can stay green while the guard is "
+            f"bypassed: {offenders}")
 
     def test_no_doc_asserts_a_builder_plan_does_not_exist(self):
         offenders: list[str] = []
