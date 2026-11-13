@@ -288,19 +288,31 @@ point, and EVERY caller of this read is on it:
 Every caller that must not have its page re-picked **opts out** via
 `_rerank_candidates=False`, in three classes — and two product reads deliberately do
 NOT, because the re-pick is the lever: `hosted_api`'s search route and
-`selfhost_api`'s search. **Order re-owners**: `_review_pool`, `suggest_entry_points`,
-`issue_insight`, `recall_state`, `recall_gaps`, `_resolve_subgraph_seed`, and
-`volunteer_context` (which binds the read as a `_search_fn=` seam rather than calling
-it, so its opt-out travels in `_search_kwargs`) sort the
-whole pool downstream, and `search_sessions` re-sorts its pool by the PRE-rerank
-`rrf` score before slicing — so a pre-cut reorder could only move which ids survive
-`limit` (and, for `search_sessions`, is a permutation that sort discards: it cannot
-change the page and it pays a model load for nothing) — an unmeasured composition
-change in every case. The eval / A-B harnesses
+`selfhost_api`'s search. Three distinct mechanisms, and they are NOT the same fact:
+
+- **Order re-owners** — `suggest_entry_points`, `issue_insight`, `recall_state`,
+  `recall_gaps` and `volunteer_context` (which binds the read as a `_search_fn=` seam
+  rather than calling it, so its opt-out travels in `_search_kwargs`) sort the whole
+  pool downstream, and `search_sessions` re-sorts its pool by the PRE-rerank `rrf`
+  score before slicing. A pre-cut reorder there can only move which ids survive
+  `limit` — an unmeasured composition change (and for `search_sessions` it is a
+  permutation that sort discards, so it cannot change the page at all and would pay a
+  model load for nothing).
+- **Consumed as a SET, never as a page** — `_review_pool` (a `{pid: …}` membership
+  map; `review_add` orders its own suggestions) and `_resolve_subgraph_seed` (an
+  expansion START set). Neither keeps an order, so "re-picked page" is not the harm
+  there; the harm is membership, which is the same class the probes below guard.
+  ⛔ Arithmetic also rules `_review_pool` out on its own: it reads `limit=200`,
+  above any sane pool width, so its page cannot move.
+- **Recorded-baseline harnesses** — the eval / A-B tools
+  (`tools/longmem_eval/retrieve.py`, `tools/fusion_formula_ab.py`,
+  `tools/ask_pool_admission_probe.py`) and the benchmarks
+  (`benchmarks/run_report.py`, `benchmarks/load_test.py`) pin it for comparability
+  against RECORDED numbers, exactly as the first three pin `_valid_time_rerank`. The eval / A-B harnesses
 (`tools/longmem_eval/retrieve.py`, `tools/fusion_formula_ab.py`,
 `tools/ask_pool_admission_probe.py`) and the benchmark harnesses
 (`benchmarks/run_report.py`, `benchmarks/load_test.py`) pin it for comparability
-against RECORDED numbers, exactly as the first three pin `_valid_time_rerank`. **Membership probes**: `battery/runner/setup.py`'s
+**Membership probes**: `battery/runner/setup.py`'s
 seed-manifest guard (`limit=20`) and `tools/why_layer_rate.py`'s support-entry
 lookup (`limit=25`) ask "is this row in the returned page", read a page smaller than
 the pool width, and would turn a re-picked page into a false `ConfigError` / a false
