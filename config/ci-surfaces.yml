@@ -2292,6 +2292,7 @@ surfaces:
   # `full: true, test_files: ALL`), not through this row.
   - test_12372_entity_type_dropped.py
   - test_candidate_recall_11901.py
+  - test_env_file_divergence.py
   # #12298 M3 (the measurement PR #12349): the brief's tables must equal the
   # committed `artifact.json`, and the brief's DEFECT claim must still match the
   # shipped tokenizer. The guarded production module is `tortoise/sparse.py`
