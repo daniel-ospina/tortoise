@@ -1346,6 +1346,12 @@ def test_section_1_locators_still_point_at_the_code_they_name(brief: str) -> Non
     the brief gets updated rather than silently dating. `cited` is the form the
     brief must still carry — a bare `:N` for a row that continues the previous
     row's path (`:58`, `:20774`), the full `path:N` otherwise.
+
+    ⛔ Do NOT reintroduce a declared HEAD here (#12349 review round 2, P2): the
+    table used to name one, nothing read it, and reverting it to the stale
+    `c17e3c5f78` left every test green — while the merge rail SQUASHES, so any
+    sha it could name is one `main` will never contain. The table now claims
+    exactly what this test enforces: these locators point at their symbols.
     """
     scope = _scope_slice(brief, "1")
     marker = "**The pinned read of the code**"
@@ -1367,8 +1373,7 @@ def test_section_1_locators_still_point_at_the_code_they_name(brief: str) -> Non
             "mechanism the brief describes has moved or gone")
         assert line == actual, (
             f"§1 cites {rel}:{line} for {symbol!r}, but that text is at line "
-            f"{actual} — update the brief's locator (and its declared head), do "
-            "not relax this pin")
+            f"{actual} — update the brief's locator, do not relax this pin")
 
 
 def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact, brief_text) -> None:
@@ -2846,9 +2851,9 @@ def test_the_index_wait_requires_exactly_the_expected_count(tool_mod) -> None:
         "artifacts' `measurement_notes` before changing this")
 
 
-def test_the_index_wait_refuses_an_object_index_that_does_not_cover_name(
+def test_the_index_wait_refuses_an_object_row_without_a_fulltext_index_on_name(
         tool_mod) -> None:
-    """The wait must refuse a WRONG-FIELD index, not just count it.
+    """The wait must refuse a row that does not carry FULLTEXT over `name`.
 
     ⛔ A document COUNT is not the identity of the index (#12349 review, P2).
     Measured on docker FalkorDB **v4.20.6**: `CALL db.idx.fulltext.queryNodes`
@@ -2859,10 +2864,17 @@ def test_the_index_wait_refuses_an_object_index_that_does_not_cover_name(
     reaches the same document count and answers every query with zero rows, so
     the shipped baseline would publish as 0.0 with every guard green.
 
-    This is a BEHAVIOURAL pin (a fake catalogue, not a source grep): the row
-    shape is the one `projection._schema_is_current` documents,
-    `[label, properties, {prop: [kind, …]}, …]`, and membership goes through the
-    repo's shared `index_catalogue.index_row_has_field`.
+    ⛔ And the FIELD NAME alone is not the identity either — the case this test
+    exists for, found only on review round 2. `Projection._ensure_indexes`
+    ALWAYS creates `("Object", "name", "RANGE")` (it is in
+    `_REQUIRED_RANGE_INDEXES`), so a field-name-only probe is satisfied on a
+    graph with no fulltext index at all: the guard would have been a silent
+    no-op on exactly the case it was added for — a false PASS inside a
+    fail-closed guard. Hence the KIND is asserted, through the triple the repo's
+    own `_schema_is_current` requires.
+
+    BEHAVIOURAL pin (a fake catalogue, not a source grep), over the measured row
+    shape `[label, properties, {prop: [kind, …]}, …, stats]`.
     """
     import pytest as _pytest
 
@@ -2882,22 +2894,33 @@ def test_the_index_wait_refuses_an_object_index_that_does_not_cover_name(
             self.g = _Graph(rows)
 
     stats = {"numDocuments": 3}
-    control = _Proj([["Object", ["name"], {"name": ["FULLTEXT"]}, stats]])
-    assert tool_mod._wait_indexed(control, 3, timeout_s=1.0) == (3, 0.0)
 
-    wrong_field = _Proj([["Object", ["id"], {"id": ["FULLTEXT"]}, stats]])
-    with _pytest.raises(SystemExit) as exc:
-        tool_mod._wait_indexed(wrong_field, 3, timeout_s=1.0)
-    assert "does not cover `name`" in str(exc.value), (
-        "the index wait accepted a full-text index over `id` — it reaches the "
-        "expected document count and returns zero rows for every query, which "
-        "is a 0.0 baseline with every other guard green")
+    def accepts(rows) -> None:
+        assert tool_mod._wait_indexed(_Proj(rows), 3, timeout_s=1.0) == (3, 0.0)
 
-    # …and the row whose FIELD LIST names `name` but whose KINDS map does not
-    # is accepted, because `indexed_field_names` reads BOTH catalogue columns on
-    # purpose (a property in only one of them still answers the question).
-    props_only = _Proj([["Object", ["name"], {"id": ["RANGE"]}, stats]])
-    assert tool_mod._wait_indexed(props_only, 3, timeout_s=1.0) == (3, 0.0)
+    def refuses(rows, why: str) -> None:
+        with _pytest.raises(SystemExit) as exc:
+            tool_mod._wait_indexed(_Proj(rows), 3, timeout_s=1.0)
+        assert "no FULLTEXT index over `name`" in str(exc.value), (
+            f"the index wait ACCEPTED a catalogue row that {why} — every query "
+            "would return zero rows and the shipped baseline would publish as "
+            "0.0 with every other guard green")
+
+    # The shape the catalogue's own module docstring records for a field that
+    # has both indexes.
+    accepts([["Object", ["id", "name"],
+              {"id": ["RANGE"], "name": ["RANGE", "FULLTEXT"]}, stats]])
+    # ⛔ THE CASE THE FIELD-NAME PROBE MISSED: `name` IS indexed — as RANGE —
+    # which is what every Tortoise graph carries, and there is no fulltext index.
+    refuses([["Object", ["id", "name"],
+              {"id": ["RANGE"], "name": ["RANGE"]}, stats]],
+            "indexes `name` only as RANGE (the default every graph has)")
+    refuses([["Object", ["id"], {"id": ["FULLTEXT"]}, stats]],
+            "full-text-indexes `id` instead of `name`")
+    # …and a row that cannot PROVE the kind fails CLOSED, the way
+    # `_schema_is_current` treats a row without a kinds map.
+    refuses([["Object", ["name"], stats]],
+            "reports `name` but carries no kinds map at all")
 
 
 def test_the_reuse_count_guard_is_wired(tool_mod) -> None:

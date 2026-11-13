@@ -108,7 +108,12 @@ which is recorded here because it constrains where the option could ever run. Ti
 and VectorChord-BM25 were named as candidates; neither had a verifiable PG-16 artifact in the sources
 read, and one working option is what M3 requires.
 
-**The pinned read of the code** (head `00a74c9cd2`, locators named because §6.2's own have drifted twice):
+**The pinned read of the code** (locators named because §6.2's own have drifted twice — and every one
+of them is asserted against the code by
+`tests/test_m3_fts_leg_recall_12298.py::test_section_1_locators_still_point_at_the_code_they_name`, so a
+line number here that stops pointing at its symbol is a test failure, not stale prose; no head sha is
+named, because the merge rail SQUASHES and any sha this table could cite is one `main` will never
+contain):
 
 | what | where | what it decides |
 |---|---|---|
@@ -186,12 +191,13 @@ fairer one — so the break is disclosed instead.
 straight after the writes can see a **partially built** index and book a present name as a miss — an
 artefact in the direction that flatters the wrong arm. The harness **waits** until `numDocuments`
 reaches the population size **exactly** (`==`, not `>=` — an over-count means the graph is not the one
-this run wrote) and **refuses** on timeout, and it **refuses a catalogue row that does not index
-`name`**: a count cannot tell `Object.name` from an `Object.id` index, and a wrong-field index reaches
-the same `numDocuments` and answers every query with zero rows — so it would publish a clean-looking
-0.0 baseline, and the leg's own trace cannot see it (measured on docker FalkorDB v4.20.6: an unindexed
-`CALL db.idx.fulltext.queryNodes` returns `[]` **without raising**, so the trace records
-`reason: empty_results`, not a degradation). It also **refuses a graph whose population differs, or that population
+this run wrote) and **refuses** on timeout, and it **refuses a catalogue row that does not carry a
+FULLTEXT index over `name`**: a count cannot tell `Object.name` from an `Object.id` index, and it cannot
+tell FULLTEXT from the RANGE index `_REQUIRED_RANGE_INDEXES` creates on `name` in every graph — a
+wrong-kind index reaches the same `numDocuments` and answers every query with zero rows, so it would
+publish a clean-looking 0.0 baseline, and the leg's own trace cannot see it (measured on docker
+FalkorDB v4.20.6: an unindexed `CALL db.idx.fulltext.queryNodes` returns `[]` **without raising**, so
+the trace records `reason: empty_results`, not a degradation). It also **refuses a graph whose population differs, or that population
 plus leftover rows**, twice over: `o.name` is an ON CREATE write (`#8919`), so a second run against the
 same graph would measure the previous population, and the graph's total `:Object` count is asserted
 against the population so a graph carrying a previous arm's `m3fx-*` fixture rows (which

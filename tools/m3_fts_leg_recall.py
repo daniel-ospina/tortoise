@@ -561,10 +561,10 @@ def _refuse_degraded_legs(trace: list[dict], query: str) -> None:
     function does not refuse — correctly, because nothing degraded. The
     ``index_missing`` degradation in ``search_engine`` is reachable only through
     a driver ERROR whose message names an index, which this engine does not
-    produce per query. The index's PRESENCE and its FIELD SET are therefore
+    produce per query. The index's PRESENCE and its KIND are therefore
     ``_wait_indexed``'s job (it reads ``CALL db.indexes()`` before any query is
-    issued and refuses an index that does not cover ``name``); do not read a
-    clean trace as proof that an index exists.
+    issued and refuses a row that does not carry a FULLTEXT index over
+    ``name``); do not read a clean trace as proof that an index exists.
     """
     entries = [e for e in trace
                if isinstance(e, dict) and e.get("leg") == "fts"]
@@ -763,6 +763,41 @@ def arm_falkordb(rows: list[dict], graph_name: str, namespace: str,
                              "identifier_fixture": fixture})
 
 
+def _object_row_fulltext_name(row) -> bool:
+    """Does this ``CALL db.indexes()`` row carry a FULLTEXT index over ``name``?
+
+    ⛔ The FIELD NAME alone is not the question (#12349 review, P2).
+    ``Projection._ensure_indexes`` always creates ``("Object", "name",
+    "RANGE")`` — it is in ``_REQUIRED_RANGE_INDEXES``
+    (``tortoise/projection/__init__.py:20304``), so EVERY Tortoise graph indexes
+    that name — and the catalogue reports a labelled row's field names beside a
+    per-property KINDS map. ``index_row_has_field(row, "name")`` therefore
+    answers True on a graph with NO fulltext index at all: the run proceeds,
+    every query returns ``[]`` without raising, and the shipped baseline
+    publishes as 0.0 with every guard green. The KIND is what separates them.
+
+    So the question asked is the triple the repo's own schema probe asks
+    (``projection._schema_is_current`` builds ``(label, prop, kind)`` from
+    ``row[2]`` and requires ``("Object", "name", "FULLTEXT")``). There is no
+    shared helper for the kind-aware question — ``index_catalogue``'s public
+    predicates are field-only — so the cell is read through the module's shared
+    ACCESSOR (``catalogue_cell``) rather than by position, and this docstring is
+    the record of why the predicate is local.
+
+    A row that cannot PROVE the kind fails CLOSED, the same way the schema probe
+    treats a row without a kinds map: an unprovable catalogue is not a pass.
+    """
+    from tortoise.index_catalogue import catalogue_cell
+
+    kinds = catalogue_cell(row, 2)
+    if not isinstance(kinds, dict):
+        return False
+    prop_kinds = kinds.get("name")
+    if isinstance(prop_kinds, str):
+        prop_kinds = [prop_kinds]
+    return "FULLTEXT" in {str(k).strip().upper() for k in (prop_kinds or ())}
+
+
 def _wait_indexed(proj, expected: int, timeout_s: float = 60.0) -> tuple[int, float]:
     """Block until the Object fulltext index reports ``expected`` documents.
 
@@ -774,14 +809,11 @@ def _wait_indexed(proj, expected: int, timeout_s: float = 60.0) -> tuple[int, fl
     index over some OTHER field (``id``) also reaches ``expected`` documents and
     also answers every query with zero rows — a legitimate-looking 0.0 baseline
     that no trace reading can catch, because on v4.20.6 an unindexed or
-    wrong-field query returns ``[]`` without raising. So the catalogue row's
-    FIELD SET is checked through the repo's one shared definition
-    (``tortoise.index_catalogue.index_row_has_field``), not a positional read:
-    the same helper ``projection._schema_is_current`` uses, so "does this row
-    index this field" cannot drift between the two sites.
+    wrong-field query returns ``[]`` without raising. So the catalogue row must
+    PROVE a FULLTEXT index over ``name``: see
+    :func:`_object_row_fulltext_name`, which asks the KIND-aware question and not
+    merely the field-name one.
     """
-    from tortoise.index_catalogue import index_row_has_field
-
     t0 = time.time()
     last = -1
     # ⛔ EQUALITY, not `>=` (#12349 review, P2). `>=` returns immediately on an
@@ -803,16 +835,18 @@ def _wait_indexed(proj, expected: int, timeout_s: float = 60.0) -> tuple[int, fl
             # (measured); an earlier comment said LAST and contradicted the code.
             if not row or row[0] != "Object":
                 continue
-            # ⛔ A row that does not cover `name` cannot answer these queries at
-            # all — see the docstring. Refuse on FIRST sight rather than waiting
-            # for a count that will never be the measurement's.
-            if not index_row_has_field(row, "name"):
+            # ⛔ A row that does not carry a FULLTEXT index over `name` cannot
+            # answer these queries at all — see `_object_row_fulltext_name`.
+            # Refuse on FIRST sight rather than waiting for a count that will
+            # never be the measurement's.
+            if not _object_row_fulltext_name(row):
                 raise SystemExit(
-                    "REFUSED: the Object fulltext index does not cover `name` "
-                    f"(catalogue row {row!r}). Every query would return zero "
-                    "rows and the shipped baseline would publish as 0.0 — a "
-                    "wrong-field index is indistinguishable from a real one by "
-                    "document count and by the leg's trace.")
+                    "REFUSED: the Object catalogue row carries no FULLTEXT "
+                    f"index over `name` (catalogue row {row!r}). Every query "
+                    "would return zero rows and the shipped baseline would "
+                    "publish as 0.0 — a RANGE-only or wrong-field index is "
+                    "indistinguishable from a real one by document count and by "
+                    "the leg's trace.")
             stats = next((c for c in row
                           if isinstance(c, dict) and "numDocuments" in c), None)
             last = int(stats["numDocuments"]) if stats else -1
