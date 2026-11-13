@@ -6143,22 +6143,30 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # shipped one round and four same-meaning tails walked straight past it —
             # "as well as", "along with", "in addition to", "for the E6 lane today,
             # and two more entries besides" — each making the claim FALSE with the
-            # pin GREEN (measured). A break is what the row actually writes after the
-            # name, and anything else is a qualifier this arm has not been taught to
-            # understand, so it refuses.
-            r"(?=\s*(?:—|–|\||\.|;|,|$))"
-            # …and `, one of two` / `, among several` turn "holds ONE" into a count
-            # of a larger set while keeping the clause-break shape.
-            r"(?!\s*,?\s*(?:one\s+of|two|three|among|several|many)\b)")
+            # pin GREEN (measured).
+            # ⛔ AND THE POSITIVE LOOKAHEAD THAT REPLACED IT ALLOWED A CLAUSE BREAK,
+            # which is the punctuation a continuation clause is written AFTER — so
+            # it was WEAKER than the deny-list on the very shape the deny-list
+            # missed. Measured at `8f09027daa`, each tail inserted immediately after
+            # the entry's closing backtick, real pin re-run: `, and one more`,
+            # `, plus another`, `, besides a second one`, ` — plus two more` were all
+            # GREEN (only `, among several` was refused, by the second lookahead
+            # below). A reader of the row then believes the block holds more than
+            # one, which the manifest arm cannot contradict. The arm therefore
+            # requires the row's ACTUAL continuation — the em-dash and the clause
+            # the document writes there — and refuses every other tail, because a
+            # qualifier after the name is the case it exists to catch.
+            r"(?=\s*—\s*cited by\b)")
         if not re.search(_ONE_ENTRY, doc_hits[0]):
             block_failures.append(
                 f"03-test-design.md's `carve_out:` sentence does not say, in the row's "
                 f"own grammar, that the block holds **one**: {ENTRY!r} — the sentence "
                 f"is the only place the document says WHICH entry it means, and a "
-                f"quantifier between the phrase and the name (`besides`, `and one "
-                f"more`, `among several`, `of the two`) asserts MORE than one while "
-                f"keeping the filename on the line. Restore 'holds **one**: "
-                f"`{ENTRY}`' with no qualifier between.")
+                f"quantifier — before OR after the name (`besides`, `and one "
+                f"more`, `plus another`, `among several`, `of the two`) — asserts "
+                f"MORE than one while keeping the filename on the line. Restore "
+                f"'holds **one**: `{ENTRY}` — cited by …', with no qualifier on "
+                f"either side of it.")
         # ⛔ THE DOCUMENT'S "hold none" HALF IS PART OF THE CLAIM, and it was
         # unchecked: the tree was verified to hold none in `uri_requiring:` and
         # `slow_files:`, but the SENTENCE could be rewritten to claim the opposite
@@ -6749,6 +6757,17 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
         "`carve_out:` holds **one**: ",
         "`carve_out:` holds **one** file besides ", 1), man),
      "`_ONE_ENTRY` (a quantifier replaces the colon)"),
+    # ⛔ A QUALIFIER AFTER THE NAME — and it is the ONLY case here that reaches the
+    # tail lookahead. The case above is already refused by the `(?::|—|–)`
+    # alternation before the tail is consulted, so deleting the lookahead left
+    # every case in this table GREEN (measured: 385 passed with the lookahead
+    # line removed) — the arm was unpinned, which is the defect this table exists
+    # to prevent. This case REDs while the lookahead is present and goes GREEN
+    # when it is deleted, so it is the load-bearing one.
+    (lambda doc, man: (doc.replace(
+        "`test_pack_logic_writeprobe_11083.py` — cited by",
+        "`test_pack_logic_writeprobe_11083.py`, and one more — cited by", 1), man),
+     "`_ONE_ENTRY` (a qualifier AFTER the name)"),
     (lambda doc, man: (doc + "\nThe `carve_out:` block and the row "
                              "`test_pack_logic_writeprobe_11083.py` sits at `:9987` "
                              "on this head.\n", man),
