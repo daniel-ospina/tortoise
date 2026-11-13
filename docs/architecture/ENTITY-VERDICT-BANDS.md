@@ -43,7 +43,7 @@ names a file, not a blog.
 | the FTS index is `name`-only | `projection/__init__.py:6819` (`:Subject`), `:6823` (`:Object`) | a name query matches both |
 | the retrieval filter is `status`-only | `search_engine.py:2973-2997` (`_STATUS_FILTERED_LABELS`, `:148`) — `resolved_from` count in `search_engine.py`, `ranking.py`, `session_link.py`, `assembly.py`: **0** | the carrier is search-visible and ranked |
 | the capture path never consulted the resolver | `extractor_v2` S3 → `_fts_rows` → `sdk.tortoise_fts_query(..., include_terminal=True)` | and it opts *back into* the wider status view |
-| the tie rule | rows land in **id-keyed dicts**, order DISCARDED — `search_graph`'s accumulator, `extractor_v2.py:3289` (the comment in `_fts_rows` says the same) | carrier and survivor **tie** on the name-only index |
+| the tie rule | rows land in **id-keyed dicts**, order DISCARDED — `search_graph`'s accumulator, `extractor_v2.py:3292-3298` (the comment in `_fts_rows` says the same) | carrier and survivor **tie** on the name-only index |
 
 ⇒ A mention could bind to **the node the merge retired**, and `resolve_entities`
 would report it as a resolution.
@@ -66,7 +66,14 @@ Four properties are load-bearing and each is pinned by a test:
   with the tree's own `normalize_entity_name` fold) — otherwise a mention spelled
   the way the merged variant was spelled finds nothing in phase 1 and is recorded
   as a measured absence, which is the same defect one field over. Pinned by
-  `test_a_re_mention_of_the_merged_variant_resolves_through_the_alias`.
+  `test_a_re_mention_of_the_merged_variant_resolves_through_the_alias`. Every
+  row that folds onto one id UNIONs its spellings into that id's row, because
+  which row reaches the fold first is FTS order and the spelling is what resolves:
+  with a first-wins dedupe, the same graph answered the same mention as a merge in
+  one row order and as a measured absence (a duplicate) in the other. Pinned by
+  `test_the_folded_row_s_aliases_do_not_depend_on_row_order`, and a bare-string
+  `aliases` is normalised, not dropped, like its two sibling readers
+  (`test_a_bare_string_stored_alias_is_normalised_not_dropped`).
 * **The survivor is not status-filtered.** This leg deliberately includes terminal
   entities (`#3301`); a merge-retired carrier is a different question from a
   terminal incarnation, and a guard that conflated them would silently drop the
@@ -169,7 +176,7 @@ spelling into the survivor's `aliases[]`, and the by-name resolver reads
 spelling's membership is *recorded*, not inferred, and no group-level comparison
 is being skipped. Without the escape, every later re-mention of an already-folded
 variant is refused **on every run for the lifetime of the merge**, and an entity
-hold is **not carried forward** (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch, `extractor_v2.py:12267`)), so the mention is
+hold is **not carried forward** (`extractor_v2.execute_embed`, the `"ENTITY hold(s) are NOT carried forward"` branch of `execute_embed`)), so the mention is
 dropped rather than queued. Pinned by
 `test_a_repeat_mention_of_a_folded_alias_merges_instead_of_being_lost`.
 

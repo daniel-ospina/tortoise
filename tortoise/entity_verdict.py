@@ -86,7 +86,8 @@ veto lives in to know that it fired:
     different question.
 
 ⛔ **On the issue's "an explicit `DIFFERENT_FROM`" veto: that predicate does not
-exist in this tree.** `grep -rn 'DIFFERENT_FROM' tortoise/ tests/` → 0 hits;
+exist in this tree.** `grep -rn 'DIFFERENT_FROM' tortoise/ tests/` finds nothing
+outside this sentence;
 `_VALID_EDGE_PREDICATES` (`projection/edges.py:717-730`) has no such edge. The
 recorded analogue is the persisted no-merge verdict — `dedup_reviewed='reject'`
 plus `dedup_target_id` / `dedup_rejected_targets` — and it is **PAIR-scoped

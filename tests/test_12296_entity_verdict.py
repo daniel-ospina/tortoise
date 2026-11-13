@@ -260,6 +260,50 @@ class TestThePriorSetNeverCarriesARetiredNode:
                 sdk, [{"id": "obj-orphan", "name": "the team", "kind": ""}],
                 {"obj-orphan": "Object"})
 
+    def test_the_folded_row_s_aliases_do_not_depend_on_row_order(
+            self, sdk_factory):
+        """Which row reaches the fold first is FTS order — the SPELLINGS must not be.
+
+        `seen` used to drop a row that folded onto an already-emitted id, taking
+        that row's surface spelling with it. Measured: the same graph resolved a
+        re-mention in one row order and CREATED A DUPLICATE in the other.
+        """
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-carrier", "the team")
+        _create_object(sdk, "obj-survivor", "Acme Holdings")
+        apply_entity_merge(sdk, "obj-carrier", "obj-survivor",
+                           method="exact", similarity=1.0)
+        rows = [{"id": "obj-carrier", "name": "the team", "kind": "core:plan"},
+                {"id": "obj-survivor", "name": "Acme Holdings",
+                 "kind": "core:plan"}]
+        labels = {"obj-carrier": "Object", "obj-survivor": "Object"}
+        first = v2._current_entity_priors(sdk, rows, labels)
+        second = v2._current_entity_priors(sdk, list(reversed(rows)), labels)
+        assert len(first) == len(second) == 1, (first, second)
+        assert first[0]["id"] == second[0]["id"] == "obj-survivor"
+        # The spelling that matched the carrier survives in BOTH orders.
+        assert set(first[0]["aliases"]) == set(second[0]["aliases"]), (
+            first, second)
+        assert "team" in first[0]["aliases"], first
+        assert "team" in second[0]["aliases"], second
+
+    def test_a_bare_string_stored_alias_is_normalised_not_dropped(
+            self, sdk_factory):
+        """`update_entity(aliases="the team")` is reachable; the fold must not
+        discard the string (its two sibling readers already normalise it)."""
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-carrier", "the team")
+        _create_object(sdk, "obj-survivor", "Acme Holdings")
+        apply_entity_merge(sdk, "obj-carrier", "obj-survivor",
+                           method="exact", similarity=1.0)
+        sdk._get_proj().g.query(
+            "MATCH (n:Object {id:'obj-survivor'}) SET n.aliases = 'The Team'")
+        out = v2._current_entity_priors(
+            sdk, [{"id": "obj-survivor", "name": "Acme Holdings",
+                   "kind": "core:plan"}],
+            {"obj-survivor": "Object"})
+        assert "team" in out[0]["aliases"], out
+
     def test_a_re_mention_of_the_merged_variant_resolves_through_the_alias(
             self, sdk_factory, monkeypatch):
         """The fold must keep the SPELLING, not only the id.
@@ -808,6 +852,16 @@ class TestTheResolverBands:
         ]
         assert v2._find_existing_entity(rivals, "the team", "core:org") == (
             None, "ambiguous")
+        # ACROSS kind rungs too: an exact-kind ALIAS must not beat a bare-kind
+        # exact NAME, or "name hits outrank alias hits" is true only within one
+        # kind level — and the pre-PR ladder bound the name row.
+        cross = [
+            {"id": "obj-A", "name": "Acme Holdings", "kind": "core:org",
+             "aliases": ["acme team"]},
+            {"id": "obj-B", "name": "Acme Team", "kind": "partner:org"},
+        ]
+        hit, mode = v2._find_existing_entity(cross, "Acme Team", "core:org")
+        assert (hit["id"], mode) == ("obj-B", "bare"), (hit, mode)
 
     def test_an_unfolded_stored_alias_still_resolves(self):
         """`aliases` is undeclared-but-writable, so the stored side must be folded

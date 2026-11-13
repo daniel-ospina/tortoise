@@ -3030,6 +3030,28 @@ def _entity_facts(graph, label: str, ids: list[str]) -> dict[str, tuple]:
             if r and r[0] is not None and str(r[0])}
 
 
+def _absorb_spellings(folded_row: dict, row: dict, fact: tuple | None) -> None:
+    """Union the spellings ``row`` (and the survivor's ``aliases``) into it.
+
+    ``aliases`` is undeclared-but-writable, so a caller may have stored a bare
+    STRING — iterating it would yield one spelling per character. The two sibling
+    readers (`apply_entity_merge`, `_entity_verdict_facts`) normalise the same way;
+    a third copy that forgot is how one of them silently loses an alias.
+    """
+    raw = fact[3] if fact is not None else None
+    if isinstance(raw, str):
+        stored = [raw]
+    elif isinstance(raw, (list, tuple, set)):
+        stored = [a for a in raw if a is not None]
+    else:
+        stored = []
+    row_name = str(row.get("name") or "")
+    for source in (row_name, *stored):
+        folded = normalize_entity_name(source) if source else ""
+        if folded and folded not in folded_row["aliases"]:
+            folded_row["aliases"].append(folded)
+
+
 class _PriorFoldUnresolvable(RuntimeError):
     """A ``resolved_from`` chain the batched fold cannot resolve (#12296, D-1).
 
@@ -3053,7 +3075,8 @@ def _current_entity_priors(sdk, rows: list[dict],
     `#12244`, at a site that issue does not name).** ``apply_entity_merge`` is
     non-destructive: the retired carrier keeps its ``name`` and gains
     ``resolved_from``, and it writes **no** ``status``
-    (``entity_resolver.py:797-805``). ``:Object``/``:Subject`` are full-text
+    (``entity_resolver.apply_entity_merge``'s candidate props).
+    ``:Object``/``:Subject`` are full-text
     indexed on ``name`` alone (``projection/__init__.py:6819``, ``:6823``) and the
     FTS leg filters ``status`` only — so **a name search returns the survivor AND
     the carrier**. The capture path never called the resolver, and this leg then
@@ -3117,7 +3140,13 @@ def _current_entity_priors(sdk, rows: list[dict],
             for nid, fact in _entity_facts(graph, label, ids).items():
                 facts[(label, nid)] = fact
     out: list[dict] = []
-    seen: set[str] = set()
+    #: The emitted row per fixpoint id. A row that folds onto an id already emitted
+    #: must UNION its spellings into that row, never be skipped: which row reaches
+    #: the fold first is FTS order, and the SPELLING is what makes a re-mention
+    #: resolve (`_find_existing_entity`) — dropping it is the measured-absence
+    #: defect one level down, and it was order-dependent (measured: the same graph
+    #: resolved `the team` in one row order and created a duplicate in the other).
+    emitted: dict[str, dict] = {}
     #: Rows this pass could not resolve to a fixpoint. They are collected rather
     #: than raised on, because the failure is known for ONE row and abandoning the
     #: loop would drop every LATER row too — and a silently-missing prior reads
@@ -3147,9 +3176,9 @@ def _current_entity_priors(sdk, rows: list[dict],
             # with no marker; the row is withheld and named instead.
             unresolved.append(rid)
             continue
-        if current in seen:
+        if current in emitted:
+            _absorb_spellings(emitted[current], row, fact)
             continue
-        seen.add(current)
         fact = facts.get((label, current))
         if fact is None or not fact[1]:
             if current != rid:
@@ -3177,16 +3206,12 @@ def _current_entity_priors(sdk, rows: list[dict],
         # §4.4 I1 makes license a CREATE. The aliases are the survivor's own plus
         # the spelling that matched the carrier, so the mention resolves to the
         # survivor deterministically instead of depending on a phase-2 model.
-        row_name = str(row.get("name") or "")
-        aliases: list[str] = []
-        for source in (row_name, *(fact[3] if isinstance(fact[3], (list, tuple, set))
-                                  else ())):
-            folded_alias = normalize_entity_name(source) if source else ""
-            if folded_alias and folded_alias not in aliases:
-                aliases.append(folded_alias)
-        out.append({"id": current, "name": str(fact[1]),
-                    "kind": "" if fact[2] is None else str(fact[2]),
-                    "aliases": aliases})
+        folded_row = {"id": current, "name": str(fact[1]),
+                      "kind": "" if fact[2] is None else str(fact[2]),
+                      "aliases": []}
+        _absorb_spellings(folded_row, row, fact)
+        emitted[current] = folded_row
+        out.append(folded_row)
     if unresolved:
         # ONE raise for the whole pass, carrying EVERY row that resolved: the
         # caller grades the lookup PARTIAL and keeps them (see `search_graph`).
@@ -6068,27 +6093,29 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     def _kind_bare(e: dict) -> bool:
         return _norm_kind(e.get("kind", "")) == bare
 
-    # ⛔ NAME BEFORE ALIAS, and an alias tie is AMBIGUOUS. `_mention_hit` used to
+    # ⛔ NAME BEFORE ALIAS, and an alias tie is AMBIGUOUS — and the name rungs
+    # come first ACROSS kind levels, not only within one. `_mention_hit` used to
     # return one undifferentiated True for both, and the caller took `[0]` — so the
     # answer depended on candidate ORDER: a row that matched by NAME could lose to
     # a row that merely carried the spelling as an alias, and two rows claiming the
     # same alias resolved silently to whichever came first. Either way the claim
     # was rewritten onto an entity nothing had decided, recorded `band: merge`.
-    # The name rungs keep their old semantics exactly (first-wins on an exact-kind
-    # name hit, unique-or-ambiguous on the bare-form rung); aliases are a strictly
-    # lower rung and must be unique.
+    # The name rungs keep their old semantics exactly (exact-kind first-wins, then
+    # unique-or-ambiguous bare-form) and a NAME hit never loses to an ALIAS hit of
+    # a more specific kind; aliases are the lower dimension entirely and must be
+    # unique.
     named_exact = [e for e in entities if _kind_exact(e) and _name_hit(e)]
     if named_exact:
         return named_exact[0], "exact"
-    aliased_exact = [e for e in entities if _kind_exact(e) and _alias_hit(e)]
-    if len(aliased_exact) == 1:
-        return aliased_exact[0], "alias"
-    if len(aliased_exact) > 1:
-        return None, "ambiguous"
     named_bare = [e for e in entities if _kind_bare(e) and _name_hit(e)]
     if len(named_bare) == 1:
         return named_bare[0], "bare"
     if len(named_bare) > 1:
+        return None, "ambiguous"
+    aliased_exact = [e for e in entities if _kind_exact(e) and _alias_hit(e)]
+    if len(aliased_exact) == 1:
+        return aliased_exact[0], "alias"
+    if len(aliased_exact) > 1:
         return None, "ambiguous"
     aliased_bare = [e for e in entities if _kind_bare(e) and _alias_hit(e)]
     if len(aliased_bare) == 1:
