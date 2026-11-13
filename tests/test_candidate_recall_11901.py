@@ -471,6 +471,41 @@ def test_the_brief_quotes_the_recall_the_artifact_holds(report, control):
         f"§3 does not state the {absent} misses absent even at k=15")
 
 
+def test_the_brief_scopes_the_lexical_identical_to_the_EXACT_arm(lexical):
+    """§7 must not generalise the lexical control's match beyond the exact arm.
+
+    ⛔ "matches every recall figure" is false and the artifact it cites says so:
+    on the VARIANT arm the lexical control is BETTER, not equal (pool 15:
+    426 vs 425; pool 40: 426 vs 424). §8 states the scope; §7 is the sentence a
+    reader takes the recommendation from, so an unqualified "every" there is a
+    claim the artifact contradicts — measured, review round 11.
+    """
+    # ⛔ RERANK_BRIEF, not the #11901 brief: this sentence is §7 of the
+    # #12297 calibration document, the one the lexical control lives in.
+    text = _squash(RERANK_BRIEF.read_text())
+    assert "matches every recall figure" not in text, (
+        "§7 generalises the lexical match past the exact arm — §8 and the "
+        "artifact both contradict it")
+    def _variant(arm: dict, pool: str) -> int:
+        """⛔ The two arms nest the SAME figure differently — the rerank arm is
+        ``arm[pool][mode]`` and the lexical arms are ``arm[mode][pool]`` — so a
+        single accessor path reads one of them as a KeyError, not a number."""
+        node = arm[pool]["variant"] if pool in arm else arm["variant"][pool]
+        return node["in_window_3_after"]
+
+    before = lexical["arms"]["rerank"]
+    lex_arm = lexical["arms"]["lexical_overlap"]
+    for pool in ("15", "40"):
+        delta = _variant(lex_arm, pool) - _variant(before, pool)
+        assert delta > 0, (
+            f"premise: the lexical arm is better on the variant arm at pool "
+            f"{pool}, so 'identical' cannot cover it ({delta})")
+        # the brief states the gap as "better by 1 at pool 15 and by 2 at pool
+        # 40", so match the MEASURED delta against the pool it belongs to
+        assert f"by {delta} at pool {pool}" in text, (
+            f"§7 must state the variant-arm gap at pool {pool} ({delta})")
+
+
 def test_the_brief_quotes_the_class_rates_and_the_mean_rank(report, control):
     """§3's mean-rank figure and §3.1's nine class cells — recomputed, not trusted.
 
@@ -1531,6 +1566,25 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(lexical, tool_mod)
             f"regenerate the artifact (it is generated, never hand-edited)")
         assert "its ceiling is arm 1" not in got, (
             f"{arm}: the retracted 'arm 1's miss_past_k' reading is back")
+
+
+def test_the_rerank_arm_measures_the_model_the_PRODUCT_would_load(tool_mod):
+    """The arm's default must come from the resolver the shipped read uses.
+
+    The read passes no model to ``rerank_pool``, which resolves through
+    ``load_scorer(model or fused_rerank_model())`` — so
+    ``TORTOISE_FUSED_RERANK_MODEL`` decides which cross-encoder the product
+    loads. A hard-coded ``RERANK_MODEL_DEFAULT`` measured (and recorded, in the
+    arm's own ``model`` field) a model the product would not load whenever that
+    knob was set: an artifact misnaming its model is worse than one that says
+    nothing.
+    """
+    import inspect
+    src = inspect.getsource(tool_mod.run)
+    assert "fused_rerank_model()" in src, (
+        "the rerank arm must default to the resolver the shipped read uses")
+    assert "args.rerank_model or RERANK_MODEL_DEFAULT" not in src, (
+        "the constant is not the product's model — the resolver is")
 
 
 def test_the_control_arms_are_not_labelled_with_the_models_cost_story(lexical):

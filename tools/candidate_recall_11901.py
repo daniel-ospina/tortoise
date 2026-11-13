@@ -1511,10 +1511,19 @@ def run(args: argparse.Namespace) -> int:
         #           the failure a rerank-only story hides, and the reason the
         #           net is reported beside both components.
         if args.rerank:
-            from tortoise.rerank import RERANK_MODEL_DEFAULT
+            # ⛔ ``fused_rerank_model()``, NOT the constant: the shipped read
+            # passes no model to ``rerank_pool``, which resolves through
+            # ``load_scorer(model or fused_rerank_model())`` — so
+            # ``TORTOISE_FUSED_RERANK_MODEL`` decides which cross-encoder the
+            # product actually loads. Hard-coding the default measured (and
+            # recorded) a model the product would not load whenever that knob
+            # was set, which is the same defect the sibling
+            # ``tools/rerank_calibration_12297.py`` was fixed for.
+            from tortoise.rerank import fused_rerank_model
+            _rerank_model = args.rerank_model or fused_rerank_model()
             arms["rerank"] = _rerank_arm(
                 sample, window, variants,
-                model=args.rerank_model or RERANK_MODEL_DEFAULT,
+                model=_rerank_model,
                 pools=tuple(args.rerank_pool or RERANK_POOLS),
                 top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K,
                 threads=args.rerank_threads)
@@ -1651,8 +1660,10 @@ def main(argv: list[str] | None = None) -> int:
                         "MEASURED, never adopted — the shipped default stays 3.")
     p.add_argument("--rerank-model", default=None,
                    help="cross-encoder to measure; default is "
-                        "`tortoise.rerank.RERANK_MODEL_DEFAULT` — the model the "
-                        "shipped rerank.py loads, so the arm measures THAT model")
+                        "`tortoise.rerank.fused_rerank_model()` — the resolver "
+                        "the shipped read goes through, so the arm measures the "
+                        "model the product would load (including a "
+                        "TORTOISE_FUSED_RERANK_MODEL override)")
     p.add_argument("--rerank-threads", type=int, default=RERANK_THREADS,
                    help=f"torch threads for the rerank arm (default "
                         f"{RERANK_THREADS}, PINNED and recorded). The unpinned "

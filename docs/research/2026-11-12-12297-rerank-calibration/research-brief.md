@@ -237,7 +237,7 @@ a run behind it and they are directly comparable in provenance if not in load:
 | candidate text | ms/pair | artifact |
 |---|---|---|
 | name-length (~4 words) | **5.179** | `measurement-noun-path.json` → `arms.rerank.latency` |
-| passage-length (~150 words) | **85.227** | `measurement-user-search.json` → `latency` |
+| passage-length (~20–150 words; the harness admits 120–900 chars) | **85.227** | `measurement-user-search.json` → `latency` |
 
 ⛔ **The 16× gap is real; the absolute figures are not load-matched.** The user-search
 run recorded `loadavg_1m = 14.0` and the noun-path run did not record one, so read
@@ -332,8 +332,10 @@ search — as the surface it earns.**
 that changes the recommendation rather than the measurement.** The falsifier compares
 the rerank against **the unreranked order**; it does not ask whether the *model* is
 the thing that produced the gain. §8 answers that, and the answer is no: a Jaccard
-token compare matches every recall figure, matches-or-beats every nDCG figure, and
-wins the variant arm outright, at ~1/1,000th the cost. **So the gain is real and
+token compare matches every **exact-arm** recall figure (on the variant arm it is
+not identical in either direction — it is better by 1 at pool 15 and by 2 at pool 40;
+§8), matches-or-beats every nDCG figure, and wins the variant arm outright, at
+~1/1,000th the cost. **So the gain is real and
 the cross-encoder is not what earns it.** The gate stays OFF either way, and the
 noun-path note above should be read as "this lever is worth turning on" **not** as
 "this model is worth paying for".

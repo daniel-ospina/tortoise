@@ -362,6 +362,60 @@ def test_the_two_restated_predicates_are_pinned_against_step_7():
             sdk_mod._fetch_rerank_pool_texts), predicate
 
 
+#: (entity_type, the RESOLVED label, step 7's own branch marker, the property
+#: step 7 materialises as that row's ``content``). The map in
+#: ``_RERANK_TEXT_FIELD_BY_LABEL`` restates this column, and a restated column
+#: that drifts is invisible: the rerank would score a property the caller never
+#: sees and return a confident, meaningless order.
+STEP7_TEXT_BRANCHES = [
+    ("point", "Point", 'if entity_type == "point":', "content"),
+    ("event", "Event", 'elif entity_type == "event":', "subject"),
+    ("subject", "Subject", 'elif entity_type == "subject":', "name"),
+    ("document", "Source", 'elif entity_type == "document":', "title"),
+    ("object", "Object", 'elif entity_type == "object":', "name"),
+    ("operator", "Point", 'elif entity_type == "operator":', "label"),
+    ("source", "Source", 'elif entity_type == "source":', "title"),
+]
+
+
+@pytest.mark.parametrize("entity_type,label,marker,field", STEP7_TEXT_BRANCHES)
+def test_the_text_column_is_the_one_STEP_7_MATERIALISES(
+        entity_type, label, marker, field):
+    """The rerank's text map must name the SAME property step 7 puts in `content`.
+
+    Pinning the map against a literal table in this file would only pin the test
+    to itself, which is why the two predicates are cross-checked against the real
+    fetch. The text column is the larger restatement of the same kind and was
+    left pinned to a literal — so a change to a step-7 branch would silently
+    leave the rerank scoring a different property. This reads step 7's OWN slice
+    for the branch (marker → the next branch marker) and requires the property
+    the map returns to appear in it.
+    """
+    assert sdk_mod._rerank_text_field(entity_type, label) == field, (
+        "the map and this table disagree — update the table WITH the map")
+
+    # Slice by LINE, not by substring: ``'if entity_type =='`` is CONTAINED in
+    # ``'elif entity_type =='`` at offset 2, so a substring search for the next
+    # branch finds the marker's own tail and slices an empty branch — which reads
+    # as a violation on every arm.
+    lines = inspect.getsource(sdk_mod.TortoiseSDK.tortoise_fts_query).splitlines()
+    starts = [i for i, line in enumerate(lines) if 'entity_type == "' in line]
+
+    def _slice(i: int) -> str:
+        later = [j for j in starts if j > i]
+        return "\n".join(lines[i:later[0]] if later else lines[i:])
+
+    # The same marker also appears in the id/label SELECTION blocks, which carry
+    # no fetch — so take the occurrence whose own slice actually queries the
+    # graph. Without this the event arm slices an ``id_field = "eventId"`` block
+    # and reads as a violation.
+    branch = next((b for b in (_slice(i) for i in starts if marker in lines[i])
+                   if "graph.query(" in b), "")
+    assert f"n.{field}" in branch, (
+        f'step 7\'s {entity_type} branch no longer materialises n.{field} — the '
+        f'rerank would score a property the caller never sees')
+
+
 def test_pool_text_read_is_best_effort():
     class _Broken:
         def query(self, *a, **k):
@@ -858,8 +912,18 @@ def test_an_all_tied_page_is_NOT_a_recency_order_in_force(sdk, monkeypatch):
         params={"ids": ids, "ts": "2026-01-01"})
     probe = {"recency_field": "createdAt", "recency_boost": 0.5}
 
-    # PREMISE, asserted: on this page the weighting is a proven no-op — the order
-    # with recency is the order without it.
+    # PREMISE, asserted at the MECHANISM and not only at the order: a no-op ORDER
+    # alone cannot tell a tied-date page from an undated one — both leave the
+    # sequence untouched (all factors 1.0 vs all 0.0), so if a date-only string
+    # ever stopped parsing here this test would go on passing under BOTH the
+    # spread predicate and the reverted sign test, covering nothing. The factor
+    # map must be NONZERO and UNIFORM: that is what makes the multiplier the
+    # identity, and it is the shape the sign test misreads as an order in force.
+    from tortoise.search_engine import _recency_factors
+    factors = _recency_factors([(i, "2026-01-01") for i in ids])
+    assert set(factors.values()) == {1.0}, factors
+    # …and at the ORDER too: on this page the weighting is a proven no-op — the
+    # order with recency is the order without it.
     without = [r["id"] for r in sdk.tortoise_fts_query(
         "zebra migration", entity_type="point", limit=5)]
     with_recency = [r["id"] for r in sdk.tortoise_fts_query(
