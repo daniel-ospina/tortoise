@@ -985,7 +985,21 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "stores `s.embedding` for the vector retrieval leg to read — NOT because no "
             "store is reachable through it",
             "#5004",
-            stores=NO_LIVE_VECTOR,  # the match is the guard's own MESSAGE, all prose
+            # `#12170`: the instrument match is the guard's own MESSAGE (prose), but the FIELD is
+            # about the store, not the match. `NO_LIVE_VECTOR` here means the writer's OWN body
+            # holds no store clause — the store is DELEGATED to the closed `:Source` passthrough
+            # (`_persist_extra_props(…, allow_keys=self._SOURCE_EXTRA_PROPS)`), the same shape
+            # `tortoise.sdk::_index_process_unit` carries. ⛔ Do NOT read this line as "no vector
+            # is stored on this path": one is, on the delegate's `:Source`, and that is the whole
+            # meaning of this row's EXEMPT-as-CARRIER class. The delegation is re-derived at HEAD
+            # by
+            # `tests/test_embed_writer_register.py::test_the_delegated_store_this_row_names_still_resolves`
+            # (hermetic: the constant still names `embedding`, and the delegate still feeds that
+            # constant to the passthrough) and end-to-end by
+            # `tests/test_11858_source_door_markers.py::test_a_caller_vector_still_gets_a_truthfully_minted_marker`
+            # (the vector really lands on the node). Without the first, dropping `embedding` from
+            # `_SOURCE_EXTRA_PROPS` leaves this reason FALSE and every owner suite green (#12170).
+            stores=NO_LIVE_VECTOR,
         ),
     ),
     (

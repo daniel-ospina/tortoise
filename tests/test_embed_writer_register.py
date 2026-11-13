@@ -3702,6 +3702,264 @@ def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
     )
 
 
+#: `#12170`. An `EXEMPT` row whose `stores` is :data:`NO_LIVE_VECTOR` because the store is
+#: **DELEGATED** is a claim about a DELEGATE: *"this writer's own body holds no store clause, and the
+#: store it feeds exists in the writer it names"*. The first half is re-derived by
+#: `test_a_no_live_vector_declaration_executes_no_store_clause` (absence in its own body). The second
+#: half had NO pin at all, and it is the half that can go quiet — measured on the tree that carries
+#: this table: delete `"embedding"` from `Projection._SOURCE_EXTRA_PROPS` and the caller's vector is
+#: **denied on the node** (`#3998` deny-and-log: measured node value `None` while the `SourceCreated`
+#: record still carries the 4-float vector), so a vector is journalled and unreadable, the
+#: declaration above still says the passthrough "stores `s.embedding` for the vector retrieval leg to
+#: read", and **390 tests across the four suites that own this seam stayed green**. That is a silent
+#: retrieval loss behind a declaration nobody re-derived — the class `#12170` is about, one level in
+#: from the missing-entry symptom the issue names.
+#:
+#: Keyed by the register key, the routes are read off SOURCE at HEAD (no import, no graph — this
+#: suite is `core` and stays URI-less):
+#:   * `handoff` — the `(path, symbol)` that must still hand its payload to the delegate op;
+#:   * `delegate` — the `(path, symbol)` the register's `reason` NAMES, which must still exist;
+#:   * `passthrough` — the call inside the delegate that performs the extra-props store;
+#:   * `allowlist` — the module constant the passthrough is fed from, which must still name
+#:     `required`. ⛔ That is what makes the exemption TRUE: a key absent from the closed `:Source`
+#:     surface is dropped, not stored (`#3998`), so a declaration that names the delegate while the
+#:     delegate stops admitting the key is a claim about a write that no longer happens.
+DELEGATED_STORE_ROUTES: dict[str, dict[str, object]] = {
+    "tortoise.sdk::create_source": {
+        "handoff": ("tortoise/sdk.py", "create_source"),
+        "delegate": ("tortoise/projection/entities.py", "_upsert_source"),
+        "passthrough": "_persist_extra_props",
+        "allowlist": "_SOURCE_EXTRA_PROPS",
+        "required": frozenset({"embedding"}),
+    },
+}
+
+
+def _constant_strings(tree: ast.Module, name: str) -> set[str] | None:
+    """Every string literal a binding of `name` carries, or None when the name is not bound.
+
+    ⛔ Not `tree.body` only: both allowlists this pin reads are CLASS attributes
+    (`_SOURCE_EXTRA_PROPS` sits in the `Projection` body), so a module-level-only walk would report
+    the constant as gone and red the control arm — a false hold naming the wrong cause. The name is
+    unique in its module, so walking every scope is precise enough for this claim.
+    """
+    values: set[str] = set()
+    found = False
+    for node in ast.walk(tree):
+        targets: list[ast.AST] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            continue
+        found = True
+        values |= {
+            n.value for n in ast.walk(node.value)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        }
+    return values if found else None
+
+
+def _delegation_violation(
+    *,
+    handoff_source: str,
+    delegate_source: str,
+    reason: str,
+    handoff: tuple[str, str],
+    delegate: tuple[str, str],
+    passthrough: str,
+    allowlist: str,
+    required: frozenset[str],
+) -> str | None:
+    """Why the DELEGATED-store claim does not re-derive at this head, or None when it does.
+
+    Kept as a function over SOURCE (not over the live tree) so the mutations below drive it: a pin
+    that can only be run against the tree's current content cannot be checked at all once the
+    content is right — the same reason `register.load` is public.
+
+    ⛔ It does NOT try to prove the vector reaches the node by data flow (that is the live falsifier
+    in `tests/test_11858_source_door_markers.py`). It proves the three text-level facts the
+    declaration's wording rests on: the writer hands off to the delegate, the delegate still calls
+    the passthrough with an allowlist, and the allowlist still admits the key. Deleting any one of
+    them makes the prose false, so each must red.
+    """
+    if delegate[1] not in reason:
+        return (
+            f"the declaration's reason does not name {delegate[1]!r}, so this pin would be guarding "
+            "a delegation the row no longer claims"
+        )
+    # (a) the WRITER still hands its payload to the delegate, under a name discovery can see.
+    handoff_tree = ast.parse(handoff_source)
+    if not any(
+        isinstance(n, ast.FunctionDef) and n.name == handoff[1] for n in ast.walk(handoff_tree)
+    ):
+        return f"{handoff[0]}::{handoff[1]} is not defined any more"
+    delegate_tree = ast.parse(delegate_source)
+    delegates = [
+        n for n in ast.walk(delegate_tree)
+        if isinstance(n, ast.FunctionDef) and n.name == delegate[1]
+    ]
+    if not delegates:
+        return f"{delegate[0]}::{delegate[1]} — the DELEGATE the reason names — is not defined any more"
+    # (b) the delegate still stores through the passthrough, fed from the allowlist constant.
+    calls = [
+        n for fn in delegates for n in ast.walk(fn)
+        if isinstance(n, ast.Call)
+        and any(kw.arg == "allow_keys" for kw in n.keywords)
+        and (
+            (isinstance(n.func, ast.Attribute) and n.func.attr == passthrough)
+            or (isinstance(n.func, ast.Name) and n.func.id == passthrough)
+        )
+    ]
+    if not calls:
+        return f"{delegate[1]} no longer calls {passthrough}(…, allow_keys=…) — the store is gone"
+    reads_allowlist = any(
+        isinstance(n, ast.Attribute) and n.attr == allowlist
+        for fn in delegates for n in ast.walk(fn)
+    )
+    if not reads_allowlist:
+        return (
+            f"{delegate[1]} no longer reads {allowlist} — the passthrough may be fed a different "
+            "set, so the declaration names a store that may not admit the vector"
+        )
+    # (c) the closed surface still admits the key, or the vector is DENIED rather than stored.
+    named = _constant_strings(delegate_tree, allowlist)
+    if named is None:
+        return f"{allowlist} is no longer defined at module level in {delegate[0]}"
+    missing = sorted(required - named)
+    if missing:
+        return (
+            f"{allowlist} no longer names {missing}, so the passthrough DENIES the vector "
+            "(#3998 deny-and-log) and the delegation stores nothing — the declaration is false"
+        )
+    return None
+
+
+def test_the_delegated_store_this_row_names_still_resolves() -> None:
+    """`#12170`: an EXEMPT-as-CARRIER row's OTHER half — the delegate — re-derived at HEAD.
+
+    ⛔ What this proves, stated at its true size: the writer still hands its payload to the delegate
+    the `reason` names, the delegate still stores through the extra-props passthrough fed from the
+    closed allowlist, and that allowlist still admits the vector key. It does NOT prove the node
+    ends up carrying the vector — that is
+    `tests/test_11858_source_door_markers.py::test_a_caller_vector_still_gets_a_truthfully_minted_marker`,
+    which drives the real write. Two halves, two homes, because a source reader cannot execute a
+    store and this suite must stay URI-less.
+
+    ⛔ Why it exists at all when the row's class is already pinned: `EXEMPT` + `NO_LIVE_VECTOR` is
+    the ONE combination whose truth lives entirely in ANOTHER function. Every other declaration
+    either names a label (re-derived by `LABEL_EVIDENCE`) or proves absence in its own body
+    (re-derived above). This one says "the store is over there", and until this pin nothing checked
+    that "over there" still stored it.
+    """
+    assert DELEGATED_STORE_ROUTES, (
+        "no routed row is declared — this pin would assert nothing"
+    )
+    for key, route in sorted(DELEGATED_STORE_ROUTES.items()):
+        record = EMBED_WRITER_CLASSES[key]
+        # The pin is about ONE shape; if the row stops being that shape, the pin must be re-derived
+        # rather than silently guarding nothing.
+        assert (record.cls, record.stores) == (EXEMPT, NO_LIVE_VECTOR), (
+            f"{key} is no longer (EXEMPT, NO_LIVE_VECTOR): {record.cls!r}/{record.stores!r} — the "
+            "delegation pin re-derives the carrier shape, so a re-classified row needs it re-derived"
+        )
+        handoff: tuple[str, str] = route["handoff"]  # type: ignore[assignment]
+        delegate: tuple[str, str] = route["delegate"]  # type: ignore[assignment]
+        violation = _delegation_violation(
+            handoff_source=(REPO_ROOT / handoff[0]).read_text(encoding="utf-8"),
+            delegate_source=(REPO_ROOT / delegate[0]).read_text(encoding="utf-8"),
+            reason=record.reason,
+            handoff=handoff,
+            delegate=delegate,
+            passthrough=str(route["passthrough"]),
+            allowlist=str(route["allowlist"]),
+            required=route["required"],  # type: ignore[arg-type]
+        )
+        assert violation is None, (
+            f"{key} declares a DELEGATED store ({record.stores}) whose route no longer re-derives: "
+            f"{violation}. The delegate's store is the WHOLE of this row's exemption; when it stops "
+            "being true the row reads as 'no vector here', which is the unqualified reading "
+            "`#12170`'s close-out note forbids"
+        )
+
+
+def test_the_delegation_pin_REDS_on_each_fact_it_rests_on() -> None:
+    """The falsifier, DRIVEN: each of the three facts must red the pin on its own.
+
+    A source-derived pin is the easiest kind to leave vacuous — a reader that returns None because
+    it found nothing reads exactly like a claim that re-derived. So each mutation below is applied
+    to the REAL source text (asserted to have changed, so a stale anchor cannot pass silently) and
+    the helper must name the fact it lost.
+    """
+    route = DELEGATED_STORE_ROUTES["tortoise.sdk::create_source"]
+    delegate_rel = route["delegate"][0]  # type: ignore[index]
+    allowlist = str(route["allowlist"])
+    delegate_source = (REPO_ROOT / delegate_rel).read_text(encoding="utf-8")
+    handoff_source = (REPO_ROOT / route["handoff"][0]).read_text(encoding="utf-8")  # type: ignore[index]
+    kwargs = dict(
+        handoff_source=handoff_source,
+        reason=EMBED_WRITER_CLASSES["tortoise.sdk::create_source"].reason,
+        handoff=route["handoff"],  # type: ignore[arg-type]
+        delegate=route["delegate"],  # type: ignore[arg-type]
+        passthrough=str(route["passthrough"]),
+        allowlist=allowlist,
+        required=route["required"],  # type: ignore[arg-type]
+    )
+    assert _delegation_violation(delegate_source=delegate_source, **kwargs) is None, (
+        "the control arm does not re-derive on the real tree, so the mutations below prove nothing"
+    )
+
+    # (c) the key is dropped from the closed `:Source` surface — the measured #12170 mutation.
+    anchor = '"domain", "summary", "topics", "status", "embedding", "about_entities",'
+    assert delegate_source.count(anchor) == 1, (anchor, delegate_source.count(anchor))
+    dropped = delegate_source.replace(
+        anchor, '"domain", "summary", "topics", "status", "about_entities",')
+    assert dropped != delegate_source, "the allowlist anchor did not change — a stale needle"
+    violation = _delegation_violation(delegate_source=dropped, **kwargs)
+    assert violation is not None and "embedding" in violation, (
+        "dropping `embedding` from the :Source allowlist must red the delegation pin: the vector "
+        f"is then DENIED, not stored — got {violation!r}"
+    )
+
+    # (b) the passthrough call is renamed — the store the row names is gone.
+    renamed = delegate_source.replace(
+        "self._persist_extra_props(", "self._persist_other_props(")
+    assert renamed != delegate_source, "the passthrough anchor did not change — a stale needle"
+    violation = _delegation_violation(delegate_source=renamed, **kwargs)
+    assert violation is not None and str(route["passthrough"]) in violation, (
+        f"renaming the store passthrough must red the pin — got {violation!r}"
+    )
+
+    # (b') the passthrough is fed a different set — the row's wording stops being derivable.
+    refed = delegate_source.replace(
+        "_allow = self._SOURCE_EXTRA_PROPS", "_allow = frozenset()")
+    assert refed != delegate_source, "the allowlist-read anchor did not change — a stale needle"
+    violation = _delegation_violation(delegate_source=refed, **kwargs)
+    assert violation is not None and allowlist in violation, (
+        f"re-feeding the passthrough from another set must red the pin — got {violation!r}"
+    )
+
+    # (a) the DELEGATE the reason names stops existing — the row names a function that is gone.
+    gone = delegate_source.replace("def _upsert_source(", "def _upsert_source_renamed(")
+    assert gone != delegate_source, "the delegate anchor did not change — a stale needle"
+    violation = _delegation_violation(delegate_source=gone, **kwargs)
+    assert violation is not None and "_upsert_source" in violation, (
+        f"a renamed delegate must red the pin — got {violation!r}"
+    )
+
+    # …and the reason no longer naming the delegate is its own red (the prose/pin drift guard).
+    violation = _delegation_violation(
+        delegate_source=delegate_source,
+        **{**kwargs, "reason": "a carrier with no delegate named"},
+    )
+    assert violation is not None and "reason" in violation, (
+        f"a reason that stops naming its delegate must red the pin — got {violation!r}"
+    )
+
+
 def test_the_store_clause_markers_still_match_a_real_store() -> None:
     r"""The marker tuple needs a falsifier in the POSITIVE direction (round-3 review, P1).
 
