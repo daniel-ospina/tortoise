@@ -11383,8 +11383,14 @@ def _dotenv_divergence(graded_target: str | None = None, *,
     # Ladder keys the ENVIRONMENT already carries — the only keys that can
     # explain a graph agreement. A provider key in the file explains nothing
     # about the graph, so it must never be the stated reason.
+    # ⛔ NON-BLANK values only: the daemon's ladder SKIPS an explicitly-empty
+    # `TORTOISE_DB_URI` (`if uri:`), and `dotenv_file`'s own docstring makes
+    # "explicitly set — even to the empty string" a first-class state. Counting
+    # a blank key named it as the reason the two targets agree, while the file's
+    # `TORTOISE_DB_PATH` was the key that actually decided (#12428 review).
     payload["shadowed_graph_keys"] = [
-        key for key in _DB_LADDER_KEYS if key in os.environ]
+        key for key in _DB_LADDER_KEYS
+        if (os.environ.get(key) or "").strip()]
 
     if graded_unresolved:
         # The caller TRIED to resolve a target of its own and failed (an invalid

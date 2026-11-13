@@ -1347,6 +1347,29 @@ def test_the_unresolved_arm_does_not_credit_a_provider_only_file(capsys, _isolat
     assert "sets no graph key" in row, row
 
 
+def test_a_blank_environment_value_does_not_decide_the_daemon_target(capsys, _isolated,
+                                                                    monkeypatch):
+    """An exported `=""` is PRESENT but the daemon's ladder skips it.
+
+    Measured: `TORTOISE_DB_URI=""` + `.env` `TORTOISE_DB_PATH=/x.db` printed
+    "the ENVIRONMENT's TORTOISE_DB_URI decides it for the daemon, so the file's
+    TORTOISE_DB_PATH cannot change the target" — while the daemon's target WAS
+    that DB_PATH (`daemon_db_target` reads `if uri:`). `dotenv_file`'s own
+    docstring makes "explicitly set — even to the empty string" a real state, so
+    presence alone is the wrong test for "this key decides" (#12428 review).
+    """
+    from tortoise.config import DEFAULT_DB_PATH
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    _write_env(_isolated, f"TORTOISE_DB_PATH={DEFAULT_DB_PATH}\n")
+
+    out = _show_text(capsys)
+
+    assert "decides it for the daemon" not in out, out
+    assert "cannot change the target" not in out, out
+    assert "the file's TORTOISE_DB_PATH" in out, out
+
+
 def test_a_broken_target_from_the_FILE_is_not_called_an_environment_error(
         _isolated, monkeypatch):
     """The pre-existence probe must not read the file's own applied value.
