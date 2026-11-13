@@ -3763,3 +3763,82 @@ def test_an_ambiguous_name_is_not_asserted_as_a_single_destination(sdk):
     assert "carried by 2 Objects" in fix, fix
     assert "the successor you named by ID" in fix, (
         "the destination must defer to the reader's choice: " + fix)
+def test_an_id_less_neither_arm_row_names_the_shape_step(sdk):
+    """The id-less arm's bare re-point leaves the row QUIET over an absent belief.
+
+    Measured on `shaped Subject → IMPL → V1` (id removed, `supersededBy` a live
+    `PolicyV2`): restore the id, name the successor, re-point and delete the old edge →
+    `confidences {}`, `iterations 0`, and `superseded_object_active_edges` rows → 0;
+    adding `{'is_operator': False, 'op_type': None}` restores it
+    (`effective_n 2.5255`, 12 iterations) (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")  # the live successor the name resolves to
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "No id-keyed repair is possible" in fix, fix
+    assert "AND re-point this IMPL edge onto" in fix, (
+        "the bare re-point cannot restore the belief on a neither-arm row: " + fix)
+    assert f"tortoise_update_entity('{actor['id']}', " in fix, fix
+
+
+def test_an_id_less_neither_arm_repair_restores_the_belief(sdk):
+    """Perform it end to end: the belief must come back and the row must clear.
+
+    Measured: restore the id + `supersededBy`, write the edge onto the live successor,
+    delete the old edge, and clear the shape → `effective_n 2.5255` on both endpoints,
+    rows 0. Without the shape call the belief stays at `confidences {}`
+    (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    sdk.update_entity(actor["id"], is_operator=False, op_type=None)
+    sdk.create_direct_edge("IMPL", actor["id"], v2["id"])
+    _q(sdk, "MATCH (a {id:$a})-[r:IMPL]->(o:Object {name:'PolicyV1'}) DELETE r",
+       {"a": actor["id"]})
+
+    run = sdk.compute_confidence(anchors=[actor["id"]], require_calibration=False)
+    assert run["confidences"], run
+    assert _issues(sdk, "superseded_object_active_edges") == []
+
+
+def test_the_direct_draft_detail_quotes_this_rows_own_figure(sdk):
+    """`2.9296` needs a SECOND live support; the single-edge row measures 2.5255.
+
+    Measured on the fixture the sentence is emitted for: promote the draft, write the
+    equivalent edge, delete the old one → `effective_n 2.5255`, 12 iterations
+    (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    assert "2.9296" not in issue.detail, issue.detail
+    assert "effective_n 2.5255" in issue.detail, issue.detail
+
+    # …and that figure is the one the emitted repair produces.
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='live'", {"i": v2["id"]})
+    sdk.create_direct_edge("IMPL", p["id"], v2["id"])
+    _q(sdk, "MATCH (a {id:$a})-[r:IMPL]->(o:Object {id:$v}) DELETE r",
+       {"a": p["id"], "v": v1["id"]})
+    run = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+    assert run["confidences"], run
+    assert round(run["confidences"][v2["id"]]["effective_n"], 4) == 2.5255, run
