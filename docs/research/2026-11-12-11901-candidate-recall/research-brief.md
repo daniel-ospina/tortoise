@@ -17,8 +17,10 @@ aboutObjects: STORAGE-ARCHITECTURE.md §14.3 V3, SEARCH-ARCHITECTURE.md V1, rese
 prior before any index. · **Decision this feeds:** `STORAGE-ARCHITECTURE.md` §14.3 **V3** (the ruling is KEEP,
 2026-11-10; what survives is *how the kept input is used*).
 **Harness:** `tools/candidate_recall_11901.py` · **Artifacts, this directory:** `measurement.json` (**hybrid**, the
-headline) and `measurement-fts-only.json` (the lexical-only control) · **Measured:** 2026-11-12, population 1,000
-names / stratified sample 300, both modes on one box.
+headline), `measurement-fts-only.json` (the lexical-only control), and `measurement-entropy-gate-12294.json`
+(**keyword-only** — `#12294`'s name-entropy gate, arm 4 of the same harness: **measured and DECLINED**, recall
+drops while the duplicate rate does not improve) · **Measured:** 2026-11-12, population 1,000 names /
+stratified sample 300, both modes on one box.
 
 ---
 
