@@ -47380,12 +47380,11 @@ class TortoiseSDK:
         # Imported here rather than at module scope because a new import line
         # shifts every ``sdk.py`` line the capstone documentation cites.
         # (`lifecycle_props_by_rendering`/`keys_rendering_as` are the ONE
-        # exception, and deliberately: the #9649 guard calls the same pair in
-        # three places across `_update_entity` — presence, the entailed-echo
-        # exemption, the status drop — so per-call imports would put three
-        # copies of the rule in one function, which is the drift this module
-        # keeps paying for. The line-shift cost was paid once, when the pair
-        # landed, and re-derived in the same commit.)
+        # exception: this door calls the pair in three places — the lifecycle
+        # presence test, the status drop, and the `:Subject` vocabulary arm
+        # (the entailed-echo exemption reads the mapping the first call made) —
+        # so per-call imports would put three copies of one rule in a single
+        # function, the drift this module keeps paying for. Cost paid once.)
         from .live import declares_event_state_key
 
         # ⛔ The reachability probe matches the label by BOTH identity keys, not
