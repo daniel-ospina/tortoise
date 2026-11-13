@@ -195,10 +195,18 @@ def _unscoped_heading_forms(doc: str,
        `_scope_slice` both cannot see: a `#` run with no space after it
        (`##3. Results` renders as prose), and a raw HTML heading.
     3. A SETEXT UNDERLINE UNDER PROSE — the spec allows `=`/`-` runs of ANY length
-       and up to 3 spaces of indent. ⛔ NOT when the parser rendered it as a
-       thematic BREAK: `---` under an ATX heading, after a fence, or after a
-       blockquote line is a break, and refusing those was the over-block half of
-       round 20 (`---` between changelog entries red the guard).
+       and up to 3 spaces of indent. A `-`/`=` run whose PRECEDING line starts with
+       `#`, `>`, ``` or `|` is skipped, which is what keeps the round-20 false
+       positives out (`---` under an ATX heading, after a fence, after a blockquote)
+       and the changelog's own `---` separators (they follow a blank line).
+       ⚠️ KNOWN OVER-BLOCK, category B, recorded rather than chased (#12349 round
+       22): that exclusion is a four-item PREFIX test, NOT the parser's `hr`
+       verdict, so `---` after a list item, an indented code block, a
+       link-reference definition or an HTML block is refused with a message that
+       calls it a setext heading. No committed document trips it (all three guard
+       clean); the consequence if it is never fixed is friction on a future docs
+       edit, not a wrong result — and the repair is to ask the parser for `hr`,
+       never to weaken the guard.
 
     The INVERSE hazard — a `## `-prefixed line inside a FENCED block truncates a
     section the document continues — is NOT fail-closed, contrary to what this
@@ -1327,6 +1335,31 @@ def test_every_invisible_section_lookalike_is_refused(opener: str) -> None:
         "the guard ACCEPTS it")
 
 
+# ⛔ A column-0 heading the parser does NOT render: `_scope_slice` still ends the
+# section there, so it TRUNCATES. Its leak is different in kind from the lists
+# above (it hides the section's own TAIL rather than swallowing the next §), so it
+# gets its own two-sided test rather than being folded into a list whose leak
+# assertion would not describe it (#12349 rounds 21-22: a fenced
+# `## Restated finding` at the end of §2 hid a false census, and a §2 that
+# contradicted its own reuse guard, with the whole suite green).
+TRUNCATING_HEADING_FORMS = [
+    "```\n## Restated finding\n```",   # fenced, non-numeric heading
+    "```\n## 3. Results\n```",         # fenced, numeric heading
+    "```\n# Restated finding\n```",     # fenced h1
+]
+
+
+@pytest.mark.parametrize("form", TRUNCATING_HEADING_FORMS)
+def test_a_fenced_heading_that_truncates_the_scope_is_refused(form: str) -> None:
+    """Each form must BOTH truncate `_scope_slice` AND be refused by the guard."""
+    doc = f"## 2. Method\n\n\u00a72 body.\n\n{form}\n\n\u00a72 TAIL\n\n## 4. Next\n"
+    assert "\u00a72 TAIL" not in _scope_slice(doc, "2"), (
+        f"{form!r} does not truncate \u2014 this case would prove nothing")
+    assert _unscoped_heading_forms(doc), (
+        f"{form!r} truncates \u00a72 and the guard accepts it \u2014 a presence pin can "
+        "then be satisfied from before the truncation")
+
+
 def test_the_heading_guard_accepts_every_form_the_helper_can_read() -> None:
     """The over-refusal half, so the guard cannot be "repaired" by weakening it.
 
@@ -1562,7 +1595,11 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, changelog: str)
     ones forever (review cycle 2, finding 3).
     """
     arms = artifact["arms"]
-    rows = _table(changelog, "Δ vs shipped", "recall@3")
+    # ⛔ `#12298`'s ENTRY, not the whole 122-line file (#12349 round 22, P1):
+    # `_table` returns the FIRST matching table, so a complete decoy table under an
+    # earlier entry satisfied this pin while `#12298`'s own row was falsified
+    # (measured B23, green). The test's other two halves already read `_scoped`.
+    rows = _table(_scope_slice(changelog, "#12298"), "Δ vs shipped", "recall@3")
     expected = [
         ("db.idx.fulltext", arms["falkordb_tfidf"]["recall_by_k"]["3"]["recall"]),
         ("our production terms", arms["postgres_bm25/tokens"]["recall_by_k"]["3"]["recall"]),
