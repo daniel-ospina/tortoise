@@ -1328,9 +1328,15 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "in any ONE dict, which is the last-wins shape this row warns about. No table ever held "
         "THREE. (Re-counted in `#12182` cycle 10 by AST over every commit that touched this file; "
         "`main`'s `f33f5e2c32` says the same — `WRITER_CENSUS` and `CENSUS_EVIDENCE` EACH carried the "
-        "key twice.) The earlier readings were both wrong in opposite ways: this row's \"a second … a "
-        "third\" and the register's ORIGINAL \"the FIRST … a SECOND\" describe a split the measurement "
-        "does not show. This is the surviving census row — surviving a "
+        "key twice.) The reading this row carried was WRONG — \"a second … a third\" — and so was the "
+        "per-dict appositive written into the REGISTER's sentence mid-review, \"one per dict\": at "
+        "`11e733f938` the CENSUS dicts EACH "
+        "held the key TWICE, not once. \u26d4 The REGISTER's ordinal is NOT thereby wrong, and an earlier "
+        "revision of this sentence said it was: `_DECLARATIONS` is ONE table and held the key 1\u00d7 after "
+        "`#12016` and 2\u00d7 after `#11996`, so \"the FIRST … a SECOND\" measures TRUE there (`#12182` "
+        "cycle 11). Only its per-dict appositive was false, because it described the CENSUS population "
+        "while naming a register count. Two tables, two counts — do not carry one onto the other. "
+        "This is the surviving census row — surviving a "
         "de-duplication, not a refutation",
     ),
     "tortoise.api::_int_is_float_exact": (
