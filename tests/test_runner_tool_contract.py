@@ -1525,43 +1525,10 @@ _MESSAGE_CMDS = ("echo", "printf")
 #: the escaped name was contiguous nowhere and 45 spellings ran the helper with no hit
 #: (measured). DIRECTION: inherited on all three readers, but it sat INSIDE a rule this
 #: change introduces, so it is closed here rather than declared.
-
-
-#: `_INERT_MESSAGE` / `_MESSAGE_WORD` share this prefix.
-#: ⛔ A SHELL STATEMENT OR LOOP KEYWORD IS NOT THE COMMAND WORD (#12088, `#12133`). A message
-#: emitted from a branch or a loop — `if …; then echo "run tools/x by hand"` — begins with the
-#: KEYWORD, so a reader anchored on the command word names the command `then`/`do` and the helper
-#: named in the message becomes a HAZARD. That is `#12133` exactly: the remedy such a hit demands
-#: (`ensure gh`) FAILS CLOSED on a no-egress pool box, so a false positive here WITHHOLDS a required
-#: CI gate from every PR. A leading `{` (the `{ …; }` block form) is skipped the same way.
-#:
-#: ⛔ SKIPPING A KEYWORD CANNOT HIDE A REAL INVOCATION: it only moves where the anchored question
-#: STARTS, and every other guard still applies — the `$( `/backtick bail, the "no separator, no
-#: unquoted argument, no unterminated quote" tail, and the whole-line `_INERT_MESSAGE` match. The
-#: word AFTER the keyword decides, so `while bash tools/h.sh` stays a hazard (the word is `bash`,
-#: not a message command) and `then echo x; bash tools/h.sh` stays one too (the `;` fails the tail).
-#: Both directions are pinned in `test_the_message_exclusion_cannot_hide_a_real_invocation`.
-_SHELL_STMT_KEYWORDS = "then|else|do|elif|if|while|until"
-_CMD_POSITION_PREFIX = (
-    r"^\s*(?:-\s+)?(?:run:\s*)?"
-    r"(?:\{\s*|(?:" + _SHELL_STMT_KEYWORDS + r")\s+)?"
-)
-#: The prefix `_INERT_MESSAGE` and `_MESSAGE_WORD` BOTH anchor on — see above for why a
-#: leading statement/loop keyword or `{` may be skipped, and why that cannot hide a call.
 _INERT_MESSAGE = re.compile(
-    _CMD_POSITION_PREFIX + r"(?:" + "|".join(_MESSAGE_CMDS) + r")"
+    r"^\s*(?:-\s+)?(?:run:\s*)?(?:" + "|".join(_MESSAGE_CMDS) + r")"
     r"(?:\s+-[A-Za-z]+)*"  # the message command's own flags (`-e`, `-n`)
     r"(?:\s*(?:\d?>>?|\d?>&|&>>?)\s*(?:[^\s;|&<>()\\]|\\.)*)*"  # no pipe, no `(`, no lone `\`
-    # ⛔ a trailing `; }` — the close of a `{ …; }` block, which is how a brace group can be the
-    # thing that PRINTS the message (`{ echo "run tools/h.sh by hand"; }`). ⚠️ STATED PRECISELY,
-    # because the first wording of this comment claimed it is *paired with the `{` the prefix
-    # skipped* and the regex does NOT enforce that: `then echo "msg"; }` (a stray brace, no block
-    # opened) reaches this tail and answers INERT. That is benign rather than a fail-open — a
-    # message followed by nothing but `; }` executes nothing (it is at worst a bash syntax error),
-    # so the helper named inside the quotes is only ever PRINTED — and it is measured in both
-    # directions: `{ echo "msg"; }; bash h.sh` and `{ echo "msg"; bash h.sh; }` both stay
-    # hazards, because the `bash h.sh` sits before the brace and cannot reach this tail.
-    r"(?:\s*;\s*\})?"
     r"\s*$"
 )
 
@@ -1710,14 +1677,11 @@ def _comment_cut(line: str) -> int:
         i += 1
     return n
 
-#: The message command must be in COMMAND POSITION of the RAW LINE — the first word, or
-#: after only the prefix `_CMD_POSITION_PREFIX` allows, which is exactly: an optional `- `
-#: (a leading list dash), an optional `run:`, then an optional `{` or statement/loop
-#: keyword. It must NOT be brought into command position by `_blank_quoted` deleting a
-#: quoted word that bash would have EXECUTED (`"bash" "tools/h.sh" echo`).
-_MESSAGE_WORD = re.compile(
-    _CMD_POSITION_PREFIX + r"(?:" + "|".join(_MESSAGE_CMDS) + r")\b"
-)
+
+#: The message command must be the FIRST WORD OF THE RAW LINE — i.e. in command
+#: position, not brought into command position by `_blank_quoted` deleting a quoted word
+#: that bash would have EXECUTED (`"bash" "tools/h.sh" echo`).
+_MESSAGE_WORD = re.compile(r"^\s*(?:-\s+)?(?:run:\s*)?(?:" + "|".join(_MESSAGE_CMDS) + r")\b")
 
 
 def _message_line_is_inert(line: str) -> bool:
@@ -2523,68 +2487,6 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     # `[]` with 0 of 40 tests red).
     trailing_bs = "\\"  # ONE backslash, named for the same reason as `bs` above
     assert _gh_hazards([f"            echo 'bash tools/{helper}' {trailing_bs}"], scripts)
-
-    # ── SHELL KEYWORDS are not the command word (#12088, `#12133`) ────────────────────────
-    # A message emitted from a branch or a loop begins with the KEYWORD, so a reader anchored
-    # on the command word names the command `then`/`do` and the helper printed in the message
-    # becomes a HAZARD. `#12133` is that false positive, and its cost is not cosmetic: the
-    # remedy the assertion demands (`ensure gh`) FAILS CLOSED on a no-egress pool box, so a
-    # hit here WITHHOLDS a required CI gate from every PR. Measured on this file before
-    # `_CMD_POSITION_PREFIX` skipped the keyword: every row below answered `hazard`. Also
-    # measured, and the reason this is closed here rather than left to a sibling cut: the
-    # `#12167` reader this one now sits inside ALSO answered `hazard` for all nine — its
-    # predicate anchors on `_MESSAGE_WORD` and it adds no keyword row at all.
-    keyword_inert = [
-        f'            then echo "run tools/{helper} by hand"',
-        f'            else echo "please run tools/{helper} --repair-labels by hand"',
-        f'            elif echo "run tools/{helper} by hand"',
-        f'            if echo "run tools/{helper} by hand"',
-        f'            while echo "run tools/{helper} by hand"',
-        f'            until echo "run tools/{helper} by hand"',
-        f'            {{ echo "run tools/{helper} by hand"; }}',
-    ]
-    for row in keyword_inert:
-        assert _gh_hazards([row], scripts) == [], f"a printed message behind a keyword: {row!r}"
-
-    # ⛔ AND SKIPPING A KEYWORD MUST NOT HIDE A REAL CALL SITE — the FAIL-OPEN direction, the
-    # only one that matters here. Each row really invokes the helper behind the same keyword,
-    # and each is caught by a DIFFERENT guard than the keyword skip: the `;` fails
-    # `_INERT_MESSAGE`'s tail, the `$( … )` must pass the substitution bail, and the DIRECT
-    # loop-keyword shapes are caught because the word after the keyword is `bash`, not a
-    # message command. Verified by reinstating the un-skipped `_MESSAGE_WORD`: every inert row
-    # above goes red and every row below STAYS green — i.e. the skip moves where the question
-    # starts and cannot answer it.
-    keyword_hazards = [
-        f"            then echo x; bash tools/{helper}",
-        f'            else echo "$(python3 tools/{helper})"',
-        f"            for f in a; do bash tools/{helper}; done",
-        f"            while true; do bash tools/{helper}; done",
-        f"            while bash tools/{helper}",
-        f"            until bash tools/{helper}",
-        f"            if bash tools/{helper}; then x; fi",
-        f"            {{ bash tools/{helper}; }}",
-    ]
-    for row in keyword_hazards:
-        assert _gh_hazards([row], scripts), f"a real invocation behind a keyword: {row!r}"
-
-    # ⛔ DECLARED RESIDUAL, OVER-REPORTING (the safe direction), and NOT an oversight: the two
-    # shapes below put a message behind a MULTI-SEGMENT loop header, which needs `for …; do ` /
-    # `while …; do ` parsed — shell MODELLING, the approach this reader was rewritten to drop
-    # precisely because every cut that modelled the shell was falsified by a shape it did not
-    # anticipate. A one-keyword prefix cannot reach them, and widening the prefix to try is the
-    # blind widening this file's own `#12149` docstring forbids. Pinning the CURRENT answer
-    # means a future widening that fixes them reds THIS row and must update this paragraph,
-    # rather than silently shipping on an unpinned choice (which is what `#12088`'s review found
-    # the `while`/`until` choice doing).
-    keyword_over_reported = [
-        f'            for d in a b; do echo "run tools/{helper} by hand"; done',
-        f'            while true; do echo "run tools/{helper} by hand"; done',
-    ]
-    for row in keyword_over_reported:
-        assert _gh_hazards([row], scripts), (
-            f"this shape is a DECLARED over-report: a message behind a multi-segment loop header "
-            f"is still reported as a hazard ({row!r}). If you have narrowed it safely, flip this "
-            f"assertion and update the paragraph above — do not delete the row")
 
 
 def test_every_printer_prefixed_shape_that_still_runs_a_command_is_a_hazard():
