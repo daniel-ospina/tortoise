@@ -88,8 +88,12 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
 - `content := name`, with `title` then `subject` as declared fallbacks —
   `entities.py:1958` (`name` is persisted *because* it is absent from `_EVENT_HANDLED`;
   meetings persist `title`);
-- the read is routable — `tool_registry.py:2030`, and `tortoise_get_entity` is absent
-  from `GRAPH_ARGUMENT_EXCLUDED` (`:1665`);
+- the read is routable — every tool advertises `graph` unless it is listed in
+  `GRAPH_ARGUMENT_EXCLUDED` (`tool_registry.py:1665`, applied by `_with_graph_argument`),
+  and `tortoise_get_entity` is not listed. ⛔ NOT `GROUP_BY_NAME` (`:1989`): that map
+  labels a tool with its **curation group**, and `"tortoise_get_entity": "graph"`
+  (`:2030`) means the events/entities/edges group, not that the tool takes a graph
+  argument. An earlier revision cited it as a "graph-taking map"; there is no such map;
 - no classifier or census change is needed — `curation.py:548`, `:618`.
 
 ## Wiring
@@ -97,7 +101,7 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
 | Call site / consumer | What it does there |
 |---|---|
 | `tools/curate_graph.py::MCPReader.read_events` | **new**: reconciles, refuses, maps rows to `C.Row(node_type="event")` |
-| `tools/curate_graph.py::MCPReader._get_entities` | **new**: the routed call (`type="events"`, `limit` = `EVENT_READ_CEILING + 1` — one request, **never sized to the count** (see step 1); `graph`), with the graph-refusal fallback every other read has |
+| `tools/curate_graph.py::MCPReader._get_entities` | **new**: the routed call (`type="events"`, `limit` = `EVENT_READ_CEILING` — one request, **never sized to the count and never the bound plus one** (see step 1); `graph`), with the graph-refusal fallback every other read has |
 | `tools/curate_graph.py::cmd_inventory` | reads the layer, feeds `C.build_plan`, emits `events_read` / `events_total_reported` / `events_reconciled` |
 | `tools/curate_graph.py::cmd_plan` | same, plus a **fresh** status read immediately before the Event read (narrows the count-vs-rows window to two requests) |
 | `tools/curate_graph.py::_disarmed_artifact` | new `events` tri-state kwarg; `events_*` present on **every** disarmed arm (`None` = no completed read) |
@@ -113,12 +117,18 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
    `test_the_event_layer_reaches_the_census` (`event:AgentSession` / `event:meeting`
    in `by_class`, `events_read == counts.Event`).
 
-   ⛔ The bound is **OURS, not the surface's**: `get_events` validates no upper `limit`
-   (it goes straight into the Cypher `LIMIT`), so declaring it as "the surface's maximum"
-   would be false — and the refusal's stated cause would not bind. The read is therefore
-   **sized to `EVENT_READ_CEILING + 1`**, and the bound is only consumed by a layer that
-   genuinely has no whole read. The refusal says exactly that: a size bound on ONE
-   response, raise it deliberately if the layer legitimately outgrew it.
+   ⛔ TWO bounds meet at 10,000 and the coincidence is the hazard. `get_events` validates
+   no upper `limit` (it goes straight into the Cypher `LIMIT`), so on the SURFACE the
+   bound is OURS — a size/memory bound on ONE response, not a wall the tool enforces.
+   But FalkorDB silently truncates any non-aggregate read at its server-global
+   `RESULTSET_SIZE`, which **defaults to 10,000** — measured on docker 4.20.4 (10,050
+   Points read back as 10,000 rows, #4515/#4233/#5062) and relied on by
+   `tests/test_backup_ledger_5062.py::_CappedGraph`. `MATCH (e:Event) … LIMIT $lim` is
+   that shape. So the read is **sized to exactly `EVENT_READ_CEILING`**, and a layer AT
+   the bound refuses (it is indistinguishable from a layer the server capped there).
+   ⛔ Raising `EVENT_READ_CEILING` alone does NOT widen the read: it widens the gap
+   between the request and the server's cap, which makes a capped response look MORE like
+   a whole one. Raise the server's `RESULTSET_SIZE` with it, and verify it.
 
    ⛔ The request size is what makes an accept SOUND, and it took three revisions to get
    right. `limit` goes straight into the Cypher `LIMIT`, so a response **shorter** than
@@ -131,9 +141,15 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
      a single Event FILLED the request — every growth became truncation-shaped, and a
      grow-then-shrink-back race was accepted as whole over unread rows (cycle 4,
      reproduced: 4 live rows unread, 4 deleted rows reported).
-   - `EVENT_READ_CEILING + 1` pays the cost ONCE, at the bound: every response below the
-     bound is provably whole at ANY size, and a response that reaches the bound is above
-     what one response may accept and refuses.
+   - `EVENT_READ_CEILING + 1` (PR-review cycle 5) looked like extra safety and was the
+     opposite: the engine's cap sits AT the bound, so a request of 10,001 can never be
+     filled, a capped response always lands one row UNDER the request, and the fill
+     refusal became an INERT arm that could only fire on inputs no server can return. A
+     layer that grew from 10,000 to 10,001 came back as 10,000 rows == the count and was
+     accepted with a row unread.
+   - `EVENT_READ_CEILING` — the shipped sizing, and the only one that is sound at the
+     cap: a capped response EQUALS the request and refuses; a response strictly below the
+     request was not capped, hence is exactly the layer.
    ⛔ A disagreement in **EITHER direction is re-counted once** before refusing
    (finding 6, made symmetric in PR-review cycle 2): `counts.Event` is fed by
    `index_sessions` (growth) and `:Event` is deleted by the hosted entity-delete path

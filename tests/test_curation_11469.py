@@ -4218,10 +4218,16 @@ def test_an_event_row_with_no_identity_is_refused(monkeypatch, tmp_path, capsys)
 
 
 def test_an_event_layer_above_the_ceiling_is_refused(monkeypatch, tmp_path, capsys):
-    """There is no offset walk, so a population above the ceiling has no whole read."""
+    """There is no offset walk, so a population at the ceiling has no whole read.
+
+    ⛔ AT, not above: FalkorDB silently caps a non-aggregate read at its server-global
+    `RESULTSET_SIZE`, which DEFAULTS to 10 000 — the same number as `EVENT_READ_CEILING`.
+    A layer AT the bound is therefore indistinguishable from one the server capped there,
+    so accepting it would file a possibly-cut layer as complete (PR-review cycle 5).
+    """
     mod = _tool_module()
     monkeypatch.setattr(mod, "_live_call_tool",
-                        _event_surface(events=[], reported=mod.EVENT_READ_CEILING + 1))
+                        _event_surface(events=[], reported=mod.EVENT_READ_CEILING))
     rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"), "--no-verify-read"])
     assert rc == 3, capsys.readouterr()
     err = capsys.readouterr().err
@@ -4239,12 +4245,12 @@ def test_a_truncation_shaped_event_read_is_refused(monkeypatch, tmp_path, capsys
     and "a truncated layer" are the same bytes. Deleting this arm reds this test.
     """
     mod = _tool_module()
-    # ⛔ The fill must reach the REQUEST, and the request is now `EVENT_READ_CEILING + 1`
-    # (a response below the bound is provably whole at any size — see read_events). A
-    # fixture that fills only the old ceiling no longer fills the request, which is why
-    # this list is sized off the request rather than off `EVENT_READ_CEILING`.
+    # ⛔ The fill must reach the REQUEST, and the request IS `EVENT_READ_CEILING` (a
+    # response below the bound is provably whole — see read_events). This fixture also
+    # models the ENGINE: a server whose `RESULTSET_SIZE` equals the bound returns exactly
+    # this many rows for a larger layer, so this is the shape a real truncation has.
     at_limit = [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"m{i}"}
-                for i in range(mod.EVENT_READ_CEILING + 1)]
+                for i in range(mod.EVENT_READ_CEILING)]
     monkeypatch.setattr(mod, "_live_call_tool",
                         _event_surface(at_limit, reported=None))
     rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"), "--no-verify-read"])
@@ -4304,11 +4310,13 @@ def test_the_event_read_is_routed_to_the_graph():
     # the argument outright left the suite green — and the live effect is that
     # `tortoise_get_entity` falls back to its own default (`limit=20`), so a 4,670-row
     # layer would return 20 rows and the census would refuse on EVERY run.
-    # ⛔ The request is `EVENT_READ_CEILING + 1` — deliberately NOT `reported + 1` and not
-    # the bare bound. Sizing it to the count gave one row of headroom, so a single grown
-    # Event FILLED it and the read became truncation-shaped (PR-review cycle 4); sizing it
-    # to the bare bound could not tell "exactly at the bound" from "above it".
-    assert calls[0].get("limit") == mod.EVENT_READ_CEILING + 1, calls
+    # ⛔ The request is EXACTLY `EVENT_READ_CEILING` — deliberately NOT `reported + 1` and
+    # NOT the bound plus one. Sizing it to the count gave one row of headroom, so a single
+    # grown Event FILLED it and the read became truncation-shaped (PR-review cycle 4);
+    # sizing it to the bound PLUS ONE was worse, because FalkorDB caps a non-aggregate read
+    # at `RESULTSET_SIZE` (default 10 000, i.e. this bound), so `bound + 1` can never be
+    # filled and the fill refusal became inert (cycle 5).
+    assert calls[0].get("limit") == mod.EVENT_READ_CEILING, calls
 
 
 def test_a_bound_credential_falls_back_and_discloses_on_the_event_read():
@@ -4617,8 +4625,9 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     # documented the fail-open (PR-review cycle 2), and nothing pinned it.
     plan = (_pathlib.Path(__file__).resolve().parent.parent / "docs" / "plans"
             / "2026-11-13-issue-12378-event-layer-read.md").read_text(encoding="utf-8")
-    assert "limit=EVENT_READ_CEILING" not in plan, (
-        "the plan's wiring row still prescribes the clamped limit the code removed")
+    assert "limit=EVENT_READ_CEILING + 1" not in plan, (
+        "the plan still prescribes the request one row ABOVE the bound, which can never be "
+        "filled and makes the fill refusal inert (PR-review cycle 5)")
     # ⛔ Pin the WIRING ROW, not the whole document: the plan legitimately RECORDS the two
     # superseded sizings as history (a reader needs to know why the request is no longer
     # sized to the count), so a whole-document "absent" assertion reds on the very
@@ -4627,17 +4636,21 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     wiring = [ln for ln in plan.splitlines() if ln.startswith("| `tools/curate_graph.py::"
                                                              "MCPReader._get_entities`")]
     assert wiring, "the plan has no MCPReader._get_entities wiring row"
-    assert "EVENT_READ_CEILING + 1" in wiring[0], wiring[0]
+    assert "limit` = `EVENT_READ_CEILING`" in wiring[0], wiring[0]
     assert "reported + 1" not in wiring[0] and "min(" not in wiring[0], wiring[0]
+    assert "EVENT_READ_CEILING + 1" not in wiring[0], wiring[0]
     # The plan must not describe the re-count as growth-only either: since the symmetric
     # fix, a SHRINK with an agreeing fresh count is accepted, and the growth-only wording
     # states the opposite of the code for the mirror direction (PR-review cycle 3).
     assert "growth direction is re-counted" not in plan, (
         "the plan still describes the re-count as growth-only")
     # The plan must describe the request the code actually sends, and must not resurrect
-    # the ONE-ROW-HEADROOM sizing (cycle 4: it made every growth truncation-shaped).
-    assert "EVENT_READ_CEILING + 1" in plan, (
+    # EITHER superseded sizing: the one-row headroom (cycle 4) or the bound-plus-one that
+    # the engine's own `RESULTSET_SIZE` cap turns into an inert guard (cycle 5).
+    assert "**sized to exactly `EVENT_READ_CEILING`**" in plan, (
         "the plan does not describe the request the code sends")
+    assert "RESULTSET_SIZE" in plan, (
+        "the plan does not name the engine cap that makes `bound + 1` unfillable")
     assert "sized to `counts.Event + 1`" not in plan, (
         "the plan still prescribes sizing the request to the count (one row of headroom)")
     # ⛔ ...and the CODE's own text, which nothing pinned (PR-review cycle 5). The plan pin
@@ -4683,10 +4696,21 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         "sends EVENT_READ_CEILING + 1")
     assert "sizes each request to `counts.Event + 1`" not in source_flat, (
         "the EVENT_READ_CEILING comment still prescribes sizing the request to the count")
-    assert "request is sized to `EVENT_READ_CEILING + 1`" in source_flat, (
-        "the read_events contract does not state the request the code sends")
-    assert "bound PLUS ONE (`EVENT_READ_CEILING + 1`)" in source_flat, (
+    # ⛔ CYCLE 5 CHANGED WHAT THE PRESENCE SIDE MUST PIN, and the scoping discipline above
+    # is what made the change visible: the shipped request is the BOUND, not the bound plus
+    # one, so the two presence assertions now name THAT sentence at each site — and each is
+    # phrased so a revert to `bound + 1` cannot satisfy it (a bare substring `sized to
+    # `EVENT_READ_CEILING`` would match inside `EVENT_READ_CEILING + 1` only up to the
+    # backtick, so the trailing `— NOT to` is load-bearing here).
+    assert "sized to `EVENT_READ_CEILING` — NOT to" in source_flat, (
+        "the read_events contract does not state the request the code sends (the bound)")
+    assert "size its request TO the bound, not above it" in source_flat, (
         "the EVENT_READ_CEILING comment does not state the request the code sends")
+    # ...and both must say WHY, because the reason is what a future lane edits away: the
+    # engine caps a non-aggregate read at `RESULTSET_SIZE`, DEFAULT 10 000, i.e. AT this
+    # bound, so `bound + 1` can never be filled and the fill refusal becomes inert.
+    assert "RESULTSET_SIZE" in source_flat, (
+        "curate_graph.py never names the engine cap that sizes this read's request")
 
     # ...and the row records the change rather than dropping the subject.
     assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (
@@ -4754,38 +4778,46 @@ def test_an_event_with_no_text_is_counted_on_the_report(monkeypatch, tmp_path):
 
 
 def test_a_layer_that_grew_past_the_bound_is_not_accepted_as_complete():
-    """The `+1` headroom must survive AT the bound, or the count silently vouches for less.
+    """A layer that grew past the bound must not be vouched for by the count.
 
     `limit_sent` used to be `min(reported + 1, EVENT_READ_CEILING)`, which collapses to
     `reported` exactly when `counts.Event == EVENT_READ_CEILING`: a layer that had grown to
     10,050 then came back as 10,000 rows == the count, passed the reconciliation, and was
-    filed `events_reconciled: True` with 50 rows unread. Measured by the PR reviewer. The
-    fix is NOT `reported + 1` either: that leaves ONE row of headroom, so a single Event
-    created between the count and the read fills the request and a truncated response
-    becomes indistinguishable from a whole one (measured as a grow-then-shrink race in a
-    later cycle). The request is now `EVENT_READ_CEILING + 1` on every read, so a response
-    strictly below it is provably whole at any size.
+    filed `events_reconciled: True` with 50 rows unread. Measured by the PR reviewer.
+    `reported + 1` was the next wrong answer (ONE row of headroom: a single Event created
+    between the count and the read fills the request), and `EVENT_READ_CEILING + 1` was the
+    third — the engine caps a non-aggregate read at `RESULTSET_SIZE` (default 10,000, i.e.
+    the bound), so a request one ABOVE the bound can never be filled and this very layer
+    came back as 10,000 rows == the count and was accepted with 50 unread. The shipped
+    request is exactly `EVENT_READ_CEILING`: the fake below models real LIMIT semantics, so
+    10,000 rows fill the request and refuse.
     """
     mod = _tool_module()
     ceiling = mod.EVENT_READ_CEILING
+    # The count sits BELOW the bound (so the bound refusal does not pre-empt the read) and
+    # the true layer sits ABOVE it: exactly the growth the cap makes invisible.
     true_layer = [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"m{i}"}
-                  for i in range(ceiling + 1)]
+                  for i in range(ceiling + 50)]
+    stale = ceiling - 1
     sent: list[int] = []
 
     def call(name, args):
         args = args or {}
         if name == "tortoise_get_entity" and args.get("type") == "events":
             sent.append(args["limit"])
-            return {"result": true_layer[:args["limit"]]}   # real LIMIT semantics
+            # LIMIT semantics AND the server's cap, which equals the request here: the
+            # response tops out at `limit` however large the layer really is.
+            return {"result": true_layer[:args["limit"]]}
         if args.get("section") == "status":
-            return {"counts": {"Event": ceiling}}          # the stale count
+            return {"counts": {"Event": stale}}            # the stale count, both reads
         return {"result": []}
 
     reader = mod.MCPReader(call, None)
     with pytest.raises(C.CurationRefused, match=r"counts\.Event"):
-        reader.read_events({"counts": {"Event": ceiling}})
-    # The request carried headroom past the bound, which is what makes the growth visible.
-    assert sent == [ceiling + 1], sent
+        reader.read_events({"counts": {"Event": stale}})
+    # The request is the bound itself: a capped response EQUALS it and refuses, and a
+    # response below it was not capped. A request of `bound + 1` could never be filled.
+    assert sent == [ceiling], sent
 
 
 def test_a_layer_that_grew_with_an_agreeing_recount_is_accepted_not_refused():
@@ -4906,8 +4938,10 @@ def test_a_response_that_FILLED_its_request_refuses_even_when_a_recount_agrees()
             return {"result": [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"e{i}"}
                                for i in range(args["limit"])]}
         if args.get("section") == "status":
-            # The re-count AGREES with the rows (the grow-then-shrink-back race).
-            return {"counts": {"Event": mod.EVENT_READ_CEILING + 1}}
+            # The re-count AGREES with the rows (the grow-then-shrink-back race), so the
+            # disagreement arm resolves in favour of the read and only the FILL arm is
+            # left to refuse it.
+            return {"counts": {"Event": mod.EVENT_READ_CEILING}}
         return {"result": []}
 
     reader = mod.MCPReader(call, None)
@@ -4915,10 +4949,60 @@ def test_a_response_that_FILLED_its_request_refuses_even_when_a_recount_agrees()
         reader.read_events({"counts": {"Event": 3}})     # stale count: the re-count decides
     except mod.C.CurationRefused as exc:
         msg = str(exc)
-        assert "RESPONSE BOUND" in msg, msg
+        assert "filling the" in msg, msg
         assert "may also have been CUT" in msg, msg
     else:
         raise AssertionError(
             "a full request + an agreeing re-count was ACCEPTED: the compound race "
             "(grow past the request, shrink back before the re-read) files "
             "events_reconciled=True over unread rows")
+
+
+def test_a_server_capped_response_disagreeing_with_the_count_refuses():
+    """The ENGINE'S cap, modelled: a non-aggregate read returns at most `RESULTSET_SIZE`.
+
+    FalkorDB truncates any non-aggregate read at its server-global `RESULTSET_SIZE`
+    (**default 10 000** — measured on docker 4.20.4, #4515/#4233/#5062) with no error and
+    no marker, so `MATCH (e:Event) … LIMIT $lim` cannot return more than the cap however
+    large the request is. The fake below enforces exactly that, which the earlier fakes did
+    not: they returned `args["limit"]` rows, an input the real server cannot produce, so
+    the "reverting the guard reds this test" property held only against impossible data.
+
+    The shape under test is the one the cap makes possible and the request geometry cannot
+    see: a layer LARGER than the cap comes back as exactly `cap` rows. Here the count says
+    9,999 and the truncated response says 10,000 — a disagreement the re-count resolves
+    against the read, so the census refuses instead of filing a cut layer as complete.
+    """
+    mod = _tool_module()
+    cap = mod.EVENT_READ_CEILING          # the engine's default RESULTSET_SIZE
+    true_layer = [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"m{i}"}
+                  for i in range(cap + 500)]
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            # ⛔ LIMIT semantics AND the server's silent cap: never more than `cap` rows,
+            # whatever `limit` was requested.
+            return {"result": true_layer[:min(args["limit"], cap)]}
+        if args.get("section") == "status":
+            return {"counts": {"Event": len(true_layer)}}   # the TRUE population
+        return {"result": []}
+
+    reader = mod.MCPReader(call, None)
+    with pytest.raises(C.CurationRefused, match=r"counts\.Event"):
+        reader.read_events({"counts": {"Event": cap - 1}})   # the stale, pre-growth count
+
+
+def test_a_layer_at_the_bound_refuses_because_the_server_caps_there():
+    """"At the bound" and "capped at the bound" are the same bytes, so it refuses.
+
+    This is the half an `EVENT_READ_CEILING + 1` request could not see: with the cap equal
+    to the bound, a request one row above it is never filled, so a 10,000-row layer was
+    accepted as whole even after it had grown to 10,001. The refusal is a FALSE BLOCK at
+    exactly 10,000 rows and that is the correct trade: an unverifiable layer is refused,
+    never filed as complete.
+    """
+    mod = _tool_module()
+    reader = mod.MCPReader(_event_surface([], reported=mod.EVENT_READ_CEILING), None)
+    with pytest.raises(C.CurationRefused, match=r"at or above"):
+        reader.read_events({"counts": {"Event": mod.EVENT_READ_CEILING}})

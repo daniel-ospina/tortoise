@@ -591,23 +591,40 @@ class MCPReader:
           indistinguishable and would fold onto one; `_upsert_event` writes `id` equal
           to the MERGE key `eventId`, and by-url/legacy rows carry the `eventId`
           spelling, so both are read;
-        * a population above `EVENT_READ_CEILING` is REFUSED — there is no offset walk
-          to page through it;
-        * a read that FILLS the requested limit exactly is REFUSED, because there is no
-          offset walk, so "a full page" and "a truncated layer" are the same bytes. The
-          request is sized to `EVENT_READ_CEILING + 1` — NEVER to `counts.Event + 1`, which
-          leaves one row of headroom and makes any growth truncation-shaped — so a response
-          that fills it is above the band this read may accept: with no reported count
-          nothing vouches for the layer's size, and with one the re-count below decides it;
+        * a population AT OR ABOVE `EVENT_READ_CEILING` is REFUSED — there is no offset
+          walk to page through it, AND FalkorDB silently caps any non-aggregate read at its
+          server-global `RESULTSET_SIZE` (default 10 000 — measured on docker 4.20.4:
+          10 050 Points read back as 10 000 rows, #4515/#4233/#5062), so a layer at the cap
+          and a layer truncated BY the cap return the same bytes;
+        * a read that FILLS the request is REFUSED, because there is no offset walk, so "a
+          full page" and "a truncated layer" are the same bytes. The request is sized to
+          `EVENT_READ_CEILING` — NOT to `EVENT_READ_CEILING + 1` and NOT to
+          `counts.Event + 1`. The `+1` looks like extra safety and is the opposite: the
+          engine's cap sits AT the bound, so a request of `bound + 1` can never be filled,
+          a capped response always lands one row UNDER the request, and the fill refusal
+          becomes an inert arm that can only fire on inputs no server can return. Sizing
+          the request TO the bound makes a capped response (== the bound) fill it and
+          refuse — and a response strictly below the bound is uncapped, hence exactly the
+          layer;
         * a read whose row count disagrees with `counts.Event` is re-counted ONCE and then
           either ACCEPTED or REFUSED. Both surfaces describe `:Event` with the same
           predicate (unlike the operator pair), so equality was expected — but the count is
           read moments earlier, and `counts.Event` moves in BOTH directions on a live graph
           (`index_sessions` creates; the hosted entity-delete path deletes). Completeness
           rests on `len(raw) < limit_sent`, NOT on the count: a response below the request
-          is the exact layer at any size, so a disagreement whose fresh count equals the
-          rows is ACCEPTED (the disagreement was a stale count) and anything else is
-          REFUSED. The refusal still names `counts.Event` and what the re-read reported.
+          is the exact layer — because the engine cannot have capped it below the bound —
+          so a disagreement whose fresh count equals the rows is ACCEPTED (the disagreement
+          was a stale count) and anything else is REFUSED. The refusal still names
+          `counts.Event` and what the re-read reported.
+
+        ⛔ RESIDUAL, stated rather than hidden: on the UNREPORTED arm completeness rests
+        only on the response having stayed below the bound. A server tuned with
+        `RESULTSET_SIZE` BELOW `EVENT_READ_CEILING` would cap such a read invisibly, and
+        nothing in this tool can see that tuning. Where a `counts.Event` exists the
+        disagreement arm catches it (a capped response never equals a larger count), which
+        is why the count is preferred and why `events_total_reported` is on the artifact.
+        A deployment that tunes the cap below the bound must lower `EVENT_READ_CEILING`
+        with it.
 
         An UNREPORTED count over a NON-EMPTY read is a lost cross-check, not a lost
         population: the rows came from their own read, so it is recorded on the report.
@@ -617,21 +634,24 @@ class MCPReader:
         on.
         """
         reported = _node_count(counts, "Event")
-        if reported is not None and reported > EVENT_READ_CEILING:
+        if reported is not None and reported >= EVENT_READ_CEILING:
             raise C.CurationRefused(
-                f"the Event layer holds {reported} rows, above this read's declared "
-                f"{EVENT_READ_CEILING}-row RESPONSE BOUND. ⛔ That number is OURS, not the "
-                "surface's: `sdk.get_events` validates no upper `limit` and passes it "
-                "straight into the Cypher `LIMIT`, so the bound is a size/memory bound on "
-                "ONE response rather than a wall the tool enforces. The refusal is that "
-                "this layer can only be read in ONE response — there is a `limit` and NO "
-                "`offset` (`MATCH (e:Event) … LIMIT $lim`), so a layer larger than the "
-                "bound cannot be read whole at all, and a truncated one entering the "
-                "census is indistinguishable from a complete one. Raise "
-                "`EVENT_READ_CEILING` deliberately if this layer legitimately outgrew it; "
+                f"the Event layer holds {reported} rows, at or above this read's declared "
+                f"{EVENT_READ_CEILING}-row RESPONSE BOUND. ⛔ TWO limits meet at this "
+                "number: `sdk.get_events` validates no upper `limit` and passes it straight "
+                "into the Cypher `LIMIT` (so the bound is OURS, a size/memory bound on ONE "
+                "response), and FalkorDB silently truncates any non-aggregate read at its "
+                "server-global `RESULTSET_SIZE`, which DEFAULTS TO 10 000 — the same "
+                "number. A layer at the bound is therefore indistinguishable from a layer "
+                "the server capped there, and there is a `limit` and NO `offset` "
+                "(`MATCH (e:Event) … LIMIT $lim`), so it cannot be read whole at all. "
+                "Raising `EVENT_READ_CEILING` alone does NOT fix this: it widens the gap "
+                "between the request and the server's cap, which makes a capped response "
+                "look MORE like a whole one. Raise the server's `RESULTSET_SIZE` with it "
+                "and verify it (`config_get`), or add an offset walk; "
                 "do not let a partial episodic layer be reported as complete")
-        # ⛔ Ask for ONE MORE than our DECLARED BOUND — never for `reported + 1`. The
-        # response size is what decides whether a read is provably whole: `limit` goes
+        # ⛔ Ask for EXACTLY the DECLARED BOUND — never `bound + 1`, never `reported + 1`.
+        # The response size is what decides whether a read is provably whole: `limit` goes
         # straight into the Cypher `LIMIT`, so a response SHORTER than the request is the
         # exact layer, and a response that FILLS the request is "at least this many" and
         # cannot be distinguished from a truncated one.
@@ -643,16 +663,21 @@ class MCPReader:
         # `events_reconciled: True` over unread rows (reproduced by the reviewer: 4 live
         # rows unread, 4 deleted rows reported).
         #
-        # `EVENT_READ_CEILING + 1` pays that cost ONCE, at the bound: every response below
-        # the bound is provably whole at ANY size (so growth and shrink are both
-        # acceptable), and a response that reaches the bound is above what this read may
-        # accept and refuses. ⛔ NOT `min(reported + 1, EVENT_READ_CEILING)`: that clamp ate
-        # the headroom exactly at the bound (a layer reporting 10,000 sent `limit=10,000`,
-        # so one that had grown to 10,050 came back as 10,000 rows == the count and was
-        # filed `events_reconciled: True` with 50 rows unread — the first reviewer round).
+        # `bound + 1` was the fifth cycle's answer and it fails for a different reason: the
+        # engine caps a non-aggregate read at `RESULTSET_SIZE`, DEFAULTS TO 10 000, i.e. AT
+        # this bound. A request of 10 001 can then never be filled, so the fill refusal
+        # below is inert — and a layer of 10 001 (one Event created after the count said
+        # 10 000) comes back as 10 000 rows == the count and was ACCEPTED with a row
+        # unread. Requesting the bound itself closes it: a capped response EQUALS the bound
+        # and refuses; a response below the bound was not capped.
+        #
+        # ⛔ NOT `min(reported + 1, EVENT_READ_CEILING)` either: that clamp ate the headroom
+        # exactly at the bound (a layer reporting 10,000 sent `limit=10,000`, so one that
+        # had grown to 10,050 came back as 10,000 rows == the count and was filed
+        # `events_reconciled: True` with 50 rows unread — the first reviewer round).
         # `reported` is already bounded by the refusal above, and `get_events` validates no
         # upper `limit`, so this is always a legal request.
-        limit_sent = EVENT_READ_CEILING + 1
+        limit_sent = EVENT_READ_CEILING
         res = self._get_entities(limit_sent)
         err = _error_of(res)
         if err:
@@ -672,7 +697,7 @@ class MCPReader:
         if reported is None and len(raw) >= limit_sent:
             raise C.CurationRefused(
                 f"the Event read returned {len(raw)} rows, filling the "
-                f"{limit_sent}-row request (the `EVENT_READ_CEILING` bound plus one), and "
+                f"{limit_sent}-row request, and "
                 "no reported count says that "
                 "is the whole layer — the response may be truncated, and this read has no "
                 "offset walk to continue from; refusing a partial episodic layer")
@@ -685,7 +710,9 @@ class MCPReader:
             #
             # ⚠️ WHY ACCEPTING HERE IS SOUND. Completeness rests on ONE fact, and the
             # request is sized to establish it: `len(raw) < limit_sent`, i.e. the response
-            # did not fill the request, so it is the exact layer — at ANY size. The
+            # did not fill the request, so the engine cannot have capped it at
+            # `RESULTSET_SIZE` (which defaults to the bound) and it is the exact layer.
+            # The
             # re-count then only answers a different question: is the number this read
             # disagrees with simply stale? (A `:Event` created by `index_sessions` or
             # deleted by the hosted entity-delete path between the two requests.)
@@ -701,7 +728,7 @@ class MCPReader:
             if fresh is not None and fresh == len(raw) and len(raw) >= limit_sent:
                 raise C.CurationRefused(
                     f"the Event layer read {len(raw)} rows, filling the "
-                    f"{EVENT_READ_CEILING}-row RESPONSE BOUND, and a re-read of "
+                    f"{limit_sent}-row request, and a re-read of "
                     f"counts.Event now also reports {fresh} — but this layer is above what "
                     "ONE response may accept, and a filled response may also have been CUT, "
                     "so the rows cannot be shown to be the whole layer. Refusing rather "
@@ -779,8 +806,9 @@ class MCPReader:
         """The Event enumeration, ROUTED to `self.graph` like every other read.
 
         `graph` is the credential's per-call routing argument (#9340,
-        `mcp_server._take_graph_argument`) and `tortoise_get_entity` honours it: it is in
-        `tool_registry`'s graph-taking map and NOT in `GRAPH_ARGUMENT_EXCLUDED`, so
+        `mcp_server._take_graph_argument`) and `tortoise_get_entity` honours it: every tool
+        advertises `graph` unless it is in `GRAPH_ARGUMENT_EXCLUDED`
+        (`_with_graph_argument`), and `tortoise_get_entity` is not in that set — so
         omitting it would read the Event layer from the DEFAULT graph while every other
         section came from `--graph` — a census mixing two graphs.
 
@@ -793,13 +821,16 @@ class MCPReader:
 
         `type="events"` with no `id` is the whole-layer listing (`tortoise_get` treats
         `id` as an optional eventKind FILTER on this arm), and `limit` is the response the
-        truncation check in `read_events` is sized against — ALWAYS `EVENT_READ_CEILING + 1`,
-        never the reported count: `reported + 1` leaves exactly one row of headroom, so a
-        single Event created between the count and the read fills the request and a
-        truncated response becomes indistinguishable from a whole one, and
-        `min(reported + 1, EVENT_READ_CEILING)` loses the headroom entirely at the bound.
-        Sizing to the bound plus one makes a response STRICTLY BELOW the request the whole
-        layer at ANY size, and a response that FILLS it a refusal.
+        truncation check in `read_events` is sized against — ALWAYS exactly
+        `EVENT_READ_CEILING`, never the reported count and never the bound plus one:
+        `reported + 1` leaves exactly one row of headroom, so a single Event created between
+        the count and the read fills the request and a truncated response becomes
+        indistinguishable from a whole one; `min(reported + 1, EVENT_READ_CEILING)` loses
+        the headroom entirely at the bound; and `bound + 1` can never be filled at all,
+        because FalkorDB caps a non-aggregate read at its `RESULTSET_SIZE` (default 10 000,
+        i.e. the bound), which makes the fill refusal inert. Sizing to the bound makes a
+        capped response EQUAL it and refuse, and a response strictly below it uncapped,
+        hence the whole layer.
         """
         args: dict[str, Any] = {"type": "events", "limit": limit}
         if not self.graph:
@@ -983,22 +1014,30 @@ OPERATOR_READ_CEILING = 10_000
 #: `MATCH (e:Event) … ORDER BY e.startedAt DESC LIMIT $lim` with NO offset and a BARE
 #: LIST return (`sdk.py`). A response that FILLS the request is therefore
 #: indistinguishable from a truncated layer, while a response STRICTLY BELOW it is the
-#: exact layer at any size — which is what `read_events` rests completeness on. Same
-#: hazard as the operator read, and the same refusals apply.
+#: exact layer — which is what `read_events` rests completeness on. Same hazard as the
+#: operator read, and the same refusals apply.
 #:
-#: ⛔ 10,000 here is OUR DECLARED response bound, NOT the surface's maximum — and that
-#: difference is worth stating because the operator constant is the opposite case. The
-#: SDK refuses `tortoise_search(limit > 10000)` outright, which is what makes
-#: `OPERATOR_READ_CEILING` a wall; `get_events` validates no upper bound at all and
-#: passes `limit` straight into the Cypher `LIMIT`, so a larger number would simply be
-#: sent. The bound exists because this layer can only be read in ONE response (a `limit`
-#: and no `offset`), so "the whole layer" needs a stated size a refusal can name — and it
-#: is a size/memory bound, not an enforcement. `read_events` sizes each request to this
-#: bound PLUS ONE (`EVENT_READ_CEILING + 1`), and never to the count: headroom above
-#: `counts.Event` is ONE ROW, so a single grown Event fills the request and a
-#: grow-then-shrink-back race is accepted as whole over unread rows, while a request one
-#: above the BOUND keeps every response below it provably whole at any size and refuses a
-#: response that reaches it instead of filing a possibly-cut layer as complete.
+#: ⛔ 10,000 is TWO bounds that happen to coincide, and the coincidence is the whole
+#: hazard. Ours: the SDK refuses `tortoise_search(limit > 10000)` outright, which makes
+#: `OPERATOR_READ_CEILING` a wall, while `get_events` validates no upper bound and passes
+#: `limit` straight into the Cypher `LIMIT` — so for Events this is a DECLARED
+#: size/memory bound on ONE response, not a surface maximum. Theirs: FalkorDB silently
+#: truncates any non-aggregate read at its server-global `RESULTSET_SIZE`, which DEFAULTS
+#: to 10,000, with no error and no marker (measured on docker 4.20.4: 10 050 Points read
+#: back as 10 000 rows — #4515/#4233/#5062). A `MATCH (e:Event) … LIMIT $lim` IS that
+#: shape. So the read must size its request TO the bound, not above it: at `bound + 1` a
+#: capped response always lands one row under the request, the fill refusal below can
+#: never fire, and a layer that grew by one row past the cap is filed as complete. Sizing
+#: to the bound makes a capped response equal it and refuse.
+#:
+#: The residual is on the UNREPORTED arm only: a server tuned BELOW this bound caps
+#: invisibly, and nothing here can see that tuning. A reported count catches it (a capped
+#: response never equals a larger count), and a deployment that lowers the cap must lower
+#: this constant with it.
+#:
+#: The bound exists because this layer can only be read in ONE response (a `limit` and no
+#: `offset`), so "the whole layer" needs a stated size a refusal can name — and it is a
+#: size/memory bound, not an enforcement.
 EVENT_READ_CEILING = 10_000
 
 
@@ -1088,8 +1127,9 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         "events_total_reported": events_reported,
         # `events_total_reported is None` means NO cross-check was available: the layer's
         # completeness then rests on the response having stayed STRICTLY BELOW the
-        # `EVENT_READ_CEILING + 1` request, because a response that FILLS it cannot be told
-        # from a truncation. A driver must be able to
+        # `EVENT_READ_CEILING` request, because a response that FILLS it cannot be told
+        # from a truncation — FalkorDB caps a non-aggregate read at `RESULTSET_SIZE`,
+        # which defaults to exactly this bound. A driver must be able to
         # answer that from a FIELD rather than from prose.
         "events_reconciled": events_reported is not None,
         "source_count_gap": gap,
