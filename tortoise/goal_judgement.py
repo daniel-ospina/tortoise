@@ -893,7 +893,11 @@ _READINGS_PAGE_SIZE = 1000
 
 
 def _newest_first_key(reading: Reading) -> tuple[int, Any, str]:
-    """Total order for :func:`latest_readings` — by real INSTANT, never by bytes.
+    """Sort key for :func:`latest_readings` — by real INSTANT, never by bytes.
+
+    Total only when the third element differs (see "NOT TOTAL" below); for every
+    reading this module writes it does, because ``e.id`` is a string and distinct
+    strings are distinct under ``str``.
 
     ⛔ THE STORED STRING IS NOT THE ORDER (#12322). A graph holds the same slot
     spelled ``Z``, ``+00:00``, date-only, and as the ingest producer's
@@ -914,34 +918,36 @@ def _newest_first_key(reading: Reading) -> tuple[int, Any, str]:
     caller can sort DESCENDING and still leave an undated reading LAST — an
     unparseable as-of cannot PROVE it is recent, so it must never displace a
     dated one. ``reading_id`` is the tie-break (the ``e.id DESC`` the query
-    itself used to carry), so equal instants keep a total order **when the
-    readings carry DISTINCT ids** and two reads of an unchanged graph agree.
+    itself used to carry), so two reads of an unchanged graph agree.
 
-    ⛔ NOT TOTAL, stated rather than implied: the tie-break is a STRING, so two
-    readings at the same instant fall back to a stable sort over ``rows`` —
-    ``id(e)`` ASCENDING, the OPPOSITE direction to the ``e.id DESC`` the pre-fix
-    query carried — whenever their ids are equal AS STRINGS. TWO reachable
-    shapes:
-
-      * **no ``reading_id`` at all.** An outside-written event carries no ``id``
-        property, and ``str(reading_id or "")`` maps "absent" and "empty" to
-        the same value (see
-        ``test_a_reading_whose_event_carries_no_id_still_orders_without_raising``);
-      * **two distinct readings sharing one ``e.id``.** Legitimate, and the
-        reason no Python de-duplication is layered on this read at all (see the
-        projection note below ``cypher``): ``str`` of the shared id is ONE value,
-        so both rows land on the same key.
+    ⛔ NOT TOTAL, stated rather than implied — and stated as a RULE, because
+    enumerating the shapes is how this claim stayed wrong through two rounds.
+    The tie-break is ``str(reading_id or "")``, so the key is total exactly when
+    that third element DIFFERS; when two same-instant readings produce the same
+    string the sort falls back to a stable pass over ``rows``, i.e. ``id(e)``
+    ASCENDING — the OPPOSITE direction to the ``e.id DESC`` the pre-fix query
+    carried. ``str(id or "")`` is NOT injective on ids, and the reachable shapes
+    include (measured, not imagined) two readings that both lack an ``id``, two
+    distinct readings sharing one ``e.id`` — legitimate, and the reason no Python
+    de-duplication is layered on this read at all (see the projection note below
+    ``cypher``) — a stored ``id: 0`` beside one with no id (``0 or ""`` is
+    ``""``), and ``1`` beside ``"1"``. The rule subsumes all of them.
 
     The result is still deterministic — two reads of an unchanged graph agree,
     which is the property that keeps a judgement reproducible — but it is NOT
     the documented direction, and that is the honest scope of the claim. It is
     left as prose rather than repaired in the key because the two rows name the
     SAME instant, so both orderings answer "newest first" equally: the defect is
-    the DIRECTION claim, not a wrong answer. A key that also carried ``id(e)``
-    would restore the documented direction, and that is a behaviour change with
-    its own pin — ``id(e)`` semantics differ across the v4/v6 cores (the hazard
-    recorded on ``hosted_backup.py`` and quoted below), so it is not a docstring
-    correction.
+    the DIRECTION claim, not a wrong answer. What actually blocks the repair is
+    narrow and mechanical — ``Reading`` carries no field for ``id(e)``, so
+    restoring the documented direction means adding one (a public dataclass
+    field) plus its own pin. ⛔ It is NOT the v4/v6 ``id()`` hazard recorded on
+    ``hosted_backup.py``: that note is about an OPERAND edge case (``id(n) > -1``
+    returning no rows on v6) and says the mechanism there is "deliberately not
+    guessed at", while this read already orders and pages on ``id(e)`` in Cypher
+    (``ORDER BY id(e)``, ``id(e) >= $cursor``) — if integer ``id(e)`` ordering
+    were unsafe across cores, the FETCH would already be broken, not just the
+    tie-break.
     """
     from .search_engine import _created_sort_key
 
@@ -976,13 +982,16 @@ def latest_readings(
     first page ends it) and ``ceil(N / _READINGS_PAGE_SIZE)`` page queries for
     ``N > 0``, ONE MORE when ``N`` is an exact multiple of the page size (a FULL
     page never ends the loop; only a short one does), PLUS the one aggregate
-    ``count(e)`` the truncation guard compares against. Instant PARSES are ``M`` for the ordering — ``M`` being the readings
-    that SURVIVE ``since``, because the filter runs BEFORE the sort (``M = N`` when
-    no boundary is given) — plus ``2N`` for ``since`` (``instant_at_or_after``
-    parses both operands per reading, boundary included): ``2N + M``, which is
-    ``3N`` when the boundary drops nothing — the ordinary case — and less when it
-    drops more (measured: 5 readings parse 15 times at a boundary that drops
-    none, 14 at one that drops one). Measured pin: 5
+    ``count(e)`` the truncation guard compares against. Instant PARSES are ``M`` —
+    the readings that SURVIVE ``since``, because the filter runs BEFORE the sort
+    (``M = N`` when no boundary is given) — and ONLY WHEN A BOUNDARY IS DECLARED
+    (``since is not None``) a further ``2N`` for it, because
+    ``instant_at_or_after`` parses BOTH operands per reading, boundary included.
+    The two cases therefore differ: **no boundary — ``M``, i.e. ``N``**, which is
+    what ``judge()`` pays whenever ``definition_boundary`` returns ``None``; **a
+    declared boundary — ``2N + M``**, which is ``3N`` when it drops nothing
+    (measured: 5 readings parse 15 times at a boundary that drops none, 14 at one
+    that drops one) and less when it drops more. Measured pin: 5
     readings at a page size of 2 take 3 page queries. That is the price of a
     correct order (:data:`_READINGS_PAGE_SIZE`); it is not a per-call constant.
 
