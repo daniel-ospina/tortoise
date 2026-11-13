@@ -97,9 +97,14 @@ def test_the_posted_rows_and_extraction_is_filed():
 
 
 def test_durable_turns_without_extraction_is_unextracted():
-    """Extraction runs AFTER the turn write, so the confirmation can prove the
-    turns while the extraction the bound abandoned is still running. The SPOOL
-    may terminalise on that; the import RECEIPT may not (#4188)."""
+    """The detail serves NO ``extraction`` block (a pre-#3520 server), so the
+    qualifier is unknown and the LEGACY reading applies (#12362 R2).
+
+    ⛔ Do NOT read this as "``extracted == 0`` alone justifies ``UNEXTRACTED``":
+    when the server DOES say the outcome is unrecorded (``outcome_known: False``)
+    the verdict is ``PENDING``, because "not recorded yet" is not "nothing was
+    extracted" — see ``test_unknown_extraction_outcome_is_PENDING_not_unextracted``.
+    """
     assert _confirm(_reader([_detail(extracted=0)])) == UNEXTRACTED
 
 

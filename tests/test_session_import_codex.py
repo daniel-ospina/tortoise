@@ -702,8 +702,11 @@ def test_a_504_with_an_UNRECORDED_outcome_writes_no_receipt(
     rc = _cmd_sessions_import(SimpleNamespace(
         file=str(codex_jsonl), harness="codex", session_id="sid-unrecorded"))
 
-    assert rc == 1
-    assert not list((tmp_path / "receipts").glob("*.json")), (
+    # The receipt is folded in with the exit code (agent-infra#3442 rule 2):
+    # `_confirm_already_captured` only writes a receipt on the path that then
+    # returns 0, so `rc == 1` alone always fires first and this row — whose name
+    # claims the RECEIPT, the #4188 property — would report an exit code instead.
+    assert (rc, [p.name for p in (tmp_path / "receipts").glob("*.json")]) == (1, []), (
         "an unrecorded outcome is not a completed import — a receipt here "
         "makes every later re-import a no-op (#4188)")
     assert read_spool_meta(spool, "sid-unrecorded") is not None, (
