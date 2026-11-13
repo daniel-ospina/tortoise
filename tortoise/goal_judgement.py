@@ -940,9 +940,12 @@ def latest_readings(
     ``ceil(N / _READINGS_PAGE_SIZE)`` page queries, ONE MORE when ``N`` is an
     exact multiple of the page size (a FULL page never ends the loop; only a short
     one does), PLUS the one aggregate ``count(e)`` the truncation guard compares
-    against, and ``N`` instant parses, for a history of ``N`` readings. Measured
-    pin: 5 readings at a page size of 2 take 3 page queries. That is the price of
-    a correct order (:data:`_READINGS_PAGE_SIZE`); it is not a per-call constant.
+    against. Instant PARSES are ``N`` for the ordering and a further ``2N`` when
+    ``since`` is given (``instant_at_or_after`` parses both operands per reading,
+    boundary included), i.e. ``3N`` for a ``judge()`` pass that declares a
+    definition boundary — for a history of ``N`` readings. Measured pin: 5
+    readings at a page size of 2 take 3 page queries. That is the price of a
+    correct order (:data:`_READINGS_PAGE_SIZE`); it is not a per-call constant.
 
     "Newest first" is ordered by the INSTANT each reading names, using the
     repo's one instant comparator (``search_engine._created_sort_key``) — never
@@ -1012,8 +1015,10 @@ def latest_readings(
     # keeps rows by BYTE rank, and that string is not the instant (see
     # `_newest_first_key`): the page kept the wrong readings and the judgement
     # was computed from a stale one. The rows are instead fetched by KEYSET PAGES
-    # — deterministic, and immune to the server's `RESULTSET_SIZE` truncation,
-    # which a single unbounded query is NOT — then ordered in Python with `limit`
+    # — deterministic, and immune to being SILENTLY truncated by the server's
+    # `RESULTSET_SIZE` (a single unbounded query is NOT: it returns a subset and
+    # says nothing), because the collected rows are compared with an independent
+    # `count(e)` and a short set RAISES — then ordered in Python with `limit`
     # applied AFTER that ordering, so no bound can decide WHICH readings the
     # judgement sees.
     #
@@ -1042,13 +1047,18 @@ def latest_readings(
         )
     batch = int(_READINGS_PAGE_SIZE)
     if batch < 1:
-        # ⛔ LOUD, NOT EMPTY. A page size of 0 makes the query return no rows on
-        # every page, so the read would answer "nothing was ever measured" —
-        # the silent-bound conflation this module refuses elsewhere (#11822: a
-        # FAILED READ is not "we could not tell").
+        # ⛔ REFUSED BY NAME, because the count guard below would otherwise report
+        # it as something else: `LIMIT 0` returns an empty page, so a measured
+        # indicator would reach the truncation check and raise `RuntimeError` —
+        # "a page came back short" — while an indicator with NO readings would
+        # return `[]`, which is the CORRECT answer. Neither is "nothing was ever
+        # measured" (the count guard makes that impossible), so the value of this
+        # guard is that it names the actual misconfiguration instead of letting a
+        # wrong-page-size read masquerade as a transport truncation.
         raise ValueError(
             f"_READINGS_PAGE_SIZE must be >= 1, got {_READINGS_PAGE_SIZE!r} — a "
-            "zero page size would report every indicator as unmeasured"
+            "zero page size would make every measured indicator raise as if its "
+            "page had been truncated"
         )
     g = sdk._get_proj().g
     # ⛔ THE INDEPENDENT COUNT, and it must be an AGGREGATE: #4233's incident is

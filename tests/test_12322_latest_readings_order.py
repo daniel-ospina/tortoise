@@ -188,10 +188,12 @@ def test_ties_are_broken_deterministically_by_reading_id(sdk):
 
     The assertion is the tie-break DIRECTION (descending ``reading_id``, the
     ``e.id DESC`` the Cypher used to carry), not just "two reads agree": a stable
-    sort over an ascending page satisfies mere repeatability while pinning
-    nothing, so deleting the third element of ``_newest_first_key`` would stay
-    green. Rows arrive id-ASCENDING, so the tie-break is the only thing that can
-    put the larger id first.
+    sort over an id-ASCENDING page satisfies mere repeatability while pinning
+    nothing. THIS test reds when the third element of ``_newest_first_key`` is
+    deleted — the page order then shows through as ascending id, and the
+    ``sorted(..., reverse=True)`` assertion fails — which is precisely the
+    regression it exists for (a peer test asserting only repeatability would stay
+    green).
     """
     indicator = _indicator(sdk, "tie")
     a = _reading(sdk, indicator, 4.0, at="2026-11-12T05:00:00Z")
