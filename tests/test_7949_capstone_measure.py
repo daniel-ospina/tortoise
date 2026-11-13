@@ -4714,15 +4714,27 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
 #: `` … `config/ci-surfaces.yml` and `tools/ci_selection.py:4140` `` is a cite of a
 #: DIFFERENT file, not of this one. Every shape above is pinned by the two matcher
 #: tests below.
-_UNIT = (r"(?!\s*(?:s|sec|secs|seconds|ms|min|mins|tests?|files|lines|rows|cases|"
-         r"bytes|shards|entries|points|(?i:kb|mb)|%)\b)")
-_NUM = rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT}(?![\d])(?!\.\d)(?!-\d)(?!:\d)"
+#: Rule 3 — a number followed by a UNIT is a COUNT, not a cite — is only as good as
+#: the unit list, and two shapes walked straight through earlier cuts:
+#:   * `%` was inside the `\b` group, and `%` is a NON-WORD character, so `%\b` can
+#:     never hold at end-of-input: `— 145 %` was read as a line cite. It is matched
+#:     OUTSIDE the boundary group now.
+#:   * the list had no time units, so `— 166 hours` was a cite.
+#: Both measured with `_MANIFEST_CITE` against `config/ci-surfaces.yml — <n> <unit>`.
+_UNIT = (r"(?!\s*(?:(?:s|sec|secs|seconds|ms|min|mins|h|hr|hrs|hour|hours|days?|weeks?|"
+         r"months?|years?|tests?|files|lines|rows|cases|bytes|shards|entries|points|"
+         r"modules?|(?i:kb|mb))\b|%))")
+#: ⛔ `(?!,\d)` IS LOAD-BEARING: without it the thousands-separated alternative
+#: BACKTRACKS to a prefix, so `1,320,023 bytes` matched as the integer `1,320` and was
+#: reported as a line cite. The existing pass-fixture never showed it because its
+#: number had no separator beside it; `config/ci-surfaces.yml — 1,320,023 bytes` did.
+_NUM = rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT}(?![\d])(?!,\d)(?!\.\d)(?!-\d)(?!:\d)"
 #: ⛔ THE `.` IN THIS LOOKBEHIND IS LOAD-BEARING: without it a DECIMAL FRAGMENT is
 #: read as an integer (`1.093 %` matched `093`), contradicting the rule stated three
 #: paragraphs up. Reproduced, then closed.
 _LEADING_NUM = rf"(?<![\w#.]){_NUM}"
 _WRAP = r"[`*]*"
-_SEP = r"(?::|#L|—|–|\bL\.?|\b(?:at|on|line|lines|row|rows|entry|entries)\b)"
+_SEP = r"(?::|#L|—|–|\bL\.?|\b(?:at|on|line|lines|row|rows|entry|entries|of)\b)"
 _GAP = r"(?:(?!\.\w)[^|]){0,160}?"
 #: A RANGE is the cite a maintainer writes when re-adding one, and `_NUM`'s `(?!-\d)`
 #: guard — which exists to stop a FRAGMENT of a longer run being read as the number —
@@ -4737,8 +4749,8 @@ _GAP = r"(?:(?!\.\w)[^|]){0,160}?"
 #: a digit, a decimal or another `-<digit>`, which is exactly what a date fragment
 #: is. Caught by the false-red fixture that already existed, which is what those
 #: fixtures are for.
-_RANGE_NUMS = (r"(?<![\d,])\d{1,5}(?:,\d{3})*\s*[-–—]\s*\d{1,5}(?:,\d{3})*"
-               r"(?![\d.])(?!-\d)")
+_RANGE_NUMS = (r"(?<![\d,-])\d{1,5}(?:,\d{3})*\s*[-–—]\s*\d{1,5}(?:,\d{3})*"
+               rf"{_UNIT}(?![\d.])(?!-\d)")
 
 #: A bare line cite with NO filename binding — the form this module documents as
 #: invisible to every sweep. Applied to the ONE sentence the claim lives on, where
@@ -4782,6 +4794,20 @@ _MANIFEST_CITE = re.compile(
 #: policy says. The `.` in the lookbehind is load-bearing in its own right: without
 #: it a DECIMAL FRAGMENT is read as an integer (`1.093 %` matched `093`).
 _BARE_NUM = re.compile(_LEADING_NUM)
+
+#: ⛔ A LONE FOUR-DIGIT 19xx/20xx RUN IS A YEAR AS OFTEN AS A LINE NUMBER, and the bare
+#: arm cannot tell them apart — so it refuses the year rather than punishing prose that
+#: dates itself ("the block was reviewed in 2026"). Execrcise is not lost: the SEPARATOR
+#: arms still catch `:2026`, `at 2026` and `line 2026`, because a cite is written with a
+#: separator and a year is not. Residual, stated: a line number of exactly 2026 written
+#: with no separator is indistinguishable from a year and is not caught here.
+_BARE_YEAR = re.compile(r"^(?:19|20)\d{2}$")
+
+
+def _bare_number_hits(text: str) -> list[str]:
+    """Bare-number hits with a lone four-digit year removed — the tested contract."""
+    return [m.group(0) for m in _BARE_NUM.finditer(text)
+            if not _BARE_YEAR.match(m.group(0))]
 
 
 class _ManifestShapeError(RuntimeError):
@@ -5744,8 +5770,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"does not pick up. Name one entry.")
         # ⛔ scan the sentence with the ENTRY NAME removed: `test_pack_logic_
         # writeprobe_11083.py` carries a 5-digit run that is not a line cite.
-        sentence_numbers = [m.group(0) for m in
-                            _BARE_NUM.finditer(doc_hits[0].replace(ENTRY, ""))]
+        sentence_numbers = _bare_number_hits(doc_hits[0].replace(ENTRY, ""))
         if sentence_numbers:
             block_failures.append(
                 f"03-test-design.md hands a reader a LINE NUMBER on the `carve_out:` "
@@ -5758,31 +5783,44 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"head-qualified history belongs AT THE PIN (this bundle's own D5), "
                 f"so this sentence carries neither a line number nor a head — say "
                 f"that it moved again and point at the pin.")
-        # ⛔ AND THE CLASS IS NOT ONE LINE. Scoping the bare arms to `doc_hits[0]`
-        # left the very form this module documents as "invisible to every sweep"
-        # green ONE LINE BELOW the claim — "the entry itself sat at `:9987` at head
-        # `1a0ace24`" — because the doc-wide arm needs the manifest token and this
-        # document WRAPS prose. Every other line that talks about the block is
-        # scanned with both bare arms. Measured at this head: three lines mention it,
-        # and none of them carries a number the arms fire on, so this is
-        # behaviour-preserving on the current document.
+        # ⛔ AND THE CLASS IS NOT ONE LINE — AND NOT ONE TOKEN. Scoping the bare arms
+        # to `doc_hits[0]` left the form this module documents as "invisible to every
+        # sweep" green ONE LINE BELOW the claim, and the first cut of this loop then
+        # gated on the LITERAL `carve_out:` — which the document carries on ONE line,
+        # the claim's own, so the loop body never executed and the hole stayed open
+        # (`The entry itself sat at `:9987` at head `1a0ace24`.`, with no token, was
+        # GREEN). The population is now "a line that talks about the block", i.e. any
+        # of the block's own names: the token in either spelling, or `entry` / `block`
+        # / `manifest`.
+        #
+        # Measured at this head: all four of those occur on exactly ONE line — the
+        # claim's — so the population is EMPTY on the current document and the
+        # widening cannot change its verdict. It only closes the hole above.
+        _BLOCK_WORDS = re.compile(r"carve[_-]?out|carve out|\b(?:entry|block|manifest)\b")
+        neighbour_findings: list[str] = []
         for other_line in doc_lines:
-            if other_line == doc_hits[0] or "carve_out:" not in other_line:
+            if other_line == doc_hits[0] or not _BLOCK_WORDS.search(other_line):
                 continue
-            stray = [m.group(0) for m in _LINE_CITE.finditer(other_line)]
-            stray += [m.group(0) for m in _BARE_NUM.finditer(other_line)
-                      if m.group(0) not in stray and ENTRY not in m.group(0)]
+            stripped = other_line.replace(ENTRY, "")
+            stray = [m.group(0) for m in _LINE_CITE.finditer(stripped)]
+            stray += [n for n in _bare_number_hits(stripped) if n not in stray]
             if stray:
-                block_failures.append(
-                    f"03-test-design.md attaches a number to a `carve_out:` line "
-                    f"besides the claim: {stray[0]!r} in {other_line.strip()[:90]!r} — "
-                    f"the claim sentence is the document's single statement about "
-                    f"this block, and a number on a NEIGHBOURING line re-creates the "
-                    f"rot just as surely (the entry's position in "
-                    f"`config/ci-surfaces.yml` is moved by every registration "
-                    f"`tools/ci_selection.py::register_tests` splices above it). "
-                    f"Keep the claim in one place and print no number.")
-                break
+                neighbour_findings.append(
+                    f"{stray[0]!r} in {other_line.strip()[:90]!r}")
+        if neighbour_findings:
+            more = (f" (and {len(neighbour_findings) - 1} more line(s))"
+                    if len(neighbour_findings) > 1 else "")
+            block_failures.append(
+                f"03-test-design.md attaches a number to the block away from the "
+                f"claim: {neighbour_findings[0]}{more} — the claim sentence is the "
+                f"document's single statement about this block, and a number on a "
+                f"NEIGHBOURING line re-creates the rot just as surely (the entry's "
+                f"position in `config/ci-surfaces.yml` is moved by every "
+                f"registration `tools/ci_selection.py::register_tests` splices above "
+                f"it). Keep the claim in one place and print no number. ⚠️ RESIDUAL, "
+                f"stated: a number on a line that names neither the block, an entry "
+                f"nor the manifest is not scanned — no mechanical rule can attribute "
+                f"it to this claim.")
         if _LINE_CITE.search(doc_hits[0].replace(ENTRY, "")):
             block_failures.append(
                 "03-test-design.md attaches a LINE NUMBER to "
@@ -5874,6 +5912,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     "`config/ci-surfaces.yml` — 961 tests",
     "`config/ci-surfaces.yml` — 166 min",
     "`config/ci-surfaces.yml`'s `slow_files:` row, re-taken on 2026-11-09",
+    # ⛔ three more measured false-REDs, each a different defect in the COUNT rule: a
+    # `%` inside a `\b` group can never match at end-of-input, a thousands-separated
+    # integer backtracked to a matching PREFIX (`1,320` out of `1,320,023`), and the
+    # unit list named no time unit at all. They are fixtures so the next widening of
+    # `_UNIT` cannot quietly re-open them.
+    "`config/ci-surfaces.yml` — 145 %",
+    "`config/ci-surfaces.yml` — 1,320,023 bytes",
+    "`config/ci-surfaces.yml` — 166 hours",
+    "`config/ci-surfaces.yml` — 12 shards",
 ])
 def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     """A legit reference near the filename is not a line cite — do not red it."""
@@ -5944,6 +5991,11 @@ def test_the_manifest_line_cite_matcher_catches_every_spelling(prose):
     ("row: 166 s", False),
     ("config/ci-surfaces.yml` — 961 tests", False),
     ("the entry's `test_x_11083.py` sibling", False),
+    # ⛔ a lone 19xx/20xx run is a YEAR, not a cite — the separator arms still catch
+    # `:2026`, so refusing it here costs no coverage (stated residual: a line number
+    # of exactly 2026 with no separator is indistinguishable and is not caught).
+    ("the block was reviewed in 2026", False),
+    ("the entry moved in 9987", True),
 ])
 def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(prose, should_match):
     """`_BARE_NUM` catches a bare line number OR head, and no count or decimal.
@@ -5953,7 +6005,7 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     cite one layer up (and D5 keeps it at the pin), and a decimal or a unit-suffixed
     count is neither and must stay green.
     """
-    hit = bool(_BARE_NUM.search(prose))
+    hit = bool(_bare_number_hits(prose))
     assert hit is should_match, (
         f"_BARE_NUM {'missed' if should_match else 'refused'} {prose!r} — the arm "
         f"shares `_NUM`'s vocabulary, so a head, a decimal and a count all behave the "
