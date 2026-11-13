@@ -735,8 +735,11 @@ def _reconcile_or_report(sdk: Any, goal_id: str | None) -> dict:
     claims DOES reconcile the word on its way past (step 4). The repair therefore
     starts from the GOAL: :func:`reconcile_goal_states` sweeps goals and routes each
     stale word through the public, idempotent :func:`reconcile_goal_state_cache` —
-    which a caller can also call directly for one goal, and which never reports a
-    failure by RAISING (a cache failure comes back as a dict).
+    which a caller can also call directly for one goal. That door REPORTS what it
+    can see (an unreadable or absent goal) as a dict, but it wraps only its own
+    ``get_entity``: ``latest_judgement`` and the ``update_entity`` writes after it
+    propagate — which is exactly why every arm here calls it through
+    :func:`_reconcile_or_report` instead of calling it bare.
     Measured before either existed: ``goalState`` stayed ``met`` after the claim was
     deleted, through both the claim sweep and this door.
 
@@ -1177,8 +1180,8 @@ def reconcile_goal_states(
     cleanup), or a retirement written out of band — takes its goal out of every
     later scan. The cached word then names a claim nothing backs, and NO later
     pass revisits the goal: :func:`reconcile_goal_state_cache`'s own docstring
-    records the same shape for the goal-retired arm (*"no later pass able to
-    repair it (the claim is no longer live, so no sweep revisits the goal)"*).
+    records the same shape for the goal-retired arm ("with no CLAIM-side pass
+    revisiting that goal once its LAST live claim is gone").
     Repairing the `alreadyRetired` arm inside the door closes the BUCKET, not
     this: nobody calls the door on a route it never sees. So the enumeration has
     to start from the GOAL — the surface that displays the word — and this is
@@ -1240,14 +1243,16 @@ def reconcile_goal_states(
       the repair route is the door plus the goal's id, or the next
       ``judge_and_record`` pass; widening the sweep to it means enumerating goals
       by kind, which is a separate decision rather than a filter tweak.
-    * **the DOOR-side partials this sweep does not supply** — :func:`invalidate`
-      still returns before its reconcile on three paths (no such judgement, an
-      already-terminal claim, and a retirement refused because a concurrent sweep
-      got there first), so the issue's own route — ``invalidate`` →
-      ``alreadyRetired: True`` → the word still standing — still reproduces through
-      the door. Those arms are #12315's (``alreadyRetired``) and are not duplicated
-      here; this sweep is the graph-wide repair, and a caller that needs the DOOR
-      to be self-healing is waiting on that work, not on this function.
+    * **nothing on the DOOR side, since #12315 landed** — every ``alreadyRetired``
+      arm of :func:`invalidate` now returns WITH its ``cache`` reconcile (absent
+      claim, already-terminal claim, the post-refusal terminal arm, and the
+      second vanish window), so the issue's own route — ``invalidate`` →
+      ``alreadyRetired: True`` → the word still standing — no longer reproduces
+      through the door. The one arm that reconciles nothing is the ``raise`` for a
+      claim that is live and REFUSED, which is a genuine refusal rather than a
+      missed repair. This sweep is the graph-wide repair for everything the door
+      is never called on; it is not a substitute for that door work, and it does
+      not duplicate it.
     * **a node holding a derived word but no ``id``** — the entity surface cannot
       address it, so the sweep cannot repair it. Reachability is narrow (the
       ``:Source`` write surface refuses ``goalState``, so only a raw write and an
