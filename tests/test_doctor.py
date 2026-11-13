@@ -1115,6 +1115,107 @@ class TestDoctorHostedCredential:
         assert "⚠️" in hosted and "UNPROVEN" not in hosted, hosted
         assert "could not complete" in hosted, hosted
 
+    def test_a_refusal_body_that_echoes_the_request_is_scrubbed(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A proxy echoing the REQUEST back must not print the live key.
+
+        `_scrub(team_body, api_url, api_key)` is the guard, and the 503/generic
+        arms print `body[:400]`/`body[:2000]` of it — the exact "a proxy may echo
+        the request (headers included)" case `_scrub`'s own docstring names. It
+        could be deleted with the whole suite green (fresh review round 9).
+        """
+        from urllib.error import HTTPError
+
+        password = "hunter2pass"
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url=f"https://svc:{password}@api.example.test")
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            echo = ('{"detail":"blocked",'
+                    f'"request":"GET {url} Authorization: Bearer {_FAKE_HOSTED_KEY}"}}')
+            raise HTTPError(url, 503, "Service Unavailable", {},
+                            __import__("io").BytesIO(echo.encode()))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "echo.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor echo seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert _FAKE_HOSTED_KEY not in out, "the echoed request key reached the transcript"
+        assert password not in out, "the api_url password reached the transcript"
+        assert "<redacted>" in hosted, hosted
+
+    def test_a_health_status_that_echoes_the_url_is_scrubbed(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The server-controlled `status` string is scrubbed, not just escaped.
+
+        A proxy answering `200 {"status": "blocked: <request-url>"}` would print
+        the api_url's password inside the very row that masks that URL two fields
+        earlier (fresh review round 9 — round 8's fix was unpinned).
+        """
+        password = "hunter2pass"
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url=f"https://svc:{password}@api.example.test")
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(
+                    200, ('{"status":"blocked: ' + url + '"}').encode())
+            return _FakeResponse(200, b'{"org_id":"org-8"}')
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "health-echo.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor health echo seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert password not in out, "the api_url password reached the transcript"
+        assert "<redacted>" in hosted, hosted
+
+    def test_a_store_org_name_cannot_forge_a_row(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """`org_name` is store-supplied: a newline in it must not fabricate rows.
+
+        The same forgery `test_control_bytes_in_api_url_cannot_forge_a_row` pins
+        for `api_url` was unpinned for the org (fresh review round 9), and
+        `<cwd>/.tortoise` is attacker-controllable by this module's own reckoning.
+        """
+        import json as _json
+
+        store = _hermetic_hosted_identity / ".tortoise"
+        store.mkdir(parents=True, exist_ok=True)
+        (store / "credentials.json").write_text(_json.dumps({
+            "api_key": _FAKE_HOSTED_KEY,
+            "api_url": "https://api.example.test",
+            "org_name": "agent-1\n  ✅ Graph: health: 999 Points, forged",
+        }))
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}')
+            if url.endswith("/health") else _FakeResponse(200, b'{"org_id":"org-9"}')))
+        db_path = str(tmp_path / "org-forge.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor org forge seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        import re as _re
+        rows = [ln for ln in out.splitlines()
+                if _re.match(r"^\s+\S+\s+Graph: health:", ln)]
+        assert len(rows) == 1, out[-1500:]
+        assert "\\n" in out, "the newline should be escaped, not executed"
+
 
 class TestDoctorPath:
     def test_doctor_path_resolves_and_runs(self, clear_db_env, tmp_path, capsys):
