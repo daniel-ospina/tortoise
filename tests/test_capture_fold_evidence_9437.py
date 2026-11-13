@@ -1055,6 +1055,38 @@ def test_a_clean_capture_point_reports_no_undeclared_props(sdk, monkeypatch):
     )
 
 
+def test_a_derived_embedding_is_structural_so_a_fold_never_claims_it_dropped():
+    """The drift guard that does NOT need an embedding model to be installed.
+
+    ⚠️ Both `_extract`-based guards above can only see `embedding` on a box where
+    `EmbeddingModel.get()` returns a model. On a keyword-only box (plain
+    `uv sync`) the projection mints no vector, so the prop is absent and the
+    guards are VACUOUS for the whole class — which is exactly how the red this
+    case closes survived: measured #12322, `test (i)` red on every PR at
+    `f33f5e2c32` with `['embedding']`, while the same suite passed **99/99**
+    locally with no model provisioned. A guard that only fires where the model
+    exists re-creates the bug for the next runner, so this case INJECTS the
+    prop and pins the declaration on every box.
+
+    ⚠️ The bucket is pinned too, not just membership: `embedding` must be
+    STRUCTURAL rather than REPORTED. It is a DERIVED vector — the projection
+    excludes it from content identity because a re-encode would otherwise read
+    as an item change — so a differing one is recomputable from the wording the
+    fold keeps, and reporting it would put a residual on every fold.
+    """
+    proj = _FakeProj(_FakeGraph(
+        dup_props={"embedding": [0.125, -0.5, 0.75]},
+        edges=[("aboutObject", "Object", "obj_1", 0.7)], carried=(1, None)))
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
+    assert out["ok"] is True, out
+    assert out["undeclared"] == [], out
+    assert "embedding" in capture_fold._STRUCTURAL_PROPS, (
+        "`embedding` must stay STRUCTURAL, not move to `_REPORTED_FIELDS`: a "
+        "derived vector is recomputable from the content the fold keeps, so "
+        "reporting it as a residual puts noise on every capture receipt"
+    )
+
+
 def test_a_real_undeclared_prop_is_named_on_the_captures_receipt(sdk, monkeypatch):
     """End to end through the capture seam: the warning NAMES the prop."""
     extracted, meta = _extract(sdk, monkeypatch,

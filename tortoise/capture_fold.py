@@ -361,7 +361,30 @@ _STRUCTURAL_PROPS = ("id", "content", "content_hash", "createdAt",
                      # a Point the epistemic engine has touched (`ep_dirty`,
                      # `ep_dirty_at`). Not evidence: the flag says "recompute me",
                      # and its value is derived from the graph, not asserted.
-                     "ep_dirty", "ep_dirty_at")
+                     "ep_dirty", "ep_dirty_at",
+                     # The DENSE VECTOR, and the marker saying it was stored
+                     # verbatim rather than computed. Both are DERIVED from the
+                     # content — the projection's own ground for excluding
+                     # `embedding` from connector content identity is that "it is
+                     # a DERIVED vector, so re-encoding (or an embedding-model
+                     # change) would advance the version with no item change"
+                     # (`projection/entities.py`) — so neither is asserted
+                     # evidence: the canonical keeps ONE wording and its own
+                     # vector matches it, and the duplicate's is recomputable
+                     # from the wording the fold keeps. Carrying it would carry
+                     # nothing new, and REPORTING it would put a residual on
+                     # every fold, which is the noise this vocabulary exists to
+                     # keep off the receipt.
+                     # ⚠️ Measured #12322: with an embedding model provisioned a
+                     # real write door mints `embedding`, and `_DECLARED_PROPS`
+                     # did not name it, so every capture receipt claimed
+                     # "dropped field(s) … could not carry: embedding" over a
+                     # prop the fold can always recompute. The drift guard
+                     # (`test_a_point_the_real_write_door_mints_reports_no_
+                     # undeclared_props`) could not catch it on a keyword-only
+                     # box, where `EmbeddingModel.get()` is None and the prop is
+                     # never minted — hence the injection arm added beside it.
+                     "embedding", "embedding_verbatim")
 
 #: Everything the duplicate read DECLARES it knows: the occurrence address, the
 #: single slots in BOTH spellings (a producer stores `when` or `validFrom`, and
