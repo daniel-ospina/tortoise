@@ -600,6 +600,10 @@ _COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp,
 #: `_comprehension_walrus_targets` cannot drift — but `_shadowed_names` is NOT a reader of it (it
 #: spells its own scope test by hand), and that gap is how round 8 cycle 7 found two asymmetries
 #: between the walks: `ast.Lambda` added by hand HERE, the PEP 572 containing-scope rule absent THERE.
+#: ⚠️ A THIRD asymmetry is named, not closed, in `_walk_own_scope`'s docstring (`#12317`): the walk
+#: yields a nested scope's NODE and skips its DEFAULTS, which PEP 572 binds in the enclosing scope —
+#: so a walrus there can leave a writer `gated`. Disclosed there because closing it widens this
+#: walk's readers, not because it is benign.
 _NEW_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
                     *_COMPREHENSION_NODES)
 
@@ -618,6 +622,17 @@ def _walk_own_scope(root: ast.AST):
     while a PARAMETER of a nested function (`def helper(_set)`) binds only inside `helper` and must
     NOT shadow the writer's module alias — recording it deleted a real clause-builder writer from
     the population (see `_locally_bound` for the measured A/B).
+
+    ⛔ NAMED RESIDUAL, NOT CLOSED HERE (`#12317`): a walrus in a nested `def`/`lambda` DEFAULT binds
+    in the ENCLOSING scope (PEP 572; `symtable` puts it in this writer's locals), so `_shadowed_names`
+    walks those defaults — this walk does not, and it is the reader that feeds `_locally_bound` →
+    `_keep_shadowed_aliases`. Measured at this head: `_enc` bound by `from … import encode_for_row as
+    _enc` then REBOUND in `f = lambda v=(_enc := print): v` leaves the writer **`gated`** (outside
+    `NEEDS_A_DECLARATION`, i.e. HIDDEN) while never reaching the gate, whereas the equivalent plain
+    rebind drops the writer from the census entirely. It is PRE-EXISTING on `main` `f33f5e2c32`
+    (measured identical there), and closing it means walking the DEFAULTS of every nested
+    `def`/`class`/`lambda` — a wider change than this PR's subject, hence the issue rather than a
+    silent third asymmetry. Do not read `_shadowed_names`' default rule as covering this reader.
     """
     stack: list[ast.AST] = [root]
     while stack:
@@ -883,8 +898,10 @@ def _import_aliases(*roots: ast.AST) -> dict[str, str]:
                 # resolved to the SEAM spelling that never runs and the writer measured `gated` —
                 # HIDDEN. ⛔ That is NOT a "regression against `main`", which is what this comment
                 # said and what `#12182`'s rebase review measured FALSE: `origin/main` at `f33f5e2c32`
-                # has no rank rule at all and yields `gated` for this same arm too. The ranked rule
-                # CLOSES a pre-existing hide; it does not restore one.
+                # has the BUILDER-ONLY preference only (the `previous not in WRITE_CLAUSE_BUILDERS and
+                # alias.name in WRITE_CLAUSE_BUILDERS` test that this change deletes) and yields
+                # `gated` for this same arm too. The ranked rule CLOSES a pre-existing
+                # hide; it does not restore one.
                 # ⛔ So the collision is decided by what the CREDIT DOES to the writer, highest wins,
                 # independent of source order: builders (KEEP the writer, `unresolved_write`) >
                 # `UNGATED_CALLS` (`ungated` INSIDE `NEEDS_A_DECLARATION` when the writer also writes,
