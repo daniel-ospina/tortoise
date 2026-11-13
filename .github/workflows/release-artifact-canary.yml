@@ -108,7 +108,7 @@ jobs:
           #   fetches:  3 x `--fetch-timeout` = 3 x 30 = 90 s NOMINAL — the engine and
           #             client reads PLUS the absence-confirmation probe after a failed
           #             install, which is a third index fetch and is bounded by the same
-          #             budget. `urlopen`'s timeout is PER SOCKET OPERATION, not a
+          #             budget. The fetch timeout is PER SOCKET OPERATION, not a
           #             wall-clock budget, so a slow-drip response or redirect hops can
           #             exceed it; that residual is bounded only by this job's
           #             `timeout-minutes`.
