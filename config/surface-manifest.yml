@@ -76,7 +76,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 45cebfc5df363ea6a1e50443af7fc73da9006d82
+cut_at_commit: ca74f2375ef4f365346551f894e127d9d7b0d44e
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -4268,7 +4268,7 @@ rows:
   job: Public SDK method TortoiseSDK.invalidate_point.
   dependency: 'reached by 1 registered tool(s): tortoise_invalidate'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null

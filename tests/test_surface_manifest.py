@@ -4293,6 +4293,58 @@ def test_a_recut_carries_the_committed_observed_usage_forward(tmp_path, monkeypa
         "a re-cut reset a recorded `exemption` — the human recording the guard judges")
 
 
+def test_an_UNREADABLE_corpus_does_not_erase_a_recorded_label(tmp_path, monkeypatch):
+    """A `used_by` label must survive a re-cut on a box that cannot read its corpus.
+
+    #11609 batch 1 cut the manifest on a Linux box where the repo's `skills/`
+    symlink
+    points at a macOS path: `usage_index()`'s `skill-docs` corpus came back EMPTY, so
+    every row re-derived WITHOUT that label and 38 untouched `sdk:` rows silently
+    lost it. Nothing reded — `used_by` is in `NON_DERIVABLE_ROW_KEYS`, so `check`
+    never compares it — and the only symptom was the render no longer matching the
+    committed document.
+
+    The distinction the fix turns on: an empty corpus is UNREADABLE, not evidence of
+    absence. Two arms, so neither can pass alone:
+
+    * a label whose corpus is empty AND recorded on the committed row is CARRIED;
+    * with the corpus present, the label is still DERIVED (a name removed from the
+      skills tree drops out), so this is not a freeze.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    exempt = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    exempt["used_by"] = "tooling, skill-docs, docs"
+    monkeypatch.setattr(sm, "MANIFEST_FILE",
+                        _manifest_at(sm, doc, tmp_path, "unreadable-corpus.yml"))
+    empty_home = tmp_path / "home"
+    empty_home.mkdir()
+    monkeypatch.setenv("HOME", str(empty_home))
+
+    real_usage_index = sm.usage_index
+    empty_skills = dict(real_usage_index())
+    empty_skills["skill-docs"] = ""
+    monkeypatch.setattr(sm, "usage_index", lambda: empty_skills)
+    derived = {r["name"]: r for r in sm.build_doc()["rows"]}
+    assert "skill-docs" in derived[exempt["name"]]["used_by"], (
+        "a re-cut dropped a recorded `skill-docs` label because the corpus was "
+        "unreadable on this box — the exact silent loss #11609 batch 1 measured")
+
+    # ...and it is NOT a freeze: with the corpus readable, a name that is no longer
+    # mentioned anywhere in it drops the label (that is what makes the column a
+    # measurement rather than a copied cell).
+    monkeypatch.setattr(sm, "usage_index", real_usage_index)
+    readable = dict(real_usage_index())
+    for label in readable:
+        readable[label] = ""
+    readable["skill-docs"] = "a skills tree that does not mention this method"
+    monkeypatch.setattr(sm, "usage_index", lambda: readable)
+    derived2 = {r["name"]: r for r in sm.build_doc()["rows"]}
+    assert "skill-docs" not in derived2[exempt["name"]]["used_by"], (
+        "the label survived a READABLE corpus that does not mention the name — the "
+        "carry-forward turned the column into a frozen cell")
+
+
 def test_a_recut_does_not_stamp_a_new_row_as_called_by_agents(tmp_path, monkeypatch):
     """The #10914 defect itself: a NEW row picked up this box's log as if it were usage.
 

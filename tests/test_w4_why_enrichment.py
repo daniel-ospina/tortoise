@@ -568,16 +568,12 @@ def _mcp_recall(sdk, query: str, **kw) -> dict:
         ms.sdk = None
 
 
-def _mcp_analyze(sdk, question: str) -> dict:
-    import tortoise.mcp_server as ms
-    from tortoise.mcp_auth import _transport_mode
-    _token = _transport_mode.set("stdio")
-    ms.sdk = sdk
-    try:
-        return ms.tortoise_analyze(question)
-    finally:
-        _transport_mode.reset(_token)
-        ms.sdk = None
+# ⛔ `_mcp_analyze` is GONE with its door: #11609 batch 1 archived
+# `tortoise_analyze` (no destination in the approved surface). The analyze-side W4
+# enrichment lived INSIDE that handler (`assemble_why_blocks` in
+# `archive/mcp-tools/b1-removed-no-destination/tortoise_analyze.py`), not in
+# `tortoise/analyze.py`, so the analyze surface no longer has a why-layer to pin.
+# The live enriched surfaces are search, MCP `recall_state` and the ask lane.
 
 
 def _ask_lane(sdk, question: str) -> dict:
@@ -585,11 +581,16 @@ def _ask_lane(sdk, question: str) -> dict:
     return run_ask_lane(sdk, question)
 
 
-def test_flag_drift_all_four_surfaces(w4_flag, monkeypatch):
-    """E2E-1 flag-drift: a contested point recalled through ALL FOUR enriched
-    surfaces (tortoise_search / tortoise_analyze / MCP recall_state + the
-    eval-only ask lane, #3849) surfaces the additive keys on every surface — a
-    surface that drops them is flag drift."""
+def test_flag_drift_all_three_live_surfaces(w4_flag, monkeypatch):
+    """E2E-1 flag-drift: a contested point recalled through every LIVE enriched
+    surface (tortoise_search / MCP recall_state + the eval-only ask lane, #3849)
+    surfaces the additive keys on every surface — a surface that drops them is
+    flag drift.
+
+    It was FOUR surfaces until #11609 batch 1 archived `tortoise_analyze`: the
+    analyze arm is removed rather than retargeted, because the W4 enrichment it
+    drove lived inside the archived handler.
+    """
     import tortoise.ask_lane as sdk_mod
     fake = _FakeReader()
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
@@ -620,18 +621,7 @@ def test_flag_drift_all_four_surfaces(w4_flag, monkeypatch):
         for k in ("warnings", "why", "conflicts", "supersession", "dig_deeper"):
             assert k in rec_hit, f"recall_state dropped {k}"
 
-        # 3. tortoise_analyze (MCP) — the additive keys ride the why entries.
-        ana = _mcp_analyze(sdk, "where is the disagreement?")
-        assert ana.get("pattern") == "disagreement"
-        why = ana.get("why") or []
-        entry = next((e for e in why if e.get("point_id") == g["claim"]), None)
-        assert entry is not None, "analyze why must carry the claim's block"
-        for k in ("support_chain", "ep", "conflicts", "supersession", "dig_deeper"):
-            assert k in entry, f"analyze why entry dropped {k}"
-        assert entry["conflicts"]["contested"] is True
-        assert any(p["kind"] == "nand" for p in entry.get("dig_deeper", []))
-
-        # 4. the ask lane (eval-only, #3849) — the why key rides the response;
+        # 3. the ask lane (eval-only, #3849) — the why key rides the response;
         # additivity is symmetric with the flag-off pin (canonical 12 + why
         # only); the reader is called EXACTLY once (zero-LLM — enrichment adds
         # zero reader calls). The ask why entry carries the DISPUTE CONTENT for
@@ -683,8 +673,7 @@ def test_flag_off_mcp_surfaces_byte_identical(monkeypatch):
         for h in rec.get("results", []):
             for k in W4_KEYS:
                 assert k not in h
-        ana = _mcp_analyze(sdk, "where is the disagreement?")
-        assert "why" not in ana
+        # (the analyze arm left with its archived door — #11609 batch 1)
 
         # 4. the eval-only ask lane — with the flag OFF the why key is absent and the
         # response stays the canonical 13-field shape (byte-identical). The
@@ -1305,18 +1294,19 @@ def test_canonical_ep_real_for_no_nand_point(w4_flag):
         sdk.close()
 
 
-def test_surface_glue_fail_open_ask_and_analyze(w4_flag, monkeypatch):
-    """S8 fail-open at the SURFACE GLUE (the branches that own the ask and
-    analyze surfaces' why-layer): a regression that breaks the ask/analyze
-    TURN (rather than degrading the why layer) must fail — each surface's
-    own fail-open branch is exercised with an injected failure.
+def test_surface_glue_fail_open_ask(w4_flag, monkeypatch):
+    """S8 fail-open at the SURFACE GLUE (the branch that owns the ask surface's
+    why-layer): a regression that breaks the ask TURN (rather than degrading the
+    why layer) must fail — the branch is exercised with an injected failure:
+    item_to_why_entry (or the pool enrichment) raising ⇒ the ask response still
+    returns the canonical fields + ``why: []`` (the why key rides the flag-ON
+    response; an empty collection is the honest degraded value, never a broken
+    turn).
 
-      - ask: item_to_why_entry (or the pool enrichment) raising ⇒ the ask
-        response still returns the canonical fields + ``why: []`` (the why
-        key rides the flag-ON response; an empty collection is the honest
-        degraded value, never a broken turn).
-      - analyze: the assembly raising inside the wrapper ⇒ the analyze
-        response is returned intact WITHOUT a ``why`` key."""
+    ⛔ The analyze half is gone with its door (#11609 batch 1 archived
+    `tortoise_analyze`); its assembly-failure branch is frozen in the archive, not
+    reachable here.
+    """
     import tortoise.ask_lane as sdk_mod
     import tortoise.why as why_mod
     sdk = _fresh_sdk()
@@ -1345,42 +1335,6 @@ def test_surface_glue_fail_open_ask_and_analyze(w4_flag, monkeypatch):
         assert isinstance(resp.get("answer"), str) and resp["answer"]
         monkeypatch.setattr(why_mod, "item_to_why_entry", item_to_why_entry)
         _reset_ask_reader_cache_for_tests()
-
-        # analyze glue: force the assembly to raise inside the wrapper
-        # (fired-spy — the analyze response intact assert must not pass
-        # vacuously if the pattern leg returned no raw rows).
-        fired_assembly: list[str] = []
-
-        def _explode_assembly(*args, **kwargs):
-            fired_assembly.append("assembly")
-            raise RuntimeError("forced analyze assembly failure")
-
-        monkeypatch.setattr(why_mod, "assemble_why_blocks", _explode_assembly)
-        ana = _mcp_analyze(sdk, "where is the disagreement?")
-        assert fired_assembly, "the analyze assembly failure must actually fire"
-        assert ana.get("pattern") == "disagreement", \
-            "analyze turn must not break when the why assembly fails"
-        assert "why" not in ana, \
-            "analyze glue failure drops the why key (absent = not computed)"
-    finally:
-        sdk.close()
-
-
-def test_analyze_why_ep_real_for_clean_point(w4_flag):
-    """Analyze-surface regression: the ``why`` entries on the consensus
-    pattern carry a REAL ep (no self-contradiction with the raw row's
-    confidence)."""
-    sdk = _fresh_sdk()
-    try:
-        g = _plant_clean(sdk, "consensus-topic")
-        ana = _mcp_analyze(sdk, "what is the consensus?")
-        assert ana.get("pattern") == "consensus"
-        why = ana.get("why") or []
-        entry = next((e for e in why if e.get("point_id") == g["claim"]), None)
-        assert entry is not None, "consensus why must carry the clean point's block"
-        assert entry["ep"]["has_ep"] is True
-        assert entry["ep"]["confidence_mean"] == pytest.approx(12 / 13, abs=1e-3)
-        assert entry["ep"]["contested"] is False
     finally:
         sdk.close()
 
@@ -1697,8 +1651,12 @@ def test_ask_why_entry_canonical_posterior_mean(w4_flag, monkeypatch):
 
     Discriminating fixture: a CLEAN 2-IMPL/0-NAND point with a 12/1
     posterior reads 1.0 under the structural ratio (2/2) but 12/13 ≈ 0.923
-    under the posterior mean — an agent comparing the same point across the
-    ask vs analyze surfaces must not see contradictory belief numbers."""
+    under the posterior mean — an agent comparing the same point across
+    surfaces must not see contradictory belief numbers.
+
+    ⛔ The analyze half of the cross-surface comparison is gone with its door
+    (#11609 batch 1 archived `tortoise_analyze`). The canonical-mean assertion on
+    the ask lane — the fix's own subject — is unchanged."""
     import tortoise.ask_lane as sdk_mod
     fake = _FakeReader()
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
@@ -1717,12 +1675,5 @@ def test_ask_why_entry_canonical_posterior_mean(w4_flag, monkeypatch):
         assert entry["ep"]["confidence_mean"] == pytest.approx(12 / 13, abs=1e-3), \
             "ask ep must carry the canonical posterior mean, not the edge-ratio (F2)"
         assert entry["ep"]["contested"] is False
-        # Same point through the analyze surface reports the SAME number
-        # (cross-surface consistency is the point of the fix).
-        ana = _mcp_analyze(sdk, "what is the consensus?")
-        why_ana = ana.get("why") or []
-        ana_entry = next((e for e in why_ana if e.get("point_id") == g["claim"]), None)
-        assert ana_entry is not None
-        assert ana_entry["ep"]["confidence_mean"] == pytest.approx(12 / 13, abs=1e-3)
     finally:
         sdk.close()

@@ -3579,12 +3579,13 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # parser that produces `attributed`: a PARTIAL door-kind parse regression removes
     # entries from both sides, so the equality below cannot see it (the pre-#10226 arm
     # carried `>= 31` and this merge lost it). The numeral is HAND-COUNTED on purpose —
-    # a derived floor would inherit exactly the blindness it is here to catch. It is 30
+    # a derived floor would inherit exactly the blindness it is here to catch. It is 29
     # at this head: the table lost its SDK traversal row when that method was retired
-    # (31 -> 30). A table change moves this numeral with the table.
-    assert attributed >= 30, (
+    # (31 -> 30), and #11609 batch 1 archived `tortoise_backfill_v25`, taking row 32's
+    # MCP door with it (30 -> 29). A table change moves this numeral with the table.
+    assert attributed >= 29, (
         f"only {attributed} door attributions were attempted across the "
-        f"customer-callable rows, and this arm cross-checks against NO fewer than 30 "
+        f"customer-callable rows, and this arm cross-checks against NO fewer than 29 "
         f"hand-counted occurrences — a partial `_doors()` regression (one door KIND "
         f"resolving for only some of its rows) subtracts from `attributed` and "
         f"`expected` alike, so this floor is the only thing that reds on it"

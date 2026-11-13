@@ -1431,20 +1431,41 @@ class TestCapabilityModel:
             for v in declared_set_violations(served_registry()))
 
     def test_read_through_non_sdk_binding_is_live(self, monkeypatch):
-        """#4035 review (P1): the op→tool binding is live — an op with no binding
-        fails loudly instead of silently dropping the check.
+        """#4035 review (P1): the op→tool binding is live, in BOTH directions.
 
-        Driven by a probe since #11609 batch 1 emptied the live ledger; deleting the
-        "has no tool binding" arm reds it.
+        The guard refuses `bound_tool is None or bound_tool not in by_name` — an op
+        with no binding AND an op bound to a tool that has vanished from the served
+        set. Both halves exist because a rename drops the check silently otherwise.
+
+        Driven by probes since #11609 batch 1 emptied the live ledger. Deleting
+        EITHER half of the guard's condition leaves one of the two assertions green:
+        measured by the reviewer as a surviving mutant when only the `None` half was
+        covered.
         """
         import tool_surface_capabilities as tsc
         from tool_surface_capabilities import declared_set_violations, served_registry
 
         assert declared_set_violations(served_registry()) == []
+        # (a) an op declared with NO binding at all.
         monkeypatch.setitem(tsc.NON_SDK_READ_OPERATIONS,
                             "probe_unbound_op", "synthetic unbound read (probe)")
         assert any(
             "NON_SDK_READ_OPERATIONS entry 'probe_unbound_op' has no tool binding" in v
+            for v in declared_set_violations(served_registry()))
+        # (b) an op bound to a tool that is not SERVED (a rename): the binding is
+        # present, so only the `not in by_name` half of the condition can catch it.
+        monkeypatch.setitem(tsc.NON_SDK_READ_BINDINGS,
+                            "probe_unbound_op", "tortoise_probe_renamed_away")
+        assert any(
+            "NON_SDK_READ_OPERATIONS entry 'probe_unbound_op' has no tool binding" in v
+            for v in declared_set_violations(served_registry()))
+        # ...and the same for the writer ledger, whose liveness arm is separate.
+        monkeypatch.setitem(tsc.NON_SDK_WRITER_OPERATIONS,
+                            "probe_unbound_write", "synthetic unbound write (probe)")
+        monkeypatch.setitem(tsc.NON_SDK_WRITER_BINDINGS,
+                            "probe_unbound_write", "tortoise_probe_renamed_away")
+        assert any(
+            "NON_SDK_WRITER_OPERATIONS entry 'probe_unbound_write' has no tool binding" in v
             for v in declared_set_violations(served_registry()))
 
     def test_a_non_read_row_never_claims_read_only_in_its_description(self):

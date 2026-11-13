@@ -116,8 +116,9 @@ def _resolve_event_log_path(*, namespace: str | None,
     ``hosted_api`` costs: it builds the whole FastAPI app at module scope
     (~1 s) and, more importantly, its presence in ``sys.modules`` IS the
     runtime deployment discriminator every self-host branch reads
-    (``mcp_server.tortoise_pack_install``, ``operator_alert.alert_store``,
-    ``mcp_server``'s own fast-path invariant). The MCP lane must resolve its
+    (``operator_alert.alert_store``, ``mcp_server``'s own fast-path invariant —
+    and, until #11609 batch 1 archived it, ``mcp_server.tortoise_pack_install``'s
+    HOSTED-only stub). The MCP lane must resolve its
     journal without importing the hosted app; ``hosted_api`` re-exports this
     name for its own lane and the existing callers, so there is still exactly
     ONE derivation (#7951 review P1).

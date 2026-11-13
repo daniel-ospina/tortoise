@@ -1042,11 +1042,15 @@ def _arguments_say_preview(name: str, arguments) -> bool:
     if not isinstance(arguments, dict):
         return False
     if name in _dry_run_tool_names():
-        # ⛔ The DEFAULT is the preview for at least one tool: the served handler
-        # of `tortoise_backfill_v25` is `dry_run: bool = True`, so the no-argument
-        # call (its most common invocation, a read-only schema inspection) writes
-        # nothing — while `arguments.get("dry_run") is True` never fires for it.
-        # Read the DECLARED default instead of assuming "explicit True".
+        # ⛔ The DEFAULT can itself be the preview: the (`#11609` batch-1 ARCHIVED)
+        # handler of `tortoise_backfill_v25` was `dry_run: bool = True`, so the
+        # no-argument call (its most common invocation, a read-only schema
+        # inspection) wrote nothing — while `arguments.get("dry_run") is True`
+        # never fired for it. No LIVE `dry_run` tool defaults to True today; the arm
+        # stays because a restore of that handler hits it again, and it is pinned by
+        # `tests/test_wait_bound_write_ack.py::test_a_tool_whose_DECLARED_default_is_the_preview_is_recognised`
+        # (a probe, for exactly that reason). Read the DECLARED default instead of
+        # assuming "explicit True".
         if _coerces_to_true(arguments.get("dry_run")):
             return True
         if "dry_run" not in arguments and _declared_dry_run_default(name) is True:
@@ -2763,10 +2767,9 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         if failure is not None and failure.startswith("Authentication required"):
             status = "auth_error"
             # The prefix is shared by producers that are NOT the #236 gate:
-            # `tortoise_manage_sources`'s no-team-context refusal and `_safe`'s
-            # unset-transport refusal both open with it. (The original example
-            # here — `tortoise_packs_list`'s HTTP no-tenant refusal — is ARCHIVED
-            # in #11609 batch 1.) Stamping
+            # `_safe`'s unset-transport refusal (`_transport_mode is None`) opens
+            # with it too, and so did `tortoise_packs_list`'s HTTP no-tenant
+            # refusal before #11609 batch 1 archived that tool. Stamping
             # `stdio_auth_gate` on those would make the metric's documented
             # meaning false and fold hosted tenant refusals into it, so the
             # KIND follows the transport that actually refused. The STATUS is

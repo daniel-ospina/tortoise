@@ -722,50 +722,43 @@ async def test_the_auth_gate_is_classified_through_a_wrap_envelope(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_hosted_tenant_refusal_is_not_labelled_the_stdio_gate(monkeypatch):
+async def test_a_non_gate_auth_refusal_is_not_labelled_the_stdio_gate(monkeypatch):
     """The `auth_error` STATUS is right; the #236 KIND is not the producer.
 
-    A tool can refuse on its OWN fail-closed branch when the HTTP transport
-    carries no tenant context — a guard that never touches the stdio gate
-    (``tortoise/mcp_server.py``, the ``_current_org_id is None`` return). Such a
-    refusal IS an ``auth_error`` to the client, but it is NOT the gate, so the
-    kind must follow the TRANSPORT that refused, not the status.
+    The classifier stamps `stdio_auth_gate` only for the stdio gate's own
+    refusal. Other producers open with the same `Authentication required` prefix
+    — `_safe`'s unset-transport refusal (`tortoise/mcp_server.py`,
+    `_transport_mode is None`) is one — so a prefix-only classifier claims them
+    for #236 and the metric no longer isolates the gate. The kind must follow the
+    TRANSPORT that refused.
 
-    ⛔ The docstring's original subject (`tortoise_packs_list`) is ARCHIVED in
-    #11609 batch 1, and it was the only handler whose own text shared the gate's
-    ``Authentication required`` prefix — so the prefix-confusion hazard it pinned
-    has no live instance. The property it tested is still live on
-    `tortoise_manage_sources`, which refuses the same way on the same branch
-    (`No team context (HTTP mode required)`) and must still be labelled by the
-    transport rather than by the gate.
+    ⛔ The original subject (`tortoise_packs_list` with an HTTP tenant context,
+    mid-flight in #11609 batch 1's archive) was the only handler whose OWN text
+    carried the prefix. An earlier retarget of this test to
+    `tortoise_manage_sources` was VACUOUS and a reviewer proved it: that refusal
+    reads `No team context (HTTP mode required)`, so the branch this test is
+    about never ran and forcing `error_kind = "stdio_auth_gate"` inside it left
+    the test green. `_transport_mode = None` enters the branch for real.
     """
     events: list[dict] = []
     monkeypatch.setattr(
         ms, "_emit_mcp_tool_call_telemetry",
         lambda org, name, status, latency, kind, count=None:
         events.append({"status": status, "error_kind": kind}))
-    token = ms._transport_mode.set("http")
-    org = ms._current_org_id.set(None)
+    token = ms._transport_mode.set(None)
     try:
-        result = await ms.mcp.call_tool("tortoise_manage_sources", {"action": "list"})
+        result = await ms.mcp.call_tool("tortoise_search", {"query": "q"})
     finally:
-        ms._current_org_id.reset(org)
         ms._transport_mode.reset(token)
 
-    # The KIND is what must not claim the gate: this refusal never touched it.
-    assert events and events[0]["error_kind"] != "stdio_auth_gate", (
-        "an HTTP tenant-context refusal took the #236 stdio gate's kind, so the "
-        f"metric no longer isolates the gate: {events!r}")
-    assert events[0]["status"] == "exec_error", events
-    # ...and the refusal is still legible to the client. ⛔ `is_error` is NOT
-    # asserted here: `tortoise_manage_sources` is annotated `-> dict`, so it has no
-    # wrap envelope and its `_SafeError` payload is a legal dict — FastMCP returns
-    # it as a normal result. The #8482 repair (a dict payload that VIOLATES a wrap
-    # envelope becomes a legible error) is pinned by
-    # `test_the_auth_gate_is_classified_through_a_wrap_envelope` above, whose
-    # subject (`tortoise_search`) is array-annotated and still live.
-    assert "No team context" in _wire_payload(result)["text"], (
-        "the tenant-context refusal must stay legible to the client")
+    assert events and events[0]["status"] == "auth_error", events
+    assert events[0]["error_kind"] is None, (
+        "a non-gate `Authentication required` refusal took the #236 stdio "
+        f"gate's kind: {events[0]['error_kind']!r}")
+    # ...and the refusal is still legible to the client.
+    assert result.is_error is True
+    assert result.structured_content is None
+    assert "Authentication required" in _wire_payload(result)["text"]
 
 
 # ── The two review findings that pin cost and readability ──────────────────

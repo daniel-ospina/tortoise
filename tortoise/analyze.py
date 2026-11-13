@@ -1,6 +1,8 @@
-"""tortoise_analyze — template-based NL→Cypher graph analysis.
+"""Template-based NL→Cypher graph analysis (the engine under `analyze`).
 
-Single MCP tool: tortoise_analyze(question) → natural language answer.
+⛔ The MCP tool that fronted this — `tortoise_analyze` — was ARCHIVED in #11609
+batch 1 (no destination in the approved surface). The engine is still live for
+SDK/CLI callers; only the MCP door is gone.
 Template Cypher + LLM for intent classification and result synthesis.
 No LLM-Cypher generation (rejected: 61% accuracy, 40% silent errors).
 """
@@ -600,7 +602,8 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
     anchors, direction/rel-filter constrained). For explicit k the operator
     cap (op_cap, default 200) stays a mid-BFS safety bound; for None the cap
     is lifted (genuine full closure) — internal callers only (the
-    user-facing tortoise_analyze HTTP tool keeps an explicit k).
+    user-facing analyze door kept an explicit k; its MCP form was archived in
+    #11609 batch 1).
 
     op_cap (#1241, epic 903-C3): truncation bound for explicit-k runs. The
     stale-first scheduler passes its per-pass operator budget through so an

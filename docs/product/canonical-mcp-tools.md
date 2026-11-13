@@ -258,8 +258,9 @@ carry two recorded decisions **in this document**: the 2026-10-17 amendment (ret
 replacement"*) and the 2026-10-25 one (*"the absorbed names stay retired-forward entries"*).
 **Removing them is a separate decision** and would need its own argument naming #3540 and #9660; it
 is not done here. The end state of the epic is still **27 advertised tools**, but that is reached by
-the full **72 → 27** consolidation (was 76 before this container, 81 before #4282 Phase 3.2), **not** by this amendment — these two answers remove 0 tools and 0
-methods on their own.
+the full consolidation (**68 → 27** after #11609 batch 1's archive of four no-destination tools;
+72 before it, 76 before this container, 81 before #4282 Phase 3.2), **not** by this amendment —
+these two answers remove 0 tools and 0 methods on their own.
 
 > **OVERRIDES:** the plan item `1.4` (`#3883`) requirement that *nothing is removed from the MCP
 > surface until a caller of a retired tool name gets a warning naming its replacement* — for the
