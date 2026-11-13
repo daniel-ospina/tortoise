@@ -1052,19 +1052,29 @@ def latest_readings(
     # applied AFTER that ordering, so no bound can decide WHICH readings the
     # judgement sees.
     #
-    # ONE ROW PER EVENT, so `id(e)` alone is a sufficient cursor. MEASURED on a
-    # lane running core `graph ver 42006` (v4): an event with TWO `aboutObject`
-    # edges to the same indicator gives `RETURN count(r)` = 2 but
-    # `RETURN id(e), e.id`, `count(e)` and `count(*)` all = **1** — the pattern is
-    # scoped by node PAIR, not by relationship — which the doubled-edge test
-    # pins. Named with its core because `hosted_backup.py:363-393` records that
-    # the v4 and v6 cores DISAGREE about `id()` semantics; if a v6 core ever
-    # emitted a row per edge, `dwell` could be satisfied by ONE measurement
-    # repeated. The cursor itself is core-independent: distinct events have
-    # distinct `id(e)`, so a duplicate pair is adjacent and at most a DUPLICATE is
-    # dropped, never a distinct reading. This is also why no Python
-    # de-duplication is layered on top — keyed on `reading_id` it could DROP a
-    # distinct reading that legitimately shares an `e.id`.
+    # ONE ROW PER EVENT **FOR THIS PROJECTION**, so `id(e)` alone is a sufficient
+    # cursor. MEASURED on a lane running core `graph ver 42006` (v4), with TWO
+    # `aboutObject` edges from one event to the same indicator: `RETURN id(e),
+    # e.id` = **1 row**, while `RETURN count(*)` on the BOUND spelling
+    # `-[r:aboutObject]->` = 2 and `count(r)` = 2. So the engine is NOT scoping
+    # the pattern by node pair — the two path rows collapse because the projected
+    # tuple is IDENTICAL (they are the same event twice), and a projection that
+    # added an edge-derived column would return both (measured: `RETURN id(e),
+    # e.id, id(r)` → 2 rows). What makes the cursor safe is therefore narrower and
+    # checkable: distinct events have distinct `id(e)`, and this projection
+    # carries no edge-derived column, so a doubled edge cannot split a reading
+    # across a page boundary nor duplicate one. The doubled-edge test pins the
+    # OUTCOME (one reading per event, none lost).
+    #
+    # ⛔ KEEP THE PROJECTION EDGE-FREE. If a later change returns `id(r)` or any
+    # other relationship property, duplicate edges become duplicate ROWS — and
+    # then a `dwell` of N can be satisfied by ONE measurement repeated, which is
+    # the hazard `hosted_backup.py:363-393` already records for `id()` semantics
+    # across the v4/v6 cores.
+    #
+    # No Python de-duplication is layered on top on purpose: keyed on
+    # `reading_id` it could DROP a distinct reading that legitimately shares an
+    # `e.id`.
     cypher = (
         f"{where} AND id(e) >= $cursor "
         "RETURN id(e), e.id, e.value, e.unit, e.startedAt, e.createdAt "

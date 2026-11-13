@@ -339,17 +339,22 @@ def test_a_doubled_about_object_edge_yields_one_reading_not_two(sdk, monkeypatch
     — and must not lose one either.
 
     MEASURED (this is the fact the cursor's comment rests on): with two
-    `aboutObject` edges from one event to one indicator, `RETURN count(r)` is 2
-    but `RETURN id(e), e.id` is **1 row** — the pattern is scoped by node PAIR,
-    not by relationship. That is why a single-column `id(e)` cursor is sufficient
-    and why no Python de-duplication is layered on top (one keyed on `reading_id`
-    could DROP a distinct reading that legitimately shares an `e.id`).
+    `aboutObject` edges from one event to one indicator, `RETURN id(e), e.id` is
+    **1 row**, while on the BOUND spelling `-[r:aboutObject]->` both
+    `RETURN count(*)` and `RETURN count(r)` are **2**. So the engine does NOT
+    scope the pattern by node pair — the two path rows collapse because the
+    PROJECTED tuple is identical (the same event twice), and projecting an
+    edge-derived column brings both back (`RETURN id(e), e.id, id(r)` → 2 rows).
+    The cursor is sufficient for the narrower, checkable reason: distinct events
+    have distinct `id(e)`, and this projection carries no edge-derived column. No
+    Python de-duplication is layered on top because one keyed on `reading_id`
+    could DROP a distinct reading that legitimately shares an `e.id`.
 
     This is a PROPERTY pin, not a mutant-killer: it stays green under either
-    cursor shape because the engine already returns one row per event. It would
-    red if the query were ever rewritten to traverse the RELATIONSHIP
-    (`MATCH ()-[r:aboutObject]->()`, which returns a row per edge) or if a
-    de-duplication step were added with the wrong key.
+    cursor shape because this projection already yields one row per event. It
+    would red if the SELECTION ever projected an edge property (`id(r)`), which
+    would double the rows and let a `dwell` of N be satisfied by one measurement
+    repeated, or if a de-duplication step were added with the wrong key.
     """
     import tortoise.goal_judgement as gj
 
