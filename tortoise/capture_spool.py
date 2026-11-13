@@ -197,6 +197,27 @@ DISCARD_ENTRY_FAILED = "entry_failed"
 #: The spool's own `entries/` listing cannot be read — every capture is invisible.
 DISCARD_SPOOL_UNREADABLE = "spool_unreadable"
 DISCARD_CORRUPT = "corrupt_entry"
+#: The META could not be READ: EACCES/EACCES-adjacent I/O refusals (``EIO``,
+#: ``EISDIR``, ``ESTALE``) or an ``ENOENT`` that raced another drain's unlink.
+#: We never saw the bytes, so we know nothing about whether they are valid
+#: (#11802).
+#:
+#: Distinct from ``DISCARD_CORRUPT``, which now means only "the bytes were read
+#: and are not a usable meta". The two used to share one ``except OSError`` /
+#: ``except JSONDecodeError`` arm, and the shared arm reported a READ refusal as
+#: "meta is not valid JSON" — a statement about bytes the process never opened —
+#: then quarantined the turn log and unlinked the meta.
+#:
+#: This arm RECORDS and KEEPS (``retained: True``): the meta and its turn log
+#: stay where they are and the next drain retries. A read refusal is a property
+#: of WHO IS ASKING, not of the entry — the same file is often perfectly
+#: readable a second later or by another uid — so destroying it turns a
+#: permission mismatch into permanent loss. The meta is also the only copy of
+#: the ``session_id``/``client_captured_at`` that anchor the ``AgentSession``
+#: Event (``docs/ONTOLOGY.md`` §5, content-addressed ``eventId``) and of the
+#: retry state, so removing it makes the entry unfilable by any verb
+#: (``_quarantine_log`` says so itself).
+DISCARD_META_UNREADABLE = "meta_unreadable"
 #: A filesystem error while writing the spool — recorded, never silent.
 DISCARD_WRITE_FAILED = "spool_write_failed"
 #: A PERMANENT HTTP refusal (4xx). The entry is RECORDED and KEPT (#7708): the
@@ -239,7 +260,12 @@ RETAINED_DISCARD_REASONS = frozenset(
      # An over-bound entry is now RECORDED + KEPT (terminal) instead of unlinked,
      # so it is not a loss either — the same instrument rule: the ledger must not
      # report a destroyed capture when the turn log is still on disk.
-     DISCARD_ENTRY_TOO_LARGE})
+     DISCARD_ENTRY_TOO_LARGE,
+     # A meta we could not READ is recorded and KEPT (#11802): nothing was read,
+     # concluded, quarantined or unlinked, so the entry survives to retry. The
+     # arm also writes `retained: True` on the record — this membership is the
+     # reading for a record that carries no flag (an older leg's line).
+     DISCARD_META_UNREADABLE})
 
 
 def is_lost_discard(record: dict) -> bool:
@@ -1322,7 +1348,21 @@ def reset_terminal_entries(root: Path) -> int:
 
 
 def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], list[dict]]:
-    """All spool metas; malformed ones become ``corrupt_entry`` discards.
+    """All spool metas, with two DISTINCT non-meta outcomes (#11802).
+
+    - ``meta_unreadable`` — the meta could not be READ (``EACCES``/``EIO``/
+      ``EISDIR``, or an ``ENOENT`` that raced another drain's unlink). Nothing is
+      concluded about the entry and NOTHING IS DESTROYED: the record is
+      ``retained: True``, the meta and its turn log stay exactly where they are,
+      and the next drain retries.
+    - ``corrupt_entry`` — the bytes WERE read and are not a usable meta (invalid
+      JSON, valid JSON with no usable ``session_id``, or bytes that are not
+      UTF-8). This keeps the #7708 repair path: record it, quarantine the turn
+      log, remove the meta.
+
+    Sharing one repair between them reported a permission refusal as data
+    corruption and destroyed sessions the draining process was never allowed to
+    read. Pinned in BOTH directions by ``tests/test_capture_spool.py``.
 
     A meta that is valid JSON but has no usable ``session_id`` is ALSO corrupt —
     otherwise the drain crashes on `meta["session_id"]` instead of recording it.
@@ -1366,13 +1406,44 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
         return metas, discards
     for name in names:
         path = d / name
-        meta = None
+        # ⛔ READING and PARSING are two different diagnoses and must not share
+        # one handler (#11802). A read refusal proves we never saw the bytes; a
+        # parse failure proves we saw them and they are unusable. Collapsing
+        # them made this function report "meta is not valid JSON" about files
+        # the process never opened, and — worse — act on it destructively.
         try:
-            meta = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            # `UnicodeDecodeError` is a `ValueError`: a non-UTF-8 meta is a
-            # CORRUPT entry (recorded below), not a crash.
-            meta = None
+            raw: str | None = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            # Every errno in this arm is the same class: the entry was not read,
+            # so nothing may be concluded about it. ENOENT here is a race with
+            # another drain's unlink — wrong MOMENT, not wrong bytes.
+            if not repair:
+                continue
+            stem = path.name[: -len(".meta.json")]
+            discards.append(record_discard(root, {
+                "session_id": f"unreadable:{stem}",
+                "reason": DISCARD_META_UNREADABLE,
+                # RETAINED: the meta AND the turn log stay on disk, unquarantined
+                # and un-unlinked, so the next drain retries. Never a loss — a
+                # read refusal is reversible (fix the permission, or run as the
+                # uid that owns the file), and an `.orphan` is unreachable to
+                # every surface and reaped FIRST at the byte ceiling, so
+                # quarantining here would be a delayed delete, not a preservation.
+                "retained": True,
+                "detail": (f"cannot read {path}: {exc} — left in place and retryable;"
+                           " the bytes were never seen, so this is NOT a corrupt entry"),
+            }))
+            continue
+        except UnicodeDecodeError:
+            # The bytes were read in full; they are just not UTF-8. That is a
+            # property of the CONTENT, so it takes the corrupt path below.
+            raw = None
+        meta = None
+        if raw is not None:
+            try:
+                meta = json.loads(raw)
+            except json.JSONDecodeError:
+                meta = None
         if not isinstance(meta, dict) or not isinstance(meta.get("session_id"), str) \
                 or not meta["session_id"]:
             if not repair:

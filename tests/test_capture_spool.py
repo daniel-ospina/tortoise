@@ -2214,6 +2214,123 @@ def test_a_meta_without_a_usable_session_id_is_corrupt_not_a_crash(tmp_path):
     assert discards[0]["reason"] == "corrupt_entry"
 
 
+# ── #11802: an entry we could not READ is not an entry we may DESTROY ────────
+# Both directions are pinned on purpose: a change that stops destroying
+# unreadable entries but also stops quarantining genuinely corrupt ones has not
+# fixed this — it has moved the loss.
+
+
+def test_an_unreadable_meta_is_kept_and_retried_never_quarantined(tmp_path):
+    """A meta the process is not allowed to read must survive, be RECORDED, and
+    be retried — never be treated as corruption.
+
+    The measured defect (#11802): a root-owned spool entry met by a user-owned
+    drain raised `PermissionError` at `open`. One `except OSError` collapsed
+    that with `JSONDecodeError`, recorded "meta is not valid JSON" about bytes
+    the process never opened, quarantined the transcript and unlinked the meta —
+    so the entry could never be filed by any verb, again. 1,356 of 3,384 lost
+    sessions were this class.
+
+    MUTATION THAT REDS THIS: put the read back inside the parsing `try`
+    (`json.loads(path.read_text(...))`) so an OSError falls into the corrupt arm;
+    or drop `"retained": True`; or move `continue` below the quarantine/unlink.
+    """
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    meta_path = entries / "locked.meta.json"
+    log_path = entries / "locked.turns.jsonl"
+    body = json.dumps({"version": 1, "session_id": "sess-locked", "harness": "pi"})
+    meta_path.write_text(body, encoding="utf-8")
+    log_path.write_text('{"role":"user","content":"keep me"}\n', encoding="utf-8")
+    meta_path.chmod(0o000)
+    try:
+        from tortoise.capture_spool import is_lost_discard, list_spool_metas
+        metas, discards = list_spool_metas(tmp_path)
+        assert metas == [], "an unreadable meta is not a readable meta"
+        assert len(discards) == 1, "a read refusal must still be RECORDED, never silent"
+        assert discards[0]["reason"] == "meta_unreadable"
+        assert discards[0]["retained"] is True, \
+            "retained: the entry survives, so this is not a lost capture"
+        assert "cannot read" in discards[0]["detail"], "the detail must name the READ refusal"
+        assert "not valid JSON" not in discards[0]["detail"], \
+            "the lie #11802 is about: json.loads was never reached"
+        assert is_lost_discard(discards[0]) is False, \
+            "the ledger must not report a destroyed capture when nothing was destroyed"
+
+        # NOTHING was destroyed.
+        assert meta_path.exists(), "the meta must NOT be unlinked"
+        assert log_path.exists(), "the live turn log must NOT be quarantined"
+        assert not (entries / "locked.turns.jsonl.orphan").exists()
+    finally:
+        # Guard the teardown: under a regression that UNLINKS the meta there is
+        # nothing to restore, and a teardown exception would hide which
+        # assertion actually failed.
+        if meta_path.exists():
+            meta_path.chmod(0o600)
+
+    assert meta_path.read_text(encoding="utf-8") == body, "and must be byte-identical"
+    assert log_path.read_text(encoding="utf-8") == '{"role":"user","content":"keep me"}\n'
+
+    # RETRYABLE: the very next drain, now able to read, sees it as pending again.
+    from tortoise.capture_spool import list_spool_metas
+    metas, discards = list_spool_metas(tmp_path)
+    assert [m["session_id"] for m in metas] == ["sess-locked"], \
+        "a read refusal is a delay, not a loss"
+    assert discards == []
+
+
+def test_a_meta_that_cannot_be_opened_is_kept_regardless_of_errno(tmp_path):
+    """uid-independent companion to the EACCES row: the arm keys on "the read
+    threw", not on a hard-coded permission errno. A root-owned drain never sees
+    EACCES at all — which is exactly how the original defect stayed invisible."""
+    entries = tmp_path / "entries"
+    (entries / "adir.meta.json").mkdir(parents=True)
+    from tortoise.capture_spool import list_spool_metas
+    metas, discards = list_spool_metas(tmp_path)
+    assert metas == []
+    assert len(discards) == 1
+    assert discards[0]["reason"] == "meta_unreadable"
+    assert discards[0]["retained"] is True
+    assert (entries / "adir.meta.json").exists(), "a read failure must never remove the entry"
+
+
+def test_a_corrupt_meta_still_quarantines_after_the_read_parse_split(tmp_path):
+    """The other direction. A fix that made everything "retryable" would leave a
+    genuinely corrupt meta wedging the drain on every pass forever."""
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    (entries / "bad.meta.json").write_text("{not json", encoding="utf-8")
+    (entries / "bad.turns.jsonl").write_text("{}\n", encoding="utf-8")
+    from tortoise.capture_spool import is_lost_discard, list_spool_metas
+    metas, discards = list_spool_metas(tmp_path)
+    assert metas == []
+    assert len(discards) == 1
+    assert discards[0]["reason"] == "corrupt_entry", \
+        "bytes that were READ and rejected keep the corrupt classification"
+    assert "not valid JSON" in discards[0]["detail"], \
+        "here the claim is true: the bytes really were read and really did not parse"
+    assert "retained" not in discards[0], "corrupt entries are still a loss"
+    assert is_lost_discard(discards[0]) is True
+    assert not (entries / "bad.meta.json").exists()
+    assert not (entries / "bad.turns.jsonl").exists()
+    assert (entries / "bad.turns.jsonl.orphan").read_text(encoding="utf-8") == "{}\n", \
+        "the intact transcript is still QUARANTINED, never deleted"
+
+
+def test_a_non_utf8_meta_is_corrupt_not_unreadable(tmp_path):
+    """Non-UTF-8 bytes were READ IN FULL — they are a property of the CONTENT,
+    so they keep the corrupt path. Only a refusal to hand over the bytes is
+    `meta_unreadable` (#11802)."""
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    (entries / "latin.meta.json").write_bytes(b'{"session_id":"caf\xe9"}')
+    from tortoise.capture_spool import list_spool_metas
+    metas, discards = list_spool_metas(tmp_path)
+    assert metas == []
+    assert discards[0]["reason"] == "corrupt_entry"
+    assert not (entries / "latin.meta.json").exists()
+
+
 def test_a_spool_directory_that_cannot_be_created_is_discarded_with_a_reason(tmp_path):
     """The spool path's parent is a regular FILE, so `mkdir` raises ENOTDIR.
 

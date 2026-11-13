@@ -1047,6 +1047,26 @@ export const DISCARD_TRANSCRIPT_EMPTY = "transcript_empty";
  *  read/decode failure must not delete the only copy of a conversation. */
 export const DISCARD_TRANSCRIPT_TORN = "transcript_torn";
 export const DISCARD_CORRUPT = "corrupt_entry";
+/** The meta could not be READ (EACCES, EIO, EISDIR, or an ENOENT raced between
+ *  `readdir` and `open`) — we never saw its bytes, so we know nothing about
+ *  whether they are valid (#11802).
+ *
+ *  Distinct from {@link DISCARD_CORRUPT}, which now means only "the bytes were
+ *  read and are not a usable meta". The two used to share one `catch`, and the
+ *  shared arm reported a READ refusal as "meta is not valid JSON" — a
+ *  statement about bytes the process never opened — then quarantined the turn
+ *  log and unlinked the meta.
+ *
+ *  This arm RECORDS and KEEPS: `retained: true`, the meta and the turn log
+ *  left exactly where they are, so the next drain retries. A read refusal is a
+ *  property of WHO IS ASKING, not of the entry — the same file is often
+ *  perfectly readable a second later, or by another uid — so destroying it
+ *  turns a permission mismatch into permanent loss. The meta is also the only
+ *  copy of the `session_id` and `client_captured_at` that anchor the
+ *  `AgentSession` Event (`docs/ONTOLOGY.md` §5, content-addressed `eventId`),
+ *  and of the retry state (`capture_key`/`attempts`/`filed_key`), so removing
+ *  it makes the entry unfilable by ANY verb. */
+export const DISCARD_META_UNREADABLE = "meta_unreadable";
 /** A filesystem error while writing the spool — recorded, never silent. */
 export const DISCARD_WRITE_FAILED = "spool_write_failed";
 /** The spool's own `entries/` listing cannot be read — every capture is invisible. */
@@ -1408,7 +1428,25 @@ export function readSpoolTurns(dir: string, sessionId: string): Turn[] {
   return turns;
 }
 
-/** All spool metas (unreadable metas are surfaced as `corrupt_entry` discards). */
+/** All spool metas.
+ *
+ *  Two distinct non-meta outcomes, and they are NOT the same event (#11802):
+ *
+ *  - `meta_unreadable` — the meta could not be READ (EACCES/EIO/EISDIR, or an
+ *    ENOENT that raced another drain's unlink). Nothing is concluded about the
+ *    entry, and NOTHING IS DESTROYED: the record is `retained: true`, the meta
+ *    and its turn log stay exactly where they are, and the next drain retries.
+ *  - `corrupt_entry` — the bytes WERE read and are not a usable meta (invalid
+ *    JSON, or valid JSON with no usable `session_id`). This keeps the #7708
+ *    repair path: record it, quarantine the turn log, remove the meta.
+ *
+ *  Sharing one repair between them reported a permission refusal as data
+ *  corruption and destroyed 1,356 sessions the draining process was never
+ *  allowed to read (#11802). Pinned by
+ *  `tests/test_capture_spool.py` (Python leg) and `tortoise-capture.test.ts`
+ *  (this leg), in BOTH directions.
+ *
+ *  Mirrors `capture_spool.list_spool_metas`. */
 export function listSpoolEntries(
   dir: string,
   opts: { repair?: boolean } = {},
@@ -1449,10 +1487,46 @@ export function listSpoolEntries(
   for (const name of names) {
     if (!name.endsWith(".meta.json")) continue;
     const path = join(root, name);
+    // ⛔ READING and PARSING are two different diagnoses and must not share one
+    // `catch` (#11802). A read refusal proves we never saw the bytes; a parse
+    // failure proves we saw them and they are unusable. Collapsing them made
+    // this function report "meta is not valid JSON" about files the process
+    // never opened, and — worse — act on that conclusion destructively.
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch (err) {
+      // ENOENT here is a race with another drain's unlink, not a corruption —
+      // wrong MOMENT, not wrong bytes. Every errno in this arm is the same
+      // class: the entry was not read, so nothing may be concluded about it.
+      if (!repair) continue;
+      const stem = name.replace(/\.meta\.json$/, "");
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      discards.push(
+        recordDiscard(dir, {
+          session_id: `unreadable:${stem}`,
+          reason: DISCARD_META_UNREADABLE,
+          // RETAINED: the meta AND the turn log stay on disk, unquarantined and
+          // un-unlinked, so the next drain retries. Never a loss — a read
+          // refusal is reversible (fix the permission / run as the right uid),
+          // and an orphaned transcript is unreachable to every surface and is
+          // reaped FIRST at the byte ceiling, so quarantining here would be a
+          // delayed delete rather than a preservation.
+          retained: true,
+          detail:
+            `cannot read ${path}: ${err instanceof Error ? err.message : String(err)}` +
+            (code ? ` [${code}]` : "") +
+            " — left in place and retryable; the bytes were never seen, so this is" +
+            " NOT a corrupt entry",
+        }),
+      );
+      continue;
+    }
     let meta: SpoolMeta | undefined;
     try {
-      meta = JSON.parse(readFileSync(path, "utf8")) as SpoolMeta;
+      meta = JSON.parse(raw) as SpoolMeta;
     } catch {
+      // Now this really IS a parse failure: the bytes were read and rejected.
       meta = undefined;
     }
     if (!meta || typeof meta.session_id !== "string" || !meta.session_id) {
