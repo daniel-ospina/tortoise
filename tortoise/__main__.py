@@ -13350,16 +13350,38 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             # — `read()` then `len()` bounds the terminal, not the process).
             try:
                 raw_health, _cut = _doctor_read_capped(resp, _DOCTOR_BODY_CAP, deadline)
-                if _cut:
-                    health_read_error = (
-                        f"the body was CUT at the {_fmt_bound(deadline - started)}s"
-                        " deadline before it completed")
-                elif isinstance(raw_health, bytes) and raw_health:
-                    parsed_health = _json.loads(raw_health.decode("utf-8", "replace"))
+                # ⛔ PARSE FIRST, CUT NOTE SECOND — and a decode failure is LOCAL
+                # (fresh review of the delta). Two things were wrong with the
+                # earlier shape, and both dropped information the probe had
+                # actually READ:
+                #   * a CUT body was recorded and then STILL parsed, whose
+                #     `JSONDecodeError` overwrote the CUT note (the row said
+                #     "could not be read (Unterminated string …)" while the code
+                #     claimed the cut was reported); and
+                #   * skipping the parse for a CUT body is also wrong, because
+                #     `_doctor_read_capped` flags `None` (chunked — the common
+                #     proxy/gzip shape, and `/health`'s slow cold start) as cut
+                #     even when the WHOLE body arrived in the one read that
+                #     outlived the bound. Suppressing the parse there discarded a
+                #     `degraded` verdict — the reachable-but-unhealthy signal
+                #     round 5 added this note for.
+                # So the parse gets its OWN guard (a fragment is not a verdict,
+                # and can never replace the cut note), and the note is phrased
+                # for what actually happened.
+                if isinstance(raw_health, bytes) and raw_health:
+                    try:
+                        parsed_health = _json.loads(
+                            raw_health.decode("utf-8", "replace"))
+                    except (ValueError, TypeError, RecursionError):
+                        parsed_health = None
                     if isinstance(parsed_health, dict):
                         candidate_status = parsed_health.get("status")
                         if isinstance(candidate_status, str) and candidate_status.strip():
                             health_status = candidate_status
+                if _cut:
+                    health_read_error = (
+                        f"the body was CUT at the {_fmt_bound(deadline - started)}s"
+                        " deadline before it completed")
             except (OSError, ValueError, TypeError, RecursionError,
                     http.client.HTTPException) as read_exc:
                 # ⛔ "the body could not be READ" is NOT "the body carried no
@@ -13468,10 +13490,24 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     if health_read_error:
         # Same rule as the status string: server/transport bytes go through
         # `_scrub` (a URL-embedded password) and `_printable` (a forged row).
-        _health_notes.append(
-            "`/health`'s body could not be read "
-            f"({_printable(_scrub(health_read_error, api_url, api_key))}) — the "
-            "service's own verdict is UNREAD, not 'healthy'")
+        #
+        # ⛔ TWO WORDINGS, because the two cases are different findings (fresh
+        # review of the delta). A body that could not be read leaves no verdict —
+        # "UNREAD, not healthy" is the honest claim and it must stay, or a
+        # stalled-but-200 `/health` reads green again (round 13). But when the
+        # status WAS read (a chunked body that completed inside the one read that
+        # outlived the bound), calling it UNREAD contradicts the verdict the same
+        # row prints — so the note says the read ended after the body completed.
+        if health_status is not None:
+            _health_notes.append(
+                "`/health`'s read ended at the probe deadline AFTER the body had "
+                f"completed ({_printable(_scrub(health_read_error, api_url, api_key))}) "
+                "— the service's own verdict above is read, not assumed")
+        else:
+            _health_notes.append(
+                "`/health`'s body could not be read "
+                f"({_printable(_scrub(health_read_error, api_url, api_key))}) — the "
+                "service's own verdict is UNREAD, not 'healthy'")
     _health_note = (" — " + "; ".join(_health_notes)) if _health_notes else ""
 
     def _combine(icon: str, detail: str) -> tuple[str, str, str]:

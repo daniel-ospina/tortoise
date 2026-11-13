@@ -2271,6 +2271,59 @@ class TestDoctorHostedCredential:
         assert "degraded" in hosted, hosted
         assert "/v1/team accepted" in hosted, hosted
 
+    def test_a_chunked_body_that_completed_is_read_not_reported_unread(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A CUT FLAG is not proof the verdict was lost — parse it anyway.
+
+        `_doctor_read_capped` flags `length is None` (CHUNKED — the common
+        proxy/gzip shape, and `/health`'s slow cold start) as cut even when the
+        WHOLE body arrived in the one read that outlived the bound. Suppressing
+        the parse for a cut body therefore discarded a `degraded` verdict the
+        probe had actually read, and printed "the service's own verdict is
+        UNREAD" over it. The parse now has its own guard (a fragment is not a
+        verdict), so the status survives and the note says what happened (fresh
+        review of the delta).
+        """
+        import time as _time
+
+        from tortoise import __main__ as _m
+
+        class _ChunkedComplete(_FakeResponse):
+            """No declared length (chunked) and the whole body arrives late."""
+
+            @property
+            def length(self):
+                return None
+
+            def read1(self, n: int = -1):
+                _time.sleep(0.30)  # past the 0.25 s floor
+                return self._buf.read(n)
+
+            def read(self, n: int = -1):
+                return self.read1(n)
+
+        monkeypatch.setattr(_m, "_DOCTOR_HEALTH_TIMEOUT_S", 0.001)  # → 0.25 floor
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _ChunkedComplete(200, b'{"status":"degraded"}') if url.endswith("/health")
+            else _FakeResponse(200, b'{"org_id":"org-k"}')))
+        db_path = str(tmp_path / "chunked-complete.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor chunked complete seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        # The verdict the probe actually READ is reported…
+        assert "degraded" in hosted, hosted
+        # …and the row does not claim it was never read.
+        assert "UNREAD" not in hosted, hosted
+        assert "AFTER the body had completed" in hosted, hosted
+        # Still a warning, never a pass (round 5's rule).
+        assert "⚠️" in hosted and "✅" not in hosted, hosted
+
     def test_an_oat_token_in_the_env_with_an_explicit_url_is_not_a_broken_key(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
         """The `oat_` 401 must not read as a revoked key — on EVERY route to it.
