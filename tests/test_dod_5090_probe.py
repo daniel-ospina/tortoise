@@ -8638,11 +8638,18 @@ def _duplicate_constant_key_sites(
     so a fully-literal `{(1, 2): …}` is compared too (390 tuple-literal keys under
     these roots, 308 of them fully literal).
 
-    ⚠️ Still outside this population, stated so it is not mistaken for a total: a
-    COMPUTED key (`SOME_NAME`), a PLACEHOLDER-BEARING f-string compared against a
-    DIFFERENT expression or against a plain literal (`{f"{x}": 1, "{x}": 2}` is one key
-    only if `x` is referentially transparent, which is the evaluation refused here),
-    any tuple containing one, and a key built by an operator outside `USub`/`UAdd`.
+    ⚠️ Still outside this population, stated so it is not mistaken for a total, AND
+    stated as a HOLE rather than as parity with the lint: a COMPUTED key (`SOME_NAME`),
+    a PLACEHOLDER-BEARING f-string compared against a DIFFERENT expression or against a
+    plain literal — that comparison needs the evaluation this refuses — any tuple
+    containing one, and a key built by an operator outside `USub`/`UAdd`. ⛔ The
+    placeholder-bearing cross-form pair is NOT harmless: `{f"{'a'}": 1, "a": 2}` is
+    `{'a': 2}` at runtime, its first entry is DEAD, and BOTH this scan and
+    `ruff 0.16.4 --select F601` report nothing for it (measured). The earlier text here
+    supported the exclusion with `{f"{x}": 1, "{x}": 2}`, which is a near-non-example
+    (`x` would have to evaluate to the literal string `"{x}"`), so a reader testing the
+    boundary that way concluded the residual was unreachable. It is reachable; closing
+    it needs evaluating the placeholder, which is the one step this function does not take.
     ⛔ The PLACEHOLDER-FREE cross-form pair, `{f"a": 1, "a": 2}`, USED to be listed
     here as "needs evaluation" — that was FALSE and it hid a duplicate no other
     instrument reported (see `_constant_key_value`); it is IN this population and is
@@ -8758,11 +8765,18 @@ def test_the_duplicate_key_detector_catches_a_duplicate():
     # `ast.unparse` normalises the quoting (`f"{x}"` and `f'{x}'` are one key, as at runtime).
     assert _duplicate_constant_key_sites('D = {f"{x}": 1, f"{x}": 2}\n') == [
         (1, 1, "f-string key f'{x}'")]
-    # …while a DIFFERENT expression is a different key, and a placeholder-bearing
-    # f-string never equates to a plain literal: both need evaluation to compare, which
-    # is the guess this refuses (`ruff` reports neither — measured, so this is not a
-    # hole of the guard's own).
+    # …while a DIFFERENT placeholder expression is a different key. ⛔ A
+    # PLACEHOLDER-BEARING f-string is NOT compared with a plain literal, and that is a
+    # RESIDUAL HOLE IN BOTH INSTRUMENTS — not parity with the lint, which the earlier
+    # wording here claimed: `{f"{'a'}": 1, "a": 2}` is `{'a': 2}` at runtime (the first
+    # entry is DEAD) and NEITHER this scan NOR `ruff 0.16.4 --select F601` reports it
+    # (both measured). Equating it needs the placeholder EVALUATED, which is the one step
+    # this function refuses; the hole is pinned here so the next lane inherits the truth
+    # rather than a claim that nothing is missed.
     assert _duplicate_constant_key_sites('D = {f"{x}": 1, f"{y}": 2}\n') == []
+    # the residual HOLE itself, pinned so its absence cannot be read as coverage:
+    assert _duplicate_constant_key_sites("D = {f\"{'a'}\": 1, \"a\": 2}\n") == []
+
     # ⛔ The one direction this arm gets WRONG, pinned so the wording cannot drift back
     # to "whatever the expression is": an IMPURE expression is re-evaluated per key, so
     # two byte-identical sources build two DISTINCT keys — and this reports a duplicate.
