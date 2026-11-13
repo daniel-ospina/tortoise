@@ -466,18 +466,49 @@ def test_empty_result_set_means_measured_and_empty():
 
 def test_none_result_set_means_not_measured():
     """`rows is None` is NOT `rows == []` — None means the catalog could not be
-    read, which a gap consumer must treat as unknown."""
+    read, which a gap consumer must treat as unknown.
 
-    class _NoneGraph(_RecordingGraph):
-        def query(self, cypher, params=None, timeout=None):
-            self.calls.append(cypher)
-            if "db.indexes()" in cypher.lower():
-                return _MockResult(None)
-            return super().query(cypher, params=params, timeout=timeout)
+    ⛔ ONE fake, not two (#11295 item 2). This test used to define its own local
+    `_NoneGraph` beside the module-scope `_NoneCatalogueGraph`, so two copies of
+    one fake could drift apart — and the local copy DID: it appended to
+    `self.calls` on every query and then delegated, double-counting any
+    non-catalogue query. The TWO things this test relies on are what
+    `_NoneCatalogueGraph` carries: the engine ANSWERS with `result_set is None`,
+    and that catalogue call is recorded in `.calls` — the `db.indexes()`
+    assertion below reads that recording, and without it `is None` would prove
+    nothing. The empty-catalogue arm stays a DIFFERENT answer, reached through
+    `_bare([])` in `test_empty_result_set_means_measured_and_empty`.
 
+    ⛔ The "lane must have RUN" assertion is what makes this able to fail ON A
+    READ THAT NEVER RAN: on a VIRGIN projection `_bare()` already leaves
+    `_vector_indexed_labels` as `None`, so `is None` afterwards is ALSO
+    satisfied by a read that never entered — the false-PASS shape
+    `test_unmeasured_pair_is_none_in_both_halves` guards its own arm against.
+
+    ⛔ The pair's COHERENCE (both halves `None`, never half-populated) is
+    deliberately NOT asserted here: on a virgin projection `_bare()` leaves the
+    served half `None` too, so the assertion cannot catch the mutation that
+    matters in this method — a dropped `self._vector_index_served_labels = None`
+    reset. What a coherence assertion placed HERE *could* red is the opposite
+    shape — a lane that POPULATES the served half while indexing nothing — and
+    that is already caught by the two guards below; it cannot see the dropped
+    reset, which is why that one belongs to a pin that populates the pair
+    first. The guards are
+    `test_unmeasured_pair_is_none_in_both_halves`, which proves each `None` lane
+    RAN from its own log line (`"inventory read failed"` /
+    `"inventory unavailable (empty response)"`), and
+    `test_a_re_read_that_cannot_measure_clears_an_already_populated_pair`, which
+    populates the pair BEFORE the failing read.
+    """
     proj = _bare()
-    proj.g = _NoneGraph()
+    proj.g = _NoneCatalogueGraph()
     proj._record_vector_index_inventory()
+    # Lower-cased for the same reason the fake is: a case change in the emitted
+    # Cypher is not a missing read, and this message would then blame the wrong
+    # thing (the file's `_is_vector_drop` lowercases for the same reason).
+    assert any("db.indexes()" in c.lower() for c in proj.g.calls), (
+        "the catalogue read must have been ATTEMPTED, or `is None` proves nothing"
+    )
     assert proj._vector_indexed_labels is None
 
 
@@ -675,11 +706,35 @@ def test_a_store_with_no_gap_does_not_warn(caplog):
 
 # ── #11087 (S4): the contract is reported POSITIVELY ──────────────────────
 #
-# The pin above is deliberately UNCHANGED (plan §6.1): it captures at
-# WARNING, so "no gap ⇒ no warning" stays true and the warning semantics a
-# caller may match on are preserved. What #11087 ends is the SILENCE — the
-# same store must now report the serves/indexes pair at INFO, and so must a
-# store that HAS a gap (which also still warns).
+# The pin above is unchanged in SUBSTANCE — "no gap ⇒ no gap report" still
+# holds, and that substance sentence is the only part of plan §6.1 relied on
+# here — but its CAPTURE LEVEL is INFO, not WARNING. ⛔ Do NOT follow §6.1 as a
+# clean record: its "captures at `logging.WARNING` … should survive unchanged"
+# sentence is STALE. The ARMED (retired) gap report is INFO by #11642; #11660
+# review F1 kept its `#4997` marker and raised the parity pins' capture level to
+# INFO — at `at_level(WARNING)` this pin's `assert not [...]` held by ABSENCE,
+# not by measurement — and that is where THIS PIN's INFO comes from
+# (583c19a25a9b). The UNARMED report keeps its WARNING — the split
+# `_gap_level()` above reads from `vector_index_retired()`. The header said
+# "captures at WARNING" over a pin that no longer takes one: the same defect
+# class the sibling pins were fixed for, and it sends the next reader to check
+# the wrong half.
+#
+# What #11087 ends is the SILENCE — the same store must now report the
+# serves/indexes pair at INFO, and so must a store that HAS a gap (which also
+# still reports the gap).
+#
+# ⛔ THE PAIR REPORT IS VALUE-LATCHED, AND THAT IS THE CONTRACT (#11311).
+# #11295's item 3 asked for a pin that two setups on one `(endpoint, graph)`
+# yield TWO INFO records — i.e. it asked to pin an UNLATCHED report. That
+# premise was superseded before this landed: an unlatched line puts two label
+# lists on the INFO stream at the hosted per-request rate. The pins that
+# replaced it are BOTH halves, and they are the ones to extend, never an
+# unlatched one: `test_an_unchanged_pair_is_not_reported_twice` (unchanged pair
+# ⇒ one record) and
+# `test_a_changed_pair_is_reported_and_a_repaired_store_announces_it` (changed
+# pair ⇒ two). A key-only latch reds the second; dropping the latch reds the
+# first — measured for #11295, so neither direction is unpinned.
 
 def _pair_records(caplog):
     return [r for r in caplog.records if "#11087" in r.getMessage()]

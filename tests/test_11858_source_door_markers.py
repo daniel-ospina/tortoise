@@ -233,11 +233,30 @@ def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
     about the door having no vector — and this row keeps the message honest: if
     the door ever stops minting for a caller vector, the message's remedy breaks
     and this reds.
+
+    ⛔ `#12170`: the "lands on the node" half of that sentence was written down but
+    NOT asserted — only the record was, and the record is the wrong half for the
+    exemption this route carries. `tortoise/embed_writer_register.py` declares
+    `tortoise.sdk::create_source` EXEMPT-as-CARRIER on exactly the delegate's store — the row names
+    `_upsert_source` as the delegate and states that its `_persist_extra_props(...,
+    allow_keys=_allow)` passthrough's closed surface DECLARES `embedding`; the "stores `s.embedding`
+    for the vector retrieval leg to read" phrasing is the probe's census row
+    (`tools/dod_5090_probe.py`, the `#5004` disposition), not the register's. Measured **at
+    `ca74f2375e`, before the node assertion below existed**: dropping `embedding` from
+    `_EntityHandlers._SOURCE_EXTRA_PROPS` denies it on the node (`#3998` deny-and-log, node
+    value `None`) while this test, the register suite, the probe suite and `#11641`'s
+    all stayed green (390 passed) — a journalled vector nothing can read. The node
+    assertion below is what makes that mutation red.
     """
     sdk, journal = _journal(tmp_path)
     try:
         sdk.create_source("https://example.invalid/11858-vector", "web",
                          embedding=[0.5] * 4)
+        # Read the NODE while the store is open: `close()` releases the embedded handle, and the
+        # claim under test is about the graph, not only about the record.
+        node = sdk._get_proj().g.query(
+            "MATCH (s:Source {url: $url}) RETURN s.embedding",
+            {"url": "https://example.invalid/11858-vector"}).result_set
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -251,6 +270,17 @@ def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
     assert record.get("embedding_width") in ("f32", "f64"), (
         "the writer must declare the width it derived; a vector with no marker is "
         "the population #11821 P0 closed")
+    # …and the NODE carries it. This is the half the register's exemption rests on: the writer's own
+    # body stores nothing, so "the vector is stored" IS "the delegate stored it". A vector that
+    # reaches the journal and not the node is durable and unreadable.
+    assert node, "the caller's vector reached no `:Source` node at all"
+    assert node[0][0] is not None, (
+        "the vector is journalled but NOT on the node: `tortoise.sdk::create_source` is declared "
+        "EXEMPT-as-CARRIER on exactly this store (the `_upsert_source` passthrough), so a node "
+        "without the vector makes that declaration false while every record assertion above still "
+        "passes — the silent-retrieval-loss shape #12170 measured")
+    assert len(node[0][0]) == 4, (
+        f"the node's vector is {node[0][0]!r}, not the 4 floats the caller passed")
 
 
 @pytest.mark.parametrize("door", [
