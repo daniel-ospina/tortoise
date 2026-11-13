@@ -618,7 +618,7 @@ def test_the_row_two_MEASURES_the_EDGE_vector_door(monkeypatch):
     # quoted: this file collects a different number today, so any unscoped figure here would
     # be the stale-measurement defect the §6 note below forbids — the reason this note
     # names no live count at all is that a forward merge moves it, `#12281`'s own
-    # `183 -> 186` being the demonstration). Without it, "41 edge types
+    # `183 -> 187` being the demonstration). Without it, "41 edge types
     # measured, none stores a vector" and "the edge arm never ran" are the SAME printed
     # evidence — `stored-without-a-query-path: none`
     # / `MET` — which is the rule the neighbouring notes already state: a `MET` must not
@@ -8047,12 +8047,12 @@ def test_the_census_doc_collects_what_the_file_collects():
     statements = [int(n) for n in re.findall(r"this tree: (\d+) collected", text)]
     statements += [int(n) for n in
                    re.findall(r"collects \*\*(\d+) in the tree", text)]
-    # ⛔ The arithmetic total is written ``(`122 + … = 186`)`` — a BACKTICK follows the
+    # ⛔ The arithmetic total is written ``(`122 + … = 187`)`` — a BACKTICK follows the
     # digits, never a paren (`#12015` review MEASURED the first spelling: it matched
     # nothing, and a dead arm shrinks to the arms that still match, so `= 999` stayed
     # green while the comment claimed all three were pinned).
     statements += [int(n) for n in re.findall(r"= (\d+)`", text)]
-    # The splits paragraph's `to the same `186` the pin re-derives` clause — the fourth
+    # The splits paragraph's `to the same `187` the pin re-derives` clause — the fourth
     # statement of the same figure, and the one an earlier revision of this pin missed.
     statements += [int(n) for n in
                    re.findall(r"to the same `(\d+)` the pin re-derives", text)]
@@ -8847,21 +8847,28 @@ def test_no_module_declares_the_same_dict_key_twice():
     assert set(_MIN_MODULES) == set(_DUP_KEY_ROOTS), (
         "every scanned root needs a non-vacuity floor — "
         f"roots={sorted(_DUP_KEY_ROOTS)}, floors={sorted(_MIN_MODULES)}")
+    # ⛔ THE FLOORS MUST BE NON-ZERO, which the key-SET assertion above cannot see
+    # (`#12281` review, mutation-led): setting every floor to 0 left both guard tests
+    # GREEN, because `per_root[name] >= 0` is satisfied by a root that yielded NOTHING —
+    # the silent narrowing the floors exist to prevent. The comment on `_MIN_MODULES`
+    # states this property; without an assertion the statement was unbacked.
+    assert all(floor >= 1 for floor in _MIN_MODULES.values()), (
+        "a zero floor can never fail, so the root it guards may vanish silently — "
+        f"floors={_MIN_MODULES}")
     # ⛔ THE REPO ROOT COMES FROM THE FILE, NOT THE CWD (#12265 review):
     # `Path(root).rglob` resolves against the invocation directory, so a run from
     # `tests/` scanned 0 modules and red this guard on a CORRECT tree. This is the
     # same derivation the module's other repo-root reads use
     # (`Path(probe.__file__).resolve().parent.parent`); `probe.REPO_ROOT` is that
     # same value, but several reads here already spell it out for the same reason.
+    # ⛔ THE VIOLATION IS ASSERTED FIRST — and the ORDER IS PINNED STRUCTURALLY at the
+    # end of this function, because it cannot be pinned behaviourally: no run builds a
+    # tree holding a duplicate AND a broken walk, so swapping these two blocks leaves
+    # every behavioural test green (measured by mutation). The rationale still stands —
+    # a floor failure means the guard is narrower than it claims, while a live duplicate
+    # in the same run is the finding the reader actually needs — so a comment alone would
+    # let the next edit reorder them silently. The AST pin below reads THIS function.
     violations, per_root = _scan_declaration_roots(_guard_root())
-    # ⛔ THE VIOLATION IS ASSERTED FIRST, deliberately: a floor failure means the
-    # guard is narrower than it claims, but a live duplicate in the same run is the
-    # finding the reader actually needs, and asserting floors first would hide it.
-    # ⚠️ The ORDER itself is not separately asserted — both asserts fire on their own
-    # (each is proven RED by its own mutation), but no test builds a tree holding a
-    # duplicate AND a broken walk, so swapping these two lines leaves the suite green
-    # (measured by mutation). The sentence above is the RATIONALE for the order, not a
-    # claim that the order is pinned.
     assert not violations, _duplicate_key_report(violations)
     # A scan that read nothing would satisfy the assertion above vacuously — and it
     # must be checked PER ROOT: rglob returns zero silently on a root that was
@@ -8874,6 +8881,34 @@ def test_no_module_declares_the_same_dict_key_twice():
             f"its floor of {floor} — the root was renamed, removed, or its walk broke, "
             "so the guard is now narrower than it claims. Re-derive the floor (or fix "
             f"the root) rather than lowering it. Full counts: {per_root}")
+    # ⛔ THE ORDER PIN, and it has to be STRUCTURAL: the violation assert above must
+    # come BEFORE the floors loop, because a reader who is told "the scan is narrower"
+    # while a live duplicate sits in the tree is sent to the wrong defect. No
+    # behavioural run can hold both states at once (the floors are satisfied by the
+    # real tree, and the real tree holds no duplicate — that is the green case), so the
+    # only falsifier is the statement order in this very function. Swapping the two
+    # blocks was MEASURED to leave the whole file green until this pin existed.
+    # It parses this file rather than trusting the comment, and it names the function
+    # so a rename reds here instead of silently unwatching the order.
+    _fn = next(
+        node for node in ast.parse(Path(__file__).read_text(encoding="utf-8")).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_no_module_declares_the_same_dict_key_twice")
+    _violation_at = [i for i, stmt in enumerate(_fn.body)
+                     if isinstance(stmt, ast.Assert)
+                     and "not violations" in ast.unparse(stmt.test)]
+    _floor_at = [i for i, stmt in enumerate(_fn.body)
+                 if isinstance(stmt, ast.For)
+                 and "_MIN_MODULES" in ast.unparse(stmt.iter)]
+    assert _violation_at and _floor_at, (
+        "the order pin could not find the violation assert and the floors loop in "
+        f"this function — violation_at={_violation_at} floor_at={_floor_at}; restore "
+        "them (or update this pin) rather than deleting it")
+    assert _violation_at[0] < _floor_at[0], (
+        "the duplicate violation must be asserted BEFORE the per-root floors — a floor "
+        "failure means the guard is narrow, but a live duplicate is the finding the "
+        f"reader actually needs; measured violation_at={_violation_at} "
+        f"floor_at={_floor_at}")
 
 
 def test_the_scan_root_is_the_REPO_not_the_process_cwd(tmp_path, monkeypatch):
