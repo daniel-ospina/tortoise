@@ -373,10 +373,23 @@ def test_the_quantiser_leaves_process_wide_warning_state_alone(monkeypatch):
         # THE PRIMARY OBSERVABLE (#11859): the regression restores a
         # suppression block; entering one is red even if its filters are
         # restored on `__exit__` (which is why `filters == before` is blind).
-        # Patched INSIDE this test's own block, so only the quantiser's call is
-        # banned — the block above is entered before the patch is installed.
-        monkeypatch.setattr(warnings, "catch_warnings", _boom)
-        try:
+        #
+        # ⛔ SCOPED WITH `monkeypatch.context()`, never the shared instance
+        # (#11859 review). `monkeypatch.undo()` would undo EVERY patch the
+        # fixture holds — including the ones `tests/conftest.py`'s autouse
+        # fixtures installed (`TORTOISE_RECORD_*`, `TORTOISE_API_URL/KEY`,
+        # `TORTOISE_AUDIT_FALLBACK_DIR`, …) — so anything this test did after
+        # that point would run OUTSIDE the suite's isolation, silently. A
+        # context undoes only what was patched through it.
+        #
+        # …and it must not outlive the CALLS either: pytest's own
+        # failure-reporting path calls `warnings.catch_warnings`, so a ban still
+        # installed while a failure is formatted turns a clean "1 failed" into a
+        # run-aborting INTERNALERROR — measured on BOTH mutants below, and it
+        # hides which assertion actually failed. Hence: calls inside the
+        # context, every assertion outside it.
+        with monkeypatch.context() as ban:
+            ban.setattr(warnings, "catch_warnings", _boom)
             # out of range: the case that warned before the plain-Python refusal
             outcomes.append(shortest_float32_vector([1e300, 0.5]))
             # underflowing to zero: the other cast-collision shape
@@ -384,14 +397,6 @@ def test_the_quantiser_leaves_process_wide_warning_state_alone(monkeypatch):
             # the on-grid path must still narrow (so the assertions above cannot
             # be satisfied by a function that refuses everything)
             outcomes.append(shortest_float32_vector([float(np.float32(0.1)), 0.5]))
-        finally:
-            # ⛔ THE BAN MUST NOT OUTLIVE THE CALLS (#11859). pytest's own
-            # failure-reporting path calls `warnings.catch_warnings`, so a ban
-            # still installed while a failure is formatted turns a clean
-            # "1 failed" into a run-aborting INTERNALERROR — measured on BOTH
-            # mutants below, and it hides which assertion actually failed. So
-            # the ban's scope ends here, and every assertion is made outside it.
-            monkeypatch.undo()
 
     assert outcomes[0] is None, (
         "an out-of-range element must be refused, not narrowed")

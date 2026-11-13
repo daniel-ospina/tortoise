@@ -98,6 +98,16 @@ def _caller_vector(width: int = _DIM) -> list[float]:
 
     ⚠️ The widening is handed over deliberately. ``float(str(np.float32(0.1)))``
     yields the plain literal ``0.1`` — still off the grid, and still blind.
+
+    ⛔ WHAT THIS SHAPE CANNOT SEE, stated so it is not assumed (#11859 review):
+    a grid-exact vector is a fixed point of ``vecf32``, so these pins no longer
+    catch the STORE-side half of #5004 round-7 (a caller vector written through
+    ``vecf32`` instead of ``$embedding``). That half needs an OFF-GRID value —
+    ``0.1`` -> ``0.10000000149011612`` moves under ``vecf32`` — and it is still
+    covered, discriminatingly, by `test_a_graph_only_caller_vectored_point_keeps_its_raw_vector_and_marker`
+    and `test_update_entity_caller_vector_rides_a_re_emit_verbatim`, which keep
+    their off-grid fixtures for exactly that reason. The two shapes cover two
+    different regressions; neither one alone covers both.
     """
     seed = [_f32(v) for v in _CALLER_SEED]
     vec = [seed[i % len(seed)] for i in range(width)]
@@ -833,12 +843,21 @@ def test_a_caller_supplied_vector_is_restored_verbatim(tmp_path):
         try:
             pid = sdk.create_point("statement", "caller-owned vector",
                                    embedding=caller_vec).get("id")
-            assert _vector(sdk, pid) == _caller_expected(caller_vec)
+            live = _vector(sdk, pid)
+            assert live == _caller_expected(caller_vec)
 
             rec = [e["point"] for e in _events(events)
                    if e.get("type") == "PointAdded"
                    and (e.get("point") or {}).get("id") == pid]
             assert rec, "no PointAdded journalled"
+            # ⛔ THE STRICTEST FORM, and render-free: the JOURNAL is what the
+            # replay reads, and its text must be the caller's own value — the
+            # graph's 15-digit render is not in this comparison at all (#11848).
+            assert rec[0].get("embedding") == caller_vec, (
+                "the journal narrowed a caller-owned vector: "
+                f"{rec[0].get('embedding')[:1]} != {caller_vec[:1]}")
+            assert rec[0].get("embedding_width") == "f64", (
+                "a caller-owned vector was declared at a width it does not have")
             assert rec[0].get("embedding_verbatim") is True, (
                 "the create site must tell the journal the vector is "
                 "caller-owned, so the replay stores it raw")
@@ -847,7 +866,10 @@ def test_a_caller_supplied_vector_is_restored_verbatim(tmp_path):
 
             with mock.patch(_EMBED_PATCH, _embed_b):
                 sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-            assert _vector(sdk, pid) == _caller_expected(caller_vec), (
+            # Live vs replay, not live vs fixture: this half is render-free, so
+            # a future change to how the GRAPH prints a double cannot make this
+            # red for a reason unrelated to the contract (#11859 review).
+            assert _vector(sdk, pid) == live, (
                 "the caller-supplied vector was narrowed to float32 (or "
                 "recomputed) on replay")
             props = sdk._get_proj().g.query(
