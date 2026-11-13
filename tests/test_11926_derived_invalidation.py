@@ -1513,6 +1513,11 @@ def test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket(sdk, monkeypat
     assert per_finding["alreadyRetired"] is True
     assert per_finding["found"] is False, per_finding
     assert "no such judgement" in per_finding["detail"]
+    # `found` is a contract on the records the DOOR returns, not on the sweep's
+    # own finding records: a `stale` record is `Invalidation.as_dict`, which
+    # carries `state` instead. Asserted so the docstring's scope stays true.
+    assert "found" not in report["stale"][0], report["stale"][0]
+    assert "state" in report["stale"][0], report["stale"][0]
 
     # ⛔ THE OVERLAP RULE — that `retired` and `failed` (or `gone`) can BOTH count
     # one finding, so the buckets are per-finding predicates and never a partition
@@ -2302,6 +2307,30 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
         "docstring's ('can reach that shape') and the absent-arm comment's "
         "('repairs it later ONCE …'); the adjacency assertion above cannot see a "
         "third one planted in another comment, so the count is the guard")
+
+    # ---- the `found` contract's SCOPE (review cycle 1) -----------------------
+    # The absolute "`found` is PRESENT on every shape" was FALSE: `stale` holds
+    # `Invalidation.as_dict` records, which carry `state` and no `found`, so a
+    # caller following the sentence and walking `stale` gets the KeyError the
+    # sentence denies. Pinned as the same two-part shape as the repair bound —
+    # the falsified absolute absent, the corrected SCOPE present — so a revert
+    # reds here instead of passing silently (`grep` shows no other test reads
+    # this docstring).
+    sweep_doc = " ".join((di.invalidate_stale.__doc__ or "").lower().split())
+    assert "present on every shape" not in sweep_doc, (
+        "`found` is NOT on every shape: `stale` records are "
+        "`Invalidation.as_dict`, which carry `state` and omit `found`")
+    assert "present on every record of ``invalidated``" in sweep_doc, (
+        "so the sentence must name the list it is true of")
+
+    # ---- the door's own wording (review cycle 1, F2) ------------------------
+    # The absent-arm comment quotes `reconcile_goal_state_cache`'s docstring.
+    # A quotation that is not a substring of the source is this PR's defect
+    # class, and the door says "calling", not "call".
+    assert '("call this again' not in norm, (
+        "the quotation must be verbatim — the door says 'calling this again'")
+    assert '("calling this again' in norm, (
+        "and the quote must still be present, not quietly dropped")
 
     # ---- the grid: every family, at every site -------------------------------
     for site, text in (
