@@ -87,12 +87,19 @@ HOW TO RUN
     docker exec m3-paradedb psql -U postgres -d m3 -c 'CREATE EXTENSION IF NOT EXISTS pg_search'
 
     # 3. the measurement (needs the `postgres` extra for psycopg2)
-    uv run python tools/m3_fts_leg_recall.py run \\
+    uv run python tools/m3_fts_leg_recall.py run --recovery-arm \\
         --pg-dsn 'host=127.0.0.1 port=16550 dbname=m3 user=postgres password=pg'
 
 The artifact lands in ``docs/research/2026-11-13-12298-m3-fts-leg/``: one
 ``population.json`` (the pinned sample) and one ``artifact.json`` (both arms +
 the paired comparison).
+
+⛔ **Reproduce the committed artifact with ``--recovery-arm``**: without it the
+recovery arm is not measured and the artifact carries three arms, not four. The
+flag is off by default because that arm measures a fix that is NOT shipped
+(``#12350``); a reader who runs the command above gets the artifact this repo
+holds, and the pinned ``population.json`` makes the run paired rather than a
+fresh harvest.
 
 WHAT THIS DOES NOT MEASURE (declared, not buried)
 -------------------------------------------------
