@@ -548,7 +548,17 @@ def classify_source(row: Row, packs: Mapping[tuple[str, str], str]) -> Decision:
 def classify_event(row: Row, packs: Mapping[tuple[str, str], str]) -> Decision:
     pack = pack_for(row.kind, row.node_type, packs)
     key = row.stable_key
-    if row.kind in (None, "", "session", "agentSession") or str(row.content).startswith("session:"):
+    # ⛔ CASE-INSENSITIVE on purpose: the real kind is `AgentSession` (capital A —
+    # `sdk.index_sessions` writes `"eventKind": "AgentSession"`, and `_upsert_event`
+    # stores it verbatim), while this comparison used to test the lower-case
+    # `agentSession` ONLY. That was unreachable while nothing read the layer; the moment
+    # `read_events` (#12378) enumerated it, all 4,670 agent-session rows fell through to
+    # the DOMAIN branch and were reported as "a domain Event … no `events` write
+    # section" — the disposition was still `undecidable` (so nothing was carried by
+    # mistake), but the per-row REASON was false for the whole layer, and the reason is
+    # the one thing reading the layer buys.
+    kind = (row.kind or "").strip().lower()
+    if kind in ("", "session", "agentsession") or str(row.content).startswith("session:"):
         return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
                         "agent-session Event: the raw/episodic tier is supposed to live outside "
                         "the graph (#10000), but the record holds 0 rows for this tenant, so "

@@ -561,6 +561,198 @@ class MCPReader:
             return C.normalise_tool_result(self._call("tortoise_search", dict(args)))
         return res
 
+    def read_events(
+        self, counts: Mapping[str, Any] | None = None,
+    ) -> tuple[list[C.Row], int | None]:
+        """The episodic layer — readable in one call, and never read until this change.
+
+        `tortoise_get_entity(type="events", limit=N)` is the ADVERTISED path (the older
+        `tortoise_get_events` name is retired at the server, #3883) and it forwards to
+        `get_events`, which is `MATCH (e:Event) … ORDER BY e.startedAt DESC LIMIT $lim`.
+        Measured on live-v4, 2026-11-13, read-only: **4,670 rows in one call**, exactly
+        `counts.Event`. The harness recorded that layer as *"READABLE but NOT read by
+        this pass"* (`NOT_ENUMERABLE["event"]`) — a scope decision it then reported as
+        a complete census, which is the omission #12378 names.
+
+        Reading it moves NO row into `carry`: `classify_event` answers `undecidable` on
+        both of its arms (an agent-session container, whose home is #10000's open D1
+        question; a domain Event, whose write path has no `events` section), so this
+        buys per-kind census resolution and per-row reasons, nothing more.
+
+        The read is ROUTED like every other one (`graph` is the credential's per-call
+        routing argument and `tortoise_get_entity` is NOT in `GRAPH_ARGUMENT_EXCLUDED`),
+        for the reason the operator read is: omitting it reads the DEFAULT graph while
+        every other section came from `--graph`, and the reconciliation then compares
+        one graph's count against another graph's rows.
+
+        Fail-closed rules, each mirroring the operator read:
+
+        * a row with neither `id` nor `eventId` is REFUSED — two id-less Events are
+          indistinguishable and would fold onto one; `_upsert_event` writes `id` equal
+          to the MERGE key `eventId`, and by-url/legacy rows carry the `eventId`
+          spelling, so both are read;
+        * a population above `EVENT_READ_CEILING` is REFUSED — there is no offset walk
+          to page through it;
+        * a read that FILLS the requested limit exactly is REFUSED when no reported
+          count says that is the whole layer, because there is no offset walk, so "a full
+          page" and "a truncated layer" are the same bytes. The request is sized to
+          `counts.Event + 1` whenever a count is available, so this arm can only fire on
+          the UNREPORTED arm, where nothing vouches for the layer's size;
+        * a read whose row count disagrees with `counts.Event` is REFUSED. Both describe
+          `:Event` with the same predicate (unlike the operator pair), so equality is
+          expected — but the count is read moments earlier, so a concurrent create can
+          still make `read > reported`, and the refusal names that cause rather than
+          asserting it is impossible.
+
+        An UNREPORTED count over a NON-EMPTY read is a lost cross-check, not a lost
+        population: the rows came from their own read, so it is recorded on the report.
+        A ZERO-ROW read with no count to reconcile it REFUSES — "this graph has no
+        Events" and "the layer was not read" are otherwise the same bytes, which is the
+        silent-zero class `read_points` and `_unreconciled_sources` already fail closed
+        on.
+        """
+        reported = _node_count(counts, "Event")
+        if reported is not None and reported > EVENT_READ_CEILING:
+            raise C.CurationRefused(
+                f"the Event layer holds {reported} rows, above this read's declared "
+                f"{EVENT_READ_CEILING}-row RESPONSE BOUND. ⛔ That number is OURS, not the "
+                "surface's: `sdk.get_events` validates no upper `limit` and passes it "
+                "straight into the Cypher `LIMIT`, so the bound is a size/memory bound on "
+                "ONE response rather than a wall the tool enforces. The refusal is that "
+                "this layer can only be read in ONE response — there is a `limit` and NO "
+                "`offset` (`MATCH (e:Event) … LIMIT $lim`), so a layer larger than the "
+                "bound cannot be read whole at all, and a truncated one entering the "
+                "census is indistinguishable from a complete one. Raise "
+                "`EVENT_READ_CEILING` deliberately if this layer legitimately outgrew it; "
+                "do not let a partial episodic layer be reported as complete")
+        # ⛔ Ask for ONE MORE than the reported count, not for the full ceiling: with an
+        # authoritative count in hand, `reported + 1` is the smallest request that PROVES
+        # non-truncation — a response of exactly `reported + 1` rows means the layer grew
+        # since the count, so the reconciliation below refuses instead of filing a short
+        # layer, and `reported` rows cannot have been cut short because the request was
+        # for more than `reported`.
+        limit_sent = (EVENT_READ_CEILING if reported is None
+                      else min(reported + 1, EVENT_READ_CEILING))
+        res = self._get_entities(limit_sent)
+        err = _error_of(res)
+        if err:
+            raise RuntimeError(f"read of the Event layer was refused: {err[:300]}")
+        if not _is_row_listing(res):
+            raise RuntimeError(
+                "read of the Event layer answered in an unrecognised shape "
+                f"({type(res).__name__} with keys "
+                f"{sorted(res)[:6] if isinstance(res, dict) else 'n/a'}) — refusing to "
+                "report an unreadable layer as an empty one")
+        raw = _rows_from_tool(res)
+        if reported is None and not raw:
+            raise C.CurationRefused(
+                "the Event read returned no rows AND the status section reported no "
+                "`Event` count, so an empty layer cannot be told from an unread one — "
+                "refusing a census that would report the episodic layer as empty")
+        if reported is None and len(raw) == EVENT_READ_CEILING:
+            raise C.CurationRefused(
+                f"the Event read returned exactly its {EVENT_READ_CEILING}-row limit and "
+                "no reported count says that is the whole layer — the response may be "
+                "truncated, and this read has no offset walk to continue from; refusing "
+                "a partial episodic layer")
+        if reported is not None and len(raw) != reported:
+            raise C.CurationRefused(
+                f"the Event layer read {len(raw)} rows but counts.Event reports {reported} "
+                "— refusing a layer two surfaces disagree about. Both count `:Event` with "
+                "the same predicate, so the difference is one of: a genuinely partial / "
+                "clamped read; another writer's Event created between the status read and "
+                "this read (the count is re-read immediately before this call to keep that "
+                "window to two requests, but it is still two requests — so `read > "
+                "reported` is possible); or an Event deleted in that window, which makes "
+                "`read < reported`")
+        empty_text = 0
+        out: list[C.Row] = []
+        for r in raw:
+            if not isinstance(r, dict):
+                # `_is_row_listing` accepts any list, so shape drift here would otherwise
+                # surface as an AttributeError (rc 1 traceback) instead of this module's
+                # designed refusal — the guard `read_operators` and `read_sources` apply.
+                raise C.CurationRefused(
+                    f"an Event row arrived as {type(r).__name__}, not an object — "
+                    "refusing the layer rather than guessing which field carries its id")
+            node_id = str(r.get("id") or r.get("eventId") or "")
+            if not node_id:
+                raise C.CurationRefused(
+                    "an Event row arrived with neither `id` nor `eventId` — the class is "
+                    "identified by its key (`_upsert_event` writes `id` equal to the "
+                    "MERGE key `eventId`), so two id-less rows would fold onto one; "
+                    "refusing the layer")
+            content = _event_text(r)
+            if not content:
+                empty_text += 1
+            out.append(C.Row(
+                node_id=node_id,
+                node_type="event",
+                # The Event surface spells the kind `eventKind`; read the curation
+                # spellings too rather than assume one (the operator read's lesson).
+                kind=r.get("eventKind") or r.get("kind") or r.get("pointKind"),
+                content=content,
+                content_hash=r.get("contentHash") or r.get("content_hash"),
+                props={k: v for k, v in r.items() if k not in ("embedding",)},
+            ))
+        if reported is None:
+            self._note("the status section reported no `Event` count, so the Event layer "
+                       "read is unreconciled (it is still the read's rows, not a count)")
+        if empty_text:
+            # ⛔ Disclosed, not hidden: an Event with no `name`/`title`/`subject` has an
+            # EMPTY text, and this pass keys Events by CONTENT (`Row.stable_key`), so
+            # those rows share one key and the plan's duplicate fold reports them as
+            # content duplicates. Nothing is carried from this class, so no write
+            # depends on the key — but the count is the difference between a reader that
+            # understood the layer and one that silently collapsed it, so it travels on
+            # the artifact.
+            self._note(f"{empty_text} of {len(raw)} Event rows carry no name/title/subject, "
+                       "so they share one content-addressed key and appear as content "
+                       "duplicates in the plan's fold (nothing is carried from them)")
+        return out, reported
+
+    def _get_entities(self, limit: int) -> Any:
+        """The Event enumeration, ROUTED to `self.graph` like every other read.
+
+        `graph` is the credential's per-call routing argument (#9340,
+        `mcp_server._take_graph_argument`) and `tortoise_get_entity` honours it: it is in
+        `tool_registry`'s graph-taking map and NOT in `GRAPH_ARGUMENT_EXCLUDED`, so
+        omitting it would read the Event layer from the DEFAULT graph while every other
+        section came from `--graph` — a census mixing two graphs.
+
+        The fallback is `_search_operators`' and `_section`'s, for their reason: a
+        graph-BOUND credential cannot be re-targeted, so a refusal ABOUT the graph
+        argument is answered by re-reading WITHOUT it (omission means "this credential's
+        own graph", a legal read) and recording the fact on the report. Any other
+        refusal — a quota, a timeout, a DB fault — raises: re-reading a different graph
+        under the requested graph's identity is how a census mixes two graphs.
+
+        `type="events"` with no `id` is the whole-layer listing (`tortoise_get` treats
+        `id` as an optional eventKind FILTER on this arm), and `limit` is the response the
+        truncation check in `read_events` is sized against — one more than the reported
+        count where a count is available, so a full response PROVES the layer grew rather
+        than being silently cut.
+        """
+        args: dict[str, Any] = {"type": "events", "limit": limit}
+        if not self.graph:
+            return C.normalise_tool_result(self._call("tortoise_get_entity", dict(args)))
+        try:
+            res = C.normalise_tool_result(
+                self._call("tortoise_get_entity", {**args, "graph": self.graph}))
+        except Exception as exc:
+            reason = str(exc) or type(exc).__name__
+            if not _looks_like_graph_refusal(reason):
+                raise
+            self._note(f"the Event read: the explicit graph argument was refused "
+                       f"({reason[:160]}); read from the credential's own graph instead")
+            return C.normalise_tool_result(self._call("tortoise_get_entity", dict(args)))
+        reason = _error_of(res)
+        if reason and _looks_like_graph_refusal(reason):
+            self._note(f"the Event read: the explicit graph argument was refused "
+                       f"({reason[:160]}); read from the credential's own graph instead")
+            return C.normalise_tool_result(self._call("tortoise_get_entity", dict(args)))
+        return res
+
     def audit(self) -> dict[str, Any]:
         res = self._section("audit")
         return res if isinstance(res, dict) else {}
@@ -618,6 +810,42 @@ def _source_gap(counts: Any, read: int) -> int | None:
     return (total - read) if isinstance(total, int) else None
 
 
+def _node_count(counts: Any, node_type: str) -> int | None:
+    """`counts.<node_type>` from the status section, or None when it reports none.
+
+    The status section nests its node counts under `counts` on some builds and
+    carries them at the top level on others (`_source_gap` reads both spellings), and
+    a missing or non-int value is None — NEVER 0, because "the surface reports no
+    Event count" and "the graph holds no Events" are different facts and the
+    reconciliation must be able to tell them apart (the silent-zero class).
+    """
+    if not isinstance(counts, dict):
+        return None
+    node_counts = counts.get("counts") if isinstance(counts.get("counts"), dict) else counts
+    value = node_counts.get(node_type) if isinstance(node_counts, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _event_text(row: Mapping[str, Any]) -> str:
+    """An Event's text, in the order the write path actually stores it.
+
+    `name` is the Event's text and IS persisted on the node — it is deliberately
+    absent from `_EVENT_HANDLED`, so `_persist_extra_props` carries it through
+    (`projection/entities.py`, the #2788 note). Two narrower carriers exist and are
+    declared here rather than discovered later: a MEETING Event persists its `title`
+    through the guarded merge (and `backfill_sources` reads it back), and a domain
+    Event always has a `subject`. An Event with none of the three keeps an empty text
+    — `read_events` counts those on the report rather than inventing content for them.
+    """
+    for key in ("name", "title", "subject"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
 def _unreconciled_sources(read: int, gap: int | None) -> str | None:
     """The refusal for a ZERO-source census that nothing can reconcile, else None.
 
@@ -637,20 +865,25 @@ def _unreconciled_sources(read: int, gap: int | None) -> str | None:
 
 NOT_ENUMERABLE = {
     "object": "no listing surface on the MCP tool set — count from counts.Object",
-    "event": "READABLE but NOT read by this pass: `tortoise_get_entity(None, "
-             "type='events', limit=N)` returns the WHOLE layer in one call (measured "
-             "2026-11-13: limit=5000 -> 4,670 rows, exactly counts.Event). Reading it is a "
-             "separate decision, not an unreachability fact: every Event classifies "
-             "`undecidable` today (session containers have no safe destination while the "
-             "record holds 0 rows for this tenant, #10000/D1; a domain Event has no "
-             "`events` write section), so it changes no disposition — only the census' "
-             "per-kind resolution. The layer's home is #10000's open question; reading it "
-             "is filed as #12378. Until then count from counts.Event",
     "subject": "no listing surface on the MCP tool set — count from counts.Subject",
     "source": "tortoise_list_sources matches `documentKind IS NULL` (sdk.list_sources), "
               "so a Document-kind Source is NOT listed — reconcile sources_read against "
               "counts.Source rather than reading the source count as complete",
 }
+#: ⛔ `event` is deliberately NOT in the table either, and its entry used to say
+#: "READABLE but NOT read by this pass" — a scope decision written where a
+#: REACHABILITY fact belongs, which made the census look complete over a layer of
+#: **4,670 rows** it had never read (#12378). The layer is enumerated by
+#: `read_events`: `tortoise_get_entity(type="events", limit=N)` forwards to
+#: `get_events` (`MATCH (e:Event) … LIMIT $lim`, a bare list, no total) and answers the
+#: whole layer in ONE call, reconciled against `counts.Event`.
+#: ⚠️ Reading it moves NO row into `carry` — `classify_event` answers `undecidable` on
+#: both arms — so the omission was never costing dispositions. What it cost was the
+#: census's per-kind resolution (an undifferentiated episodic tier) and #11469's
+#: Target 2, "every dropped row is named with its reason", for rows never enumerated.
+#: The episodic tier's DESTINATION is still #10000's open D1 question; that is the part
+#: that stayed a decision after the read landed.
+
 #: ⛔ `operator` is deliberately NOT in the table above. It used to be, with the
 #: reason "tortoise_query excludes operator Points unless an operator kind is
 #: requested" — and that is false twice over, measured on live-v4 2026-11-13:
@@ -677,6 +910,25 @@ NOT_ENUMERABLE = {
 OPERATOR_READ_CEILING = 10_000
 
 
+#: The Event layer is read in ONE `tortoise_get_entity(type="events", limit=…)` call,
+#: which forwards to `tortoise_get_events` (`mcp_server.py`) — a
+#: `MATCH (e:Event) … ORDER BY e.startedAt DESC LIMIT $lim` with NO offset and a BARE
+#: LIST return (`sdk.py`), so a short response is indistinguishable from a truncated
+#: layer: the same hazard as the operator read, and the same refusals apply.
+#:
+#: ⛔ 10,000 here is OUR DECLARED response bound, NOT the surface's maximum — and that
+#: difference is worth stating because the operator constant is the opposite case. The
+#: SDK refuses `tortoise_search(limit > 10000)` outright, which is what makes
+#: `OPERATOR_READ_CEILING` a wall; `get_events` validates no upper bound at all and
+#: passes `limit` straight into the Cypher `LIMIT`, so a larger number would simply be
+#: sent. The bound exists because this layer can only be read in ONE response (a `limit`
+#: and no `offset`), so "the whole layer" needs a stated size a refusal can name — and it
+#: is a size/memory bound, not an enforcement. `read_events` sizes each request to
+#: `counts.Event + 1` rather than to this bound, so the bound is only ever consumed by a
+#: layer that genuinely has no whole read.
+EVENT_READ_CEILING = 10_000
+
+
 def cmd_inventory(args: argparse.Namespace) -> int:
     reader = MCPReader(_live_call_tool, args.graph)
     # ⛔ ONE handler for EVERY census read, and the SAME one `plan` has. The refusal type
@@ -701,6 +953,13 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         # for the verb a driver runs FIRST — the window would be the whole walk.
         structure = reader.structure()
         operators, operators_reported = reader.read_operators(structure)
+        # ⛔ The episodic layer — readable in one call and omitted from every census
+        # before this change (#12378). ⛔ Its count is re-read HERE, immediately before the
+        # read, rather than reusing `counts` from the top: that one is read before the
+        # point walk (34+ calls on a real graph), and reconciling this layer against it
+        # would make the refusal's "two requests" window claim false and turn a correct
+        # read into a refusal the moment an Event was created mid-walk.
+        events, events_reported = reader.read_events(reader.counts())
         # ⛔ The audit section is a census read too (it is in the `used` set the tests
         # assert, and it feeds the report), so it belongs INSIDE this handler: outside
         # it, an `is_error` payload here raised as rc 1 while the other four answered
@@ -715,7 +974,7 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     if unreconciled:
         print(f"REFUSED: {unreconciled}", file=sys.stderr)
         return 3
-    plan = C.build_plan(points + sources + operators,
+    plan = C.build_plan(points + sources + operators + events,
                         source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target or "(none: inventory only)")
     if args.rows:
@@ -747,6 +1006,17 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         # leaving it at `True` was the machine-readable form of "this layer was read
         # whole", which the read cannot claim when nothing vouched for the count.
         "operators_reconciled": operators_reported is not None,
+        # The episodic layer this census used to omit entirely (#12378). Same two facts
+        # as the operator pair, for the same reason: `events_read` is the READ's own
+        # count, `events_total_reported` is `counts.Event`, and the reader refuses when
+        # they disagree — so a reader of this artifact can see both.
+        "events_read": len(events),
+        "events_total_reported": events_reported,
+        # `events_total_reported is None` means NO cross-check was available: the layer's
+        # completeness then rests on `get_events` having no `offset`, where a short
+        # response is indistinguishable from a whole layer. A driver must be able to
+        # answer that from a FIELD rather than from prose.
+        "events_reconciled": events_reported is not None,
         "source_count_gap": gap,
         "structure": structure,
         "graphs": graphs,
@@ -789,6 +1059,7 @@ def _disarmed_artifact(
     census_measured: bool | None = None,
     read_note: str | None = None,
     operators: tuple[int, int | None] | None = None,
+    events: tuple[int, int | None] | None = None,
 ) -> int:
     """A DISARMED run that stopped early: exit 0, the reason on the artifact.
 
@@ -847,6 +1118,8 @@ def _disarmed_artifact(
     # makes — with the only contrary fact in `read_note` prose, which is the defect the
     # field exists to close, one artifact over.
     operators_read, operators_reported = (None, None) if operators is None else operators
+    #: The episodic layer's own tri-state, resolved ONCE for the same reason.
+    events_read, events_reported = (None, None) if events is None else events
     payload = {
         # `null` when the census could not be measured — never a zeroed census, which
         # is indistinguishable from "the graph is empty" (the silent-zero class R7
@@ -867,6 +1140,16 @@ def _disarmed_artifact(
         "operators_total_reported": operators_reported,
         "operators_reconciled": (None if operators is None
                                  else operators_reported is not None),
+        # ⛔ The episodic layer's TRI-STATE travels on the disarmed arms too, and for the
+        # reason the operator pair does: `None` means NO COMPLETED LAYER READ, not "this
+        # graph has no Events"; `(n, m)` is a completed read, `(n, None)` a completed read
+        # with no count to reconcile it. A disarmed payload that dropped these fields made
+        # the layer's state unknowable exactly when the run was reduced to reporting it
+        # (the round-2/3 defect class on the operator layer, one layer over).
+        "events_read": events_read,
+        "events_total_reported": events_reported,
+        "events_reconciled": (None if events is None
+                              else events_reported is not None),
         "run": {
             "applied": False, "off": True, "skipped_known": 0, "written": 0,
             "target_graph": args.target, "digest": None, "refused": refused,
@@ -903,6 +1186,14 @@ def cmd_plan(args: argparse.Namespace) -> int:
     #: `(rows, reported)`. Declared before the `try` so every disarmed arm reports the
     #: truth for its own point in the sequence (see the assignment below).
     layer: tuple[int, int | None] | None = None   # set only when the read COMPLETES
+    #: The episodic layer's own tri-state — `None` until the Event read completes, then
+    #: `(rows, reported)`. A SECOND field, not a reuse of `layer`: "the reasoning layer was
+    #: read" says nothing about the episodic one. ⛔ Declared before the `try` for `layer`'s
+    #: reason and one more: the refusal handler below reports it, so a refusal raised by
+    #: any read at or before the Event read would leave a later assignment unreached — an
+    #: UnboundLocalError inside the handler, turning a designed rc 3 into a traceback
+    #: (measured: the disarmed-Event-read-failure test caught exactly that).
+    episodic: tuple[int, int | None] | None = None
     try:
         counts = reader.counts()
         points, points_total = reader.read_points(page=args.page, verify=args.verify_read)
@@ -922,6 +1213,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # `None` ("never read") would state the opposite of what happened (round-3
         # review). `None` now means only what it says.
         layer = (len(operators), operators_reported)
+        # ⛔ The episodic layer (#12378): count FRESH, immediately before the read, for the
+        # reason `cmd_inventory` states — the `counts` above predates the point walk, and
+        # the refusal claims a two-request window.
+        events, events_reported = reader.read_events(reader.counts())
+        episodic = (len(events), events_reported)
         # INSIDE the guard too: `graphs()` feeds the identity guard and the ledger
         # scope, so a failure there is the same census class.
         graphs = reader.graphs()
@@ -940,7 +1236,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # end — dropping it would lose the only record that part of this census came from
         # a different graph than `--graph` names.
         return _disarmed_artifact(args, str(exc), refused=str(exc), read_failure=str(exc),
-                                  read_note=reader.note, operators=layer)
+                                  read_note=reader.note, operators=layer, events=episodic)
     except Exception as exc:
         # ⛔ THE SWITCH IS RESOLVED BEFORE THE CENSUS, for EVERY read — not only the
         # source section. An armed run still raises (a failed read must be loud); a
@@ -960,7 +1256,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # commit's own `run.refused` defect, one field over (round-2 review).
         return _disarmed_artifact(args, f"{type(exc).__name__}: {exc}",
                                   refused=f"{type(exc).__name__}: {exc}",
-                                  read_note=reader.note, operators=layer,
+                                  read_note=reader.note, operators=layer, events=episodic,
                                   read_failure=f"{type(exc).__name__}: {exc}")
     gap = _source_gap(counts, len(sources))
     unreconciled = _unreconciled_sources(len(sources), gap)
@@ -984,7 +1280,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
               "`--target` names cannot be proven — an applying run is refused rather "
               "than resolved by shape", file=sys.stderr)
         return 3
-    plan = C.build_plan(points + sources + operators,
+    plan = C.build_plan(points + sources + operators + events,
                         source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target)
     try:
@@ -1020,6 +1316,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
                                       pending=len(plan.carry_rows()), refused=str(exc),
                                       census_measured=unreconciled is None,
                                       operators=layer,
+                                      events=episodic,
                                       read_note=reader.note)
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3
@@ -1051,6 +1348,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
                "operators_total_reported": operators_reported,
                # See `cmd_inventory`: the layer's completeness is a field, not a note.
                "operators_reconciled": operators_reported is not None,
+               # The episodic layer (#12378), same three facts as the reasoning one.
+               "events_read": len(events),
+               "events_total_reported": events_reported,
+               "events_reconciled": events_reported is not None,
                "source_count_gap": gap,
                # The plan is the artifact a driver writes; a census without the
                # classes this read path cannot enumerate reads as complete.

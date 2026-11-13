@@ -3110,8 +3110,8 @@ OPERATOR_ROWS = [
 _UNSET = object()
 
 
-def _with_operator_count(call, operators=()):
-    """Adapt a PRE-OPERATOR fake surface: it now has to answer ONE more section.
+def _with_operator_count(call, operators=(), events=()):
+    """Adapt a PRE-OPERATOR fake surface: it now has to answer MORE reads.
 
     Every fake written before 2026-11-13 answers an unknown section with an empty
     listing, which the harness cannot tell from an UNREAD operator layer — so the
@@ -3119,25 +3119,47 @@ def _with_operator_count(call, operators=()):
     fail for an unrelated reason. The wrapper makes the fake's graph explicit: these
     rows answer `tortoise_search`, and this count answers `structure.operators`.
     A test that exercises the operator read itself must NOT be wrapped.
+
+    The EVENT layer (#12378) needs the same adaptation for the same reason, and without
+    it the whole pre-existing suite would fail on a refusal that has nothing to do with
+    what each test is about: `events` answers `tortoise_get_entity(type="events")` and
+    its length answers `counts.Event` in the status section. The default `events=()` is a
+    graph with NO Event layer, which is a legitimate census — and because the count is
+    merged as well, it reconciles to 0 rather than hitting the silent-zero refusal.
+    A test that exercises the EVENT read itself must NOT be wrapped either.
     """
     def wrapped(name, args):
         args = args or {}
         if name == "tortoise_search":
             return {"result": list(operators)}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return {"result": list(events)}
         res = call(name, args)
         if args.get("section") == "structure" and isinstance(res, dict) and "error" not in res:
             merged = {k: v for k, v in res.items() if k not in ("result", "results", "points")}
             merged.setdefault("operators", len(operators))
             return merged
+        if args.get("section") == "status" and isinstance(res, dict) and "error" not in res:
+            merged = dict(res)
+            counts = merged.get("counts")
+            if isinstance(counts, dict):
+                counts = dict(counts)
+                counts.setdefault("Event", len(events))
+                merged["counts"] = counts
+            else:
+                merged.setdefault("Event", len(events))
+            return merged
         return res
     return wrapped
 
 
-def _operator_surface(operators=None, *, reported=_UNSET, points=None):
+def _operator_surface(operators=None, *, reported=_UNSET, points=None, events=()):
     """A fake surface whose operator layer answers `tortoise_search`, like the real one.
 
     ``reported=None`` means the `structure` section carries NO `operators` key at all
     (the unreported arm) — distinct from the default, which is the layer's own length.
+    ``events`` answers the Event read (#12378) and for the same reason: every surface in
+    this file now has to, or the census refuses a layer the fake simply never mentioned.
     """
     operators = OPERATOR_ROWS if operators is None else operators
     points = ([{"id": "p1", "kind": "decision", "content": "a durable claim"}]
@@ -3150,6 +3172,8 @@ def _operator_surface(operators=None, *, reported=_UNSET, points=None):
             if args.get("entity_type") == "operator":
                 return {"result": list(operators)}
             return {"result": []}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return {"result": list(events)}
         if name == "tortoise_query":
             return {"result": list(points), "total": len(points)}
         if args.get("section") == "structure":
@@ -3158,7 +3182,8 @@ def _operator_surface(operators=None, *, reported=_UNSET, points=None):
                 structure["operators"] = reported
             return structure
         if args.get("section") == "status":
-            return {"counts": {"Point": len(points), "Source": 0}}
+            return {"counts": {"Point": len(points), "Source": 0,
+                               "Event": len(events)}}
         if args.get("section") == "sources":
             return {"result": []}
         if args.get("section") == "graphs":
@@ -3197,13 +3222,11 @@ def test_the_operator_layer_is_not_claimed_unlistable():
     mod = _tool_module()
     assert "operator" not in mod.NOT_ENUMERABLE, mod.NOT_ENUMERABLE
     # ...and the classes this pass does NOT read stay named, each with its own reason.
-    # `event` belongs here because it is NOT read by this pass — not because it is
-    # unlistable (it is not: see the entry's own text and #12378).
-    for still_named in ("object", "event", "subject"):
+    # ⛔ `event` is NOT in this tuple any more: #12378 made the Event layer a READ layer,
+    # so an entry describing it as unenumerated would be the same defect one layer over.
+    # (`test_the_event_layer_is_no_longer_claimed_unreadable` pins that side.)
+    for still_named in ("object", "subject"):
         assert still_named in mod.NOT_ENUMERABLE, still_named
-    assert "no listing surface" not in mod.NOT_ENUMERABLE["event"], (
-        "the Event layer IS readable in one call (measured 2026-11-13); its entry "
-        "records that it is deliberately not read here, not that it cannot be read")
 
 
 def test_an_operator_is_never_carried_as_a_floating_node():
@@ -3392,12 +3415,17 @@ def test_the_operator_read_is_routed_to_the_graph_and_falls_back_on_a_binding_re
                 return {"error": "This credential is bound to one graph and cannot be "
                                  "re-targeted by a `graph` argument (requested x)"}
             return {"result": list(OPERATOR_ROWS)}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            # This surface's Event layer is empty but RECONCILED: the census reads it
+            # now (#12378), and an unmentioned layer would refuse the run for a reason
+            # this test is not about.
+            return {"result": []}
         if name == "tortoise_query":
             return {"result": [{"id": "p1", "kind": "decision", "content": "c"}], "total": 1}
         if args.get("section") == "structure":
             return {"total": 1, "operators": len(OPERATOR_ROWS)}
         if args.get("section") == "status":
-            return {"counts": {"Point": 1, "Source": 0}}
+            return {"counts": {"Point": 1, "Source": 0, "Event": 0}}
         if args.get("section") == "sources":
             return {"result": []}
         return {"result": []}
@@ -3991,3 +4019,350 @@ def test_a_structure_refusal_is_the_designed_refusal_on_BOTH_verbs(monkeypatch, 
                        "--out", str(tmp_path / "p.json")])
     assert rc == 3, (verb, rc, capsys.readouterr())
     assert "REFUSED" in capsys.readouterr().err
+
+
+# ── the Event layer is READABLE, and the census must not omit it (#12378) ──
+#
+# Measured on live-v4, 2026-11-13, read-only: `tortoise_get_entity(None,
+# type="events", limit=5000)` returns **4,670 rows in ONE call**, exactly `counts.Event`
+# — the ADVERTISED path (the older `tortoise_get_events` name is retired at the server,
+# #3883). The harness recorded the layer as "READABLE but NOT read by this pass" and
+# never enumerated it, so the census carried no per-kind resolution for the episodic
+# tier and #11469's Target 2 ("every dropped row is named with its reason") could not be
+# satisfied for rows it never read.
+#
+# What the layer does NOT do is move a row: `classify_event` answers `undecidable` on
+# both of its arms (an agent-session container, whose home is #10000's open D1 question;
+# a domain Event, whose write path has no `events` section). The read buys per-kind
+# census resolution, and these cases pin it plus the guards that keep a truncated layer
+# out of the census.
+
+#: The real `get_events` row shape: `properties(e)` of a `:Event`, whose text is `name`
+#: (persisted because it is absent from `_EVENT_HANDLED`, `projection/entities.py`).
+#: A meeting persists `title` instead — that is the declared fallback, and `ev3` pins it.
+EVENT_ROWS = [
+    {"id": "ev-1", "eventKind": "AgentSession", "name": "session 2026-11-13"},
+    {"id": "ev-2", "eventKind": "meeting", "name": "kickoff"},
+    {"id": "ev-3", "eventKind": "deployment", "title": "deploy 4f2a", "subject": "tortoise"},
+]
+
+
+def _event_surface(events=None, *, reported=_UNSET, points=None, operators=None):
+    """A fake surface whose Event layer answers `tortoise_get_entity(type="events")`.
+
+    ``reported=None`` means the STATUS section carries no `Event` count at all (the
+    unreported arm) — distinct from the default, which is the layer's own length.
+    """
+    events = EVENT_ROWS if events is None else events
+    reported = len(events) if reported is _UNSET else reported
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return {"result": list(events)}
+        if name == "tortoise_search":
+            return {"result": list(operators or [])}
+        if name == "tortoise_query":
+            pts = ([{"id": "p1", "kind": "decision", "content": "a durable claim"}]
+                   if points is None else points)
+            return {"result": list(pts), "total": len(pts)}
+        if args.get("section") == "structure":
+            return {"total": 1, "operators": len(operators or [])}
+        if args.get("section") == "status":
+            counts = {"Point": 1, "Source": 0}
+            if reported is not None:
+                counts["Event"] = reported
+            return {"counts": counts}
+        return {"result": []}
+    return call
+
+
+def test_the_event_layer_reaches_the_census(monkeypatch, tmp_path):
+    """The episodic layer is 4,670 readable rows in one call, and the census must carry it.
+
+    Omitting it made `total_rows` a claim about a population the pass never read, and
+    left the episodic tier as one undifferentiated number in `by_class` — where the
+    operator layer was before PR #12380.
+    """
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface())
+    assert mod.main(["inventory", "--out", str(tmp_path / "inv.json"),
+                     "--no-verify-read"]) == 0
+    report = json.loads((tmp_path / "inv.json").read_text())
+    census = report["census"]
+    assert census["total_rows"] == 4, census            # 1 point + 3 events
+    assert census["by_class"]["event:AgentSession"]["undecidable"] == 1, census["by_class"]
+    assert census["by_class"]["event:meeting"]["undecidable"] == 1, census["by_class"]
+    assert census["by_class"]["event:deployment"]["undecidable"] == 1, census["by_class"]
+    assert report["events_read"] == 3, report.get("events_read")
+    assert report["events_total_reported"] == 3, report.get("events_total_reported")
+    assert report["events_reconciled"] is True, report.get("events_reconciled")
+
+
+def test_the_event_layer_is_no_longer_claimed_unreadable():
+    """The surface table must not describe a read layer as one this pass does not read.
+
+    `NOT_ENUMERABLE["event"]` said "READABLE but NOT read by this pass" — a scope
+    decision written in the table whose job is to name what *cannot* be reached, and the
+    report then presented itself as complete over 4,670 unread rows.
+    """
+    mod = _tool_module()
+    assert "event" not in mod.NOT_ENUMERABLE, mod.NOT_ENUMERABLE
+    # ...and the classes this pass still does NOT read stay named.
+    for still_named in ("object", "subject"):
+        assert still_named in mod.NOT_ENUMERABLE, still_named
+
+
+def test_an_events_text_is_its_name_with_title_and_subject_fallbacks():
+    """An Event's text is `name`; a meeting persists `title`. Content-address on either.
+
+    `Row.stable_key` is content-addressed for this class, so an empty text folds every
+    such row onto one keeper — the trap the operator layer was fixed for.
+    """
+    mod = _tool_module()
+    reader = mod.MCPReader(_event_surface(), None)
+    rows, reported = reader.read_events({"counts": {"Event": 3}})
+    assert reported == 3
+    assert [r.content for r in rows] == ["session 2026-11-13", "kickoff", "deploy 4f2a"]
+    assert [r.kind for r in rows] == ["AgentSession", "meeting", "deployment"]
+    assert len({r.stable_key for r in rows}) == 3, [r.stable_key for r in rows]
+
+
+def test_an_event_row_carrying_eventId_is_read():
+    """`_upsert_event` writes `id` == the MERGE key `eventId`, but legacy/by-url rows
+    carry the `eventId` spelling — refusing those would drop a readable layer."""
+    mod = _tool_module()
+    reader = mod.MCPReader(
+        _event_surface([{"eventId": "ev-9", "eventKind": "meeting", "name": "x"}]), None)
+    rows, _ = reader.read_events({"counts": {"Event": 1}})
+    assert [r.node_id for r in rows] == ["ev-9"]
+
+
+def test_an_event_row_with_no_identity_is_refused(monkeypatch, tmp_path, capsys):
+    """Two id-less Events are indistinguishable and would fold onto one keeper."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _event_surface([{"eventKind": "meeting", "name": "x"}]))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"),
+                   "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    err = capsys.readouterr().err
+    assert "eventId" in err and "Event row" in err, err
+
+
+def test_an_event_layer_above_the_ceiling_is_refused(monkeypatch, tmp_path, capsys):
+    """There is no offset walk, so a population above the ceiling has no whole read."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _event_surface(events=[], reported=mod.EVENT_READ_CEILING + 1))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"), "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    err = capsys.readouterr().err
+    # ⛔ The BOUND's own words, not just "Event layer": the disagreement arm also says
+    # "Event layer" (0 rows vs a reported 10,001), so an assertion on the subject only
+    # stayed green with this arm deleted — measured, and it is why the ceiling text is
+    # named here.
+    assert "RESPONSE BOUND" in err, err
+
+
+def test_a_truncation_shaped_event_read_is_refused(monkeypatch, tmp_path, capsys):
+    """A response that FILLS the limit, with nothing vouching for it, may be truncated.
+
+    `sdk.get_events` is `MATCH (e:Event) … LIMIT $lim` with no `SKIP`, so "a full page"
+    and "a truncated layer" are the same bytes. Deleting this arm reds this test.
+    """
+    mod = _tool_module()
+    at_limit = [{"id": f"ev-{i}", "eventKind": "meeting", "name": f"m{i}"}
+                for i in range(mod.EVENT_READ_CEILING)]
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _event_surface(at_limit, reported=None))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"), "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    assert "truncated" in capsys.readouterr().err
+
+
+def test_a_zero_row_event_read_with_no_count_refuses(monkeypatch, tmp_path, capsys):
+    """"No Events in this graph" and "the layer was not read" are the same bytes."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface([], reported=None))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"), "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    assert "Event" in capsys.readouterr().err
+
+
+def test_an_event_read_disagreeing_with_the_count_is_refused(monkeypatch, tmp_path,
+                                                             capsys):
+    """Two surfaces describing one population must agree, or one did not read it."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool",
+                        _event_surface(EVENT_ROWS, reported=9))
+    rc = mod.main(["inventory", "--out", str(tmp_path / "i.json"), "--no-verify-read"])
+    assert rc == 3, capsys.readouterr()
+    assert "counts.Event" in capsys.readouterr().err
+
+
+def test_an_unreported_event_count_is_disclosed_not_refused(monkeypatch, tmp_path):
+    """A lost cross-check over a NON-EMPTY read is a note, not a lost population."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface(EVENT_ROWS, reported=None))
+    assert mod.main(["inventory", "--out", str(tmp_path / "i.json"),
+                     "--no-verify-read"]) == 0
+    report = json.loads((tmp_path / "i.json").read_text())
+    assert report["events_read"] == 3
+    assert report["events_total_reported"] is None
+    assert report["events_reconciled"] is False
+    assert "Event" in (report["read_note"] or ""), report.get("read_note")
+
+
+def test_the_event_read_is_routed_to_the_graph():
+    """Omitting `graph` reads the DEFAULT graph while every other section came from
+    `--graph` — a census mixing two graphs, which is the operator read's own defect."""
+    mod = _tool_module()
+    calls: list[dict] = []
+
+    def call(name, args):
+        calls.append({"name": name, **(args or {})})
+        return {"result": list(EVENT_ROWS)}
+
+    reader = mod.MCPReader(call, "org_x_g_old")
+    reader.read_events({"counts": {"Event": 3}})
+    assert calls and calls[0]["name"] == "tortoise_get_entity", calls
+    assert calls[0].get("type") == "events", calls
+    assert calls[0].get("graph") == "org_x_g_old", calls
+
+
+def test_a_bound_credential_falls_back_and_discloses_on_the_event_read():
+    """A graph-BOUND credential cannot be re-targeted: re-read without the argument and
+    SAY SO — but only for a refusal about the graph itself."""
+    mod = _tool_module()
+
+    def call(name, args):
+        if (args or {}).get("graph"):
+            return {"error": "This credential is bound to one graph and cannot be "
+                             "re-targeted by a `graph` argument"}
+        return {"result": list(EVENT_ROWS)}
+
+    reader = mod.MCPReader(call, "org_x_g_old")
+    rows, reported = reader.read_events({"counts": {"Event": 3}})
+    assert len(rows) == 3 and reported == 3
+    assert "Event read" in (reader.note or ""), reader.note
+
+
+def test_a_disarmed_event_read_failure_reports_the_layer_as_unread(monkeypatch, tmp_path):
+    """`None` means NO COMPLETED READ — not "this graph has no Events".
+
+    The round-2/3 defect class on the operator layer, one layer over: a disarmed payload
+    that DROPS the layer's fields leaves its state unknowable exactly when the run has
+    been reduced to reporting it.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_get_entity" and args.get("type") == "events":
+            return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
+        return _with_operator_count(_event_surface())(name, args)
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--off",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["events_read"] is None, payload
+    assert payload["events_total_reported"] is None, payload
+    assert payload["events_reconciled"] is None, payload
+    # The READ that refused is identified by the tri-state (`None`, not 0), and the
+    # envelope's own text rides `read_failure` — the same shape the operator layer's
+    # refusal takes, because `normalise_tool_result` raises before the layer-specific
+    # message is reachable. One state, one spelling, both layers.
+    assert "429" in (payload["read_failure"] or ""), payload
+
+
+def test_a_disarmed_run_after_a_completed_event_read_reports_the_pair(monkeypatch,
+                                                                     tmp_path):
+    """The OTHER arm of the same tri-state: a completed read travels with its count."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface())
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--off",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["run"]["off"] is True, payload["run"]
+    assert payload["events_read"] == 3, payload
+    assert payload["events_total_reported"] == 3, payload
+    assert payload["events_reconciled"] is True, payload
+
+
+def test_an_agent_session_event_gets_the_session_reason_not_the_domain_one():
+    """`AgentSession` is the real spelling; the classifier used to test lower-case only.
+
+    `sdk.index_sessions` writes `"eventKind": "AgentSession"` and `_upsert_event` stores
+    it verbatim, while `classify_event` compared against `agentSession` case-SENSITIVELY.
+    That was unreachable while nothing read the layer; once `read_events` enumerated it,
+    every agent-session row fell through to the domain branch and was reported as
+    "a domain Event … no `events` write section" — the disposition stayed `undecidable`
+    (nothing was carried by mistake), but the per-row REASON, which is the one thing
+    reading the layer buys, was false for the whole 4,670-row layer.
+    """
+    _tool_module()          # the module must import; the classifier is the subject
+    packs: dict[tuple[str, str], str] = {}
+    for kind in ("AgentSession", "agentSession", "session", ""):
+        row = C.Row(node_id="ev-x", node_type="event", kind=kind, content="a session")
+        decision = C.classify_event(row, packs)
+        assert decision.disposition == C.UNDECIDABLE, (kind, decision)
+        assert "agent-session Event" in decision.reason, (kind, decision.reason)
+    # ...and a real domain Event keeps the domain reason.
+    domain = C.classify_event(
+        C.Row(node_id="ev-y", node_type="event", kind="deployment", content="deploy 4f2a"),
+        packs)
+    assert domain.disposition == C.UNDECIDABLE, domain
+    assert "no `events` section" in domain.reason, domain.reason
+
+
+def test_the_ledger_disarmed_arm_carries_the_completed_event_layer(monkeypatch, tmp_path):
+    """The THIRD disarmed stop point — and the one a two-arm tri-state test would miss.
+
+    `cmd_plan` reaches `_disarmed_artifact` from three call sites (a refused census read,
+    an unexpected exception, and a refused/damaged LEDGER). The operator precedent passes
+    its layer to all three; a test that only exercises the first two stays green with the
+    ledger arm silently dropping `events_*`, which is exactly the round-2/3 defect class
+    on the operator layer one layer over.
+    """
+    mod = _tool_module()
+    led = tmp_path / "l.jsonl"
+    led.write_text("null\n")          # a damaged ledger line: unreadable keys
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface())
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--apply", "--off", "--ledger", str(led), "--no-verify-read",
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["census"] is not None and payload["census_measured"] is True, payload
+    # The audit of this arm is "the census WAS read; the LEDGER is what failed".
+    assert payload["events_read"] == 3, payload
+    assert payload["events_total_reported"] == 3, payload
+    assert payload["events_reconciled"] is True, payload
+
+
+def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
+    """The doc is the other half of the artifact: a stale row makes the read look optional.
+
+    `docs/architecture/CURATION-11469.md` stated the Event layer as "counted here, NOT
+    enumerated … this pass deliberately does not read it (class table; #12378)" and, in
+    the class table, "this pass does NOT read it". Once `read_events` lands those rows are
+    false — and a false doc is how the next lane re-derives the omission as intended.
+    """
+    mod = _tool_module()          # noqa: F841  (the module must import; the doc is the subject)
+    doc = (_pathlib.Path(__file__).resolve().parent.parent
+           / "docs" / "architecture" / "CURATION-11469.md").read_text(encoding="utf-8")
+    assert "this pass does NOT read it" not in doc, (
+        "the class table still says the Event layer is not read")
+    assert "deliberately does not read it" not in doc, (
+        "the node-count table still says the omission is deliberate")
+    assert "counted here, NOT enumerated" not in doc, (
+        "the node-count table still describes the Event layer as unenumerated")
+    # ...and the row records the change rather than dropping the subject.
+    assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (
+        "the Event row must say it IS enumerated now, and cite #12378")
