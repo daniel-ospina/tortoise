@@ -1119,6 +1119,14 @@ def test_the_supersession_line_renders_by_the_labels_own_status_rule(
     assert ask_hit_view["line"] == "", (
         "an ask-lane hit names its layer as `kind`, not `entity_type` — the "
         ":Event still got a Point-lane status: " + repr(ask_hit_view))
+    # ⛔ round 9: a DISPLAY kind is not a LAYER name. `ranking._enrich` spends
+    # `kind` on the display chain (`coalesce(pointKind, objectKind, …)`), so a
+    # dictated value like "statement" must resolve to NO label — otherwise a
+    # display kind would silently decide how a status renders.
+    for _not_a_layer in ({"kind": "statement"}, {"point_kind": "statement"}):
+        assert why_module._entity_label(_not_a_layer) is None, (
+            "a display kind resolved as a layer label: " + repr(_not_a_layer))
+
     event_entry = why_module.item_to_why_entry(
         {"id": "ev1", "entity_type": "event", "why": {"support_chain": []}})
     assert event_entry is not None and event_entry["supersession"]["status"] == "", (

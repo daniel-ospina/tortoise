@@ -200,19 +200,30 @@ def _entity_label(item: dict) -> str | None:
     on the first day (it named a ``:Document`` label no writer produces), so the
     canonical one is imported instead.
 
-    Two spellings reach it, because two answers carry the layer and an item may
-    have either:
-      * ``entity_type`` — the search surfaces;
-      * ``kind`` — the ask-lane/``assemble_context`` hits built by
-        ``assembly.synthesize_hits`` (``"point"``/``"event"``), which carry NO
-        ``entity_type``. ⛔ Without this fallback the unnamed arm below took them,
-        and an ``:Event`` row got the Point-lane word ``live`` on the ask lane — the
-        #6976 conflation reaching the one path the search gates do not cover.
+    Two spellings reach it, because two ANSWERS carry the layer:
+      * ``entity_type`` — the RECALL surfaces (``recall_subgraph`` stamps
+        ``"entity_type": "point"``, ``sdk.py``);
+      * ``kind`` — the ask-lane / ``assemble_context`` hits built by
+        ``assembly.synthesize_hits`` (literal ``"point"``/``"event"``), which carry
+        NO ``entity_type``. ⛔ Without this fallback the unnamed arm below took
+        them, and an ``:Event`` row got the Point-lane word ``live`` on the ask
+        lane — the #6976 conflation reaching the one path the search gates do not
+        cover.
+
+    ⛔ The SEARCH surfaces carry NEITHER (#11928 review round 9): their rows come
+    from ``SearchResult.to_dict``, which emits ``point_kind`` — the CLAIM's kind,
+    not the layer — and no layer key at all, and their enrichment is gated on the
+    ``entity_type`` FUNCTION ARGUMENT, so the unnamed arm below is that lane's whole
+    population and is correct only while the gate is ``entity_type == "point"``. A
+    widening of those gates must SUPPLY the layer; this lookup cannot infer it, and
+    a spelled ``kind`` is not by itself a layer name (``ranking._enrich`` spends it
+    on a DISPLAY kind, ``ranking.py``: ``coalesce(pointKind, objectKind, …)``).
 
     An UNNAMED label is treated as STATUS-CARRYING, which is
-    ``live.status_as_reported``' own rule — right for Point/Subject/Object (and
-    for an operator, which IS a ``:Point``), and reachable here only for an item
-    that names neither spelling."""
+    ``live.status_as_reported``' own rule — right for Point/Subject/Object (and for
+    an operator, which IS a ``:Point``), and reachable here for an item that names
+    neither spelling OF ITS LAYER (a display ``kind`` such as ``"statement"`` or a
+    ``point_kind`` is not one)."""
     for _key in ("entity_type", "kind"):
         _value = item.get(_key)
         if isinstance(_value, str):
