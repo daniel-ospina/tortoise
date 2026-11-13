@@ -6184,16 +6184,26 @@ def _verdict_facts(facts, node_id, mention_name: str = "") -> dict:
     aliases = entry.get("aliases")
     spellings = {normalize_entity_name(a) for a in aliases
                  if a is not None} if isinstance(aliases, (list, tuple, set)) else set()
-    # ⛔ The candidate's OWN name counts, not only its aliases. A mention spelled
-    # exactly like the target is not inferring membership of a group — nothing is
-    # being inferred — and phase 1 can miss it when the mention's kind is unstated
-    # (`""`/`other`/`unclassified`), which used to reach phase 2 and there be
-    # vetoed `group_join` with the reason "no alias of the candidate carries this
-    # spelling" about the candidate's own name.
-    if entry.get("name"):
-        spellings.add(normalize_entity_name(entry["name"]))
-    out["mention_is_alias"] = bool(
-        mention_name and normalize_entity_name(mention_name) in spellings)
+    mention_folded = normalize_entity_name(mention_name) if mention_name else ""
+    # ⛔ TWO facts, not one, and the split is load-bearing.
+    #
+    # `mention_is_alias` means the spelling is one a MERGE RECORDED in the
+    # candidate's `aliases[]` — the reviewer already decided these two are one
+    # entity, so the verdict must not re-litigate the identifier/date/kind
+    # spellings (an entity hold is not carried forward, so re-litigating LOSTS the
+    # mention forever). `aliases[]` ONLY: folding the candidate's own name in here
+    # would stand `kind_conflict` down for every phase-2 proposal of the form
+    # "same spelling, different declared kind", which is the DOMINANT phase-2
+    # shape (phase 1's name rungs are kind-gated, so that pair is exactly what
+    # reaches phase 2) — a silent false merge, and there is no alias record
+    # behind it.
+    out["mention_is_alias"] = bool(mention_folded and mention_folded in spellings)
+    # `mention_is_own_name` means the mention is spelled exactly like the target.
+    # That is not an inference about a group, so it stands `group_join` down —
+    # but it is not a reviewer's record either, so the spelling vetoes still run.
+    out["mention_is_own_name"] = bool(
+        mention_folded and entry.get("name")
+        and mention_folded == normalize_entity_name(entry["name"]))
     return out
 
 

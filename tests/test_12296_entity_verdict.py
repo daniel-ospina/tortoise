@@ -942,7 +942,11 @@ class TestTheResolverBands:
                            "suppressed": False, "name": "Acme Holdings",
                            "aliases": ["team"]}}
         derived = v2._verdict_facts(facts, "obj-0", "Acme Holdings")
-        assert derived["mention_is_alias"] is True, derived
+        # The own-name fact stands `group_join` down; it is NOT an alias record,
+        # so the spelling vetoes keep running (see the same-spelling/different-kind
+        # case below).
+        assert derived["mention_is_own_name"] is True, derived
+        assert derived["mention_is_alias"] is False, derived
         for kind in ("", "other"):
             res = v2.resolve_entities(
                 [{"name": "Acme Holdings", "kind": kind}],
@@ -1039,6 +1043,35 @@ class TestTheResolverBands:
                "link_before_create": []}
         notes = v2._supersession_records(raw, {"entities": folded})
         assert notes == [], notes
+
+    def test_same_spelling_with_a_different_kind_is_still_a_kind_conflict(
+            self, monkeypatch):
+        """The OWN-NAME fact must not stand `kind_conflict` down.
+
+        Phase 1's name rungs are kind-gated, so "same spelling, different declared
+        kind" is the DOMINANT phase-2 shape. Widening the alias record to include
+        the candidate's own name made that pair merge silently — a false merge,
+        the expensive direction — with no alias record behind it.
+        """
+        facts = {"obj-0": {"retired": False, "dependents": 0,
+                           "suppressed": False, "name": "Acme",
+                           "aliases": []}}
+        derived = v2._verdict_facts(facts, "obj-0", "Acme")
+        assert derived["mention_is_alias"] is False, derived
+        assert derived["mention_is_own_name"] is True, derived
+        monkeypatch.setattr(
+            v2, "_complete",
+            lambda *a, **kw: '{"resolutions": [{"name": "Acme", '
+                             '"resolves_to": "obj-0"}], "new": []}')
+        res = v2.resolve_entities(
+            [{"name": "Acme", "kind": "core:plan"}],
+            {"entities": [{"id": "obj-0", "name": "Acme",
+                           "kind": "core:org"}], "degraded": False},
+            model=object(), facts=facts)
+        assert res["map"] == {}, res
+        assert res["new"] == [], res
+        assert [h["reason"] for h in res["held"]] == [v2.HOLD_VETOED], res
+        assert res["held"][0]["vetoes"] == [verdict.VETO_KIND_CONFLICT], res
 
     def test_the_facts_reader_and_the_resolver_are_wired_together(
             self, sdk_factory):

@@ -229,12 +229,15 @@ name-only mention has no node, so only the target-less form (`target_suppressed`
 is evaluable here; the targeted form is honoured by the merge verb
 (`sdk.py:24861-24879`). Stated rather than approximated.
 
-**Phase 1 applies `target_retired` — and, on the alias path, the name/kind vetoes
-too.** It binds on an exactly-equal folded name+kind *or* on a spelling the
-survivor's `aliases[]` already records (`mode: "alias"`), and on that second path
-the two spellings differ by more than separators, so `identifier_conflict` /
-`date_conflict` / `kind_conflict` are reachable there (the warning names the codes
-that actually fired, never a retirement that did not happen). `group_join` is
+**Phase 1 applies `target_retired` only.** It binds on an exactly-equal folded
+name+kind *or* on a spelling the survivor's `aliases[]` already records
+(`mode: "alias"`), and on that alias path the three SPELLING vetoes are stood
+down on purpose: `aliases[]` is the reviewer's record that these two are one
+entity, and `kind_conflict` in particular would fire on the retired variant's kind
+namespace (`extractor_v2.py` passes `mention_is_alias: mode == "alias"`, and the
+warning names only the codes that actually fired). On the exact/bare rungs the
+spellings are `_norm`-equal and the kind already matched, so none of the three can
+fire there either. What phase 1 never skips is `retired` — D-1's second door. `group_join` is
 deliberately NOT applied in phase 1: an exactly-equal spelling, or one the merge
 recorded as an alias, is the strongest evidence the tree has, and the merge
 queue's own rule lets an exact re-mention bind. `target_suppressed` is NOT applied

@@ -77,10 +77,11 @@ veto lives in to know that it fired:
 
 ``date_conflict``
     Both sides carry a year and/or a quarter token, the values are disjoint for a
-    SHARED kind, **and the names are otherwise the same** (`the Q3 plan` vs `the
-    Q4 plan`). Evaluated per kind, so `Q3 plan` against `2026 plan` is not a
-    conflict: nothing there is contradicted, and those two spellings can name one
-    entity.
+    SHARED kind (or for a shared IMPLIED dimension — year / month / day — when the
+    kinds do not meet, which is what makes a full date contradict a bare month),
+    **and the names are otherwise the same** (`the Q3 plan` vs `the Q4 plan`).
+    Compared like with like: `Q3 plan` against `2026 plan` is not a conflict —
+    nothing there is contradicted, and those two spellings can name one entity.
 
 ``kind_conflict``
     Both sides carry a SPECIFIC kind and they differ. `other`/empty is the
@@ -678,7 +679,9 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
         # when it does, the correct answer is a refusal, not a hop: a caller
         # that reached here lost the evidence the hop needs.
         got.append(VETO_TARGET_RETIRED)
-    if int(facts.get("dependents") or 0) >= 1 and not facts.get("mention_is_alias"):
+    if (int(facts.get("dependents") or 0) >= 1
+            and not facts.get("mention_is_alias")
+            and not facts.get("mention_is_own_name")):
         # The alias escape: the survivor's `aliases[]` already records that this
         # exact spelling was folded into it, so no group-level inference is being
         # made. Refusing here would refuse the one case the tree proved, and the
@@ -714,8 +717,9 @@ VETO_REASONS: dict[str, str] = {
         "a contradicting identity, so this is not a merge"
     ),
     VETO_DATE_CONFLICT: (
-        "the two spellings carry disjoint date tokens of the same kind — the "
-        "dates contradict, so this is not a merge"
+        "the two spellings carry disjoint date values — for a shared kind, or for "
+        "a shared implied dimension (year / month / day) when the kinds do not "
+        "meet — so the dates contradict, and this is not a merge"
     ),
     VETO_KIND_CONFLICT: (
         "the two spellings declare different kinds — a typed identity conflict, "
