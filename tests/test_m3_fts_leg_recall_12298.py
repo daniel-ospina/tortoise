@@ -652,25 +652,34 @@ def _shape(text: str, values: tuple[str, ...] = (),
     magnitude (`_magnitude`), which puts the sign inside the wildcard.
     """
     # Each `free` entry maps every one of its ALTERNATIVES to that entry's
-    # pattern; a plain entry is `\S+`, an alternation entry only its own words.
+    # pattern; a plain entry is `[^\s*]+`, an alternation entry only its own words.
+    # ⛔ The slot is `[^\s*]+`, NOT `\S+`: a slot at the head of a claim otherwise
+    # swallows the markdown emphasis (`**Shipped:`), so the match no longer equals
+    # the stored text and a CORRECT document false-reds (measured).
+    # ⛔ The split is CASE-INSENSITIVE and anchored at TOKEN BOUNDARIES, mirroring
+    # `_strip_free` (#12349 round-24 reviewer, cycle 8): the gate counted
+    # `shipped` as named while the case-sensitive split kept `Shipped` literal in
+    # the shape, so the plant went green — a declaration that silently does
+    # nothing, which is the one failure this mechanism exists to prevent.
     slot: dict[str, str] = {}
     for entry in free:
         pat = (r"(?:" + "|".join(re.escape(a) for a in entry.split("|")) + ")"
-               if "|" in entry else r"\S+")
+               if "|" in entry else r"[^\s*]+")
         for alt in entry.split("|"):
-            slot[alt] = pat
+            slot[alt.lower()] = pat
     pattern = "(" + "|".join(
-        [re.escape(a) for a in sorted(slot, key=len, reverse=True)]
+        [r"(?<![A-Za-z0-9_])(?i:" + re.escape(a) + r")(?![A-Za-z0-9_])"
+         for a in sorted(slot, key=len, reverse=True)]
         + [_SIGNED_NUMBER]) + ")"
     out = []
     named = {_magnitude(v) for v in values}
     for part in re.split(pattern, text):
-        if part in slot:
+        if part is not None and part.lower() in slot:
             # `\S+`, not `\w+`: the falsifiable content of a claim is not always a
             # word — `` `==`, not `>=` `` has operators as its content, and a
             # `\w+` wildcard there matched nothing at all (measured: the pin
             # reddened on the TRUE sentence).
-            out.append(slot[part])
+            out.append(slot[part.lower()])
         elif _magnitude(part) in named:
             out.append(_SIGNED_NUMBER)
         else:
@@ -706,6 +715,19 @@ def _only_claim(scope: str, true: str, where: str,
         "copy no longer matches and the plant passes — the false-pass class "
         "three review cycles found (#12349 round 24). Pass it in `values=`, or "
         "in `free=` if it is a word/threshold rather than a number")
+    # ⛔ A PLAIN `free` entry that does not occur in its own claim declares
+    # nothing (an alternation legitimately holds words the claim does not use).
+    # This is the check that would have caught the case-sensitivity split above
+    # (#12349 round-24 reviewer, cycle 8).
+    for entry in free:
+        if "|" in entry:
+            continue
+        if not re.search(r"(?<![A-Za-z0-9_])" + re.escape(entry)
+                         + r"(?![A-Za-z0-9_])", true, re.I):
+            raise AssertionError(
+                f"{where} declares `free={entry!r}` but the claim {true!r} does "
+                "not contain that word — an unused declaration leaves the word "
+                "LITERAL in the shape, so the pin silently stops seeing it")
     unnamed_words = _unnamed_words(true, free)
     assert not unnamed_words, (
         f"{where} pins a claim whose DIRECTION words are not all named: "
@@ -831,10 +853,18 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     #     the gate reported success while a pivot sat literal — a fail-OPEN in the
     #     gate itself (#12349 round-24 reviewer, cycle 7).
     with pytest.raises(AssertionError, match="DIRECTION words are not all named"):
+        _only_claim("not accepted, and nothing else is",
+                    "not accepted, and nothing else is", "scope",
+                    free=("not",))
+    _only_claim("not accepted, and nothing else is",
+                "not accepted, and nothing else is", "scope",
+                free=("not", "nothing"))
+    # …and a PLAIN `free` entry that does not occur in the claim declares NOTHING,
+    # which is the other half of the same failure (cycle 8: a case-sensitive split
+    # let `free=("shipped",)` be counted as named while `Shipped` stayed literal).
+    with pytest.raises(AssertionError, match="does not contain that word"):
         _only_claim("nothing else is accepted", "nothing else is accepted",
                     "scope", free=("not",))
-    _only_claim("nothing else is accepted", "nothing else is accepted",
-                "scope", free=("nothing",))
 
 
 # ── 1. the defect claim, asserted against the shipped tokenizer ─────────────
@@ -2211,20 +2241,25 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     # truth restated beside it in §3.3).
     _only_claim(section33, f"the {len(hashed)} `#n` shapes",
                 "§3.3's `#n` population", values=(str(len(hashed)),))
-    _only_claim(section33, f"**{sh} of {len(hashed)}**",
+    # ⛔ EVERY digit here is a value, so `**N of N**` alone identifies nothing: a
+    # second, TRUE bolded ratio in §3.3 false-reds it (round-24 reviewer, cycle 8).
+    # The claim carries the sentence's own words.
+    _only_claim(section33,
+                f"found by the **shipped** leg **{sh} of {len(hashed)}**",
                 "§3.3's `#n` recall cell",
-                values=(str(sh), str(len(hashed))))
+                values=(str(sh), str(len(hashed))), free=("shipped",))
     want = (f"the {len(snake)} `snake_case` names: {sn_sh} of {len(snake)} "
             f"({sn_sh / len(snake):.3f}) shipped → {sn_fx} of {len(snake)} "
             f"({sn_fx / len(snake):.3f}) with the in-place fix, "
             f"+{(sn_fx - sn_sh) / len(snake) * 100:.1f} pts")
     _only_claim(plain33, want,
                 "§3.3's `snake_case` decomposition (re-derived from the ranks)",
-                free=("\u2192", "shipped"),
                 values=(str(len(snake)), str(sn_sh),
                         f"{sn_sh / len(snake):.3f}", str(sn_fx),
                         f"{sn_fx / len(snake):.3f}",
-                        f"{(sn_fx - sn_sh) / len(snake) * 100:.1f}"))
+                        f"{(sn_fx - sn_sh) / len(snake) * 100:.1f}"),
+                # ⛔ `with|without` inverts which arm the +91.8 belongs to.
+                free=("\u2192", "shipped", "with|without"))
 
 
 def test_changelog_does_not_restate_superseded_numbers(artifact, population,
@@ -2542,9 +2577,16 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     # a falsified total with the true one restated inside §4.3 stayed green. ⛔ The
     # claim carries its own words — a bare `73.5 %` shape (`\d+\.\d+ %`) matches
     # every other percentage in the section, which is a false red, not a pin.
-    _only_claim(_s43, f"the rows above sum to {total:.1f} %",
-                "§4.3's published share total", values=(f"{total:.1f}",),
-                free=("above|below",))
+    # ⛔ `above|below` freed plus a value-only number leaves the SHAPE too wide: a
+    # true "The rows below sum to 26.5 %" (the remainder this very paragraph
+    # states) false-reds it (round-24 reviewer, cycle 8). The arithmetic is the
+    # identity, so it is carried in the claim.
+    _only_claim(_s43,
+                f"the rows above sum to {total:.1f} % "
+                f"({definite} + {hashed} + {token_share:.1f})",
+                "§4.3's published share total",
+                values=(f"{total:.1f}", f"{definite}", f"{hashed}",
+                        f"{token_share:.1f}"), free=("above|below",))
     _only_claim(_s43, f"i.e. **{100 - total:.1f} %**",
                 "§4.3's published remainder",
                 values=(f"{100 - total:.1f}",))
@@ -2635,7 +2677,9 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         # passed magnitude (`str(0)`) can never match a token in the claim — the
         # word IS the value there (round-24 reviewer, P2: `ZERO` → `two` with the
         # truth restated was green).
-        free=("constant|variable", "holds|breaks")
+        # ⛔ `with|without` is the sentence's axis — it says what the +1.33 CONTROLS
+        # FOR — and one token inverts it (round-24 reviewer, cycle 8).
+        free=("with|without", "constant|variable", "holds|breaks")
         + (("ZERO",) if k15["discordant"] == 0 else ()))
     k5 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k5"]
     assert k5["only_b"] == 0 and k5["only_a"] > 0, (
