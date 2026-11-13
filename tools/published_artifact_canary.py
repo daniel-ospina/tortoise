@@ -480,15 +480,19 @@ def render_summary(report: Report) -> str:
         lines.append(f"| `{arm.name}` | {'yes' if arm.gated else 'no'} | {detail} |")
     if report.verdict == FAIL:
         if report.wheel_mode:
-            # Branch on which arm actually failed: an install failure is not a
-            # "first command" failure, and a reader chasing the wrong step loses the
-            # whole release window (#12363 round 5).
+            # Branch on which arm actually failed. A substring test was wrong twice: the
+            # console-script arm's detail says "the installed artifact provides no
+            # `tortoise` console script", which contains "install" and rendered as "does
+            # not install" — false, it installed cleanly. Match the LEADING clause, and
+            # name the entry-point case separately (#12363 rounds 5 and 6).
             step = next((arm for arm in report.arms if arm.gated and arm.status == FAIL), None)
-            what = (
-                "does not install"
-                if step is not None and "install" in step.detail
-                else "fails its documented first command"
-            )
+            detail = step.detail if step is not None else ""
+            if detail.startswith("the BUILT wheel") and "failed to install" in detail:
+                what = "does not install"
+            elif "console script" in detail:
+                what = "installs but ships no `tortoise` console script, so the documented first command cannot run"
+            else:
+                what = "fails its documented first command"
             lines += [
                 "",
                 f"The BUILT wheel {what}. Nothing has been "
@@ -786,6 +790,27 @@ def install_and_run(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Exit 0 green / 1 the artifact is broken / 2 the canary could not answer.
+
+    ⛔ THE BACKSTOP for "an I/O fault must never borrow the release verdict". Exit 1 is
+    reserved for "the published artifact is broken", and BOTH consumers read it that way
+    — the workflow's alarm step and `published-artifact-alert.sh` — so any unexpected
+    exception that escaped with 1 would tell a human to cut an irreversible release for a
+    detector fault. `_main` guards its own I/O sites with specific messages (the
+    `pyproject.toml` read, the log write, the `--summary-file` append); this wrapper
+    catches everything else, including a bug nobody anticipated (#12363 rounds 5 and 6).
+    """
+    try:
+        return _main(argv)
+    except Exception as exc:  # the exit code IS the contract here — see the docstring
+        print(
+            f"the canary could not evaluate the artifact: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Smoke the PUBLISHED PyPI artifacts (the documented first command, not the tree)."
     )

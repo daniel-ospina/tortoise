@@ -424,6 +424,11 @@ jobs:
                   # the record cannot silently lose the cadence factor that
                   # qualifies every availability figure.
                   startswith(".github/scripts/availability-record"),
+                  # #12363: the published-artifact canary's ALERT — delegating to the
+                  # shared substrate (#3907) instead of re-implementing dedupe, the
+                  # exit-code branch that keeps a detector outage from reading as "cut a
+                  # release", and the transcript TAIL in the issue body.
+                  startswith(".github/scripts/published-artifact-alert"),
                   # #10109: the deploy-staleness detector — its harness pins the
                   # positive reading (deployed sha vs origin/main), the
                   # fail-closed unreadable-revision red, the behind-bound
@@ -1478,6 +1483,13 @@ jobs:
         # search, and never adopts a forged/exact-mismatched look-alike title.
         if: ${{ !cancelled() }}
         run: bash .github/scripts/auto-file-issue.test.sh
+      - name: Published-artifact canary alert (#12363)
+        # The durable record behind release-artifact-canary: one issue per finding via
+        # the shared substrate, an exit-2 detector outage that never tells a human to cut
+        # a release, the transcript TAIL in the body, fail-closed with no token, and a
+        # green run's resolve that cannot turn itself red.
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/published-artifact-alert.test.sh
       - name: Deploy failure alert (#2240)
         # The out-of-band alert #2240 exists for: per-step attribution from the
         # workflow's step ids, ONE issue per failing step with `Recurrence #N` on
