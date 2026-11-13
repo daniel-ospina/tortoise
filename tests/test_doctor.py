@@ -405,6 +405,81 @@ class TestDoctorHostedCredential:
         assert "not probed" not in hosted, hosted
         assert "✅" in hosted or "❌" in hosted, hosted
 
+    def test_a_spent_budget_stops_the_probe_instead_of_hanging(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The probe's 75 s is WALL CLOCK, and a spent budget is ⚠️, not a hang.
+
+        `urlopen(timeout=n)` bounds each `recv`; `resp.read(_DOCTOR_BODY_CAP)` is
+        unbounded while every inter-byte gap stays under `n`, so four legs on a
+        dripping proxy could hold `doctor` (and `onboard`'s last step) for hours
+        while the constant comment claimed 75 s worst case (fresh review round
+        13). A leg the budget cannot fit must NOT be begun, and the row must say
+        UNPROVEN — ⚠️, never `❌` + exit 1, which would blame the credential for a
+        slow link.
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
+            f"no leg may be started past the budget — dialled {url}"))
+        monkeypatch.setattr(
+            __import__("tortoise.__main__", fromlist=["x"]), "_DOCTOR_TOTAL_BUDGET_S", 0.0)
+        db_path = str(tmp_path / "budget.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor budget seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert calls == []
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "⚠️" in hosted, hosted
+        assert "budget" in hosted and "UNPROVEN" in hosted, hosted
+        assert "❌ Hosted" not in out, out[-1200:]
+        assert rc == 0, "a slow link is not a failing credential"
+
+    def test_an_unreadable_health_body_is_never_green(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A `/health` body that could not be READ is not "no status" — it is UNREAD.
+
+        The read is wrapped in `except (OSError, ValueError, TypeError,
+        RecursionError, HTTPException)` and set `health_status = None`, which is
+        the same value as "the body carried no `status` field". That collapse left
+        `_health_notes` empty, so a service that sent 200 headers and then stalled
+        (a saturated app, a streaming proxy) printed `✅ … /health 200` and
+        `All checks passing!` with its own verdict never read — the
+        reachable-but-unhealthy-reads-green class this note exists to remove
+        (fresh review round 13). The transport error is recorded, scrubbed and
+        escaped like every other server byte.
+        """
+        password = "hunter2pass"
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url=f"https://svc:{password}@api.example.test")
+
+        class _StalledBody(_FakeResponse):
+            def read(self, *_a, **_k):
+                raise TimeoutError(
+                    "the read timed out for https://svc:" + password + "@x/health")
+
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _StalledBody(200) if url.endswith("/health")
+            else _FakeResponse(200, b'{"org_id":"org-9","tier":"anon"}')))
+        db_path = str(tmp_path / "unread.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor unread body seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "✅" not in hosted, hosted
+        assert "⚠️" in hosted, hosted
+        assert "could not be read" in hosted, hosted
+        # The unread verdict suppresses the all-clear line.
+        assert "All checks passing" not in out
+        # Transport bytes are scrubbed and escaped like every other server value.
+        assert password not in out
+
     def test_a_crashing_hosted_block_cannot_forge_a_row(
             self, clear_db_env, tmp_path, capsys, monkeypatch):
         """The crash arm's exception text is escaped, not interpolated raw.
@@ -470,6 +545,12 @@ class TestDoctorHostedCredential:
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1500:]
         assert "❌" not in hosted, hosted
+        # ⛔ The ICON is asserted, not just the absence of ❌: `_row()` returns the
+        # first match and `✅` counts in the PASS column, so pinning only "no ❌"
+        # let this refusal be flipped green with the suite still passing (fresh
+        # review round 13).`
+        assert "ℹ️" in hosted, hosted
+        assert "✅" not in hosted, hosted
         assert "GRAPH_SCOPED_TEAM_SURFACE" in hosted, hosted
         assert "by design" in hosted or "deliberate" in hosted, hosted
         # A deliberate scope refusal must not contribute a FAIL to the report.
@@ -1259,9 +1340,14 @@ class TestDoctorHostedCredential:
         assert hosted is not None, out[-1200:]
         assert password not in out, "the api_url password reached the transcript"
         # The endpoint ANSWERED /health, so a reset on the authenticated leg is a
-        # service blip: unproven, not a broken key (round 7).
+        # service blip: unproven, not a broken key (round 7). ⛔ And the row must
+        # NOT claim the key is fine: only the authenticated read can prove a key,
+        # so a proxy that serves anonymous GETs and rewrites `Authorization` is
+        # unauthored-for by "the endpoint answered" (fresh review round 13).
         assert "⚠️" in hosted, hosted
-        assert "could not complete" in hosted and "SERVICE" in hosted, hosted
+        assert "could not complete" in hosted, hosted
+        assert "UNPROVEN" in hosted and "not verified" in hosted, hosted
+        assert "rather than your key" not in hosted, hosted
 
     def test_a_refusal_body_that_echoes_the_request_is_scrubbed(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):

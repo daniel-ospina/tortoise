@@ -12870,6 +12870,17 @@ _DOCTOR_TEAM_RETRY_TIMEOUT_S = 30
 #: `doctor` buffer an unbounded stream on a memory-tight box.
 _DOCTOR_BODY_CAP = 65536
 
+#: The WHOLE hosted probe's wall-clock budget (#11912).
+#: ⛔ The per-leg numbers above are per-`recv` SOCKET timeouts, not wall clock:
+#: `resp.read(_DOCTOR_BODY_CAP)` is unbounded while every inter-byte gap stays
+#: under the bound, so a dripping proxy can hold one leg for hours and there are
+#: four legs. Without this deadline the comment above ("an outer watchdog that
+#: sizes itself from this must use 75") is false, and `doctor` — plus
+#: `onboard`'s last step — hangs on exactly the network `--offline` exists for.
+#: So every leg takes `min(its own bound, what is left)` and a leg the budget
+#: cannot fit is NOT BEGUN (fresh review round 13).
+_DOCTOR_TOTAL_BUDGET_S = 75
+
 
 def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> None:
     """#11912: report the hosted identity AND whether it works.
@@ -13059,13 +13070,36 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     # and it is interpolated into EVERY row below — a newline in it would forge
     # whole `doctor` rows, which is the one thing a verdict report must not do.
     base = _printable(_mask_display_target(api_url or ""))
+    probe_deadline = time.monotonic() + _DOCTOR_TOTAL_BUDGET_S
+
+    def _leg_budget(own: int) -> float | None:
+        """The bound for ONE leg: `min(its own bound, budget left)` — or None.
+
+        None means the budget is spent, and the leg must not be STARTED:
+        starting it is what turns a slow link into an unbounded wait. The 0.25 s
+        floor is the shortest bound worth opening a socket with.
+        """
+        left = probe_deadline - time.monotonic()
+        if left <= 0.25:
+            return None
+        return max(0.25, min(float(own), left))
+
+    def _budget_spent_row(leg: str) -> tuple[str, str, str]:
+        """A budget stop is UNPROVEN, not wrong: ⚠️, never `❌` + exit 1."""
+        return ("Hosted", "⚠️",
+                f"{base} — the hosted probe ran out of its "
+                f"{_DOCTOR_TOTAL_BUDGET_S} s budget before {leg}; the credential "
+                "is UNPROVEN rather than wrong. Re-run, or use `tortoise doctor "
+                f"--offline` to skip the hosted half{_provenance_note}")
+
     health_code: int | None = None
     health_status: str | None = None
+    health_read_error: str | None = None
     latency: float | None = None
     health_timeout_used = _DOCTOR_HEALTH_TIMEOUT_S
 
     def _health_request(timeout: int) -> None:
-        nonlocal health_code, health_status, latency
+        nonlocal health_code, health_status, health_read_error, latency
         started = time.monotonic()
         with urlopen(Request(f"{api_url}/health"), timeout=timeout) as resp:
             health_code = getattr(resp, "status", None) or resp.getcode()
@@ -13085,12 +13119,26 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                         if isinstance(candidate_status, str) and candidate_status.strip():
                             health_status = candidate_status
             except (OSError, ValueError, TypeError, RecursionError,
-                    http.client.HTTPException):
+                    http.client.HTTPException) as read_exc:
+                # ⛔ "the body could not be READ" is NOT "the body carried no
+                # status": collapsing the two left `_health_notes` empty, so a
+                # service that sent headers and then stalled (a saturated app, a
+                # streaming proxy) printed `✅ … /health 200 in 0.00s` and
+                # `All checks passing!` with its own verdict never read — the
+                # reachable-but-unhealthy-reads-green class the health note was
+                # added to remove (fresh review round 13). Recorded so the row
+                # downgrades to ⚠️ below.
                 health_status = None
+                health_read_error = (
+                    f"{type(read_exc).__name__}: {str(read_exc)[:80]}")
         latency = time.monotonic() - started
 
+    _health_budget = _leg_budget(_DOCTOR_HEALTH_TIMEOUT_S)
+    if _health_budget is None:
+        results.append(_budget_spent_row("the `/health` read"))
+        return
     try:
-        _health_request(_DOCTOR_HEALTH_TIMEOUT_S)
+        _health_request(_health_budget)
     except HTTPError as exc:
         # A 4xx/5xx IS an answer — the host is reachable and something is
         # serving. The code is reported; it does not need the transport branch.
@@ -13126,9 +13174,13 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         # broken endpoint, blames the user's config, and exits 1. The `/health`
         # leg is retried for the SAME reason as the authenticated one, and the
         # wider bound that was used is named in the output.
+        _retry_budget = _leg_budget(_DOCTOR_TEAM_RETRY_TIMEOUT_S)
+        if _retry_budget is None:
+            results.append(_budget_spent_row("the `/health` retry"))
+            return
         try:
             health_timeout_used = _DOCTOR_TEAM_RETRY_TIMEOUT_S
-            _health_request(_DOCTOR_TEAM_RETRY_TIMEOUT_S)
+            _health_request(_retry_budget)
         except HTTPError as retry_exc:
             health_code = retry_exc.code
         except (OSError, http.client.HTTPException, ValueError) as retry_exc:
@@ -13161,6 +13213,13 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             f"`{_printable(_scrub(str(health_status), api_url, api_key))}` on /health")
     if not (isinstance(health_code, int) and 200 <= health_code < 400):
         _health_notes.append(f"/health returned {health_code}")
+    if health_read_error:
+        # Same rule as the status string: server/transport bytes go through
+        # `_scrub` (a URL-embedded password) and `_printable` (a forged row).
+        _health_notes.append(
+            "`/health`'s body could not be read "
+            f"({_printable(_scrub(health_read_error, api_url, api_key))}) — the "
+            "service's own verdict is UNREAD, not 'healthy'")
     _health_note = (" — " + "; ".join(_health_notes)) if _health_notes else ""
 
     def _combine(icon: str, detail: str) -> tuple[str, str, str]:
@@ -13197,16 +13256,24 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             except (OSError, http.client.HTTPException):
                 team_body = ""
 
+    _team_budget = _leg_budget(_DOCTOR_TEAM_TIMEOUT_S)
+    if _team_budget is None:
+        results.append(_budget_spent_row("the `/v1/team` read"))
+        return
     try:
-        _team_request(_DOCTOR_TEAM_TIMEOUT_S)
+        _team_request(_team_budget)
     except (OSError, http.client.HTTPException, ValueError) as exc:
         reason = getattr(exc, "reason", None) or exc
         if not _is_timeout_reason(reason):
             reach_error = _printable(_scrub(str(reason), api_url, api_key))
         else:
             # Cold start, not a broken credential: retry once, bounded.
+            _team_retry_budget = _leg_budget(_DOCTOR_TEAM_RETRY_TIMEOUT_S)
+            if _team_retry_budget is None:
+                results.append(_budget_spent_row("the `/v1/team` retry"))
+                return
             try:
-                _team_request(_DOCTOR_TEAM_RETRY_TIMEOUT_S)
+                _team_request(_team_retry_budget)
             except (OSError, http.client.HTTPException, ValueError) as retry_exc:
                 retry_reason = getattr(retry_exc, "reason", None) or retry_exc
                 reach_error = (
@@ -13227,8 +13294,10 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         # unproven rather than wrong.
         results.append(_combine("⚠️",
                         f"{base} — the authenticated check could not complete: "
-                        f"{reach_error}. The endpoint answered, so this is the "
-                        "SERVICE rather than your key — re-run shortly. "
+                        f"{reach_error}. `/health` answered, so a wrong key is "
+                        "unlikely — but the key is UNPROVEN, not verified: only "
+                        "an authenticated read can prove it. Re-run; if it "
+                        "persists, look for a proxy that rewrites `Authorization`. "
                         "`tortoise config show` reports what this machine knows"))
         return
 
