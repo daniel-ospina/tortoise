@@ -171,7 +171,10 @@ the same selector as `:382`), and comments/docstrings (`sdk.py:24087`, `:24321`,
    refuses anything else (`sdk.py:24350` `if action not in ("merge", "reject")`), but that constrains one
    argument of one method, not the property. `update_entity(id, dedup_reviewed="link")` is one call, and the
    record side is unconstrained too — `supabase/migrations/20261012000003_record_epistemic.sql:106` is a bare
-   `dedup_reviewed text,` with **no `CHECK`**, unlike neighbouring columns. **So the write is not missing. Only
+   `dedup_reviewed text,` with **no `CHECK`** — and no neighbouring column carries one either (`:102-111`:
+   `dedup_method`, `dedup_similarity`, `dedup_target_id`, `dedup_reviewed`, `temporal_*` are all bare; the nearest
+   column-level `CHECK` is `node_label` at `:54`, and `:123-130` are table-level constraints, none of which names
+   `dedup_reviewed`). **So the write is not missing. Only
    the value-aware read is.**
 2. ⛔ **`'link'` is not inert — it silently DEQUEUES.** The content review queue filters
    `n.dedup_reviewed IS NULL` (`sdk.py:24256-24257`), so **any** non-NULL value removes the row from the review
@@ -182,8 +185,8 @@ the same selector as `:382`), and comments/docstrings (`sdk.py:24087`, `:24321`,
 
 `grep -rn "'link'\|\"link\"" --include=*.py tortoise/` → **0 matches** as a *verdict value*; `tests/` → **26**, none
 of them a `dedup_reviewed` value (an HTML VOID set at `tests/e2e/test_legal_pages.py:424`, `os.link` monkeypatches,
-`tmp_path / "link"` at `tests/test_reaper.py:621`). In `docs/`, the only `"link"` occurrences are that same
-unrelated void-element set, restated **three** times in
+`tmp_path / "link"` at `tests/test_reaper.py:621`). Outside this document, the only `"link"` occurrences in `docs/`
+are that same unrelated void-element set, restated **three** times in
 `docs/plans/2026-08-08-657-legal-pages-plan.md:194`, `:271`, `:450`; round 2's own hypothesis lives on the
 round-2 branch `research-brief.md` §7 ~`:830`, **not** in this tree's `docs/`.
 
@@ -295,10 +298,11 @@ M3; they do not move its scope, and they add no new gate.
 | the fuzzy fold keeps alphanumerics + apostrophes | `:46-50` `_normalize_name_for_fuzzy`: `re.sub(r"[^a-z0-9' ]", ' ', …)` |
 | Jaccard over the **shingle sets** | `:132-141` `_jaccard_similarity(a: set[str], b: set[str])` |
 | threshold 0.9, 32 MinHash permutations, band 4 | `:34-36` `_FUZZY_JACCARD_THRESHOLD = 0.9`, `_MINHASH_PERMUTATIONS = 32`, `_MINHASH_BAND_SIZE = 4` |
-| candidate universe = **LSH band buckets only** | built at `:319-322` (`lsh_buckets[(band_index, band)].append(...)`), consumed at `:355-358` — and the Jaccard loop runs over `candidate_ids` **only** |
+| candidate universe = **LSH band buckets only** | built at `:310` (`lsh_buckets[(band_index, band)].append(candidate.uuid)`, inside `_build_candidate_indexes` `:293`), consumed at `:360-361` (`candidate_ids.update(indexes.lsh_buckets.get((band_index, band), []))`) — and the Jaccard loop runs over `candidate_ids` **only** |
 | **no edge read anywhere in the module** | confirmed by reading all 400 lines: the only inputs are `candidate.name`, `.uuid`, `.labels`, `.attributes`, `.created_at`. Zero relationship access |
 
-**The refinement round 2 got right, worth keeping visible** — `dedup_helpers.py:336-340`, verbatim:
+**The refinement round 2 got right, worth keeping visible** — `dedup_helpers.py:328-330` (the docstring of
+`_resolve_with_similarity`; `:336-340` is the code that implements it, not the quote), verbatim:
 
 > "Exact normalized-name matching runs first for *all* names regardless of length or entropy. The entropy gate
 > only guards the fuzzy (MinHash/LSH) path where short or low-entropy names produce unreliable shingle sets."
@@ -456,10 +460,10 @@ substrates it would consume** and **a one-line applicability verdict**.
 | **three candidate sources, unioned** | identity-property lookup (`_collect_identity_property_candidate_nodes`), exact-normalised name (`_collect_exact_name_candidate_nodes`), semantic cosine (`:622-623`) |
 | **thresholds** | `NODE_DEDUP_CANDIDATE_LIMIT = 15` (`:67`), `NODE_DEDUP_COSINE_MIN_SCORE = 0.6` (`:68`); fuzzy Jaccard `0.9`, 32 perms, band 4 (`dedup_helpers.py:34-36`); entropy `>= 1.5` (`:31`) over names ≥ 6 chars **or** ≥ 2 tokens (`:80-86`) |
 | **band count** | **four rungs, in order**, per node: identity-props → exact-normalised → MinHash/LSH fuzzy → LLM. First rung that answers ends the question; ambiguity at rung 2 does **not** fall to rung 3, it falls to the LLM (`dedup_helpers.py:344-349`) |
-| **prompt shape** | `prompts/dedupe_nodes.py` — system: *"NEVER fabricate entity names or mark distinct entities as duplicates"*; user blocks `<PREVIOUS MESSAGES>`, `<CURRENT MESSAGE>`, `<ENTITIES>`, `<EXISTING ENTITIES>`, each JSON. Output model `NodeResolutions{entity_resolutions:[NodeDuplicate{id, name, duplicate_candidate_id}]}`, **`-1` = new** (`:34-44`). Exact-count contract: *"Your response MUST include EXACTLY N resolutions with IDs 0 through N−1"* (`:146-152`) |
+| **prompt shape** | `prompts/dedupe_nodes.py` — system: *"NEVER fabricate entity names or mark distinct entities as duplicates"*; user blocks `<PREVIOUS MESSAGES>`, `<CURRENT MESSAGE>`, `<ENTITIES>`, `<EXISTING ENTITIES>`, each JSON. Output model `NodeResolutions{entity_resolutions:[NodeDuplicate{id, name, duplicate_candidate_id}]}`, **`-1` = new** (`:34-44`). Exact-count contract: *"Your response MUST include EXACTLY N resolutions with IDs 0 through N−1"* (`:154` — the `Task:` header above it is `:152-153`; `:146-152` is the duplicate-criteria block, a different instruction) |
 | **what the adjudicator can SEE** | `existing_nodes_context` (`node_operations.py:703-712`) = `{**candidate.attributes, candidate_id, name, entity_types, summary[:120]}`. **No neighbours, no degree, no edges. Zero topology.** |
 | **batching** | `MAX_NODES = 30` (`:66`); dedupe output capped `min(max_tokens or 16384, 16384)` (`:736`) |
-| **model routing** | `ModelSize.small` for attribute extraction (`:1064`) and summaries (`:1243`); the **dedupe verdict call passes no `model_size`** (`:737-745`) → default model. ⚠️ **This is Graphiti's own model-size router, not Jev** — Jev is ours (TypeSafe). ⛔ **Correction to this lane's first draft: it called the wrong phrase "Jev routing" and attributed it to round 2 — and "Jev" appears in neither round.** Measured: `grep -c "Jev" research-brief.md` is **0** at this head **and** **0** on `origin/research/12186-round2-depth`, and `git grep` finds no `Jev` anywhere under `docs/research/2026-11-12-12186-search-inventory/` on either. The phrase is this lane's own; the substantive correction stands — the dedupe verdict call passes no `model_size` (`:737-745`), so it takes the default model. |
+| **model routing** | `ModelSize.small` for attribute extraction (`:1064`) and summaries (`:1243`); the **dedupe verdict call passes no `model_size`** (`:737-745`) → default model. ⚠️ **This is Graphiti's own model-size router, not Jev** — Jev is ours (TypeSafe). ⛔ **Correction to this lane's first draft: it called the wrong phrase "Jev routing" and attributed it to round 2 — and "Jev" appears in neither round.** Measured: `grep -c "Jev" research-brief.md` is **0** at this head **and** **0** on `origin/research/12186-round2-depth`, and `git grep` finds no `Jev` in `research-brief.md` on either branch — the only `Jev` under this directory is the sentence you are reading. The phrase is this lane's own; the substantive correction stands — the dedupe verdict call passes no `model_size` (`:737-745`), so it takes the default model. |
 | **how `summary` is produced** | a separate small-model call (`:1230-1260`), truncated `MAX_SUMMARY_CHARS`, then `[:120]` again at prompt time |
 
 **Our substrates:** `name` → `name`; `entity_types` → the label (`:Object`/`:Subject`) plus `object_kind`;
@@ -523,8 +527,8 @@ a fan-out cap.
 
 | element | code |
 |---|---|
-| **how the entity collection is BUILT at `add()`** | `extract_entities(text)` — **deterministic spaCy NER + heuristics, no LLM** (`entity_extraction.py`: `_add_ner_candidates` `:498`, `_add_technical_identifier_candidates` `:528`, `_add_proper_name_candidates` `:543`, `_add_quoted_candidates` `:581`, `_add_topic_phrase_candidates` `:590`, `_resolve_candidates` `:705`; the pipeline calling them in order is `:743-748`). Then `_upsert_entity` (`main.py:611-649`): **exact normalised-text match first** (`_existing_entities_by_text`, `_normalize_entity_text`), else a **semantic `top_k=1` match at `score >= 0.95`** (`:614-621` — `top_k=1` at `:617`, the gate at `:621`), else insert. A match appends `memory_id` to `linked_memory_ids` (`:624-629`) |
-| **search-side pool** | `internal_limit = max(limit*4, 60)` (`main.py:1662`); semantic, keyword, entity searches all sized to that |
+| **how the entity collection is BUILT at `add()`** | `extract_entities(text)` — **deterministic spaCy NER + heuristics, no LLM** (`entity_extraction.py`: `_add_ner_candidates` `:498`, `_add_technical_identifier_candidates` `:528`, `_add_proper_name_candidates` `:543`, `_add_quoted_candidates` `:581`, `_add_topic_phrase_candidates` `:590`, `_resolve_candidates` `:705`; the pipeline calling them in order is `:743-748`). Then `_upsert_entity` (`main.py:605`, exact-normalised match at `:610`): **exact normalised-text match first** (`_existing_entities_by_text`, `_normalize_entity_text`), else a **semantic `top_k=1` match at `score >= 0.95`** (`:614-621` — `top_k=1` at `:617`, the gate at `:621`), else insert. A match appends `memory_id` to `linked_memory_ids` (`:624-629`) |
+| **search-side pool** | `internal_limit = max(limit*4, 60)` (`main.py:1655`, again at `:3344`); semantic, keyword, entity searches all sized to that |
 | **candidate pool is SEMANTIC-ONLY** | `main.py:1674-1684`, comment *"Step 7: Build candidate set from semantic results"* — the BM25 arm scores rows already in that pool; so does the entity arm. **A keyword-only or entity-only hit cannot enter** |
 | **BM25 normalisation** | query-length-adaptive **sigmoid**: midpoint 5 / 7 / 9 / 10 / 12, steepness 0.7 / 0.6 / 0.5 / 0.5 / 0.5 by term count (`scoring.py:16-40`), `1/(1+exp(−s·(x−m)))` (`:43-54`) |
 | **the entity boost, exactly** | `main.py:1747-1827`: ≤ 8 deduped query entities → entity store `search(top_k=500)` → skip `similarity < 0.5` → `num_linked = max(len(linked_memory_ids), 1)` → **`memory_count_weight = 1/(1 + 0.001·(num_linked−1)²)`** → `boost = similarity × ENTITY_BOOST_WEIGHT × memory_count_weight`, `ENTITY_BOOST_WEIGHT = 0.5` (`scoring.py:57`) → taken as **`max`** per memory, never summed |
@@ -559,7 +563,7 @@ position, which M-11 did not have.
 **Verdict: not applicable to candidate generation, and it should not be** — it is a **context-construction**
 strategy, not a retrieval one. Its relevance to this epic is as the bound, not the answer, which is why our own
 `STORAGE-ARCHITECTURE.md` §12.2b already carries the same direction (*"write less, and write things worth
-keeping"*). **Adopting it would reverse none of (1)–(6)** — which is exactly why it is worth carrying as a
+keeping"*). **Adopting it would reverse none of the records named at the end of this section** — which is exactly why it is worth carrying as a
 *scope* note and not as a lever.
 
 ⛔ **Two overclaims this lane made on first draft, withdrawn** (raised by review, verified here):
@@ -601,7 +605,7 @@ should take, and it is the shape §8.1.5 already settled.
 |---|---|---|---|
 | **M-12 ⭐** | **Interleave fusion for the dedup/noun candidate pool** — `interleave_fusion` (`fusion.py:112-176`), Hindsight's own stated fix for the *consolidation-dedup* dilution RRF causes | the inventory has no fusion-order lever at all; our `rrf_fusion` is the diluted shape, and Hindsight documents the failure in the exact words that describe ours | an interleaved pool does not lift candidate recall@3 on the `#11901` population over `rrf_fusion` → the dilution is not our bottleneck and the lever is dropped. ⛔ **Contradiction: the recorded 2026-08-25 production default `{"vector": 1.5}` weighted RRF (`sdk.py:41233-41237`) IS a recorded decision this would reverse on the product search path — so M-12 is a candidate for the *dedup candidate pool only*, never for `tortoise_fts_query`'s product path, and shipping it globally would be a reopen** |
 | **M-13 ⭐** | **A per-entity fan-out cap, before any shared-neighbour score** — `per_entity_limit` 200 (`link_expansion.py:10`), `degreeCutoff` (GDS) | nobody has proposed the cap because nobody has proposed the join; but our `:Object` is minted `MERGE (o:Object {name:$name})`, so a bare definite description is a hub and an uncapped self-join is quadratic over the label | the largest entity's fan-out on a real graph is < 50 → the cap is decoration, ship the score without it |
-| **M-14** | **The `memory_count_weight` damping, copied exactly** — `1/(1 + 0.001·(n−1)²)` (`main.py:1815`) | M-11 names "entity boost" but not its damping, and without it an entity linked to thousands of memories boosts all of them; the formula is the difference between a signal and a wash | removing the damping changes no ordering on the `#11901` population → the hub-collision it prevents does not occur here |
+| **M-14** | **The `memory_count_weight` damping, copied exactly** — `1/(1 + 0.001·(n−1)²)` (`main.py:1816`; `num_linked` is `:1815`) | M-11 names "entity boost" but not its damping, and without it an entity linked to thousands of memories boosts all of them; the formula is the difference between a signal and a wash | removing the damping changes no ordering on the `#11901` population → the hub-collision it prevents does not occur here |
 | **D-1** | *(defect, not a lever)* the merge's read-side incompleteness — §8.2 | — | §8.2's one-query falsifier |
 
 ---
@@ -620,7 +624,7 @@ should take, and it is the shape §8.1.5 already settled.
 | §8.3.1 Zep's adjudicator carries no topology | **no recorded decision reaches this work** | corrects round 2's *"context in the adjudicator is free"* — it is free to *add*, and it is an extension, not a copy |
 | §8.3.2 interleave fusion (M-12) | ⛔ **YES, on the product search path**: the owner decision 2026-08-25 making `{"vector": 1.5}` weighted RRF the production default (`sdk.py:41233-41237`). **M-12 is therefore scoped to the dedup candidate pool; applying it to `tortoise_fts_query` would be a reopen, argued at that decision's home** | **scoped down** |
 | §8.3.3 Mem0's pool vs its signal | **no recorded decision reaches this work** | M-11 already carries it |
-| §8.3.4 Mastra: no **similarity-based** retrieval step (the narrower claim — see §8.3.4's two withdrawals) | **none of (1)–(6) is touched**; the D block's suspension (§7/§17.4.6) is untouched | scope note only |
+| §8.3.4 Mastra: no **similarity-based** retrieval step (the narrower claim — see §8.3.4's two withdrawals) | **it touches none of the records named at the end of this section**; the D block's suspension (§7/§17.4.6) is untouched | scope note only |
 | §8.3.5 topology never decides identity in the field | **no recorded decision reaches this work** | supports B1 staying a *verdict*, not a similarity threshold |
 
 **Not reversed, and checked explicitly:** the **KEEP ruling** (`#11395`), **V1**, **§12.2/§12.2c**, **§14.3 V3**,
