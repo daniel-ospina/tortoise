@@ -536,8 +536,12 @@ def _name_carries_signal(name: str) -> bool:
     full-name predicate cannot see through our tokenizer:
 
     1. **No content token at all** — every token is a `SPARSE_STOPWORDS` member
-       (`the same`, `the one`), so `build_or_query` falls back to the escaped
-       raw string.
+       (`the and` — article + connective), so `build_or_query` falls back to the
+       escaped raw string. ⛔ Not `the same` / `the one`: `same` and `one` are NOT
+       `SPARSE_STOPWORDS` members, so those are case-2 names
+       (`_signal_tokens("the same") == ["same"]`), which is what
+       `tests/test_name_entropy_12294.py` pins. This class is EMPTY on the
+       measured corpus (`gate_gated_names` has no entry with `signal_tokens: []`).
     2. **Zep's predicate on the CONTENT tokens** — refuse a name whose only
        surviving token is one Zep's rule would refuse on its own. `the fix` →
        `fix`, three characters and one token, so it is refused by the same rule
@@ -1070,13 +1074,29 @@ def run(args: argparse.Namespace) -> int:
         #: through ANOTHER name's query in the same capture. This measures exactly
         #: that: build the union from the NON-gated names only (what the gate
         #: would leave in place), then ask whether each gated name's canonical is
-        #: still in it. ``lost`` is the gate's true recall cost.
+        #: still in it.
+        #: ⛔ ``lost`` is NOT "every gated name that is not rescued" — it is a
+        #: recall cost, so it must be one the gate CAUSES: the canonical was in
+        #: the UNGATED union (``merged``) and is not in the gated one. A gated
+        #: name whose canonical neither union holds is
+        #: ``unreachable_regardless`` — the gate costs nothing there, and it is
+        #: exactly #12294's target class, so counting it as loss would inflate
+        #: the decline's own evidence (a defect that ran the flattering-for-the-
+        #: conclusion way: the first cut booked all 12 k=3 misses as ``lost``).
+        #: ⚠️ THE COMMITTED ARTIFACT PREDATES THE SPLIT: its `shipped` k=3 cell
+        #: (`lost` 85) is therefore an UPPER bound — the honest value is
+        #: ``86 - rescued - unreachable_regardless``, bounded below by
+        #: ``86 - 1 - 12 = 73`` since every name whose own query found it is in
+        #: ``merged``. Its k=15 cell is EXACT (all 86 gated names are in-window at
+        #: k=15, so ``unreachable_regardless`` is 0 there), which is why the PR
+        #: body quotes k=15's 80 lost and never k=3's.
         #: ⛔ Per WINDOW, and the key says which: the first cut measured k=3 only
         #: and recorded no `k`, so "1 of 85 rescued" was silently the NARROWEST
         #: union — the choice that maximises apparent loss. k=15 is recorded
         #: beside it, and the artifact now names both.
         pooled_gate: dict[str, dict[str, dict[str, int]]] = {
-            p: {str(k): {"gated": 0, "rescued_by_union": 0, "lost": 0}
+            p: {str(k): {"gated": 0, "rescued_by_union": 0, "lost": 0,
+                        "unreachable_regardless": 0}
                 for k in _GATE_KS if k in KS}
             for p in ("shipped", "zep_full_name")}
         budget = 15   # production ``max_queries``
@@ -1127,8 +1147,12 @@ def run(args: argparse.Namespace) -> int:
                         cell["gated"] += 1
                         if row["id"] in kept[p]:
                             cell["rescued_by_union"] += 1
-                        else:
+                        elif row["id"] in merged:
+                            # reachable BEFORE the gate, gone after it: a real loss
                             cell["lost"] += 1
+                        else:
+                            # neither union holds it — the gate costs nothing here
+                            cell["unreachable_regardless"] += 1
         arms["pooled_gate"] = pooled_gate
         arms["pooled"] = pooled
 

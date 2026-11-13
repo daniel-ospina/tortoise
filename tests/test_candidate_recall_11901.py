@@ -1040,6 +1040,11 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
     by_query = {_sanitise_query_text(n): n for n in names}
 
     def _rows(query):
+        # `#2266` is the UNREACHABLE-REGARDLESS case: no query (not even its own)
+        # ever returns its row, so neither the ungated nor the gated union holds
+        # it — the gate costs nothing there and it must NOT book as `lost`.
+        if by_query.get(query) == "#2266":
+            return [row_by_name["#2258"]]
         own = row_by_name.get(by_query.get(query, ""))
         rows = [own] if own is not None else []
         if row_by_name["#2258"] not in rows:
@@ -1078,9 +1083,10 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
             g["suppressed_correct_k_sum"], p
         assert g["gated"] == sum(1 for e in arms["gate_gated_names"]
                                  if p in e["predicates"]), p
-        # this row set holds the canonical for EVERY name, so a gated name is
-        # never "unreachable at any k" — the falsifier's headline cannot invert
-        assert g["gated_and_missed"] == 0, p
+        # this row set withholds `#2266` from every window, so EXACTLY ONE gated
+        # name is unreachable at any k — the falsifier's headline cannot invert,
+        # and the k it would invert over is pinned by name rather than by count
+        assert g["gated_and_missed"] == 1, p
         for k, cell in arms["pooled_gate"][p].items():
             # EXACT, not a sum: this fixture can rescue exactly ONE gated name
             # (`#2258` — every kept name's query returns its row; no other gated
@@ -1089,8 +1095,11 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
             # rescued" into "80 of 86" — the falsifier into an endorsement of the
             # gate (measured: green before this assertion existed).
             assert cell["rescued_by_union"] == 1, (p, k, cell)
-            assert cell["lost"] == cell["gated"] - 1, (p, k, cell)
-            assert cell["rescued_by_union"] + cell["lost"] == cell["gated"] > 0, (p, k)
+            # `#2266` is unreachable regardless, so it is NOT in `lost`
+            assert cell["lost"] == cell["gated"] - 2, (p, k, cell)
+            assert cell["unreachable_regardless"] == 1, (p, k, cell)
+            assert (cell["rescued_by_union"] + cell["lost"]
+                    + cell["unreachable_regardless"] == cell["gated"] > 0), (p, k)
 
 
 def test_the_harness_reports_how_much_of_its_own_input_it_discarded(tmp_path):
