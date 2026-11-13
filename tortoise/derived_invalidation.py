@@ -892,8 +892,8 @@ def invalidate(
         # absent, which is what keeps an absent `cache` readable as "no reconcile
         # was attempted" on every other shape.
         # ⛔ AND THE RECORD NAMES THE GOAL IT RECONCILED, so the repair route the
-        # `reconcile_goal_state_cache` docstring documents ("call this again with
-        # the goal's id") is walkable from the record alone (#12315 review cycle
+        # `reconcile_goal_state_cache` docstring documents ("calling this again
+        # with the goal's id") is walkable from the record alone (#12315 review cycle
         # 16): a DIRECT `invalidate()` caller has no `report["stale"]` to join
         # against, and on this arm the claim is gone, so the id cannot be re-read
         # from the graph either.
@@ -1512,8 +1512,9 @@ def invalidate_stale(
     either. An omitted key is otherwise this module's documented defect class —
     see the ``found`` paragraph below.
 
-    ``found`` is PRESENT on every shape, so
-    ``record["found"]`` never raises: ``False`` means NO CLAIM NOW — absent at
+    ``found`` is PRESENT on every record of ``invalidated`` — and NOT on
+    ``stale``'s :meth:`Invalidation.as_dict` records, which carry ``state``
+    instead — so ``record["found"]`` never raises there: ``False`` means NO CLAIM NOW — absent at
     the door's first read,
     OR read and then deleted before ``retract_point`` landed — ``True`` a claim
     the retirement read, ``None`` the refusal. ⚠️ TWO arms share ``False`` and the

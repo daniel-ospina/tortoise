@@ -1538,8 +1538,10 @@ def test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket(sdk, monkeypat
         "the goal still displays a word nothing backs: "
         f"{sdk.get_entity(g['id']).get('goalState')!r}")
     assert per_finding["cache"]["checked"] is True, per_finding["cache"]
-    # nothing was written for a claim that no longer exists (a missing point reads
-    # back as a falsy dict, which is why `_read_claim` folds it to MISSING)
+    # FIXTURE PREMISE, not a claim about `invalidate`: the probe deleted this
+    # point BEFORE the retirement ran (see `vanishing`, above), so it reads back
+    # falsy no matter what the sweep does. Asserted so the premise stays
+    # checkable — it is never coverage of "nothing was written".
     assert not sdk.get_entity(made["point_id"])
 
 
