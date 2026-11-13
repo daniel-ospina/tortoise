@@ -1258,8 +1258,10 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
     # deleted name. ⛔ And do not RE-WIDEN that pin's source scan to `ast.walk`: the three tables are
     # module-level declarations, so the top level is the only scope where "the table" is a single
     # object. (This is not a duplicate fail-open fix — the duplicate assert fires per visited node,
-    # so a decoy cannot hide one; a decoy can only shadow the trailing key-count agreement.
-    # Re-measured: a real duplicate plus a 23-key decoy still reds.)
+    # so a decoy cannot hide one. What a decoy CAN shadow is the trailing checks that read `seen`:
+    # the runtime-dict key count and the per-literal key floors, plus the vacuity set when the decoy
+    # names a table absent at top level. Re-measured: a real duplicate plus a 23-key decoy still
+    # reds.)
     # Provenance and the carrier rationale are merged into this row so neither reading is lost.
     "tortoise.sdk::create_source": (
         CENSUS_EXEMPT,
