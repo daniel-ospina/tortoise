@@ -1188,6 +1188,85 @@ class TestDoctorHostedCredential:
         assert "Connection refused" in hosted, hosted
         assert rc == 0, out[-800:]
 
+    def test_a_refused_team_retry_is_not_reported_as_a_wait(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The `/v1/team` retry leg carries the same claim — pin it separately.
+
+        Both legs route through `_retry_wait_claim`, but only the `/health` leg
+        had a test: reverting the authenticated leg to the unconditional wait
+        left the whole suite green (fresh review round 17 measured `110 passed`),
+        so a garbled sentence or a wrong bound in it was invisible to CI.
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url="https://api.example.test")
+        seen_team: list[str] = []
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            seen_team.append(url)
+            if len(seen_team) == 1:
+                raise TimeoutError("timed out")
+            raise ConnectionRefusedError("[Errno 111] Connection refused")
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "team-refused-retry.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor team refused retry seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert len(seen_team) == 2, "the retry must still be attempted"
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "refused on retry" in hosted, hosted
+        # The FIRST bound is the one that timed out; naming the 30 s retry bound
+        # here would assert a wait the reader cannot map to an attempt.
+        assert "timed out at 10s" in hosted, hosted
+        assert "and none in" not in hosted, hosted
+        assert rc == 0, out[-800:]
+
+    def test_a_non_refusal_retry_failure_is_not_called_a_refusal(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A DNS/TLS/closed-connection failure is not the endpoint REFUSING.
+
+        Splitting the world into "timeout" and "refused" replaced one
+        unmeasured claim with another: a `gaierror`, an expired certificate, a
+        `RemoteDisconnected` and a `ValueError` all rendered "refused on retry",
+        and the row's remedy then blames the endpoint/proxy while the real cause
+        needs a different fix (fresh review round 17). Only
+        `ConnectionRefusedError` is a refusal.
+        """
+        import socket
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url="https://api.example.test")
+        seen_health: list[str] = []
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                seen_health.append(url)
+                if len(seen_health) == 1:
+                    raise TimeoutError("timed out")
+                raise socket.gaierror(-2, "Name or service not known")
+            return _FakeResponse(200, b'{"org_id":"org-g"}')
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "dns-retry.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor dns retry seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "the retry failed" in hosted, hosted
+        assert "refused on retry" not in hosted, hosted
+        assert "Name or service not known" in hosted, hosted
+        assert rc == 0, out[-800:]
+
     def test_control_bytes_in_api_url_cannot_forge_a_row(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
         """`api_url` comes from a store; a newline in it must not fabricate rows.
