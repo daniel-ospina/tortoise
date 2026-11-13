@@ -4978,11 +4978,23 @@ def _neighbour_number_strays(line: str) -> list[str]:
     module, which this module's own contract says must stay green ("elsewhere in the
     document that is a legitimate cite of some OTHER module").
 
-    ⚠️ RESIDUAL, stated: a bare `:NNNN` on a line that also names another file is
-    therefore not seen. It is ambiguous by construction — nothing mechanical can tell
-    a continuation of that file's cite from a re-typed manifest line — and the
-    doc-wide STRICT arm (`_MANIFEST_CITE`) still catches a manifest-bound cite on any
-    line whatsoever. ⛔ THAT CONCLUSION DOES NOT EXTEND TO THE MANIFEST ITSELF: the
+    ⚠️ RESIDUAL, stated, and it is WIDER THAN IT USED TO SAY (#12369 review, P3,
+    measured): the exemption is an EARLY RETURN, so when the line names another source
+    file it exempts EVERY number shape, not the `:NNNN` continuation alone. The earlier
+    wording said "a bare `:NNNN` on a line that also names another file is therefore not
+    seen", which a reader would reasonably take to mean that `9987 lines` on such a line
+    IS seen. Measured, it is not:
+
+        The `carve_out:` entry sits 9987 lines down after `tools/ci_selection.py`
+        spliced a block above it.                                        -> []
+
+    And that spelling is not contrived — naming the tool that causes the shift is the
+    natural sentence, more natural than the separator form the old text named. It is
+    ACCEPTED for the reason the exemption exists (nothing mechanical can tell a
+    continuation of another file's cite from a re-typed manifest line) and the doc-wide
+    STRICT arm (`_MANIFEST_CITE`) still catches a manifest-BOUND cite on any line — but
+    a line that names the tool and NOT the manifest is caught by neither, and the
+    disclosure now says so instead of being quiet about the wider class. ⛔ THAT CONCLUSION DOES NOT EXTEND TO THE MANIFEST ITSELF: the
     strict arm sees only a cite with a SEPARATOR, so exempting `ci-surfaces.yml`
     would hide the separator-less form (`read 9943`) from BOTH arms — which is why
     `_MANIFEST_FILE` is subtracted before this test.
