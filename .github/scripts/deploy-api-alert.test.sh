@@ -1332,6 +1332,12 @@ assert_eq "$RC" "0" "case 17q: a \`wc\` with an internal separator still files t
 assert_eq "$(count_creates)" "1" "case 17q: and the ledger leg is untouched by it"
 assert_not_contains "$OUT" "integer expression expected" "case 17q: and NO arithmetic diagnostic reaches the job log"
 assert_contains "$WC_SEP_BODY" "could NOT be measured" "case 17q: and the loss it could not measure is DECLARED, not cleared (the whole-string strip resolved \`1 2\` to 12 and said nothing)"
+# ⛔ THE SENTENCE MUST ALSO NAME THE STATE IT IS ACTUALLY IN (review cycle 1, P3). Its parenthetical
+# used to enumerate two causes ("no count, or longer than 18 digits") while the guard's predicate has
+# three, so in THIS state it named neither — a reader checking the parenthetical found it false. The
+# three named causes are the exact complement of the predicate (non-empty, all digits, ≤18), so this
+# row is a closed set by construction rather than by hope.
+assert_contains "$WC_SEP_BODY" "carried a non-digit" "case 17q: and that sentence names THIS state's cause (a non-digit), not only the empty/long ones"
 assert_not_contains "$WC_SEP_BODY" "the excerpt is NOT byte-identical" "case 17q: and it does NOT assert a comparison it never made"
 # ⛔ THE SIZE PROBE IS THE OTHER NORMALISATION SITE, and it has its own discriminator: an
 # unmeasurable size takes the WINDOW arm. A whole-string strip made `1 2` a KNOWN 12-byte report,

@@ -209,8 +209,10 @@ failed_step_from() { # <"id=outcome id=outcome …">
 # form, and it turned a `wc` that printed `1 2` into the comparable count `12` on BOTH sides of
 # the comparison — so a genuinely shortened excerpt resolved to "identical" and NONE of the three
 # disclosure sentences fired: the silent-loss state this guard exists to remove, reached by one
-# more `wc` shape (measured end-to-end by the #12272 cycle-12 reviewer). An interior separator now
-# stays non-numeric and lands on the existing "could NOT be measured" arm.
+# more `wc` shape — measured end-to-end by the #12337 cycle-12 reviewer, and recorded with the
+# one-line fix on #12340. An earlier draft of this line credited it to a "#12272 cycle-12" review;
+# the measurement was made under #12337, so the citation now names the record that holds it.
+# An interior separator now stays non-numeric and lands on the existing "could NOT be measured" arm.
 # The two expansions are the ends-only idiom: `%%[![:space:]]*` leaves the LEADING run, which `#`
 # then removes; `##*[![:space:]]` leaves the TRAILING run, which `%` then removes. The patterns
 # stay UNQUOTED on purpose — a quoted one is a literal and matches nothing.
@@ -633,7 +635,7 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
             # failing is NOT the comparison saying "no loss": a report whose cut split a
             # character is exactly the input this arm sees, and `wc` may be the broken tool.
             echo
-            echo "_(whether the excerpt is byte-identical to the report could NOT be measured — the length comparison was not made, because the count was not one this guard will compare (no count, or longer than 18 digits), so a dropped character cannot be ruled out and the excerpt may be shorter than the report; the full text is in the run link above)_"
+            echo "_(whether the excerpt is byte-identical to the report could NOT be measured — the length comparison was not made, because the count was not one this guard will compare (it was empty, carried a non-digit, or was longer than the 18 digits this guard will compare), so a dropped character cannot be ruled out and the excerpt may be shorter than the report; the full text is in the run link above)_"
           fi
         fi
       else
