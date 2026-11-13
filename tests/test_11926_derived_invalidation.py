@@ -272,10 +272,12 @@ def test_a_retired_indicator_retires_the_state_derived_from_its_readings(sdk):
     ("indicator", "indicator-retired"),
     ("goal", "goal-retired"),
 ])
-def test_the_LEGACY_outdated_WORD_retires_an_input_like_every_read_surface(sdk, retire, reason):
-    """`outdated` is the legacy supersede/invalidate WORD, and every read surface
-    already refuses to serve a node carrying it (`live.TERMINAL_EXCLUDED_STATUSES`,
-    which this module IMPORTS and uses for the claim itself two hundred lines down).
+def test_the_LEGACY_outdated_WORD_retires_an_input_like_the_recall_lane(sdk, retire, reason):
+    """`outdated` is the legacy supersede/invalidate WORD, and the RECALL lane
+    already treats it as stale: `assembly._RECALL_OBJECT_EXCLUDED_STATUSES` is
+    `commit_ops.OBJECT_TERMINAL_STATUSES | {"outdated"}`, frozen by
+    `tests/test_assembly_pure.py`, and this module's own ``invalidate()`` uses
+    `live.TERMINAL_EXCLUDED_STATUSES` on the claim for the same reason.
 
     ⛔ Measured RED before this case existed: `_retirement` tested the narrower
     `commit_ops.OBJECT_TERMINAL_STATUSES`, which OMITS `outdated`, so an input
@@ -286,8 +288,16 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_every_read_surface(sdk, 
     whose justification is gone"), reachable through a public door, not a
     theoretical spelling.
 
-    The invariant is AGREEMENT WITH THE READ SURFACES, not this module's own
-    vocabulary: if no reader will serve the input, no derived state may outlive it.
+    ⚠️ THE INVARIANT IS STALENESS, NOT READER UNANIMITY, and this docstring said the
+    opposite until a review falsified it against the source: the OBJECT family is
+    SPLIT about this word — the four retrieval legs and `sdk.recall_state` still
+    SERVE an `outdated` Object (`search_engine._status_vocab_for` passes
+    `OBJECT_TERMINAL_STATUSES` with `include_outdated_flag=False`; `commit_ops.py`
+    says it outright: *"'outdated' IS visible — it is not in the object vocabulary,
+    only in the POINT-terminal set"*). Retiring anyway is correct because a state
+    derived from an input carrying the legacy invalidate word is exactly the stale
+    conclusion #11926 exists to retire, and re-derivation mints a fresh claim —
+    nothing is lost.
     """
     i, t, g = _world(sdk, tag=f"legacy-outdated-{retire}")
     made = _judge(sdk, i, t, g)
@@ -310,9 +320,12 @@ def test_a_truthy_NON_BOOLEAN_outdated_flag_is_terminal_like_is_terminal_status(
     (a STRING, which no in-repo writer produces but old graphs can carry) is
     terminal to every flag-aware read surface. An identity test (``is True``)
     called it LIVE: the same disagreement this arm exists to end, surviving on a
-    narrower population. The one value where ``bool()`` and Cypher still differ
-    (numeric ``0`` / ``""``: falsy in Python, terminal in Cypher) is the residual
-    ``is_terminal_status`` documents and #7075 rules unreachable in-repo.
+    narrower population. The one CLASS where ``bool()`` and the Cypher predicate
+    still differ — falsy-but-not-``false`` values (``0``/``0.0``, ``""``): live
+    here, terminal in Cypher — is the residual ``is_terminal_status`` documents
+    and #7075 rules unreachable in-repo. (Both spellings point the same way there:
+    Python says live, the graph says terminal — the direction the fix under test
+    closed, not its opposite.)
     """
     i, t, g = _world(sdk, tag="legacy-outdated-truthy")
     made = _judge(sdk, i, t, g)

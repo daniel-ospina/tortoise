@@ -363,9 +363,11 @@ def _retirement(node: Any, *, goal: bool = False) -> str | None:
     # number. An identity test diverges on a truthy non-boolean legacy value —
     # a node holding `outdated = 'true'` is terminal to the flag-aware read
     # surfaces and was LIVE here, which is the same disagreement this arm exists
-    # to end. The one place the two spellings differ in the OTHER direction
-    # (numeric ``0`` / ``""``: falsy here, terminal in Cypher) is the residual
-    # ``is_terminal_status`` documents and no in-repo writer can produce (#7075).
+    # to end. The one CLASS where ``bool()`` and the Cypher predicate still differ —
+    # falsy-but-not-``false`` values (``0``/``0.0``, ``""``): live here, terminal in
+    # Cypher — is the residual ``is_terminal_status`` documents and no in-repo writer
+    # can produce (#7075). Both spellings point the same way there (Python live,
+    # graph terminal): the direction this fix CLOSES, not its opposite.
     if bool(node.get("outdated")):
         return "its legacy outdated flag is set"
     successor = node.get("supersededBy") or node.get("superseded_by")
