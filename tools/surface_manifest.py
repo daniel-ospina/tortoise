@@ -2306,10 +2306,20 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
     # which no gate sees the removal at all (review of PR #12313, round 9). The sibling owns
     # this question; the record reader now asks it instead of answering it again.
     try:
-        violations = archive_surface.manifest_violations(doc, path.parent)
-        violations += archive_surface.file_violations(
-            [e for e in (doc.get("entries") or []) if isinstance(e, dict)], path.parent, ROOT
-        )
+        # ⛔ ONLY WHERE THERE IS A MANIFEST TO GRADE. `manifest_violations`'s first arm reds a
+        # MISSING `archive/MANIFEST.json` (correctly, for `check`, which is asked whether the
+        # archive is intact) — but `load_manifest`'s contract is the opposite one this reader
+        # needs: "missing file is EMPTY, not an error (first run)". Delegating unconditionally
+        # refused EVERY cut on a tree with no archive at all, removal or not — a false refusal
+        # of the ordinary path, which is worse than the forged-record hole it closed
+        # (review of PR #12313, round 10). An absent manifest holds no records either way, so
+        # there is nothing here to grade.
+        violations: list[str] = []
+        if path.exists():
+            violations += archive_surface.manifest_violations(doc, path.parent)
+            violations += archive_surface.file_violations(
+                [e for e in (doc.get("entries") or []) if isinstance(e, dict)], path.parent, ROOT
+            )
     except Exception as exc:  # pragma: no cover - an environment fault is a refusal
         raise SurfaceEvidenceUnreadable(
             f"could not grade the archive manifest against its own checker: "

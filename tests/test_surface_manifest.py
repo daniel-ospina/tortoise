@@ -5069,8 +5069,15 @@ def test_an_unreadable_archive_manifest_is_a_REFUSAL_not_an_empty_record(tmp_pat
     with _pytest.raises(sm.SurfaceEvidenceUnreadable):
         sm.removal_records(archive_manifest=broken)
 
-    # And the documented first-run arm still reads as empty rather than refusing.
-    assert sm.removal_records(archive_manifest=tmp_path / "absent.json")["archived"] == set()
+    # And the documented first-run arm still reads as empty rather than refusing — asserted in
+    # a directory that has NO `MANIFEST.json` at all. The previous form used a sibling path in
+    # `tmp_path` AFTER writing `MANIFEST.json` there, so the absence arm of the delegated
+    # `manifest_violations` never ran and the assertion was satisfied by the wrong branch: it
+    # passed while every cut on an archive-less tree was refused (review of PR #12313, round 10).
+    empty_dir = tmp_path / "no-archive-here"
+    empty_dir.mkdir()
+    assert not (empty_dir / "MANIFEST.json").exists(), "the fixture must not carry a manifest"
+    assert sm.removal_records(archive_manifest=empty_dir / "MANIFEST.json")["archived"] == set()
 
 
 def _prior_with_extra_rows(derived_baseline, rows: list[dict]) -> dict:
