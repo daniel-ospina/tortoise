@@ -3335,10 +3335,10 @@ def _glob_matches(pattern: str, names: tuple[str, ...]) -> bool:
     string-concatenated arguments and character classes are graded by what they MATCH rather than
     by how they are spelled — the distinction three review rounds were spent on. A pattern with NO
     wildcard (`python-ci.yml`, a deliberate single-workflow reference, or a tuple of REQUIRED
-    filenames) can open exactly one file, so it is not an EXTENSION-CLASS enumeration and it
-    matches nothing here by construction: `"*.yml"` still reds, while `glob("python-ci.yml")` and
-    a filename tuple stay clean instead of reding as "one-sided enumerations" (measured, review
-    round 7).
+    filenames) can open at most one file per pattern, so it is not an EXTENSION-CLASS enumeration
+    and it matches nothing here by construction: `"*.yml"` still reds, while `glob("python-ci.yml")`
+    and a filename tuple stay clean instead of reding as "one-sided enumerations" (measured,
+    review round 7).
     """
     segment = pattern.rsplit("/", 1)[-1]
     if not any(ch in segment for ch in "*?["):
@@ -3437,11 +3437,16 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         `os.listdir`. Measured clean, and not pinnable from source text without a dataflow
         analysis. (`rglob` IS graded: it is in the same NAME set as `glob`, and a recursive
         enumeration of the workflows directory reds like any other one-sided glob.)
-      * a both-extension pair written by hand — `[*WORKFLOWS.glob("<star>.yml"),
-        *WORKFLOWS.glob("<star>.yaml")]`, or the same pair as module constants. This is an
+      * a both-extension pair written by hand as TWO CALLS — `[*WORKFLOWS.glob("<star>.yml"),
+        *WORKFLOWS.glob("<star>.yaml")]` — or as two separate module constants. This is an
         OVER-BLOCK by choice: the pair is CORRECT, but it is also the shape whose `.yaml` half
         can be dropped silently later, and `_workflow_paths()` already expresses it once. The red
         says so rather than licensing a receiver, which is what measured worse (cut 5 above).
+        ⛔ NOT the over-block: ONE constant holding the pair as a single tuple/list
+        (`_PAIR_GLOBS = ("<star>.yml", "<star>.yaml")`) stays CLEAN — the constants arm grades a
+        tuple as a GROUP, because that is how it is consumed, and dropping either member still
+        reds (measured). So "the same pair as module constants" reds only in the two-constants
+        spelling; a reply that read the pair-in-one-constant form as reachable would be wrong.
       * a one-sided pattern held in a LOCAL binding or a `__`-prefixed global rather than a
         module-level constant (`globs = ("<star>.yml",)` inside a function, consumed by
         `WORKFLOWS.glob(pattern)`). The constant arm reads module globals only, so a bare NAME
