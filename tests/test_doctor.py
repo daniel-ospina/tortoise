@@ -42,6 +42,20 @@ def clear_db_env(monkeypatch):
     return monkeypatch
 
 
+@pytest.fixture(autouse=True)
+def _no_hosted_egress(monkeypatch):
+    """#11912: `doctor` now probes the hosted endpoint when a credential resolves.
+
+    No test in this module needs the real network, and the alternative is worse
+    than slow: a box with a real `~/.tortoise/credentials.json` would SEND that
+    key to api.premiselabs.co during `pytest` (measured by the PR #12371 review).
+    Pin every run at a closed loopback port; the tests that exercise the probe
+    monkeypatch `urllib.request.urlopen` themselves and never reach this.
+    """
+    monkeypatch.setenv("TORTOISE_API_URL", "http://127.0.0.1:1")
+    return monkeypatch
+
+
 def _run_doctor(argv: list[str]) -> int:
     """Invoke `tortoise doctor <argv>` (main returns int)."""
     from tortoise.__main__ import main
@@ -1763,6 +1777,10 @@ class TestDoctorHostedCredentialRows:
                                              {"detail": "Invalid API key"}).encode())
                     raise urllib.error.HTTPError(url, team, "err", {},
                                                  io.BytesIO(body))
+                if isinstance(team_body, bytes):
+                    # A RAW body (e.g. b"" from a proxy) — never substituted by
+                    # a plausible default, which is the false PASS under test.
+                    return _Resp(team_body)
                 return _Resp(_json.dumps(
                     team_body or {"org_id": "agent-00e8e3", "tier": "free"}
                 ).encode())
@@ -1825,6 +1843,13 @@ class TestDoctorHostedCredentialRows:
 
         assert "--offline" in out, out
         assert "credentials.json" in out, out
+        # ⛔ The assertions above ALONE cannot fail on a mutant that drops the
+        # offline short-circuit: `_probe_hosted` swallows every exception and its
+        # "unreachable … re-run with --offline" text satisfies both of them. Pin
+        # the ROW, so a probe-only-inside-`_forbidden` regression reds here
+        # (PR #12371 review, BLOCKING).
+        assert "ℹ️ Hosted" in out, out
+        assert "❌ Hosted" not in out, out
 
     def test_a_valid_key_reports_latency_and_the_team_it_belongs_to(
             self, monkeypatch, tmp_path, capsys):
@@ -1857,6 +1882,23 @@ class TestDoctorHostedCredentialRows:
         hosted = next(ln for ln in out.splitlines() if "Hosted" in ln)
         assert "graph-scoped" in hosted, hosted
         assert "by design" in hosted, hosted
+
+    def test_a_200_with_no_team_identity_is_not_a_verified_key(
+            self, monkeypatch, tmp_path, capsys):
+        """PR #12371 review (BLOCKING): an EMPTY 200 body parsed as `{}` is a
+        dict, so an earlier revision reported "key accepted" for a response the
+        server never made — a proxy answering 200 with no body put a ✅ on a box
+        whose hosted half is broken, which is the exact false PASS #11912
+        removes. `team info` refuses the same shape."""
+        self._store(tmp_path, "tt_" + "e" * 40)
+        self._install(monkeypatch, team_body=b"")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "✅ Hosted" not in out, out
+        assert "❌ Hosted" in out, out
+        assert "team identity" in out, out
 
     def test_the_credentials_row_names_the_store_and_never_the_key(
             self, monkeypatch, tmp_path, capsys):

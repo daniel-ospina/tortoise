@@ -12912,6 +12912,11 @@ def _probe_hosted(api_url: str, api_key: str,
                                     timeout=min(timeout, _DOCTOR_HEALTH_TIMEOUT_S)) as resp:
             resp.read(2048)
     except urllib.error.HTTPError as exc:
+        # The body is never read on this path; close it so a `-W error::
+        # ResourceWarning` run does not red a test for a diagnostic's leak.
+        import contextlib as _contextlib
+        with _contextlib.suppress(Exception):
+            exc.close()
         return ("❌", f"{shown}/health answered {exc.code} — the endpoint is up but "
                       "not healthy; check status.premiselabs.co or retry")
     except Exception as exc:  # transport, bad URL, TLS, timeout
@@ -12926,20 +12931,29 @@ def _probe_hosted(api_url: str, api_key: str,
         req = urllib.request.Request(
             f"{base}/v1/team", headers={"Authorization": f"Bearer {api_key}"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
+            # Bounded like every other read on this surface: a proxy page must
+            # not be pulled into memory just because it answers 200.
+            raw = resp.read(65536)
+        # NO `or b"{}"` FABRICATION (#12371 review, BLOCKING): an empty body
+        # parsed as `{}` is a dict, and the branch below would then report "key
+        # accepted" for a response the server never made — the exact false PASS
+        # this row exists to remove, now wearing a ✅ the user trusts more than
+        # the old silence. Parse what arrived, and require EVIDENCE of a team
+        # identity before claiming acceptance (a `{}` 200 is not acceptance).
         try:
-            data = __import__("json").loads(raw or b"{}")
+            data = __import__("json").loads(raw)
         except (ValueError, TypeError, RecursionError):
             data = None
-        if not isinstance(data, dict):
-            # A 200 whose body is not an object (proxy, captive portal) is not a
-            # verified credential — `config show` refuses the same shape.
-            return ("❌", f"health OK ({health_ms} ms) but /v1/team answered a "
-                          "non-JSON-object body — a proxy or captive portal is "
-                          "in the path; check TORTOISE_API_URL")
-        org = data.get("org_id")
-        tail = f" ({_printable(org)})" if isinstance(org, str) and org else ""
-        return ("✅", f"health OK ({health_ms} ms) · key accepted{tail}")
+        org = data.get("org_id") if isinstance(data, dict) else None
+        if not isinstance(data, dict) or not (isinstance(org, str) and org.strip()):
+            # A 200 whose body carries no team identity (empty, an array, a
+            # captive-portal page) is not a verified credential — `team info`
+            # refuses the same shapes.
+            return ("❌", f"health OK ({health_ms} ms) but /v1/team did not answer "
+                          "with a team identity — a proxy or captive portal may "
+                          "be in the path; check TORTOISE_API_URL")
+        return ("✅", f"health OK ({health_ms} ms) · key accepted "
+                      f"({_printable(_scrub(org, base, api_key))})")
     except urllib.error.HTTPError as exc:
         import http.client
         try:
@@ -12963,6 +12977,7 @@ def _probe_hosted(api_url: str, api_key: str,
 
 def _doctor_hosted_rows(api_key: str | None, api_url: str | None, *,
                         source: str | None = None, org_id: str | None = None,
+                        org_name: str | None = None,
                         offline: bool = False, refused: str | None = None,
                         degraded: str | None = None,
                         ) -> list[tuple[str, str, str]]:
@@ -13008,7 +13023,12 @@ def _doctor_hosted_rows(api_key: str | None, api_url: str | None, *,
     if target:
         detail += f" · {target}"
     if org_id:
-        detail += f" · org {_printable(org_id)}"
+        # The human-readable name first when the store carries one: "who am I"
+        # is answered by a name, with the id as the verifiable half.
+        label = (f"{_printable(org_name)} ({_printable(org_id)})"
+                 if isinstance(org_name, str) and org_name.strip()
+                 else _printable(org_id))
+        detail += f" · org {label}"
     rows: list[tuple[str, str, str]] = [("Credentials", "✅", detail)]
 
     if offline:
@@ -13292,11 +13312,12 @@ def _cmd_doctor(args):
             source=("env:TORTOISE_API_KEY" if (_cfg_path is None and _api_key)
                     else (str(_cfg_path) if _cfg_path is not None else None)),
             org_id=(_cfg or {}).get("org_id") if isinstance(_cfg, dict) else None,
+            org_name=(_cfg or {}).get("org_name") if isinstance(_cfg, dict) else None,
             offline=_offline))
     except _ConfigError as exc:
         # The resolver REFUSED a store: that is the diagnosis, and probing with
         # no key would fail for a reason we already know.
-        _offender = exc.args[0] if exc.args else "(unknown store)"
+        _offender = _printable(exc.args[0] if exc.args else "(unknown store)")
         _why = str(exc.__cause__) if exc.__cause__ else "api_key missing or invalid"
         results.extend(_doctor_hosted_rows(
             None, None, offline=_offline,
