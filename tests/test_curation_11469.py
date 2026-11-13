@@ -4328,6 +4328,118 @@ def test_a_bound_credential_falls_back_and_discloses_on_the_event_read():
     assert "Event read" in (reader.note or ""), reader.note
 
 
+def test_a_non_graph_refusal_on_the_event_read_does_NOT_fall_back():
+    """Only a refusal ABOUT the graph may be re-read without it.
+
+    Re-reading a different graph under the requested graph's identity is how a census
+    mixes two graphs — the doctrine this module states for `_section`. Measured: deleting
+    either `_looks_like_graph_refusal` guard (the RAISED arm and the ENVELOPE arm) left the
+    whole suite green, so a 429 or a timeout on the requested graph was silently re-read
+    against the credential's own graph and only caught when the counts happened to
+    disagree (final review, F3).
+    """
+    mod = _tool_module()
+
+    # Both arms, both shapes: the raised arm needs something that RAISES, the envelope arm
+    # an error payload — a fixture that only exercises one leaves the other unpinned.
+    for shape in ("envelope-429", "envelope-deadline", "raises-timeout"):
+        def call(name, args, _shape=shape):
+            if (args or {}).get("graph"):
+                if _shape == "raises-timeout":
+                    raise TimeoutError("read timed out after 10s")
+                # ⛔ A plain DICT envelope for the envelope arm: a `RealCallToolResult`
+                # with `is_error=True` is refused EARLIER (inside `normalise_tool_result`,
+                # i.e. on the RAISED arm), so it never reaches the envelope arm and leaves
+                # that arm's `_looks_like_graph_refusal` guard unpinned — measured, with a
+                # `RealCallToolResult` the guard could be deleted and this test stayed
+                # green.
+                err = ("429 Too Many Requests" if _shape == "envelope-429"
+                       else "Deadline Exceeded")
+                return {"error": err}
+            return {"result": list(EVENT_ROWS)}
+
+        reader = mod.MCPReader(call, "org_x_g_old")
+        try:
+            reader.read_events({"counts": {"Event": 3}})
+        except Exception as exc:  # the refusal shape is what is under test
+            assert "429" in str(exc) or "timed out" in str(exc) or "Deadline" in str(exc), exc
+        else:
+            raise AssertionError(
+                f"{shape}: a non-graph refusal was re-read without the graph argument, so "
+                "the Event layer came from a DIFFERENT graph than the one requested")
+        assert not reader.note or "read from the credential" not in reader.note, reader.note
+
+
+def test_an_event_payload_that_is_not_a_row_listing_is_refused():
+    """A count-only or renamed-key payload is not "an empty layer" (final review, F4).
+
+    `_is_row_listing` is the arm that separates an unreadable payload from an empty one.
+    Measured: deleting it left the suite green, so a `{"total": 3}` answer (a renamed
+    `result` key, or a resolution block arriving as the first parseable part) would have
+    read as zero Events.
+    """
+    mod = _tool_module()
+    base = _event_surface(reported=3)
+
+    def call(name, args):
+        # ⛔ The raw payload, NOT through `_event_surface` — that helper wraps whatever it
+        # is given in `{"result": [...]}`, which is exactly the shape this test must not
+        # produce (a dict inside `result` is a ROW-list of one non-row, and the failure it
+        # then reaches is the row-shape arm, not this one).
+        if name == "tortoise_get_entity" and (args or {}).get("type") == "events":
+            return {"total": 3}
+        return base(name, args)
+
+    # ⚠️ Asserted at the READER, not through `main`: an unrecognisable payload RAISES
+    # (a RuntimeError), so it never reaches the census as rows — which is the property
+    # this arm exists for. A `main`-level assertion would just be observing the traceback.
+    reader = mod.MCPReader(call, None)
+    try:
+        reader.read_events({"counts": {"Event": 3}})
+    except RuntimeError as exc:
+        # ⛔ The ARM's own words. `CurationRefused` subclasses RuntimeError, so an assertion
+        # on the exception TYPE alone is satisfied by the DISAGREEMENT arm when this guard
+        # is deleted (measured green under exactly that mutation) — a false pin.
+        assert "unrecognised shape" in str(exc), exc
+        assert "counts.Event reports" not in str(exc), exc
+    else:
+        raise AssertionError(
+            "a count-only payload was accepted as the Event layer — an unreadable payload "
+            "became an empty or partial layer")
+
+
+def test_an_error_envelope_on_the_event_read_is_named_as_a_refusal_not_a_shape():
+    """The refusal must be ATTRIBUTABLE: an envelope is an error, not a weird payload.
+
+    Measured: deleting the `_error_of` check left the suite green; the 429 the surface
+    returned then surfaced as "answered in an unrecognised shape", which sends an operator
+    to the wrong place entirely (final review, F5).
+    """
+    mod = _tool_module()
+    base = _event_surface(reported=3)
+
+    def call(name, args):
+        if name == "tortoise_get_entity" and (args or {}).get("type") == "events":
+            # A plain dict envelope — the shape `_error_of` reads. A `RealCallToolResult`
+            # with `is_error=True` is refused EARLIER (by `normalise_tool_result`), so it
+            # never reaches this arm and would pin nothing.
+            return {"error": "429 Too Many Requests"}
+        return base(name, args)
+
+    # Asserted at the READER: the payload-shape arm raises here rather than returning rows.
+    reader = mod.MCPReader(call, None)
+    try:
+        reader.read_events({"counts": {"Event": 3}})
+    except RuntimeError as exc:
+        # The refusal must be ATTRIBUTABLE. Measured: with the `_error_of` check deleted,
+        # the 429 is still refused (fail-closed) but arrives as "answered in an
+        # unrecognised shape", which sends an operator to the wrong place entirely.
+        assert "was refused" in str(exc) and "429" in str(exc), exc
+        assert "unrecognised shape" not in str(exc), exc
+    else:
+        raise AssertionError("an error envelope was accepted as the Event layer")
+
+
 def test_a_disarmed_event_read_failure_reports_the_layer_as_unread(monkeypatch, tmp_path):
     """`None` means NO COMPLETED READ — not "this graph has no Events".
 
