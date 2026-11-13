@@ -2749,8 +2749,8 @@ to answer.
   `classify(union) failed` — the two are byte-identical at the `except` line, so what tells them
   apart is STRUCTURE (each sits under its own `if classify_later and …` gate), not text. The
   `+83` band is uniform below `@@ -10129` but NOT above it: a cite between the third and fourth
-  hunks moves by `+82`, which is why the three `create_operator` mentions in
-  `RECONCILE-A1-A2-A5.md` were re-derived to `:9569`, `:9587`, `:9594`, not by adding 83.
+  hunks moves by `+82`, which is why the FOUR `create_operator` mentions in
+  `RECONCILE-A1-A2-A5.md` were re-derived to `:9569`, `:9587`, `:9594`, `:9974`, not by adding 83.
 - **Carriers updated, all of them LIVE:** §9's provenance row, §11.1's prose, §11.3's fail-open
   sentence, and §11's `steps:` condition — the four `_live_blocks` carriers the pin binds. §10.5's
   pair is **not** touched: it is a change-control entry, `_without_change_history` strips it, and

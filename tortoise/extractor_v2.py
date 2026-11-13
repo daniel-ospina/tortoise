@@ -5803,8 +5803,8 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     ``E`` FOLD is non-injective, DOES attach alone, and is the class this rung
     newly binds — ``C++``, ``C#`` and ``C`` all fold to ``c``, so a capture window
     holding exactly one of them binds the other (measured:
-    ``_find_existing_entity([{id:"obj-csharp", name:"C#"}], "C++")`` returns
-    ``("obj-csharp", "folded")``; pinned at
+    ``_find_existing_entity([{"id": "obj-csharp", "name": "C#", "kind": "core:other"}],
+    "C++", "core:other")`` returns ``("obj-csharp", "folded")``; pinned at
     ``tests/test_12295_entity_blocking.py`` and declared as invariant 3 in
     ``entity_blocking.py``). Do NOT read this rung as safe-except-basenames.
     ``name`` is never rewritten; the key is derived for the comparison

@@ -80,13 +80,13 @@ Zep/Graphiti (`graphiti_core/utils/maintenance/dedup_helpers.py`, read at
    the stored ``canonical_name`` key); the ATTACH is CREATED here, by the folded
    rung this PR adds to ``extractor_v2._find_by_folded_key`` — on ``origin/main``
    ``_find_existing_entity`` has only the ``exact`` and ``bare`` arms, both
-   ``_norm``-keyed, so ``_find_existing_entity([{id:o1, name:"C#"}], "C++")``
-   returns ``(None, "none")`` there. :func:`key_of` collapses punctuation, so
+   ``_norm``-keyed, so ``_find_existing_entity([{"id": "o1", "name": "C#", "kind": "core:other"}],
+   "C++", "core:other")`` returns ``(None, "none")`` there. :func:`key_of` collapses punctuation, so
    ``C++``, ``C#`` and ``C``
    all fold to ``c`` (likewise ``.NET``/``NET``, ``50%``/``50``), and a capture
    window holding exactly one of them binds the other —
-   ``_find_existing_entity([{id:o1, name:"C#"}], "C++")`` returns ``o1`` by the
-   ``folded`` rung. Only ONE collider need be present, so the basename arm's
+   ``_find_existing_entity([{"id": "o1", "name": "C#", "kind": "core:other"}], "C++",
+   "core:other")`` returns ``o1`` by the ``folded`` rung. Only ONE collider need be present, so the basename arm's
    "exactly one carries it" test cannot see it. That is a DECLARED RESIDUAL, the
    third beside ``space-to-hyphen`` and ``basename-only``: the dedupe scan reports
    such a pair as ``exact``/``auto_mergeable`` so a reviewer meets it there, and

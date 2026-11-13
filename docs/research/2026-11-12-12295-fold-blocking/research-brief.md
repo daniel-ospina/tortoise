@@ -25,20 +25,29 @@ asserts `report["code_head"] in brief`, and it reds on a first-generation sha su
 live one (measured, both directions). The artifact is the
 source of truth for this field and the brief must agree with it.
 Commits after it touch those files in two ways, and the provenance claim is stated as the diff
-rather than as a summary of it: (a) DOCSTRINGS/COMMENTS — `5b618ed0524d` moves the `emitted:` note
-and `f546f0e5a957` adds the `complete=True` note; (b) LABELS — `d52a989eafd2` renames the
+rather than as a summary of it: (a) DOCSTRINGS/COMMENTS — the `emitted:` note moves, and a
+`complete=True` note is added; (b) LABELS — `1990cca573` (pre-rebase `d52a989eafd2`) renames the
 `lsh_bands` docstring label and the `stats()` counter key `keys` -> `key_memberships`, and
-`22ec4d1a6048` adds a `candidates(label=None)` LABEL FALLBACK in `entity_blocking.py`.
-⛔ The enumeration, not this summary, is what proves it: `git log --format=%h ae63e846e410..HEAD --
-tortoise/entity_resolver.py tortoise/entity_blocking.py tortoise/extractor_v2.py` lists the
-commits, of which exactly TWO are statement changes — `d52a989eafd2` (the `stats()` key rename,
-a diagnostic LABEL, which is why the artifact reads `key_memberships` while the run emitted
-`keys`) and `22ec4d1a6048` (the fallback). Apart from those two, everything on that list is
-docstring/comment-only, and this run never reaches the fallback: the harness calls
+`22e43732e9` (pre-rebase `22ec4d1a6048`) adds a `candidates(label=None)` LABEL FALLBACK in
+`entity_blocking.py`.
+⛔ The enumeration, not this summary, is what proves it — and ⛔ **THE RANGE NO LONGER ISOLATES
+POST-RUN CHANGES**: the `#12304` rebases rewrote every branch sha, so
+`git log --format=%h ae63e846e410..HEAD -- tortoise/entity_resolver.py tortoise/entity_blocking.py
+tortoise/extractor_v2.py` now prints **25** commits (`git rev-list --count ae63e846e410..HEAD` is
+**55** unrestricted) that SPAN the whole rewritten branch. It is not a list of docstring-only
+commits and this paragraph does not claim it is — it holds the branch's own feature and fix
+commits too, which is what a base-moved range holds. What the enumeration DOES establish is the
+IDENTITY of the two statement changes, and it establishes it by CONTENT, not by position: the
+`stats()` key rename (a diagnostic LABEL, which is why the artifact reads `key_memberships` while
+the run emitted `keys`) is `git log -S'key_memberships'` -> `1990cca573`, and the fallback is
+`git log -S'every label this index actually holds'` -> `22e43732e9`; both are members of that
+25-commit list, and both pre-rebase shas are dangling objects no reader can resolve. This run never
+reaches the fallback: the harness calls
 `index.candidates(surface, label="Object")` (cited BY SYMBOL, never by line — the number has rotted
 three times already, so `grep -n` for the symbol in `tools/candidate_recall_11901.py` is the
-check), so the `label is None` branch is not taken. No statement in `entity_resolver.py` or
-`extractor_v2.py` moved after `ae63e846e410`.
+check), so the `label is None` branch is not taken. Nothing further is claimed about the
+range's contents: the two `git log -S` invocations above are the proof offered, and they
+answer only WHICH commits the two label changes are.
 
 ⛔ **THE SCOPE ABOVE IS THE PRODUCT CODE — NOT THE HARNESS, WHICH ALSO MOVED.** The code that
 PRODUCES this artifact is `tools/candidate_recall_11901.py`, and `git diff --stat e9a572d4b4

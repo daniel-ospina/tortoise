@@ -11951,19 +11951,19 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "line that spells the predicate allowlist")
     assert "`extractor_v2.py:11607`" in text, (
         "the record must cite the comment that says nothing consumes the channel")
-    # The SAME line is cited a SECOND time as a bare `:11524`, inside the
+    # The SAME line is cited a SECOND time as a bare `:11607`, inside the
     # reproduction block's comment. A bare cite carries no file token, so the
     # prefixed arm above cannot see it: measured by re-staling it to `:10815` in
     # place, which left every arm True before this assert existed.
     # ⛔ Pinned as the BARE occurrence of the NUMBER, not as the sentence around it (#10891
     # is the claim; "the comment at" is one way of saying it). A literal needle redded on
-    # `the comment on :11524` and on `` the comment at `:11517` `` — both correct, both
+    # `the comment on :11607` and on `` the comment at `:11517` `` — both correct, both
     # sending the reader to the live line (measured) — the same false-block this leg removed
     # for `both now read`, the `# §0/§2` heading and `MENTIONS`. The prose above carries the
     # PREFIXED form `extractor_v2.py:11607`; this is the only statement without a file token,
     # so exactly one bare occurrence is the claim.
     assert re.findall(r"(?<!extractor_v2\.py):11607", text) == [":11607"], (
-        "the reproduction block must state the live number `:11524` exactly once as a BARE "
+        "the reproduction block must state the live number `:11607` exactly once as a BARE "
         "cite — re-stale it and this record's only reproduction path points at a dead line")
     # ⛔ DIRECTION FLIPPED with the correction this arm forced. The comment at this line used to
     # read "nothing in this tree consumes `result[\"relations\"]`" — a claim that was FALSE from the
