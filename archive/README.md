@@ -113,7 +113,10 @@ enforced at two different seams, deliberately:
   required gate green; a shrink pin on the committed counts is the only instrument that would
   see it ([`#12327`](https://github.com/daniel-ospina/tortoise/issues/12327)), and
   [`#12291`](https://github.com/daniel-ospina/tortoise/issues/12291) covers the same absence class
-  for the archive. **Both halves of the baseline are compared** (`rows:` and `retired:`), because a
+  for the archive. **Both halves of the baseline are compared** — unless the committed
+  baseline carries no `retired:` half at all: `check` already reds that shape, so `cut`
+  is repairing it, and the cut then says so and does NOT compare that half. With both
+  halves present they are compared because a
   retired name is still SERVED: `RETIRED_TOOL_REGISTRY` is derived from
   `RETIRED_USE_INSTEAD`, so one edit to that map detaches both, and a gate reading only
   `rows:` would watch a live name leave the product and report nothing. A dropped symbol must

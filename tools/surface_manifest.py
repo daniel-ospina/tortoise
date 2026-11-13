@@ -2203,7 +2203,11 @@ def surface_symbols(doc: dict) -> set[tuple[str, str]]:
                     "which symbol disappeared, and guessing one would grade the wrong record"
                 )
             if name.startswith("sdk:"):
-                symbols.add((str(row.get("method") or name[len("sdk:"):]), "sdk"))
+                # The row's NAME is its identity; `method` is a DERIVED cell beside it, and a
+                # hand-edit can move it while the name still says which method departed. The
+                # suffix is preferred (falling back to `method`) so the gate reads what the row
+                # says rather than what a splicer left in a derived column (review of PR #12313).
+                symbols.add((name[len("sdk:"):] or str(row.get("method") or ""), "sdk"))
             else:
                 symbols.add((name, "tool"))
     return symbols

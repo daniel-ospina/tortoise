@@ -5786,3 +5786,15 @@ def test_an_SDK_archive_entry_without_the_map_entry_is_REFUSED_by_both_gates():
     problems, accounting = sm.removal_report({("backfill_sources", "sdk")}, set(), records)
     assert problems == [], problems
     assert "archived code" in accounting[("backfill_sources", "sdk")], accounting
+
+
+def test_an_SDK_rows_identity_is_its_NAME_not_its_derived_method_cell():
+    """A hand-edit that moves `method` must not move which symbol the gate thinks departed.
+
+    `method` is a DERIVED column beside the row's `sdk:<name>`; reading it first made the
+    gate's identity for a prior row come from that cell, so a row still naming the departed
+    method could be graded as a surviving one (review of PR #12313).
+    """
+    sm = _load_manifest_tool()
+    prior = {"rows": [{"name": "sdk:tortoise_vanished", "method": "something_else"}]}
+    assert sm.surface_symbols(prior) == {("tortoise_vanished", "sdk")}
