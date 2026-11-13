@@ -15510,8 +15510,11 @@ class TortoiseSDK:
         #    (`"embedding" in props`: that vector describes the caller's own
         #    text) and never when the embedder was unavailable (nothing then
         #    describes the composed text, and a later `backfill_embeddings`
-        #    re-encode is from `content`). Attaching it anyway is exactly the
-        #    #4194 lie `update_point`'s content arm clears.
+        #    re-encode USED TO be from `content` — since #12489 it reads
+        #    `embeddingText or content`, so the backfill is no longer a reason
+        #    this rule is safe; it stands on the #4194 identity alone). Attaching
+        #    it anyway is exactly the #4194 lie `update_point`'s content arm
+        #    clears.
         # ⛔ THE NEIGHBOUR HALF IS DELIBERATELY NOT WIRED HERE, and the reason is
         # measured rather than assumed (#11739 review round 4): a Point has NO
         # resolved neighbours at its own creation. `create_point` mints NO
@@ -42410,6 +42413,84 @@ class TortoiseSDK:
         # choice either: a read that opted in and was left alone DISCLOSES it.
         _rr_on = rerank_pool_enabled()
         _rr_order_by_ok = order_by == "relevance"
+        _rr_text_ok = bool((query or "").strip())
+        # ⛔ THE ENTRY CONDITION IS "ARMED", NOT "ARMED AND NON-EMPTY" (#12382).
+        # Every arm below carries ``result_ids and ... and (query or "").strip()``
+        # in its condition, so the TWO shapes with the least to rerank — a
+        # query-less FULL SCAN (``tortoise_fts_query(None, kind=..., limit=N)``,
+        # a documented caller-facing mode) and a candidate set that a filter
+        # emptied before this point (the kind / claim-class / relationship /
+        # traversal / status / turn-echo filters all narrow ``result_ids`` in
+        # place) — left the block through its own ``not query``/empty-list exit
+        # WITHOUT an entry. Measured at #12343's head ``93af561442``: with
+        # ``TORTOISE_FUSED_RERANK=1`` a full-scan read returned 3 rows and
+        # ``rerank entries: []`` — byte-identical to a caller that never armed the
+        # gate, so "the lever declined" read as "the lever was never on".
+        # That is the ONE rule this block exists to enforce (see the degrade arms
+        # below and #8487's ``valid_time`` leg): an armed lever that did not run
+        # MUST say so.
+        # ⛔ NOT the read that found NOTHING AT ALL: that one returns from the
+        # fallback path above, before this block, and already carries its own
+        # verdict on every leg it asked (``empty_results``, or
+        # ``below_relevance_floor`` / ``breaker_open`` where that is what
+        # happened) — a rerank entry there would restate the same fact twice.
+        # ⛔ THE REASONS ARE ``rerank_pool``'s OWN vocabulary, not a new one: it
+        # already degrades on ``empty_query`` and ``empty_pool`` — terms the
+        # wiring could never reach because these two exits fired first. Naming
+        # them here makes the wiring agree with the function it calls.
+        # ⛔ AND THE TWO ARE NOT THE SAME FACT, so they are not one reason: a
+        # query-less read has nothing to SCORE WITH, an empty result set has
+        # nothing to score — collapsing them (both ``empty_query``) would blame
+        # the caller's query for a read whose candidate set was emptied, which is
+        # the mis-direction ``pool_text_empty`` vs ``pool_text_read_failed`` below
+        # is already careful about.
+        # ⛔ AND WHEN BOTH ARE TRUE THE POOL WINS — ``rerank_pool``'s own order
+        # (``tortoise/rerank.py``: the ``empty_pool`` return precedes the
+        # ``empty_query`` one). A read that returned NO rows reads
+        # ``empty_pool`` even when the query is also blank, because "you sent no
+        # query" is not an instruction that would have helped: the caller's own
+        # filter removed every candidate, and ``rerank_unscored`` is 0 either way.
+        # The other order inverted the function's precedence, so "the wiring
+        # agrees with the function it calls" was true only on the exclusive
+        # shapes (review round 2 on #12382).
+        # ⛔ GATE OFF STAYS SILENT — that is the one case where "no entry" is the
+        # truthful signal (``test_the_off_path_writes_no_rerank_trace_entry``),
+        # and it is why this arm keys on ``_rr_on`` rather than on the exits.
+        # ⛔ A CALLER DECISION OUTRANKS AN EMPTY INPUT, in the arms' OWN precedence
+        # (review round 1 on #12382): the four arms below are keyed on
+        # ``result_ids`` too, so they cannot fire on a read this arm catches — and
+        # naming ``empty_query`` for a caller that ALSO opted out (`recall_state`
+        # passes ``_rerank_candidates=False`` with ``query=None`` by default,
+        # ``sdk.py`` "1. Candidate pool") would send that reader to fix the query
+        # when the lever is what declined it. Same rule the block states for
+        # recency: the read's own reason wins over an incidental one.
+        # ⛔ ALL THREE caller decisions, not just the two that are booleans here
+        # (review round 4): ``recency_order_applied`` is the third — a read that
+        # asked for a recency order and ALSO has an empty input used to be told
+        # ``empty_query``, and supplying a query then reports
+        # ``recency_order_applied``, so the advice was a loop.
+        # ⛔ AND IT CAN COEXIST WITH AN EMPTIED POOL (review round 5):
+        # ``_recency_applied`` needs a non-empty pool AT STEP 4b, not here — the
+        # kind / relationship / traversal / status / claim-class / turn-echo
+        # filters all narrow ``result_ids`` AFTER it, so ``recency_order_applied``
+        # does shadow ``empty_pool`` on a filter-emptied pool (measured). That is
+        # the same rule as the two decisions above, not an accident, and
+        # ``test_the_recency_skip_CAN_coexist_with_an_emptied_pool`` pins it.
+        _rr_recency_conflict = bool(_recency_applied)
+        _rr_skip_reason = (
+            "order_by_not_relevance" if not _rr_order_by_ok
+            else "order_owned_downstream" if not _rerank_candidates
+            else "recency_order_applied" if _rr_recency_conflict
+            else "empty_pool" if not result_ids
+            else "empty_query")
+        if _rr_on and status_trace is not None and not (
+                result_ids and _rr_text_ok):
+            status_trace.append(dict(
+                _trace_entry("rerank", ran=False, degraded=False,
+                             reason=_rr_skip_reason, count=0),
+                **{RERANK_POOL_KEY: fused_rerank_pool_width(),
+                   RERANK_SCORED_KEY: 0,
+                   RERANK_UNSCORED_KEY: len(result_ids)}))
         # ⛔ THE SECOND HALF OF THE SAME GUARD. ``order_by``/recency catch a
         # caller that ASKS for another order; they do not catch a caller that
         # re-owns the order DOWNSTREAM — or consumes it as a SET — and passes
@@ -42428,8 +42509,9 @@ class TortoiseSDK:
         # Without this arm the rerank re-picked their page INVISIBLY — the trace
         # said ``ok``, because nothing in the block knew the caller had opted
         # out.
-        _rr_recency_conflict = bool(_recency_applied)
-        if (result_ids and _rr_on and (query or "").strip()
+        # (``_rr_recency_conflict`` is bound ABOVE, with the disclosure arm that
+        # also needs it.)
+        if (result_ids and _rr_on and _rr_text_ok
                 and _rr_order_by_ok and not _rerank_candidates
                 and status_trace is not None):
             status_trace.append(dict(
@@ -42438,7 +42520,7 @@ class TortoiseSDK:
                 **{RERANK_POOL_KEY: fused_rerank_pool_width(),
                    RERANK_SCORED_KEY: 0,
                    RERANK_UNSCORED_KEY: len(result_ids)}))
-        if (result_ids and _rr_on and (query or "").strip()
+        if (result_ids and _rr_on and _rr_text_ok
                 and not _rr_order_by_ok and status_trace is not None):
             status_trace.append(dict(
                 _trace_entry("rerank", ran=False, degraded=False,
@@ -42452,7 +42534,7 @@ class TortoiseSDK:
         # reasons (measured: ``tools/longmem_eval/retrieve.py`` passes exactly that
         # combination). The first reason the read has is the one that wins: it
         # declined the rerank for its own sake, and recency never got a vote.
-        if (result_ids and _rr_on and (query or "").strip()
+        if (result_ids and _rr_on and _rr_text_ok
                 and _rr_order_by_ok and _rerank_candidates
                 and _rr_recency_conflict and status_trace is not None):
             status_trace.append(dict(
@@ -42461,7 +42543,7 @@ class TortoiseSDK:
                 **{RERANK_POOL_KEY: fused_rerank_pool_width(),
                    RERANK_SCORED_KEY: 0,
                    RERANK_UNSCORED_KEY: len(result_ids)}))
-        if (result_ids and _rr_on and (query or "").strip()
+        if (result_ids and _rr_on and _rr_text_ok
                 and _rr_order_by_ok and _rerank_candidates
                 and not _rr_recency_conflict):
             # ONE width for the batch read AND the scorer (#12297 review): the

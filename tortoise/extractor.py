@@ -1024,6 +1024,140 @@ class EntityStage(_SemanticStage):
         return entities
 
 
+def _referentiality_hold(surface: str) -> tuple[str, str] | None:
+    """#12094 — ASK the referentiality cue ``#11021`` landed; never a second gate.
+
+    ``extractor_v2``'s Subject candidates ride ``entities[]``, which
+    ``route_mentions`` (S2.2) filters through ``referentiality.judge`` before
+    the S5 entity loop can mint them. This module is the OTHER extractor
+    generation, and its ``subjects`` section (``extract_entities`` below) had
+    no equivalent predicate at all: every name the stage returned went
+    straight to ``api.add_subject``, the explicit registration door
+    (``#3590`` D1) that mints when no live holder exists.
+
+    So a pronoun or a discourse-generic head that the model returned as a
+    subject became a durable ``:Subject`` on the document path — through THIS
+    stage's write. The repair is NOT a new rule set — it is calling the SAME
+    leaf, under the SAME flag and under the SAME fail-open discipline, so the
+    two generations cannot disagree about a surface **this stage returns**,
+    including when the cue RAISES:
+
+    ⛔ **THIS STAGE'S WRITE IS THE WHOLE SCOPE — state it that way, because a
+    wider claim is false.** The same document ingest reaches a SECOND
+    ``:Subject`` mint that this predicate does not gate: each Point's
+    ``aboutEntities`` is passed VERBATIM to ``api.add_point`` (``_run_document``,
+    below), which runs the rel-agnostic about* cascade and mints a Subject stub
+    (``_mint_subject_stub``) for a name that resolves to nothing. So this cue
+    does not make the *document* free of a minted non-referent, and an armed run
+    can leave that surface's Subject population unchanged — measured at the
+    #12102 review (``api.add_point(aboutEntities=["it", "the former"])`` then
+    ``MATCH (s:Subject) RETURN s.name, s.id`` →
+    ``[['it', 'it'], ['the former', 'the former']]``: each non-referent is a stub
+    whose id IS its name, and ``RETURN s.name`` alone → ``[['it'], ['the former']]``).
+    ⛔ Name the QUERY, not just the rows: two result columns sharing one name are
+    refused by the engine, so a copied row shape without the projection is not a
+    reproduction recipe.
+
+    ⛔ **It is DECLINED here, not fixed, and that is a decision with a reason.**
+    The construction the door lands in is a recorded design, not an oversight:
+    ``#8398`` deliberately WITHDREW the retirement of that stub, because *"a
+    name no producer registered lost its link on every replay"*, and journals
+    ``mint_if_absent: true`` so live and replay agree. So the open question is
+    not "add a missing predicate" — it is *"may a non-referent be an about*
+    target at all"*, which is that design's decision to take and not this cue's;
+    v4 answered it on its own path (``route_mentions`` strips held surfaces from
+    claim/event ``about_entities``) and v1 has NOT, which is the asymmetry.
+    Tracked as ``#12247``; siblings ``#12118`` (identifier class) and ``#12119``
+    (the v1 Object loop). Pinned by
+    ``test_the_point_about_entities_door_is_declined_and_still_mints``, so a
+    later fix here fails loudly and reads this paragraph first.
+
+    * the ``referentiality`` module owns the cue AND its flag, and they are TWO
+      objects: ``judge`` is the LEAF and ``enabled()`` is the flag check
+      (``TORTOISE_REFERENTIALITY``, **OFF** by default per ``#5087`` plan R1 —
+      *unmeasured ⇒ fail open*). ⛔ ``judge`` does NOT consult the flag — measured:
+      with the variable unset, ``enabled()`` is ``False`` while ``judge("it")``
+      still returns ``('referentiality.pronoun', …)`` — so the check that makes an
+      unarmed run make the SAME MINT DECISIONS as the pre-#12094 code is the
+      ``enabled()`` call at THIS call site, not anything inside ``judge``. Say it
+      that way, because the other reading is the one a future caller cites when
+      skipping the check and arming the cue on an unarmed run. ⛔ Not the same
+      return value either: the census
+      keys below (``subjects_minted`` … ``mentions``) are present
+      unconditionally, which is why this docstring says *mint decisions* rather
+      than borrowing ``route_mentions``' "byte-identical" promise — that
+      promise is about ``embed_list``, where adding even a stats key broke an
+      S4-rescue guard (``extractor_v2.py``: *"a key is not byte-identical"*,
+      ``#2335``), and no such consumer reads this return;
+    * a RAISING cue is FAIL-OPEN here exactly as it is there: both v4 call
+      sites wrap ``route_mentions`` in ``except Exception … "candidates kept
+      (fail-open)"``, and this module's caller (``tortoise/ingest.py``) turns an
+      escaping exception into *"S7 entity extraction failed"* — which would
+      discard every remaining Subject AND every Object in the document, a far
+      larger loss than the one non-referent this gate exists to stop. So the
+      call site treats a raise as "judge could not answer" → the surface is
+      minted (the pre-#12094 behaviour), and the failure is recorded and
+      reported rather than swallowed;
+    * the identifier-only class (``#4118``, a path) is deliberately NOT asked
+      here: wiring it on this path would ship an unmeasured discard to a live
+      document ingest and can drop a must-keep surface
+      (``config/ci-surfaces.yml`` is one of the surfaces ``#11021``'s must-keep
+      arm exists to protect). That is a different decision, on a different path,
+      and it is not this issue's.
+
+      ⛔ **Nothing DISCARDS this class on THIS path — stated as measured, not
+      inferred.** The cue DOES consult ``value_gate``: ``judge`` calls
+      ``_claimed_by_value_gate`` (``referentiality.py``), which asks
+      ``value_gate.identifier_only``, and DECLINES a surface that predicate
+      claims (returns ``None`` → the surface mints here, unchanged). So the
+      identifier class is not double-owned and nothing on this path is dropped
+      by it — the reason is "the cue declines what the value gate claims", not
+      "no gate runs here". And the value gate would not claim the surface this
+      issue actually measures anyway:
+      ``value_gate.identifier_only("issue:daniel-ospina/tortoise#1234")``
+      returns ``None``, while ``"#4118"`` and a path correctly resolve to
+      ``reference``/``path``. So the 453 ``issue:<repo>#<n>`` Subjects #12060
+      measured still mint on this path — tracked as ``#12118``, NOT discharged
+      by this cue. The same holds for the object loop in the same section walk
+      (``for o in entities.get("objects", [])``, also unclaimed, ``#12119``);
+      this PR is the S7 **Subject** mint only — not "the
+      one Subject mint on this path", which the ``aboutEntities`` door above
+      falsifies.
+
+    ``the owner`` / ``the founder`` / ``the user`` are NOT held by this
+    predicate and must not become so: ``#2453``/``#4899`` measured them as real
+    entities with no antecedent, and ``referentiality``'s own docstring
+    records that no surface rule separates them from a definite description
+    (``the parity harness``) — that difference is meaning, and it belongs to
+    the arbiter (``s2_decision_seam``), never to this cue. Pinned by
+    ``tests/test_12094_subject_referentiality.py``.
+    """
+    from tortoise import referentiality
+    if not referentiality.enabled():
+        return None
+    return referentiality.judge(surface)
+
+
+def _referentiality_tokens(surface: str) -> list[str]:
+    """The cue's OWN tokenisation of ``surface`` — the phrase it actually judged.
+
+    The hold decision is taken on these tokens (lower-cased, edge punctuation
+    stripped), so the occurrence offset must be located with the SAME
+    definition; reconstructing the phrase from the RAW model string is how the
+    two paths disagree (#12102 round-3 review: ``The  Former`` is held while a
+    case-sensitive raw search records ``None`` for a phrase that is present).
+
+    Fail-open to ``[]``: a tokeniser that raises must not turn a RECORDED hold
+    into an aborted document pass — the surface stays held and the offset is
+    simply ``None``.
+    """
+    try:
+        from tortoise import referentiality
+        return referentiality.phrase_tokens(surface)
+    except Exception:  # a provenance field never blocks capture
+        return []
+
+
 class LLMExtractor:
     """Cheap point model + large relation model, same Extractor interface as the
     mock. Spans/quotes come from the deterministic segmenter, so provenance
@@ -1241,8 +1375,44 @@ class LLMExtractor:
         Emits SubjectAdded/ObjectAdded events via the API. Deduplicates by name
         within a run (idempotent across runs via IngestKey in begin_ingest).
 
+        #12094: a SUBJECT candidate the referentiality cue holds (a pronoun, a
+        pure deictic, a discourse-generic head — ``referentiality.judge``, the
+        SAME leaf ``#11021`` put in front of ``entities[]``) is NOT minted. It
+        is reported in ``held_subjects`` with its rule, its section and the
+        span it addressed. The cue is flag-gated OFF by default, so an unarmed
+        run makes the same MINT DECISIONS as before (the census keys below are
+        still returned — see the module-level note on why this is *decisions*,
+        not *bytes*).
+
         Returns: {"subjects": N, "objects": M, "subject_names": [...],
-                  "entities": [names...], "failed_sections": [titles...]}
+                  "entities": [names...], "failed_sections": [titles...],
+                  "subjects_minted": N, "subjects_held": H,
+                  "held_subjects": [...], "subjects_held_by_rule": {...},
+                  "subjects_hold_failed": F, "hold_failures": [...],
+                  "mentions": None}
+
+        UNITS, because a census whose buckets count different things invites a
+        caller to add them: ``subjects_minted``, ``subjects_held`` and
+        ``subjects_hold_failed`` are all SURFACE-level (distinct names), while
+        ``held_subjects`` is OCCURRENCE-level — one record per (surface, section),
+        so a surface the model returns in two sections appears twice there and
+        once in the counters. ⛔ ``hold_failures`` is NOT that second list despite
+        being a list of records: a FAILED surface is minted (fail-open), so it is
+        in ``seen_subjects`` and a later section never reaches the cue again — one
+        record per surface, in step with ``subjects_hold_failed``.
+
+        ⛔ ``subjects_hold_failed`` IS A SUBSET OF ``subjects_minted``, NOT A THIRD
+        DISJOINT BUCKET (#12102 review P2). A cue that raises mints the surface,
+        so it is counted in BOTH. Therefore ``minted + held == population`` and
+        ``minted + held + failed`` OVERCOUNTS by exactly ``failed``. The failed
+        count is disclosed because a silently degraded gate must be visible, not
+        so it can be summed. And a section skipped under ``skip_on_failure=True``
+        contributes to NO bucket: its subjects were never proposed, so they are
+        absent from the population rather than counted anywhere.
+
+        ``mentions`` is ``None`` on purpose, not an empty list: this stage has
+        no claim Point to carry a mention record (DM1 / ``#11021``), so the
+        honest answer is "unanswerable here", never "nothing to report".
 
         ``subject_names`` (#4938) are the names that actually produced a
         ``SubjectAdded`` — the document path wires its ``aboutSubject`` edges
@@ -1253,8 +1423,18 @@ class LLMExtractor:
         """
         is_doc, sections = _document_sections(text)
         if not is_doc:
+            # ⛔ The FULL shape, not the pre-#12094 five keys: the docstring
+            # above documents this return as always carrying the disposition
+            # keys, so a non-document input returning a short dict hands the
+            # next caller a KeyError on a contract that reads as complete.
+            # ``mentions`` is ``None`` for the same reason as the main return
+            # (no claim Point at this stage), never ``[]``.
             return {"subjects": 0, "objects": 0, "subject_names": [],
-                    "entities": [], "failed_sections": []}
+                    "entities": [], "failed_sections": [],
+                    "subjects_minted": 0, "subjects_held": 0,
+                    "held_subjects": [], "subjects_held_by_rule": {},
+                    "subjects_hold_failed": 0, "hold_failures": [],
+                    "mentions": None}
 
         # Build kind vocabularies from the domain_loader adapter (#951):
         # domain_kinds()/known_kinds(bucket) previously did not exist — the
@@ -1284,8 +1464,39 @@ class LLMExtractor:
         all_entity_names: set[str] = set()
         n_subjects, n_objects = 0, 0
         failed: list[str] = []
+        # #12094: surfaces the referentiality cue HELD — never minted, never
+        # dropped, and reported with the section (this stage's claim unit) and
+        # the phrase's offset inside it. See the census in the return value.
+        # ⛔ OCCURRENCE-level: one record per (surface, section), so a surface the
+        # model returns in two sections yields two records. The COUNTERS below are
+        # SURFACE-level (``_held_only``, the filtered view of ``held_surfaces``)
+        # so they are comparable with
+        # ``subjects_minted``, which is name-deduplicated — a census whose buckets
+        # count different units invites a caller to add them up.
+        held_subjects: list[dict] = []
+        held_surfaces: dict[str, str] = {}  # surface → its rule_id (first hold)
+        # ⛔ The UNIT above is (surface, section), so this set is what ENFORCES it:
+        # the ``name in seen_subjects`` skip below never applies to a held surface
+        # (``continue`` precedes the mint), so without this a model returning the
+        # same name twice inside ONE section appends two records with the SAME
+        # section — measured at the #12102 review: ``payload={"it","it","ODT"}``
+        # gave ``len(held_subjects)==2`` with ``[h["section"]] == ['A','A']`` while
+        # ``subjects_held==1``. A census that overcounts occurrences is worse than
+        # no census, because the measurement (#5087 R1) reads the records.
+        held_records_seen: set[tuple[str, int, int]] = set()  # (surface, *span)
+        # #12094: a cue that RAISES is fail-open — the surface is minted, as it
+        # would have been before this gate existed — and the failure is reported.
+        # ⛔ ONE record per surface, not per occurrence: a failed surface mints, so
+        # it lands in ``seen_subjects`` and a later section never asks the cue
+        # again. That is why this list is stated as surface-level above.
+        hold_failures: list[dict] = []
 
-        for title, body, span in sections:  # noqa: B007
+        # ⛔ The ruff B007 silencing directive that used to sit on this loop is
+        # GONE, and that IS the #12094 change: `span` was an unused loop control
+        # variable until the held-surface record started carrying
+        # `"span": list(span)`, so keeping it would red RUF100 (an unused
+        # silencing directive) rather than silence anything.
+        for title, body, span in sections:
             try:
                 entities = stage.run(title, body, context)
             except Exception:
@@ -1299,6 +1510,108 @@ class LLMExtractor:
             for s in entities.get("subjects", []):
                 name = s["name"].strip()
                 if not name or name in seen_subjects:
+                    continue
+                # #12094: the referentiality selection ``entities[]`` already
+                # has. A held surface is recorded (I2: never a silent drop) and
+                # NOT minted; it is also kept out of `subject_names`, so the
+                # document wires no `aboutSubject` edge to a Subject that does
+                # not exist and `_create_about_edges`' Subject-stub fallback
+                # cannot resurrect it (#4938).
+                # ⛔ ``_verdict = None`` is ALSO the fail-open answer: a cue that
+                # raises must not abort this pass — the raise would escape into
+                # ``ingest.py``'s "S7 entity extraction failed" and discard every
+                # remaining Subject and Object in the document, which is the
+                # larger loss. Both v4 call sites make the same choice
+                # (``route_mentions`` is wrapped in ``except Exception …
+                # "candidates kept (fail-open)"``).
+                try:
+                    _verdict = _referentiality_hold(name)
+                except Exception as exc:  # never block capture (#12094)
+                    _verdict = None
+                    hold_failures.append({
+                        "surface": name,
+                        "section": title,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+                    logger.warning(
+                        "#12094: referentiality cue raised on %r in %r — minted "
+                        "(fail-open): %s", name, title, exc, exc_info=True)
+                if _verdict is not None:
+                    held_surfaces.setdefault(name, _verdict[0])
+                    # ONE record per (surface, section), exactly as documented —
+                    # a repeat inside the same section is the same disposition.
+                    # ⛔ KEYED ON THE SPAN, not the section TITLE: a repeated
+                    # header (two `## Open Questions`) is ordinary markdown and
+                    # `_document_sections` returns it as TWO sections with distinct
+                    # spans — measured at the #12102 round-2 review, title-keying
+                    # collapsed them into one record and UNDERCOUNTED the very
+                    # occurrences this list exists to count.
+                    if (name, span[0], span[1]) in held_records_seen:
+                        continue
+                    held_records_seen.add((name, span[0], span[1]))
+                    # ⛔ A WORD-BOUNDARY match, not `body.find(name)`. A substring
+                    # index is wrong for exactly the class this gate holds: the
+                    # pronoun `it` is found INSIDE "with"/"within"/"itself", so the
+                    # recorded offset pointed at a different word than the surface
+                    # — measured at the #12102 review (`body[14:16] == 'it'` inside
+                    # "with" on the fixture body: a SUBSTRING match, which is exactly
+                    # what the word-boundary rule exists to refuse). `None` when the phrase is genuinely absent is the
+                    # honest answer, never a nearby match.
+                    # ⛔ AND IT MATCHES THE PHRASE THE CUE JUDGED, not the raw model
+                    # string (#12102 round-3 review P2): `referentiality.judge`
+                    # decides on CASE-FOLDED, EDGE-STRIPPED TOKENS, so a surface the
+                    # model returned as `The  Former` is HELD while the raw
+                    # case-sensitive search found nothing and recorded `None` for a
+                    # phrase that IS in the section — the "None means absent"
+                    # reading a measurement would take. Building the pattern from
+                    # the SAME tokeniser the decision used is what makes the two
+                    # paths unable to disagree; `\s+` between tokens covers the
+                    # whitespace difference, `IGNORECASE` the case difference.
+                    _phrase = r"\s+".join(
+                        re.escape(tok) for tok in _referentiality_tokens(name))
+                    _match = (re.search(rf"(?<!\w){_phrase}(?!\w)", body,
+                                        re.IGNORECASE)
+                              if _phrase else None)
+                    _offset = _match.start() if _match is not None else None
+                    # ⚠️ COORDINATE BASE (#12102 review P3): `_offset` indexes
+                    # THIS SECTION'S STRIPPED BODY (`body`, leading whitespace
+                    # removed), while `span` below is `[content_start,
+                    # content_end]` over `_document_sections`' text — which is
+                    # `_strip_frontmatter(transcript)` with fenced code rewritten,
+                    # NOT the original document. So it is not "document
+                    # coordinates" either: measured, a document carrying a 4-line
+                    # frontmatter puts its body at index 8 there and 35 in the
+                    # original, and a fence line is rewritten: an OPENING one goes
+                    # 3 chars -> 6 (`f"\n\n{text[i:i+3]}\n"`), a CLOSING one 3 -> 5
+                    # (`f"{fence_char}\n\n"`) — so later text shifts by +5 per
+                    # complete block (+3 on an unterminated one), PLUS +3 for each
+                    # `## ` line at line start INSIDE the block (mangled to
+                    # `#_# # `, 3 chars -> 6), measured on a two-fence body.
+                    # The two fields of this one record therefore cannot be
+                    # combined: do NOT compute
+                    # the document index as `span[0] + phrase_offset`. The gap is
+                    # NOT a constant — it is the WIDTH OF THE STRIPPED PREFIX:
+                    # measured 0 for a flush-left body and -3 for a body indented
+                    # three spaces (`span[0]+offset` = 53 against a true document
+                    # index of 53 and 56 respectively), so no fixed correction
+                    # exists. (An earlier revision of this note claimed the
+                    # combination "lands one char left"; that does not reproduce.
+                    # A constant-offset story invites a caller to apply a constant
+                    # correction, which is why the measured mechanism replaces it —
+                    # #12102 review P3.) Both arms are pinned by
+                    # `test_the_phrase_offset_does_not_share_a_coordinate_base_with_span`.
+                    # Nothing consumes the pair yet; stated because
+                    # the census exists to feed a measurement (#5087 R1) and a
+                    # provenance-looking pair that silently disagrees is how a
+                    # measurement goes wrong in the quiet direction.
+                    held_subjects.append({
+                        "surface": name,
+                        "rule_id": _verdict[0],
+                        "reason": _verdict[1],
+                        "section": title,
+                        "span": list(span),
+                        "phrase_offset": _offset,
+                    })
                     continue
                 try:
                     # #9572: forward the kind ONLY when the model named one — a
@@ -1341,9 +1654,56 @@ class LLMExtractor:
                 if ename:
                     all_entity_names.add(ename)
 
+        # A surface whose cue raised is MINTED, so it is not held — see the
+        # final-disposition note in the return below.
+        _held_only = {n: r for n, r in held_surfaces.items() if n not in seen_subjects}
+
         return {
             "subjects": n_subjects,
             "objects": n_objects,
+            # ── #12094: the census, in NAMED buckets, never one number ──
+            # `subjects` above is retained (= minted) so every existing caller
+            # and test keeps its contract; the counters below are what makes the
+            # disposition readable rather than inferable.
+            #
+            # ⛔ There is no `mentioned` bucket HERE and that is not an
+            # omission: DM1 (``#11021``) puts a mention record on the claim
+            # Point that used it, and at this stage no Point exists yet —
+            # ``_DocumentPointStage`` runs in a separate pass. So a held
+            # surface on this path is a HOLD with a section span, NOT a
+            # mention.
+            #
+            # ⛔ FINAL DISPOSITION, not first observation (#12102 round-2 review
+            # P2): a surface HELD in an earlier section can still MINT later if the
+            # cue raises on it — fail-open mints it and puts it in
+            # `seen_subjects`. The mint wins (a node reached the graph), so the
+            # held counters exclude it below. That is what keeps
+            # `subjects_minted + subjects_held == population` true; without it the
+            # surface is counted in BOTH and the sum overcounts. Its earlier
+            # `held_subjects` record is KEPT — that occurrence really was held, and
+            # deleting it would be the I2 silent-drop this gate exists to refuse.
+            "subjects_minted": n_subjects,
+            "subjects_held": len(_held_only),
+            "held_subjects": held_subjects,
+            # ⛔ ``subjects_held`` counts SURFACES (distinct names), matching
+            # ``subjects_minted``; ``held_subjects`` carries one record per
+            # (surface, section). Both units are stated because a caller reading
+            # "minted + held" must not be adding names to occurrences.
+            "subjects_held_by_rule": {
+                rule: sum(1 for held_rule in _held_only.values() if held_rule == rule)
+                for rule in sorted(set(_held_only.values()))
+            },
+            # A cue that failed is NOT a hold: the surface minted. Reported so a
+            # silently degraded gate is visible rather than inferred from a count.
+            "subjects_hold_failed": len(hold_failures),
+            "hold_failures": hold_failures,
+            # Why ``mentions`` is ``None`` rather than ``[]``: DM1 (#11021) puts a
+            # mention record on the claim Point that used it, and at this stage no
+            # Point exists yet (``_DocumentPointStage`` runs in a separate pass), so
+            # "this instrument cannot answer" is the honest value — ``[]`` would
+            # read as "nothing to report" (the #12047 defect class). Pinned by the
+            # census test.
+            "mentions": None,
             # #4938: the created Subject names, so the document path can wire
             # (document Source)-[:aboutSubject]->(Subject) from the Subjects
             # this run actually minted — never from an uncreated name, which

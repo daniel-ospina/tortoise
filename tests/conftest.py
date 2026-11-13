@@ -660,6 +660,65 @@ def _isolate_process_env():
             os.environ[k] = v
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _no_ambient_dotenv():
+    """#12407: a developer's repo-root `.env` is invisible to the suite.
+
+    ``cp .env.example .env`` is the DOCUMENTED configure step, so a machine that
+    followed the docs has one. After #12407 the two verbs that DISCLOSE it
+    (``tortoise config show`` / ``doctor``) print an extra block or row *because
+    it exists* — so those assertions would depend on the machine rather than the
+    diff: green in CI (no `.env`), different locally.
+
+    That is #4277's class one layer down. #4277 was ``.env`` defeating
+    ``monkeypatch.delenv``; its fix was the loader's ``pytest`` guard, which
+    covers the WRITING side. This covers the READING side: the daemon's `.env`
+    path is pinned to one that cannot exist, so "there is no `.env`" is a
+    property of the suite. A test that wants one writes it and patches this back
+    (see ``tests/test_env_file_divergence.py``).
+
+    Session-scoped and assignment-based (not ``monkeypatch``) so it is in force
+    before every function-scoped fixture, including a module's own autouse ones;
+    the originals are restored at teardown.
+
+    ⛔ BOTH IN-PROCESS discovery surfaces are pinned, not just the daemon's.
+    Pinning only ``dotenv_path`` leaves the CWD scan in
+    ``_dotenv_unread_candidates`` finding the developer's real repo-root
+    ``.env`` and reporting it as "read by NO entry point" — measured: with the
+    daemon path pinned and a repo-root ``.env``, ``doctor`` still gained a
+    machine-dependent row (fresh review of PR #12428, P2). A test that chdirs to
+    ``tmp_path`` never sees this, which is why it has to be closed at the seam
+    rather than per test.
+
+    ⚠️ SCOPE — IN-PROCESS ONLY. A SUBPROCESS is born outside pytest, so the
+    loader's `"pytest" not in sys.modules` guard does not apply there and it
+    fills from the developer's real `.env`: measured, a `.env` with the
+    documented `TORTOISE_DB_URI=docker://…` line makes
+    `test_stdio_entrypoint_serves_full_registry` spawn a daemon that retries a
+    dead port and exits 1 (413 passed, 1 failed) — with no `.env`, 467 passed.
+    That is the LOADER's pre-existing behaviour, not this fixture's claim; closing
+    it needs an env seam the loader honours (tracked on the loader side), and
+    until then this docstring must not promise more than it pins.
+    """
+    from tortoise import __main__ as _cli
+    from tortoise import dotenv_file
+
+    original = dotenv_file.dotenv_path
+    original_others = _cli._dotenv_unread_candidates
+
+    def _absent() -> str:
+        return os.path.join(tempfile.gettempdir(),
+                            "tortoise-tests-no-dotenv", ".env")
+
+    dotenv_file.dotenv_path = _absent
+    _cli._dotenv_unread_candidates = lambda daemon_path: []
+    try:
+        yield
+    finally:
+        dotenv_file.dotenv_path = original
+        _cli._dotenv_unread_candidates = original_others
+
+
 @pytest.fixture(autouse=True)
 def _no_ambient_record_arming(monkeypatch):
     """#9231 review P2: the record's arming keys are never ambient for a test.

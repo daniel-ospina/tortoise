@@ -3323,20 +3323,14 @@ def test_an_operator_layer_beyond_one_call_is_refused_not_truncated(monkeypatch,
     )
 
 
-def test_an_operator_read_that_fills_its_limit_is_refused_unless_the_count_vouches(
-        monkeypatch, capsys, tmp_path):
-    """A response that fills the requested limit EXACTLY may be truncated.
+def test_an_operator_read_that_fills_its_bound_is_refused(monkeypatch, capsys, tmp_path):
+    """A response that FILLS the requested limit may be truncated — so it is refused.
 
     `tortoise_search` has a `limit` and no `offset`, so there is no page to walk to:
-    "a full page" and "a truncated layer" are the same bytes unless a reported count
-    says that is the whole population. Round-1 review found this arm unpinned.
-
-    ⛔ BOTH arms are pinned here. Refusing is the safe failure, but always refusing is
-    the OVER-BROAD one: a layer of exactly `OPERATOR_READ_CEILING` rows that
-    `structure.operators` vouches for as complete is a legitimate full read, and round-7
-    review measured that flipping the guard to `if len(raw) == OPERATOR_READ_CEILING:`
-    (refuse the vouched-for case too) left every test green while blocking the whole
-    census — the carry set included, since the refusal has no override.
+    "a full page" and "a truncated layer" are the same bytes. This is the arm that held
+    the UNREPORTED half, split out when #12440 made the fill refusal absolute — it is the
+    reachable pin on the fill shape (the at-bound arm lives in the test below, which
+    refuses before the read).
     """
     mod = _tool_module()
     at_limit = [{"id": f"o{i}", "content": "", "point_kind": "IMPL"}
@@ -3347,17 +3341,66 @@ def test_an_operator_read_that_fills_its_limit_is_refused_unless_the_count_vouch
     assert rc == 3, (rc, capsys.readouterr())
     assert "truncat" in capsys.readouterr().err.lower()
 
-    # …and the ACCEPT arm: the same 10,000 rows WITH a count that vouches for them is a
-    # complete layer, not a truncation.
+
+def test_an_operator_layer_at_the_bound_is_refused_before_the_read(
+        monkeypatch, capsys, tmp_path):
+    """A count AT the bound is not a voucher — the layer is refused BEFORE the read.
+
+    ⛔ #12440 reverses what this test asserted until it landed. Round-7 review had pinned
+    the opposite ("a layer of exactly `OPERATOR_READ_CEILING` rows that
+    `structure.operators` vouches for as complete is a legitimate full read") to keep the
+    refusal from being over-broad. That reasoning holds for a count that DISAGREES; it
+    fails exactly at the bound, where the count coincides with the engine's default
+    `RESULTSET_SIZE` and the SDK slices the answer back at `limit` — so a layer ENDING
+    there and one the engine CUT there return the same bytes, and no count on this
+    surface can tell them apart. The genuinely-whole at-bound layer is refused with them:
+    that cost is stated in the refusal text and in `docs/architecture/CURATION-11469.md`,
+    and the counter-arm below pins that a layer BELOW the bound is still accepted.
+
+    ⛔ The fixture is keyed on the COUNT, not on rows: three operator rows beside a
+    reported 10,000 refuses for the count alone, and the assertion that NO read was spent
+    is what separates this arm from the disagreement arm one line further down (which
+    would refuse the same input AFTER spending a `tortoise_search` call, with a different
+    message).
+    """
+    mod = _tool_module()
+    calls: list[str] = []
+    surface = _operator_surface(operators=OPERATOR_ROWS,
+                                reported=mod.OPERATOR_READ_CEILING)
+
+    def call(name, args):
+        calls.append(name)
+        return surface(name, args)
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "RESPONSE BOUND" in capsys.readouterr().err, (
+        "the refusal must be the bound gate's, not the disagreement arm's")
+    assert "tortoise_search" not in calls, (
+        "a count at the bound must refuse BEFORE the read is spent")
+
+
+def test_an_operator_layer_one_row_below_the_bound_is_accepted(monkeypatch, tmp_path):
+    """The counter-arm: the strict bound must not become an over-broad refusal.
+
+    A layer of `OPERATOR_READ_CEILING - 1` rows with a count that agrees is provably the
+    whole layer — the RESPONSE fills nothing (9 999 rows against a 10 000-row request that
+    is itself the engine's cap), so it cannot have been cut. #12440
+    moves only the single cell where the count and the response are both AT the bound;
+    everything below it must keep reading, or the fix would block a census it can measure.
+    """
+    mod = _tool_module()
+    below = [{"id": f"o{i}", "content": "", "point_kind": "IMPL"}
+             for i in range(mod.OPERATOR_READ_CEILING - 1)]
     monkeypatch.setattr(mod, "_live_call_tool",
-                        _operator_surface(operators=at_limit,
-                                          reported=mod.OPERATOR_READ_CEILING))
-    out = tmp_path / "inv_accepted.json"
+                        _operator_surface(operators=below, reported=len(below)))
+    out = tmp_path / "inv_below.json"
     rc = mod.main(["inventory", "--out", str(out), "--no-verify-read"])
-    assert rc == 0, (rc, capsys.readouterr())
+    assert rc == 0, (rc, "")
     payload = json.loads(out.read_text())
-    assert payload["operators_read"] == mod.OPERATOR_READ_CEILING, payload["operators_read"]
-    assert payload["operators_total_reported"] == mod.OPERATOR_READ_CEILING
+    assert payload["operators_read"] == mod.OPERATOR_READ_CEILING - 1, payload["operators_read"]
+    assert payload["operators_total_reported"] == mod.OPERATOR_READ_CEILING - 1
     assert payload["operators_reconciled"] is True
 
 
@@ -3962,6 +4005,16 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
     surface = _operator_surface(operators=OPERATOR_ROWS, reported=len(OPERATOR_ROWS),
                                events=EVENTS)
     status_calls = [0]
+    # ⛔ A FLAG, not an ordinal (measured FALSE RED). Keying the disagreeing count on
+    # `status_calls[0] == 2` assumed EXACTLY ONE `status` request sits between the top-of-verb
+    # `counts()` and the layer read. That is not a property of the code: a
+    # freshness-PRESERVING tidy-up (an extra `counts = reader.counts()` after the walk, for
+    # the report — the motion the comment below requires to stay green) makes the count
+    # immediately before the layer read the TRUE one, so no re-count happens, the note is
+    # absent, and this pin redded CORRECT code (`events_read=1 events_total_reported=1
+    # events_reconciled=True`). What matters is not WHICH status call it is, but whether the
+    # whole-layer request has already returned.
+    layer_done = [False]
 
     def recording(name, args=None):
         args = args or {}
@@ -3969,6 +4022,8 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         typed.append((name, args.get("type")))
         limited.append((name, args.get("limit")))
         payload = surface(name, args)
+        if name == "tortoise_get_entity" and args.get("limit") == mod.EVENT_READ_CEILING:
+            layer_done[0] = True
         # ⛔ THE FIRST status READ IS TOO EARLY TO VOUCH (review cycle 14). It is the
         # top-of-verb `counts`, taken BEFORE the 34+-call point walk. Stripping its `Event`
         # key makes the stale and fresh arms produce DIFFERENT artifacts, which is what
@@ -3980,7 +4035,7 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
             status_calls[0] += 1
             if status_calls[0] == 1:
                 payload = {"counts": {"Point": 1, "Source": 0}}
-            elif status_calls[0] == 2:
+            elif not layer_done[0]:
                 # ⛔ THE COUNT IMMEDIATELY BEFORE THE LAYER MUST NOT ALREADY BE THE ANSWER
                 # (review cycle 16, measured). Reporting `len(EVENTS)` here let a change
                 # write the ARTIFACT field from a fresh count while reconciling the read
@@ -3999,6 +4054,7 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         typed.clear()
         limited.clear()
         status_calls[0] = 0
+        layer_done[0] = False
         monkeypatch.setattr(mod, "_live_call_tool", recording)
         argv = [verb, "--graph", "org_x_g_old", "--no-verify-read",
                 "--out", str(tmp_path / f"{verb}.json")]
@@ -4041,6 +4097,14 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         # alone could be satisfied by a fresh count that the layer read never consumed.
         assert "CHANGED between the status count and this read" in (out.get("read_note") or ""), (
             verb, out)
+        # ⛔ AND THE WHOLE-LAYER READ HAPPENS EXACTLY ONCE (measured EVASION). Every
+        # single-read shape is closed, but a SECOND `read_events(counts)` call satisfied the
+        # artifact — `events_reported` and the note come from the first, fresh read, while the
+        # ROWS the census/plan uses come from a read reconciled against the stale count — with
+        # the whole file at 240 passed. Contrived, and one line to close.
+        whole = [lim for name, lim in limited
+                 if name == "tortoise_get_entity" and lim == mod.EVENT_READ_CEILING]
+        assert len(whole) == 1, (verb, limited)
 
 
 def test_the_plan_payload_carries_the_layers_three_fields(monkeypatch, tmp_path):
