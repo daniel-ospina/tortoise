@@ -3226,9 +3226,16 @@ def test_the_enumerator_returns_every_workflow_file_github_would_run():
     """An INDEPENDENT read of the directory, not a second call to the same glob.
 
     Compared against `iterdir()` filtered by a LITERAL suffix pair — not by
-    `_WORKFLOW_SUFFIXES` — so a typo or a dropped entry in the tuple cannot pass by agreeing
-    with itself, the same reason `test_the_job_splitter_returns_exactly_the_jobs_yaml_declares`
-    compares `_jobs` against `yaml.safe_load` rather than against a hand-written expectation.
+    `_WORKFLOW_SUFFIXES` — so the enumerator cannot pass by agreeing with itself, the same reason
+    `test_the_job_splitter_returns_exactly_the_jobs_yaml_declares` compares `_jobs` against
+    `yaml.safe_load` rather than against a hand-written expectation.
+
+    WHAT THIS PIN CANNOT SEE, measured rather than assumed: the tree holds 0 `.yaml` workflows, so
+    dropping `".yaml"` from `_WORKFLOW_SUFFIXES` leaves this comparison GREEN (41 == 41) — the
+    narrowed enumerator misses nothing that exists. The dropped entry is caught by the tuple
+    assertion in `test_no_site_spells_the_workflow_glob_one_sidedly` and by the synthetic `.yaml`
+    in `test_a_dot_yaml_workflow_is_scanned_like_a_dot_yml_one`, not here. What THIS pin answers is
+    that the enumerator and the directory agree, and that the population is non-empty.
 
     The population assertion is not decoration: with an EMPTIED `.github/workflows`, a
     two-sided comparison is `set() == set()` and passes while proving nothing — a gate that
@@ -3294,6 +3301,8 @@ def _glob_calls(source: str) -> list[tuple[int, str, list[str]]]:
                     continue
                 if isinstance(value, str):
                     literals.append(value)
+            elif inner.type == tokenize.FSTRING_MIDDLE:
+                literals.append(inner.string)
         out.append((token.start[0], receiver, literals))
     return out
 
@@ -3346,12 +3355,16 @@ def _one_sided_workflow_pattern_constants(
         if name.startswith("__"):
             continue
         members = value if isinstance(value, (tuple, list, set, frozenset)) else (value,)
+        #: NO PATH PREFIX REQUIRED. The module's own workflow code spells RELATIVE patterns
+        #: (`WORKFLOWS.glob(...)`), so `_WORKFLOW_GLOBS = ("<star>.yml",)` is the natural fourth
+        #: site — and requiring `workflows/` in the member graded only the `REPO.glob(
+        #: ".github/workflows/<star>.yml")` spelling (measured, review round 5). Dropping the
+        #: requirement costs nothing: a constant that matches neither witness stem is skipped by
+        #: the symmetry test below, so `.sh`/`.py` pattern tuples stay out.
         patterns = [
             member
             for member in members
-            if isinstance(member, str)
-            and "workflows/" in member
-            and (".yml" in member or ".yaml" in member)
+            if isinstance(member, str) and (".yml" in member or ".yaml" in member)
         ]
         if not patterns:
             continue
@@ -3398,6 +3411,12 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
       * a both-extension pair spread across two DIFFERENT receivers. Pairing is per receiver, so
         that reads as one-sided. It is also the shape that would be a genuine bug — the two
         receivers need not name the same directory — so the red there is the safe direction.
+      * the MIRROR of that: a receiver that pairs both extensions over one DIRECTORY also excuses
+        a one-sided glob into a DIFFERENT directory (`REPO.glob("config/<star>.yml")` beside
+        `REPO.glob("config/<star>.yaml")` and a narrow `REPO.glob(".github/workflows/ci-<star>.yml")`).
+        Measured, review round 5. Keying on the directory segment would close it and would red the
+        legitimate pair whenever the two halves spell the directory differently, so it is declared
+        instead.
       * a `.yml`-only glob in this module that does NOT target workflows (a future config or
         fixture loader). It reds, and that is an OVER-BLOCK by choice: a receiver-based filter
         would have to guess which directories hold workflows, and every guess it got wrong in
