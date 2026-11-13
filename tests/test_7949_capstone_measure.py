@@ -5266,10 +5266,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `carve_out:` opens 9900, `uri_requiring:` 10231 — so 10026 is inside the
         # section, and the identical text also sits at 6103 and 8541, which is what
         # the 5th element exists to refuse. ⚠️ The `d571ade` advance is ONE of the
-        # `main` commits in this range that do NOT touch `config/ci-surfaces.yml`
-        # (eight of them do not — `git diff --numstat <c>^ <c> -- config/ci-surfaces.yml`
-        # is empty for each, `7d49270e56` and `87c07462a8` among them — so it is not
-        # "the one"), so that
+        # `main` commits that do NOT touch `config/ci-surfaces.yml` (so it is not
+        # "the one"): in `abf186f1109a..87c07462a8` exactly THREE of the ten touch it
+        # (`ea2c41a696`, `a53ba8cf53`, `73c479ce40`), so SEVEN do not —
+        # `git rev-list abf186f1109a..87c07462a8` is 10 and
+        # `git diff --quiet <c>^ <c> -- config/ci-surfaces.yml` is clean for the
+        # other seven, `7d49270e56` and `87c07462a8` among them. So that
         # merge moved the entry by 0: `b08ff33bbc` already read 10026 and its merged
         # tree read 10026. The last +14 belongs to the `abf186f1109a` merge below,
         # not to that one.
@@ -5329,7 +5331,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `main`: it was 9943 + the 8 lines #12060 was predicted to add, and two
         # other registrations landed first, so the prediction described no
         # checkable commit — which is why this one number had been
-        # "re-derived" FOUR times BEFORE this merge (six at this head: 9988 at
+        # "re-derived" FIVE times BEFORE this merge (six at this head: 9988 at
         # `0c6144d3f9`, 10012 at `cbe855ab`, 10026 at `d60c33b163`, 10058 at
         # `1d7f9a8b4d`, then 10060 at `fca6b3ada6`, then 10115 here). That is
         # the row's real defect and not a
@@ -5441,9 +5443,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # re-derived from THIS merged tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
-            # the merge — and now that #12108 has LANDED (`ea2c41a696`), no
-            # earlier value in this file's history describes a tree holding both
-            # blocks, which is why this number has been re-derived five times.
+            # the merge — and now that #12108 has LANDED (`ea2c41a696`), no value
+            # BEFORE that landing describes a tree holding both blocks (the ones
+            # that do are the merge trees at and after it: 10058, 10060, 10115),
+            # which is why this number has been re-derived six times.
             # Measured values, not a delta: 9943 at `9828250732`, 9949 at
             # `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24e4`, 9987 at
             # the `main` tip `abf186f1109a` (+14: a 13-line `surfaces:` block at
@@ -5469,9 +5472,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # read 7509 / 7576 / 10365 on the pre-rebase tree, and 7507 / 7574 /
             # 10363 on the tree before `main`'s +2). A row sitting
             # BELOW every insertion moves by the whole +55 on this advance. The
-            # `core:` sub-key reads 2248 here — it is the ONE
-            # sub-key the @2237 registration cannot move, because that insertion
-            # sits BELOW the key; `sdk:` moves +30 then +13 then +32 to 8300, then
+            # `core:` sub-key reads 2248 here — it is the one OF THE `core:` / `sdk:`
+            # PAIR the @2237 registration cannot move, because that insertion
+            # sits BELOW the key (`api:` and `battery:` sit above it and are
+            # equally unmoved, so the claim is scoped to the pair this paragraph
+            # names); `sdk:` moves +30 then +13 then +32 to 8300, then
             # +39 to 8339, then +2 to 8341, then +50 to 8391.
             ("10115", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
