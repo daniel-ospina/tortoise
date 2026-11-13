@@ -331,17 +331,38 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
             if isinstance(rec.get("point"), dict) else None
         if not vector or width != JOURNAL_VECTOR_WIDTH_F32:
             continue
+        # ⛔ Three DISTINCT links, each computed against something outside the
+        # frame. An earlier version compared `pack_f32(narrow(x)) == pack_f32(x)`,
+        # which is an IDENTITY — packing as f32 rounds whether or not you round
+        # first — so it held for 384 random floats with no journal at all and the
+        # assertion built on it could never fail. The link that matters is against
+        # `vec`, the PRODUCER's vector, which is what the graph will store.
         text = frame("f32", 4, vector)
         decoded = unframe(text)
-        same = as_f32_bits(decoded) == as_f32_bits(vector)
-        p0_text_f32 = as_f32_bits([float(np.float32(v)) for v in vector])
-        text_equiv = p0_text_f32 == as_f32_bits(vector)
+        producer = [float(x) for x in vec]
+        b64_vs_producer = as_f32_bits(decoded) == as_f32_bits(producer)
+        p0text_vs_producer = as_f32_bits(vector) == as_f32_bits(producer)
+        invertible = as_f32_bits(decoded) == as_f32_bits(vector)
         print(f"  {rec.get('type', '?'):<20} {len(vector):>4}-d  "
-              f"base64→f32 bits == P0 text→f32 bits: {same}"
-              f"   (P0 text→f32 == producer f32: {text_equiv})")
-        assert same and text_equiv, rec.get("type")
+              f"base64→f32 == producer f32: {b64_vs_producer}"
+              f"   P0 text→f32 == producer f32: {p0text_vs_producer}"
+              f"   (frame invertible: {invertible})")
+        assert b64_vs_producer and p0text_vs_producer and invertible, rec.get("type")
         equiv += 1
     print(f"  {equiv} of {len(recs)} corpus records carry a vector and were verified")
+
+    # ⛔ Why the assertion is on BITS: a float64-VALUE equality test cannot tell a
+    # faithful encoding from a lossy one, because an f32 value IS exactly a
+    # float64 — so it passes on any correct encode, on a degenerate vector, and on
+    # a vector that was narrowed and re-widened. Measured, not assumed:
+    producer = [float(x) for x in vec]
+    print("  float64-value equality decoded==producer (would PASS vacuously):",
+          [float(np.float64(v)) for v in producer] == producer)
+    # …and the bits assertion CAN fail — a negative control, so it is not vacuous:
+    perturbed = list(producer)
+    perturbed[0] = float(np.nextafter(np.float32(perturbed[0]), np.float32(1e9)))
+    print("  the same assertion on a 1-ULP perturbation (must be False):",
+          as_f32_bits(perturbed) == as_f32_bits(producer))
 
     # ── the f64 population: NOT narrowed ────────────────────────────────
     print("\n== the caller-owned / preserved population (#5004 round-7)")

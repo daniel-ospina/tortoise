@@ -62,11 +62,15 @@ of framing (14 B prefix + 2 B of JSON quotes) = **2,064 B**.
 
 ## The two properties the format must survive
 
-- **Decode equivalence at float32 bits** — `base64 → float32 bits == P0 text → float32 bits == the
-  producer's float32 bits`, on every vector-bearing record. It is **not** float64-value equality with
-  P0's text: P0's stored float64 is deliberately off the float32 grid (`0.0012301534`, not
-  `0.001230153371579945`), which is why `stored_form.narrow_to_stored_width` / `consistency._as_f32`
-  narrow the truth side (#8615).
+- **Decode equivalence at float32 bits** — three links, each computed against something **outside** the
+  frame: `decoded f32 == producer f32`, `P0 text→f32 == producer f32`, and frame-invertibility. (An earlier
+  version's third link was `pack_f32(narrow(x)) == pack_f32(x)` — an identity, true for random floats with no
+  journal at all, so its `assert` could never fail.) A **float64-value** comparison is deliberately not the
+  test: an `f32` value is exactly a `float64`, so it passes on this vector, on a degenerate one, and on a
+  narrowed-then-re-widened one — the probe prints it passing, beside a **1-ULP perturbation** negative
+  control that proves the bits assertion can fail. Where a value *is* off the float32 grid (the `f64`
+  fixture below) the truth side is narrowed by `stored_form.narrow_to_stored_width` /
+  `consistency._as_f32` (#8615).
 - **The `f64` population is not narrowed** — a caller-owned / preserved vector round-trips to the
   **same float64 bits**, and the fixture is off the float32 grid so the check cannot pass vacuously
   (P0's R2 rule).

@@ -76,9 +76,9 @@ how a repairable gap becomes a permanent one.
   several do, so base64 is chosen among them for ubiquity, not for being the smallest (§2.5.1 measures all
   six: `b85`/`z85` are 25 % overhead against base64's 33.3 %, `a85` is refused for containing `"` and
   `\`, `hex` costs +100 %). On
-  **corruption detection all six *formats* give this note nothing**: none carries a checksum over *this* payload by
-  default (Parquet's optional page-level CRC32 is the exception, and it covers the page, not the vector),
-  and a checksum would not catch a **validly re-encoded** alteration in any case. That is why §2.2's
+  **corruption detection none of them gives this note anything**: no text alphabet carries a checksum, and of
+  the binary formats only Parquet offers one (an optional **page-level** CRC32 — it covers the page, not the
+  vector); a checksum would not catch a **validly re-encoded** alteration in any case. That is why §2.2's
   refusals are structural (count, version, alphabet) and why this note does **not** claim integrity from
   the encoding. Recorded
   in-repo too: `STORAGE-ARCHITECTURE.md` §5.2 reads *"~4× more than base64 of the same information as the
@@ -382,10 +382,20 @@ does not mean**: the committed corpus carries exactly **one** `embedding`, a **2
 — so the five rows are five records sharing one vector, not five corpus vectors, and §2.5 says the same
 ("the vector the probe injects; no corpus record carries it"). The five rows are still the right check
 because the property is **element-wise and therefore vector-independent**: each of the 384 floats must
-survive pack → base64 → unpack. It is **not** float64-value equality with P0's text: such a test
-would fail on **384 of the probe's 384 elements** (a deliberately off-grid vector) and would **pass
-vacuously** on a degenerate one — all zeros and small integers are exactly representable — which is exactly
-why the assertion is on the float32 **bits**.
+survive pack → base64 → unpack. ⛔ **It is not the equality the obvious test would assert.** A float64-VALUE comparison
+(`float(decoded) == float(p0_text)`) cannot tell a faithful encode from a lossy one, because an `f32` value
+**is** exactly a `float64` — so it **passes on this vector, on a degenerate vector, and on a vector that was
+narrowed and re-widened**. The probe prints it passing (`float64-value equality decoded==producer (would
+PASS vacuously): True`) and, beside it, the **negative control** that proves the bits assertion is not
+vacuous: a **1-ULP perturbation** of one element flips it to `False`. The bits are the property because the
+bits are what the graph stores.
+
+⚠️ **And each of the three links is computed against something outside the frame**, which an earlier draft
+got wrong: `decoded f32 == producer f32` (against the producer's vector, not against the frame's own input),
+`P0 text→f32 == producer f32`, and frame-invertibility. The first draft's third link was
+`pack_f32(narrow(x)) == pack_f32(x)` — an **identity** (packing as `f32` rounds whether or not you round
+first), true for 384 random floats with no journal at all, so the `assert` built on it could never fail.
+It is now two named links plus a negative control.
 
 That 9 significant digits suffice for float32 is float32's own structure (24-bit significand ⇒ 9 decimal
 digits round-trip; 8 do not always). Checked rather than cited, on 2,000,000 random float32 values:
@@ -412,7 +422,10 @@ element size, declared in the frame **and** cross-checked against P0's `embeddin
 - `embedding_width` present, value is a plain JSON list → P0 shape, read as today (the mixed-log path).
 
 The duplication is deliberate: it costs **4 B of the 16 B frame** (the `f32:` width token, which is
-already implied by `embedding_width`) and it removes the only way the width can be wrong at rebuild
+already implied by `embedding_width`) and it removes the one **detectable-at-read** failure — a frame that disagrees with the marker; a marker
+already wrong when written is copied into the frame, so the two agree and nothing can catch it at rebuild
+(that is the `#11835` F2 class, which is why §2.4.1's writer rule exists) — and it removes the last way the
+width can be wrong at rebuild
 time without anything noticing. Where a checked duplicate and a single source of truth conflict, the
 unrecoverable direction wins.
 
@@ -549,14 +562,16 @@ The frame is decoded in **`EventLog.read_all`**, at the record-read boundary, so
 and cursor readers) still sees **exactly the shape it sees today** and needs no change. One spelling of
 the frame, one place to get it wrong — the same reason P0 put the width decision in one seam.
 
-**The bypasses, named rather than left to be found.** Three journal line-parsers do *not* go through
-`read_all`: `log.py`'s seal/tail detection, `subject_binding`'s key scan, and `MentionScan`
-(`log.py:1243`, used by `EventLog.mention_lines` and `sdk._journal_presence_state`). All three read
+**The bypasses, named rather than left to be found.** Four journal line-parsers do *not* go through
+`read_all`: `log.py`'s seal/tail detection, `subject_binding`'s key scan, `MentionScan` (`log.py:1243`, used
+by `EventLog.mention_lines` and `sdk._journal_presence_state`), and `backup._count_journal_events`
+(`backup.py:68`, used on the restore path at `:660` — **count-only**: it reads no key and no value, so a
+frame cannot reach it, and `embedding` appears nowhere in `backup.py`). The three that read keys read
 `type`/id-shaped keys and **never** `embedding` — measured at this head: `embedding` appears as a **code**
-token on **no line** of `log.py` or `subject_binding.py` (tokenised, comments excluded, and **both** token
-classes counted — a `NAME` and a `STRING`, because a JSON access like `rec["embedding"]` is a string token
-and a NAME-only scan would miss it; `log.py`'s eight
-mentions are all comment prose), and `_apply_journal_presence` — the parser behind `MentionScan` — and
+token on **no line** of `log.py`, `subject_binding.py` **or `backup.py`** (tokenised, comments excluded, and
+**both** token classes counted — a `NAME` and a `STRING`, because a JSON access like `rec["embedding"]` is a
+string token and a NAME-only scan would miss it; `log.py`'s eight mentions are all comment prose, and the
+other two files have none at all), and `_apply_journal_presence` — the parser behind `MentionScan` — and
 `_journal_presence_state` contain none. So an undecoded frame cannot reach them. That is a property to
 keep, not an accident to assume: the implementation's tests must red if any of them starts reading a
 vector, and they must spy on **`_apply_journal_presence`**, not only on `MentionScan`, or the symbol that
@@ -622,8 +637,9 @@ Named here so the implementation cannot choose a weaker one:
 
 ### 3.3 The failure this section exists to prevent
 
-`rebuild_all` is the only consumer that can be wrong **catastrophically rather than visibly**: it wipes and
-reconstructs. A reader that skipped a frame-bearing record would rebuild a graph **missing vectors** and
+`rebuild_all` and `consistency.recover_from_log` are the two consumers that can be wrong
+**catastrophically rather than visibly** — both wipe and replay (their own docstrings say "Rebuild = wipe +
+full replay" / "wipe + full replay"), so a wrong decode is silent rather than a visible read error. A reader that skipped a frame-bearing record would rebuild a graph **missing vectors** and
 report success; a reader that decoded wrongly would rebuild **different vectors** and report success. Both
 are silent. That is why the review of this note and of the implementation must be on the **rebuild** path
 and not the append path — the issue says so, and it is right.
@@ -778,7 +794,8 @@ journal — every frame-bearing journal is thereafter a second code path that mu
 ## 7. Recommendation — stated plainly, because the number is smaller than the headline
 
 **The format in §2–§4 is the correct one if P2 is taken.** §2.1 chooses a **tagged string under the existing
-key**, against a sibling key, a nested object, a file header and a binary layer — and it satisfies all four
+key**, against a sibling key, a nested object and a file header (§2.1), and a binary layer (§2.5) — and it
+satisfies all four
 recorded constraints: per-record versioning (append-only), a count that fails closed on the measured
 silent-truncation path, two widths so #5004 is preserved rather than overridden, and JSONL compatibility so
 the tear contract and the reader are not replaced.
@@ -866,13 +883,15 @@ PY
 
 ```bash
 # 4. the §3.1 claim that no bypassing reader touches a vector: `embedding` as a CODE
-#    token (comments excluded) on every journal line-parser that skips `read_all`.
+#    token (comments excluded) on the three journal line-parsers that read KEYS and
+#    skip `read_all` (the fourth, `backup._count_journal_events`, is count-only and
+#    reads no key at all — `rg -n embedding tortoise/backup.py` finds none).
 #    ⛔ NAME tokens alone are not enough — a JSON access is a STRING token, so
 #    `rec["embedding"]` would be invisible to a NAME-only check. Both are counted.
 uv run python - <<'PY2'
 import io, inspect, tokenize
 import tortoise.sdk as s
-for path in ("tortoise/log.py", "tortoise/subject_binding.py"):
+for path in ("tortoise/log.py", "tortoise/subject_binding.py", "tortoise/backup.py"):
     code, comments = [], 0
     for t in tokenize.generate_tokens(io.StringIO(open(path).read()).readline):
         if t.type == tokenize.COMMENT and "embedding" in t.string:

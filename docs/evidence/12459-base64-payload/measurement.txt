@@ -26,12 +26,14 @@
   delta 13,125 B — all of it in the 5 vector-bearing records
 
 == decode equivalence (float32 bits, not float64 values)
-  PointAdded            384-d  base64→f32 bits == P0 text→f32 bits: True   (P0 text→f32 == producer f32: True)
-  PointAdded            384-d  base64→f32 bits == P0 text→f32 bits: True   (P0 text→f32 == producer f32: True)
-  OperatorAdded         384-d  base64→f32 bits == P0 text→f32 bits: True   (P0 text→f32 == producer f32: True)
-  PointPromoted         384-d  base64→f32 bits == P0 text→f32 bits: True   (P0 text→f32 == producer f32: True)
-  OperatorPromoted      384-d  base64→f32 bits == P0 text→f32 bits: True   (P0 text→f32 == producer f32: True)
+  PointAdded            384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
+  PointAdded            384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
+  OperatorAdded         384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
+  PointPromoted         384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
+  OperatorPromoted      384-d  base64→f32 == producer f32: True   P0 text→f32 == producer f32: True   (frame invertible: True)
   5 of 39 corpus records carry a vector and were verified
+  float64-value equality decoded==producer (would PASS vacuously): True
+  the same assertion on a 1-ULP perturbation (must be False): False
 
 == the caller-owned / preserved population (#5004 round-7)
   float64 frame round-trip bit-identical: True
