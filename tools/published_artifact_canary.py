@@ -557,10 +557,17 @@ def fetch_index(package: str, timeout: float) -> tuple[dict[str, Any] | None, st
 
 
 def _clean_env(home: Path) -> dict[str, str]:
+    # ⛔ Compared CASE-INSENSITIVELY. pip's vendored requests calls
+    # `getproxies_environment()`, which LOWERCASES every variable name before looking for
+    # a proxy, so `Http_Proxy` / `ALL_PROXY` are honoured by the child while a
+    # case-sensitive strip walks straight past them — leaving open the very channel (grade
+    # a proxy's copy of the artifact) the strip exists to close (#12363 round 7).
+    stripped = tuple(name.lower() for name in _STRIPPED_ENV_PREFIXES)
+    exact = frozenset(name.lower() for name in _STRIPPED_ENV_NAMES)
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(_STRIPPED_ENV_PREFIXES) and key not in _STRIPPED_ENV_NAMES
+        if not key.lower().startswith(stripped) and key.lower() not in exact
     }
     env["HOME"] = str(home)
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
@@ -754,6 +761,15 @@ def install_and_run(
         return (Arm("engine-init", UNKNOWN, f"could not run: {exc}"), "\n".join(transcript))
 
     db_path = home / ".tortoise" / "tortoise.db"
+    # ⛔ The DEFAULT path is a second copy of `tortoise/config.py`'s decision. If a release
+    # relocates the default, a hardcoded expectation reds this canary FOREVER and the
+    # summary then says "a release is owed" when the fix belongs in this tool. Requiring a
+    # database SOMEWHERE under the fresh HOME keeps the property under test ("the command
+    # really initialised storage") without freezing the location (#12363 round 7).
+    if not db_path.is_file():
+        created = sorted(home.rglob("*.db"))
+        if created:
+            db_path = created[0]
     if swept.returncode != 0:
         return (
             Arm(

@@ -127,12 +127,15 @@ jobs:
       # and that ends in an irreversible upload. Gate it on the canary's OWN outcome
       # (#12363 round 4), and BRANCH the text on the exit code: exit 2 is a detector
       # outage, and leading it with "this clears when a release lands" is the sentence
-      # that ends in an upload nobody needed (#12363 round 5).
+      # that ends in an upload nobody needed (#12363 round 5). It also covers
+      # `cancelled`: a canary killed at its own `timeout-minutes` is the ONE terminal
+      # state the `if: always()` upload exists for, and gating on `failure()` alone left it
+      # red every day with no issue filed and no explanation (#12363 round 7).
       - name: What a red here means
-        if: failure() && steps.canary.outcome == 'failure'
+        if: ${{ !cancelled() && contains(fromJSON('["failure", "cancelled"]'), steps.canary.outcome) }}
         run: |
           {
-            if [ "${{ steps.canary.outputs.exit_code }}" = "2" ]; then
+            if [ "${{ steps.canary.outputs.exit_code }}" != "1" ]; then
               echo "### This is a DETECTOR outage, not a release finding"
               echo
               echo "The canary could not evaluate the published artifact (index unreachable,"
@@ -154,7 +157,7 @@ jobs:
       # the run, so a red that opens no issue is a red nobody sees — and a 97-day broken
       # artifact can go on being broken while every summary says so (#12363 round 5).
       - name: File or refresh the alert issue
-        if: failure() && steps.canary.outcome == 'failure'
+        if: ${{ !cancelled() && contains(fromJSON('["failure", "cancelled"]'), steps.canary.outcome) }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EXIT_CODE: ${{ steps.canary.outputs.exit_code }}

@@ -95,6 +95,8 @@ grep -q '^VERB=file$' "$RECORDER" || note "open did not delegate to the substrat
 grep -q '^TITLE=release-artifact-canary: published PyPI artifact is red$' "$RECORDER" ||
   note "open did not pass the canary's stable title (the dedupe key)"
 grep -q '^LABEL=bug$' "$RECORDER" || note "open did not pass the bug label"
+grep -q '^TITLE=release-artifact-canary: published PyPI artifact is red$' "$RECORDER" ||
+  note "the release finding must keep its OWN ledger title"
 
 # ── 2. the exit-code branch ─────────────────────────────────────────────────────────
 grep -q 'clears when a release lands' "$RECORDER.body" ||
@@ -107,9 +109,17 @@ rc="$(run_open 2)"
 [ "$rc" = "0" ] || note "open (exit 2) exited $rc, expected 0"
 grep -qi 'not\*\* evidence the artifact is broken' "$RECORDER.body" ||
   note "exit 2 body does not say the artifact is NOT implicated"
+grep -q '^TITLE=release-artifact-canary: could not evaluate the published artifact$' "$RECORDER" ||
+  note "a detector outage must get its OWN ledger — sharing the release title lets one severity absorb the other's recurrence"
 if grep -q 'clears when a release lands' "$RECORDER.body"; then
   note "exit 2 body tells a human to cut a release on a detector outage"
 fi
+
+# ── 2b. an UNSET exit code (a cancelled step writes no output) is an outage ─────────
+rm -f "$RECORDER" "$RECORDER.body"
+EXIT_CODE="" GH_TOKEN="fake-token" GITHUB_REPOSITORY="o/r" RUNNER_TEMP="$tmp" open_issue >/dev/null 2>&1
+grep -q 'could not evaluate' "$RECORDER" ||
+  note "an empty exit code must not post a release-owed body"
 
 # ── 3. the transcript TAIL, not the head ────────────────────────────────────────────
 # 60 preamble lines, then the diagnosis: a head would show only the preamble.
@@ -146,10 +156,6 @@ fi
 if GH_TOKEN=x GITHUB_REPOSITORY=o/r bash .github/scripts/published-artifact-alert.sh bogus \
   >/dev/null 2>&1; then
   note "an unknown verb exited 0"
-fi
-if ! GH_TOKEN=x GITHUB_REPOSITORY=o/r bash .github/scripts/published-artifact-alert.sh --help \
-  >/dev/null 2>&1; then
-  : # --help is not a verb; it must not be silently accepted either
 fi
 
 if [ "$fail" -ne 0 ]; then
