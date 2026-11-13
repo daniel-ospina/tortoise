@@ -2558,6 +2558,40 @@ def test_an_id_less_neutral_row_is_told_to_delete(sdk):
     assert "delete this edge: §3.1's disposition here is DROP" in fix, fix
 
 
+def test_a_NEUTRAL_neither_arm_row_scopes_the_DROP_to_here(sdk):
+    """The DROP's SCOPE is neutral-aware too, and that guard was unpinned.
+
+    ``neither_drops`` is true on a neutral neither-arm row whose successor is unread
+    and whose chain has no live head, so the scope expression has to exclude it: with
+    ``(neither_drops and not neutral)`` reduced to ``neither_drops`` the triage says
+    "the disposition for the edge AS NAMED is DROP" — inviting a carry to a
+    differently-named successor — on the one row whose own ``fix`` says DELETE and
+    adds "Clearing the shape is NOT required to DELETE it". Measured: removing the
+    ``not neutral`` from the scope leaves the whole suite green (mutant M4), so this
+    fixture is what pins it (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    # Terminal AND chainless: `neither_drops` needs an unread successor with no live
+    # head, and an archived Object with no ``supersededBy`` has neither.
+    sdk.update_entity(v2["id"], status="archived")
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
+              {"i": v2["id"]}) == [[None]], "fixture drifted: the successor has a chain"
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "DELETE it instead" in fix, fix
+    assert "the disposition here is DROP" in fix, (
+        "a neutral edge's DROP is the edge's own, so its scope is 'here': " + fix)
+    assert "AS NAMED" not in fix, (
+        "'AS NAMED' invites the carry this row's own fix calls inert: " + fix)
+
+
 def test_a_shaped_neutral_row_is_not_told_to_move_the_edge(sdk):
     """The resolvable SHAPE arm needs the neutral guard too.
 
