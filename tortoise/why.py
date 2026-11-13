@@ -200,24 +200,33 @@ def _entity_label(item: dict) -> str | None:
     on the first day (it named a ``:Document`` label no writer produces), so the
     canonical one is imported instead.
 
-    Two spellings reach it, because two ANSWERS carry the layer:
-      * ``entity_type`` — the RECALL surfaces (``recall_subgraph`` stamps
-        ``"entity_type": "point"``, ``sdk.py``);
-      * ``kind`` — the ask-lane / ``assemble_context`` hits built by
-        ``assembly.synthesize_hits`` (literal ``"point"``/``"event"``), which carry
-        NO ``entity_type``. ⛔ Without this fallback the unnamed arm below took
-        them, and an ``:Event`` row got the Point-lane word ``live`` on the ask
-        lane — the #6976 conflation reaching the one path the search gates do not
-        cover.
+    Two spellings reach it, because two answers carry the layer:
+      * ``entity_type`` — the RECALL paths: ``recall_state``'s item pool and its
+        filter both key on it (``sdk.py``: the connection-target rows stamp the
+        neighbour's label lower-cased; ``recall_gaps``' pool stamps
+        ``"entity_type": "point"``);
+      * ``kind`` — the ask-lane / ``assemble_context`` SLICE rows from
+        ``assembly.synthesize_hits`` (``spine_rows`` / ``day_rows`` /
+        ``window_rows``, ``kind`` = ``"point"``/``"event"``), which carry NO
+        ``entity_type``. ⛔ Without this fallback the unnamed arm below took them,
+        and an ``:Event`` row got the Point-lane word ``live`` on the ask lane —
+        the #6976 conflation reaching the one path the search gates do not cover.
 
-    ⛔ The SEARCH surfaces carry NEITHER (#11928 review round 9): their rows come
-    from ``SearchResult.to_dict``, which emits ``point_kind`` — the CLAIM's kind,
-    not the layer — and no layer key at all, and their enrichment is gated on the
-    ``entity_type`` FUNCTION ARGUMENT, so the unnamed arm below is that lane's whole
-    population and is correct only while the gate is ``entity_type == "point"``. A
-    widening of those gates must SUPPLY the layer; this lookup cannot infer it, and
-    a spelled ``kind`` is not by itself a layer name (``ranking._enrich`` spends it
-    on a DISPLAY kind, ``ranking.py``: ``coalesce(pointKind, objectKind, …)``).
+    ⛔ THREE surfaces supply NEITHER, and a widening must not assume otherwise:
+      * the SEARCH lane (``SearchResult.to_dict`` emits ``point_kind`` — the
+        CLAIM's kind, not the layer — and no layer key at all), whose enrichment
+        is gated on the ``entity_type`` FUNCTION ARGUMENT (``entity_type ==
+        "point"``), so the unnamed arm is that lane's whole population;
+      * ``recall_subgraph`` (its nodes carry ``type`` — the lower-cased graph
+        label — and a DISPLAY ``kind``), which nothing enriches today;
+      * the SECTION rows ``synthesize_hits`` also emits (``"interval"``,
+        ``"ordering"``, ``"duration-state"``, ``"class-window"``, ``"date"`` …),
+        which carry other kinds and no ``id``, so ``enrich_items`` never projects
+        them.
+    A widening that brings any of them here must SUPPLY the layer: this lookup
+    cannot infer it, and a spelled ``kind`` is not by itself a layer name
+    (``ranking._enrich`` spends it on a DISPLAY kind, ``coalesce(pointKind,
+    objectKind, …)``).
 
     An UNNAMED label is treated as STATUS-CARRYING, which is
     ``live.status_as_reported``' own rule — right for Point/Subject/Object (and for
