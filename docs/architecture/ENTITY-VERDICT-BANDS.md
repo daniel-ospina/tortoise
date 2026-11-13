@@ -100,8 +100,12 @@ Four properties are load-bearing and each is pinned by a test:
   `folded` rows to carry — so `entities` comes back EMPTY and every prior row's
   spelling is named on `entities_unresolved`. The pass therefore still runs (the
   gate accepts the named set), the resolver declares those spellings unmatched,
-  and the run appends one HOLD per fold: `payload["entities"]` is empty and nothing
-  is created. No pre-hop row is emitted by either arm. Pinned by
+  and the run appends one HOLD per fold — and every spelling it holds is withheld
+  from the commit's create list (`payload["entities"]`), so none of THEM is created.
+  ⚠️ Scope is per held key: a mention with no prior row, or one `_norm`-distinct
+  from the withheld spelling (the #12424 residual below), is still created — the
+  create window is closed per withheld spelling, not for the whole arm. No pre-hop
+  row is emitted by either arm. Pinned by
   `test_a_prior_set_read_failure_withholds_every_row_by_name` (producer) and by
   the withheld-hold tests (consumer: `…is_held_rather_than_read_as_absent`,
   `…is_held_even_when_the_resolver_raises`). The only client skipped is one with
