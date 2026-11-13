@@ -1036,6 +1036,7 @@ surfaces:
   - test_per_session_census.py
   - test_graph_integrity_gate.py
   - test_cli_claim.py
+  - test_cli_setup.py
   - test_cli_global_config.py
   - test_cli_context.py
   - test_cli_resolver.py
