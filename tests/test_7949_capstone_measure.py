@@ -5315,8 +5315,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
             # the merge — `main` read 9943 and the branch read 9941, and neither
-            # number describes a tree that adds BOTH. The 8-line delta over `main`
-            # is #12060's own registration block above the entry.
+            # number describes a tree that adds BOTH.
+            # The +30 over `main` `9828250732` is THREE insertions above the entry,
+            # and naming only the first is how 9951 stood here: `+8 @2725` (#12060's
+            # registration block → that is the 9951 step), `+6 @6729` (`test_archive.py`,
+            # #11609), `+16 @7522` (`test_11926_derived_invalidation.py`, #11926) —
+            # measured with `git diff -U0 9828250732..cd22562c2 -- config/ci-surfaces.yml`
+            # (zero deletions, those three hunks). Re-derive the SUM, never the 8.
             ("9973", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
