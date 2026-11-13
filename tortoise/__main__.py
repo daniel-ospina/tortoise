@@ -13832,8 +13832,11 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                             f"({_printable(body[:160]) if body else '(empty body)'}) "
                             "— a proxy or captive portal answering for the "
                             "endpoint also returns 200, so the key is NOT proven. "
-                            "Check your TORTOISE_API_URL, then `tortoise config "
-                            "show`"))
+                            # ⛔ The SAME inert-knob split as the transport rows
+                            # (fresh review round 19): for a STORE-sourced key
+                            # `TORTOISE_API_URL` cannot move the endpoint, so this
+                            # row sent the user at a knob that does nothing.
+                            f"{_endpoint_remedy}"))
             return
         org = None
         if isinstance(parsed, dict):
