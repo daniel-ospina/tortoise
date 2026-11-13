@@ -695,11 +695,12 @@ def test_a_claim_that_NAMES_NO_goal_falls_back_to_the_CALLERs(sdk, monkeypatch,
 
     ⛔ THE FALLBACK IS A REACHABLE SHAPE, NOT DECORATION, and it was unpinned in
     all four arms: deleting `or invalidation.goal_id` from every local left the
-    suite green, because every other test's claim carries a `goalId`. A claim
-    can name none — `invalidation_for` documents "a corrupt or partial claim" as
-    reachable, and `REMOVE p.goalId` produces it — and with the fallback gone
-    that shape SKIPS the reconcile: `cache.checked` is `False` and neither
-    `counts.failed` nor `counts.gone` moves, which is the silent class the
+    suite green, because every other test that reaches these locals reads a claim
+    carrying a `goalId`. A claim can name none — `invalidation_for` documents
+    "a corrupt or partial claim" as reachable, and `REMOVE p.goalId` produces it —
+    and with the fallback gone that shape SKIPS the reconcile: `cache.checked` is
+    `False` and neither `counts.failed` nor `counts.gone` moves, which is the
+    silent class the
     helper exists to make visible (#12336).
     """
     i, t, g = _world(sdk, tag=f"fallback-{shape}")
