@@ -2277,8 +2277,12 @@ surfaces:
   # instead of a head sha (the repo squash-merges), so its ENTIRE provenance is
   # `provenance.probe_sha256` — a digest of the probe's bytes — and this pin recomputes both digests
   # from the committed probes, so an edit to either probe (re-tuning the 0.89 band being the move
-  # #12436 forbids) reds here instead of silently re-pointing the evidence. Hermetic: two files
-  # hashed, two JSON artifacts parsed — no DB, no graph, no network, no key.
+  # #12436 forbids) reds here instead of silently re-pointing the evidence. It also pins the
+  # recorded FAIL verdict against an in-place flip (a passing re-run is a NEW artifact — this one is
+  # the baseline #12436 is scoped against) and binds the recorded 0.89 / 0.72 bands to
+  # `tortoise.embeddings.NEAR_DUPLICATE_THRESHOLD` /
+  # `DEFAULT_THRESHOLD`. Hermetic: two probe files hashed, two JSON artifacts parsed, one float pair
+  # imported — no DB, no graph, no network, no key, no model.
   # `tier1` below is LOAD-BEARING, because every guarded artifact is under `docs/` and a docs-only
   # diff runs `tier1` only (the `test_11739_quote_population_probe.py` precedent above).
   - test_11739_composed_gate_probe.py
@@ -12760,7 +12764,7 @@ durations:
   # not the weight: "33 passed in 6.46s" (33 cases from 22 `def test_`,
   # embedded SDK fixture, this host, this head) — a later junit sweep re-cuts it.
   test_11739_composed_embed_text.py: 2.0
-  test_11739_composed_gate_probe.py: 2.0  # new in #12436 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: three assertions over two sha256 digests and two committed JSON artifacts; hermetic (no DB, no graph, no network, no key, no model call, no import of `tortoise.*`), measured locally at ~0.05 s as CONTEXT and not as the weight. `tools/ci_selection.py --integrity` is the authority and replaces this from junit once a push-to-main sweep includes it.
+  test_11739_composed_gate_probe.py: 2.0  # new in #12436 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: FIVE assertions — two sha256 digests recomputed from the committed probes, two committed JSON artifacts parsed, and one float-pair read from `tortoise.embeddings` (`NEAR_DUPLICATE_THRESHOLD`/`DEFAULT_THRESHOLD`; numpy only, no torch, no model, no key, no network, no DB), measured locally at ~0.1 s as CONTEXT and not as the weight. `tools/ci_selection.py --integrity` is the authority and replaces this from junit once a push-to-main sweep includes it.
   test_next_work.py: 7.5
   test_oauth_stray_code_refusal.py: 2.3
   test_reader_aggregation_aware.py: 0.1

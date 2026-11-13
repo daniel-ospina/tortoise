@@ -132,17 +132,25 @@ cd <checkout>
 set -a; . ~/keys.env; set +a      # TORTOISE_MCP_API_KEY
 uv sync --extra embeddings
 # 1. the three gates (a fresh run WRITES provenance itself; ~16 min of encoding)
+#    ⛔ WRITE TO A SCRATCH PATH, then diff — do NOT overwrite the committed artifact:
+#    this bundle is the 2026-11-13 baseline #12436 is scoped against, and a fresh run with no
+#    cache on the box is a LIVE walk, so its numbers are EXPECTED to differ. The pin does not
+#    stop a drifted overwrite: probe bytes, verdict and bands would all still hold.
 uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
-    --out docs/evidence/11739-composed-gate/gate.json --cache /tmp/11739-rows.jsonl
+    --out /tmp/gate.json --cache /tmp/11739-rows.jsonl
 # 2. the root cause (no encoding, ~30 s)
 uv run python docs/evidence/11739-composed-gate/probes/quote_identity.py \
-    --rows /tmp/11739-rows.jsonl \
-    --out docs/evidence/11739-composed-gate/quote_identity.json
+    --rows /tmp/11739-rows.jsonl --out /tmp/quote_identity.json
 # 3. only after a probe EDIT — rebinds provenance to the edited probe WITHOUT re-running the
 #    measurement (every fresh run already writes its own provenance)
 uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
     --attest docs/evidence/11739-composed-gate/gate.json
 ```
+
+Then compare: `diff <(uv run python -m json.tool /tmp/gate.json) <(uv run python -m json.tool
+docs/evidence/11739-composed-gate/gate.json)`. A pass where the committed artifact records a FAIL is
+a NEW artifact (its own bundle directory and index row, cited by the PR that flips
+`TORTOISE_COMPOSED_EMBED_TEXT`), never an edit to this one.
 
 The probe walks the whole live population through the #11838 census probe's own client/walk
 (one owner for the paging contract), caches the rows, encodes the composed text with the pinned
@@ -158,7 +166,7 @@ producer of that field: a fresh run calls it, and `--attest` calls it on an exis
 refuses an artifact with no gate verdicts). `--attest` exists because a fresh run is ~16 minutes of
 encoding while the binding is a pure function of the probe's bytes; it rewrites ONLY `provenance`, so
 it cannot move a number. Note what that means for a re-run: the committed numbers are reproducible
-from the committed row cache, and a fresh run (no cache on the box) is a **live** walk over a graph
-that has captured more Points since 2026-11-13 — so it reproduces the **protocol and the gate logic**,
-which is what #12436's acceptance test means by "the same gate re-run", not these literals (see the
-`rows_source` limitation above).
+from the row cache named in `provenance.rows_source` (`/tmp/11739-rows.jsonl`, which is **not**
+committed — see the limitation above), and a fresh run (no cache on the box) is a **live** walk over a
+graph that has captured more Points since 2026-11-13 — so it reproduces the **protocol and the gate
+logic**, which is what #12436's acceptance test means by "the same gate re-run", not these literals.
