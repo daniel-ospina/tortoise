@@ -538,9 +538,12 @@ def _rerank_arm(
     """#12297 arm 5 — the cross-encoder over the SAME fused candidates.
 
     For each mention we take the real fused read at pool width ``P`` (wider than
-    production's 3), score every candidate with the shipped
-    ``rerank.CrossEncoderScorer`` exactly as ``rerank.py`` scores — one
-    ``score(query, contents)`` call per mention — and cut to ``top_k``.
+    production's 3) and hand it to the SHIPPED ``rerank.rerank_pool`` — one
+    ``score(query, contents)`` call per mention, scoring only the slots whose text
+    is non-empty and writing those back into their OWN slots, exactly as the
+    product does (a textless row is never scored and never moves). The harness
+    then scores that order at ``top_k`` — the cut is the measurement's, not this
+    function's.
 
     ⛔ THREE things this arm deliberately does NOT do, each because doing it
     would make the number unreadable:
