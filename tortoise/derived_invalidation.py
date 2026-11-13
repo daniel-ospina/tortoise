@@ -794,8 +794,13 @@ def invalidate(
        stale, so there is nothing to retire because it is already gone (#12315).
        ⛔ EVERY ``alreadyRetired`` answer still owes the goal's cache its
        reconcile (step 4), including this one: the word a goal displays can name
-       a claim that vanished or was retired elsewhere, and no automatic path
-       repairs it (#12336). ``found`` says which shape it was — ``False`` when there is
+       a claim that vanished or was retired elsewhere (#12336). ANOTHER of that
+       goal's claims going stale later DOES repair it automatically — that
+       finding's own step-4 reconcile re-derives the word from whatever still
+       stands — but a goal whose LAST claim is gone is never a finding again, so
+       on that shape the repair route is the manual, public, idempotent
+       :func:`reconcile_goal_state_cache`. ``found`` says which shape it was —
+       ``False`` when there is
        NO CLAIM NOW (it was absent, or it was read at the top and then vanished
        before ``retract_point`` landed — in that second shape a claim WAS read,
        and its ``goalId`` is still what the reconcile uses), and ``True`` when a
