@@ -873,14 +873,20 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
 #: independent ``count(e)`` aggregate — the guard ``hosted_backup`` calls "the
 #: load-bearing" one, and the only shape a result-set cap cannot truncate to a
 #: lie, because it is ONE row — and RAISES rather than answering from the part it
-#: managed to read. ⛔ THE LOSS IS ARBITRARY BY INSTANT, WHICH IS THE POINT: pages
-#: ascend by `id(e)` = INSERT order, so a truncated tail loses the most recently
-#: CREATED readings — and a backfilled row can be instant-OLD while landing last
+#: managed to read. ⛔ THE LOSS IS ARBITRARY BY INSTANT, WHICH IS THE POINT, and
+#: ``id(e)`` is CREATION order only while nothing has been deleted: the engine
+#: REUSES a freed node id (MEASURED on a lane, `graph ver 42006`: create A, B, C
+#: -> ids 2, 3, 4; delete the middle one and create D -> D holds id 3). So a
+#: truncated tail costs whatever currently holds the HIGHEST LIVE ids, not the
+#: newest reading — and a backfilled row can be instant-OLD while landing last
 #: (MEASURED: create the 12.0/newest-instant reading first, an older one second,
-#: and truncation keeps the 12.0 while the guard reports the loss). So the guard
-#: is fail-closed on "the answer would be taken from an incomplete set", never on
-#: "the newest reading is certainly gone" — the two are different claims and only
-#: the first is true.
+#: and truncation keeps the 12.0 while the guard reports the loss). The guard's
+#: honest guarantee is therefore narrower than "nothing was lost": it fires when
+#: the row COUNT comes back short of the count taken before the read (a create
+#: that reuses an id already paged past leaves the count equal — a CHANGED set is
+#: not a short one). It is fail-closed on "the answer would be taken from an
+#: incomplete set", never on "the newest reading is certainly gone" — the two are
+#: different claims and only the first is true.
 _READINGS_PAGE_SIZE = 1000
 
 
@@ -941,13 +947,12 @@ def latest_readings(
     ``ceil(N / _READINGS_PAGE_SIZE)`` page queries, ONE MORE when ``N`` is an
     exact multiple of the page size (a FULL page never ends the loop; only a short
     one does), PLUS the one aggregate ``count(e)`` the truncation guard compares
-    against. Instant PARSES are ``N`` for the ordering and a further ``2N`` when
-    ``since`` is given (``instant_at_or_after`` parses both operands per reading,
-    boundary included), plus ``M`` for the ordering — ``M`` being the readings
-    that SURVIVE ``since``, because the filter runs BEFORE the sort — so a
-    ``judge()`` pass that declares a definition boundary parses ``2N + M``: ``3N``
-    at most, and EXACTLY ``3N`` when the boundary drops nothing, which is the
-    ordinary case (measured: 5 readings parse 15 times at a boundary that drops
+    against. Instant PARSES are ``M`` for the ordering — ``M`` being the readings
+    that SURVIVE ``since``, because the filter runs BEFORE the sort (``M = N`` when
+    no boundary is given) — plus ``2N`` for ``since`` (``instant_at_or_after``
+    parses both operands per reading, boundary included): ``2N + M``, which is
+    ``3N`` when the boundary drops nothing — the ordinary case — and less when it
+    drops more (measured: 5 readings parse 15 times at a boundary that drops
     none, 14 at one that drops one). Measured pin: 5
     readings at a page size of 2 take 3 page queries. That is the price of a
     correct order (:data:`_READINGS_PAGE_SIZE`); it is not a per-call constant.
@@ -1110,19 +1115,22 @@ def latest_readings(
         cursor = int(page[-1][0]) + 1
     if len(rows) < expected:
         # A short page is indistinguishable from a last page by shape alone, and
-        # the rows it costs are the most recently CREATED (pages ascend by id, not
-        # by instant), so the answer would be taken from an incomplete set. Refuse
-        # rather than answer from the part that arrived.
+        # the rows it costs are whatever currently holds the highest LIVE ids
+        # (``id(e)`` is creation order only while nothing has been deleted — the
+        # engine reuses freed ids, measured), so the answer would be taken from an
+        # incomplete set. Refuse rather than answer from the part that arrived.
         raise RuntimeError(
             f"latest_readings read {len(rows)} of {expected} rows for indicator "
             f"{indicator_id!r} — a page came back short of {batch}. TWO causes, "
             "with different remedies: a server-side RESULTSET_SIZE pinned below "
             "_READINGS_PAGE_SIZE (lower the constant below the cap) or a "
             "concurrent delete of a reading that landed mid-read (re-run; no "
-            "setting can prevent it). The rows a truncated tail costs are the most "
-            "recently CREATED, and a deleted row is wherever it was, so the loss "
-            "is arbitrary by instant either way: an answer would be computed from "
-            "an incomplete set, which is why this refuses rather than returns."
+            "setting can prevent it). Which rows a truncated tail costs is "
+            "whatever currently holds the highest live ids (``id(e)`` is creation "
+            "order only while nothing has been deleted, and a deleted row is "
+            "wherever it was), so the loss is arbitrary by instant: an answer "
+            "would be computed from an incomplete set, which is why this refuses "
+            "rather than returns."
         )
     out: list[Reading] = []
     for row in rows:
