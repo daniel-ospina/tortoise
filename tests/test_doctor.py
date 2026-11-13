@@ -379,18 +379,21 @@ class TestDoctorReadCappedIsAWallClock:
         """A DETERMINISTIC reproduction of "EOF after OUR interrupt", unraced.
 
         The close-delimited drip test below exercises the real shape, but there the
-        loop's own deadline check usually wins the race and reports `cut` anyway,
-        so it cannot isolate the decision. This one always reaches the EOF branch
+        loop's own deadline check may win the race and report `cut` before this
+        branch is reached, so it cannot isolate the decision. This one always does
         with nothing declared: the deadline is 20 ms out, the watchdog fires while
         `read1` is still blocked (100 ms), and `read1` answers the shutdown the way
         a close-delimited body does — `b""`, no exception, `length is None`.
 
-        It pins the OUTCOME (`cut=True`), not one implementation of it: the flag
-        and the clock heuristic each satisfy it here. The flag is the stronger
-        form — the clock cannot see the window between the timer firing and the
-        next `monotonic()` read, which is the window the false red was measured in
-        (`fb2926ef9e`: 360 bytes, `cut=False`, 0.50 s) — and that window is not
-        reproducible without faking the clock, so it is stated rather than pinned.
+        It pins the OUTCOME (`cut=True`), not one implementation of it. An earlier
+        version of this docstring claimed an `interrupted` flag was the stronger
+        signal because "the clock cannot see the window between the timer firing
+        and the next `monotonic()` read". That claim is FALSIFIED at the primary
+        source: `threading.Timer` never fires early (300 fires measured, min
+        `fire - deadline` = +176.5 us), so `interrupted` implies
+        `monotonic() >= deadline` and the flag only added one wrong verdict — a
+        `length == 0` body it reported CUT. The flag is gone; the clock and the
+        declared length decide, and this test pins the outcome they produce.
         """
         import time
 
@@ -432,8 +435,9 @@ class TestDoctorReadCappedIsAWallClock:
         close-delimited `/v1/team` reply then reached the no-identity arm as
         `❌ … Check your TORTOISE_API_URL` with exit 1 (measured at `fb2926ef9e`:
         360 bytes, `cut=False`, 0.50 s as shipped; `cut=True` with the watchdog
-        disarmed — the interrupt itself caused the false red). The flag is what
-        separates "the peer ended the body" from "we ended it".
+        disarmed — the interrupt itself caused the false red). The CLOCK is what
+        separates "the peer ended the body before the deadline" from "we ended it
+        at the deadline"; a DECLARED length still outranks it in both directions.
         """
         import http.client
         import time
