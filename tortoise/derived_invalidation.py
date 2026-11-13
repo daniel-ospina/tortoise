@@ -738,8 +738,10 @@ def _reconcile_or_report(sdk: Any, goal_id: str | None) -> dict:
     which a caller can also call directly for one goal. That door REPORTS what it
     can see (an unreadable or absent goal) as a dict, but it wraps only its own
     ``get_entity``: ``latest_judgement`` and the ``update_entity`` writes after it
-    propagate — which is exactly why every arm here calls it through
-    :func:`_reconcile_or_report` instead of calling it bare.
+    propagate — which is exactly why every arm of :func:`invalidate` calls it
+    through :func:`_reconcile_or_report` instead of calling it bare (the goal sweep
+    calls it bare on purpose: it needs the door's own ``checked``/``gone``
+    discrimination to tell a repair from a reconcile that did not happen).
     Measured before either existed: ``goalState`` stayed ``met`` after the claim was
     deleted, through both the claim sweep and this door.
 
@@ -1248,11 +1250,14 @@ def reconcile_goal_states(
       claim, already-terminal claim, the post-refusal terminal arm, and the
       second vanish window), so the issue's own route — ``invalidate`` →
       ``alreadyRetired: True`` → the word still standing — no longer reproduces
-      through the door. The one arm that reconciles nothing is the ``raise`` for a
-      claim that is live and REFUSED, which is a genuine refusal rather than a
-      missed repair. This sweep is the graph-wide repair for everything the door
-      is never called on; it is not a substitute for that door work, and it does
-      not duplicate it.
+      through the door. TWO arms reconcile nothing, and both are refusals rather
+      than missed repairs: ``raise`` for a claim that is live and REFUSED, and
+      ``raise`` when the claim could not be READ at all (its state is unknown, so
+      retiring it would be a guess). Both leave the goal's word standing, which is
+      why the sweep counts a goal whose reconcile did not report ``checked: true``
+      as unrepaired instead of reading it as clean. This sweep is the graph-wide
+      repair for everything the door is never called on; it is not a substitute
+      for that door work, and it does not duplicate it.
     * **a node holding a derived word but no ``id``** — the entity surface cannot
       address it, so the sweep cannot repair it. Reachability is narrow (the
       ``:Source`` write surface refuses ``goalState``, so only a raw write and an
