@@ -40361,7 +40361,7 @@ class TortoiseSDK:
         #     result set, at ``limit=5``). None of the three passes
         #     ``_valid_time_rerank=False``, and a re-picked page turns each into a
         #     false diagnosis.
-        # Composition can only move when ``limit < _scored_n``, so a large-pool
+        # Composition can only move when ``limit < _pool_n``, so a large-pool
         # caller (the evals' ``pool_size`` reads) is safe by construction — but
         # "safe today because of an arithmetic accident" is not an opt-out. ⛔ The two opt-outs are SEPARATE on purpose: the capture path
         # (``extractor_v2._fts_rows``) deliberately KEEPS the rerank — it has a

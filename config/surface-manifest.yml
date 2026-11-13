@@ -1237,8 +1237,17 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
+# #12297: SPLICED, not re-cut. The tool's CONTRACT is unchanged (same inputs,
+# same reply shape, same registry row) — its BODY gained one kwarg, which moves the
+# code-object digest the freeze records. `cut_at_commit` must name a DEFAULT-BRANCH
+# commit and a raw `cut` would also drop the hand-curated `used_by` /
+# `recommendation` / `basis` cells, so only the derived `served_from` cell moves
+# here — to exactly the value `check` derives from the declaration
+# (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it stands on
+# this branch, after the owner's 2239f94ff6 and c82c0337a4 rewrote the same two
+# comments). Nothing else in this row, and nothing in any other row, moves.
 - name: tortoise_suggest_entry_points
-  served_from: tortoise/mcp_server.py:efb6a1ed2e00a044
+  served_from: tortoise/mcp_server.py:aae4bf5f5ceffe7c
   served_attributes: 542cf2dbb222d260
   family: memory
   family_rank: 1
