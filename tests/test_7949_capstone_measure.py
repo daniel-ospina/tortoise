@@ -5595,10 +5595,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # over it would be my error, not the document's.
     #
     # ⚠️ THE CLASSIFIER IS A SUBSTRING RULE, and that residual is stated rather than
-    # hidden: a capstone file whose NAME carries none of these markers and which
-    # lands in `uri_requiring:`/`slow_files:` would not be seen. It is tied to the
-    # DOCUMENT's definition (`03-test-design.md`'s four `durations:` globs) and must
-    # be moved with it; the block membership itself is exact (YAML, not a hand scan).
+    # hidden: a capstone file whose NAME carries none of the DOCUMENT's four
+    # `durations:` globs and which lands in `uri_requiring:`/`slow_files:` would not be
+    # seen. It must be moved with the document's definition; the block membership
+    # itself is exact (YAML, not a hand scan). Widening past those globs is a FALSE
+    # BLOCK rather than coverage — that is how `pack_logic`/`writeprobe` were removed.
     block_failures: list[str] = []
     ci_lines = sources["ci_surfaces"]
     # ⚠️ THE CLASSIFIER MUST MATCH THE DOCUMENT'S OWN DEFINITION, or the pin holds a
@@ -5609,14 +5610,27 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # `test_graph_census_8882.py` — neither carrying any of the four markers this
     # tuple used to hold, so adding either to `carve_out:` (or leaking it into
     # `slow_files:`) left "holds **one**" / "hold none" false with the pin GREEN.
-    # A review reproduced exactly that. The two extra markers are the document's own
-    # globs, and they are the whole set the document names: four globs, four-name
-    # expansion, no fifth. Widening PAST them would start refusing unrelated files,
-    # which is a false block rather than coverage — so the tuple is pinned to the
-    # document, and the residual it still leaves is stated below.
-    capstone = ("7949", "capstone", "pack_logic", "writeprobe",
-                "v4_declared", "graph_census")
+    # A review reproduced exactly that.
+    #
+    # ⛔ SO THE ENTRY MATCHES BY EQUALITY, and everything else by the document's four
+    # globs — NOT by five markers. `pack_logic`/`writeprobe` are not among the
+    # document's globs; they were here to catch the entry itself, and they also
+    # caught a registered sibling: `test_pack_logic_census_11083.py` (in no
+    # sixteen-name row) put into `slow_files:` turned this arm RED while the
+    # document's claim was still true — a FALSE BLOCK, the opposite failure from the
+    # one the widened tuple was fixing. Equality on `ENTRY` catches exactly the file
+    # the sentence names; the four globs catch exactly the set the document defines.
+    capstone_globs = ("capstone", "7949", "v4_declared", "graph_census")
     ENTRY = "test_pack_logic_writeprobe_11083.py"
+
+    def _is_capstone(name: str) -> bool:
+        """The document's four `durations:` globs, plus the entry ITSELF by equality.
+
+        Equality rather than a fifth/sixth marker: `pack_logic`/`writeprobe` are not
+        part of the document's definition, and using them over-matched a registered
+        sibling (`test_pack_logic_census_11083.py`) into a false block.
+        """
+        return name == ENTRY or any(g in name for g in capstone_globs)
 
     # ⛔ PARSED ONCE. The manifest is ~1.3 MB and one strict parse is ~0.8 s on a
     # shared cell; asking `_section_entries` per section re-parsed it three times, for
@@ -5678,7 +5692,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"into a surface block moves this entry, and `03-test-design.md` "
                 f"states it. If the manifest is reordered, the paragraph that "
                 f"explains the rot is now false; re-derive it, do not delete this")
-        carve = [e for e in carve_all if any(k in e for k in capstone)]
+        carve = [e for e in carve_all if _is_capstone(e)]
         if not carve:
             block_failures.append(
                 f"config/ci-surfaces.yml's `carve_out:` block holds NO capstone "
@@ -5708,7 +5722,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                     f"— 03-test-design.md states it holds NONE of the capstone files, "
                     f"which is a claim about a block that must EXIST to be checked")
             continue
-        leaked = [e for e in entries if any(k in e for k in capstone)]
+        leaked = [e for e in entries if _is_capstone(e)]
         if leaked:
             block_failures.append(
                 f"config/ci-surfaces.yml's `{other}:` block carries {leaked!r} — "
