@@ -1108,21 +1108,38 @@ def latest_readings(
     # applied AFTER that ordering, so no bound can decide WHICH readings the
     # judgement sees.
     #
-    # ONE ROW PER EVENT **FOR THIS PROJECTION**, so `id(e)` alone is a sufficient
-    # cursor. MEASURED on a lane running core `graph ver 42006` (v4), with TWO
-    # `aboutObject` edges from one event to the same indicator: `RETURN id(e),
-    # e.id` = **1 row**, while `RETURN count(r)` on the BOUND spelling
-    # `-[r:aboutObject]->` = 2. So the engine is NOT scoping the pattern by node
-    # pair — the two path rows collapse because the projected tuple is IDENTICAL
-    # (they are the same event twice), and a projection that added an
-    # edge-derived column returns both (measured: `RETURN id(e), e.id, id(r)` →
-    # 2 rows). ⚠️ Do not reason from `count(*)` here: two independent runs on the
-    # same core measured it as 2 and as 1, so it is not a stable discriminator —
-    # `count(r)` and an edge-derived projection are. What makes the cursor safe is therefore narrower and
-    # checkable: distinct events have distinct `id(e)`, and this projection
-    # carries no edge-derived column, so a doubled edge cannot split a reading
-    # across a page boundary nor duplicate one. The doubled-edge test pins the
-    # OUTCOME (one reading per event, none lost).
+    # ONE ROW PER (event, matched object NODE) PAIR — not per event — so `id(e)`
+    # alone is a sufficient cursor. MEASURED on a lane running core `graph ver
+    # 42006` (v4):
+    #   * TWO `aboutObject` edges from one event to the SAME indicator node:
+    #     `RETURN id(e), e.id` = **1 row**, while `RETURN count(r)` on the BOUND
+    #     spelling `-[r:aboutObject]->` = 2.
+    #   * TWO DISTINCT object nodes that SHARE `o.id`, one edge each from ONE
+    #     event: `count(e)` = **2** and the same projection returns **2
+    #     BYTE-IDENTICAL rows** (`[[2, 'b1', 9.0], [2, 'b1', 9.0]]`) — NOT
+    #     collapsed.
+    # So the engine IS scoping the pattern by node PAIR: two edges onto the SAME
+    # object node collapse, and identical projected tuples from two DIFFERENT
+    # object nodes do not. ⚠️ Do not reason from `count(*)` here: it counts PATH
+    # rows, and its answer depends on the spelling AND on how many object nodes
+    # share the id (measured 2 on both spellings on a two-object-node fixture,
+    # and 2-vs-1 on a single-object one), so it is not a stable discriminator —
+    # `count(r)` and an edge-derived projection are. What makes the cursor safe
+    # is therefore narrower and checkable: distinct events have distinct
+    # `id(e)`, so a duplicate row costs at most a repeated MEASUREMENT, never a
+    # distinct reading skipped across a page boundary — `>= last + 1` advances
+    # past every copy of the last event.
+    #
+    # ⛔ WHAT IS **NOT** SAFE: a repeated row means a `dwell` of N can be
+    # satisfied by ONE measurement counted N times, and the shipped projection
+    # does NOT exclude that — a duplicated `o.id` across two object nodes is
+    # enough (measured: 2 rows, one event, one reading). An edge-derived column
+    # (`id(r)`) is a SECOND route to the same defect, not the only one. Filed
+    # as **#12511** with the fixture; closing it needs a de-duplication keyed
+    # on `id(e)` (distinct events have distinct `id(e)`), not on `reading_id`.
+    #
+    # The doubled-edge test pins the OUTCOME (no reading LOST, none invented)
+    # for the graph the SDK's own ingest writes; it does not pin #12511's.
     #
     # ⛔ KEEP THE PROJECTION EDGE-FREE. If a later change returns `id(r)` or any
     # other relationship property, duplicate edges become duplicate ROWS — and

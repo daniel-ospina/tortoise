@@ -434,20 +434,24 @@ def test_a_doubled_about_object_edge_yields_one_reading_not_two(sdk, monkeypatch
     — and must not lose one either.
 
     MEASURED (this is the fact the cursor's comment rests on): with two
-    `aboutObject` edges from one event to one indicator, `RETURN id(e), e.id` is
-    **1 row**, while on the BOUND spelling `-[r:aboutObject]->`
-    `RETURN count(r)` is **2**. So the engine does NOT scope the pattern by node
-    pair — the two path rows collapse because the PROJECTED tuple is identical
-    (the same event twice), and projecting an edge-derived column brings both
-    back (`RETURN id(e), e.id, id(r)` → 2 rows). (`count(*)` is NOT the
-    discriminator: two runs on the same core measured it 2 and 1.) The cursor is
+    `aboutObject` edges from one event to one indicator NODE, `RETURN id(e),
+    e.id` is **1 row**, while on the BOUND spelling `-[r:aboutObject]->`
+    `RETURN count(r)` is **2**. So the engine DOES scope the pattern by node
+    PAIR — two edges onto the SAME object node collapse — and identical
+    projected tuples from two DIFFERENT object nodes do NOT: two `:Object`
+    nodes sharing `o.id`, one edge each from ONE event, measure `count(e)` = 2
+    and project **2 byte-identical rows**. (`count(*)` is NOT the
+    discriminator: it counts PATH rows and answers per spelling and per fixture —
+    measured 2 on both spellings on a two-object-node fixture.) The cursor is
     sufficient for the narrower, checkable reason: distinct events have distinct
-    `id(e)`, and this projection carries no edge-derived column. No
-    Python de-duplication is layered on top because one keyed on `reading_id`
-    could DROP a distinct reading that legitimately shares an `e.id`.
+    `id(e)`, so a duplicate row costs a repeated MEASUREMENT and never a
+    distinct reading. No Python de-duplication is layered on top because one
+    keyed on `reading_id` could DROP a distinct reading that legitimately shares
+    an `e.id`; the duplicate-`o.id` route it leaves open is **#12511**.
 
     This is a PROPERTY pin, not a mutant-killer: it stays green under either
-    cursor shape because this projection already yields one row per event. It
+    cursor shape because this projection already yields one row per matched
+    object NODE (see the measurement above). It
     would red if the SELECTION ever projected an edge property (`id(r)`), which
     would double the rows and let a `dwell` of N be satisfied by one measurement
     repeated, or if a de-duplication step were added with the wrong key.
