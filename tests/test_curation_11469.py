@@ -4747,8 +4747,21 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     # per-clause rule could not separate them. Only a marker attached to the SIZING makes
     # a statement historical rather than prescriptive; a bare `cycle N` or `original`
     # says where the number came from, not that it was withdrawn.
+    # ⛔⛔ AND A HISTORY *WORD* IS NOT A HISTORY *STATEMENT* (review cycle 11, measured).
+    # Exempting any clause that merely CONTAINS one of `withdrawn|superseded|no longer|used
+    # to` let an unrelated subject donate the marker while the prescription rode along:
+    #
+    #     The withdrawn clamp left the read sized to `counts.Event + 1`.
+    #     The clamp was withdrawn and the read is sized to `counts.Event + 1` today.
+    #     An earlier revision was superseded and the read is sized to `counts.Event + 1`.
+    #
+    # all stayed GREEN (measured, 1 passed apiece). The exemption is therefore on the
+    # SIZING PHRASE BEING PAST-FORM — the only shape that REPORTS a withdrawn sizing
+    # rather than prescribing a current one.
     _HISTORY = _re.compile(
-        r"\b(?:was|were|had been)\s+sized\b|withdrawn|superseded|no longer|used to", _re.I)
+        r"\b(?:was|were|had been)\s+(?:\w+\s+){0,2}sized\b"      # "was [therefore] sized"
+        r"|\bsized\s+the\s+request\s+to\b"                       # narrative past
+        r"|\b(?:no longer|never)\s+sized\b", _re.I)               # "is no longer sized"
 
     # ⛔ THE VERB FAMILY, not one inflection (PR-review cycle 10, measured): the plan pin
     # matched only `sized to ...`, so "The read sizes its request to `counts.Event + 1`."
@@ -4816,6 +4829,18 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     assert _prescribes(
         "As earlier, the read is sized to `counts.Event + 1`."), (
         "a bare history word in the same clause still exempts a live prescription")
+    # ⛔ ...and an UNRELATED subject must not be able to donate the marker (review cycle
+    # 11, measured GREEN before these three): the history word is in the clause, but it is
+    # not what the sizing is doing.
+    assert _prescribes(
+        "The withdrawn clamp left the read sized to `counts.Event + 1`."), (
+        "an unrelated historical subject still exempts a live prescription")
+    assert _prescribes(
+        "The clamp was withdrawn and the read is sized to `counts.Event + 1` today."), (
+        "an unrelated historical subject still exempts a live prescription")
+    assert _prescribes(
+        "An earlier revision was superseded and the read is sized to `counts.Event + 1`."), (
+        "an unrelated historical subject still exempts a live prescription")
     prescribing = _prescribes(plan_norm)
     assert not prescribing, (
         "the plan prescribes sizing the request to the count (one row of headroom), which "
