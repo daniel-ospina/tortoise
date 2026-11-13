@@ -362,6 +362,11 @@ NDCG_K = 10
 #: `max_queries=15` budget (research-brief §1, consequence 1). Both are
 #: MEASURED; neither is adopted.
 RERANK_POOLS: tuple[int, ...] = (15, 40)
+#: #12297: torch threads for the rerank arm. PINNED to 1 and recorded in the
+#: artifact: the unpinned default (one thread per core, 16 here) thrashes under
+#: fleet load and measured ~20x slower per pair on identical input, so an
+#: unpinned latency figure would describe the scheduler rather than the model.
+RERANK_THREADS = 1
 
 
 def _ndcg_at(rank: int | None, k: int = NDCG_K) -> float:
@@ -386,6 +391,7 @@ def _rerank_arm(
     pools: tuple[int, ...],
     top_k: int = TOP_K_RERANK_CUT,
     ndcg_k: int = NDCG_K,
+    threads: int = RERANK_THREADS,
 ) -> dict:
     """#12297 arm 4 — the cross-encoder over the SAME fused candidates.
 
@@ -416,6 +422,16 @@ def _rerank_arm(
     """
     from tortoise.rerank import get_scorer
 
+    # ⛔ PIN THE THREADS BEFORE THE FIRST SCORE, and record the pin.
+    # Measured on this box (`tools/rerank_calibration_12297.py` docstring): the
+    # default (one thread per core, 16) thrashes under fleet load at ~100 ms/pair
+    # where one thread reports ~5.3 ms/pair — a 20x difference on identical
+    # input. A latency figure taken under the default would describe the
+    # scheduler, not the model, and would be quoted as if it described the model.
+    if threads and threads > 0:
+        import torch  # local: arm 4 is this tool's only torch consumer
+        torch.set_num_threads(threads)
+
     scorer, reason = get_scorer(model)
     if scorer is None:
         return {"applied": False, "degrade_reason": reason, "model": model}
@@ -425,6 +441,7 @@ def _rerank_arm(
         "model": model,
         "top_k": top_k,
         "ndcg_k": ndcg_k,
+        "torch_threads": threads,
         "ceiling_note": (
             "a reranker only reorders rows the legs already returned, so its "
             "ceiling is arm 1's miss_past_k (rows inside a 15-window that fell "
@@ -526,9 +543,14 @@ def _rerank_arm(
         "ms_per_pair": (round(1000.0 * score_s / pairs_scored, 3)
                         if pairs_scored else None),
         "device": "cpu (this box has no GPU)",
+        "torch_threads": threads,
         "note": ("per-pair wall clock around ONE score() call per mention, "
                  "including the scorer's lock and the torch sigmoid; it "
-                 "excludes model load"),
+                 "excludes model load. torch threads are PINNED to "
+                 f"{threads} and recorded here, because the unpinned default "
+                 "(one thread per core) measured ~20x slower on this box "
+                 "under fleet load — an unpinned figure describes the "
+                 "scheduler, not the model"),
     }
     return out
 
@@ -896,7 +918,8 @@ def run(args: argparse.Namespace) -> int:
                 sample, window, variants, _find_existing_entity,
                 model=args.rerank_model or RERANK_MODEL_DEFAULT,
                 pools=tuple(args.rerank_pool or RERANK_POOLS),
-                top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K)
+                top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K,
+                threads=args.rerank_threads)
 
         # ⛔ A MIXED run is refused: `legs_seen` OR-s the looser #3005 predicate
         # over thousands of windows, so a run where the dense leg held for some
@@ -1006,6 +1029,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="cross-encoder to measure; default is "
                         "`tortoise.rerank.RERANK_MODEL_DEFAULT` — the model the "
                         "shipped rerank.py loads, so the arm measures THAT model")
+    p.add_argument("--rerank-threads", type=int, default=RERANK_THREADS,
+                   help=f"torch threads for the rerank arm (default "
+                        f"{RERANK_THREADS}, PINNED and recorded). The unpinned "
+                        f"default measured ~20x slower per pair on this box "
+                        f"under fleet load; 0 leaves torch's default in place "
+                        f"and the artifact then says so")
     return run(p.parse_args(argv))
 
 
