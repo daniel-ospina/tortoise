@@ -45,8 +45,15 @@ def _quotes(text: str, value: object) -> bool:
     ``"0.0255"`` — so the pin stayed green over an artifact that contradicts the
     brief (measured #12304 review round 24: the four mutations below and this one
     each gave ``9 passed``). Every numeric needle therefore goes through this.
+
+    ⛔ AND THE TRAILING BOUNDARY HAS TO REJECT A DECIMAL TAIL, not just a digit:
+    with only ``(?!\d)`` an INTEGER needle matches the integer part of a decimal
+    the prose happens to contain — ``_quotes("x 42.65 per", 42)`` was ``True``,
+    so mutating ``attached_folded`` 386 -> 42 left the suite green by matching
+    the brief's ``42.65`` (measured #12304 review round 25). ``(?!\.\d)`` closes
+    that direction without rejecting a legitimate sentence-final ``386.``.
     """
-    pattern = r"(?<![\d.])" + re.escape(str(value)) + r"(?!\d)"
+    pattern = r"(?<![\d.])" + re.escape(str(value)) + r"(?!\d)(?!\.\d)"
     return re.search(pattern, text) is not None
 
 
@@ -447,3 +454,70 @@ def test_the_completeness_claim_cannot_survive_a_skipped_block(report):
     assert "`oversized_skipped` **empty**" in text, (
         "the brief no longer says the skipped set is empty — the claim guarded "
         "above is gone or reworded, so re-read it against that assertion")
+
+
+def test_the_cost_column_and_the_population_are_bound_to_the_artifact(report):
+    """The brief's COST column and its POPULATION are the figures its verdict rests on.
+
+    The verdict sentence is that the blocker is **not earned on COST**: it compares
+    the blocker's ``34.9`` against the window's ``15`` and states the ratio as
+    ``2.3x``. Only ``34.9`` was pinned, and only ONE-SIDEDLY (``>``), so a different
+    window width or population left the brief's own ratio and denominator false
+    with the file green — measured #12304 review round 25, each giving
+    ``10 passed``: ``candidates_mean_per_mention["15"]`` 15 -> 14 (ratio becomes
+    2.49, the brief still says 2.3x), ``["5"]`` 5 -> 9, ``["3"]`` 3 -> 7,
+    ``corpus.population`` 1000 -> 2000, and ``blocking.population`` 1000 -> 500
+    (the denominator of the pinned ``reduction_ratio``).
+    """
+    fits = report["arms"]["blocking"]["fts_only"]
+    per_mention = fits["candidates_mean_per_mention"]
+    widths = sorted(int(k) for k in per_mention)
+    #: The INVARIANT, not a copied number: an FTS window at ``k`` sees exactly
+    #: ``k`` candidates per mention, which is what makes the two generators
+    #: quotable in one column at all.
+    assert {w: int(per_mention[str(w)]) for w in widths} == {w: w for w in widths}, (
+        "an FTS window's per-mention candidate count is not its own width — the "
+        f"brief's cost column is then not comparable to the blocker's: {per_mention}")
+    corpus_pop = report["corpus"]["population"]
+    blocking_pop = report["arms"]["blocking"]["population"]
+    assert corpus_pop == blocking_pop, (
+        f"the blocker was measured over {blocking_pop} names while the corpus "
+        f"holds {corpus_pop} — reduction_ratio's denominator is then not the "
+        "population the brief states")
+    text = BRIEF.read_text()
+    for w in widths:
+        assert f"| {per_mention[str(w)]} |" in text, (
+            f"the brief does not tabulate the artifact's k={w} cost cell "
+            f"({per_mention[str(w)]} candidates per mention)")
+    #: The verdict's ratio, derived from the two pinned figures.
+    ratio = (report["arms"]["blocking"]["multikey"]["candidates_mean_per_mention"]
+             / per_mention[str(max(widths))])
+    assert _quotes(text, round(ratio, 1)), (
+        f"the brief does not quote the artifact's own cost ratio ({round(ratio, 1)}x)")
+    assert "the cost" in text, (
+        "the ratio is quoted somewhere, but not attached to a COST claim — the "
+        "verdict sentence is about cost and that sentence has gone")
+    for rendered in (f"--population {corpus_pop}", f"all {corpus_pop}",
+                     f"C({corpus_pop}, 2)"):
+        assert rendered in text, (
+            f"the brief does not state the population as {rendered!r}")
+
+
+def test_the_provenance_note_states_no_count_it_cannot_sustain(report):
+    """Neither document may state a commit count for the rewritten range.
+
+    The note's own disclaimer says no count is stated, "because the commit that
+    writes this sentence adds itself to any number it would quote" — and both
+    documents nevertheless said "25-commit list" while the very command the note
+    documents printed 26, in the commit that wrote the sentence (measured #12304
+    review round 25). The range is a base-moved range, so a number in that
+    position moves with every commit that lands: the ABSENCE is what is pinned.
+    """
+    pattern = re.compile(r"\b\d+-commit\b")
+    for name, blob in (("code_head_note", report["code_head_note"]),
+                       ("research-brief.md", BRIEF.read_text())):
+        hit = pattern.search(blob)
+        assert hit is None, (
+            f"{name} states a commit count ({hit.group(0)!r}) that the note's own "
+            "disclaimer forbids — the range is base-moved, so the number is "
+            "stale as soon as the next commit lands")
