@@ -416,9 +416,21 @@ class MCPReader:
         * a row with no ``id`` is REFUSED — the class's identity key is its id (its text
           is a label, routinely empty), so two id-less rows are indistinguishable and
           would fold onto one;
-        * a read that fills the requested ``limit`` exactly is REFUSED when no reported
-          count says that is the whole layer — there is no offset walk here, so "a full
-          page" and "a truncated layer" are the same bytes;
+        * a population AT OR ABOVE ``OPERATOR_READ_CEILING`` is REFUSED before the read is
+          spent — a layer that ENDS at the bound and one the engine CUT there are the same
+          bytes, because that number is both this reader's ``limit`` and the engine's
+          default ``RESULTSET_SIZE`` (#12440). Unlike Events there is no bound to raise:
+          10,000 is the SDK's hard maximum, so a bigger constant raises ``ValueError`` out
+          of the SDK instead of reading a wider layer;
+        * a read that FILLS the requested ``limit`` is REFUSED, whichever count accompanies
+          it — there is no offset walk here, so "a full page" and "a truncated layer" are
+          the same bytes. The count cannot vouch for a filled response: one at or above
+          the bound has already refused before the read, and any other disagrees. (For a
+          filled response WITH a count, the bound gate and the disagreement rule already
+          refuse, so this arm's own reachable cell is the UNREPORTED one — it is also the
+          arm that keeps a gate deletion fail-CLOSED, which is the fail-open #12378
+          measured for Events at ``read_events``'s gate, so it is ABSOLUTE rather than
+          conditioned on a count);
         * a read whose row count disagrees with ``structure.operators`` is REFUSED. The
           reconciliation is the same discipline the source listing gets, and for the same
           reason: two surfaces describing one population must agree, or one of them did
@@ -449,14 +461,51 @@ class MCPReader:
             value = structure.get("operators")
             if isinstance(value, int) and not isinstance(value, bool):
                 reported = value
-        if reported is not None and reported > OPERATOR_READ_CEILING:
+        # ⛔ AT the bound, not merely above it (#12440). Three bounds coincide on this
+        # number: this read's `limit`, the SDK's hard maximum (a larger one raises
+        # `ValueError`, so there is nothing to raise it TO), and the engine's default
+        # `RESULTSET_SIZE`. The structural leg asks for twice the limit and the SDK then
+        # slices the answer at `limit` (`sdk.py`), so a reader can never SEE more than
+        # `OPERATOR_READ_CEILING` rows: `len(raw) == bound` reads "the layer is at least
+        # this many", never "the layer is this many". A count AT the bound is therefore
+        # not a voucher, and the count is all this gate has.
+        if reported is not None and reported >= OPERATOR_READ_CEILING:
             raise C.CurationRefused(
-                f"the operator layer holds {reported} rows, above the "
-                f"{OPERATOR_READ_CEILING}-row single-call ceiling — that ceiling IS the "
-                "surface's maximum `limit` (the SDK refuses a larger one), so there is no "
-                "wider read to raise it to, only a `limit` and NO `offset`: no page walk, "
-                "and a truncated layer entering the census is indistinguishable from a "
-                "complete one; refusing rather than reporting a partial reasoning layer")
+                f"the operator layer holds {reported} rows, AT OR ABOVE this read's "
+                f"declared {OPERATOR_READ_CEILING}-row RESPONSE BOUND. ⛔ That count is "
+                "`is_operator = true OR op_type IS NOT NULL` with NO status filter, so it "
+                "can EXCEED the layer this read serves — the disagreement rule below names "
+                "the causes — and a count AT the bound is no voucher either way. A layer "
+                "ENDING at "
+                "this number and one the engine CUT there return the SAME bytes: this "
+                "request's `limit` is the SDK's own maximum (a larger `limit` raises "
+                "`ValueError` out of the SDK, not this refusal), the structural leg asks "
+                "for twice it and the answer is sliced back at it, and FalkorDB silently "
+                "truncates any non-aggregate read at its server-global `RESULTSET_SIZE`, "
+                "which DEFAULTS to 10 000 — the same number. Unlike the Event read there "
+                "is NO bound to raise and NO `offset` to walk (`tortoise_search` has a "
+                "`limit` and no page walk), and reading `RESULTSET_SIZE` is not a remedy "
+                "either: a `-1` cap cannot widen the SDK's own slice at `limit`. ⚠️ Do NOT "
+                "read 'below the bound' as immunity: a server tuned with `RESULTSET_SIZE` "
+                "BELOW this bound caps such a read INVISIBLY, and a count that EQUALS its "
+                "cap cannot detect it — verify the tuning with `config_get` and lower this "
+                "constant with it (the residual #12440 states, and the same one the Event "
+                "read carries). The layer must come BELOW this bound to be read whole "
+                "without that tuning — MERGE or DELETE operators (a STATUS CHANGE does NOT "
+                "lower `structure.operators`, which counts with no status filter) — or "
+                "the enumeration needs a SURFACE change: an `offset` (a page walk) is the "
+                "cap remedy, and a filter whose result is a PROVABLE partition would let "
+                "the layer be read in pieces — today's per-`op_type` `kind=` is NOT one "
+                "(`create_operator` accepts 7 values and raw writes can store any, so a "
+                "union of per-`op_type` calls cannot be shown complete) — an MCP/SDK "
+                "surface decision, not a constant; refusing rather than reporting a "
+                "partial "
+                "reasoning layer. ⚠️ Second residual, the other direction: this gate refuses "
+                "WITHOUT reading, "
+                "and operators have no re-count rescue (unlike Events), so a count that is "
+                "stale-HIGH across the bound refuses un-read even where a read would have "
+                "come in below it — fail-CLOSED, and it clears on a re-run; the same root "
+                "as #12445, which tracks the Events instance")
         res = self._search_operators()
         err = _error_of(res)
         if err:
@@ -473,12 +522,31 @@ class MCPReader:
                 "the operator read returned no rows AND the structure section reported no "
                 "`operators` count, so an empty layer cannot be told from an unread one — "
                 "refusing a census that would report the reasoning layer as empty")
-        if len(raw) == OPERATOR_READ_CEILING and reported != OPERATOR_READ_CEILING:
+        # ⛔ ABSOLUTE on purpose (#12378's lesson, measured for Events at `read_events`'s
+        # gate): a filled response is "at least this many" whatever the count says, and
+        # conditioning this arm on the count is what made removing THAT gate a FAIL-OPEN
+        # — `len(raw) == reported == bound` then reached no fill check at all. With the
+        # bound gate above in place, a filled response that CARRIES a count is refused by
+        # the gate or by the disagreement rule, so this arm's own remaining cell is the
+        # UNREPORTED one (a fill with no count to disagree with) — which is why deleting
+        # this arm re-opens a real fail-open rather than removing dead code. It is the
+        # BELT that keeps a gate deletion fail-CLOSED, not a second detector.
+        if len(raw) >= OPERATOR_READ_CEILING:
+            # The count is SPLIT OUT rather than rendered blind: `reported=None` is the
+            # reachable arm here (a fill WITH a count is refused by the gate above), and
+            # "the reported count (None) ... any other disagrees with the rows" was a
+            # sentence about a count that does not exist.
+            voucher = (
+                "no count accompanied this read, so nothing can vouch for it"
+                if reported is None else
+                "the reported count cannot vouch for it: a count at or above the bound "
+                "refuses BEFORE this read, and any other disagrees with the rows")
             raise C.CurationRefused(
-                f"the operator read returned exactly its {OPERATOR_READ_CEILING}-row limit and "
-                f"no reported count says that is the whole layer (structure.operators "
-                f"reported {reported!r}) — the response may be truncated, and `tortoise_search` "
-                "has no offset walk to continue from; refusing a partial reasoning layer")
+                f"the operator read returned {len(raw)} rows, FILLING its "
+                f"{OPERATOR_READ_CEILING}-row response — a filled response says `at least "
+                f"this many`, so it cannot be told from one the engine truncated, and "
+                f"`tortoise_search` has no offset walk to continue from; {voucher}; "
+                f"refusing a partial reasoning layer")
         if reported is not None and len(raw) != reported:
             raise C.CurationRefused(
                 f"the operator layer read {len(raw)} rows but structure.operators reports "
@@ -1012,18 +1080,22 @@ NOT_ENUMERABLE = {
 #: reasoning layer — stayed out of a census that then reported itself complete.
 
 #: The operator layer is read in ONE call: `tortoise_search` takes a `limit` and has no
-#: `offset`, so there is no page walk to fall back on. A population above this ceiling
-#: is therefore REFUSED rather than truncated — a partial layer entering the census
-#: looks exactly like a complete one.
+#: `offset`, so there is no page walk to fall back on. A population AT OR ABOVE this
+#: ceiling is therefore REFUSED, and refused BEFORE the read is spent (#12440) — a layer
+#: ending exactly here and one the engine cut here are the same bytes, and a partial layer
+#: entering the census looks exactly like a complete one.
 #:
 #: ⛔ 10,000 is NOT a chosen trade-off, it is the SURFACE'S hard maximum: the SDK refuses
-#: `limit > 10000` outright (`tortoise_fts_query`, `sdk.py:40575`), so this constant is
-#: also the `limit` every operator read sends. There is no headroom to spend — raising
-#: it does not read a wider layer, it makes every operator read raise `ValueError` out
-#: of the SDK, which is NOT a `CurationRefused`: an ARMED run reaches rc 1 through the
-#: generic `except Exception` arm, and a DISARMED run reports it on the artifact and
-#: exits 0 — that arm exists for exactly this. A population above 10,000 has no
-#: single-call read on this surface at all, which is what the refusal says.
+#: `limit > 10000` outright (`tortoise_fts_query`, `sdk.py:41126`), so this constant is
+#: also the `limit` every operator read sends, and the structural leg's own request
+#: (`2 × limit`) is sliced back to it before it reaches this reader. There is no headroom
+#: to spend — raising it does not read a wider layer, it makes every operator read raise
+#: `ValueError` out of the SDK, which is NOT a `CurationRefused`: an ARMED run reaches rc 1
+#: through the generic `except Exception` arm, and a DISARMED run reports it on the
+#: artifact and exits 0 — that arm exists for exactly this. A population at or above
+#: 10,000 has no single-call read on this surface at all, which is what the refusal says,
+#: and a layer of exactly 10,000 rows that is genuinely WHOLE is refused with it: nothing
+#: on this surface can show it whole.
 OPERATOR_READ_CEILING = 10_000
 
 
@@ -1032,14 +1104,13 @@ OPERATOR_READ_CEILING = 10_000
 #: `MATCH (e:Event) … ORDER BY e.startedAt DESC LIMIT $lim` with NO offset and a BARE
 #: LIST return (`sdk.py`). A response that FILLS the request is therefore
 #: indistinguishable from a truncated layer, while a response STRICTLY BELOW it is the
-#: exact layer — which is what `read_events` rests completeness on. Same hazard as the
-#: operator read, but the Event read refuses STRICTLY MORE, and the difference is the
-#: engine cap: a count AT the bound refuses before the read, and a FILLED response refuses
-#: even when a fresh count agrees. The operator read (#12380) refuses only a count ABOVE
-#: `OPERATOR_READ_CEILING` and a fill whose count disagrees, so a 10,000-row operator layer
-#: capped at 10,000 is accepted — the same fail-open, latent there (3,727 of 10,000 used)
-#: and tracked separately (#12440); do not read this constant as evidence that arm needs no
-#: audit.
+#: exact layer — which is what `read_events` rests completeness on. The operator read now
+#: refuses the SAME two shapes (#12440, closing the arm #12380 left weaker): a count AT OR
+#: ABOVE `OPERATOR_READ_CEILING` refuses before the read, and a FILLED response refuses
+#: whatever count accompanies it. What still differs is the RESIDUAL: Events have a bound
+#: that can be RAISED (`get_events` validates no upper `limit`) plus a re-count rescue,
+#: while 10,000 is the SDK's hard maximum for operators and they have no re-count arm — so
+#: a stale count there is always a refusal, with no accept path.
 #:
 #: ⛔ 10,000 is TWO bounds that happen to coincide, and the coincidence is the whole
 #: hazard. Ours: the SDK refuses `tortoise_search(limit > 10000)` outright, which makes
