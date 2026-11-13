@@ -270,6 +270,16 @@ are candidates, not assumptions) with **score distributions**, not only ranks, p
 fixture. Moving it opportunistically would trade a known cost win for a measured quality loss — the
 opposite of the ordering in §5.
 
+> **STATUS — M3 is measured (2026-11-13, `#12298`).** Both qualifiers above are now resolved and this
+> decision is unchanged by the answer: a BM25-capable Postgres option was measured against the shipped
+> leg on one paired population, and moving the index earns no recall return — with the query terms held
+> constant the swap moves recall@3 by ~1 point (not significant) and by **zero** at k=15, while the
+> whole 25-point swing the deployable arm shows reproduces **inside the current index**. The leg's
+> actual defect is a **tokenizer contract**, not a scorer or a ranking baseline, and it is filed as
+> `#12350`. Numbers, method and the artifacts: `docs/research/2026-11-13-12298-m3-fts-leg/`; the
+> changelog entry records what changed and what did not. ⛔ **This note does not decide `C3` (SPLADE)**
+> — that pre-authorisation is ruled on `#12298`, and the measurement is the evidence before it.
+
 ### 6.3 EP state — the carve-out stands, and the fix is not to store it
 
 `ep_*`, `confidence`, `posterior_*` and `baseline_set` are **recomputed from the structure and never stored

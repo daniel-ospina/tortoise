@@ -73,10 +73,10 @@ required shard, so the violation made every PR on the repository unmergeable.
 ## `#12298` — M3 measured: the text index does not move, and the recall gap was never the scorer
 
 `SEARCH-ARCHITECTURE.md` §6.2 defers the text index behind measure **M3** — *"a BM25-capable Postgres
-option with score distributions, not only ranks, plus the identifier fixture"* — and §1.5's M3 row
+option with score distributions, not only ranks, plus the identifier fixture"* — and §9's M3 row
 states the same. `#12298` ran that measurement on the `#11901` corpus with its instrument
 (`tools/m3_fts_leg_recall.py`, artifacts in `docs/research/2026-11-13-12298-m3-fts-leg/`), and its
-result **keeps §6.2 as written**.
+result answers M3's question: **the text index does not move**.
 
 **The numbers** (300 names, paired — one pinned population, one run, both backends, repeated with an
 identical second run):
@@ -93,9 +93,15 @@ identical second run):
 held constant, swapping TF-IDF for BM25 moves recall@3 by 1.33 points (1.15 on the subset where the
 control holds) and by **zero** at k=15, with zero discordant pairs. The 25-point difference is real, is
 **not BM25**, and is reproducible **inside the current index** — so an index migration earns no recall
-return, which is what §6.2's deferral exists to establish. The measurement therefore also closes
-**C3 (SPLADE)** in epic `#12186`: a learned-sparse representation would re-index a vocabulary of its own
-and so would *mask* the contract defect below, at a neural pass per query.
+return, which is what §6.2's deferral exists to establish.
+
+⛔ **This entry does NOT close `C3` (SPLADE), and an earlier revision of it wrongly said so.** `#12298`'s
+step 3 is a recorded owner instruction to proceed into SPLADE without re-litigation, and the literal
+falsifier it states is *not* met — a deployable BM25-in-Postgres does beat the current scorer. The
+measurement is evidence that C3's **premise** (a ranking limit in the text index) is falsified, and the
+brief records that as a recommendation; the ruling on C3 stays on `#12298`, where the owner can take it.
+A lane may no more decline pre-authorised scope on its own reading than it may adopt something over a
+decision.
 
 **The `#8933` identifier fixture is part of the DoD, and the shipped leg fails it.** Five fixture records
 queried at the production window: shipped **3 of 5 reachable**, the in-place query **5 of 5**, BM25 fed

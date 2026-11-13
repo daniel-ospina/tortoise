@@ -149,6 +149,21 @@ if str(REPO_ROOT) not in sys.path:
 KS = (3, 5, 10, 15)
 HERE = REPO_ROOT / "docs" / "research" / "2026-11-13-12298-m3-fts-leg"
 
+
+def _repo_relative(path: Path) -> str:
+    """A path as this repo would spell it — absolute only if it is outside.
+
+    The artifact is a COMMITTED record read on other boxes, so an authoring
+    checkout's absolute path is noise at best and a leak of one machine's layout
+    at worst (#12349 review, P2: the committed artifacts carried
+    ``/home/cmux/tortoise/.worktrees/fix-12298/…``).
+    """
+    try:
+        return str(Path(path).resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 #: The falsifier's k — the width the product ships (``extractor_v2._fts_rows``
 #: calls ``tortoise_fts_query`` with ``limit=3``).
 PRIMARY_K = 3
@@ -169,8 +184,18 @@ DECISION_RULE = (
 #: ``ERR-4032 -> err4032`` *plus* the adjacency phrase, so a candidate engine that
 #: loses either loses a capability the shipped leg has. Each tuple is
 #: ``(id, stored name, query text, what it gates)``; the fixture rows are added
-#: AFTER the recall sweep (so they cannot move a document frequency under it) and
-#: the query is asked at the production ``limit=3``.
+#: AFTER that arm's own recall sweep (so they cannot move a document frequency
+#: under it) and the query is asked at the production ``limit=3``.
+#:
+#: ⛔ "That arm's own" is load-bearing and was WRONG in the committed artifacts
+#: (#12349 review, P1): both arms shared one graph, so the recovery arm's sweep
+#: ran with the five rows the shipped arm had already inserted — its
+#: ``index_numDocuments`` reads 305 against the shipped arm's 300, and a
+#: five-document population difference is exactly the thing this comment promises
+#: cannot happen. Each arm now writes to its OWN graph (``<graph>__recovery``) so
+#: a re-run measures both on the same 300-document population. The committed
+#: artifacts predate that fix and still record the 305; the brief states it and
+#: says why the direction is not rescued by it. ⛔ Do not hand-edit those counts.
 FIXTURES: tuple[tuple[str, str, str, str], ...] = (
     ("m3fx-0", "ERR-4032", "ERR-4032",
      "the composite identifier itself (#8933's own example)"),
@@ -421,6 +446,27 @@ def recovery_terms(query: str) -> list[str]:
     return out
 
 
+def recovery_query(query: str) -> str:
+    """The recovery arm's OR string — the shipped terms PLUS the additive ones.
+
+    ⛔ This is a FUNCTION and not three inline lines at each call site because of
+    what the zero-regression claim rests on (#12349 review, P2): the pin has to
+    assert the property on the code that produced the artifact, and a test that
+    re-implements the construction can only assert a tautology about its own
+    local list. A ``recovery_query`` that ever *removed* a shipped term would
+    red the pin instead of quietly making the arm non-additive.
+
+    The recovery terms are computed from the SANITISED QUERY, never from
+    ``build_or_query``'s output: the output has already split ``web_search`` into
+    ``web``/``search``, so reading it back would recover nothing.
+    """
+    from tortoise.sparse import build_or_query
+
+    built = build_or_query(query)
+    extra = [t for t in recovery_terms(query) if t not in built.split("|")]
+    return "|".join([built, *extra]) if extra else built
+
+
 def _fts_cypher(graph, or_string: str, limit: int) -> list[tuple[str, float]]:
     """The production ``queryNodes`` Cypher, verbatim, with a caller-supplied OR string.
 
@@ -529,9 +575,7 @@ def arm_falkordb(rows: list[dict], graph_name: str, namespace: str,
             # from `build_or_query`'s output: the output has already split
             # ``web_search`` into ``web``/``search``, so reading it back would
             # recover nothing.
-            built = build_or_query(q)
-            extra = [t for t in recovery_terms(q) if t not in built.split("|")]
-            or_string = "|".join([built, *extra]) if extra else built
+            or_string = recovery_query(q)
         by_class[row["cls"]]["n"] += 1
         found_at: int | None = None
         for k in ks:
@@ -568,10 +612,7 @@ def arm_falkordb(rows: list[dict], graph_name: str, namespace: str,
         sent = ""
         for kk in (PRIMARY_K, 15):
             if recovery:
-                built = build_or_query(q)
-                extra = [t for t in recovery_terms(q)
-                         if t not in built.split("|")]
-                sent = "|".join([built, *extra]) if extra else built
+                sent = recovery_query(q)
                 out = _fts_cypher(proj.g, sent, kk)
             else:
                 sent = build_or_query(q)
@@ -709,7 +750,12 @@ def arm_postgres(rows: list[dict], dsn: str, ks: tuple[int, ...]) -> dict:
         elapsed = time.time() - t0
         out = _summarise(f"postgres_bm25/{mode}", per_k, ranks, by_class,
                          top_scores, rows, elapsed, n_q,
-                         engine_note=(f"PostgreSQL {pgver.split(' on ')[0]}, "
+                         # ``server_version`` already renders as
+                         # "PostgreSQL 16.15 (Debian …) on …" — prefixing it with
+                         # another "PostgreSQL" produced "PostgreSQL PostgreSQL
+                         # 16.15", which the committed artifacts carry (#12349
+                         # review, P2) and which a reader quotes as the engine.
+                         engine_note=(f"{pgver.split(' on ')[0]}, "
                                       f"ParadeDB pg_search {extver}, "
                                       f"USING bm25 (id, name); query "
                                       f"`name ||| <terms>` with "
@@ -867,7 +913,10 @@ def run(args: argparse.Namespace) -> int:
         "decision_rule": DECISION_RULE,
         "primary_k": PRIMARY_K,
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "population_file": str(pop_file),
+        # REPO-RELATIVE, never the authoring checkout's absolute path: the
+        # committed artifacts carried `/home/cmux/tortoise/.worktrees/…`, which
+        # is a path on one box and a leak of it (#12349 review, P2).
+        "population_file": _repo_relative(pop_file),
         "population_digest": pop["digest"],
         "sample": len(rows),
         "ks": list(ks),
@@ -900,8 +949,17 @@ def run(args: argparse.Namespace) -> int:
             rows, args.graph, args.namespace, ks)
         if args.recovery_arm:
             print("arm falkordb_tfidf__tokens_fixed …", flush=True)
+            # ⛔ A SEPARATE graph, not `args.graph` (#12349 review, P1).
+            # `arm_falkordb` inserts the five #8933 fixture rows at the END of
+            # its own call, deliberately — but a second arm sharing the graph
+            # inherits them, so its recall sweep ran over 305 documents while
+            # the first ran over 300. The fixture-ordering invariant the
+            # docstring promises is per-arm, and sharing a graph silently
+            # breaks it for every arm after the first. The committed artifacts
+            # were produced before this line existed and record the 305.
             art["arms"]["falkordb_tfidf__tokens_fixed"] = arm_falkordb(
-                rows, args.graph, args.namespace, ks, recovery=True)
+                rows, args.graph + "__recovery", args.namespace, ks,
+                recovery=True)
     if args.arm in ("postgres", "both"):
         print("arm postgres_bm25 …", flush=True)
         pg = arm_postgres(rows, args.pg_dsn, ks)

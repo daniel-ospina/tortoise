@@ -21,6 +21,13 @@ the shipped code**. Both rot the same two ways this repo already knows:
    earlier revision compared FOUR values by whole-document substring and claimed
    in three places that every headline number was covered — a coverage claim the
    pin did not enforce is the silent-rot class this file exists to close).
+   ⛔ The cell comparisons are backed by a recomputation from the arms' per-query
+   `ranks`: `recall_by_k` and every paired statistic are re-derived from the
+   ranks that produced them, so the summary cells and the prose cannot agree with
+   each other while disagreeing with the run (#12349 review, P2). `ranks` is the
+   only per-query record the artifacts carry, and two populations live in them —
+   `tokens_controlled_subset` is computed over 174 rows, not 300 — so that
+   comparison is made against each comparison's OWN `n`.
 
 The recovery arm's own terms are pinned as a CLASS, not as strings: an additive
 arm that could ever *remove* a term would not be the #8933 pattern the brief
@@ -170,7 +177,9 @@ def test_the_identifier_class_cannot_match_its_own_node(tool_mod) -> None:
 
     for name in ("web_search", "verified_files", "py_compile"):
         emitted = set(build_or_query(name).split("|"))
-        assert name not in emitted
+        # The OR string is a real multi-term query (not a fallback to the raw
+        # name), and NONE of its terms is the term the index actually holds.
+        assert len(emitted) > 1, (name, emitted)
         assert not (emitted & {name}), name
 
 
@@ -224,15 +233,103 @@ def test_recovery_terms_only_add(tool_mod) -> None:
 
 
 def test_recovery_terms_never_remove_an_existing_term(tool_mod) -> None:
-    """Every shipped term survives into the recovery query."""
+    """Every shipped term survives into the recovery query — on the HARNESS's own builder.
+
+    ⛔ This asserts the production function, not a re-implementation of it. An
+    earlier cut rebuilt ``shipped + extra`` here and then checked that the list
+    had ``shipped`` as its prefix — a tautology about a local variable that could
+    not fail, presented as the pin for the zero-regression claim (#12349 review,
+    P2).
+    """
     from tortoise.sparse import build_or_query
 
     for name in ("web_search", "tests/test_7949_capstone.py", "the diff",
-                 "the admin-merge rail"):
+                 "the admin-merge rail", "ERR-4032"):
         shipped = build_or_query(name).split("|")
-        extra = [t for t in tool_mod.recovery_terms(name) if t not in shipped]
-        recovered = shipped + extra
-        assert shipped == recovered[:len(shipped)]
+        recovered = tool_mod.recovery_query(name).split("|")
+        assert set(shipped) <= set(recovered), (
+            f"the recovery arm DROPPED a shipped term for {name!r}: "
+            f"{sorted(set(shipped) - set(recovered))}")
+        # It is additive and nothing else: the difference is exactly the runs the
+        # shipped tokenizer split, and nothing not already in `recovery_terms`.
+        assert set(recovered) - set(shipped) <= set(tool_mod.recovery_terms(name)), name
+        if not tool_mod.recovery_terms(name):
+            assert recovered == shipped, (
+                f"nothing to add for {name!r}, so the query must be unchanged")
+
+
+def test_the_artifact_ranks_reproduce_the_recall_table(artifact) -> None:
+    """``recall_by_k`` must be re-derivable from the per-query ``ranks``.
+
+    ⛔ The discriminating half of the brief pin (#12349 review, P2). The headline
+    test compares each arm's ``recall`` cell to a literal and checks the literal
+    appears in the brief — but the same literals appear in several cells, so a
+    swapped or hand-edited cell would pass. This recomputes every k for every arm
+    from the ranks the run recorded, which no edit to a summary cell can satisfy.
+    """
+    for arm_name, arm in artifact["arms"].items():
+        ranks = arm["ranks"]
+        n = len(ranks)
+        assert n == artifact["sample"], (arm_name, n)
+        for k, cell in arm["recall_by_k"].items():
+            found = [r for r in ranks.values() if r is not None and r <= int(k)]
+            assert cell["in_window"] == len(found), (arm_name, k)
+            assert cell["recall"] == pytest.approx(round(len(found) / n, 4)), (
+                arm_name, k, cell["recall"], round(len(found) / n, 4))
+            assert cell["rows_zero"] <= n, (arm_name, k)
+
+
+def test_the_paired_comparison_recomputes_from_both_arms_ranks(artifact) -> None:
+    """Every paired statistic must fall out of the two arms' ranks.
+
+    Same reasoning as the test above: ``delta_pts``/``only_a``/``only_b`` are one
+    subtraction away from the ranks, so recomputing them is what makes the
+    published ``+25.00 pts`` a measurement rather than a claimed cell.
+
+    ⛔ Two populations live in this artifact and they are NOT
+    interchangeable (#12349 review, P2 caught the first cut of this test doing
+    exactly that): ``tokens_controlled_subset`` is computed over the queries with
+    a surviving token list (its recorded ``n``, with ``excluded_degenerate``
+    removed), so recomputing it from the full arms' ``ranks`` compares 174 rows
+    against 300 and reads a fabricated discrepancy. The full-population
+    comparisons are recomputed from the ranks; the subset comparison is checked
+    for internal consistency (its cells against its OWN ``n``) and for the
+    degenerate split that defines it.
+    """
+    for key, cmp in artifact["comparisons"].items():
+        ra = artifact["arms"][cmp["a"]]["ranks"]
+        rb = artifact["arms"][cmp["b"]]["ranks"]
+        n_full = len(ra)
+        # The subset comparisons drop the degenerate queries; anything else that
+        # disagrees with the sample size is a broken pairing, not a subset.
+        subset = "n" in cmp
+        n = cmp["n"] if subset else n_full
+        if not subset:
+            assert sorted(ra) == sorted(rb), key
+            assert n == artifact["sample"], (key, n)
+        for k in artifact["ks"]:
+            cell = cmp[f"k{k}"]
+            # Invariants that hold for ANY population: the cells agree with each
+            # other, and the delta is the one division away from them.
+            a_found = cell["only_a"] + cell["both"]
+            b_found = cell["only_b"] + cell["both"]
+            assert cell["discordant"] == cell["only_a"] + cell["only_b"], (key, k)
+            assert cell["delta_pts"] == pytest.approx(
+                round(100.0 * (b_found - a_found) / n, 2)), (key, k)
+            assert cell["a_recall"] == pytest.approx(round(a_found / n, 4)), (key, k)
+            assert cell["b_recall"] == pytest.approx(round(b_found / n, 4)), (key, k)
+            if subset:
+                continue
+            # The discriminating half: recomputed straight from the ranks.
+            a_ids = {i for i, r in ra.items() if r is not None and r <= k}
+            b_ids = {i for i, r in rb.items() if r is not None and r <= k}
+            assert cell["only_a"] == len(a_ids - b_ids), (key, k)
+            assert cell["only_b"] == len(b_ids - a_ids), (key, k)
+            assert cell["both"] == len(a_ids & b_ids), (key, k)
+            assert cell["discordant"] == len(a_ids ^ b_ids), (key, k)
+        if subset:
+            assert cmp["excluded_degenerate"] + n == n_full, (
+                key, cmp["excluded_degenerate"], n, n_full)
 
 
 # ── 3. the paired statistics ────────────────────────────────────────────────

@@ -56,13 +56,25 @@ sentence alone M3 **passes**, and the instruction that follows is *"proceed stra
 was conditional on a measurement whose *premise* was that the text index's **ranking** limits recall.
 That premise is now measured and false, so building a learned-sparse representation — which re-indexes a
 vocabulary of its own and would therefore **mask** the defect (§6) at a neural pass per query — would be
-adopting a lever for a cause that no longer exists. A reader who insists the deployable arm decides can
-reopen `#12298`; the SPLADE lane is then a separate, well-specified job and nothing here blocks it.
+adopting a lever for a cause that no longer exists.
 
-**Therefore:** the text index **does not move**; `SEARCH-ARCHITECTURE.md` §6.2 and V1's deferral
-**stand**; **no `OVERRIDES` line is minted** because nothing is adopted over a recorded decision.
-**C3 (SPLADE) is closed with this evidence** (`#12186` item 2). The **one lever this found** is filed:
-**`#12350`** — the tokenizer contract.
+⛔ **But closing C3 is not this lane's call, and this brief does not make it.** `#12298`'s step 3 is a
+recorded owner instruction — *"If M3 passes — proceed straight into SPLADE / learned sparse. Do **not**
+re-litigate, do not split it out, do not wait for another approval. The owner pre-authorised this on
+2026-11-12."* — and the literal falsifier it states is **not** met: a deployable BM25-in-Postgres does
+beat the current scorer (Reading 1). A lane may not decline pre-authorised scope on its own reading any
+more than it may adopt something over a decision: both are reversals of the same ruling, and the route
+in either direction is a **reopen argued in front of the owner**, in this issue's own home. So what this
+brief records is the **measurement, plus a recommendation** — that C3's premise is falsified and the
+learned-sparse lever should be reconsidered — and it leaves the ruling on `#12298` open for the owner.
+**Until that ruling, C3 is neither closed nor proceeding.** Everything downstream of the deferral
+(§6.2's decision, V1, `#12186`) therefore keeps its existing status rather than being re-stated here;
+the evidence for the reopen is in §0 and §3.
+
+**Therefore:** the text index **does not move** on this evidence — that is the measurement's answer to
+§6.2's M3 question, not a new decision. **No `OVERRIDES` line is minted, because nothing is adopted
+over a recorded decision** — and nothing is declined over one either: the C3 ruling is left where it
+lives.
 
 ---
 
@@ -101,7 +113,7 @@ read, and one working option is what M3 requires.
 | the leg | `tortoise/search_engine.py:2800` `run_fts_query`, Cypher at `:2986-2998` | `CALL db.idx.fulltext.queryNodes('Object', $query) … ORDER BY score DESC, <recency tie> LIMIT` |
 | the tie key | `search_engine.py:2642` `recency_tie_clause` | `coalesce(<recency>,'') DESC, coalesce(<id>,'') DESC` — the **id key is DESC on every label** |
 | the score discard | `tortoise/search_engine.py:4492` `for rank, (pid, _score) in enumerate(ranked)` | **why this is a recall question** |
-| the index | `tortoise/projection/__init__.py:20327` `("Object", "name", "FULLTEXT")`, created at `:20755` | **no `OPTIONS`** → RediSearch defaults (language `english`, default stopwords, default tokenizer) |
+| the index | `tortoise/projection/__init__.py:20333` `("Object", "name", "FULLTEXT")`, created by `_create_fulltext_index` (def at `:20761`, called from `:20747`) | **no `OPTIONS`** → RediSearch defaults (language `english`, default stopwords, default tokenizer) |
 
 ---
 
@@ -232,16 +244,27 @@ RediSearch treats `_` as a **word character**. `tortoise/sparse.py:58` does not.
 ```
 
 so for a stored `web_search` the shipped leg issues `build_or_query('web_search')` = `search|web`. The
-query is well-formed, the leg returns nothing, and the class's `recall@3` is **0.20** with **21 empty
-result sets**.
+query is well-formed, the leg returns nothing, and the identifier class's `recall@3` is **0.20**.
+**21** of the **300** population queries return an empty result set at k=3 — a whole-population count
+(the artifact records `rows_zero` per k, not per class), so it is not a claim about the class: most of
+that class's 72 misses at k=3 come back non-empty and simply omit the target.
 
 ### 3.5 The `#8933` identifier fixture — requirement 5, and the shipped leg FAILS it
 
-Five fixture records are added to both stores **after** the recall sweep (so they cannot move a document
-frequency under a measured query) and queried at the production `limit=3` and at k=15. The criterion is
+Five fixture records are queried at the production `limit=3` and at k=15, and are inserted **after that
+arm's own** recall sweep so they cannot move a document frequency under it. The criterion is
 **reachability** (`rank_wide is not None`) — the DoD question is *can this store retrieve a record whose
 name carries a composite identifier*, and a fixture row inserted beside 300 look-alike names also
 competes on ranking, which `#11901` already owns.
+
+⛔ **Recorded, not tidied:** in the committed artifacts the ordering did NOT hold for the recovery arm.
+Both FalkorDB arms shared one graph and the shipped arm inserts its fixtures at the end of its own call,
+so the recovery arm's sweep ran over a **305**-document index against the shipped arm's **300** — the
+artifact's own `index_numDocuments` records both, unedited. The harness now gives each arm its own graph
+(a re-run measures 300 on both), and the direction is not rescued by the defect: five extra documents
+compete for the same three slots, so the recovery arm was measured on the **harder** population of the
+two and still recorded zero regressions. The re-run is still the confirmation, and it is what `#12350`
+should be measured with. See `artifact.json`'s `measurement_notes`.
 
 | stored name | query | shipped | in-place fix | `pg/tokens` | `pg/native` |
 |---|---|---|---|---|---|
@@ -351,8 +374,14 @@ here. The 29–38 % of names in the residual rows are **assumed** Δ = 0; nothin
 
 ## 6. What happens next
 
-1. **`SEARCH-ARCHITECTURE.md` §6.2's status line is accurate and stays.** C2 = the scorer is not the
-   constraint. C3 = SPLADE is **closed with this evidence** (`#12186` item 2), not carried.
+1. **`SEARCH-ARCHITECTURE.md` §6.2's DECISION stands; its "unmeasured … until M3" qualifier is now
+   resolved and gets a status line.** M3 was the measurement §6.2 asks for; its answer is that the text
+   index does not move (§3), so the decision is unchanged — but two sentences in §6.2 still read as
+   *outstanding* (`:247` "how far our hosted leg sits from that baseline is *unmeasured* — that is what
+   M3's score distributions are for"; `:268` "the text index **stays** until **M3** measures …"), and a
+   reader arriving after this PR would be told to go and do work that is done. §6.2 carries a status
+   line pointing here rather than a re-statement of the numbers. **C3 (SPLADE) is NOT closed here** —
+   that ruling is the owner's and is left open on `#12298` (§0).
 2. **The one real lever this measurement found is filed: `#12350`** — the tokenizer contract between
    `sparse.tokenize_sparse_query` and RediSearch's `_`-as-word-character. **Measured, not shipped** here:
    the additive term is an arm of this harness, because a query-bytes change touches every label and
