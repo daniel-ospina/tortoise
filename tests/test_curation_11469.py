@@ -3569,3 +3569,41 @@ def test_inventory_and_plan_answer_the_same_exit_code_for_a_surface_fault(
                      "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
                      "--out", str(tmp_path / "p.json")])
     assert plan == inv, (plan, inv)
+
+
+def test_an_error_payload_on_the_audit_section_is_a_designed_refusal_too(
+        monkeypatch, capsys, tmp_path):
+    """EVERY census read, not just the four this was first written for.
+
+    Round-4 review measured the `audit` read sitting outside `cmd_inventory`'s designed
+    refusal handler: an `is_error` payload there raised as rc 1 while `status`,
+    `structure`, `sources` and `graphs` answered rc 3 — one failure, two codes, one
+    section over from where round 3 removed exactly that. The audit section is in the
+    `used` set the census tests assert, so it is a census read and belongs inside.
+    """
+    mod = _tool_module()
+    sections = {"status", "structure", "sources", "graphs", "audit"}
+
+    def call(name, args):
+        args = args or {}
+        section = args.get("section")
+        if section in sections and section == "audit":
+            return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
+        if section == "structure":
+            return {"total": 1, "operators": 0}
+        if section == "status":
+            return {"counts": {"Point": 1, "Source": 0}}
+        if section == "sources":
+            return {"result": [], "total": 0}
+        if section == "graphs":
+            return {"result": [{"namespace": "org_x_g_old"}]}
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision", "content": "a durable claim"}],
+                    "total": 1}
+        return {"result": []}
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["inventory", "--graph", "org_x_g_old", "--no-verify-read",
+                   "--out", str(tmp_path / "i.json")])
+    assert rc == 3, (rc, capsys.readouterr())
+    assert "REFUSED" in capsys.readouterr().err

@@ -684,6 +684,12 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         # a refusal here is the DESIGNED kind (rc 3), not a crash: it says two surfaces
         # disagree about one population, or that the layer cannot be read whole.
         operators, operators_reported = reader.read_operators(structure)
+        # ⛔ The audit section is a census read too (it is in the `used` set the tests
+        # assert, and it feeds the report), so it belongs INSIDE this handler: outside
+        # it, an `is_error` payload here raised as rc 1 while the other four answered
+        # rc 3 — the two-vocabularies defect round 3 removed, one read over (round-4
+        # review measured it).
+        audit = reader.audit()
     except C.CurationRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3
@@ -692,7 +698,6 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     if unreconciled:
         print(f"REFUSED: {unreconciled}", file=sys.stderr)
         return 3
-    audit = reader.audit()
     plan = C.build_plan(points + sources + operators,
                         source_graph=args.graph or "(credential-bound)",
                         target_graph=args.target or "(none: inventory only)")
