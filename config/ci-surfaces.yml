@@ -2241,9 +2241,13 @@ surfaces:
   # entry, so a goal_judgement-only diff falls through to this `core` fallback
   # (measured: `select(['tortoise/goal_judgement.py'])` → ['core'], and the file
   # is in that selection's `test_files`). `select()` REPLACES the fallback on a
-  # named match — measured: a `tortoise/sdk.py`-only diff selects `core` too but
-  # does not reach this file — so a narrower `ep`/`sdk` registration would run on
-  # none of the diffs that can break it. Keep it here.
+  # named match, so an `ep`/`sdk`-only registration would run on NO diff that can
+  # break this read — `tortoise/goal_judgement.py` matches none of their patterns.
+  # ⚠️ `tortoise/sdk.py` and `tortoise/ep.py` are `SHARED_MODULES`, so their own
+  # diffs select the FULL matrix and are carried either way (measured: `sdk.py`
+  # alone → `full: true`, `test_files: ALL`, per `select()`'s SHARED_MODULES
+  # branch) — they are not evidence against a narrower registration, and the
+  # `sdk` row's own note at ~line 480 says the same. Keep it here.
   - test_12322_latest_readings_order.py
   - test_candidate_recall_11901.py
   # #12294: the ported predicate and the falsification that declined it. `core`
