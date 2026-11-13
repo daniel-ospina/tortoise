@@ -75,7 +75,7 @@ Round 2 said *"retires the node in **every** reader"*. That is true of the ident
 **false of every retrieval reader**, and the difference matters because it is the difference between "a redirect
 is a worse merge" and "a redirect is a merge **plus** a visible duplicate".
 
-**The identity readers — all five, and they all retire the carrier:**
+**The identity readers — five reads, four of which retire the carrier:**
 
 | reader | line at `f33f5e2c3215` | what it does |
 |---|---|---|
@@ -94,8 +94,8 @@ tortoise/session_link.py    resolved_from=0   dedup_reviewed=0
 tortoise/assembly.py        resolved_from=0   dedup_reviewed=0
 ```
 
-⚠️ **`sdk.py` is deliberately not in that table, because it does mention `resolved_from` — three times, and all
-three are off the read path:** a docstring (`:24321`), the `approve_merge` verdict echo (`:24485-24486`), and the
+⚠️ **`sdk.py` is deliberately not in that table, because it does mention `resolved_from` — four lines across
+three sites, and all three sites are off the read path:** a docstring (`:24321`), the `approve_merge` verdict echo (`:24485-24486`), and the
 `exists_by_name` guard comment (`:27847-27852`). **None of them is a retrieval filter**; the module's retrieval
 legs reach the graph through `search_engine`'s legs. Stated so a reviewer who greps `sdk.py` does not read the
 table as a claim about the whole tree.
@@ -499,7 +499,7 @@ That is the noun matcher's exact shape: the right existing entity at similarity 
 zero graph support, diluted out of a small window by RRF. ⛔ **`grep -rn interleave tortoise/` → 50 hits**, and
 the honest reading of them is narrower than "we have it" and wider than "we don't": only **4** of the 50 are in
 `tortoise/retrieval.py` (`:17-18` / `:2225` — *"Budget-capped, **rank-interleaved** reader context (C1 #1745)"*);
-the other 46 are concurrency/write-interleaving comments across 26 files (`hosted_api.py` 11, `log.py` 5,
+the other 46 are concurrency/write-interleaving comments across 25 files (`hosted_api.py` 11, `log.py` 5,
 `vector_write.py` 3, `sdk.py` 2, …). The 4 are an interleave of **assembled context blocks**, not of
 **retrieval arms**. **No arm-level interleave
 exists** (`rrf_fusion` is the only fusion in `search_engine.py`), and the two are different mechanisms that a
@@ -523,7 +523,7 @@ a fan-out cap.
 
 | element | code |
 |---|---|
-| **how the entity collection is BUILT at `add()`** | `extract_entities(text)` — **deterministic spaCy NER + heuristics, no LLM** (`entity_extraction.py:1-25`: `_add_ner_candidates`, `_add_proper_name_candidates`, `_add_quoted_candidates`, `_add_topic_phrase_candidates`, `_add_technical_identifier_candidates`, `_resolve_candidates`). Then `_upsert_entity` (`main.py:611-649`): **exact normalised-text match first** (`_existing_entities_by_text`, `_normalize_entity_text`), else a **semantic `top_k=1` match at `score >= 0.95`** (`:632-638`), else insert. A match appends `memory_id` to `linked_memory_ids` (`:640-646`) |
+| **how the entity collection is BUILT at `add()`** | `extract_entities(text)` — **deterministic spaCy NER + heuristics, no LLM** (`entity_extraction.py`: `_add_ner_candidates` `:498`, `_add_technical_identifier_candidates` `:528`, `_add_proper_name_candidates` `:543`, `_add_quoted_candidates` `:581`, `_add_topic_phrase_candidates` `:590`, `_resolve_candidates` `:705`; the pipeline calling them in order is `:743-748`). Then `_upsert_entity` (`main.py:611-649`): **exact normalised-text match first** (`_existing_entities_by_text`, `_normalize_entity_text`), else a **semantic `top_k=1` match at `score >= 0.95`** (`:614-621` — `top_k=1` at `:617`, the gate at `:621`), else insert. A match appends `memory_id` to `linked_memory_ids` (`:624-629`) |
 | **search-side pool** | `internal_limit = max(limit*4, 60)` (`main.py:1662`); semantic, keyword, entity searches all sized to that |
 | **candidate pool is SEMANTIC-ONLY** | `main.py:1674-1684`, comment *"Step 7: Build candidate set from semantic results"* — the BM25 arm scores rows already in that pool; so does the entity arm. **A keyword-only or entity-only hit cannot enter** |
 | **BM25 normalisation** | query-length-adaptive **sigmoid**: midpoint 5 / 7 / 9 / 10 / 12, steepness 0.7 / 0.6 / 0.5 / 0.5 / 0.5 by term count (`scoring.py:16-40`), `1/(1+exp(−s·(x−m)))` (`:43-54`) |
@@ -633,7 +633,10 @@ fix on the merge, not a change to what is stored.
 ## 8.6 What changes for `#12186`
 
 1. **Round 2's `resolved_from` conclusion survives; its wording does not.** "Retires the node in every reader" →
-   **"retires it in every identity reader and none of the retrieval readers."** N-4's dispatch readiness is
+   **"retires it in every identity read that decides *which entity a name lands on*, and in none of the retrieval
+   readers."** ⛔ That is four of the five (see §8.1.1's table): the fifth, `_name_holder_ids_same_entity`
+   (`entity_identity.py:410`), deliberately does **not** collapse, because a held name must not read as unheld —
+   so "every identity reader" would overstate by one. N-4's dispatch readiness is
    unchanged (still blocked on `SAME_AS`), and the redirect is now a *worse* substitute than round 2 said, because
    it also leaves a visible duplicate.
 2. **`dedup_reviewed='link'` is worse than inert, and the fix is a READER, not a writer.** The write is one
@@ -681,6 +684,18 @@ fix on the merge, not a change to what is stored.
 8. **Mastra's retrieval passthrough at `observational-memory.ts:620` was read, not traced** — I did not follow
    `config.retrieval.vector` into the tool it names, so "OM has no retrieval of its own" is asserted for OM's
    module and not for every configuration Mastra ships.
+9. **⛔ The four external sources are pinned to floating `main` refs, not to a commit sha** —
+   `getzep/graphiti@main`, `vectorize-io/hindsight@main`, `mem0ai/mem0@main`, `mastra-ai/mastra/main`. This
+   document's own rule (`:27`) is that a pin must name its head; these do not, **and the cost is already realised
+   for one of them**: at `vectorize-io/hindsight@main` today, `hindsight_api/engine/search/fusion.py`,
+   `…/link_expansion.py`, `…/reranking.py` and `…/db/ops_postgresql.py` all return **404** (`hindsight-api/` now
+   holds only `README.md` and `pyproject.toml`), so **M-12's sole source (`fusion.py:112-176`) and §8.1.5's SQL
+   (`ops_postgresql.py:1069-1109`) cannot be re-derived from `main`** — they are recorded as read on 2026-11-12,
+   and a later lane must either locate the commit or re-read the moved tree. The other three still resolve and
+   their load-bearing claims were re-checked: Zep 400 L with `_FUZZY_JACCARD_THRESHOLD = 0.9` `:34`, 32 perms
+   `:35`, band 4 `:36`, entropy 1.5 `:31`; Mem0 `main.py` 3,916 L with `memory_count_weight` `:1815-1817` and
+   `ENTITY_BOOST_WEIGHT` `scoring.py:57`; Mastra `observational-memory.ts` 4,723 L. **Record a sha at read time;
+   this round did not.**
 
 ---
 
