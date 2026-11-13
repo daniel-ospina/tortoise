@@ -81,6 +81,11 @@ CENSUS_PROBE = REPO / "docs/evidence/11739-quote-population/probes/quote_populat
 #: Which ``k`` the read path's default top-k uses when the caller does not say. The
 #: point of the metric is that a fixed small page is what a caller sees.
 TOP_K = 10
+#: The three gate flags `verdict.gates` must carry, and no others. `--attest` bounds the block
+#: against this EXACT set (#12476): requiring only "not empty" let a hand-edit delete ONE flag
+#: and still be blessed, because `all_pass: false` agreed with `all({False, False})`.
+GATE_NAMES = ("gate1", "gate2", "gate3")
+
 #: Seeded so the run is re-runnable: the query sample and the cross-lens sample are
 #: both deterministic.
 SEED = 11739
@@ -460,11 +465,21 @@ def _attest(path: str) -> int:
     refuses an artifact whose gate verdicts are absent, so a failed walk can never be attested
     into a pass. The numbers are unchanged by this step, which is why the README can show the
     pair of commands and still claim the committed file is what they produce.
+
+    ⛔ EVERY refusal below exits ``2`` with the documented marker, and NONE of them may raise:
+    ``--attest`` is scripted by lanes, so an ``AttributeError`` out of ``main()`` (exit 1) is a
+    caller that cannot tell a refusal from a crash. That is why the artifact's SHAPE is checked
+    with ``isinstance`` before any ``.get`` / ``.values()`` is called on it (#12476, where a
+    non-object ``verdict.gates`` exited 1 with a traceback).
     """
     try:
         report = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         _say(f"ATTEST-UNREADABLE({path}): {e}\n")
+        return 2
+    if not isinstance(report, dict):
+        _say(f"ATTEST-REFUSED({path}): the artifact is not a JSON object "
+             f"(`{type(report).__name__}`), so it carries no gate verdicts\n")
         return 2
     if "verdict" not in report or "gate1_similarity" not in report:
         _say(f"ATTEST-REFUSED({path}): no gate verdicts in this artifact\n")
@@ -475,11 +490,23 @@ def _attest(path: str) -> int:
     # on an absent block too: `if gates and …` skipped the check when a hand-edit DELETED the
     # flags, which blessed the tamper shape it was written for (measured in review: `verdict`
     # present, no `gates` → attested, exit 0).
-    gates = (report.get("verdict") or {}).get("gates") or {}
-    if not gates:
-        _say(f"ATTEST-REFUSED({path}): no gate flags to check in `verdict.gates`\n")
+    verdict = report.get("verdict")
+    if not isinstance(verdict, dict):
+        _say(f"ATTEST-REFUSED({path}): `verdict` is not an object "
+             f"(`{type(verdict).__name__}`), so its gate flags cannot be checked\n")
         return 2
-    if bool(report["verdict"].get("all_pass")) != all(bool(v) for v in gates.values()):
+    # ⛔ EXACTLY the three names — not merely "non-empty". A hand-edit that deletes ONE flag
+    # leaves `all_pass: false` agreeing with `all({False, False})`, which the consistency check
+    # below CANNOT see: measured on #12476, deleting `gate2` was attested, exit 0. The exact-set
+    # bound subsumes both the emptied block and the partially deleted one in a single guard.
+    gates = verdict.get("gates")
+    if not isinstance(gates, dict) or set(gates) != set(GATE_NAMES):
+        found = (", ".join(sorted(str(k) for k in gates)) if isinstance(gates, dict)
+                 else type(gates).__name__)
+        _say(f"ATTEST-REFUSED({path}): `verdict.gates` must carry exactly "
+             f"{', '.join(GATE_NAMES)} (found: {found})\n")
+        return 2
+    if bool(verdict.get("all_pass")) != all(bool(v) for v in gates.values()):
         _say(f"ATTEST-INCONSISTENT({path}): all_pass disagrees with the gate flags {gates}\n")
         return 2
     source = str(report.get("source", ""))
@@ -510,8 +537,8 @@ def main(argv: list[str]) -> int:
     census = _load_census()
     meta = {"endpoint": ""}
     if args.cache and os.path.exists(args.cache):
-        with open(args.cache, encoding="utf-8") as fh:
-            rows = [json.loads(line) for line in fh]
+        with open(args.cache, encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f]
         about = sorted({k for r in rows for k in r if k.lower().startswith("about")})
         meta = {
             "source": f"cache:{args.cache}",
