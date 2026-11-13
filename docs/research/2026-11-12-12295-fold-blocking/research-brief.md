@@ -9,9 +9,13 @@ measured at code head `dcb43345a3b6755d58725469aa96b9d339427d6d` — quoted in f
 `code_head` verbatim.
 ⛔ **AND THAT SHA IS *NOT* A REPRODUCTION ANCHOR — the correction (#12304 review round 21).** This
 paragraph used to call it "the anchor a reader reproduces from" and to imply it survived the rebases
-because the LATEST one left it. Measured: `git merge-base --is-ancestor dcb43345a3b6` answers **1**
-against BOTH this branch's HEAD and `origin/main`, and no ref contains it at all — the `#12304` force-pushes carried the local `refs/remotes/` entry past the generation that held it — so it is dangling in exactly the way the paragraph below
-calls disqualifying, and no reader can `git show` it from a fresh clone. The FIELD is kept because
+because the LATEST one left it. Measured: `git merge-base --is-ancestor dcb43345a3b6 origin/main`
+answers **1**, while the same command against this branch's HEAD answers **0** — the field now names a
+commit ON this branch (the current generation's twin of the pre-rebase stand-in it named before;
+`git diff --quiet` on the three measurement files is EMPTY between the two) — and the rail
+SQUASH-merges, so once this PR lands it is served by no ref at all and a reader reproducing from it
+lands on a commit `git show` cannot find. That is the same disqualification the paragraph below
+describes, which is why the anchor is CONTENT and not a sha. The FIELD is kept because
 it is what the artifact's own contract requires and because a squash merge destroys every branch
 sha anyway (the pin's own comment records that, and is why it asserts the note's SHAPE and a
 content-equivalence rather than an ancestry). What replaces it as the anchor is CONTENT, which is
@@ -167,7 +171,7 @@ same quantity: `k` rows per mention for the window, one candidate list per menti
 | FTS window, k=10 | 10 | 0.9976 |
 | FTS window, k=15 | 15 | **1.0000** |
 | FTS candidate set a capture actually sees (`search_graph` pooled union) | 2.84 (42.65 per capture of 15 mentions — **not** a per-mention figure, and not comparable to the row below) | not measured per mention |
-| **multi-key blocking** (`entity_blocking.BlockIndex`: folded key ∪ folded prefix ∪ per-token prefixes ∪ LSH shingle bands) | **35.9** (max 152) | **1.0000** (422/422), reduction ratio 0.0255 |
+| **multi-key blocking** (`entity_blocking.BlockIndex`: folded key ∪ folded prefix ∪ per-token prefixes ∪ LSH shingle bands) | **34.9** (max 152) | **1.0000** (422/422), reduction ratio 0.0255 |
 
 The reduction ratio is the blocker's actual cost on the whole graph: pairs proposed by **all 1000**
 names over `C(1000, 2)` (`entity_blocking.reduction_ratio`, computed by that one helper). It is NOT
