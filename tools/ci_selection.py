@@ -3507,13 +3507,20 @@ def _is_safe_root_file(path: str) -> bool:
 # docstring, a generated-doc link, or `scripts/record-review.sh`'s basename case
 # — no test or tool reads its CONTENT, so the mention was not a reader.
 #
+# ⛔ `CONTRIBUTING.md` is NOT here any more, and the census is why. #12313
+# (`test(surface)`, 2026-11-13) added `tests/test_surface_manifest.py:5538` —
+# `(sm.ROOT / "CONTRIBUTING.md").read_text(...)` — which READS the document to
+# pin the surface rule's own wording. That is the silent-hole class this comment
+# warns about, and it made the ratchet below RED on `main` for every PR: a
+# `CONTRIBUTING.md` edit would have skipped the guard that unpins it. A member
+# is reprieved only while nothing reads it, so the reprieve goes, not the guard.
+#
 # Ratchets: `test_non_code_doc_paths_exist` (liveness) and
 # `test_non_code_doc_paths_have_no_content_reader` (the read census).
 NON_CODE_DOC_PATHS = frozenset({
     ".github/pull_request_template.md",
     "CHANGELOG.md",
     "CLAUDE.md",
-    "CONTRIBUTING.md",
 })
 
 
