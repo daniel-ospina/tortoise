@@ -1071,7 +1071,7 @@ steps:
     - step: S2.3
       condition: >-
         the S2 map left at least one candidate's kind missing or `unclassified`, so
-        `_collect_classify_items` (tortoise/extractor_v2.py:11857, `def _collect_classify_items`) had an item to hand the classifier;
+        `_collect_classify_items` (tortoise/extractor_v2.py:12682, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
         the run's own classify surface reads enabled=true with empty s2/union, the receipt's
@@ -1200,7 +1200,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11857-11879` (`_collect_classify_items`, the collector's item set), `:14276` and `:14429` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:12682-12704` (`_collect_classify_items`, the collector's item set), `:15101` and `:15254` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -2635,23 +2635,23 @@ to answer.
   offset applied to the block would be wrong at two of those three regions, which is exactly why
   every line below was opened instead.
 - **New value — measured at this head, by opening each line:** `_collect_classify_items` at
-  `:11857`, extent `:11857-11879` (`def` to `return items`, unchanged in size); the two `if items:`
-  gates at `:14276`/`:14429`; the two fail-open `except` arms at `:14289`/`:14440`; the two result
-  blocks at `:14640` (closing `:14646`) and `:14650` (closing `:14654`); `_run_vet_pass`'s S2.2
-  call at `:16834` and its post-S4 union call at `:14405`; and the `#10360` read-back
-  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:10536`.
-- **Verified by content, not by arithmetic.** `:11857` is
-  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:11879` is `return items`;
-  `:14276`/`:14429` are the two `if items:` gates; `:14289`/`:14440` are the two fail-open
-  `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:14640`
-  opens `result["classify_later"]` and `:14646` closes it (`}`), `:14650` opens `result["vet"]`
-  and `:14654` closes it; `:16834` is
-  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14405` is
-  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:10536` is the read-back assignment.
-  The selection flags this block sits under are at `:13820` (`vet_enabled`), `:13789`
-  (`classify_later`) and `:13814` (its construction-failure arm), and the early return that emits
-  both OFF surfaces is `if not edus:` at `:13824`, with `edus = _edus_from_conversation(...)` at
-  `:13823` above it.
+  `:12682`, extent `:12682-12704` (`def` to `return items`, unchanged in size); the two `if items:`
+  gates at `:15101`/`:15254`; the two fail-open `except` arms at `:15114`/`:15265`; the two result
+  blocks at `:15563` (closing `:15569`) and `:15573` (closing `:15577`); `_run_vet_pass`'s S2.2
+  call at `:17757` and its post-S4 union call at `:15230`; and the `#10360` read-back
+  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:11361`.
+- **Verified by content, not by arithmetic.** `:12682` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12704` is `return items`;
+  `:15101`/`:15254` are the two `if items:` gates; `:15114`/`:15265` are the two fail-open
+  `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:15563`
+  opens `result["classify_later"]` and `:15569` closes it (`}`), `:15573` opens `result["vet"]`
+  and `:15577` closes it; `:17757` is
+  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:15230` is
+  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:11361` is the read-back assignment.
+  The selection flags this block sits under are at `:14645` (`vet_enabled`), `:14614`
+  (`classify_later`) and `:14639` (its construction-failure arm), and the early return that emits
+  both OFF surfaces is `if not edus:` at `:14649`, with `edus = _edus_from_conversation(...)` at
+  `:14648` above it.
 - **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,

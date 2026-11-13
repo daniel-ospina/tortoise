@@ -3495,13 +3495,19 @@ def _is_safe_root_file(path: str) -> bool:
 # docstring, a generated-doc link, or `scripts/record-review.sh`'s basename case
 # — no test or tool reads its CONTENT, so the mention was not a reader.
 #
+# ⛔ AND IT IS OUT AGAIN (`main`, #12313's `tests/test_surface_manifest.py`): that
+# suite reads the file's TEXT (`(sm.ROOT / "CONTRIBUTING.md").read_text(...)`) to
+# hold the documented surface rule to the shipped one, so a prose edit to
+# `CONTRIBUTING.md` can now change a guard's verdict. The census this list rests
+# on is "does anything READ it", and one reader is enough — the exemption would
+# have dropped exactly that guard from the PR that edits the file it guards.
+#
 # Ratchets: `test_non_code_doc_paths_exist` (liveness) and
 # `test_non_code_doc_paths_have_no_content_reader` (the read census).
 NON_CODE_DOC_PATHS = frozenset({
     ".github/pull_request_template.md",
     "CHANGELOG.md",
     "CLAUDE.md",
-    "CONTRIBUTING.md",
 })
 
 
