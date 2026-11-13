@@ -485,8 +485,9 @@ class LexicalScorer:
       so it is the strongest fair form of "a 5 us string compare". (An exact
       match needs no short-circuit: equal NON-EMPTY token sets make the Jaccard
       ratio 1.0 on its own, and a branch that returned early would have been a
-      second code path to time. ⛔ Two EMPTY token sets are 0.0 by the guard
-      above, not 1.0 — that is why the shortcut is safe to omit either way.)
+      second code path to time. ⛔ Two EMPTY token sets are 0.0 — returned by the
+      ``if not ta or not tb`` guard in ``_one``, not by the ratio — so the
+      shortcut is safe to omit either way.)
     """
 
     def __init__(self, mode: str = "difflib") -> None:
@@ -1621,8 +1622,9 @@ def run(args: argparse.Namespace) -> int:
         # emitted note. ⛔ `recall_3_after` is what the arm ACHIEVED, not the
         # ceiling: they coincide only where `lost` is 0, so the note names both the
         # ceiling (in_window) and the achieved cell — they coincide when
-        # `recall_3_before - lost + gained` reaches the ceiling, NOT when `lost`
-        # alone is 0. ⛔ Not `arms.exact.<P>`: that
+        # `recall_3_before - lost + gained` reaches `in_window`; `lost` 0 is
+        # NECESSARY but not sufficient (a no-gain rerank has it 0 with the achieved
+        # figure still below the ceiling). ⛔ Not `arms.exact.<P>`: that
         # table is arm 1's own width-by-width one, and a pool width outside its
         # keys has no cell there.
         #
