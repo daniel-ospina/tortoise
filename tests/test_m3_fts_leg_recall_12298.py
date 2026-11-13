@@ -1273,9 +1273,10 @@ def test_brief_headline_matches_the_artifact(artifact, brief, arm: str, want: fl
     assert artifact["arms"][arm]["recall_by_k"]["3"]["recall"] == pytest.approx(want)
     got = {}
     for cells in _table(_scope_slice(brief, "0"), "recall@3", "Δ vs shipped"):
-        m = re.match(r"`([^`]+)`", cells[0])
-        if m:
-            got[m.group(1)] = cells[1]
+        # `_plain` drops the backticks as well, so the ARM is the first token.
+        arm_name = _plain(cells[0]).split(" (")[0].strip()
+        if arm_name:
+            got[arm_name] = cells[1]
     assert arm in got, f"the brief's §0 table has no `{arm}` row"
     assert round(_num(got[arm]), 4) == round(want, 4), (
         f"the brief's §0 row for {arm} states {_plain(got[arm])!r}; the committed "
@@ -1364,9 +1365,9 @@ def test_brief_headline_table_pins_every_column_and_the_subset_row(
         if "tokens-controlled subset" in cells[0]:
             rows["__subset__"] = cells
             continue
-        m = re.match(r"`([^`]+)`", cells[0])
-        if m:
-            rows[m.group(1)] = cells
+        arm_name = _plain(cells[0]).split(" (")[0].strip()
+        if arm_name:
+            rows[arm_name] = cells
 
     for arm, cell in _HEADLINE_ROWS:
         assert arm in rows, f"§0's table has no row for {arm!r}"
@@ -2366,12 +2367,17 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, population,
          arms["falkordb_tfidf__tokens_fixed"]["recall_by_k"]["3"]["recall"]),
     ]
     for needle, want in expected:
-        hit = [r for r in rows if needle in r[0]]
+        # ⛔ A structural match like the rest (round-25 review, cycle 6): the
+        # LABEL cell is compared on its text (asterisks stripped) but keeps its
+        # backticks — one needle is `the \`_\`-preserving runs`, whose code span
+        # is part of the label.
+        hit = [r for r in rows if needle.replace("`", "") in
+               r[0].replace("*", "").replace("`", "")]
         assert len(hit) == 1, f"the changelog table lost its {needle!r} row"
         assert round(_num(hit[0][1]), 4) == round(want, 4), (
             f"the changelog states recall@3 {_plain(hit[0][1])} for {needle!r}; "
             f"the committed artifact says {want:.4f}")
-    subset = [r for r in rows if "subset" in r[0]]
+    subset = [r for r in rows if "subset" in _plain(r[0])]
     assert len(subset) == 1, "the changelog table lost its tokens-controlled subset row"
     # ⛔ The row's LABEL is a claim too (#12349 review, P2): the cell pair below
     # was pinned and the `174 of 300` label was not — measured, `174` → `173`
@@ -2383,7 +2389,7 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, population,
     assert n_pop == artifact["sample"], (
         f"the committed population holds {n_pop} names; the artifact measured "
         f"a sample of {artifact['sample']} — the two must be the same run")
-    assert f"({n_sub} of {n_pop} queries)" in subset[0][0], (
+    assert f"({n_sub} of {n_pop} queries)" in _plain(subset[0][0]), (
         f"the changelog's subset row states {subset[0][0]!r}; the artifact "
         f"records n = {n_sub} over a {n_pop}-name population")
     pair = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
