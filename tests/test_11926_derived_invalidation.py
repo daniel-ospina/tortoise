@@ -542,11 +542,10 @@ def test_an_already_terminal_claim_reconciles_the_goal_the_CLAIM_names(sdk):
 def test_the_success_arm_reconciles_the_goal_the_CLAIM_names(sdk):
     """The arm that ACTUALLY retires is the one where a skipped reconcile is fatal.
 
-    #12315 review cycle 12. Every other success-path test goes through
-    `invalidate_stale`, where `invalidation_for` copies `goalId` from the claim —
-    so a DIRECT `invalidate()` call with a goal-less `Invalidation` was the one
-    shape nobody built, and it passed `invalidation.goal_id` (None) to the
-    reconcile. The claim is terminal after this call, so `invalidate_stale` never
+    #12315 review cycle 12. No success-path test had built a DIRECT `invalidate()`
+    call carrying a goal-less `Invalidation`, so that shape passed
+    `invalidation.goal_id` (None) to the reconcile. The claim is terminal after
+    this call, so `invalidate_stale` never
     scans it again: the goal keeps the derived word FOREVER, and neither
     `counts.failed` nor `counts.gone` moves for the skip. The result must also
     report the resolved id, not the caller's `None`.
@@ -690,10 +689,9 @@ def test_a_claim_that_NAMES_NO_goal_falls_back_to_the_CALLERs(sdk, monkeypatch,
                                                               shape):
     """The `or invalidation.goal_id` half of every arm's precedence (#12315 c17).
 
-    ⛔ THE FALLBACK IS A REACHABLE SHAPE, NOT DECORATION, and it was unpinned in
+    ⛔ THE FALLBACK IS A REACHABLE SHAPE, NOT DECORATION, and it went unpinned in
     all four arms: deleting `or invalidation.goal_id` from every local left the
-    suite green, because every other test that reaches these locals reads a claim
-    carrying a `goalId`. A claim can name none — `invalidation_for` documents
+    suite green. A claim can name none — `invalidation_for` documents
     "a corrupt or partial claim" as reachable, and `REMOVE p.goalId` produces it —
     and with the fallback gone that shape SKIPS the reconcile: `cache.checked` is
     `False` and neither `counts.failed` nor `counts.gone` moves, which is the
@@ -1246,12 +1244,13 @@ def test_a_window_with_an_UNDATED_reading_is_UNDECIDABLE_not_narrower(sdk):
 
 
 def test_every_minted_dwell_claim_places_its_window(sdk):
-    """Why these are the only shapes a MINTED dwell claim can reach the undecidable
-    report through.
+    """Why a MINTED dwell claim can reach the undecidable report at all.
 
-    (The undecidable arm has three routes in total; this paragraph covers only the
-    one this test can build. `undecidable_scope` and the "cannot be ordered"
-    boundary branch are separate routes, pinned elsewhere.)
+    This covers only the route this test builds. The undecidable arm has other
+    routes — `undecidable_scope`, the "cannot be ordered" boundary branch, and the
+    "records no reading instant" branch for a non-dwell legacy claim — which are
+    reached by other tests, not by this one. (No count is asserted here on purpose:
+    a number in a comment is another claim to keep true.)
 
     An UNCHANGED state mints nothing (#11822's unchanged arm re-asserts the live
     claim), and a `dwell-holding` pass reports the PREVIOUS state — which equals the
