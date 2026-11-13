@@ -1,10 +1,12 @@
 """#12455 — `tortoise_query(text=...)` ACCEPTED `filters=` and DROPPED it.
 
 The tool's signature takes ``filters`` and the docstring documents it for the
-structural path. The ``text=`` arm forwards only
-``kind``/``entity_type``/``limit``/``min_confidence``/``order_by`` into
-``sdk.tortoise_fts_query`` — **no filters** — and ``_filters`` is not even
-computed until *after* that arm has returned. So a caller who passes
+structural path. The (pre-fix) ``text=`` arm forwarded only
+``kind``/``entity_type``/``limit``/``min_confidence``/``order_by`` — **no
+property filter** — into ``sdk.tortoise_fts_query``, and ``_filters`` was not even
+computed until *after* that arm had returned. It now forwards a sixth argument,
+``include_terminal``, promoted from ``include_retracted`` (a flag, never a
+property filter — see the boundary section below). So a caller who passes
 ``text="x", filters={"domain": "y"}`` was answered with the UNFILTERED
 population, shaped as if the filter had applied.
 
@@ -410,6 +412,27 @@ def test_a_tag_read_without_filters_still_serves(stub) -> None:
 _FILTERS_REFUSAL = re.compile(
     r"refus\w*\s+`?filters=?`?|`?filters=?`?\s+is\s+refused", re.IGNORECASE)
 
+#: A NEGATED refusal must never satisfy the guard (#12455 round 4). Round 3's
+#: regex was anchored but still matched "...does NOT refuse `filters=` - it
+#: ignores it", a 12-character edit from the shipped text, and the mention gate
+#: was case-sensitive so "ignores `Filters`" slipped past it too. Both mutants
+#: left the suite green; both now fail.
+_NEGATED_REFUSAL = re.compile(r"\b(?:not|never|no\s+longer)\s+refus|n't\s+refus",
+                              re.IGNORECASE)
+
+
+def _refuses_filters(bullet: str) -> bool:
+    """True only for an UNAMBIGUOUS refusal attached to ``filters=``.
+
+    Case-insensitive on the mention, negation-aware on the verb, so neither
+    "does NOT refuse `filters=`" nor "ignores `Filters`" can pass.
+    """
+    if "filters" not in bullet.lower():
+        return True          # the bullet does not discuss filters at all
+    if _NEGATED_REFUSAL.search(bullet):
+        return False
+    return bool(_FILTERS_REFUSAL.search(bullet))
+
 
 def _docstring_bullets(doc: str, head_prefix: str) -> list[str]:
     """Each bullet that starts with ``head_prefix``, joined with its
@@ -451,8 +474,7 @@ def test_no_docstring_bullet_still_says_the_tag_arm_IGNORES_filters() -> None:
         "expected the tag= bullet AND the tag-mode bullet; found "
         f"{len(bullets)}: {bullets}"
     )
-    stale = [b for b in bullets
-             if "filters" in b and not _FILTERS_REFUSAL.search(b)]
+    stale = [b for b in bullets if not _refuses_filters(b)]
     assert stale == [], (
         "a `tag=` bullet mentions `filters` without refusing it, contradicting "
         f"the guard: {stale}"
@@ -487,7 +509,8 @@ def test_the_docstring_does_not_advertise_filters_for_the_text_arm() -> None:
         "the `text=` bullet does not mention `filters`, so a caller still reads "
         f"the structural documentation as applying here: {bullet!r}"
     )
-    assert "refus" in bullet.lower(), (
-        "the `text=` bullet mentions filters without saying they are REFUSED, "
-        f"which still reads as `applies unless said otherwise`: {bullet!r}"
+    assert _refuses_filters(bullet), (
+        "the `text=` bullet mentions filters without saying they are REFUSED, or "
+        "states it NEGATED ('are ignored, not refused'), which still reads as "
+        f"`applies unless said otherwise`: {bullet!r}"
     )

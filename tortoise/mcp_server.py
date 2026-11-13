@@ -3904,7 +3904,7 @@ def tortoise_query(kind: str | None = None,
       by this arm — a known accepted-and-dropped gap tracked in #12500, not a
       documented feature.
     - include_retracted=True surfaces tombstones on every path (structural,
-      paginated, and tag modes); default False excludes them. Known gap, tracked
+      paginated, text, and tag modes); default False excludes them. Known gap, tracked
       in #12502: the TAG arm's own exclusion is `status != "retracted"` only, so
       it still serves superseded/archived/outdated/deprecated rows by default,
       where the structural and fts arms exclude the whole terminal vocabulary.
