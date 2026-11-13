@@ -240,7 +240,7 @@ def test_shingles_and_bands_are_deterministic_across_processes():
 
 
 def test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_shares_only_it():
-    """One witness per generator — `P`, `T`, `S` — each sharing THAT key alone.
+    """One witness per generator — `P`, `T`, `S` — each pair REQUIRING that key.
 
     ⛔ MEASURED before this test: deleting the `P:` append from `block_keys` left
     all 59 tests green, and deleting the whole shingle block left all 59 green too.
@@ -251,8 +251,22 @@ def test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_shares_only_i
     ⛔ `entity_resolver.py`'s module docstring says
     `test_the_scan_finds_a_transposition_the_single_prefix_key_could_not` "pins"
     the `T` key. It does not: those two names share `T` *and* `S`, so either one
-    survives the other's deletion. The `T` witness below is the pair whose ONLY
-    shared key is a token prefix.
+    survives the other's deletion.
+
+    ⛔ AND "SHARES THAT KEY ALONE" WOULD BE FALSE OF TWO OF THESE THREE WITNESSES,
+    which is the same shape this docstring just criticised above. MEASURED on this
+    head — `set(block_keys(a)) & set(block_keys(b))` per pair:
+
+      * `("ab cd", "ab gh")`                     -> `{P}`              — `P` alone
+      * `("project alpha", "alpha project")`      -> `{T, S}`           — `T` *and* `S`
+      * `("configuration guide", "configuration guidse")` -> `{P, T, S}` — all three
+
+    So what each arm actually proves is what it ASSERTS, not what the word "alone"
+    would suggest: (a) all three namespaces exist for one name, (b) the `P` witness
+    requires `P:`, (c) the `T` witness requires `T:` in the intersection (it also
+    holds `S:`, which is fine — arm (d) pins `S` independently, on `S`-only sets),
+    and (d) the `S` witness requires `S`. Each arm reds when its own namespace is
+    deleted, which is the discriminating property a witness needs.
     """
     # (a) all three namespaces are present in ONE ordinary high-entropy name.
     for ns in (PREFIX, TOKEN, SHINGLE):

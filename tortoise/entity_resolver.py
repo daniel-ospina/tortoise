@@ -80,7 +80,11 @@ blocking. ⛔ The bound the prefix alone imposed is GONE (#12295): a pair
 whose folded names share no 3-character prefix is no longer excluded — that is
 exactly what the ``T`` (word order / transposition) and ``S`` (typo and separator
 classes) keys reach, and `test_every_key_namespace_in_the_union_is_pinned_by_a_pair_that_shares_only_it`
-pins each of ``P``/``T``/``S`` with a witness sharing THAT key alone. ⚠️ The
+pins each of ``P``/``T``/``S`` with a pair whose own namespace its arm REQUIRES (not
+"shares alone" — measured, only the ``P`` witness shares ``P`` by itself; the ``T``
+witness shares ``T`` and ``S``, the ``S`` witness all three, which is why each arm
+asserts membership of its OWN namespace rather than equality of the intersection).
+⚠️ The
 transposition test (`test_the_scan_finds_a_transposition_the_single_prefix_key_could_not`)
 does NOT pin the namespace: its pair shares ``T`` *and* ``S``, so deleting either
 generator leaves it green. ``E`` is always present; ``P`` is added only where the fold is at least

@@ -15,18 +15,22 @@ tortoise/entity_blocking.py tortoise/extractor_v2.py` is EMPTY. ⛔ This paragra
 `437d…`-generation shas (a first rebase generation, now dangling) until #12304 review round 10 —
 every one of them fails `git merge-base --is-ancestor` against this branch, i.e. they were dangling
 in exactly the way the sentence beside them calls disqualifying. They are named here WITHOUT their
-full digests on purpose: a dead sha quoted as provenance is the defect this paragraph warns about,
-and `test_the_artifact_declares_one_uniform_retrieval_mode` now asserts that every sha the brief
-quotes resolves in this repo. The artifact is the
-source of truth for this field and the brief must agree with it; that same test now asserts
-`report["code_head"] in brief` so they cannot diverge again.
+full digests on purpose, so that this paragraph cannot itself re-introduce the advert it warns
+about. ⛔ And a reader should NOT expect the obvious guard: an "every quoted sha resolves" arm was
+WRITTEN and MEASURED and is deliberately NOT shipped, because a rebased-out commit leaves every
+ref while its object stays in the local object DB — `git cat-file -e` answers 0 for
+`437d5d17a5f5` today — so the arm stayed GREEN on exactly the mutation it exists to catch. What
+IS shipped is the arm that can fail: `test_the_artifact_declares_one_uniform_retrieval_mode`
+asserts `report["code_head"] in brief`, and it reds on a first-generation sha substituted for the
+live one (measured, both directions). The artifact is the
+source of truth for this field and the brief must agree with it.
 Commits after it touch those files in two ways, and the provenance claim is stated as the diff
 rather than as a summary of it: (a) DOCSTRINGS/COMMENTS — `5b618ed0524d` moves the `emitted:` note
 and `f546f0e5a957` adds the `complete=True` note; (b) LABELS — `d52a989eafd2` renames the
 `lsh_bands` docstring label and the `stats()` counter key `keys` -> `key_memberships`, and
 `22ec4d1a6048` adds a `candidates(label=None)` LABEL FALLBACK in `entity_blocking.py`.
 ⛔ The enumeration, not this summary, is what proves it: `git log --format=%h ae63e846e410..HEAD --
-tortoise/entity_resolver.py tortoise/entity_blocking.py tortoise/extractor_v2.py` returns 12
+tortoise/entity_resolver.py tortoise/entity_blocking.py tortoise/extractor_v2.py` lists the
 commits, of which exactly TWO are statement changes — `d52a989eafd2` (the `stats()` key rename,
 a diagnostic LABEL, which is why the artifact reads `key_memberships` while the run emitted
 `keys`) and `22ec4d1a6048` (the fallback). Apart from those two, everything on that list is
@@ -35,6 +39,18 @@ docstring/comment-only, and this run never reaches the fallback: the harness cal
 three times already, so `grep -n` for the symbol in `tools/candidate_recall_11901.py` is the
 check), so the `label is None` branch is not taken. No statement in `entity_resolver.py` or
 `extractor_v2.py` moved after `ae63e846e410`.
+
+⛔ **THE SCOPE ABOVE IS THE PRODUCT CODE — NOT THE HARNESS, WHICH ALSO MOVED.** The code that
+PRODUCES this artifact is `tools/candidate_recall_11901.py`, and `git diff --stat e9a572d4b4
+<code_head> -- tools/candidate_recall_11901.py` is `494 insertions(+), 7 deletions(-)`: the `#12294`
+name-entropy arms arrived with the base move. So a re-run at the declared head emits **two arms
+this artifact does not contain** — `arms.gate_variant` and `arms.pooled_gate` are unconditional
+assignments in today's harness, and this artifact's `arms` keys are exactly `blocking` /
+`duplicate_rate` / `exact*` / `pooled` / `variant*`. Read it as the reproduction contract: these
+numbers are the RUN's (the harness as it stood at `e9a572d4b4`); a re-run at the declared head
+reproduces every arm here **plus** the two `#12294` ones, whose absence is the base having moved
+and not a lost measurement. Those arms have their own run and their own artifact
+(`measurement-entropy-gate-12294.json`), and `code_head_note` carries this same disclosure.
 
 **Search rung, stated because it was taken twice and failed twice.**
 `mcp__seo-intelligence__perplexity_search` → `Unknown MCP server 'seo-intelligence'` (rung 1
@@ -64,7 +80,7 @@ as of `#12047`. What did not exist, and is what this lane adds:
 
 | gap | site | measured consequence |
 |---|---|---|
-| the capture prior compared `_norm` only — whitespace + lowercase, byte-identical to Zep's `_normalize_string_exact` | `extractor_v2._norm` at `:4232`, the historical arm in `_find_existing_entity` (`:5769`), which now delegates to `_find_by_folded_key` (`:5823`, the folded rung this lane added) | **0 of 422** variant pairs attach at any `k`, both modes — the before-half of every rate in §3 |
+| the capture prior compared `_norm` only — whitespace + lowercase, byte-identical to Zep's `_normalize_string_exact` | `extractor_v2._norm` at `:4232`, the historical arm in `_find_existing_entity`; `extractor_v2._find_by_folded_key` cited BY SYMBOL (a `file.py:<line>` cite rots on any insertion above it, and this one did — it read `:5823` for two review rounds after the def moved to `:5831`) (`:5769`), which now delegates to `_find_by_folded_key` (`:5823`, the folded rung this lane added) | **0 of 422** variant pairs attach at any `k`, both modes — the before-half of every rate in §3 |
 | the dedupe scan blocks on ONE key — `folded[:3]` | `entity_resolver.py:394` **on `origin/main`** (this change moves it) | a transposition (`the project alpha` / `alpha project`) is never compared, at any similarity |
 
 External confirmation at source (rung 3): Zep's `_normalize_string_exact` is *"Lowercase text and
