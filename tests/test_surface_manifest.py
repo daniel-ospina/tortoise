@@ -5415,6 +5415,45 @@ def test_the_rename_remedy_does_not_claim_to_be_the_whole_record_for_an_SDK_meth
     assert accounting == {}, accounting
 
 
+def test_the_audit_line_does_not_call_a_TOOL_deletion_a_rename(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The `accounted` line is the ONLY lasting record of a removal; it may not mislabel one.
+
+    `cut` persists nothing about removals (its own comment says so), so the accounted block is
+    the audit `#11609` keeps. The generic waiver arm labelled it "a deliberate RENAME" and
+    cannot tell a rename from a deletion: on the TOOL surface a rename can never reach the arm
+    (a `RETIRED_USE_INSTEAD` name stays served, so it stays in the `retired:` half; with the
+    key present and the declaration gone the cut refuses it as a contradiction before any
+    waiver is read), and every other state that reaches it is a deletion — so the label
+    contradicted the operator's own `--allow-removal-reason` printed one line below it (review
+    of PR #12313, round 24).
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["tortoise_vanished_probe"],
+            allow_removal_reason="deleted: zero callers, owner approved",
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    asserted = out[out.index("accounted 1 removal(s)") :]
+    assert "deliberate removal, stated in the PR" in asserted, asserted
+    assert "deliberate rename" not in asserted, asserted
+    # The reason the operator typed is echoed beside it, so a "rename" label would contradict
+    # the line directly below it — that juxtaposition is what made the old wording a defect.
+    assert "deleted: zero callers, owner approved" in asserted, asserted
+
+
 def test_the_rename_remedy_is_NOT_offered_as_the_clearance_for_a_DEPARTURE(
     monkeypatch, tmp_path, derived_baseline, capsys
 ):
@@ -6070,7 +6109,9 @@ def test_an_override_cannot_waive_TWO_surfaces_at_once():
     # is the point: the waiver may not silently cover the second one (non-vacuity: the
     # qualified arm really does waive its own class, or this would pass for the wrong reason).
     problems, accounting = sm.removal_report(prior, set(), records, allowed={"tool:tortoise_x"})
-    assert accounting == {("tortoise_x", "tool"): "`--allow-removal` (deliberate rename, stated in the PR)"}, accounting
+    assert accounting == {
+        ("tortoise_x", "tool"): "`--allow-removal` (deliberate removal, stated in the PR)"
+    }, accounting
     assert len(problems) == 1 and "tortoise_x (sdk)" in problems[0], problems
 
     # …and naming BOTH surfaces is the remedy the refusal above prescribes, so it must PASS

@@ -2729,8 +2729,18 @@ def removal_report(
                 # command and whose prescribed remedy the operator had already applied
                 # (review of PR #12313).
                 waived.setdefault(symbol, []).append(cls)
+            # ⛔ NOT "a deliberate RENAME" — this arm cannot tell one from a deletion. It is
+            # reached by ANY unrecorded removal the override names, and on the TOOL surface a
+            # rename can never reach it at all (a name in `RETIRED_USE_INSTEAD` stays served,
+            # so it stays in the baseline's `retired:` half and is not a removal; with the key
+            # present and the declaration gone the cut refuses it as a contradiction before
+            # any waiver is read). Since `#11609`'s audit line is the ONLY lasting record of a
+            # removal — `cut` persists nothing about removals — calling a deletion a
+            # rename in the log contradicted the operator's own `--allow-removal-reason` one
+            # line below it (review of PR #12313, round 24). The verified rename is the SDK
+            # arm above, which reads `sdk_renamed` and says so.
             accounting[(symbol, cls)] = (
-                "`--allow-removal` (deliberate rename, stated in the PR)"
+                "`--allow-removal` (deliberate removal, stated in the PR)"
             )
             continue
         problems.append(RemovalProblem(
