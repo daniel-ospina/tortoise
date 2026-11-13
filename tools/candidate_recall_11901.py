@@ -889,7 +889,9 @@ def run(args: argparse.Namespace) -> int:
         # multi-key blocker's, so "better completeness at lower cost" is a
         # comparison of two numbers in the artifact and not a sentence in a brief.
         # The FTS candidate set a capture sees is the POOLED union over its
-        # derived queries (`search_graph`, `extractor_v2.py:3074`), not `limit`.
+        # derived queries (`search_graph`, `extractor_v2.py`: the accumulation
+        # `results[bucket[entity_type]][rid] = row`), not `limit`. Cited by SYMBOL
+        # and not by line — a `file.py:<line>` cite rots on any insertion above it.
         _pool3 = arms["pooled"][KS[0]]
         #: ⛔ A run with ZERO capture groups measured no pooled set, so publishing
         #: ``0.0`` would read as "a capture sees zero candidates" — the same false

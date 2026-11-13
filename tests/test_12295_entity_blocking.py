@@ -460,10 +460,15 @@ def test_the_scan_reports_its_largest_block_and_caps_NOTHING(monkeypatch):
         f"the scan compared {len(rows)} of {n - 1} duplicates — a size cap on the "
         "scan path dropped pairs a smaller graph would have reported")
 
+    #: ⛔ DO NOT assert `not stats.get("oversized_skipped")` here. That key is
+    #: written only by `candidates()` — a QUERY — and the index below never answers
+    #: one, so the assertion could never fail and would pin nothing. MEASURED:
+    #: restoring the `<= MAX_BLOCK_SIZE` filter in `blocks()` leaves it green while
+    #: the row-count assertion above fires (200 rows -> 0). The discriminating
+    #: assertion is the row count; this one pins only that the size is REPORTED
+    #: rather than truncated at index time.
     stats = BlockIndex.from_rows([dict(e) for e in ents]).stats()
     assert stats["max_block_size"] == n      # reported, not capped
-    assert not stats.get("oversized_skipped"), (
-        "the SCAN indexed a block as oversized — the cap belongs to the query path")
 
 
 def test_the_fold_collision_is_a_declared_residual_not_a_regression():

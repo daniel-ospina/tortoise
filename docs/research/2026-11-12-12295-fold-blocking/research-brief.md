@@ -15,7 +15,7 @@ provenance claim is stated as the diff rather than as a summary of it: (a) DOCST
 `keys` -> `key_memberships`, and `f7c0e819f4` adds a `candidates(label=None)` LABEL FALLBACK in
 `entity_blocking.py`. Apart from that counter-key RENAME, the fallback is the only statement change in those
 files after `437d5d17a5f5`, and this run never reaches it: the harness calls
-`index.candidates(surface, label="Object")` (`tools/candidate_recall_11901.py:717`), so the
+`index.candidates(surface, label="Object")` (`tools/candidate_recall_11901.py:725`), so the
 `label is None` branch is not taken. No statement in `entity_resolver.py` or `extractor_v2.py`
 moved after `437d5d17a5f5`.
 
