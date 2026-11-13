@@ -5269,7 +5269,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # never copied forward from a run that was green earlier. That is exactly why
         # it was retired.
         #
-        # The history, because it is why this row carries this much prose:
+        # The history, because it is why the RETIRED row carried this much prose:
         # `#12035` re-derived the document here (9635 -> 9714) and its own +3 kept
         # the entry and the document in step at 9714. Later merges then moved the
         # entry out from under the document without touching it: `#12061` +7
@@ -5396,8 +5396,7 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     so the row that existed to hold this number was **42 lines adrift on its own
     tree** and `test_the_epic_bundle_cites_the_branch_rederived_resolve` was RED on
     `main` — the fifth and sixth re-stale, landing on the fix for the first four.
-    So the
-    entry is pinned where the ownership sits: it must be the ONLY occurrence in
+    So the entry is pinned where the ownership sits: it must be the ONLY occurrence in
     `carve_out:`, and the document must not print the entry's LIVE line number in
     ANY form — qualified, bare, arrowed, `@`-prefixed, bolded or behind a `#L<N>`
     anchor (see the arm below for why an allow-list of cite shapes was the wrong
@@ -5418,8 +5417,11 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     role at a different head, not a second head for this pair. `:9906`, which an earlier
     revision of this docstring attributed to `9f4c0bde5a`, is the document's cite at an
     EARLIER head and is not the value at `c7499ac7a7`.)
-    A bare number is not a cite; the file name is what makes a number
-    checkable, and a headed history row is not a claim about today.
+    ⛔ The rule is NOT "a bare number is not a cite". A headed history value is legal
+    whether it is dressed or not; the LIVE value is refused in EVERY form, bare
+    included, because it is a claim about a tree that has not happened yet. The
+    headings above are what make a history value checkable — not the absence of them
+    on a live one.
 
     This is `05-verify.md` D5's own rule ("the symbol is authoritative and the line
     number is a convenience") applied to the one cite whose number a third party
@@ -5449,7 +5451,14 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
         return head, tail
 
     def _name(i: int) -> str:
-        """Line `i` as the WRITER reads it — see the comment below the bounds."""
+        """Line `i` with the WRITER's tokenising, but KEEPING its `- ` marker.
+
+        The writer's own expression (`tools/ci_selection.py:4908`) is
+        `lines[i].strip()[2:].split("#", 1)[0].rstrip()`, which additionally drops
+        the two-character marker. The two agree modulo that uniform `- ` prefix,
+        which this helper needs — `entry` is written `"- test_…"` and `_is_family`
+        reads `startswith("- ")`. So: same cut, same trim, marker retained.
+        """
         return lines[i].strip().split("#", 1)[0].rstrip()
 
     start, end = _block_bounds("carve_out")
