@@ -4775,7 +4775,7 @@ _UNIT_POSITION_WORDS = r"lines|rows|entries"
 #: the doc-wide arm — the cost is a false red a maintainer rewrites, against a miss
 #: that ships the rot — and a count and a position are not separable there, so the
 #: alternative is kept and NAMED rather than presented as a discriminator.
-_POSITION_TAIL = (r"(?:into|down|deep|below|above|from\s+the\s+top|"
+_POSITION_TAIL = (r"(?:into|down|deep|below|above|up(?:ward)?|from\s+the\s+(?:top|bottom)|"
                   r"in(?=[.,;:!?)\]]|$)|"
                   r"of\s+the\s+(?:manifest|file))")
 #: Used where a POSITION must be refused: everything is a unit except `lines`/`rows`.
@@ -4844,8 +4844,11 @@ _LINE_CITE = re.compile(rf"{_SEP}\s*{_WRAP}{_NUM}{_WRAP}")
 
 #: ⛔ THE BINDING MUST INCLUDE THE NAME THE DOCUMENT ACTUALLY USES. The document
 #: names the manifest BOTH ways: ``config/ci-surfaces.yml`` in the intro prose and in
-#: another row's second cell, and *"the manifest"* on the claim's own sentence (whose
-#: row carries the filename NOWHERE — measured). Binding only the literal FILENAME left the doc-wide arm blind to
+#: another row's second cell, and *"the manifest"* on the claim's own sentence — and
+#: the claim row now uses BOTH spellings (measured at this head; an earlier cut of
+#: this comment said the row carried the filename NOWHERE, which was true of the head
+#: it was written at and stopped being true one commit later). Binding only the
+#: literal FILENAME left the doc-wide arm blind to
 #: the sentence's own vocabulary: appending *"the `carve_out:` entry the table above
 #: names sits on line 9987 of the manifest at this head"* was GREEN, while the same
 #: sentence with the literal filename was RED. That is the exact rot this arm
@@ -4868,10 +4871,19 @@ _MANIFEST = r"(?:ci-surfaces\.ya?ml|the\s+manifest)"
 #: ⛔ AND THE BLANKET FIX IS NOT AVAILABLE: making `lines`/`rows` non-units
 #: doc-wide refused `— 155 lines of rows`, which this file pins as CORRECT PROSE
 #: (a count is not a cite). So the discriminator is the POSITIONAL TAIL — `into`,
-#: `down`, `deep`, `below`, `above`, `from the top` — which a count does not carry.
-#: Residual, stated: a bare `9987 lines` with no tail is genuinely ambiguous with a
-#: count and is NOT caught here; on the CLAIM sentence it is, because that arm has no
-#: count exemption at all (`_BARE_NUM`).
+#: `down`, `deep`, `below`, `above`, `up`, `from the top|bottom`, clause-final `in` —
+#: which a count does not carry, PLUS the deliberate over-catch `of the manifest|file`
+#: (a count and a position are not separable there; the tolerated direction is the
+#: false red, not the miss). ⚠️ RESIDUAL, stated: the tail list is CLOSED, so a
+#: positional phrase with an unlisted tail (`9987 lines up from the bottom` before
+#: `up` was added — measured GREEN at `9c8348767e`) is not caught HERE, and the
+#: neighbour arm cannot take it when the same line also names another source file,
+#: because that exemption is an early return as wide as the line. On a line naming no
+#: other file the neighbour arm IS strict (`_bare_number_hits_neighbour` →
+#: `_LEADING_NUM_NO_POSITION`) and catches every tail spelling; the gap is exactly the
+#: intersection of those two exemptions. A bare `9987 lines` with no tail is ambiguous
+#: with a count and is not caught here either; on the CLAIM sentence it is, because
+#: that arm has no count exemption at all.
 _MANIFEST_CITE = re.compile(
     rf"{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_NUM}{_WRAP}"
     rf"|(?<![\w.]){_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}{_MANIFEST}"
@@ -6325,8 +6337,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"it). Keep the claim in one place and print no number. ⚠️ TWO RESIDUALS, "
                 f"both stated rather than left to be discovered: a number on a line "
                 f"that names none of the block, an entry nor the manifest (by the WORD "
-                f"or by its FILENAME — the population is `_BLOCK_WORDS_WITH_MANIFEST`, "
-                f"so both vocabularies are scanned) is not "
+                f"or by its FILENAME — the population is `_in_neighbour_population`, "
+                f"i.e. `_BLOCK_WORDS_WITH_MANIFEST` PLUS `_ENTRY_STEMS`, so all three "
+                f"vocabularies are scanned) is not "
                 f"scanned, and ANY number on a line that names ANOTHER source file — "
                 f"`:NNNN`, `N lines down`, `Nth row`, `read 9943` — is not scanned "
                 f"either (that exemption is an EARLY RETURN in "
@@ -6520,6 +6533,23 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     "`config/ci-surfaces.yml`, 9987 rows from the top",
     "`config/ci-surfaces.yml` — the entry is 9987 lines into the file",
     "`config/ci-surfaces.yml` lines 9987–9995",
+    # ⛔ ONE FIXTURE PER `_POSITION_TAIL` ALTERNATIVE (#12369 review, P3: five of the
+    # eight alternatives were pinned by NOTHING — dropping `deep`, `below`, `above`,
+    # the clause-final `in` or `of the file` from the tail flipped a real position
+    # from RED to GREEN with the whole suite green). Each line below reds if its own
+    # alternative is removed, which is the property that was missing.
+    "`config/ci-surfaces.yml` — 9987 lines deep into the block",
+    "`config/ci-surfaces.yml` — 9987 lines below the header",
+    "`config/ci-surfaces.yml` — 9987 rows above it",
+    "`config/ci-surfaces.yml` reads 9987 rows in.",
+    "`config/ci-surfaces.yml` — 9987 lines of the file",
+    # ⛔ …and the tail the closed list was MISSING (#12369 review, P2): this module's
+    # own docstring cites `9987 lines up from the bottom` as proof that a closed tail
+    # list ACCEPTS a false position, and the doc-wide arm then shipped a list without
+    # it — so this spelling, beside the filename, was GREEN in both arms whenever the
+    # line also named another source file (the neighbour arm's early return).
+    "`config/ci-surfaces.yml` — 9987 lines up from the bottom",
+    "`config/ci-surfaces.yml` — 9987 lines from the bottom",
     # ⛔ THE LONG FORM, and it was GREEN until this arm's `_GAP` was widened from 160
     # to 400: a heavily qualified sentence put MORE prose than the old bound between
     # the manifest's name and the number, which is a cite a reader follows and the
@@ -6628,7 +6658,7 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
      "`entry_lines` loop, `:4906`) and the entry line moves under them.", []),
     ("The `corpus` block in `capstone_run.py` is frozen; its literal sits at `:1186`.",
      []),
-    ("`sdk.py`'s `extraction_mode` pair (`sdk.py:24003` → `:24634`) is the same row.",
+    ("`sdk.py`'s `extraction_mode` literal sits at `sdk.py:16323` — another row's cite.",
      []),
     # …and the forms it MUST still catch, so the "another file" exemption cannot become
     # a bypass: a bare cite with NO other file named, and the history-trimmed number.
@@ -6738,6 +6768,26 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
             f"gate on their own")
         assert _neighbour_number_strays(line), (
             f"{line!r} is in the population but yields no stray — the arm is inert")
+    # ⛔ …AND THE ENTRY'S VOCABULARY IS THE OTHER HALF OF THE HELPER (#12369 review,
+    # P2: the helper was asserted only over manifest-spelled lines, so deleting its
+    # `_ENTRY_STEMS` branch re-opened the "scan the line that names the entry" false
+    # pass with all 240 cases green). A line naming the ENTRY carries none of the
+    # block's words and no filename, so ONLY that branch admits it.
+    for line in (
+            "The row `test_pack_logic_writeprobe_11083.py` sits at `:9987` on this head.",
+            "The write-probe row sits at `:9987` on this head.",
+            "The row `test_pack_logic_writeprobe_11083.py` sits at 9987 on this head."):
+        assert not _BLOCK_WORDS_WITH_MANIFEST.search(line), (
+            f"{line!r} matches the manifest vocabulary, so it does not prove the "
+            f"ENTRY branch of the helper is live")
+        assert _in_neighbour_population(line, "the claim line"), (
+            f"{line!r} names the entry and must therefore be in the population — "
+            f"this is the `_ENTRY_STEMS` half of `_in_neighbour_population`, and "
+            f"without it the stale-number false pass returns with every other case "
+            f"green")
+        assert _neighbour_number_strays(
+            line.replace("test_pack_logic_writeprobe_11083.py", "")), (
+            f"{line!r} is admitted but yields no stray — the arm is inert")
     # …and the CLAIM line itself is never a neighbour, or the block arm would report
     # the claim sentence's own text as a stray beside itself.
     assert not _in_neighbour_population("`carve_out:` holds one", "`carve_out:` holds one")
