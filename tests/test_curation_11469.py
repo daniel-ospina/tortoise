@@ -4499,6 +4499,33 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         "the plan does not describe the request the code sends")
     assert "sized to `counts.Event + 1`" not in plan, (
         "the plan still prescribes sizing the request to the count (one row of headroom)")
+    # ⛔ ...and the CODE's own text, which nothing pinned (PR-review cycle 5). The plan pin
+    # above guards the plan, but `tools/curate_graph.py` carried the SAME superseded
+    # prescription in TWO places — the `read_events` docstring bullet and the
+    # `EVENT_READ_CEILING` constant's comment — while the code sends
+    # `EVENT_READ_CEILING + 1` (`curate_graph.py:limit_sent`). It survived four review
+    # cycles and one peer fix for exactly that reason: the phrase was pinned in the plan
+    # only. A maintainer reconciling code to that text deletes the bound-sized request and
+    # restores the one-row-headroom truncation window, so the wrong direction is the
+    # DANGEROUS one and the absence is asserted on the prescribing phrasing, not on the
+    # digits (the corrective comments legitimately quote the old sizing as history).
+    #
+    # ⚠️ The `#:` markers are STRIPPED before matching, and that is load-bearing: the
+    # constant's comment wraps, so the raw text carries `sizes each request to\n#:
+    # `counts.Event + 1`` and a phrase assertion on the un-stripped text matches NOTHING —
+    # a first revision of this pin passed over the exact defect it was written for
+    # (measured: reverted the comment, the pin stayed green).
+    source_text = (_pathlib.Path(__file__).resolve().parent.parent
+                   / "tools" / "curate_graph.py").read_text(encoding="utf-8")
+    source_flat = _re.sub(r"\s*#:\s*", " ", _re.sub(r"\s+", " ", source_text))
+    assert "sized to `counts.Event + 1`" not in source_flat, (
+        "curate_graph.py still prescribes sizing the Event request to the count; the code "
+        "sends EVENT_READ_CEILING + 1")
+    assert "sizes each request to `counts.Event + 1`" not in source_flat, (
+        "the EVENT_READ_CEILING comment still prescribes sizing the request to the count")
+    assert source_flat.count("EVENT_READ_CEILING + 1") >= 2, (
+        "curate_graph.py must state the request the code actually sends, in the "
+        "read_events contract AND at the constant it is derived from")
 
     # ...and the row records the change rather than dropping the subject.
     assert "enumerated** since #12378" in doc or "**enumerated** — agent-session" in doc, (

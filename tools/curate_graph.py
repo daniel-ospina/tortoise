@@ -593,12 +593,12 @@ class MCPReader:
           spelling, so both are read;
         * a population above `EVENT_READ_CEILING` is REFUSED — there is no offset walk
           to page through it;
-        * a read that FILLS the requested limit exactly is REFUSED when no reported
-          count says that is the whole layer, because there is no offset walk, so "a full
-          page" and "a truncated layer" are the same bytes. The request is sized to
-          `counts.Event + 1` whenever a count is available (uncapped — see below), so this
-          arm can only fire on the UNREPORTED arm, where nothing vouches for the layer's
-          size;
+        * a read that FILLS the requested limit exactly is REFUSED, because there is no
+          offset walk, so "a full page" and "a truncated layer" are the same bytes. The
+          request is sized to `EVENT_READ_CEILING + 1` — NEVER to `counts.Event + 1`, which
+          leaves one row of headroom and makes any growth truncation-shaped — so a response
+          that fills it is above the band this read may accept: with no reported count
+          nothing vouches for the layer's size, and with one the re-count below decides it;
         * a read whose row count disagrees with `counts.Event` is re-counted ONCE and then
           either ACCEPTED or REFUSED. Both surfaces describe `:Event` with the same
           predicate (unlike the operator pair), so equality was expected — but the count is
@@ -987,9 +987,12 @@ OPERATOR_READ_CEILING = 10_000
 #: passes `limit` straight into the Cypher `LIMIT`, so a larger number would simply be
 #: sent. The bound exists because this layer can only be read in ONE response (a `limit`
 #: and no `offset`), so "the whole layer" needs a stated size a refusal can name — and it
-#: is a size/memory bound, not an enforcement. `read_events` sizes each request to
-#: `counts.Event + 1` rather than to this bound, so the bound is only ever consumed by a
-#: layer that genuinely has no whole read.
+#: is a size/memory bound, not an enforcement. `read_events` sizes each request to this
+#: bound PLUS ONE (`EVENT_READ_CEILING + 1`), and never to the count: headroom above
+#: `counts.Event` is ONE ROW, so a single grown Event fills the request and a
+#: grow-then-shrink-back race is accepted as whole over unread rows, while a request one
+#: above the BOUND keeps every response below it provably whole at any size and refuses a
+#: response that reaches it instead of filing a possibly-cut layer as complete.
 EVENT_READ_CEILING = 10_000
 
 
