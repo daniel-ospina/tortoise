@@ -1,0 +1,23 @@
+## MUTATION ATTRIBUTION — measured, not asserted (agent-infra#3442)
+
+Every mutant below was **applied to `tortoise/derived_invalidation.py` and run** against `tests/test_11926_derived_invalidation.py` (81 tests). Each row's reddened row is the actual `FAILED` node pytest reported, not a prediction. Baseline with the fix in place: **81 passed**. Working tree restored to pristine after each run (`git status` clean).
+
+| assertion | mutant (the edit that reverts the fix) | reddened row | observed |
+|---|---|---|---|
+| `tests/…:1138` `report["alreadyRetired"] is True`, `:1180` `counts["alreadyRetired"] == 1`, `:1187`, `:1265` | absent arm back to `"alreadyRetired": False` — **the #12315 bug restored** | `test_retiring_a_missing_claim_reports_it_rather_than_raising`, `test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket`, `test_an_absent_claim_whose_GOAL_is_gone_lands_in_GONE_too` | `3 failed, 78 passed` |
+| `:1147` `report["cache"]["checked"] is False`, `:1211` `per_finding["cache"]["checked"] is True`, `:1266` `counts["gone"] == 1` | absent arm loses its `"cache": _reconcile_or_report(...)` line | same three rows | `3 failed, 78 passed` |
+| `:1143` `report["found"] is False`, `:1188` `per_finding["found"] is False` | absent arm reports `"found": True` (absent read as present) | `test_retiring_a_missing_claim…`, `test_a_claim_that_VANISHES_mid_sweep…` | `2 failed, 79 passed` |
+| `:1139` `report["status"] is None` | absent arm reports a status word (`"status": "retracted"`) | `test_retiring_a_missing_claim…` | `1 failed, 80 passed` |
+| `:1237` `report["cache"]["checked"] is True`, `:1238` `cleared is True` | pre-read already-terminal arm loses its reconcile | `test_an_ALREADY_TERMINAL_claim_also_reconciles_the_goal_word` | `1 failed, 80 passed` |
+| `:1124` `again["found"] is True`, `:1236` `report["found"] is True` | pre-read already-terminal arm reports `"found": False` | `test_the_retirement_is_reported_in_full_and_is_IDEMPOTENT`, `test_an_ALREADY_TERMINAL_claim…` | `2 failed, 79 passed` |
+| `:1295` `report["alreadyRetired"] is True`, `:1298` `cache["checked"] is True`, `:1299` `goalState is None` | post-exception terminal arm loses its reconcile | `test_the_POST_EXCEPTION_terminal_arm_reconciles_too`, `test_a_reconcile_that_RAISES_is_reported_not_raised` | `2 failed, 79 passed` |
+| `:1340` `counts["alreadyRetired"] == 1`, `:1341` `counts["failed"] == 1` | `_reconcile_or_report` re-raises instead of reporting (replace its `except` body with `raise`) | `test_a_reconcile_that_RAISES…`, `test_a_failed_cache_reconcile_is_reported_and_the_retirement_still_lands`, `test_a_failed_cache_write_counts_as_a_FAILED_sweep` | `3 failed, 78 passed` |
+| `:1114` `retired["found"] is True` (SUCCESS arm) | success arm drops `"found": True` | `test_the_retirement_is_reported_in_full_and_is_IDEMPOTENT` | `1 failed, 80 passed` |
+| `:1565` `failed[0]["found"] is None`, `:1572` `"cache" not in failed[0]` | synthesized refusal record drops `"found": None` (back to `.get()` silence) | `test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep` | `1 failed, 80 passed` |
+| `:1347` `counts["undecidable"] == 0`, `:1591` `report["counts"]["undecidable"] == 0`, `:558`/`:936` `counts["undecidable"] == 1` | rename `counts["undecidable"]` key | `test_a_failed_read_of_the_DEFINITION_BOUNDARY…`, `test_a_claim_that_records_NO_reading_instant…`, `test_a_reconcile_that_RAISES…`, `test_dry_run_writes_nothing_and_names_what_it_would_retire` | `4 failed, 77 passed` |
+| `:632` `counts["gone"] == 1`, `:1266` | `counts.gone` stops reading the reconcile report (`"gone": 0`) | `test_a_GOAL_that_no_longer_EXISTS_is_reported_gone_not_cleared`, `test_an_absent_claim_whose_GOAL_is_gone_lands_in_GONE_too` | `2 failed, 79 passed` |
+| `:1179` `counts["retired"] == 0`, `:1186` `per_finding["invalidated"] is False` | absent arm reports `"invalidated": True` (a retirement that did not happen) | the three absent-arm rows | `3 failed, 78 passed` |
+
+SETUP-INTEGRITY ASSERTIONS (declared, not counted as fix guards): `:1212` `assert not sdk.get_entity(made["point_id"])` asserts the test's own precondition — that `made` really was deleted from the graph before the sweep — so it varies with the *fixture*, not with any edit to the fix. `:1178` `counts["stale"] == 1` and `:1183` `counts["failed"] == 0 and counts["gone"] == 0` pin the reported shape of the bug (stale, nothing retired, no reconcile failure); the `alreadyRetired`/`retired` halves of that shape are covered by rows 1 and 13.
+
+Every mutant produced at least one attributable red. No new assertion in this diff stayed green under the mutation that reverts the behaviour it names.
