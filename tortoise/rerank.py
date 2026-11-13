@@ -95,6 +95,17 @@ FUSED_RERANK_MODEL_ENV = "TORTOISE_FUSED_RERANK_MODEL"
 #: keep their retrieval order and stay in the list.
 DEFAULT_FUSED_RERANK_POOL = 40
 
+#: #12297 — the trace-entry keys carrying the rerank's OWN decision, written on
+#: the ``leg="rerank"`` entry. Additive keys, the #4999 ``mechanism`` precedent:
+#: the cap is reported ALONGSIDE the leg verdict, never through ``degraded``
+#: (which in a leg trace means "a retrieval leg did not run", #8487 review P1).
+#: ``rerank_pool`` is how many leading candidates were SCORED; rows past it keep
+#: their retrieval order and can never be promoted, so a caller that opted in
+#: must be able to tell "the reranker decided" from "it never saw that row".
+RERANK_POOL_KEY = "rerank_pool"
+RERANK_SCORED_KEY = "rerank_scored"
+RERANK_UNSCORED_KEY = "rerank_unscored"
+
 
 def rerank_pool_enabled(flag: bool | None = None) -> bool:
     """#12297 gate. Explicit kwarg wins; else ``TORTOISE_FUSED_RERANK`` —
@@ -116,6 +127,26 @@ def fused_rerank_model() -> str:
     loaded cross-encoder rather than paying a second 20 s load."""
     return (os.environ.get(FUSED_RERANK_MODEL_ENV, RERANK_MODEL_DEFAULT)
             .strip() or RERANK_MODEL_DEFAULT)
+
+
+def fused_rerank_pool_width(pool: int | str | None = None) -> int:
+    """#12297 — the effective number of leading candidates that get SCORED.
+
+    ONE resolution for the env knob and the read path (the ``_clamp_int``
+    contract, #2513): the explicit/kwarg value wins over
+    ``TORTOISE_FUSED_RERANK_POOL``, and garbage, blank or out-of-range (< 1)
+    falls back to :data:`DEFAULT_FUSED_RERANK_POOL`.
+
+    ⛔ It exists so the WIRING and the scorer cannot disagree about the width.
+    Before it, ``sdk.py`` sliced the pool text read with the DEFAULT constant
+    while ``rerank_pool`` resolved the knob: a configured width BELOW the
+    default worked, and a width ABOVE it was silently ignored (the batch read
+    had already dropped the extra ids), so a tuning run believed it had raised
+    a width it never scored. Both callers now take the number from here.
+    """
+    return _clamp_int(
+        pool if pool is not None else os.environ.get(FUSED_RERANK_POOL_ENV),
+        DEFAULT_FUSED_RERANK_POOL)
 
 
 def rerank_pool(
@@ -156,9 +187,7 @@ def rerank_pool(
     if not (query or "").strip():
         return untouched, {"applied": False, "degrade_reason": "empty_query"}
 
-    pool_n = _clamp_int(
-        pool if pool is not None else os.environ.get(FUSED_RERANK_POOL_ENV),
-        DEFAULT_FUSED_RERANK_POOL)
+    pool_n = fused_rerank_pool_width(pool)
     n_scored = min(len(untouched), pool_n)
     head = untouched[:n_scored]
 

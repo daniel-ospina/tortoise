@@ -4,8 +4,9 @@
 `CrossEncoderScorer`, landed under #317/#1545) and **not wired**. The wiring
 landed on this branch (`31cf88be51`) behind a gate that ships **OFF**
 (`TORTOISE_FUSED_RERANK`); this document is the calibration that decides whether
-it earns that gate. Machine-readable artifacts sit beside it:
-`measurement-noun-path.json`, `measurement-user-search.json`.
+it earns that gate. Machine-readable artifact beside it:
+`measurement-noun-path.json`. The **user-search** artifact is **not attached** —
+that arm was not run for this PR; §5 states it rather than citing a file.
 
 Every number below was produced on **this box, on CPU** — it has no GPU — from
 the **shipped** code path, not a re-implementation.
@@ -169,11 +170,34 @@ So the correct reading is:
 
 ---
 
-## 5. User search
+## 5. User search — **NOT MEASURED in this PR. State that, do not cite a file.**
 
-See `measurement-user-search.json` and §5 of this document's results table,
-produced by `tools/rerank_calibration_12297.py` (the fixed, DECLARED query set
-landed in `65968f8a70`).
+**No user-search artifact is attached.** An earlier draft of this section pointed
+at `measurement-user-search.json` and at "§5 of this document's results table";
+neither existed — the file is not in this branch and this document had no such
+table. That is a dangling citation in the one section whose entire job is to say
+whether a second surface was measured, so it is corrected here rather than
+quietly deleted: **the user-search arm was NOT run for this PR.**
+
+The harness it would run through IS committed and is itself pinned:
+`tools/rerank_calibration_12297.py` (with its declared query construction, its
+pairing, and its in-run permutation assertion) and
+`tests/test_rerank_calibration_12297.py`. Producing the artifact is one command
+and needs the `embeddings` extra plus a live lane:
+
+```bash
+uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"
+uv run python tools/rerank_calibration_12297.py --records 400 \
+    --out docs/research/2026-11-12-12297-rerank-calibration/measurement-user-search.json
+```
+
+**What that does to the verdict: nothing — and that is deliberate.** §7 rests on
+the noun path alone, where the shipped read was measured paired and
+counterfactual on the real corpus. §4 already says these numbers are silent about
+user search; this section now says the same thing about the *absence* of a
+number, which is the honest form of the same claim. A reader must not be able to
+infer "user search was measured and looked good" from this document, and with a
+phantom filename they could.
 
 ---
 

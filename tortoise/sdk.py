@@ -69,7 +69,10 @@ from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contra
 # here). The alternative — a function-local import — would sit in the hot path
 # for no benefit.
 from .rerank import (
-    DEFAULT_FUSED_RERANK_POOL,
+    RERANK_POOL_KEY,
+    RERANK_SCORED_KEY,
+    RERANK_UNSCORED_KEY,
+    fused_rerank_pool_width,
     rerank_pool,
     rerank_pool_enabled,
 )
@@ -41550,6 +41553,84 @@ class TortoiseSDK:
                 _logger.warning(
                     "turn-echo exclusion failed — pass-through", exc_info=True)
 
+        # ── #12297: the FUSED-CANDIDATE-LIST rerank, placed AHEAD of the cut.
+        #
+        # This is the ONE wiring point for both surfaces the issue names:
+        #   * user search — a caller's own ``limit`` (MCP ``tortoise_search`` /
+        #     the SDK read);
+        #   * the capture-time noun-matching prior — ``extractor_v2._fts_rows``
+        #     calls THIS function at ``limit=3`` for every derived entity query,
+        #     so the prior leg is reranked here without a second call site and
+        #     without touching its window (``#11901`` measured the window lever
+        #     and declined it standalone; this is the PAIRED shape).
+        #
+        # ⛔ Placed BEFORE ``result_ids[:limit]`` on purpose: a reranker that
+        # ran after the cut could only reorder rows that already survived, and
+        # its entire value is choosing WHICH rows survive a fixed ``limit``.
+        # ⛔ ``rerank_pool`` is a PERMUTATION, never a filter — see its contract.
+        # ⛔ Ordered BEFORE step 5e (valid-time selection) ON PURPOSE, and this
+        # is a CORRECTNESS ordering, not a preference. #8487 made the valid-time
+        # demotion the read's last word on order so that a present-tense query
+        # never serves a superseded claim as current; a relevance reorder placed
+        # after it would silently re-promote exactly that row. Relevance may not
+        # outrank correctness, so the rerank runs first and the demotion lands on
+        # top of it. ``tests/test_rerank_pool.py`` pins the order.
+        # ⛔ Default OFF (``TORTOISE_FUSED_RERANK``): the shipped order is
+        # byte-identical when the flag is unset, which is also why this costs
+        # one env lookup rather than a batch read on every search.
+        if result_ids and rerank_pool_enabled() and (query or "").strip():
+            # ONE width for the batch read AND the scorer (#12297 review): the
+            # knob used to be resolved only inside ``rerank_pool``, so a
+            # configured width ABOVE the default was silently unreachable —
+            # the text read had already dropped the ids past the constant.
+            _pool_n = fused_rerank_pool_width()
+            _pool_ids = result_ids[:_pool_n]
+            _pool_texts = _fetch_rerank_pool_texts(
+                graph, entity_type, graph_label, id_field, _pool_ids)
+            if _pool_texts:
+                _rows = [{"id": pid, "content": _pool_texts.get(pid, "")}
+                         for pid in _pool_ids]
+                # ⛔ THE UNSCORED TAIL RIDES ALONG. Handing ``rerank_pool`` only
+                # the scored head made its ``unscored`` count structurally ZERO
+                # — the stats said "nothing went unscored" while every candidate
+                # past the width had gone unscored — which is the silent-cap
+                # defect reproduced INSIDE the disclosure. The tail's content is
+                # never read (it is not scored); it is here so the count is true.
+                _rows += [{"id": pid, "content": ""}
+                          for pid in result_ids[_pool_n:]]
+                _reranked, _rr_stats = rerank_pool(query, _rows, pool=_pool_n)
+                if _rr_stats.get("applied"):
+                    # ``rerank_pool`` is a permutation of what it was handed — the
+                    # scored head reordered, the unscored tail in its retrieval
+                    # order — so the read's id set is unchanged.
+                    result_ids = [r["id"] for r in _reranked]
+                # ⛔ THE CAP IS DISCLOSED, NEVER SILENT. ``rerank_pool`` bounds
+                # how many leading candidates are SCORED; rows past that width
+                # keep their retrieval order and can never be promoted, so a
+                # caller that opted into the lever must be able to tell "the
+                # reranker decided" from "the reranker never saw it". Before
+                # this, the stats were written to ``_trunc["rerank"]`` and read
+                # by NOTHING (``mark_truncation`` publishes only
+                # candidates/exact/incomplete), i.e. the cap was undisclosed.
+                # ``ran``/``reason``/``count`` follow the #8487 ``valid_time``
+                # leg precedent (``count`` = what the lever DID); the width rides
+                # as ADDITIVE keys (#4999) and ``degraded`` stays False — in a
+                # leg trace that flag means "a retrieval leg did not run".
+                if status_trace is not None:
+                    _rr_applied = bool(_rr_stats.get("applied"))
+                    status_trace.append(dict(
+                        _trace_entry(
+                            "rerank",
+                            ran=_rr_applied,
+                            degraded=False,
+                            reason=("ok" if _rr_applied else str(
+                                _rr_stats.get("degrade_reason") or "not_applied")),
+                            count=int(_rr_stats.get("moved") or 0)),
+                        **{RERANK_POOL_KEY: _pool_n,
+                           RERANK_SCORED_KEY: int(_rr_stats.get("scored") or 0),
+                           RERANK_UNSCORED_KEY: int(
+                               _rr_stats.get("unscored") or 0)}))
+
         # 5e. (#8487) VALID-TIME SELECTION — prefer the CURRENTLY-VALID version.
         #     Runs at the SAME pre-truncation seam as ``exclude_status`` (#898)
         #     so ``limit`` counts already-selected candidates: a stale claim
@@ -41761,41 +41842,6 @@ class TortoiseSDK:
         #     saturated window into COMPLETE;
         #   * an asked leg never answered (``_lost_legs``, folded above).
         _trunc["incomplete"] = bool(_leg_peak >= str_limit or _lost_legs)
-        # ── #12297: the FUSED-CANDIDATE-LIST rerank, placed AHEAD of the cut.
-        #
-        # This is the ONE wiring point for both surfaces the issue names:
-        #   * user search — a caller's own ``limit`` (MCP ``tortoise_search`` /
-        #     the SDK read);
-        #   * the capture-time noun-matching prior — ``extractor_v2._fts_rows``
-        #     calls THIS function at ``limit=3`` for every derived entity query,
-        #     so the prior leg is reranked here without a second call site and
-        #     without touching its window (``#11901`` measured the window lever
-        #     and declined it standalone; this is the PAIRED shape).
-        #
-        # ⛔ Placed BEFORE ``result_ids[:limit]`` on purpose: a reranker that
-        # ran after the cut could only reorder rows that already survived, and
-        # its entire value is choosing WHICH rows survive a fixed ``limit``.
-        # ⛔ ``rerank_pool`` is a PERMUTATION, never a filter — see its contract.
-        # ⛔ Default OFF (``TORTOISE_FUSED_RERANK``): the shipped order is
-        # byte-identical when the flag is unset, which is also why this costs
-        # one env lookup rather than a batch read on every search.
-        if result_ids and rerank_pool_enabled() and (query or "").strip():
-            _pool_ids = result_ids[:DEFAULT_FUSED_RERANK_POOL]
-            _pool_texts = _fetch_rerank_pool_texts(
-                graph, entity_type, graph_label, id_field, _pool_ids)
-            if _pool_texts:
-                _rows = [{"id": pid, "content": _pool_texts.get(pid, "")}
-                         for pid in _pool_ids]
-                _reranked, _rr_stats = rerank_pool(query, _rows)
-                _trunc["rerank"] = _rr_stats
-                if _rr_stats.get("applied"):
-                    # ``rerank_pool`` is a permutation of what it was handed, so
-                    # the scored head keeps its length and the ids past the pool
-                    # width follow in their own retrieval order, untouched.
-                    _head = [r["id"] for r in _reranked]
-                    _head_set = set(_head)
-                    result_ids = _head + [i for i in result_ids
-                                          if i not in _head_set]
         result_ids = result_ids[:limit]
 
         # 6. EP annotation (Point only)

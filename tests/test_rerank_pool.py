@@ -1,9 +1,10 @@
 """#12297 — the FUSED-CANDIDATE-LIST rerank: permutation, gate, pool width, degrade.
 
-Hermetic except the last two tests, which need the lane's DB seam like every
-other `pytest` run in this repo (epic #1647 P4). The cross-encoder is never
-loaded: the deterministic in-repo ``rerank.FakeScorer`` is injected through the
-shared ``rerank.load_scorer`` policy seam, so no model, no network, no GPU.
+The first five sections are hermetic: the cross-encoder is never loaded (the
+deterministic in-repo ``rerank.FakeScorer`` is injected through the shared
+``rerank.load_scorer`` policy seam — no model, no network, no GPU). Section 6
+runs the WIRING against a real (embedded) store, because the property it pins is
+the composed read's, not an isolated function's.
 
 The contract this file exists to pin is ONE sentence: **a reranker reorders, it
 never filters.** Everything below is a consequence or a failure mode of that:
@@ -16,11 +17,16 @@ never filters.** Everything below is a consequence or a failure mode of that:
   5. the pool's TEXT read names the right property per graph label, and restates
      exactly the two predicates the real content fetch applies — so the rerank
      cannot score a row set the caller never sees;
-  6. the wiring in ``tortoise_fts_query`` sits BEFORE ``result_ids[:limit]``,
-     which is the only placement where a rerank can change what survives a cut.
+  6. the wiring in ``tortoise_fts_query`` sits BEFORE ``result_ids[:limit]``
+     (the only placement where a rerank can change what survives a cut) and
+     BEFORE step 5e's valid-time demotion (relevance may not outrank #8487's
+     correctness guarantee); it is a permutation of the read's id set, it takes
+     its width from the SAME resolver the scorer does, and it DISCLOSES the cap
+     it applied on the leg trace — so the bound is never silent.
 """
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 
@@ -294,3 +300,111 @@ def test_pool_text_read_refuses_an_empty_id_list():
     g = _FakeGraph([["a", "x"]])
     assert sdk_mod._fetch_rerank_pool_texts(g, "point", "Point", "id", []) == {}
     assert g.calls == []
+
+
+# ── 6. the WIRING: placement, permutation, and the DISCLOSED cap ───────────
+
+@pytest.fixture
+def sdk(tmp_path, monkeypatch):
+    """A real store (embedded), so the read path's own composition is under test.
+
+    The lane's session gate still has to be satisfied by the invoking run; this
+    fixture then deletes ``TORTOISE_DB_URI`` so the module is backend-pinned
+    instead of depending on which lane happened to run it (the #8447 pattern)."""
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_POOL_FLOOR", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "rerank-pool.db"))
+    from tortoise.sdk import TortoiseSDK
+
+    s = TortoiseSDK()
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+def _seed(sdk, n):
+    for i in range(n):
+        sdk.create_point(kind="statement",
+                         content=f"zebra migration claim number {i:02d}",
+                         entity_type="point")
+
+
+def _rerank_entries(trace):
+    return [e for e in trace if e.get("leg") == "rerank"]
+
+
+def test_the_wiring_is_a_permutation_and_discloses_the_cap(
+        sdk, monkeypatch, _restore_loader):
+    """One sentence, two halves: the row SET is unchanged, and the cap is SAID.
+
+    A test that pinned the width without the disclosure would pass while the
+    bound stayed silent — and a bound on what the reranker can PROMOTE is a
+    result-shaping fact, so the disclosure is part of the contract.
+    """
+    monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+    # The width knob must reach BOTH the pool text read and the scorer: pin the
+    # DEFAULT down and set the knob above it, which is exactly the shape that
+    # used to be silently ignored (the read sliced with the constant).
+    monkeypatch.setattr(rerank, "DEFAULT_FUSED_RERANK_POOL", 2)
+    monkeypatch.setenv(rerank.FUSED_RERANK_POOL_ENV, "4")
+    _inject(rerank.FakeScorer())
+    _seed(sdk, 5)
+
+    off = sdk.tortoise_fts_query("zebra migration", entity_type="point",
+                                 limit=5)
+    trace: list[dict] = []
+    on = sdk.tortoise_fts_query("zebra migration", entity_type="point",
+                                limit=5, leg_trace=trace)
+
+    # PERMUTATION, end to end: same ids, same length, nothing dropped. The gate
+    # is the ONLY difference between the two reads.
+    assert sorted(r["id"] for r in on) == sorted(r["id"] for r in off)
+    assert len(on) == len(off)
+
+    entries = _rerank_entries(trace)
+    assert len(entries) == 1, trace
+    entry = entries[0]
+    assert entry["reason"] == "ok" and entry["ran"] is True
+    assert entry[rerank.RERANK_POOL_KEY] == 4      # the knob, not the constant
+    # SCORED + UNSCORED is the candidate set the rerank was handed. Derive it
+    # from the gate-off read at the SAME limit rather than assuming a count: the
+    # legs' own windows decide how many rows fuse, and a hand-written number
+    # would pin a property of this fixture instead of the contract.
+    candidates = len(off)
+    assert entry[rerank.RERANK_SCORED_KEY] == min(4, candidates)
+    assert (entry[rerank.RERANK_SCORED_KEY]
+            + entry[rerank.RERANK_UNSCORED_KEY]) >= candidates
+    if candidates < 5:      # no cut, so the candidate set is exactly what shipped
+        assert (entry[rerank.RERANK_SCORED_KEY]
+                + entry[rerank.RERANK_UNSCORED_KEY]) == candidates
+    else:                   # the page was cut: rows past it were never scored
+        assert entry[rerank.RERANK_UNSCORED_KEY] >= candidates - 4
+    # Degradation is NOT reported through ``degraded``: in a leg trace that flag
+    # means "a retrieval leg did not run" and would turn the read STATUS degraded.
+    assert entry["degraded"] is False
+
+
+def test_the_off_path_writes_no_rerank_trace_entry(sdk, monkeypatch):
+    """A caller that never opted in pays nothing and is told nothing — the
+    entry exists only when the lever ran, so its presence is itself the signal."""
+    monkeypatch.delenv(rerank.FUSED_RERANK_ENV, raising=False)
+    _seed(sdk, 3)
+    trace: list[dict] = []
+    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=3,
+                           leg_trace=trace)
+    assert _rerank_entries(trace) == []
+
+
+def test_the_rerank_runs_before_the_valid_time_demotion():
+    """#12297 — ORDER IS A CONTRACT, so it is pinned rather than commented.
+
+    #8487 made the valid-time demotion the read's LAST word on order: a
+    superseded claim must never be served as current on a present-tense query.
+    A relevance reorder placed after it re-promotes exactly that row. The
+    composed behaviour needs the temporal branch (intent detection + a state
+    map + edge rows) to reach, so the invariant is pinned where it is legible:
+    the call order in the source.
+    """
+    src = inspect.getsource(sdk_mod.TortoiseSDK.tortoise_fts_query)
+    assert src.index("rerank_pool(") < src.index("prefer_latest_ids(")

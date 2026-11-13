@@ -385,7 +385,6 @@ def _rerank_arm(
     sample: list[dict],
     window,
     variants,
-    find_existing_entity,
     *,
     model: str,
     pools: tuple[int, ...],
@@ -416,9 +415,10 @@ def _rerank_arm(
        score into an attach decision needs a threshold, and #11901 records a
        SECOND similarity constant as a REFUSED row beside
        ``embeddings.DEFAULT_THRESHOLD``. This arm only reorders, so the phase-1
-       attach rate is untouched by construction and is reported as such
-       (``attached_*`` is computed with the shipped matcher over the reranked
-       order to show it moved by zero).
+       attach rate is untouched BY CONSTRUCTION — the matcher is never called on
+       the reranked order, and this artifact therefore makes **no** claim about
+       the attach rate moving (an earlier draft said it computed one; it does
+       not, and it no longer says so).
     """
     from tortoise.rerank import get_scorer
 
@@ -915,7 +915,7 @@ def run(args: argparse.Namespace) -> int:
         if args.rerank:
             from tortoise.rerank import RERANK_MODEL_DEFAULT
             arms["rerank"] = _rerank_arm(
-                sample, window, variants, _find_existing_entity,
+                sample, window, variants,
                 model=args.rerank_model or RERANK_MODEL_DEFAULT,
                 pools=tuple(args.rerank_pool or RERANK_POOLS),
                 top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K,
