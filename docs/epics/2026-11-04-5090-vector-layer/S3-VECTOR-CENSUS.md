@@ -321,11 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 186 collected
-                                 # (docker lane at `eee465029a`: 185 passed, 1 skipped)
+                                 # this tree: 187 collected
+                                 # (docker lane: 186 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **186 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **187 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -364,7 +364,7 @@ actually born and where
 `main-lint.yml`'s ruff gate (`#2174`) only reds it after the fact; the scan also found the live
 `# noqa: F601` duplicate in `tests/test_commit_schema.py`, which the census-scoped pin cannot see —
 and which lint itself does NOT catch, because the suppression is on the repeated line)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 3 = 186`). ⚠️ No figure here names what `main` collects TODAY:
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 3 + 1 = 187`). ⚠️ No figure here names what `main` collects TODAY:
 which of those additions are already merged moves with `main`, so any "`main` at N" would be a moving
 reference this paragraph forbids — the total is bound to THIS TREE alone): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
@@ -404,8 +404,8 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and both splits add
-to the same `186` the pin re-derives. That is why **neither is a stale figure**: a carve-out run that
-"corrects" 185/1 to 184/2 rewrites a true record into a false one, and the pin deliberately does
+to the same `187` the pin re-derives. That is why **neither is a stale figure**: a carve-out run that
+"corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
 head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is

@@ -8746,6 +8746,20 @@ def _duplicate_key_report(violations: list[str]) -> str:
     )
 
 
+def _guard_root() -> Path:
+    """The repo root the duplicate-key scan walks, resolved from THIS FILE.
+
+    ⛔ NOT `Path.cwd()`. `Path(root).rglob(...)` resolves against the invocation
+    directory, so a CWD-derived root scans 0 modules when pytest is launched from
+    `tests/` and reds this guard on a CORRECT tree. Hoisted out of the test body
+    only so `test_the_scan_root_is_the_REPO_not_the_process_cwd` can be the
+    FALSIFIER for it: a `chdir` is the one thing that tells a file-derived root
+    apart from a CWD-derived one, and comparing without it passes under the repo
+    root, which is how CI and `tools/test_lane.py` both invoke pytest.
+    """
+    return Path(probe.__file__).resolve().parent.parent
+
+
 def _scan_declaration_roots(root: Path) -> tuple[list[str], dict[str, int]]:
     """`(violation messages, modules FOUND per root)` over `_DUP_KEY_ROOTS` under `root`.
 
@@ -8832,8 +8846,7 @@ def test_no_module_declares_the_same_dict_key_twice():
     # same derivation the module's other repo-root reads use
     # (`Path(probe.__file__).resolve().parent.parent`); `probe.REPO_ROOT` is that
     # same value, but several reads here already spell it out for the same reason.
-    violations, per_root = _scan_declaration_roots(
-        Path(probe.__file__).resolve().parent.parent)
+    violations, per_root = _scan_declaration_roots(_guard_root())
     # ⛔ THE VIOLATION IS ASSERTED FIRST. A floor failure means the guard is
     # narrower than it claims, but a live duplicate in the same run is the finding
     # the reader actually needs, and asserting floors first would hide it.
@@ -8849,6 +8862,35 @@ def test_no_module_declares_the_same_dict_key_twice():
             f"its floor of {floor} — the root was renamed, removed, or its walk broke, "
             "so the guard is now narrower than it claims. Re-derive the floor (or fix "
             f"the root) rather than lowering it. Full counts: {per_root}")
+
+
+def test_the_scan_root_is_the_REPO_not_the_process_cwd(tmp_path, monkeypatch):
+    """The FALSIFIER for `_guard_root` — a `chdir` is the only thing that tells them apart.
+
+    ⛔ WHY THIS EXISTS (#12265 review cycle 3). `_guard_root` is a fix for a measured
+    defect (a run from `tests/` scanned 0 modules and red this guard on a CORRECT
+    tree), and until this test the fix had NO driving case: mutating the return to
+    `Path.cwd()` kept the whole guard GREEN when pytest runs from the repo root —
+    which is exactly how CI and `tools/test_lane.py` invoke it — so the defect could
+    return with every assertion here still passing.
+
+    ⛔ The `chdir` is the discriminating half, not decoration. Comparing
+    `_guard_root()` against `probe.REPO_ROOT` WITHOUT moving the CWD passes under
+    either implementation, because at the repo root the two derivations agree. Only
+    after `monkeypatch.chdir(tmp_path)` do they diverge — a CWD-derived root answers
+    `tmp_path` and reds here.
+    """
+    before = _guard_root()
+    assert (before / "tortoise").is_dir() and (before / "tools").is_dir(), (
+        f"_guard_root() returned {before}, which is not this checkout — the scan would "
+        "walk roots that do not exist and satisfy its floors vacuously")
+    monkeypatch.chdir(tmp_path)
+    after = _guard_root()
+    assert after == before, (
+        f"_guard_root() moved with the CWD ({before} -> {after}): it is derived from "
+        "`Path.cwd()` (or another process-relative source) instead of this file, so "
+        "every invocation from a directory other than the repo root scans 0 modules "
+        "and the duplicate-key guard silently narrows to nothing")
 
 
 def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
