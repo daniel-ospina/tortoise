@@ -48,9 +48,13 @@ Exit codes
 ----------
   0  every gated arm passed
   1  at least one gated arm FAILED — the published artifact is broken
-  2  the canary could not be evaluated (unreadable index, no venv/network, a
-     failed install) — fail-closed, reported as RED because a detector that
-     cannot run must never look like a pass (the no-op-gate class)
+  2  the canary could not be evaluated (unreadable index, no venv/network, and a
+     failed install that pip did NOT attribute to the artifact) — fail-closed,
+     reported as RED because a detector that cannot run must never look like a
+     pass (the no-op-gate class). ⛔ An install failure the INDEX corroborates is
+     exit 1: pip's absence vocabulary is not proof of absence, but a confirmed
+     absence means users cannot install the release, which is a release finding,
+     not a detector outage (`install_and_run` / `index_absence_probe`).
 
 Usage
 -----
