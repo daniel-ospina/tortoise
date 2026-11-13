@@ -270,6 +270,167 @@ def test_wheel_mode_is_red_when_the_built_wheel_fails_its_first_command():
 
 
 # --------------------------------------------------------------------------
+# cycle-2 findings: the details and the exception surface
+# --------------------------------------------------------------------------
+
+
+def test_a_truncated_index_body_is_UNREADABLE_not_a_bare_traceback(monkeypatch):
+    """`IncompleteRead`/`BadStatusLine` are `http.client.HTTPException`, NOT
+    `OSError`, and 3.12 does not wrap them in `URLError` — so an uncaught one
+    escaped `fetch_index`, exited 1 with a traceback and produced NO report at all,
+    which the workflow summary then presents as "a release is owed" (cycle-2
+    review B-1)."""
+    import http.client
+
+    class _Truncated:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            raise http.client.IncompleteRead(b"partial", 100)
+
+    monkeypatch.setattr(canary.urllib.request, "urlopen", lambda *a, **k: _Truncated())
+    doc, reason, state = canary.fetch_index("tortoise-graph", 5)
+    assert doc is None
+    assert state == canary.INDEX_UNREADABLE, state
+    assert "IncompleteRead" in reason
+
+
+def test_a_forgotten_index_state_falls_on_the_SAFE_side():
+    """A caller that omits `*_state` while passing `*_doc=None` must land on
+    UNKNOWN/exit 2. The default `INDEX_OK` is the trap: flip it to `INDEX_ABSENT`
+    (or invert the branch) and every such caller reports a broken artifact and
+    routes a human to an irreversible upload — with nothing going red."""
+    report = canary.build_report(
+        engine_doc=None,
+        client_doc=None,
+        tree_version="0.2.0",
+        init_arm=None,
+        now=NOW,
+    )
+    assert report.get("engine-index").status == canary.UNKNOWN
+    assert report.get("client-published").status == canary.UNKNOWN
+    assert report.verdict == canary.UNKNOWN
+    assert report.exit_code == 2
+
+
+def test_wheel_mode_fail_details_do_not_claim_the_index_or_a_user(tmp_path):
+    """The arm DETAILS must branch on the mode too, not just the summary
+    paragraph: a blocked publish used to read "… from the index failed — users
+    cannot even install it" directly above "Nothing has been uploaded" (cycle-2
+    review B-4/E-4)."""
+    wheel = tmp_path / "dist" / "tortoise_graph-0.2.0-py3-none-any.whl"
+    wheel.parent.mkdir(parents=True, exist_ok=True)
+    wheel.write_bytes(b"")
+
+    init_fail, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner({"tortoise": _completed(["tortoise", "init"], 1, "", "boom")}),
+        wheel=wheel,
+    )
+    assert init_fail.status == canary.FAIL
+    assert "from the index" not in init_fail.detail
+    assert "BUILT wheel" in init_fail.detail
+    assert wheel.name in init_fail.detail, init_fail.detail
+    assert "{wheel.name}" not in init_fail.detail
+
+    install_fail, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner({"pip": _completed(["pip", "install"], 1, "", "no")}),
+        wheel=wheel,
+    )
+    assert install_fail.status == canary.FAIL
+    assert "from the index" not in install_fail.detail
+    assert "users cannot even install" not in install_fail.detail
+    # …and the WHEEL NAME must actually render: an escaped `{{wheel.name}}` emits a
+    # literal placeholder, and asserting only the ABSENCE of the wrong phrases let it
+    # through the suite (#12363 review round 3, caught by the verifier).
+    assert wheel.name in install_fail.detail, install_fail.detail
+    assert "{wheel.name}" not in install_fail.detail
+
+
+def test_the_install_cannot_resolve_from_a_configured_MIRROR(tmp_path, monkeypatch):
+    """The pip INDEX variables choose WHICH INDEX the install resolves from: on a
+    box with a mirror configured the canary would grade the mirror's copy instead
+    of what PyPI serves (cycle-2 review B-3)."""
+    for name in ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_NO_INDEX", "PIP_CONFIG_FILE"):
+        monkeypatch.setenv(name, "https://mirror.internal/simple")
+    captured = {}
+
+    class _Capture(_Runner):
+        def __call__(self, cmd, **kwargs):
+            captured["env"] = kwargs["env"]
+            return super().__call__(cmd, **kwargs)
+
+    canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Capture({}, creates_db_for="tortoise"),
+    )
+    assert not [
+        k for k in captured["env"] if k.startswith("PIP_") and k != "PIP_DISABLE_PIP_VERSION_CHECK"
+    ]
+
+
+def test_both_workflows_keep_the_transcript_and_budget_the_fetches():
+    """The evidence pairing and the budget arithmetic are pinned HERE because a
+    comment is what drifted: the publish step wrote its transcript to a directory
+    nothing uploaded (cycle-2 E-1), and one `--timeout` bounded the fetches too,
+    making the worst case exceed the job (cycle-2 B-2/E-3)."""
+    import yaml
+
+    workflows = REPO_ROOT / ".github" / "workflows"
+    canary_wf = yaml.safe_load((workflows / "release-artifact-canary.yml").read_text())
+    publish_wf = yaml.safe_load((workflows / "publish-pypi.yml").read_text())
+
+    canary_steps = canary_wf["jobs"]["canary"]["steps"]
+    canary_run = " ".join(
+        str(s.get("run", ""))
+        for s in canary_steps
+        if "published_artifact_canary" in str(s.get("run", ""))
+    )
+    assert "--fetch-timeout" in canary_run, (
+        "the canary must set both budgets: `--timeout` alone also bounds the two index "
+        "fetches, so 5 x 300 s exceeds the 20 min job and the report is never written"
+    )
+    assert "--transcript-dir" in canary_run
+    assert any(
+        s.get("if") == "failure()" and str(s.get("uses", "")).startswith("actions/upload-artifact")
+        for s in canary_steps
+    ), "the canary drops the transcript on failure"
+
+    build_steps = publish_wf["jobs"]["build"]["steps"]
+    publish_run = " ".join(
+        str(s.get("run", ""))
+        for s in build_steps
+        if "published_artifact_canary" in str(s.get("run", ""))
+    )
+    assert "--transcript-dir" in publish_run
+    assert any(
+        s.get("if") == "failure()" and str(s.get("uses", "")).startswith("actions/upload-artifact")
+        for s in build_steps
+    ), (
+        "the pre-publish gate writes a transcript it says to read ('see the transcript') "
+        "and nothing uploads it — a blocked release becomes undiagnosable"
+    )
+    # The per-command budget must fit inside a job timeout the job actually declares.
+    job_timeout = publish_wf["jobs"]["build"].get("timeout-minutes")
+    assert job_timeout, "the build job declares no timeout-minutes for the smoke to fit inside"
+    assert job_timeout * 60 >= 3 * 300
+
+
+# --------------------------------------------------------------------------
 # install_and_run — an injected runner, so the failure modes are exercised
 # --------------------------------------------------------------------------
 
