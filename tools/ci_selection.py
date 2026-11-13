@@ -3502,12 +3502,9 @@ def _is_safe_root_file(path: str) -> bool:
 # READS stays out. `README.md` (tests/test_embedded_durability_claim.py:62,
 # tests/test_capacity_page.py:40), `AGENTS.md` (the base-subset pin),
 # `.gitignore` (tests/test_kind_index.py:290) and `.env.example` are therefore
-# NOT here. `CONTRIBUTING.md` was left out of #6786's two-file reprieve on a
-# MENTION census ("the surface tooling"); re-derived here, every mention is a
-# docstring, a generated-doc link, or `scripts/record-review.sh`'s basename case
-# — no test or tool reads its CONTENT, so the mention was not a reader.
+# NOT here.
 #
-# ⛔ `CONTRIBUTING.md` is NOT here any more, and the census is why. #12313
+# ⛔ `CONTRIBUTING.md` is NOT here, and the census is why. #12313
 # (`test(surface)`, 2026-11-13) added `tests/test_surface_manifest.py:5538` —
 # `(sm.ROOT / "CONTRIBUTING.md").read_text(...)` — which READS the document to
 # pin the surface rule's own wording. That is the silent-hole class this comment
