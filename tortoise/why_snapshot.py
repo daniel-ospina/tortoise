@@ -370,9 +370,12 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
     per-point loop), so a snapshot's block is byte-equal to what the pull
     surface would compute at this instant.
 
-    A requested id with NO assembled block is either not a Point (never got a
-    block by design — the ep read is the existence anchor) or has been deleted,
-    so its snapshot is dropped: serving a why-block for a point whose
+    A requested id with NO assembled block is either (a) a NON-Point id, which
+    this cache cannot serve (its read half and ``_vanished`` are ``:Point``-
+    anchored) and which is therefore dropped from the id set before the
+    assembly — see the ``#11928`` note below, where non-Points DO get a block
+    from the assembly itself — or (b) deleted, so its snapshot is dropped:
+    serving a why-block for a point whose
     ``PointRetracted`` event is the one being delivered would state the
     opposite of the event. The drop is driven by an EXISTENCE read
     (:func:`_vanished`), never by a missing block, because a failed assembly is

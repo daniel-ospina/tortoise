@@ -792,6 +792,61 @@ def test_the_batch_read_count_is_fixed_for_a_goal_batch(sdk, monkeypatch):
 
 # ── the enriched item + the ask lane carry the dimension ──────────────────
 
+def test_one_labels_read_failure_does_not_empty_another_labels_dimension(
+        sdk, monkeypatch):
+    """Fail-open is per LABEL too, not only per dimension (review round 3).
+
+    Each dimension's ``try`` used to wrap the whole ``for _label, _ids in
+    resolved.items()`` loop. That was equivalent while a dimension was one query
+    over the ONE resolved label; after the #11928 widening it is not: ``Point`` is
+    always FIRST, so a raise on the Point instantiation aborted every remaining
+    label and the Object/Event dimension was never queried — the block survived
+    and answered nothing, which is exactly the trust failure this issue exists to
+    end. Measured as a mutant: restore the outer ``try`` and the Object's
+    ``support_chain`` comes back ``[]`` here.
+    """
+    from tortoise import why as why_module
+    from tortoise.projection import _GuardedGraph
+
+    # Two labels resolve in ONE batch: a Point claim with a supporter (a direct
+    # IMPL edge, the leg this test poisons), and a goal (:Object) whose support
+    # entry is the judgement this fixture records (the operator leg).
+    claim = sdk.create_point("caching", "the cache is warm")
+    supporter = sdk.create_point("cache-hit-rate", "the hit rate is 98%")
+    sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$a}), (t:Point {id:$t}) CREATE (a)-[:IMPL]->(t)",
+        params={"a": supporter["id"], "t": claim["id"]})
+    indicator, target_node, goal = _world(sdk, tag="fail-open")
+    _judge(sdk, indicator, target_node, goal, 8.0, at="2026-05-01T00:00:00Z")
+
+    proj = sdk._get_proj()
+    healthy = assemble_why_blocks(proj, [claim["id"], goal["id"]])
+    assert healthy[claim["id"]]["support_chain"], "fixture: the claim lost its support"
+    assert healthy[goal["id"]]["support_chain"], "fixture: the goal lost its support"
+
+    poisoned = why_module._for_label(why_module._SUPPORT_DIRECT_CYPHER, "Point")
+    real_query = proj.g.query
+
+    def _query(self, cypher, params=None, timeout=None):
+        if cypher == poisoned:
+            raise RuntimeError("injected Point support-leg read failure")
+        return real_query(cypher, params=params, timeout=timeout)
+
+    monkeypatch.setattr(_GuardedGraph, "query", _query)
+    try:
+        blocks = assemble_why_blocks(proj, [claim["id"], goal["id"]])
+    finally:
+        monkeypatch.setattr(_GuardedGraph, "query", real_query)
+
+    assert blocks[claim["id"]]["support_chain"] == [], (
+        "the injected failure did not take effect on the Point leg: "
+        + repr(blocks[claim["id"]]["support_chain"]))
+    assert blocks[goal["id"]]["support_chain"], (
+        "one label's read failure emptied EVERY label's dimension — the "
+        "Object leg's own query never ran: "
+        + repr(blocks[goal["id"]].get("support_chain")))
+
+
 def test_the_enriched_item_and_ask_entry_carry_the_assessment(sdk, monkeypatch):
     """The dimension reaches the surfaces that answer the question: the enriched
     item (search/analyze/recall) and ``item_to_why_entry`` (the ask lane)."""

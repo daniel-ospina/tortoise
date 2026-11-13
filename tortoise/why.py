@@ -1144,8 +1144,17 @@ def assemble_why_blocks(
         #    never a silent clobber of one leg). Cross-label legs can never
         #    collide: ``resolved`` groups are disjoint by construction, so no
         #    id is assembled twice.
-        try:
-            for _label, _ids in resolved.items():
+        # ⛔ #11928 review round 3: the try is INSIDE the per-label loop, on
+        #    every dimension below. It used to wrap the whole loop, which was
+        #    equivalent while a dimension was ONE query over the ONE resolved
+        #    label. With the widening it is not: a raise on the FIRST resolved
+        #    label (Point is always first) aborted the remaining labels, so a
+        #    Point read error emptied an Object's or Event's dimension without
+        #    its own query ever running — the block survived and answered
+        #    nothing, which is the trust failure this issue exists to end.
+        #    Fail-open is per DIMENSION and per LABEL, and now says so.
+        for _label, _ids in resolved.items():
+            try:
                 # ONE fusion map per label, shared by both legs: the union is
                 # re-derived and re-capped after each call (see _assemble_supports).
                 _seen: dict[str, dict[str, dict]] = {}
@@ -1165,18 +1174,19 @@ def assemble_why_blocks(
                     seen=_seen,
                     rank=_rank,
                 )
-        except Exception as e:  # noqa: BLE001, RUF100 — fail-open per dimension
-            logger.warning("W4 support-chain read failed: %s", e)
+            except Exception as e:  # noqa: BLE001, RUF100 — fail-open per label
+                logger.warning("W4 support-chain read failed for %s: %s",
+                               _label, e)
         # 3. NAND conflicts (≤ max_conflicts) — NANDer-only query.
-        try:
-            for _label, _ids in resolved.items():
+        for _label, _ids in resolved.items():
+            try:
                 _assemble_conflicts(
                     g.query(_for_label(_CONFLICTS_CYPHER, _label),
                             params={"ids": _ids}).result_set,
                     blocks,
                 )
-        except Exception as e:  # noqa: BLE001, RUF100
-            logger.warning("W4 conflict read failed: %s", e)
+            except Exception as e:  # noqa: BLE001, RUF100 — fail-open per label
+                logger.warning("W4 conflict read failed for %s: %s", _label, e)
         # 4. Supersession view — persisted flat state projection. STAYS
         #    ``:Point``-only (#11824's read gate, see the block note above), so
         #    a non-Point anchor simply has no ``supersession`` dimension.
@@ -1188,27 +1198,28 @@ def assemble_why_blocks(
         except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("W4 supersession read failed: %s", e)
         # 5. Tradeoffs — decision points only (≥ 2 alternatives).
-        try:
-            for _label, _ids in resolved.items():
+        for _label, _ids in resolved.items():
+            try:
                 _assemble_tradeoffs(
                     g.query(_for_label(_TRADEOFFS_CYPHER, _label),
                             params={"ids": _ids}).result_set,
                     blocks,
                 )
-        except Exception as e:  # noqa: BLE001, RUF100
-            logger.warning("W4 tradeoff read failed: %s", e)
+            except Exception as e:  # noqa: BLE001, RUF100 — fail-open per label
+                logger.warning("W4 tradeoff read failed for %s: %s", _label, e)
         # 6. Assessments — the derived judgement that decides the belief, with
         #    the reading/target/comparison it compared (#11928). This is what
         #    makes "why is this goal green?" answerable at all.
-        try:
-            for _label, _ids in resolved.items():
+        for _label, _ids in resolved.items():
+            try:
                 _assemble_assessments(
                     g.query(_for_label(_ASSESSMENTS_CYPHER, _label),
                             params={"ids": _ids}).result_set,
                     blocks,
                 )
-        except Exception as e:  # noqa: BLE001, RUF100
-            logger.warning("W4 assessment read failed: %s", e)
+            except Exception as e:  # noqa: BLE001, RUF100 — fail-open per label
+                logger.warning("W4 assessment read failed for %s: %s",
+                               _label, e)
         # 7. Pure projections (no reads): conflicts + dig_deeper.
         _materialize_conflicts(blocks)
         _assemble_dig_deeper(blocks)
