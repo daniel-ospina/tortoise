@@ -615,8 +615,10 @@ def test_the_row_two_MEASURES_the_EDGE_vector_door(monkeypatch):
     # halves are pinned here (`#12015` round 4: measured UNPINNED by removing the
     # `not projection["relationships_probed"]` arm and watching every test in this file
     # stay green — a green run OF THE FILE AS IT STOOD THEN, which is why no count is
-    # quoted: this file collects 183 today, so any unscoped figure here would be the
-    # stale-measurement defect the §6 note below forbids). Without it, "41 edge types
+    # quoted: this file collects a different number today, so any unscoped figure here would
+    # be the stale-measurement defect the §6 note below forbids — the reason this note
+    # names no live count at all is that a forward merge moves it, `#12281`'s own
+    # `183 -> 186` being the demonstration). Without it, "41 edge types
     # measured, none stores a vector" and "the edge arm never ran" are the SAME printed
     # evidence — `stored-without-a-query-path: none`
     # / `MET` — which is the rule the neighbouring notes already state: a `MET` must not
@@ -669,8 +671,9 @@ def test_an_edge_arm_that_stops_PLANTING_cannot_report_full_coverage(monkeypatch
     full coverage. That promise was pinned by NOTHING: deriving the population from the input
     list (`edge_probed.add(rel_type)` at the top of the per-type loop — the exact variant the
     probe's own comment calls MEASURED wrong) left the file as it stood then green at
-    `171 passed, 2 skipped` (=173, SCOPED to that head — this file collects 183 today, so the
-    figure is not re-cut). What CANNOT be reproduced here is that GREEN observation: the
+    `171 passed, 2 skipped` (=173, SCOPED to that head — this file collects a different
+    number today, so the figure is not re-cut). What CANNOT be reproduced here is that
+    GREEN observation: the
     variant is CAUGHT now — measured, it leaves the population pin above SATISFIED
     (input-derived equals `KNOWN_REL_TYPES`, so `:607` is not the assert that reds) while
     THIS test's own `relationships_probed == frozenset()` assertion below does red. Only
@@ -7912,9 +7915,9 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # existed, but the note that enrols it did not until `#12000`'s F1b note),
     # and a provenance asserted here would be the false record this note exists
     # to prevent. ⛔ The count is SCOPED
-    # to that head rather than re-cut, because this file collects 183 now and no
-    # run of it can report
-    # 152; an unscoped figure here would be the stale-measurement defect §6 of the
+    # to that head rather than re-cut, because this file collects a different number now and
+    # no run of it can report 152; an unscoped figure here would be the stale-measurement
+    # defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
     # measured at this tree, deleting the same line ADDS exactly one failure over
     # the same run's own baseline, namely
