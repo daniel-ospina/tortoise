@@ -337,8 +337,10 @@ def _retirement(node: Any, *, goal: bool = False) -> str | None:
     # review, P1). `commit_ops.OBJECT_TERMINAL_STATUSES` omits `outdated` — the
     # legacy supersede/invalidate WORD — and the OBJECT family is SPLIT about it:
     # the four retrieval legs and the recall view still SERVE an Object whose
-    # status is `outdated` (`search_engine._status_vocab_for`,
-    # `commit_ops.py:1472` states it: *"'outdated' IS visible — it is not in the
+    # status is `outdated` (`search_engine._status_vocab_for`; cited by SHAPE, not
+    # by line — a stale pointer here read `commit_ops.py:1472` while the text lives
+    # ~1,100 lines below it, #12457 review cycle 9. The source states it:
+    # *"'outdated' IS visible — it is not in the
     # object vocabulary, only in the POINT-terminal set"*), while the recall
     # fold's own exclusion, ``assembly._RECALL_OBJECT_EXCLUDED_STATUSES``, is
     # `OBJECT_TERMINAL_STATUSES | {"outdated"}` and is frozen by
@@ -1177,10 +1179,13 @@ _GONE_PROBE = "MATCH (n) WHERE n.id = $id RETURN n.id LIMIT 1"
 #: MEASURED (#12412 review cycle 5; #12457 review cycle 2): ``:Widget
 #: {id:'w-1', goalState:'met'}``, an unlabelled ``{id:'nolabel-1', goalState:'met'}``
 #: and a ``:Event {id:'e-1', goalState:'met'}`` (id present, ``eventId`` absent) each
-#: came back ``{'action': 'gone', 'reason': "the goal 'w-1' no longer exists"}``
-#: while ``MATCH (n {id:'w-1'}) RETURN n.goalState`` still answered ``met``. The
-#: payload asserted a DELETION that never happened — the same false PASS the rest of
-#: this module exists to prevent, in its most literal form.
+#: came back ``action: 'gone'`` with a ``reason`` naming that node's OWN id — the
+#: door's exact wording is ``the goal '<id>' no longer exists — its cache cannot be
+#: reconciled`` (``reconcile_goal_state_cache``'s absent arm; quoted in full here
+#: because a quotation that is not a substring of the source is this PR's defect
+#: class) — while ``MATCH (n {id:'w-1'}) RETURN n.goalState`` still answered
+#: ``met``. The payload asserted a DELETION that never happened — the same false
+#: PASS the rest of this module exists to prevent, in its most literal form.
 #:
 #: ⛔ SO THE GRAPH IS ASKED, one id-wide read, ONLY on the already-rare ``gone`` arm.
 #: A node that is still there is UNADDRESSABLE — counted with the no-``id`` shape —

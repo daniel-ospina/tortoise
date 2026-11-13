@@ -2750,7 +2750,8 @@ def test_a_goal_on_a_label_the_surface_CANNOT_RESOLVE_is_COUNTED_not_reported_GO
     ⛔ WHAT THE DEFECT WAS, measured: such a candidate was handed to the door
     anyway, and the door's only answer for an id it cannot resolve is
     ``gone: True``, documented as *"the goal node is gone"*. The sweep recorded
-    ``{'action': 'gone', 'reason': "the goal 'w-1' no longer exists"}`` for nodes
+    ``action: 'gone'`` — with the door's ``reason``, ``the goal '<id>' no longer
+    exists — its cache cannot be reconciled``, naming that node's own id — for nodes
     that were still there with ``goalState='met'`` — a DELETION asserted in the
     payload that never happened, which is a worse falsehood than the silent drop
     the sibling no-``id`` counter exists to prevent.
