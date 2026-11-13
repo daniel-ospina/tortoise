@@ -187,14 +187,21 @@ def test_the_refusal_happens_before_the_read(stub) -> None:
 @pytest.mark.parametrize("filters", [
     {"domain": "legal"},                      # one property
     {"domain": "legal", "tenant": "acme"},    # two
-    '{"domain": "legal"}',                    # a JSON string, as MCP delivers it
+    # MALFORMED JSON — the one payload that is still a `str` when the guard sees
+    # it. `_parse` runs `json.loads` on any string, so a WELL-FORMED JSON object
+    # arrives here as a dict and would pin nothing the first two cases do not
+    # (#12455 round 1, finding 4). A truthiness guard still catches this shape;
+    # an `isinstance(filters, dict)` guard would NOT, which is exactly why the
+    # guard is written on truthiness.
+    '{"domain": "legal"',
 ])
 def test_every_shape_of_a_non_empty_filters_refuses(stub, filters) -> None:
     """RED before the fix for all three shapes.
 
-    The JSON-string shape is the one that matters most: ``_parse`` hands it
-    through as a string, so a guard written as ``isinstance(filters, dict)``
-    would miss the exact form the MCP transport delivers.
+    The third case is the only payload that reaches the guard as a ``str``: a
+    well-formed JSON object is parsed into a dict by ``_parse`` first. It exists
+    so the guard cannot be narrowed to ``isinstance(filters, dict)`` without a
+    test going red.
     """
     from tortoise.mcp_server import tortoise_query
 
@@ -255,18 +262,20 @@ def test_the_structural_arm_still_applies_the_same_filters(stub) -> None:
 
 # ── the boundary this guard does NOT cover, pinned so it cannot drift ────────
 
-def test_include_retracted_in_filters_is_promoted_and_the_text_arm_ignores_it(
-    stub,
-) -> None:
-    """The one documented exception, asserted rather than left implicit.
+def test_include_retracted_is_promoted_and_APPLIED_on_the_text_arm(stub) -> None:
+    """The one exception, asserted rather than left implicit — and now HONOURED.
 
     ``include_retracted`` is popped out of ``filters`` into the parameter before
-    this guard runs, so it is not a property filter and must not be refused. The
-    ``text=`` arm does not apply it (the fts leg excludes terminal statuses
-    unless it is given ``include_terminal``), and the tool's docstring says so.
-    This test pins BOTH halves: a future change that starts refusing this shape
-    over-blocks, and one that silently starts applying it changes behaviour
-    without the docstring moving.
+    this guard runs, so it is not a property filter and must not be refused.
+    Round 1 of review found the other half: the ``text=`` arm then never applied
+    it either, so a caller who asked for tombstoned rows got them excluded with
+    no signal (the same accepted-and-dropped defect one level down). It is now
+    forwarded as the fts leg's ``include_terminal`` — an EXISTING SDK parameter
+    (sdk.py:40668), so no surface change — which is also what the tool's own
+    docstring always promised ("surfaces tombstones on every path").
+
+    Pins BOTH halves: a guard that starts refusing this shape over-blocks, and a
+    text arm that stops forwarding it silently re-opens the drop.
     """
     from tortoise.mcp_server import tortoise_query
 
@@ -278,10 +287,85 @@ def test_include_retracted_in_filters_is_promoted_and_the_text_arm_ignores_it(
     )
     fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
     assert fts, f"the text arm did not read: {stub.calls}"
-    assert "include_terminal" not in fts[0][3], (
-        "the text arm started forwarding include_retracted as include_terminal — "
-        "that is a behaviour change the docstring and the guard must move with"
+    assert fts[0][3].get("include_terminal") is True, (
+        "the text arm did not forward include_retracted as the fts leg's "
+        f"include_terminal — tombstoned rows are silently excluded: {fts[0][3]}"
     )
+
+
+def test_include_retracted_stays_false_by_default(stub) -> None:
+    """The other polarity: the default read must not start surfacing tombstones.
+
+    Fails if the forwarding is written as a constant ``True`` (an easy slip that
+    every other test here would miss, because they all pass the flag
+    explicitly).
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    tortoise_query(text="anything")
+
+    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    assert fts, f"the text arm did not read: {stub.calls}"
+    assert fts[0][3].get("include_terminal") is False, (
+        f"a default text= read started surfacing terminal rows: {fts[0][3]}"
+    )
+
+
+# ── the tag arm cannot apply filters either (#12455 round 1, P1) ─────────────
+
+@pytest.mark.parametrize("kwargs", [
+    {"tag": "pricing", "filters": {"domain": "legal"}},
+    {"tag": "pricing", "text": "q", "filters": {"domain": "legal"}},
+])
+def test_the_tag_arm_refuses_a_filters_dict_it_cannot_apply(stub, kwargs) -> None:
+    """RED before round-1's fix: the unfiltered TAG population came back.
+
+    ``query_points_by_tag(tag)`` has no filter parameter, and the guard used to
+    sit BELOW the tag branch, so `tag=…, filters=…` (and `tag=…, text=…,
+    filters=…`, where tag takes precedence) answered every tagged row with no
+    error — the same false PASS, one arm over. Fails if the guard stops covering
+    the tag arm, or if it is moved back below it.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(**kwargs)
+
+    assert _is_refusal(result), (
+        f"{sorted(kwargs)} was accepted and the filter was DROPPED — the "
+        f"unfiltered tag population was served: {len(result) if isinstance(result, list) else result}"
+    )
+    assert [c for c in stub.calls if c[0] == "query_points_by_tag"] == [], (
+        f"the tag read happened before refusing: {stub.calls}"
+    )
+
+
+def test_the_tag_arm_names_itself_in_the_refusal(stub) -> None:
+    """A message that says `text=` to a caller who passed `tag=` is a dead end.
+
+    Fails if the arm name is hard-coded rather than derived — the caller cannot
+    tell which argument to drop.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(tag="pricing", text="q", filters={"domain": "legal"})
+
+    assert _is_refusal(result), "no refusal to read a message off"
+    assert "tag=" in result["error"], result["error"]
+    assert "tag mode takes precedence" in result["error"] or "tag=" in result["error"]
+
+
+def test_a_tag_read_without_filters_still_serves(stub) -> None:
+    """The tag arm's hot path must be untouched by the widened guard.
+
+    Fails if the guard keys on ``tag is not None`` too eagerly (e.g. treating an
+    empty filters dict as a request).
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(tag="pricing")
+
+    assert not _is_refusal(result), f"refused a legitimate tag read: {result}"
+    assert [c[0] for c in stub.calls] == ["query_points_by_tag"], stub.calls
 
 
 def test_the_docstring_does_not_advertise_filters_for_the_text_arm() -> None:
