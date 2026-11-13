@@ -4777,14 +4777,14 @@ class TestThe12120ReviewRound18:
                 "RETURN s.status, s.supersededBy").result_set
             assert row and tuple(row[0]) == ("superseded", "New Team"), row
             # A re-ingest through the merged carrier stays silent (the round-19
-            # rescue's purpose). ⛔ This assertion does NOT pin the rescue's
-            # `candidate_names` argument: measured both ways on the shape below
-            # AND on a fold-only successor ('Acme Corporation' reached by
-            # `canonical_name='acme'`), the outcome is `(0, [], [])` either way,
-            # because the arm's FIRST disjunct already carries the successor's
-            # candidate set. The kwarg is passed for consistency with
-            # `_same_successor`'s contract, not because a reachable shape was
-            # shown to need it.
+            # rescue's purpose). ⚠️ CORRECTED (round 20, second pass): an earlier
+            # revision of this comment claimed the rescue's `candidate_names` was
+            # behaviour-inert here. That was measured on the two halves
+            # SEPARATELY and is false for their COMBINATION — see
+            # `TestThe12120ReviewRound20`, where the same shape plus a successor
+            # reached only by its folded key turns into a reported divergence
+            # without the kwarg (`terminal subject target` + a warn instead of
+            # `(0, [], [])`).
             applied2, skips2, msgs2 = self._apply(sdk, [
                 {"superseded": "The Team", "supersedes_by": "New Team",
                  "evidence": "test"}])
@@ -4991,6 +4991,124 @@ class TestThe12120ReviewRound18:
         assert [r[0] for r in rows] == ["three-a", "three-b"], rows
         assert widened == {"three-a": "gone-r18",
                            "three-b": "gone-r18"}, widened
+
+
+class TestThe12120ReviewRound20:
+    """The rescue's `candidate_names` is load-bearing — on the COMBINED shape.
+
+    The terminal-target rescue exists so a merge-then-supersede re-ingest stays
+    silent when the entity's REPRESENTATIVE (the retired survivor) stores a
+    divergent successor while the live carrier that was folded stores this
+    record's. Adding a successor reached only by its FOLDED key makes the rescue's
+    own comparison decisive: the retired survivor holds `Elsewhere`, so the arm's
+    first disjunct is false, and the carrier stores `_one_successor_spelling`'s
+    value (`Acme Corporation`) which folds DIFFERENTLY from the record's `Acme`.
+    Without `candidate_names` the rescue cannot see that those name one entity and
+    reports a divergence that never happened.
+
+    Measured on both families at the head that lacked the kwarg: `applied=0,
+    skips=[{'reason': 'terminal object target' / 'terminal subject target'}]` plus
+    a keep-first conflict warning, where `main` and the same graph with a
+    same-spelling successor are silent.
+
+    ⛔ Neither half alone reproduces it (a merge-then-supersede target with a
+    same-spelling successor is silent either way; so is a fold-only successor on a
+    single-node target) — which is why the first pass called this unverifiable.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r20",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_an_id_matched_subject_target_reports_instead_of_raising(
+            self, sdk_factory):
+        """An ID-matched terminal Subject refuses loudly, it does not raise.
+
+        The rescue's row set was bound inside the NAME arm, so the keep-first arm
+        (which is reached from BOTH arms) raised `UnboundLocalError` for an
+        ID-matched terminal Subject with a divergent successor — and an exception
+        is not a refusal: it aborted the whole batch, losing the #5365 report for
+        that record and every record after it, where `main` warned and skipped.
+        """
+        sdk = sdk_factory()
+        try:
+            sdk.create_subject("New Team", "organization")
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (s:Subject {id:'r20-idt', name:'Shared Co', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'Other Co'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "r20-idt", "supersedes_by": "New Team",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert any("terminal subject target" in str(s.get("reason") or "")
+                       for s in skips), (
+                f"the id-matched divergence was not reported: {skips!r}")
+            assert msgs, "the id-matched divergence emitted no warning"
+        finally:
+            sdk.close()
+
+    def test_the_object_twin_stays_silent(self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (n:Object {id:'r20-succ', name:'Acme Corporation', "
+                "canonical_name:'acme', objectKind:'organization', "
+                "status:'live'}) "
+                "CREATE (s:Object {id:'r20-surv', name:'Old Co', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Elsewhere'}) "
+                "CREATE (c:Object {id:'r20-carrier', name:'Old Co', "
+                "objectKind:'document', status:'live', "
+                "resolved_from:'r20-surv'})")
+            rec = [{"superseded": "Old Co", "supersedes_by": "Acme",
+                    "evidence": "test"}]
+            first = self._apply(sdk, rec)
+            assert first == (1, [], []), (
+                f"the fixture did not fold on the first apply: {first!r}")
+            second = self._apply(sdk, rec)
+            assert second == (0, [], []), (
+                "a merge-then-supersede re-ingest was reported as a divergence "
+                "because the rescue compared spellings without the successor's "
+                f"candidate set: {second!r}")
+        finally:
+            sdk.close()
+
+    def test_the_subject_twin_stays_silent(self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (n:Subject {id:'r20s-succ', name:'Acme Corporation', "
+                "canonical_name:'acme', subjectKind:'organization', "
+                "status:'live'}) "
+                "CREATE (s:Subject {id:'r20s-surv', name:'Old Co', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'Elsewhere'}) "
+                "CREATE (c:Subject {id:'r20s-carrier', name:'Old Co', "
+                "subjectKind:'organization', status:'live', "
+                "resolved_from:'r20s-surv'})")
+            rec = [{"superseded": "Old Co", "supersedes_by": "Acme",
+                    "evidence": "test"}]
+            first = self._apply(sdk, rec)
+            assert first == (1, [], []), (
+                f"the Subject fixture did not fold on the first apply: {first!r}")
+            second = self._apply(sdk, rec)
+            assert second == (0, [], []), (
+                "the Subject twin reported a re-ingest as a divergence because "
+                f"the rescue lacked the successor's candidate set: {second!r}")
+        finally:
+            sdk.close()
 
 
 class TestThe12120ReviewRound19:

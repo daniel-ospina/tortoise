@@ -1415,6 +1415,12 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
     # re-ingest silent when the entity's representative (the SURVIVOR) stores
     # something else (rounds 19-20).
     _subj_raw: list = []
+    # ⛔ Bound HERE, not inside the name arm (review round 20, second pass): the
+    # keep-first arm below reads it from EITHER arm, so an ID-matched terminal
+    # Subject with a divergent successor hit `UnboundLocalError` — and because an
+    # exception is not a refusal, one such record aborted the whole batch (the
+    # module's contract is the opposite) instead of warning + `_skip`ing.
+    _subj_target_rows = list(by_id)
     if len(by_id) > 1:
         # #1423 review P2: the Object twin records this refusal durably
         # (``record_non_folded``) as well as warning — the entry IS the
@@ -1456,7 +1462,6 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
         # warned and where the same graph minus that node reported
         # `terminal subject target`. That is the Object twin's round-19 finding, in
         # the arm the Object twin's fix did not reach.
-        _subj_target_rows = list(by_id)
         if by_name:
             _the_target_node = str(by_name[0][0])
             for _rep, _k2, _members in _subj_raw:
