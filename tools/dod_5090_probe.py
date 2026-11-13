@@ -5176,6 +5176,16 @@ def _sdk_methods_on_vector_leg(
         Not modelled, and named rather than implied: `global` / `nonlocal` (they rebind a name whose
         scope this walk does not track). Both are OVER-reports at worst, and a foreign receiver that
         happens to be named exactly like the enclosing class is the same direction.
+
+        ⛔ …and the PEP 572 CONTAINING-SCOPE half of the comprehension skip below (`#12182` review,
+        P3). This walk `continue`s past a comprehension subtree, but a walrus INSIDE one binds in the
+        CONTAINING scope, not the comprehension's — so `[(_pool := r) for r in rows]` followed by a
+        mention of `_pool` is published as a genuine by-reference reach. That is the OVER-report
+        direction (a cry-wolf caveat on an otherwise complete table), i.e. the safe side, which is
+        why it is disclosed here rather than fixed in a lane that came to land something else. It is
+        the same asymmetry `_NEW_SCOPE_NODES`' comment names as "the PEP 572 containing-scope rule
+        absent THERE", and the LAMBDA half of that asymmetry is what this change fixes; the
+        comprehension half is tracked separately as `#12306`.
         """
         shadowed: set[str] = set(_parameter_names(fn.args))
         for sub in list(fn.body):

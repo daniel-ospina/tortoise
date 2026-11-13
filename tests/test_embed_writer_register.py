@@ -2835,25 +2835,29 @@ def _carrier_issues_a_call(statement: ast.stmt) -> bool:
     `assert`, which discards what it evaluated.
     ⛔ `with` and `yield` must NOT be listed with the shapes above (`#12182` review, P3, re-measured
     at this head): they are REJECTED, not accepted, so they are the fail-CLOSED direction — an
-    over-block, not a blind spot. `_statements_that_store` skips every `_COMPOUND_STATEMENTS`
-    member, so a clause in a `with`'s context expression never reaches a body statement and the row
-    reds with "'…' is carried by 1 statement(s) in w, and none of them stores anything"; and
-    `_carrier_issues_a_call` answers `isinstance(statement.value, ast.Call)` for an `ast.Expr`,
-    which is False for an `ast.Yield`, so a `yield` reds the same way. Listing them as residual
+    over-block, not a blind spot. `with` reds because `_COMPOUND_STATEMENTS` is consulted at BOTH
+    gates and `ast.With`/`ast.AsyncWith` are members: `_statements_that_store` skips the container,
+    so the clause in `with <here>:` never reaches a body statement, and `_carrier_stores` sends a
+    container to that same own-scope list rather than reading its slice. `yield` reds because
+    `_carrier_issues_a_call` answers `isinstance(statement.value, ast.Call)` for an `ast.Expr`, which
+    is False for an `ast.Yield`. Both report "'…' is carried by 1 statement(s) in w, and none of them
+    stores anything". ⛔ BOTH gates are load-bearing for `with` — removing the tuple membership OR the
+    `_carrier_stores` container deferral accepts it — so naming one of them would be the same
+    claim-wider-than-mechanism defect this paragraph exists to catch. Listing either as residual
     invited a maintainer to "decide" them — which would WIDEN the hole instead of narrowing it.
-    Both directions are pinned by
-    `test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list`.
-    ⛔ `#12182` review cycle 3 (P3): TWO of the shapes above are pinned, not the list. The plain
-    `Assign` by `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual` (it rewrites the
-    shipped statement to `_unused = (…`) and `raise` by
-    `test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind`. `AnnAssign`, `AugAssign`, the
-    tuple/attribute target, `.append(…)` and `return` are NAMED here and measured by
-    hand — `return` included: it is the same data-flow class and was omitted from an earlier version
-    of THIS accounting while being named in the list above — and
-    NOTHING reds if one of them silently changes direction — the previous wording ("they are pinned …
+    The REJECT direction and the residual list are both pinned by
+    `test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list`, which also pins this
+    paragraph's own wording so the prose cannot drift away from the mechanism again.
+    ⛔ `#12182` review: FOUR of the shapes above are pinned, not the list. The plain `Assign` by
+    `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual` (it rewrites the shipped
+    statement to `_unused = (…`), `raise` by
+    `test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind`, and `return` plus `.append(…)` by
+    `test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list`'s accepted arm.
+    `AnnAssign`, `AugAssign` and the tuple/attribute target are NAMED here and measured by hand, and
+    NOTHING reds if one of THEM silently changes direction — the previous wording ("they are pinned …
     so the blind spot can narrow in neither direction silently") claimed otherwise, which is the
     stale-disclosure shape the round-10 test exists to prevent. (`with` and `yield` used to be listed
-    here; they are rejected, not accepted, and are accounted for separately below.)
+    with those three; they are rejected, not accepted, and are accounted for separately ABOVE.)
     """
     if isinstance(statement, ast.Expr):
         return isinstance(statement.value, ast.Call)
@@ -3746,6 +3750,24 @@ def test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list() -> N
             "the mechanism")
         assert "none of them stores anything" in violation, (
             f"{name} reds for a DIFFERENT reason than the disclosure names: {violation!r}")
+
+    # ⛔ …and pin the DISCLOSURE, not only the mechanism (`#12182` review, P3). The file's own
+    # convention for this docstring is a phrase pin (see `test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_residual` and the
+    # `raise` pin above), because a mechanism-only pin passes while the sentence a maintainer READS
+    # says the opposite — which is exactly how `with`/`yield` sat in the fail-OPEN list while the
+    # code rejected them. A revert that re-adds them to the residual list must red HERE.
+    doc = _carrier_issues_a_call.__doc__ or ""
+    assert "`with` and `yield` must NOT be listed with the shapes above" in doc, (
+        "`_carrier_issues_a_call` no longer forbids listing `with`/`yield` as accepted residual "
+        "shapes — measured at this head they are REJECTED, so the disclosure would again point a "
+        "maintainer at WIDENING the blind spot instead of narrowing it")
+    assert "and a `raise`/`return` that carries it" in doc, (
+        "the accepted-residual sentence changed — re-derive whether it still names ONLY shapes the "
+        "choke point actually ACCEPTS, then re-cut this pin rather than deleting it")
+    assert "accounted for separately ABOVE" in doc, (
+        "the `with`/`yield` note points somewhere it is not — the corrected accounting sits ABOVE "
+        "the pinned-shapes paragraph, and a stale directional pointer is how a reader concludes the "
+        "sentence was never re-read")
 
 
 def test_a_deleted_vector_write_reds_the_BOUND_STORE_row() -> None:
