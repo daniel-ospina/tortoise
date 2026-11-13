@@ -374,7 +374,10 @@ def test_the_install_cannot_resolve_from_a_configured_MIRROR(tmp_path, monkeypat
         "PIP_INDEX_URL",
         "PIP_EXTRA_INDEX_URL",
         "PIP_NO_INDEX",
-        "PIP_CONFIG_FILE",
+        # NOT in this stripped list: `PIP_CONFIG_FILE` is REPLACED with `os.devnull`
+        # rather than dropped (dropping it re-opens the GLOBAL-config class), and the
+        # exact-survivor assertion below is what proves the parent's value did not
+        # survive (#12363 review round 6).
         "PIP_REQUIRE_VIRTUALENV",
         "PIP_CONSTRAINT",
         # EVERY proxy spelling: pip has no `trust_env=False`, so proxies are consumed by
@@ -406,7 +409,9 @@ def test_the_install_cannot_resolve_from_a_configured_MIRROR(tmp_path, monkeypat
         runner=_Capture({}, creates_db_for="tortoise"),
     )
     assert not [
-        k for k in captured["env"] if k.startswith("PIP_") and k != "PIP_DISABLE_PIP_VERSION_CHECK"
+        k
+        for k in captured["env"]
+        if k.startswith("PIP_") and k not in ("PIP_DISABLE_PIP_VERSION_CHECK", "PIP_CONFIG_FILE")
     ]
     for spelling in ("https_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
         assert spelling not in captured["env"], (
@@ -420,6 +425,16 @@ def test_the_install_cannot_resolve_from_a_configured_MIRROR(tmp_path, monkeypat
     )
     assert "--index-url" in captured["cmd"], captured["cmd"]
     assert canary.PYPI_SIMPLE in captured["cmd"], captured["cmd"]
+    # `--isolated` narrows the config-file class but does not close it: the GLOBAL
+    # `/etc/pip.conf` still loads, and its `extra-index-url` MERGES with the CLI
+    # `--index-url`. `PIP_CONFIG_FILE=os.devnull` is the closure (pip's
+    # `_load_config_files` early-returns for every kind), so the parent's value must be
+    # REPLACED — not merely dropped — and no other `PIP_` may survive except the one this
+    # tool sets itself. Asserted as an exact set: a survivor list that grows silently is
+    # how a later `PIP_*` reintroduces the mirror (#12363 review round 6).
+    pip_survivors = {key for key in captured["env"] if key.startswith("PIP_")}
+    assert pip_survivors == {"PIP_DISABLE_PIP_VERSION_CHECK", "PIP_CONFIG_FILE"}, pip_survivors
+    assert captured["env"]["PIP_CONFIG_FILE"] == canary.os.devnull
 
 
 def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_path):
