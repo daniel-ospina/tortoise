@@ -8549,16 +8549,27 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
         "}\n", encoding="utf-8")
     # A module that cannot be parsed must be NAMED, never skip silently to a green.
     (tmp_path / "tests" / "broken.py").write_text("def (:\n", encoding="utf-8")
+    # …and neither may one that cannot be DECODED: the UNREADABLE arm is the one whose
+    # own comment states the doctrine ("a hole is a hole, not a zero"), so leaving it
+    # undriven would make that comment the only thing behind it — and its failure mode
+    # is a FALSE GREEN (the file is counted as scanned, contributes no violation, and
+    # satisfies the per-root floor).
+    (tmp_path / "tools" / "binary.py").write_bytes(b"\xff\xfe\n")
 
     violations, per_root = _scan_declaration_roots(tmp_path)
 
-    assert per_root == {"tortoise": 1, "tools": 1, "tests": 1}, per_root
+    # `binary.py` still counts as SCANNED (the counter runs before the read), which is
+    # exactly why the report — not the count — is what has to name it.
+    assert per_root == {"tortoise": 1, "tools": 2, "tests": 1}, per_root
     # The key is rendered with `repr`, so `1` and `'1'` stay distinguishable in the
     # report — the whole reason that spelling was chosen over `str(value)`.
     assert any(
         v.startswith("tortoise/dup.py:3 re-declares key 'x::y' (first at :2)") for v in violations
     ), violations
     assert any(v.startswith("tests/broken.py: UNPARSEABLE") for v in violations), violations
+    assert any(
+        v.startswith("tools/binary.py: UNREADABLE (UnicodeDecodeError)") for v in violations
+    ), violations
     # …and the clean module contributes nothing: the report is specific, not a roll-up.
     assert not any("clean.py" in v for v in violations), violations
     # ⛔ And the JOINED render — the string `test_no_module_declares_the_same_dict_key_twice`
