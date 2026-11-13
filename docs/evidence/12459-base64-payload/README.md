@@ -12,9 +12,11 @@ aboutObjects: "#12459, #11821, #12458, #5004, #11886, docs/plans/2026-11-13-issu
 # `#12459` — P2 byte measurement (base64 of packed float32)
 
 Evidence for `docs/plans/2026-11-13-issue-12459-journal-base64-payload.md`. **This directory contains a
-measurement probe, not storage code**: nothing here encodes a journal, touches a writer, or changes a
-payload. It computes lengths and bit-equality over an in-memory record set built by the **committed
-writer**.
+measurement probe, not storage code**: it changes no payload, writes no product journal and touches no
+configured path. ⚠️ **It does run the writer** — it appends the corpus to a throwaway
+`tempfile.mkdtemp()/events.jsonl` with the **committed** `EventLog.append`, then re-reads that file, because
+the baseline has to be P0's *real on-disk bytes*, not a re-serialisation. That is also why the probe is
+species-confused if described as "in-memory": the record set is in memory, the bytes it measures are not.
 
 ## What is measured, and against what
 

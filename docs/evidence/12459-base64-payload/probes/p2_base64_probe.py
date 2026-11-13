@@ -26,9 +26,12 @@ and then the two claims the format must survive:
     SAME float64 bits, so `#5004` round-7's raw-form rule is preserved by the
     encoding rather than overridden by it.
 
-⚠️ THIS IS NOT AN IMPLEMENTATION. It encodes nothing into the journal and
-touches no writer; it computes lengths and bit-equality over an in-memory
-record set. `tools/journal_growth.py` cannot answer the vector questions (it
+⚠️ THIS IS NOT AN IMPLEMENTATION. It encodes nothing into a PRODUCT journal and
+changes no payload — but it is not writer-free either, and saying so is the
+point: it writes a throwaway journal under `tempfile.mkdtemp()` with the
+COMMITTED writer (`EventLog(...).append`), then re-reads that file, because a
+baseline measured off the real writer's bytes is the only baseline that answers
+"what would this cost". Everything it prints is measured on that tempdir copy. `tools/journal_growth.py` cannot answer the vector questions (it
 re-serialises with SPACED separators — its own docstring calls the output
 attribution; see #11886), so the vector spans here are measured by walking the
 journal this probe actually wrote, on ONE ruler.

@@ -329,12 +329,12 @@ in `measurement.txt`):
    -16   0          1,524 B   381.00   True        refuses
    -20   0          1,521 B   380.25   False       refuses
   count check on the -16 frame: REFUSED (frame declares 384 elements at f32 (1536 B), decoded 1524 B)
-
-*(The block above is `measurement.txt` verbatim. The two checks disagree on exactly one row — `len%4==0` is
-`True` at −16 while the declared-count check `refuses` — and that disagreement **is** the argument: a reader
-with only the length check accepts a 381-float truncation, and the count is the only thing between it and a
-silently short vector.)*
 ```
+
+*(Quoted from `measurement.txt`, one `b64decode` message elided with `…` for width. The two checks disagree
+on exactly one row — `len%4==0` is `True` at −16 while the declared-count check `refuses` — and that
+disagreement **is** the argument: a reader with only the length check accepts a 381-float truncation, and the
+count is the only thing between it and a silently short vector.)*
 
 `b64decode` **refuses** a cut that is not a multiple of 4 characters (`Incorrect padding`, or *"cannot be 1
 more than a multiple of 4"*) — so the danger is not a partial quantum. It is the **aligned** cut: 4 base64
@@ -375,9 +375,15 @@ Two different claims get conflated under "lossless", and P2 changes which one ho
   gives back exactly the 4 bytes that were packed.
 
 That acceptance property is stated at the right width: **`base64 → float32 bits == P0 text → float32 bits
-== the producer's float32 bits`**, verified on **all five** vector-bearing records in the corpus (5 of 39;
-the probe loops every record, not one per type — `p2_base64_probe.py`, "decode equivalence"). It is **not**
-float64-value equality with P0's text, and a test that asserted that would fail on every element by design.
+== the producer's float32 bits`**, verified on **every record the probe gives a vector to — 5 of 39**, of which there are four types
+(`PointAdded`, `OperatorAdded`, `PointPromoted`, `OperatorPromoted`). ⚠️ **Say what that breadth does and
+does not mean**: the committed corpus carries exactly **one** `embedding`, a **2-element placeholder** on
+`/point/embedding`, which the probe **replaces** with its own injected 384-d `unit_vector()` before writing
+— so the five rows are five records sharing one vector, not five corpus vectors, and §2.5 says the same
+("the vector the probe injects; no corpus record carries it"). The five rows are still the right check
+because the property is **element-wise and therefore vector-independent**: each of the 384 floats must
+survive pack → base64 → unpack. It is **not** float64-value equality with P0's text, and a test that
+asserted that would fail on every element by design.
 
 That 9 significant digits suffice for float32 is float32's own structure (24-bit significand ⇒ 9 decimal
 digits round-trip; 8 do not always). Checked rather than cited, on 2,000,000 random float32 values:
@@ -731,12 +737,21 @@ journal — every frame-bearing journal is thereafter a second code path that mu
 
 ## 7. Recommendation — stated plainly, because the number is smaller than the headline
 
-**The format in §2–§4 is the correct one if P2 is taken.** It is the only **frame shape** of those compared
-— a tagged string under the existing key, against a sibling key, a nested object, a file header and a binary
-layer (§2.1, §2.5) — that satisfies all four recorded constraints at once: per-record versioning
-(append-only), a count that fails closed on the measured silent-truncation path, two widths so #5004 is
-preserved rather than overridden, and JSONL compatibility so the tear contract and the reader are not
-replaced.
+**The format in §2–§4 is the correct one if P2 is taken.** §2.1 chooses a **tagged string under the existing
+key**, against a sibling key, a nested object, a file header and a binary layer — and it satisfies all four
+recorded constraints: per-record versioning (append-only), a count that fails closed on the measured
+silent-truncation path, two widths so #5004 is preserved rather than overridden, and JSONL compatibility so
+the tear contract and the reader are not replaced.
+
+⚠️ **It is the chosen shape, not the only workable one, and the note does not claim otherwise.** The two
+structural refusals in §2.1 are the sibling key (it must drop `embedding`, and R1's *presence is ownership*
+then forces a silent re-embed) and the file header (append-only, in-place upgrade). A **nested object** is
+not refused by structure at all: it fails only because `stamp_journal_embedding` refuses a `dict` — *"the
+same branch"* that also refuses a bare string (`embeddings.py:504`) — and either would be reachable if §3.1
+decoded the value in `read_all` before the seam sees it. The flat string is preferred on **hand-readability**
+(a `b64:1:f32:384:` prefix is legible in the log without knowing the schema) and because it adds no key to
+the payload; a nested object with a version/count/width is a defensible alternative that would need its own
+measurement.
 
 ⛔ **The alphabet inside that shape is a separate choice, and base64 is not the only one that works.**
 §2.5.1 measures six: `b85` satisfies all four constraints **128 B/record cheaper** (2,670 B, 2.03×) and needs
