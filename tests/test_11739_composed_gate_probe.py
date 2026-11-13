@@ -388,6 +388,22 @@ def test_attest_rewrites_on_a_legitimate_rebind_and_still_carries_the_residual()
     assert rebound["verdict"]["all_pass"] is True
 
 
+@pytest.mark.parametrize("probe_name", ["composed_gate.py", "quote_identity.py"])
+def test_attest_refuses_an_unreadable_artifact(probe_name):
+    """FAILS IF either probe's `ATTEST-UNREADABLE` arm is weakened into a crash or a blessing.
+
+    Both probes are driven, and this is the ONE refusal shape the other cases cannot reach: every
+    other arm needs a PARSEABLE artifact to reason about, so nothing else exercises the
+    `except (OSError, ValueError)` at the top of `_attest`. Measured before this test existed:
+    deleting that `except` from `quote_identity.py` made the arm exit **1** (`FileNotFoundError`
+    out of `main`) instead of **2** with nothing red — `probe_sha256` is not a backstop, because
+    the documented repair (`--attest`) deliberately clears it. No mode bits involved, so unlike
+    the `PROBE-WRITE` arm below this needs no root skip (ENOENT for every uid).
+    """
+    rc = _load_probe(probe_name)._attest("/nonexistent-attest-target.json")
+    assert rc == 2, f"{probe_name}'s unreadable-artifact arm exited {rc}, not 2 (ATTEST-UNREADABLE)"
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits the PROBE-WRITE arm needs")
 @pytest.mark.parametrize("probe_name,artifact_name", [
     ("composed_gate.py", "gate.json"),
