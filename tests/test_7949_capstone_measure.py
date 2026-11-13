@@ -5277,10 +5277,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # transcription slip: the number is owned by another tool, so every
         # landing PR above it is a re-derivation this pin cannot do for itself.
         #
-        # So it is re-derived from THIS MERGED tree (a rebase of this branch onto
-        # `6408da01ce`, so the entry sits where THAT tree puts it), and every
-        # value below is stated with the tree it was read from, never carried
-        # across a rebase or a merge:
+        # So it is re-derived from THIS MERGED tree — `9e0bb06062`, the merge of
+        # `origin/main` (`6408da01ce`) INTO this branch, measured with
+        # `git cat-file -p 9e0bb06062 | grep '^parent'` — so the entry sits where
+        # the tree that adds both puts it. (Naming the act matters: this branch
+        # was MERGED with its base, not rebased onto it, and a comment that calls
+        # a merge a rebase sends the next reader to `git log` looking for a
+        # rewrite that never happened.) Every value below is stated with the tree
+        # it was read from, never carried across a rebase or a merge:
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
         # 9943 at `9828250732`; 9949 at `ba84fbfabf`, 9965 at `e200623286` and
