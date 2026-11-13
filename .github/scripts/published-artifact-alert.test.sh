@@ -60,7 +60,9 @@ af_file() {
 }
 
 af_resolve() {
-  printf 'VERB=resolve\n' >"$RECORDER"
+  # APPEND, not truncate: `close` resolves TWO ledgers and a per-call truncation made the
+  # harness unable to see either one missing (#12363 round 8).
+  printf -- '---\nVERB=resolve\n' >>"$RECORDER"
   while [ $# -gt 0 ]; do
     case "$1" in
       --title) printf 'TITLE=%s\n' "$2" >>"$RECORDER"; shift 2 ;;
@@ -95,8 +97,6 @@ grep -q '^VERB=file$' "$RECORDER" || note "open did not delegate to the substrat
 grep -q '^TITLE=release-artifact-canary: published PyPI artifact is red$' "$RECORDER" ||
   note "open did not pass the canary's stable title (the dedupe key)"
 grep -q '^LABEL=bug$' "$RECORDER" || note "open did not pass the bug label"
-grep -q '^TITLE=release-artifact-canary: published PyPI artifact is red$' "$RECORDER" ||
-  note "the release finding must keep its OWN ledger title"
 
 # ── 2. the exit-code branch ─────────────────────────────────────────────────────────
 grep -q 'clears when a release lands' "$RECORDER.body" ||
@@ -114,6 +114,13 @@ grep -q '^TITLE=release-artifact-canary: could not evaluate the published artifa
 if grep -q 'clears when a release lands' "$RECORDER.body"; then
   note "exit 2 body tells a human to cut a release on a detector outage"
 fi
+
+# ── 2c. a genuine release finding disproves an earlier outage ──────────────────────
+rm -f "$RECORDER" "$RECORDER.body"
+EXIT_CODE=1 GH_TOKEN="fake-token" GITHUB_REPOSITORY="o/r" RUNNER_TEMP="$tmp" \
+  open_issue >/dev/null 2>&1
+grep -qF 'TITLE=release-artifact-canary: could not evaluate the published artifact' "$RECORDER" ||
+  note "a release finding must resolve the stale outage ledger (it proves the artifact evaluates)"
 
 # ── 2b. an UNSET exit code (a cancelled step writes no output) is an outage ─────────
 rm -f "$RECORDER" "$RECORDER.body"
@@ -145,6 +152,12 @@ fi
 rm -f "$RECORDER"
 GH_TOKEN="fake" GITHUB_REPOSITORY="o/r" close_issues >/dev/null 2>&1
 grep -q '^VERB=resolve$' "$RECORDER" || note "close did not delegate to the substrate's 'resolve' verb"
+for ledger in \
+  'TITLE=release-artifact-canary: published PyPI artifact is red' \
+  'TITLE=release-artifact-canary: could not evaluate the published artifact'; do
+  grep -qF "$ledger" "$RECORDER" ||
+    note "close did not resolve the ledger: $ledger"
+done
 grep -q '^WHY=Green:' "$RECORDER" || note "close did not explain itself to the next reader"
 
 if ! ( unset GH_TOKEN; GITHUB_REPOSITORY="o/r" close_issues >/dev/null 2>&1 ); then

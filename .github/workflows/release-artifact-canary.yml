@@ -73,6 +73,9 @@ jobs:
     # `tortoise init` boot is ~90 s measured; 20 min leaves room for a slow index without
     # letting a wedged pip hold a runner for hours.
     timeout-minutes: 20
+    # The report job below reads this: it is the only severity signal the alert has.
+    outputs:
+      exit_code: ${{ steps.canary.outputs.exit_code }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -129,29 +132,54 @@ jobs:
           name: published-artifact-canary-log
           path: ${{ runner.temp }}/canary/
           if-no-files-found: warn
+
+  # ⛔ THE REPORT RUNS IN ITS OWN JOB, and this is not stylistic. `if: failure()` is
+  # JOB-scoped, and a step's outcome cannot rescue it: a job killed at its own
+  # `timeout-minutes` runs NONE of its remaining steps, `always()` included — so every
+  # in-job gate (and the round-7 `!cancelled() && contains(…, 'cancelled')`, which was also
+  # self-contradictory: `cancelled()` true ⇒ the guard false) left the alert silent in
+  # exactly the terminal state the `if: always()` transcript upload exists for. A
+  # downstream job with `needs:` and `always()` runs whenever the canary job ENDS, however
+  # it ends, and sees its conclusion as `needs.canary.result` (#12363 round 8).
+  report:
+    needs: canary
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # ⛔ The `gh` requirement belongs to THIS job, not to `canary`: the alert legs
+      # (`published-artifact-alert.sh` → `auto-file-issue.sh`) are the only `gh` users in
+      # the workflow, and they run here. A pool runner without `gh` would fail the alert
+      # step with 127 and the durable record this workflow exists to leave would never be
+      # filed (#9018, #12363 round 8).
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
       # A red here is NOT a code defect in the merged tree: it is the published artifact
       # being broken or missing, and only a release clears it. Say which, in the job
       # summary, so the next reader does not go looking for a PR to fix.
-      # ⛔ `if: failure()` alone is JOB-scoped: a checkout/setup-python failure, or a
-      # failed transcript upload, would print "cut a release" for a runner-side problem —
-      # and that ends in an irreversible upload. Gate it on the canary's OWN outcome
-      # (#12363 round 4), and BRANCH the text on the exit code: exit 2 is a detector
-      # outage, and leading it with "this clears when a release lands" is the sentence
-      # that ends in an upload nobody needed (#12363 round 5). It also covers
-      # `cancelled`: a canary killed at its own `timeout-minutes` is the ONE terminal
-      # state the `if: always()` upload exists for, and gating on `failure()` alone left it
-      # red every day with no issue filed and no explanation (#12363 round 7).
+      # The comparison is `!= "1"` on purpose: ONLY an explicit 1 means "the artifact is
+      # broken". A cancelled or timed-out canary exports NO exit code, and telling a human
+      # to cut a release on that is the sentence that ends in an unneeded upload.
       - name: What a red here means
-        if: ${{ !cancelled() && contains(fromJSON('["failure", "cancelled"]'), steps.canary.outcome) }}
+        if: ${{ needs.canary.result != 'success' }}
+        env:
+          EXIT_CODE: ${{ needs.canary.outputs.exit_code }}
         run: |
           {
-            if [ "${{ steps.canary.outputs.exit_code }}" != "1" ]; then
+            if [ "${EXIT_CODE:-}" != "1" ]; then
               echo "### This is a DETECTOR outage, not a release finding"
               echo
-              echo "The canary could not evaluate the published artifact (index unreachable,"
-              echo "or the install could not be judged either way). Nothing here says the"
-              echo "artifact is broken — do NOT cut a release on this run. The detector is"
-              echo "the thing to check; a transient index failure clears on the next run."
+              echo "The canary could not evaluate the published artifact (canary result:"
+              echo "${{ needs.canary.result }}, exit code: ${EXIT_CODE:-none}). Nothing here"
+              echo "says the artifact is broken — do NOT cut a release on this run. The"
+              echo "detector is the thing to check; a transient index failure clears on the"
+              echo "next run."
             else
               echo "### This is a RELEASE finding, not a tree finding"
               echo
@@ -160,22 +188,22 @@ jobs:
               echo "`publish-pypi.yml`) and `tortoise-client` is published. See #12363."
             fi
             echo
-            echo "exit_code=${{ steps.canary.outputs.exit_code }}"
+            echo "canary result=${{ needs.canary.result }} exit_code=${EXIT_CODE:-none}"
           } >> "$GITHUB_STEP_SUMMARY"
       # THE DURABLE RECORD. The sibling detectors this workflow is modelled on file an
       # issue and close it on recovery; a step summary is visible only to whoever opens
       # the run, so a red that opens no issue is a red nobody sees — and a 97-day broken
       # artifact can go on being broken while every summary says so (#12363 round 5).
       - name: File or refresh the alert issue
-        if: ${{ !cancelled() && contains(fromJSON('["failure", "cancelled"]'), steps.canary.outcome) }}
+        if: ${{ needs.canary.result != 'success' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EXIT_CODE: ${{ steps.canary.outputs.exit_code }}
+          EXIT_CODE: ${{ needs.canary.outputs.exit_code }}
         run: bash .github/scripts/published-artifact-alert.sh open
       # Recovery closes it, so the next red opens a fresh issue instead of hiding in a
       # stale thread (the sibling detectors' close-on-green rule).
       - name: Close the alert issue on a green run
-        if: success() && steps.canary.outcome == 'success'
+        if: ${{ needs.canary.result == 'success' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/published-artifact-alert.sh close

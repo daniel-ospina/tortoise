@@ -92,6 +92,15 @@ open_issue() {
   local rc=0
   af_file --title "$title" --body-file "$body_file" --label bug || rc=$?
   rm -f "$body_file"
+  # ⛔ An EXIT-1 run PROVES the artifact evaluates at all, so an open "could not evaluate"
+  # issue is now claiming a condition that is no longer true. Same contract the substrate
+  # states for `resolve` (#8841) — the ledger must not outlive the state that justified it
+  # (#12363 round 8). Best-effort: the filing above is the finding, this is bookkeeping.
+  if [ "$title" = "$TITLE_RELEASE" ]; then
+    af_resolve --title "$TITLE_OUTAGE" \
+      --why "The canary IS evaluating the artifact again (this run reached a verdict): the outage this issue recorded has ended." ||
+      echo "::warning::could not resolve the outage ledger"
+  fi
   return "$rc"
 }
 

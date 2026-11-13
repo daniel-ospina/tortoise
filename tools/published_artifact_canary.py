@@ -799,7 +799,11 @@ def install_and_run(
     # database SOMEWHERE under the fresh HOME keeps the property under test ("the command
     # really initialised storage") without freezing the location (#12363 round 7).
     if not db_path.is_file():
-        created = sorted(home.rglob("*.db"))
+        # …but the candidate must still be TORTOISE's store: "any *.db under HOME" would
+        # accept a cache/settings/telemetry sqlite file that some unrelated code path
+        # created, turning the "reported success but created no database" arm into one that
+        # can never fire (#12363 round 8).
+        created = sorted(p for p in home.rglob("*.db") if "tortoise" in str(p).lower())
         if created:
             db_path = created[0]
     if swept.returncode != 0:
