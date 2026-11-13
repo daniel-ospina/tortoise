@@ -2635,7 +2635,7 @@ to answer.
   `main` (`6408da01ce`) MOVED THE FILE AGAIN — by `+48` — so every number below was opened on the
   MERGED tree instead of carrying either parent's value or an offset from it.**
 - **New value — measured at this head, by opening each line:** `_collect_classify_items` at
-  `:12730`, extent `:12730-12704` (`def` to `return items`, unchanged in size); the two `if items:`
+  `:12730`, extent `:12730-12752` (`def` to `return items`, unchanged in size); the two `if items:`
   gates at `:15149`/`:15302`; the two fail-open `except` arms at `:15162`/`:15313`; the two result
   blocks at `:15611` (closing `:15617`) and `:15621` (closing `:15625`); `_run_vet_pass`'s S2.2
   call at `:17805` and its post-S4 union call at `:15278`; and the `#10360` read-back

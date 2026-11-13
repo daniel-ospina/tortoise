@@ -807,9 +807,9 @@ sed -n '45p' docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md   # "#
 # A5 (§3) — Subject 19, three of four families at zero
 grep -n -A 12 '"label_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 grep -n -A 12 '"relationship_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
-git grep -n -A 14 '_ekind = _payload_entity_kind(e)' -- tortoise/sdk.py   # the kind→label routing at the
+git grep -n -A 24 '_ekind = _payload_entity_kind(e)' -- tortoise/sdk.py   # the kind→label routing at the
                                                           # write seam (#5230/#1370's fix); symbol, not a
-                                                          # line — the -A 14 reproduces sdk.py:18203-18227
+                                                          # line — the -A 24 reproduces sdk.py:18203-18227
 for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
 # #4889's 13-type hosted census is QUOTED from its scoping comment, not re-derived here:
 gh issue view 4889 --json comments -q '.comments[].body' | grep -n -A 3 'CONTAINS` 35,046'
