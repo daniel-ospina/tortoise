@@ -354,27 +354,59 @@ def production_terms(query: str) -> tuple[list[str], bool]:
     string from this list and REFUSES on any difference. The control is
     verified, never assumed: a drifted "controlled" arm would measure a
     tokenizer that is not the product's and look perfectly healthy.
+
+    ⛔ **``#12368`` ADDED A THIRD TAIL**, after the alias and phrase tails: the
+    ``_``-PRESERVING composites (:func:`tortoise.sparse.underscore_run_terms`),
+    which is the repair this harness's own §3.4 finding asked for. It also counts
+    in ``build_or_query``'s DEGENERATE predicate, so a `_`-carrying query whose
+    plain tokens all die (``in_progress``) no longer takes the escaped-raw branch.
+    Both are reproduced below, because a control that skipped either would stop
+    reproducing the shipped leg — the one thing this module exists to guarantee.
+
+    Measured on THIS bundle's committed population (300 names): the emitted string
+    CHANGES for **87** of them, and the degenerate census moves 126 -> 125 — one
+    row (``in_progress``), whose BYTES are unchanged (the escaped literal and the
+    composite are the same string); its flag moves because the leg now hands it a
+    term list of one instead of the raw text. So the ranks in ``artifact.json`` are
+    untouched by the repair, which is why ``#12368`` did **not** re-run M3: what
+    moved is the emitted QUERY, on the very 87 names whose §3.4 mechanism row says
+    the leg emitted terms the index never holds. See the brief's §3.4 disclosure —
+    the recorded ``terms_census`` is the ``#12349`` measurement, taken before this
+    tail existed.
     """
     from tortoise.sparse import (
         DEFAULT_MAX_OR_TERMS,
+        escape_redisearch_literal,
         identifier_aliases,
         identifier_phrase_terms,
         identifier_tokens_enabled,
         tokenize_sparse_query,
+        underscore_run_terms,
+        underscore_terms_enabled,
     )
     on = identifier_tokens_enabled()
     aliases = identifier_aliases(query) if on else []
     phrases = identifier_phrase_terms(query) if on else []
+    composites = underscore_run_terms(query) if underscore_terms_enabled() else []
     tokens = tokenize_sparse_query(query, keep_numeric=False,
                                    keep_identifiers=False)
     if len(tokens) <= 1 and not aliases and not phrases:
-        return [query], True
+        if not composites:
+            return [query], True
+        # `build_or_query`'s degenerate-WITH-composites arm: the escaped literal
+        # STAYS (the non-ASCII repair — for `año_actual` the index's term is the
+        # literal, and the composite this module can build from it is a term
+        # NOTHING holds), and the composites ride beside it, deduped against it
+        # CASE-INSENSITIVELY because the index folds case.
+        literal = escape_redisearch_literal(query)
+        tail = [c for c in composites if c != literal and c != literal.lower()]
+        return [literal, *tail], False
     tokens.sort(key=len, reverse=True)  # stable — ties keep source order
     terms = list(tokens[:DEFAULT_MAX_OR_TERMS])
-    # `build_or_query`'s own dedupe: an alias/phrase already present as a plain
-    # token is not appended twice (``present = set(terms)``).
+    # `build_or_query`'s own dedupe: an alias/phrase/composite already present as
+    # a plain token is not appended twice (``present = set(terms)``).
     present = set(terms)
-    for term in list(aliases) + list(phrases):
+    for term in list(aliases) + list(phrases) + list(composites):
         if term not in present:
             present.add(term)
             terms.append(term)

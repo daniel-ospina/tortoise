@@ -117,13 +117,13 @@ contain):
 
 | what | where | what it decides |
 |---|---|---|
-| the query builder | `tortoise/sparse.py:505` `build_or_query` | OR-union of `tokenize_sparse_query` terms, then the #8933 alias/phrase tail, deduped against the originals |
-| the tokenizer | `tortoise/sparse.py:381` `tokenize_sparse_query` | splits on **every** `[^a-z0-9]` (`_SPLIT_RE` at `:58`) — **including `_`** |
-| the query term cap | `tortoise/sparse.py:63` `DEFAULT_MAX_OR_TERMS = 12` | 12 terms, longest-first |
-| the degenerate branch | `sparse.py:590` — `return escape_redisearch_literal(query)` | when ≤1 token survives, the whole query is the **escaped raw string** |
-| the leg | `tortoise/search_engine.py:2800` `run_fts_query`, Cypher at `:2986-2998` | `CALL db.idx.fulltext.queryNodes('Object', $query) … ORDER BY score DESC, <recency tie> LIMIT` |
+| the query builder | `tortoise/sparse.py:793` `build_or_query` | OR-union of `tokenize_sparse_query` terms, then the #8933 alias/phrase tail, then the #12360 `_`-preserving composite tail, deduped against the originals |
+| the tokenizer | `tortoise/sparse.py:662` `tokenize_sparse_query` | splits on **every** `[^a-z0-9]` (`_SPLIT_RE` at `:67`) — **including `_`** |
+| the query term cap | `tortoise/sparse.py:72` `DEFAULT_MAX_OR_TERMS = 12` | 12 terms, longest-first |
+| the degenerate branch | `sparse.py:931` — `return escape_redisearch_literal(query)` | when ≤1 token survives, the whole query is the **escaped raw string** |
+| the leg | `tortoise/search_engine.py:2800` `run_fts_query`, Cypher at `:3008-3017` | `CALL db.idx.fulltext.queryNodes('Object', $query) … ORDER BY score DESC, <recency tie> LIMIT` |
 | the tie key | `search_engine.py:2642` `recency_tie_clause` | `coalesce(<recency>,'') DESC, coalesce(<id>,'') DESC` — the **id key is DESC on every label** |
-| the score discard | `tortoise/search_engine.py:4492` `for rank, (pid, _score) in enumerate(ranked)` | **why this is a recall question** |
+| the score discard | `tortoise/search_engine.py:4514` `for rank, (pid, _score) in enumerate(ranked)` | **why this is a recall question** |
 | the index | `tortoise/projection/__init__.py:20346` `("Object", "name", "FULLTEXT")` (declared in `_REQUIRED_FULLTEXT_INDEXES`), created by `_create_fulltext_index` (def at `:20774`) from the `_FULLTEXT_INDEX_LABEL_FIELDS` loop at `:21224` | **no `OPTIONS`** → RediSearch defaults (language `english`, default stopwords, default tokenizer) |
 
 ---
@@ -281,7 +281,7 @@ unaffected. The movement is entirely the **73 `snake_case` names: 1 of 73 (0.014
 
 ### 3.4 The mechanism — a tokenizer contract mismatch, measured
 
-RediSearch treats `_` as a **word character**. `tortoise/sparse.py:58` does not. Probe on the lane graph
+RediSearch treats `_` as a **word character**. `tortoise/sparse.py:67` does not. Probe on the lane graph
 (v4.20.6), verbatim:
 
 ```text
@@ -293,11 +293,25 @@ RediSearch treats `_` as a **word character**. `tortoise/sparse.py:58` does not.
 'test_7949_capstone_verdict_check' -> []                    # absent from THIS probe graph (see §3.5)
 ```
 
-so for a stored `web_search` the shipped leg issues `build_or_query('web_search')` = `search|web`. The
+so for a stored `web_search` the shipped leg issued `build_or_query('web_search')` = `search|web` at the
+head this section measures. The
 query is well-formed, the leg returns nothing, and the identifier class's `recall@3` is **0.20**.
 **21** of the **300** population queries return an empty result set at k=3 — a whole-population count
 (the artifact records `rows_zero` per k, not per class), so it is not a claim about the class: most of
 that class's 72 misses at k=3 come back non-empty and simply omit the target.
+
+> ⛔ **REPAIRED AFTER THIS MEASUREMENT — the emitted-query half only (`#12368`).** Every figure in this
+> section was measured at a head where `build_or_query` emitted the split terms alone. `#12368` appends
+> the `_`-preserving composite as a further OR alternative, so the leg also sends `web_search` — the
+> term the index actually holds — and the emitted string changes for **87** of the 300 population
+> names. **M3 was NOT re-run there:** re-measuring needs a live FalkorDB lane and a `pg_search`
+> Postgres, this section's numbers are pinned cell by cell against the committed `artifact.json`, and a
+> measurement whose query changed is not repaired by editing its arithmetic. So treat this section as a
+> record of the pre-`#12368` emission, not as a statement about what ships. What did NOT change is the
+> half `#12350` owns: `tokenize_sparse_query` still splits on `_`, and the index still holds the
+> composite. The harness's `terms_census` is likewise the `#12349` reading — a re-run reads 125
+> degenerate rows rather than 126, the one row being `in_progress`, whose emitted bytes are identical
+> either way (its flag moves because the leg now hands over a term list of one).
 
 ### 3.5 The `#8933` identifier fixture — requirement 5, and the shipped leg FAILS it
 

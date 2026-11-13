@@ -932,12 +932,16 @@ def test_the_shipped_tokenizer_splits_the_run_the_index_keeps(name: str, run: st
     RediSearch treats ``_`` as a word character, so the index's term for
     ``web_search`` IS ``web_search`` (probe recorded in the brief §3.4:
     ``'web_search' -> [['web_search', 8.0]]`` while ``'web' -> []``). The
-    shipped tokenizer splits that run, so the OR query it builds contains
-    **no term the index holds** — which is why the identifier class scores
+    shipped tokenizer splits that run, so the OR query it built contained
+    **no term the index holds** — which is why the identifier class scored
     ``recall@3 = 0.20`` with 21 empty result sets.
 
-    ⛔ If this reds, the tokenizer gained ``_``-preservation: re-measure M3 and
-    update the brief. Do not delete the test to make the document true.
+    ⛔ **``#12368`` REPAIRED THE EMITTED-QUERY HALF, and this pin now asserts the
+    repaired state.** The tokenizer assertion below is UNCHANGED, and that is the
+    point: the repair is query-side, so ``_`` still splits and
+    ``tokenize_sparse_query`` is still the module #12350 has to decide about.
+    Deleting the direction instead of flipping it is what this docstring forbade,
+    so both halves are named rather than relaxed away.
     """
     from tortoise.sparse import build_or_query, tokenize_sparse_query
 
@@ -945,22 +949,28 @@ def test_the_shipped_tokenizer_splits_the_run_the_index_keeps(name: str, run: st
                                  keep_identifiers=False) == name.split("_"), (
         f"{name!r}: the tokenizer's split changed — re-measure #12298")
     emitted = build_or_query(name).split("|")
-    assert run not in emitted, (
-        f"{name!r}: build_or_query now emits the run the index holds "
-        f"({emitted}) — the measured defect is repaired; re-measure and "
-        f"rewrite the brief §3.4 rather than relaxing this assertion")
+    assert run in emitted, (
+        f"{name!r}: the emitted query no longer carries the run the index holds "
+        f"({emitted}) — #12368's `_`-preserving composite is gone, so the record "
+        f"is unretrievable by its own name again")
 
 
 def test_the_identifier_class_cannot_match_its_own_node(tool_mod) -> None:
-    """The finding in one line: every emitted term for the class is not the index's term."""
+    """The finding in one line: no emitted term WAS the index's term — now one is.
+
+    ⛔ ``#12368`` appended the ``_``-preserving composite as a further OR
+    alternative, so the set now CONTAINS the index's term while still being a real
+    multi-term query (not a fallback to the raw name). Both halves stay asserted:
+    a change that dropped the split terms would still red here.
+    """
     from tortoise.sparse import build_or_query
 
     for name in ("web_search", "verified_files", "py_compile"):
         emitted = set(build_or_query(name).split("|"))
         # The OR string is a real multi-term query (not a fallback to the raw
-        # name), and NONE of its terms is the term the index actually holds.
+        # name), and the term the index actually holds is now ONE OF its terms.
         assert len(emitted) > 1, (name, emitted)
-        assert not (emitted & {name}), name
+        assert name in emitted, name
 
 
 # ── 2. the control is verified, not assumed ─────────────────────────────────
@@ -1289,26 +1299,28 @@ _HEADLINE_ROWS: tuple[tuple[str, tuple[str, str] | None], ...] = (
 #: two halves this pin compares, so sharing one source would make the comparison
 #: vacuous.
 _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
-    ("tortoise/sparse.py", 505, "def build_or_query(",
-     "`tortoise/sparse.py:505`"),
-    ("tortoise/sparse.py", 58, "_SPLIT_RE", "`:58`"),
-    ("tortoise/sparse.py", 381, "def tokenize_sparse_query(",
-     "`tortoise/sparse.py:381`"),
-    ("tortoise/sparse.py", 63, "DEFAULT_MAX_OR_TERMS = 12",
-     "`tortoise/sparse.py:63`"),
+    ("tortoise/sparse.py", 793, "def build_or_query(",
+     "`tortoise/sparse.py:793`"),
+    ("tortoise/sparse.py", 67, "_SPLIT_RE", "`:67`"),
+    ("tortoise/sparse.py", 662, "def tokenize_sparse_query(",
+     "`tortoise/sparse.py:662`"),
+    ("tortoise/sparse.py", 72, "DEFAULT_MAX_OR_TERMS = 12",
+     "`tortoise/sparse.py:72`"),
     # ⛔ The degenerate branch is the `return`, NOT the enclosing `def`: the row
-    # cited 505 (the function header) for a statement 85 lines below it.
-    ("tortoise/sparse.py", 590, "return escape_redisearch_literal(query)",
-     "`sparse.py:590`"),
+    # cited 505 (the function header) for a statement 85 lines below it. #12360/
+    # #12368 moved it to 931 (two `return escape_redisearch_literal(query)` lines
+    # now exist and `next()` takes the FIRST, at `max_terms < 1`).
+    ("tortoise/sparse.py", 931, "return escape_redisearch_literal(query)",
+     "`sparse.py:931`"),
     ("tortoise/search_engine.py", 2800, "def run_fts_query(",
      "`tortoise/search_engine.py:2800`"),
-    ("tortoise/search_engine.py", 2986, "CALL db.idx.fulltext.queryNodes",
-     "`:2986-2998`"),
+    ("tortoise/search_engine.py", 3008, "CALL db.idx.fulltext.queryNodes",
+     "`:3008-3017`"),
     ("tortoise/search_engine.py", 2642, "def recency_tie_clause(",
      "`search_engine.py:2642`"),
-    ("tortoise/search_engine.py", 4492,
+    ("tortoise/search_engine.py", 4514,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4492`"),
+     "`tortoise/search_engine.py:4514`"),
     ("tortoise/projection/__init__.py", 20346, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:20346`"),
     ("tortoise/projection/__init__.py", 20774, "def _create_fulltext_index(",
@@ -1533,7 +1545,12 @@ def test_the_degenerate_branch_is_declared_not_hidden(tool_mod, artifact) -> Non
 
     # What the two arms do on a degenerate query, stated as behaviour.
     assert tool_mod.arm_terms("the diff") == ("the diff", True)
-    assert tool_mod.arm_terms("web_search") == ("search web", False)
+    # ⛔ `#12368`: `web_search` is NOT degenerate any more — `build_or_query` rides
+    # the composite as a further OR alternative, so the leg hands over a term LIST
+    # (the split terms, then the composite) and the two Postgres arms are two arms
+    # on this row. The census above is the `#12349` measurement, taken before that
+    # tail existed (a re-run reads 125, one row fewer); see the brief's §3.4.
+    assert tool_mod.arm_terms("web_search") == ("search web web_search", False)
 
 
 def test_degenerate_rows_are_identical_across_the_two_postgres_arms(artifact) -> None:
