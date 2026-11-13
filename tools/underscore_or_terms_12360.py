@@ -87,15 +87,26 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.12+-only import (this tool imports the retrieval stack, which pins the repo
-# floor) would raise an UNATTRIBUTED ImportError first, which reads as "this tool
-# is broken" rather than "your interpreter is too old" (D9 shape).
+# #5128: refuse a <3.12 interpreter before any real work, so the refusal is
+# ATTRIBUTED rather than a traceback from inside a function.
+#
+# ⚠️ The mechanism here is NOT the usual D9 one. This file has no 3.12-only
+# MODULE-LEVEL import — every `tortoise.*` import is function-local (`_ctx`,
+# `_authored_query_arm`), and the module-level block below is stdlib and 3.9-clean.
+# So without this guard an old interpreter would print `--help` fine and then die
+# MID-RUN, inside `_ctx`, on the retrieval stack's floor — an unattributed error
+# that reads as "this tool is broken". The guard moves that refusal to the front,
+# where it can name the floor, the interpreter and the fix.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/underscore_or_terms_12360.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        "`uv run python tools/underscore_or_terms_12360.py`"
+        # ⛔ `--help`, NOT the bare script path: `main()` requires a subcommand
+        # (`add_subparsers(dest="cmd", required=True)`), so the bare form exits 2
+        # with an argparse usage error — a SECOND unattributed error, exactly the
+        # harm #5128 was filed for (#11507, #11744). Same advice as the sibling
+        # guards in `tools/build_site_icons.py` and `tools/embedding_residual_scan.py`.
+        "`uv run python tools/underscore_or_terms_12360.py --help`"
     )
 
 import argparse
