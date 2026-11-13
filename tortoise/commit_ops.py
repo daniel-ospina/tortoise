@@ -2347,8 +2347,20 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # into a reported divergence plus a `skipped` entry — where `main`
             # (whose raw arm hit the carrier) was silent, and where hosted counts
             # a warn as a real keep-first conflict.
+            # ⛔ `not rows` is load-bearing (review round 19, second pass): an
+            # ID-matched target (`rows` non-empty) also has `_name_rows` — the
+            # rows the NAME probe matched for the SAME ref text, which may be a
+            # DIFFERENT entity that happens to carry that id as its name (the OR
+            # collision this file records as reachable). Asking THOSE rows whether
+            # the fold happened answered for the wrong node and silenced a genuine
+            # divergence (`applied=0, skips=[], warns=[]`, where the same graph
+            # with one unrelated name-match changed reported
+            # `terminal object target` and warned). The intended shape — a
+            # merge-then-supersede target whose CARRIERS store this record's
+            # successor — is reached only on the name arm.
             _stored_here = (o_sb or "")
-            if (not _same_successor(_stored_here, supersedes_by)
+            if (not rows
+                    and not _same_successor(_stored_here, supersedes_by)
                     and any(_same_successor(str(r[4] or ""), supersedes_by)
                             for r in _name_rows if len(r) > 4)):
                 continue

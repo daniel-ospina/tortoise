@@ -4891,3 +4891,57 @@ class TestThe12120ReviewRound18:
         assert [r[0] for r in rows] == ["three-a", "three-b"], rows
         assert widened == {"three-a": "gone-r18",
                            "three-b": "gone-r18"}, widened
+
+
+class TestThe12120ReviewRound19:
+    """An ID-matched target must not be judged by the NAME probe's rows.
+
+    The terminal-target arm's idempotency silence asked `_name_rows` — the rows the
+    NAME probe matched for the same ref TEXT — whether the fold had happened. When the
+    ref is an Object's id that another Object also carries as its NAME (the OR
+    collision this module records as reachable), those rows belong to a DIFFERENT
+    entity, and the guard silenced a genuine divergence: `applied=0, skips=[],
+    warns=[]` where `main` warned, and where the same graph with one unrelated
+    name-match changed reported `terminal object target`. Scoped to the name arm
+    (`not rows`), both cases behave as documented.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r19",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_an_id_matched_divergence_is_not_silenced_by_a_name_row(
+            self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            # A: the ID-matched target, terminal with a DIFFERENT successor.
+            # B: an unrelated Object whose NAME is A's id, and which already
+            #    carries this record's successor — the row that used to silence it.
+            g.query(
+                "CREATE (a:Object {id:'obj-t1', name:'Acme Holdings', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Old Co'}) "
+                "CREATE (b:Object {id:'obj-t1-name', name:'obj-t1', "
+                "objectKind:'document', status:'live', "
+                "supersededBy:'New Co'})")
+            sdk.create_object("New Co", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "obj-t1", "supersedes_by": "New Co",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert any("terminal object target" in str(s.get("reason") or "")
+                       for s in skips), (
+                "an id-matched target's DIVERGENCE was silenced by a name row of "
+                f"another entity: {skips!r} {msgs!r}")
+            assert msgs, "the divergence emitted no warning"
+        finally:
+            sdk.close()
