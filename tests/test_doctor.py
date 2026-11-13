@@ -276,7 +276,7 @@ class TestDoctorReadCappedIsAWallClock:
     """
 
     def _drip_chunk_size_server(self, drip_gap: float, bytes_to_drip: int,
-                                status: int = 200):
+                                status: int = 200, chunked: bool = True):
         """A chunked response whose CHUNK-SIZE LINE arrives one byte at a time.
 
         No newline is ever sent, so the chunk-size `readline` cannot complete —
@@ -305,9 +305,15 @@ class TestDoctorReadCappedIsAWallClock:
             try:
                 conn.recv(65536)
                 reason = {200: b"OK", 500: b"Internal Server Error"}[status]
+                # ⛔ TWO shapes share this server: `chunked` (a chunk-size line
+                # that never completes, so `read1` spins inside `readline`) and
+                # close-delimited (no `Content-Length`, no `Transfer-Encoding`,
+                # where the same interrupt makes `read1` return `b""` instead of
+                # raising). Both are drips inside ONE call; only the second can be
+                # mistaken for the peer's own end of body.
+                framing = b"Transfer-Encoding: chunked\r\n" if chunked else b""
                 conn.sendall(b"HTTP/1.1 " + str(status).encode() + b" " +
-                             reason + b"\r\n"
-                             b"Transfer-Encoding: chunked\r\n"
+                             reason + b"\r\n" + framing +
                              b"Content-Type: application/json\r\n\r\n")
                 for _ in range(bytes_to_drip):
                     conn.sendall(b"a")
@@ -368,6 +374,96 @@ class TestDoctorReadCappedIsAWallClock:
             "between-calls deadline check cannot bound it")
         assert outcome.startswith("raised") or cut, (
             f"the interrupted body was reported COMPLETE ({outcome})")
+
+    def test_a_body_the_watchdog_ended_is_never_reported_complete(self):
+        """The DETERMINISTIC form of the same defect: EOF after OUR interrupt.
+
+        The close-delimited test below exercises the shape, but on the shipped
+        code the loop's deadline check usually wins the race and reports `cut`
+        anyway, so it cannot isolate the flag. This one does: the deadline is 20 ms
+        out, the watchdog fires while `read1` is still blocked (100 ms), and
+        `read1` answers the shutdown the way a close-delimited body does — with
+        `b""`, no exception, and `length is None`. Grading that as "the stream
+        declared its end" is the false red: it reported `cut=False` for a body
+        THIS reader truncated (measured at `fb2926ef9e`).
+        """
+        import time
+
+        from tortoise import __main__ as cli
+
+        class _Sock:
+            def shutdown(self, how):        # the watchdog's only call
+                pass
+
+        class _Raw:
+            _sock = _Sock()
+
+        class _Fp:
+            raw = _Raw()
+
+        class _CloseDelimited:
+            fp = _Fp()
+            length = None                   # no declared length, either shape
+
+            def read1(self, n: int = -1):
+                time.sleep(0.1)             # the 20 ms watchdog fires in here
+                return b""                  # what a shutdown looks like here
+
+        body, cut = cli._doctor_read_capped(_CloseDelimited(), 65536,
+                                           time.monotonic() + 0.02)
+        assert body == b"", body
+        assert cut is True, (
+            "a body the watchdog ended was reported COMPLETE — the interrupt is "
+            "being read as the peer's own end of body")
+
+    def test_a_close_delimited_body_is_not_read_as_complete(self):
+        """The interrupt must be OBSERVABLE, not inferred from the body shape.
+
+        A close-delimited reply (no `Content-Length`, no `Transfer-Encoding`)
+        declares no length — `HTTPResponse.length` is None, exactly as it is for a
+        chunked body — but `read1` does NOT raise when the socket is shut down; it
+        returns `b""`. Grading that as "the stream declared its end" reported
+        `cut=False` for a body THIS reader had truncated, and a healthy
+        close-delimited `/v1/team` reply then reached the no-identity arm as
+        `❌ … Check your TORTOISE_API_URL` with exit 1 (measured at `fb2926ef9e`:
+        360 bytes, `cut=False`, 0.50 s as shipped; `cut=True` with the watchdog
+        disarmed — the interrupt itself caused the false red). The flag is what
+        separates "the peer ended the body" from "we ended it".
+        """
+        import http.client
+        import time
+
+        from tortoise import __main__ as cli
+
+        bound = 0.5
+        port, srv = self._drip_chunk_size_server(drip_gap=0.05,
+                                                 bytes_to_drip=200,
+                                                 chunked=False)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=bound)
+        try:
+            conn.request("GET", "/v1/team")
+            resp = conn.getresponse()
+            assert resp.length is None, "a close-delimited body declares no length"
+            started = time.monotonic()
+            outcome = "returned"
+            cut = False
+            try:
+                body, cut = cli._doctor_read_capped(
+                    resp, cli._DOCTOR_BODY_CAP, started + bound)
+                outcome = f"returned {len(body)} bytes cut={cut}"
+            except (OSError, http.client.HTTPException) as exc:
+                outcome = f"raised {type(exc).__name__}"
+            elapsed = time.monotonic() - started
+        finally:
+            conn.close()
+            srv.close()
+
+        assert elapsed < 6.0, (
+            f"one close-delimited read against a {bound} s deadline took "
+            f"{elapsed:.2f} s ({outcome}) — the watchdog did not interrupt it")
+        assert outcome.startswith("raised") or cut is True, (
+            f"a body THIS reader truncated was reported COMPLETE ({outcome}) — "
+            "a `b''` from an interrupt is not the peer's end of body")
 
     def test_an_http_error_body_is_bounded_the_same_way(self):
         """The THIRD call site reads an `HTTPError`, not an `HTTPResponse`.
