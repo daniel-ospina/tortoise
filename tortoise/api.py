@@ -2307,7 +2307,20 @@ class EventAPI:
         # escaped this door as a bare ``TypeError: unhashable type`` (measured,
         # cycle 6 P3), which is the un-named 500-class the eager refusal exists to
         # replace.
-        elif label_names_an_event(payload.get("label")) \
+        # ⛔ A SEPARATE `if`, NOT an `elif` on the EventRecorded arm (review: conflict-sweep
+        # lane F, P1). An `EventRecorded` record CAN also carry the state-op shape —
+        # `emit_belief("EventRecorded", id=…, label="Event", op="restatus",
+        # state={"status": "superseded"})` — and with the `elif` the arm above matched
+        # first, so this check never ran. The record then reached `_emit`, whose
+        # chokepoint runs its state-op loop UNCONDITIONALLY, raised there — inside the
+        # `except Exception` below, which re-raises only `UnapprovedKindNamespace` — and
+        # was logged and DROPPED. Measured: that call returned None with the node and
+        # the journal both unchanged, i.e. exactly the F2 divergence the door's own
+        # comment says it exists to prevent, reached through a public method.
+        # The eager check is what gives the caller a refusal NAMING the door they used;
+        # making it unconditional is also what keeps the two predicates identical rather
+        # than one being shadowed for a record type both accept.
+        if label_names_an_event(payload.get("label")) \
                 and isinstance(payload.get("op"), str) \
                 and payload.get("op") in _ENTITY_MUTATION_STATE_OPS:
             _state = payload.get("state")

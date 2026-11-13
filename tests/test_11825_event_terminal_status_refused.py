@@ -929,6 +929,35 @@ class TestTheBeliefSeam:
                 state={"status": status})
         assert _props(sdk, eid) == before
 
+    @pytest.mark.parametrize("status", _TERMINAL)
+    def test_an_event_record_carrying_the_state_op_shape_is_refused_too(
+            self, sdk, status):
+        """Conflict-sweep lane F, P1 — the two guarded shapes OVERLAP.
+
+        The state-op check sat on an `elif` under the `EventRecorded` arm, so a
+        record that is BOTH — `EventRecorded` plus `label="Event"`, `op="restatus"`,
+        `state={"status": …}` — matched the first arm and skipped the second. The
+        first arm reads a TOP-LEVEL `status`, which this payload does not carry; the
+        second would have seen it, and did not run. The record then reached `_emit`,
+        whose chokepoint sweeps the state-op shape UNCONDITIONALLY, raised THERE —
+        inside this door's `except Exception`, which re-raises only
+        `UnapprovedKindNamespace` — and was logged and DROPPED. Measured before the
+        fix: the call returned `None` with the node and the journal unchanged, i.e.
+        the F2 divergence the door's own comment says it exists to prevent, reached
+        through a public method. The check is a separate `if` now, so the refusal is
+        eager and NAMES this door.
+        """
+        eid = _event(sdk, name=f"BeliefBoth-{status}")
+        before = _props(sdk, eid)
+        journal_before = len(_journal_lines(sdk._test_log))
+        with pytest.raises(ValueError, match=":Event"):
+            self._api(sdk).emit_belief(
+                "EventRecorded", id=eid, eventKind="deployment",
+                label="Event", op="restatus", state={"status": status})
+        assert _props(sdk, eid) == before
+        assert len(_journal_lines(sdk._test_log)) == journal_before, (
+            "a refused record must not reach the journal either")
+
     def test_a_label_that_renders_two_ways_is_still_an_event(self, sdk):
         """Review cycle 8, P1 — `str(label)` is not the only renderer.
 
