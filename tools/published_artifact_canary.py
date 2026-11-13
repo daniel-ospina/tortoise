@@ -739,13 +739,48 @@ def _clean_env(home: Path) -> dict[str, str]:
     return env
 
 
+def _communicate_runner(cmd, **kwargs):
+    """`subprocess.run`, except a TIMEOUT keeps whatever the child printed.
+
+    ⛔ POSIX `subprocess.run` kills the child and re-raises `TimeoutExpired` WITHOUT
+    attaching its output (`process.kill(); process.wait(); raise` — only `_mswindows`
+    copies the streams). The transcript for the one state the alarm most needs to explain
+    — a command that HUNG — therefore ended at the bare `$ …` line and read as "the
+    command printed nothing", while `install_and_run`'s own contract promises a
+    transcript that survives the terminal state where the diagnosis is worth most
+    (#12363 round 17).
+
+    `Popen.communicate()` is documented to lose nothing when it is called AGAIN after a
+    `TimeoutExpired`, so draining there is the supported way to recover the output rather
+    than reading `exc.stdout` (which is `None` on POSIX and whose append would be a
+    silent no-op). Windows already behaves this way inside `run()`; this makes the
+    behaviour one thing on both platforms.
+    """
+    timeout = kwargs.pop("timeout", None)
+    if kwargs.pop("capture_output", False):
+        kwargs.setdefault("stdout", subprocess.PIPE)
+        kwargs.setdefault("stderr", subprocess.PIPE)
+    with subprocess.Popen(cmd, **kwargs) as process:
+        try:
+            out, err = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                # The documented drain: the bytes already in the pipes are returned.
+                out, err = process.communicate()
+            except Exception:  # evidence is best-effort; the verdict path is not
+                out, err = None, None
+            raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err) from None
+        return subprocess.CompletedProcess(cmd, process.returncode, out, err)
+
+
 def install_and_run(
     *,
     package: str,
     version: str,
     workdir: Path,
     timeout: float,
-    runner=subprocess.run,
+    runner=_communicate_runner,
     wheel: Path | None = None,
     transcript_path: Path | None = None,
     absent_probe=None,
@@ -880,7 +915,10 @@ def install_and_run(
                     "engine-init",
                     UNKNOWN,
                     f"`pip install` could not be evaluated (exit {installed.returncode}): "
-                    f"{(installed.stderr or '').strip().splitlines()[-1:] or ['no output']}",
+                    # ⛔ The LAST LINE, not `[-1:]` — a one-element LIST interpolates its
+                    # repr (`['ERROR: …']`) into the arm detail, which is rendered
+                    # verbatim in the step summary and the issue body (#12363 round 17).
+                    f"{next(iter((installed.stderr or '').strip().splitlines()[-1:]), 'no output')}",
                 ),
                 "\n".join(transcript),
             )
@@ -971,6 +1009,25 @@ def install_and_run(
             )
         swept = run([str(console), "init"], "the documented first command, fresh HOME")
     except subprocess.TimeoutExpired as exc:
+        # Whatever the command printed BEFORE the kill is evidence and must reach the
+        # transcript: the default runner drains it into the exception (see
+        # `_communicate_runner`). A runner that cannot supply it leaves `None`, which is
+        # then NAMED rather than shown as silence — the reader must never be handed a bare
+        # `$ …` line and told it means the command was quiet (#12363 round 17).
+        recovered = False
+        for stream in (exc.stdout, exc.stderr):
+            if stream:
+                transcript.append(stream.rstrip())
+                recovered = True
+        transcript.append(
+            f"[killed at the {exc.timeout}s budget — the command did not finish; "
+            + (
+                "the output above is what it produced first]"
+                if recovered
+                else "no output was recovered]"
+            )
+        )
+        flush()
         return (
             Arm("engine-init", UNKNOWN, f"timed out after {exc.timeout}s"),
             "\n".join(transcript),

@@ -1314,6 +1314,107 @@ def test_a_timeout_is_unknown_not_green(tmp_path):
     assert arm.status == canary.UNKNOWN
 
 
+def test_a_timeout_KEEPS_the_output_the_command_had_already_produced(tmp_path):
+    """The hung-command state is the one the alarm most needs to explain, and it used to
+    arrive as a bare `$ …` line — i.e. as silence (round 17).
+
+    On POSIX `subprocess.run` re-raises `TimeoutExpired` WITHOUT the child's output, so
+    appending `exc.stdout` there is a no-op; the default runner drains the pipe instead
+    (`canary._communicate_runner`). This case pins what the transcript must carry when a
+    runner CAN supply it, and the next one pins that a runner which cannot is not left
+    looking like a quiet command.
+    """
+
+    def boom(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd, kwargs.get("timeout", 1), output="Collecting numpy\nDownloading numpy-2.1.0.whl\n"
+        )
+
+    arm, transcript = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=7.0,
+        runner=boom,
+    )
+    assert arm.status == canary.UNKNOWN
+    assert "Collecting numpy" in transcript, transcript
+    assert "killed at the 7.0s budget" in transcript, transcript
+    assert "the output above is what it produced first" in transcript, transcript
+
+
+def test_a_timeout_with_NO_recoverable_output_SAYS_so_instead_of_implying_silence(tmp_path):
+    def boom(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 1))
+
+    _arm, transcript = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=boom,
+    )
+    assert "no output was recovered" in transcript, transcript
+    assert "the output above is what it produced first" not in transcript, transcript
+
+
+def test_the_DEFAULT_runner_recovers_output_from_a_command_it_kills(tmp_path):
+    """Drives the REAL runner against a REAL hung child, and pins that it is the DEFAULT.
+
+    ⛔ Both halves are load-bearing (#12363 round 17). Driving `_communicate_runner`
+    directly proves the drain works but NOT that `install_and_run` uses it: reverting the
+    default to `subprocess.run` left this case GREEN, because the output-losing runner it
+    exists to replace was never reached. A pin that cannot fire on the regression it
+    describes is the defect this suite is about.
+    """
+    # The wiring half: the default must BE the draining runner, or the canary loses the
+    # diagnosis in exactly the hung-command state the alarm exists for.
+    import inspect
+
+    default = inspect.signature(canary.install_and_run).parameters["runner"].default
+    assert default is canary._communicate_runner, (
+        f"install_and_run defaults to {default!r}: a POSIX timeout then re-raises "
+        "without the child's output and the transcript shows silence"
+    )
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        canary._communicate_runner(
+            [
+                sys.executable,
+                "-c",
+                "import time; print('Collecting numpy', flush=True); time.sleep(60)",
+            ],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    assert "Collecting numpy" in (raised.value.stdout or ""), raised.value.stdout
+
+
+def test_the_pip_failure_detail_is_the_LAST_stderr_LINE_not_a_list_repr(tmp_path):
+    """`splitlines()[-1:]` interpolates a one-element LIST, so the arm detail — rendered
+    verbatim in the step summary and the alert issue's body — read
+    `['ERROR: something weird']` (#12363 round 17)."""
+    arm, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Runner(
+            {
+                "pip": _completed(
+                    ["pip", "install"], 1, "", "a warning line\nERROR: something weird\n"
+                )
+            },
+            creates_db_for=None,
+        ),
+    )
+    assert arm.status == canary.UNKNOWN, arm
+    assert "ERROR: something weird" in arm.detail, arm.detail
+    assert "a warning line" not in arm.detail, arm.detail
+    assert "['" not in arm.detail and "']" not in arm.detail, arm.detail
+
+
 def test_wheel_mode_installs_the_local_file_not_the_index(tmp_path):
     """The pre-publish gate must install the exact bytes about to be uploaded;
     an index spec here would test the PREVIOUS release instead of this build."""
