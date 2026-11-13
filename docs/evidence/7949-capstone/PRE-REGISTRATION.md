@@ -2716,8 +2716,10 @@ to answer.
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file, and the bundle README's present-tense digest with it.
-- **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
-  supersede marker.
+- **This entry was LIVE for the merged tree until §10.31** — §10.31 is its successor for the rest
+  of the `+83` block (§10.30 declared that work a follow-up; §10.31 discharges it). The three
+  numbers THIS entry owns — `:10619`, `:14359`, `:14512` — are unchanged and still live, so it is
+  not superseded on them.
 
 ### 10.31 — §10.30's declared follow-up: `_collect_classify_items`, the fail-open pair, and §9/§11's carriers (2026-11-13, `#12295`)
 

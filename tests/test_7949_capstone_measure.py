@@ -11972,7 +11972,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # SAME LINE (the block's line count was held at 13 so every cite below keeps its number) and that
     # the retracted sentence is gone from the file entirely.
     assert "result[\"relations\"]" in ext[11607 - 1], (
-        f"extractor_v2.py:11524 reads {ext[11607 - 1].strip()[:90]!r} — the record's three-hit grep "
+        f"extractor_v2.py:11607 reads {ext[11607 - 1].strip()[:90]!r} — the record's three-hit grep "
         "is scoped to this channel, so the line it names must still carry the token")
     # The block is READ AS ONE PROSE UNIT: it wraps mid-sentence, so a literal phrase match would
     # pin the line breaks rather than the claim (measured: `IS consumed` spans two comment lines).
