@@ -8738,6 +8738,13 @@ def test_the_duplicate_key_detector_catches_a_duplicate():
     assert _duplicate_constant_key_sites("D = {+1: 'a', 1: 'b'}\n") == [(1, 1, "1")]
     assert _duplicate_constant_key_sites("D = {(-1, 2): 'a', (-1, 2): 'b'}\n") == [
         (1, 1, "(-1, 2)")]
+    # ⛔ `bool` is an `int` in this arm ON PURPOSE (`+True` IS `1`), and that is what
+    # makes `{+True: 'a', True: 'b'}` a real duplicate — `ruff F601` flags it too. Nothing
+    # pinned it until a review MEASURED the narrowing: `isinstance(operand, (int, float,
+    # complex))` → `type(operand) in (int, float, complex)` reads like a tidy-up, makes the
+    # scan return `[]`, and leaves the whole suite GREEN — a false PASS on a shape lint
+    # catches, i.e. exactly the weakness this arm exists to avoid.
+    assert _duplicate_constant_key_sites("D = {+True: 'a', True: 'b'}\n") == [(1, 1, "True")]
     # …and the sign is compared, not stripped: `-1` and `1` are DIFFERENT keys.
     assert _duplicate_constant_key_sites("D = {-1: 'a', 1: 'b'}\n") == []
     # An F-STRING key is a gap a fresh review MEASURED in this guard: the scan returned
@@ -8909,8 +8916,11 @@ def test_no_module_declares_the_same_dict_key_twice():
     # ⛔ …and a floor of ZERO is the same hole: `per_root[name] >= 0` is true for a walk
     # that yielded nothing, so `{n: 0 for n in _DUP_KEY_ROOTS}` satisfies the loop below
     # while making the non-vacuity claim vacuous — measured GREEN before this assert
-    # existed. The comment says "non-zero"; this is the line that enforces it.
-    assert all(floor > 0 for floor in _MIN_MODULES.values()), (
+    # existed. The comment says "non-zero"; this is the line that enforces it. ⛔ And an
+    # EMPTY population is the same vacuity one level up: `all(...)` over no values is True
+    # and the key-set equality is satisfied by two empty containers, so the scan walks
+    # nothing and passes — measured GREEN with `_DUP_KEY_ROOTS = ()`.
+    assert _MIN_MODULES and all(floor > 0 for floor in _MIN_MODULES.values()), (
         f"every floor must be non-zero, or a root that yields nothing passes — {_MIN_MODULES}")
     # ⛔ THE REPO ROOT COMES FROM THE FILE, NOT THE CWD (#12265 review):
     # `Path(root).rglob` resolves against the invocation directory, so a run from
