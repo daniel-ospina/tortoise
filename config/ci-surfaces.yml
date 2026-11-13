@@ -737,6 +737,24 @@ surfaces:
   # exists for (the "guard for X does not run when X changes" class). The `core`
   # arm covers the `record_projection.py` migration resolver the same pin reads.
   - test_health_build_identity_10447.py
+  # #10488: the `/health` consent-key block (`consent_token_key`). DUAL-REGISTERED (api + core) for
+  # exactly the reason above: `tortoise/hosted_api.py` is an exact `api` SOURCE_PATTERN and a match
+  # REPLACES the `core` fallback, so registering this only in `core` would mean a hosted_api.py-only
+  # diff that dropped or broke the block ran NO guard at all. Measured before this row existed:
+  # `tools/ci_selection.py --changed-files tortoise/hosted_api.py` → surfaces ['api','onboarding']
+  # and the file was NOT selected. Coverage of the OTHER files this change touches is by different
+  # mechanisms, each verified: a `tools/consent_key_check.py`-only edit selects `api` through its
+  # SOURCE_PATTERNS row (see `tools/ci_selection.py`), a Pages-route edit
+  # (`functions/api/consent/key.ts`) selects `onboarding`, where `test_oauth_consent_bff_routes.py`
+  # lives and pins the cross-language fingerprint equality, and a workflow edit sets `full: true`.
+  - test_consent_key_fingerprint_10488.py
+  # #10488: the drift COMPARISON's verdict table. Registered in `api` as well as `core` because
+  # `tools/consent_key_check.py` is an `api` SOURCE_PATTERNS row (a checker-only edit would otherwise
+  # select no surface at all — `tools/` is a flat NON_PYTHON_PREFIXES entry), and a named-surface
+  # match REPLACES the `core` fallback. The `core` arm carries the same pin wherever `core` is
+  # selected — measured: `--changed-files config/ci-surfaces.yml` → `['core']`, both consent
+  # guards selected. It is NOT a per-class claim: see the note on the `api` row above.
+  - test_consent_key_check.py
   # #7816: importing tortoise.hosted_api must not write the audit JSONL fallback
   # into $HOME. Dual-registered from `core` for the reason this list exists: the
   # guard subprocess-imports tortoise/hosted_api.py, an exact `api` surface match
@@ -5935,6 +5953,32 @@ surfaces:
   # guard tests key presence); a ZERO row packs it at weight 0. Neither is a
   # substitute for the measured value (#4259 review).
   - test_fly_secret_drift.py
+  # #10488: the consent bridge's key-fingerprint halves. Registered in `core` beside the other
+  # deploy-time config guards (test_fly_secret_drift.py, test_fly_machines_guard.py,
+  # test_deploy_workflow.py) because the defect it closes is the SAME class one provider along: a
+  # secret whose value is set by hand in one deployment and by CI in the other, with no comparison
+  # between them. `test_consent_key_check.py` pins the comparison's verdict table (including the
+  # MISMATCH arm, which is the 2026-11-01 incident); `test_consent_key_fingerprint_10488.py` pins the
+  # published reading itself, including the `/health` block.
+  # ⛔ `test_consent_key_fingerprint_10488.py` is DUAL-REGISTERED (`api` + here). `tortoise/hosted_api.py`
+  # is an EXACT `api` SOURCE_PATTERN, and a match REPLACES the `core` fallback — so a
+  # hosted_api.py-only diff that dropped or broke the `/health` block would select `api` and this
+  # guard would NOT run. Measured: `tools/ci_selection.py --changed-files tortoise/hosted_api.py` →
+  # surfaces `['api','onboarding']`, and the `api` row above is what makes the pin run there.
+  # ⛔ The `core` arm does NOT cover the other file classes of this change — measured, one row each:
+  # a `tools/consent_key_check.py` edit selects `api` (its own SOURCE_PATTERNS row, so both consent
+  # guards run); a `docs/engineering/auth/consent-identity-bridge.md` edit selects
+  # `['api','onboarding']` (that doc is now an `api` SOURCE_PATTERNS row too — ⛔ NOT because it
+  # ran no guard before: `onboarding` already runs three consent guards on it, but NONE of them
+  # pins §2.5, so a §2.5-only rewrite of the runbook was invisible — and the pin that DOES cover
+  # §2.5 (`test_the_SPEC_section_2_5_still_states_the_contract_the_code_implements`, in
+  # `test_consent_key_fingerprint_10488.py`) lives in `api`, which the `api` row above is what selects); a
+  # `functions/api/consent/key.ts` edit selects `onboarding` (the BFF suite pins the cross-language
+  # equality); and a workflow edit sets
+  # `full: true`. What the `core` arm covers is the diff that SELECTS `core` — measured:
+  # `--changed-files config/ci-surfaces.yml` → `['core']`, both guards selected.
+  - test_consent_key_check.py
+  - test_consent_key_fingerprint_10488.py
   # #5656: the MACHINE-side half of #4568 — asserts the RUNNING machine's
   # `config.env` carries every `fly-toml-env` name with the value `fly.toml`
   # `[env]` declares. Registered in `core` beside its sibling deploy-time guards
