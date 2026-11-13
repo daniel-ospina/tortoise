@@ -63,7 +63,10 @@ Zep/Graphiti (`graphiti_core/utils/maintenance/dedup_helpers.py`, read at
    :data:`AMBIGUOUS_KEYS` and attaches **only when exactly one live candidate
    carries it AND the population is known complete** — the same "bare-form
    fallback ONLY when unambiguous" discipline ``_find_existing_entity`` already
-   applies to kinds. ⚠️ A bare ``#`` reference is NOT in this class:
+   applies to kinds. ⚠️ **No production caller passes ``complete=True`` today**:
+   the only non-test caller is ``extractor_v2._find_by_folded_key``, whose
+   population is a capped capture window, so a basename never decides there and
+   the rule is currently held for a complete-population caller. ⚠️ A bare ``#`` reference is NOT in this class:
    ``normalize_entity_name`` folds ``#12295`` to ``12295``, so it travels the
    ordinary ``E`` key and attaches on equality like any other fold. It was the
    documented reason for a ``H`` key namespace that this module does not have.

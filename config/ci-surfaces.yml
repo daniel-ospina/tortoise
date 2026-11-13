@@ -3737,6 +3737,22 @@ surfaces:
   # break the create-side resolution runs NONE of these tests (measured:
   # `❌ manifest drift: ['test_12047_entity_resolution.py']`).
   - test_12047_entity_resolution.py
+  # #12295: the comparison-side key set and the multi-key blocking union, and the
+  # pair-completeness/duplicate-rate measurement `#11901`'s corpus is read for.
+  # `core` for the same reason as the two rows above: the subjects are
+  # `tortoise/entity_blocking.py` (new), `tortoise/entity_resolver.py` and
+  # `tortoise/extractor_v2.py`, all of which select `core` ALONE — so a PR that
+  # adds the fold or the blocker would otherwise run NONE of its own evidence.
+  # Verified against the gate this row exists for: both files were in NO surface
+  # when the PR landed them (measured: `❌ manifest drift:
+  # ['test_12295_entity_blocking.py', 'test_12295_fold_blocking_measurement.py']`
+  # — the same defect `test_10997_identity_hold.py` and
+  # `test_11653_s3_hold_not_add.py` record one row up).
+  - test_12295_entity_blocking.py
+  # The measurement pins. Hermetic: they read the COMMITTED artifact and the
+  # brief from disk and assert the numbers agree — no DB, no network, no model —
+  # so they cost milliseconds and belong wherever the mechanism's tests are.
+  - test_12295_fold_blocking_measurement.py
   - test_ci_verdict.py
   # #10962/#10968: the owner-facing merge-readiness gate — six conditions over the tree, the
   # required checks, the review record, coverage, the declared exclusions and open blocking
@@ -12307,6 +12323,16 @@ durations:
   test_bounded_raw_clients_3065.py: 21.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 12.6
   test_socket_bound_not_multiplied_2969.py: 2.2  # Readings: 4.0s warm on the authoring box, 8.1s cold on a reviewer box (first import of redis/falkordb/tortoise.projection dominates); the two socket measurements themselves are ~1.0s each. Declared at the HIGHER reading so a cold leg cannot under-pack — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 7.5
   test_entity_identity.py: 16.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 14.9
+  # #12295: new in this PR — the #3400/#4348 trap applies (a file a PR ADDS can
+  # never carry a junit reading yet), so these take the header's flat
+  # `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a
+  # SHARD-LAYOUT input. MEASURED LOCALLY as context only, not as the weight:
+  # 4.4 s for the whole entity-blocking file (23 cases; hermetic, no DB) and
+  # 3.5 s for the 7 measurement pins. Both are millisecond-scale, so the flat
+  # default OVERSTATES them until the refresher re-bases them, which is the safe
+  # direction for a shard layout.
+  test_12295_entity_blocking.py: 2.0
+  test_12295_fold_blocking_measurement.py: 2.0
   test_3589_3326_salvage.py: 4.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652): a single-test file cannot prove full coverage from a partial reading; the reading (0.2s) is a LOWER bound; kept 4.2
   test_5388_org_enumeration_completeness.py: 6.8  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 3.8
   test_7951_write_doors.py: 11.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 7.5
