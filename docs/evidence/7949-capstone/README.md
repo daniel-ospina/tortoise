@@ -378,7 +378,7 @@ one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:14766-14769` — the classify block starts at `:14766`, the vet surface at `:14770` — and `:15653-15659` / `:15663-15667`, the two result blocks). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:14766-14770` — the classify block starts at `:14766`, the vet surface at `:14770` — and `:15653-15659` / `:15663-15667`, the two result blocks). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -1184,7 +1184,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 The pipeline's OWN path WAS `TortoiseSDK.capture_session` (**DELETED by #4282**, 2026-10-27 —
 this bundle's probes now drive the private `sdk._capture_session`) →
 `sdk._extract_session_v2` (`sdk.py:17912`; called at `:16801`) →
-`extractor_v2.extract_session_v2` (`extractor_v2.py:13705`), which calls, in one pass.
+`extractor_v2.extract_session_v2` (`extractor_v2.py:14620`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
 re-derived from the tree at the head it is stamped at and is paired with the symbol it names —
@@ -1210,12 +1210,12 @@ the same lesson (cite the symbol, not the line).
 | step | call site | witness the probe reads | on the receipt? |
 |---|---|---|---|
 | S0 READ | `_edus_from_conversation` `:14738` | `stats["edus"]`, `stats["chunks"]` | ✅ |
-| S1 NARRATE | `run_s1` `:16748` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
-| S2.1 EXTRACT | `run_s2` `:16780` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
+| S1 NARRATE | `run_s1` `:17761` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
+| S2.1 EXTRACT | `run_s2` `:17793` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
 | S2.2 VET | `_run_vet_pass` `:17847` | `result["vet"]` — built at `extractor_v2.py:15663-15667`, copied onto the receipt at the meta fold `sdk.py:18864` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
 | S2.3 CLASSIFY | `_apply_classify_kinds` `:15193` | `result["classify_later"]` — built at `extractor_v2.py:15653-15659`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
-| S3 RESOLVE | `search_graph` `:14294` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
-| S5 CONNECT | `execute_embed` `:14554` (+ `run_s4` `:14315` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
+| S3 RESOLVE | `search_graph` `:15209` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
+| S5 CONNECT | `execute_embed` `:15567` (+ `run_s4` `:15230` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
 | S6 COMMIT | `execute_embed` payload | `result["payload"]`, copied as `stats["step_witness"]["commit"]` (payload_produced + the count the write loop RESOLVED — created or folded onto an existing canonical, so a fully-folded capture reports the folded count, never 0) | ✅ — `capstone_measure.py` additionally reads the committed `:Point` nodes and their `eventId` stamps off the live graph |
 
 `capstone_run.py` binds `result = captured` and hands `observe_steps` the receipt itself — the

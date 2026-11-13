@@ -4949,13 +4949,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # cannot see it, and no row scoped to it — which is exactly the invisibility
         # this pin exists for. Both rows hold the CALL, not the definition.
         ("README.md", "gap filler", (
-            ("14554", "result = execute_embed(complete_list, search, "
+            ("15567", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ...and the probe's own copy of the same number, which sits in prose a
         # reader is sent to rather than in a table.
         ("probes/capstone_run.py", "ONE cite per symbol", (
-            ("14554", "result = execute_embed(complete_list, search, "
+            ("15567", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ⛔ The S1 row's CALL SITE, held on its own row (#11517 rebase review).
@@ -4971,7 +4971,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
             # qualifier insert above the call, so the number is re-derived from
             # the tree each time rather than carried from the round that added
             # the row (the row's INTENT is unchanged: pin the CALL).
-            ("16748", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
+            ("17761", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
         )),
         # ⛔ THE FIVE REMAINING BARE STEP CITES ON THE SAME FIVE-LINE CLAIM, and
         # the reason `test (f)` went red on this branch (#11517 review round 5,
@@ -4991,17 +4991,17 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # sentence takes three rows rather than one — the same reason the
         # `README.md` "i.e. BEFORE the" claim above takes two.
         ("probes/capstone_run.py", "(S2.1,", (
-            ("16780", "embed_list = run_s2(model, story, master,"),
-            ("16834", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("17793", "embed_list = run_s2(model, story, master,"),
+            ("17847", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
         )),
         ("probes/capstone_run.py", "_apply_classify_kinds`` (S2.3,", (
-            ("14277", "out = kind_classifier.classify_items(items)"),
-            ("14278", '_apply_classify_kinds(embed_list, out["assignments"])'),
+            ("15192", "out = kind_classifier.classify_items(items)"),
+            ("15193", '_apply_classify_kinds(embed_list, out["assignments"])'),
         )),
         ("probes/capstone_run.py", "(S3,", (
-            ("14294", "search = search_graph(sdk, embed_list, story, "
+            ("15209", "search = search_graph(sdk, embed_list, story, "
                       "session_id=session_id)"),
-            ("14315", "s4 = run_s4(model, story, search, embed_list, master,"),
+            ("15230", "s4 = run_s4(model, story, search, embed_list, master,"),
         )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
