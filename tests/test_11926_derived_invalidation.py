@@ -2807,7 +2807,9 @@ def test_a_goal_on_a_label_the_surface_CANNOT_RESOLVE_is_COUNTED_not_reported_GO
     # has just declared the node unaddressable.
     # ⚠️ AND THE COUNTERS DO NOT COVER IT, which an earlier version of this comment
     # claimed on false grounds. `counts["repaired"] += 1` lives ONLY in the final
-    # `else` (`derived_invalidation.py:1446`), which the `if present:` arm falls
+    # `else` (the `else:` that increments `counts["repaired"]` — cited by shape,
+    # not by line, because a merge above it moves the number), which the
+    # `if present:` arm falls
     # past — so a blind write there leaves `repaired == 1`, `unaddressable == 3` and
     # `gone == 0` all green. `repaired == 1` catches a RE-CLASSIFICATION, the
     # interceptor catches a WRITE ATTEMPT: different mutants, and both are needed.

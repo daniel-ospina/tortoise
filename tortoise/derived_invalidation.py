@@ -1199,9 +1199,12 @@ _GONE_PROBE = "MATCH (n) WHERE n.id = $id RETURN n.id LIMIT 1"
 #: label, so a MISS takes an All-Node scan — ``LIMIT 1`` bounds the ROWS RETURNED,
 #: not the scan. It runs only where the sweep was already about to write a
 #: falsehood, and the label-less candidate scan immediately before it is the same
-#: order of work, so a handful of gone goals is not a cost change. A graph
-#: carrying MANY genuinely-deleted goals makes it O(N) per goal; the honest remedy
-#: there is an ``id`` index over all labels, not weakening this probe.
+#: order of work, so a handful of gone goals is not a cost change. A graph carrying
+#: MANY genuinely-deleted goals makes it O(N) per goal, and ⛔ THERE IS NO INDEX
+#: ESCAPE HATCH: FalkorDB indexes are label-scoped (the `sdk.py` rule below says so),
+#: so no index — not even "an ``id`` index over all labels", which does not exist —
+#: can serve an unlabelled pattern. The knobs are the caller's ``limit`` and how
+#: often the sweep runs, not a weaker probe.
 #:
 #: ⛔ THIS IS A DELIBERATE DEPARTURE, and it is named here because the shape is
 #: forbidden elsewhere in this codebase: `sdk.py` carries the rule twice, verbatim
@@ -1214,7 +1217,6 @@ _GONE_PROBE = "MATCH (n) WHERE n.id = $id RETURN n.id LIMIT 1"
 #: at projection/__init__.py", which says nothing of the kind (#12457 review, cycle
 #: 5, verified: that module's index notes are about an un-indexed PROP inside a
 #: LABELLED branch); the rule it overrides is the `sdk.py` one above, so an auditor
-#: can tell a measured trade-off from an accident.
 #: can tell a measured trade-off from an accident.
 #:
 #: ⚠️ WHAT THE PROBE ESTABLISHES, stated here rather than inside the payload string:
@@ -1720,11 +1722,10 @@ def invalidate_stale(
     genuinely unknown and ``None`` is the only honest value.
 
     ``counts.gone`` counts the findings whose cache reconcile did not happen
-    because the door could not resolve the goal — the retirement landed, but there
-    was no resolved node to reconcile the ``goalState`` cache on. ⛔ That is a
-    DELETED node AND an id the entity surface merely cannot ADDRESS: it is the
-    door's UN-PROBED answer, so the two are counted alike here (#12534 owns the
-    code fix; the sweep's wording above is the correct one).
+    because the door could not resolve the goal. ⛔ That is a DELETED node AND an id
+    the entity surface merely cannot ADDRESS: it is the door's UN-PROBED answer, so
+    the two are counted alike here (#12534 owns the code fix; the sweep's wording
+    above is the correct one).
     FOUR shapes set it, and it means the same thing in all of them — "the
     cache could not be reconciled", never "a retirement landed": a retirement
     that DID land whose cache follow-up could not; #12315's ABSENT arm (``found:
@@ -1845,8 +1846,10 @@ def invalidate_stale(
             "retired": sum(1 for r in invalidated if r.get("invalidated")),
             "alreadyRetired": sum(1 for r in invalidated if r.get("alreadyRetired")),
             # ⛔ ``gone`` IS A CACHE FACT, NOT A RETIREMENT FACT. It counts the
-            # findings whose goal no longer exists, so its ``goalState`` could not
-            # be reconciled — there is no node to reconcile it on. FOUR shapes set
+            # findings whose goal the DOOR could not resolve — which is a deleted
+            # node and also an id the entity surface cannot address, the two being
+            # indistinguishable from that answer alone (#12534) — so its
+            # ``goalState`` could not be reconciled. FOUR shapes set
             # it and they mean the same thing in all four (see the
             # ``invalidate_stale`` docstring, which enumerates them):
             #   1. a retirement that DID land whose cache follow-up could not;
