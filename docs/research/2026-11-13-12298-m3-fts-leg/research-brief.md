@@ -193,7 +193,9 @@ artefact in the direction that flatters the wrong arm. The harness **waits** unt
 reaches the population size **exactly** (`==`, not `>=` — an over-count means the graph is not the one
 this run wrote) and **refuses** on timeout, and it **refuses a catalogue row that does not carry a
 FULLTEXT index over `name`**: a count cannot tell `Object.name` from an `Object.id` index, and it cannot
-tell FULLTEXT from the RANGE index `_REQUIRED_RANGE_INDEXES` creates on `name` in every graph — a
+tell FULLTEXT from the RANGE index the sweep creates on `name` in every graph — the DDL loop over
+`_RANGE_INDEX_LABEL_PROPS` (`tortoise/projection/__init__.py:6798` for Object), which
+`_REQUIRED_RANGE_INDEXES` merely REQUIRES — a
 wrong-kind index reaches the same `numDocuments` and answers every query with zero rows, so it would
 publish a clean-looking 0.0 baseline, and the leg's own trace cannot see it (measured on docker
 FalkorDB v4.20.6: an unindexed `CALL db.idx.fulltext.queryNodes` returns `[]` **without raising**, so

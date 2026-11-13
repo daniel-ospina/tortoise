@@ -769,11 +769,15 @@ def _object_row_fulltext_name(row) -> bool:
     """Does this ``CALL db.indexes()`` row carry a FULLTEXT index over ``name``?
 
     ⛔ The FIELD NAME alone is not the question (#12349 review, P2).
-    ``FalkorProjection._ensure_indexes`` always creates ``("Object", "name",
-    "RANGE")`` — it is in ``_REQUIRED_RANGE_INDEXES``
-    (``tortoise/projection/__init__.py:20305``, the tuple itself starting at
-    ``:20285``) — so EVERY Tortoise graph indexes that name — and the catalogue
-    reports a labelled row's field names beside a per-property KINDS map.
+    ``FalkorProjection._ensure_indexes`` creates ``("Object", "name", "RANGE")``
+    unconditionally — the DDL loop walks ``_RANGE_INDEX_LABEL_PROPS``
+    (``tortoise/projection/__init__.py:6782``, Object's entry at ``:6798``) at
+    ``:21166-21169``, and ``_REQUIRED_RANGE_INDEXES`` (``:20285``, the `name`
+    entry at ``:20305``) is the PROBE's requirement list, not the creator — so
+    EVERY Tortoise graph indexes that name. (Membership is not creation:
+    ``("Session", "id", "RANGE")`` is required at ``:20325`` while Session's
+    index is a separate statement at ``:21203``.) And the catalogue reports a
+    labelled row's field names beside a per-property KINDS map.
     ``index_row_has_field(row, "name")`` therefore answers True on a graph with
     NO fulltext index at all: the run proceeds, every query returns ``[]``
     without raising, and the shipped baseline publishes as 0.0 with every guard

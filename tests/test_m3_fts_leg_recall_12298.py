@@ -2865,16 +2865,22 @@ def test_the_index_wait_refuses_an_object_row_without_a_fulltext_index_on_name(
     the shipped baseline would publish as 0.0 with every guard green.
 
     ⛔ And the FIELD NAME alone is not the identity either — the case this test
-    exists for, found only on review round 2. `Projection._ensure_indexes`
-    ALWAYS creates `("Object", "name", "RANGE")` (it is in
-    `_REQUIRED_RANGE_INDEXES`), so a field-name-only probe is satisfied on a
-    graph with no fulltext index at all: the guard would have been a silent
-    no-op on exactly the case it was added for — a false PASS inside a
-    fail-closed guard. Hence the KIND is asserted, through the triple the repo's
-    own `_schema_is_current` requires.
+    exists for, found only on review round 2. `FalkorProjection._ensure_indexes`
+    ALWAYS creates `("Object", "name", "RANGE")` (the DDL loop over
+    `_RANGE_INDEX_LABEL_PROPS`, not `_REQUIRED_RANGE_INDEXES` — that tuple is the
+    PROBE's requirement list, and membership is not creation: `("Session", "id",
+    "RANGE")` is required and created by a separate statement), so a
+    field-name-only probe is satisfied on a graph with no fulltext index at all:
+    the guard would have been a silent no-op on exactly the case it was added for
+    — a false PASS inside a fail-closed guard. Hence the KIND is asserted, through
+    the triple the repo's own `_schema_is_current` requires.
 
     BEHAVIOURAL pin (a fake catalogue, not a source grep), over the measured row
-    shape `[label, properties, {prop: [kind, …]}, …, stats]`.
+    shape `[label, properties, {prop: [kind, …]}, …, stats]`, plus ONE short-row
+    case (`["Object", ["name"]]`) that the engine this measurement ran on does
+    not emit — it is the defensive branch `index_catalogue` documents for an
+    engine whose catalogue shape differs, and the docstring says so because this
+    is the only record distinguishing real shapes from defensive ones.
     """
     import pytest as _pytest
 
