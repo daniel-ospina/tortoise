@@ -527,12 +527,26 @@ def test_an_unexpected_fault_in_the_allowance_gate_is_closed_not_unknown(
     completes.
 
     ⛔ It is `closed`, NOT `unknown`, and the difference is measured rather than
-    stylistic: `enforce_allowances` is the write gate's FIRST check, so the same
-    exception escapes `_enforce_quota`, and `_safe`'s generic `except Exception`
-    returns `ERR_QUOTA_SERVER` (`mcp_server.py:3359`) — the write does not
-    complete. The count arm below reports its own unexpected raise as `closed`
-    for the same reason. `unknown` is reserved for a budget expiry HERE, where
-    the gate has no such timeout and its answer may still land.
+    stylistic: `enforce_allowances` is the write gate's FIRST check
+    (`enforce_org_limit` calls it at `quota.py:1356`, outside the guarded import,
+    so the raise propagates), and `_safe` catches it — so no write completes. The
+    count arm below reports its own unexpected raise as `closed` for the same
+    reason. `unknown` is reserved for a budget expiry HERE, where the gate has no
+    such timeout and its answer may still land.
+
+    ⛔ CORRECTION (post-merge review of #12426): this docstring used to say
+    `_safe` returns `ERR_QUOTA_SERVER` here. It does not — `ERR_QUOTA_SERVER`
+    comes only from `_safe`'s `QuotaCheckError` branch (`mcp_server.py:3384`); the
+    generic arm returns `_SafeError({"error": msg})` with no `code` at all (the
+    module says so in `_carried_error_text`'s docstring). The classification rests
+    on "no write completes", which is now driven below — not on the code.
+
+    ⛔ AND THE GATE IS DRIVEN, not just the report asked: the first version of
+    this test only called `org_quota_state` and asserted the word `closed`, so a
+    defensive `try/except` added around the seam would have let `health` keep
+    saying `closed` while the write COMPLETED, with this file green (measured:
+    that mutant left 49 passed). The file already holds its count arm to this
+    standard (`_refuses_raising`); the allowance arm now does too.
     """
     sdk = _sdk(tmp_path / "unexp.db", "unexp", points=1)
     _pin_count(monkeypatch, 100)
@@ -543,15 +557,27 @@ def test_an_unexpected_fault_in_the_allowance_gate_is_closed_not_unknown(
         # the gate, which is what this arm exists for.
         raise RuntimeError("unexpected fault inside the allowance gate")
 
+    limits = {"org_id": "t", "max_points": 25_000}
     monkeypatch.setattr(ag, "enforce_allowances", _bug)
-    state = org_quota_state({"org_id": "t", "max_points": 25_000},
-                            "points", sdk=sdk)
+    state = org_quota_state(limits, "points", sdk=sdk)
     assert state["state"] == "closed", (
         "an unexpected fault at the allowance seam still refuses the write; "
         f"got {state['state']!r}")
     assert state["state"] != "open"
     assert state["error"] and "unexpected" in state["error"]
     assert state["points_used"] is None and state["points_limit"] is None
+    # ⛔ The gate's own behaviour in this state, which is what `closed` CLAIMS.
+    # ANY raise counts: this is not a modelled quota refusal, it is an uncoded
+    # failure — and `_safe` turns any raise into an error, so no write completes.
+    gate_raised = False
+    try:
+        enforce_org_limit(limits, "points", sdk=sdk)
+    except Exception:  # the raise IS the refusal being pinned
+        gate_raised = True
+    assert gate_raised, (
+        "`health` reports `closed`, so the gate must actually refuse by raising; "
+        "otherwise the report asserts a refusal the write path does not make "
+        "— #11153's false signal, inverted")
     sdk.close()
 
 

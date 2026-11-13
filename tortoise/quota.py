@@ -1708,14 +1708,26 @@ def org_quota_state(limits: dict | None, resource: str = "points", sdk=None,
     except Exception as exc:  # noqa: BLE001, RUF100 — never escape the contract
         # ⛔ `closed`, not `unknown` (fresh review of #12426, round 5). An
         # UNEXPECTED raise here is not this report's own machinery failing in
-        # isolation: `enforce_allowances` IS the write gate's FIRST check, so the
-        # same exception escapes `_enforce_quota` and `_safe`'s generic
-        # `except Exception` turns it into `ERR_QUOTA_SERVER` — i.e. NO write
-        # completes. The count arm a few lines below already reports its own
-        # unexpected raise as `closed` for exactly this reason. `unknown` stays
-        # reserved for OUR budget expiry (`run_bounded_quota_state`), where the
-        # gate has no such timeout and its answer may still land. Leaving this
-        # `unknown` understated a refusal as a shrug — and round 5 measured the
+        # isolation: `enforce_allowances` IS the write gate's FIRST check
+        # (`enforce_org_limit` calls it at `quota.py:1356`, OUTSIDE the guarded
+        # import, so the raise propagates), and `_safe` catches it — so NO write
+        # completes.
+        # ⛔ CORRECTION (post-merge review of #12426): an earlier version of this
+        # comment said `_safe` turns it into `ERR_QUOTA_SERVER`. It does NOT, and
+        # the distinction is not cosmetic: `ERR_QUOTA_SERVER` is emitted only by
+        # `_safe`'s `QuotaCheckError` branch (`mcp_server.py:3384`); the GENERIC
+        # arm returns `_SafeError({"error": msg})` with **no `code` at all** —
+        # the module states this itself in `_carried_error_text`'s docstring
+        # ("the auth gate and the generic branch carry the text alone"). So this
+        # state is an UNCODED failure, not a quota-coded refusal, and a consumer
+        # branching on `code == ERR_QUOTA_SERVER` will never match it. What the
+        # classification rests on is only "no write completes", which IS measured
+        # — not the code.
+        # The count arm a few lines below already reports its own unexpected
+        # raise as `closed` for exactly that reason. `unknown` stays reserved for
+        # OUR budget expiry (`run_bounded_quota_state`), where the gate has no
+        # such timeout and its answer may still land. Leaving this `unknown`
+        # understated a refusal as a shrug — and round 5 measured the
         # classification UNPINNED: reclassifying this arm to `open` left both
         # this file and the 3-file regression set green (47 / 284 passed).
         _logger.error(
