@@ -366,7 +366,8 @@ class BlockIndex:
         scoring line in `entity_resolver.scan_entities`, not a line number),
         so indexing this row by ``key_of(name)`` would BLOCK on one value and
         SCORE on another — and a row whose ``canonical_name`` differs from its
-        name's fold (legal: a caller-supplied key, ``api.py:2671``, or a pre-
+        name's fold (legal: a caller-supplied key, `api.add_object`'s
+        ``props.setdefault("canonical_name", …)``, or a pre-
         `#12047` row) would then be invisible to every rung. One value, one key.
 
         A member whose fold is empty is NOT indexed. ⚠️ "Empty" is NARROWER than it

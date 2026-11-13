@@ -6192,15 +6192,17 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
 
     def _name_hit(e: dict) -> bool:
         # ⛔ `_norm` ONLY — deliberately NOT `normalize_entity_name`. A surface
-        # variant (article, separator, punctuation) is INVISIBLE to phase 1 by
-        # #11901's decision: the candidate-recall harness measures the fallback's
-        # contribution FROM that gap, and its 0% arm is pinned by
-        # `tests/test_candidate_recall_11901.py::test_the_matcher_is_exact_norm_equality_plus_kind`.
-        # Round 6 proposed folding this comparison to make a variant bind
+        # variant (article, separator, punctuation) is INVISIBLE to the NAME arms
+        # by #11901's decision: the candidate-recall harness measures the
+        # fallback's contribution FROM that gap, and its 0% arm is pinned by
+        # `tests/test_candidate_recall_11901.py::test_the_matcher_is_norm_exact_AND_gains_the_folded_rung_12295`.
+        # ⛔ #12295 does NOT widen this comparison — the fold arrives as the LAST
+        # rung, in `_find_by_folded_key`, AFTER every name and alias arm has
+        # declined. Round 6 proposed folding THESE arms to make a variant bind
         # deterministically here; that CONTRADICTS the recorded #11901 conclusion,
-        # so it is refused and recorded rather than adopted. The variant's home is
-        # the write door's fold (`entity_identity.resolve_or_mint`), which folds on
-        # `canonical_name`, so no duplicate node is created.
+        # so it is still refused and recorded rather than adopted. The variant's
+        # home is the write door's fold (`entity_identity.resolve_or_mint`), which
+        # folds on `canonical_name`, so no duplicate node is created.
         return _norm(e.get("name", "")) == norm_name
 
     def _alias_hit(e: dict) -> bool:

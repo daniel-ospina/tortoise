@@ -287,10 +287,12 @@ spellings are `_norm`-equal and the kind already matched, so none of the three c
 fire there either. ⛔ That `_norm` equality is #11901's decision, not an oversight:
 a surface variant (article, separator, punctuation) is deliberately INVISIBLE to
 phase 1, because the candidate-recall harness measures the fallback's contribution
-from exactly that gap (`test_the_matcher_is_exact_norm_equality_plus_kind` pins it).
-Widening the name comparison to the fold would make the variant bind deterministically
-here — a round-6 review proposed it — but it CONTRADICTS that recorded conclusion, so
-it is refused; the variant's home is the write door's fold
+from exactly that gap (`test_the_matcher_is_norm_exact_AND_gains_the_folded_rung_12295` pins it).
+⛔ The fold is NOT refused as a wider comparison of THESE arms — #12295 ships it as the LAST rung
+(`_find_by_folded_key`), after every name and alias arm has declined, so the variant still binds
+only when nothing more exact claims it. What stays refused is widening the NAME arms themselves: a
+round-6 review proposed that, and it CONTRADICTS the recorded #11901 conclusion; the variant's own
+home is the write door's fold
 (`entity_identity.resolve_or_mint`). What phase 1 never skips is `retired` — D-1's second door. `group_join` is
 deliberately NOT applied in phase 1: an exactly-equal spelling, or one the merge
 recorded as an alias, is the strongest evidence the tree has, and the merge
