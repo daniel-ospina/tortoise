@@ -471,7 +471,11 @@ class MCPReader:
         if reported is not None and reported >= OPERATOR_READ_CEILING:
             raise C.CurationRefused(
                 f"the operator layer holds {reported} rows, AT OR ABOVE this read's "
-                f"declared {OPERATOR_READ_CEILING}-row RESPONSE BOUND. ⛔ A layer ENDING at "
+                f"declared {OPERATOR_READ_CEILING}-row RESPONSE BOUND. ⛔ That count is "
+                "`is_operator = true OR op_type IS NOT NULL` with NO status filter, so it "
+                "can EXCEED the layer this read serves — the disagreement rule below names "
+                "the causes — and a count AT the bound is no voucher either way. A layer "
+                "ENDING at "
                 "this number and one the engine CUT there return the SAME bytes: this "
                 "request's `limit` is the SDK's own maximum (a larger `limit` raises "
                 "`ValueError` out of the SDK, not this refusal), the structural leg asks "
@@ -486,15 +490,21 @@ class MCPReader:
                 "cap cannot detect it — verify the tuning with `config_get` and lower this "
                 "constant with it (the residual #12440 states, and the same one the Event "
                 "read carries). The layer must come BELOW this bound to be read whole "
-                "without that tuning (retire/merge operators), or "
-                "the enumeration needs a SURFACE change (an `offset`, an "
-                "`include_terminal`, or the `op_type` disjunction) — an MCP/SDK surface "
-                "decision, not a constant; refusing rather than reporting a partial "
+                "without that tuning — MERGE or DELETE operators (a STATUS CHANGE does NOT "
+                "lower `structure.operators`, which counts with no status filter) — or "
+                "the enumeration needs a SURFACE change: an `offset` (a page walk) is the "
+                "cap remedy, and a filter whose result is a PROVABLE partition would let "
+                "the layer be read in pieces — today's per-`op_type` `kind=` is NOT one "
+                "(`create_operator` accepts 7 values and raw writes can store any, so a "
+                "union of per-`op_type` calls cannot be shown complete) — an MCP/SDK "
+                "surface decision, not a constant; refusing rather than reporting a "
+                "partial "
                 "reasoning layer. ⚠️ Second residual, the other direction: this gate refuses "
                 "WITHOUT reading, "
                 "and operators have no re-count rescue (unlike Events), so a count that is "
                 "stale-HIGH across the bound refuses un-read even where a read would have "
-                "come in below it — fail-CLOSED, and it clears on a re-run")
+                "come in below it — fail-CLOSED, and it clears on a re-run; the same root "
+                "as #12445, which tracks the Events instance")
         res = self._search_operators()
         err = _error_of(res)
         if err:
@@ -519,14 +529,21 @@ class MCPReader:
         # bound refuses before the read; any other count disagrees), so this arm is the
         # BELT that keeps a gate deletion fail-CLOSED, not a second detector.
         if len(raw) >= OPERATOR_READ_CEILING:
+            # The count is SPLIT OUT rather than rendered blind: `reported=None` is the
+            # reachable arm here (a fill WITH a count is refused by the gate above), and
+            # "the reported count (None) ... any other disagrees with the rows" was a
+            # sentence about a count that does not exist.
+            voucher = (
+                "no count accompanied this read, so nothing can vouch for it"
+                if reported is None else
+                "the reported count cannot vouch for it: a count at or above the bound "
+                "refuses BEFORE this read, and any other disagrees with the rows")
             raise C.CurationRefused(
                 f"the operator read returned {len(raw)} rows, FILLING its "
                 f"{OPERATOR_READ_CEILING}-row response — a filled response says `at least "
                 f"this many`, so it cannot be told from one the engine truncated, and "
-                f"`tortoise_search` has no offset walk to continue from. The reported count "
-                f"({reported!r}) cannot vouch for it: a count at or above the bound refuses "
-                f"BEFORE this read, and any other disagrees with the rows; refusing a "
-                f"partial reasoning layer")
+                f"`tortoise_search` has no offset walk to continue from; {voucher}; "
+                f"refusing a partial reasoning layer")
         if reported is not None and len(raw) != reported:
             raise C.CurationRefused(
                 f"the operator layer read {len(raw)} rows but structure.operators reports "
