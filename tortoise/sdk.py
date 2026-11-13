@@ -14336,8 +14336,16 @@ class TortoiseSDK:
             # ⚠️ `creating=False` (the emit branch's) stamps no identity, and
             # that arm DROPS identity keys the props already carried (measured:
             # `embedding_model`/`embedding_revision`/`embedding_text_hash` are
-            # popped) — a caller-supplied one is now absent. `_META_KEYS` skips
-            # them, so no node/replay change follows.
+            # popped) — a caller-supplied one is now absent. ⛔ NOT because
+            # `_META_KEYS` skips them (#11859): `_META_KEYS` holds only
+            # `embedding_width` of this family. The three identity keys sit in
+            # `_POINT_HANDLED` — the POINT fast-path — and are absent from
+            # `_EVENT_HANDLED`, so the `EventRecorded` replay this door emits is
+            # NOT the set that would skip them (`_persist_extra_props`' skip set
+            # on that fold is `_META_KEYS | _EVENT_HANDLED`). So no node/replay
+            # change follows only because NO producer in this population
+            # supplies them today: they are UNTOUCHED, not skipped — and a
+            # future producer that supplies one is not silently covered.
         built = {"type": "EventRecorded", "id": event_id, **record}
         # ── #5475: the record door is a WRITE door ──
         # The payload carries kind spellings straight from frontmatter --

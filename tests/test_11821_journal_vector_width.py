@@ -513,7 +513,11 @@ def test_a_reemitted_snapshot_is_narrowed_because_the_store_already_did():
     """`PointPromoted` &c. carry a vector read back off the node, and the store
     writes `vecf32($embedding)` for every non-verbatim vector
     (`stored_form.node_statement`) — so narrowing keeps the float32 bits the
-    store holds and shortens the text. The width declaration is what moves.
+    store holds and shortens the text. ⛔ The declaration is NOT the only thing
+    that moves, and an earlier wording here said it was ("The width declaration
+    is what moves") — it contradicted the ⛔ paragraph directly below it (#11945),
+    and a reader who believed the summary alone would delete the truth-side
+    narrowing in `consistency._as_f32` as redundant and reinstate #8615.
 
     ⛔ It is NOT a no-op on the float64 (#11835 review round 3, F1): the payload's
     value becomes the shortest decimal for those bits (`0.001230153371579945` →
