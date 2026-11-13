@@ -616,3 +616,92 @@ def test_a_non_enumerable_remedy_states_its_bound_and_the_real_size_source(
     assert "graph_overview(section='status')" in message, (
         f"the {entity_type!r} remedy names no source for the layer's size: {message!r}"
     )
+
+
+# ── review round 4: the blank-text clause, its bounds, and the count key ────
+
+
+def test_an_empty_string_kind_does_not_widen_the_blank_text_hole(stub_factory) -> None:
+    """The legs test `if kind:` (truthiness), so `kind=""` adds no condition.
+
+    Round 3's clause keyed on `kind is None`, so `text="  ", kind="",
+    entity_type="event"` slipped through and answered `[]` — an empty result
+    indistinguishable from a complete one. Fails on `is_refusal(result)`; the
+    fixture reaches it because `""` is falsy but not `None`.
+    """
+    from tortoise.mcp_server import tortoise_query
+    stub = stub_factory()
+
+    result = tortoise_query(text="  ", kind="", entity_type="event", limit=5)
+
+    assert _is_refusal(result), f"kind='' left the leg conditionless: {result!r}"
+    assert stub.calls == [], f"the leg was read before refusing: {stub.calls}"
+
+
+def test_a_blank_text_still_serves_operator_because_its_leg_has_a_condition(
+        stub_factory) -> None:
+    """The false block to avoid: `operator` answers a blank text on its own clause.
+
+    `run_structural_query` appends `n.is_operator = true` for this type, so the
+    leg fires with no kind and no query and really does read the layer — the
+    same read the remedy names. Fails on the fts leg being reached; a blanket
+    blank-text refusal would red here.
+    """
+    from tortoise.mcp_server import tortoise_query
+    stub = stub_factory()
+
+    out = tortoise_query(text="  ", entity_type="operator", limit=3)
+
+    assert isinstance(out, list), f"a working combination was refused: {out!r}"
+    assert stub.calls[-1][0] == "tortoise_fts_query"
+    assert stub.calls[-1][3].get("entity_type") == "operator"
+
+
+def test_a_non_string_text_does_not_raise_out_of_the_tool_body(stub_factory) -> None:
+    """`.strip()` on a non-str `text` raised `AttributeError` out of the handler.
+
+    The body contract is a structured error for a bad argument shape, not an
+    exception; refusing a non-str is the SDK's job. Fails on the raise (an
+    `AttributeError` escapes the call); the fixture reaches it because `5` is
+    truthy, so a guard calling `text.strip()` unconditionally hits it.
+    """
+    from tortoise.mcp_server import tortoise_query
+    stub_factory()
+
+    out = tortoise_query(text=5, entity_type="event", limit=1)  # type: ignore[arg-type]
+
+    assert out is not None, "the call must answer, not raise"
+
+
+@pytest.mark.parametrize("entity_type", ["document", "object", "subject"])
+def test_a_remedys_named_count_is_a_key_the_status_section_serves(
+        entity_type) -> None:
+    """A remedy naming `counts.<X>` must name a key `taxonomy()` actually returns.
+
+    Round 3 wrote `counts.Document`; D10 retires `:Document` (a document IS a
+    `:Source`), so `taxonomy()` reports only the labels it owns — a caller
+    following the remedy would find no such key. The key set is taken from
+    `taxonomy()`'s own ANSWER (run against a fake projection), never re-typed
+    here, so a future label change moves both together. Fails on `key in
+    served`; a remedy naming any invented key reds.
+    """
+    import re
+
+    from tortoise.taxonomy import taxonomy
+
+    class _FakeProj:
+        class g:  # mirrors the SDK's `.g.query(...)` surface
+            @staticmethod
+            def query(_cypher):
+                return type("_R", (), {"result_set": [[0]]})()
+
+    served = set(taxonomy(_FakeProj()).keys())
+    message = _message_for(entity_type)
+    named = re.findall(r"counts\.(\w+)", message)
+    assert named, f"the {entity_type!r} remedy names no count key: {message!r}"
+    for key in named:
+        assert key in served, (
+            f"the {entity_type!r} remedy names counts.{key}, which "
+            f"tortoise_graph_overview(section='status') does not serve "
+            f"({sorted(served)})"
+        )

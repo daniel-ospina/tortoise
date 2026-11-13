@@ -3787,8 +3787,9 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
     "document": (
         "No bulk listing: tortoise_search(entity_type='document', "
         "kind=<documentKind>, limit=10000) answers ONE kind at a time and "
-        "slices at `limit` (default 10, no total), and the layer's size is "
-        "counts.Document in tortoise_graph_overview(section='status')."),
+        "slices at `limit` (default 10, no total). Its size is counts.Source "
+        "in tortoise_graph_overview(section='status') — D10 retires :Document, "
+        "so a document IS a :Source there, alongside provenance sources."),
     "object": (
         "No bulk listing — and none is planned (#12378 keeps these as counts): "
         "tortoise_search(entity_type='object', kind=<objectKind>, "
@@ -3924,8 +3925,23 @@ def tortoise_query(kind: str | None = None,
         validate_entity_type(entity_type)
     except ValueError as exc:
         return _SafeError({"error": str(exc)})
-    if entity_type != "point" and (
-            tag is not None or not text or (kind is None and not text.strip())):
+    # A blank `text` is classified by the legs as "no query" (`query.strip()` in
+    # `tortoise/search_engine.py`), so the structural leg fires with NO condition
+    # and answers `[]` with `reason="empty_results"` — an empty result
+    # indistinguishable from a complete one. Refuse that shape for a non-point
+    # type, with three bounds that keep it exactly as wide as the problem:
+    #   * `not kind` (not `kind is None`): the leg's own predicate is truthiness,
+    #     so `kind=""` leaves it conditionless too;
+    #   * EXCEPT `operator`, whose leg appends its own condition
+    #     (`n.is_operator = true`) and therefore really does answer;
+    #   * and never for a non-str `text`: refusing that is the SDK's job, and
+    #     `.strip()` here would raise out of the tool body instead of returning
+    #     the structured error the docstring promises.
+    _blank_text = (
+        isinstance(text, str) and not text.strip() and not kind
+        and entity_type != "operator"
+    )
+    if entity_type != "point" and (tag is not None or not text or _blank_text):
         return _SafeError({"error": (
             f"entity_type={entity_type!r} is not served on this path: "
             f"tortoise_query's structural and tag arms read the Point label "
