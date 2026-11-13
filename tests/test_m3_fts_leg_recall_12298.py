@@ -245,7 +245,11 @@ def _unscoped_heading_forms(doc: str,
     enclosing_major: list[str | None] = []
     cur: str | None = None
     for ln in lines:
-        major = re.match(r"^## (\d+)\. ", ln)
+        # ⛔ The trailing period is OPTIONAL in `_READABLE_ARCH` (`## 2 …`) and in
+        # `_scope_slice`'s own `^## 2\.? `, so the tracker must accept it or it
+        # abstains for a heading form that document's own guard allows
+        # (round 24 review, P2).
+        major = re.match(r"^## (\d+)(?:\.\d+)?\.? ", ln)
         if major:
             cur = major.group(1)
         enclosing_major.append(cur)
