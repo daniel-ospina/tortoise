@@ -1823,10 +1823,13 @@ function entriesDirStamp(dir: string): string {
  *  never wrote between scans.
  *
  *  Byte-identical to the Python leg's `_stem_set_stamp`, so the two legs — which
- *  share one spool root and one ledger — dedupe each other's records. (Both sort
- *  the stem list — JS by UTF-16 code unit, Python by code point — and the stems
- *  are `entryKey()` hex digests, so the two orders cannot differ for any name the
- *  spool can hold.) */
+ *  share one spool root and one ledger — dedupe each other's records, for every
+ *  entry EITHER leg writes (stem = an `entryKey()` hex digest). Scope, stated
+ *  because it is not the whole directory: both sort the stem list (JS by UTF-16
+ *  code unit, Python by code point) and the scan does not filter names to key
+ *  shape, so a foreign/hand-placed file whose ordering differs between the two
+ *  sorts yields two digests and the legs record one line each for the same set —
+ *  cost, never correctness (the retention decision is per entry, not per digest). */
 function stemSetStamp(stems: string[]): string {
   return `set:${createHash("sha256").update(stems.join("\n"), "utf8").digest("hex").slice(0, 16)}`;
 }

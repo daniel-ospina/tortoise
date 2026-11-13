@@ -961,9 +961,13 @@ def _stem_set_stamp(stems: list[str]) -> str:
 
     The TS leg's ``stemSetStamp`` produces the SAME string, so the two legs —
     which share one spool root and one ledger — dedupe each other's records
-    rather than each writing its own. (Both sort the stem list — Python by code
-    point, JS by UTF-16 code unit — and the stems are `entry_key()` hex digests,
-    so the two orders cannot differ for any name the spool can hold.)
+    rather than each writing its own -- for every entry EITHER leg writes, whose
+    stem is an `entry_key()` hex digest. Scope, stated because it is not the whole
+    directory: both sort the stem list (Python by code point, JS by UTF-16 code
+    unit) and the scan does not filter names to key shape, so a foreign or
+    hand-placed file whose ordering differs between the two sorts yields two
+    digests, and the legs then record one line each for the same set. Cost, never
+    correctness: the retention decision is per entry, not per digest.
     """
     digest = hashlib.sha256("\n".join(stems).encode("utf-8")).hexdigest()[:16]
     return f"set:{digest}"

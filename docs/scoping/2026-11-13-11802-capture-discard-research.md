@@ -28,8 +28,8 @@ agent-infra#3921.
 >
 > Code line numbers survive only where they name the tree they were measured on — three such groups:
 > the §2.5 PRE-fix table is pinned to the **base** (`origin/main` @ `2dbfb046d7e3`, whose lines are the
-> defect sites this change moves); the §3 copies table is measured on the **shipping** artifact (the
-> repo copy is byte-identical from `8ad837711f` onward) and says so in its own lead-in; and one live
+> defect sites this change moves); the §3 copies table is measured on the **shipping** artifact —
+> re-measured every time a commit touches the artifact, and it says so in its own lead-in; and one live
 > citation, `tortoise/hook_install.py` `PI_EXTENSION_NAME`, keeps a line number because the symbol is
 > a module constant rather than something to quote — safe because this PR does not touch that file.
 >
@@ -153,8 +153,10 @@ failure — on the transcript. The meta is the one sibling that never got the sa
 - **`recordDiscard` already accepts `retained`** (`tortoise-capture.ts` `recordDiscard`)
   and writes it to the append-only `discarded.jsonl` ledger.
 - **Precedent arms that keep + record**: `DISCARD_ENTRY_GROWTH_REFUSED` and `DISCARD_SPOOL_SATURATED`
-  both write `retained: true` (`tortoise-capture.ts` the two `retained: true` arms), with the
-  comment "a refused growth is a delay, not a loss".
+  both write `retained: true` (`tortoise-capture.ts` — `DISCARD_ENTRY_GROWTH_REFUSED` and
+  `DISCARD_SPOOL_SATURATED`; the file carries a third `retained: true` arm after this change, and it is
+  this fix's own `DISCARD_META_UNREADABLE`, not a precedent), with the comment "a refused growth is a
+  delay, not a loss".
 - **A `repair: false` reader** already skips corrupt entries without mutating — a bare
   `if (!repair) continue;` inside `tortoise-capture.ts` `listSpoolEntries` (no comment there; the
   TS *and* Python `repair=False` behaviour is documented on `list_spool_metas`).
@@ -194,13 +196,14 @@ leg destroying the same files on the next tick.
 
 ## 3 · Which deployed copy is being patched, and how that was proved
 
-**The brief warned not to guess. Measured on the SHIPPING artifact — the repo copy is byte-identical
-from `8ad837711f` onward, so these numbers hold for this branch — and on this box's live install.
+**The brief warned not to guess. Measured on the SHIPPING artifact at this branch's head — the two
+numbers move whenever a commit touches the artifact, which is why the digest pin in
+`tests/test_capture_install.py` moves with them — and on this box's live install.
 Every number below is a `wc -lc` / `head -1` reading, not an inference:**
 
 | Copy | Path | Size / lines | Marker |
 |---|---|---|---|
-| Repo (canonical source) | `tortoise/pi-hooks/tortoise-capture.ts` | 206,594 B / 4,216 | `// tortoise-hook-version: 21` |
+| Repo (canonical source) | `tortoise/pi-hooks/tortoise-capture.ts` | 206,890 B / 4,219 | `// tortoise-hook-version: 21` |
 | Fleet deployed | `~/.pi/agent/extensions/tortoise-capture.ts` | 190,157 B / 3,935 | `// tortoise-hook-version: 18` |
 | Other repo | `agent-infra/extensions/tortoise-capture/index.ts` | 33,983 B / 827 | not the same artifact |
 
