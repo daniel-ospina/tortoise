@@ -170,34 +170,61 @@ So the correct reading is:
 
 ---
 
-## 5. User search — **NOT MEASURED in this PR. State that, do not cite a file.**
+## 5. User search — the second surface, and it is a DIFFERENT verdict on cost
 
-**No user-search artifact is attached.** An earlier draft of this section pointed
-at `measurement-user-search.json` and at "§5 of this document's results table";
-neither existed — the file is not in this branch and this document had no such
-table. That is a dangling citation in the one section whose entire job is to say
-whether a second surface was measured, so it is corrected here rather than
-quietly deleted: **the user-search arm was NOT run for this PR.**
+> **Provenance, kept because the correction it records is real:** an earlier draft
+> of this section cited `measurement-user-search.json` and "§5 of this document's
+> results table" **before either existed** — a dangling citation in the one
+> section whose job is to say whether a second surface was measured. That was
+> corrected to *NOT MEASURED*, and it was true at the time. **The run has since
+> been performed and its artifact is committed in this branch**, so the section
+> below is the measurement the citation originally claimed. The fixer's rule still
+> binds: a section may not cite a number it does not carry.
 
-The harness it would run through IS committed and is itself pinned:
-`tools/rerank_calibration_12297.py` (with its declared query construction, its
-pairing, and its in-run permutation assertion) and
-`tests/test_rerank_calibration_12297.py`. Producing the artifact is one command
-and needs the `embeddings` extra plus a live lane:
+`tools/rerank_calibration_12297.py` (the fixed, DECLARED query set landed in
+`65968f8a70`), run over **400 real captured turns** written to a run-scoped graph
+(`rerank12297_1794530438_106980`), population digest `ba6699b97f026982`, the real
+fused read through `tortoise_fts_query` at `limit=40` (the shipped
+`DEFAULT_FUSED_RERANK_POOL`), the shipped `rerank_pool`, cut `[:10]`. Paired: the
+before-order is the SAME pool's fused order.
 
-```bash
-uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"
-uv run python tools/rerank_calibration_12297.py --records 400 \
-    --out docs/research/2026-11-12-12297-rerank-calibration/measurement-user-search.json
-```
+**Declared caveat, restated because it bounds every number below:** the query is
+built from its own gold passage (first 8 words / a mid 8-word window). It is a
+harder-than-trivial but **easier-than-real** task — it measures promotion of the
+correct passage above near-duplicates the legs already ranked ahead of it, and is
+**not** an estimate of production search quality.
 
-**What that does to the verdict: nothing — and that is deliberate.** §7 rests on
-the noun path alone, where the shipped read was measured paired and
-counterfactual on the real corpus. §4 already says these numbers are silent about
-user search; this section now says the same thing about the *absence* of a
-number, which is the honest form of the same claim. A reader must not be able to
-infer "user search was measured and looked good" from this document, and with a
-phantom filename they could.
+| arm | nDCG@10 before → after | recall@10 before → after | gained / lost | gold never in pool |
+|---|---|---|---|---|
+| **prefix** (first 8 words) | 0.1301 → **0.6766** | 26.5 % → **67.8 %** | **+165 / −0** | 129/400 |
+| **midspan** (mid 8 words) | 0.1632 → **0.7516** | 34.0 % → **75.2 %** | **+165 / −0** | 99/400 |
+
+**Both metrics improve on both arms, with zero regressions** — the falsifier does
+not fire on this surface either. And the ceiling is visible in the table: the
+`gold never in pool` column is the hard limit, because **a permutation cannot
+recover a row retrieval never returned** (129/400 prefix, 99/400 midspan). Those
+queries stay in the denominator at score 0 — dropping them would let a reranker
+raise nDCG by losing queries.
+
+### ⛔ The cost verdict on this surface is NEGATIVE, and it is the same measurement
+
+User search scored **31,511 pairs in 2,685.6 s** — **85.2 ms/pair**, i.e.
+**≈ 3.4 s added per query** at pool 40. That is ~16× the noun path's
+5.179 ms/pair, and the cause is **passage length, not load or model**: the noun
+path's candidate text is a 2–4-word **name**, while here it is a 120–900-char
+**turn**. Measured directly on this box at loadavg 2.7, same model, same pinned
+thread:
+
+| candidate text | ms/pair |
+|---|---|
+| name-length (~4 words) | **7.5** |
+| passage-length (~150 words) | **62.9** |
+
+So the user-search rerank **improves ranking and is not affordable**: 3.4 s per
+query on CPU, per query, in the interactive search path. **The lever earns its gate
+on the noun path only.** This is a scoped recommendation, not a general one, and
+the gate's default-off posture is what makes that scope enforceable.
+
 
 ---
 
@@ -231,6 +258,12 @@ the arithmetic of 3 s/pair, not 5 ms/pair — the correction matters because the
 ratio is the whole reason a reader might wrongly assume the CPU cost is
 irreducible.)
 
+⛔ **This figure is specific to SHORT candidate text.** It is cheap because a
+noun-path candidate is a **name** (2–4 words). On user search the candidate is a
+full turn and the same model costs **85.2 ms/pair → ≈ 3.4 s per query** (§5) —
+measured, not extrapolated. Do not carry 5.179 ms/pair over to any surface whose
+candidate text is a passage.
+
 ---
 
 ## 7. Verdict against the falsifier
@@ -246,6 +279,12 @@ irreducible.)
 **→ The lever is NOT parked. It earns its gate, and the gate stays OFF by
 default** — the rerank is worth ~207 ms/mention when a caller opts in, and the
 default-off posture in `31cf88be51` is the right one given that cost.
+
+**On user search the ranking also improves (§5: nDCG@10 0.1301→0.6766 and
+0.1632→0.7516, recall@10 +41.3 / +41.2 pts, zero regressions) but the lever is
+NOT affordable there: ≈ 3.4 s per query on CPU.** So the honest scope of this
+result is: **keep the gate, ship it OFF, and treat the noun path — not user
+search — as the surface it earns.**
 
 ### Residuals (stated, not hidden)
 
