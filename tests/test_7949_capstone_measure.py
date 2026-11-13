@@ -5277,9 +5277,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # transcription slip: the number is owned by another tool, so every
         # landing PR above it is a re-derivation this pin cannot do for itself.
         #
-        # So it is re-derived from THIS MERGED tree, and every value below is
-        # stated with the tree it was read from, never carried across a rebase or
-        # a merge:
+        # So it is re-derived from THIS MERGED tree (a rebase of this branch onto
+        # `6408da01ce`, so the entry sits where THAT tree puts it), and every
+        # value below is stated with the tree it was read from, never carried
+        # across a rebase or a merge:
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
         # 9943 at `9828250732`; 9949 at `ba84fbfabf`, 9965 at `e200623286` and
@@ -5292,23 +5293,27 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # sentence, exactly as the #9649 hunk reads 9737 in `276503dad1` and 9759
         # at `ca74f2375e` — named here rather than left as "here", because
         # `87c07462a807` predates that hunk entirely (it carries no `#9649` row);
-        # 10022 at `42409813a7` (+1 at 2237, #12348); and 10076 at the `main`
+        # 10022 at `42409813a7` (+1 at 2237, #12348); 10076 at the `main`
         # tip `ca74f2375e`, whose +54 came from THREE landings in FIVE hunks
         # ABOVE the entry (12 at 1610, 7 at 2250, 8 at 6830, 22 at 7565, 5 at
         # 9759 — positions read off `ca74f2375e` itself, where each hunk's OWN
         # commit would give the position in that commit's tree instead: the
         # #9649 hunk reads 9737 under `276503dad1` and 9759 once `ca74f2375e`
-        # lands its +22 above it). The range has EIGHT hunks; the other three
-        # are `durations:`/`durations_floors:` rows BELOW the entry and do not
-        # move the pin, which is why they are not in this sum. This
-        # branch adds +13 at 2258 (its own `core:` registration), so the tree
-        # that adds BOTH parents reads 10089 = 10076 + 13.
-        # `carve_out:` opens 9963 and `uri_requiring:` 10294 at THIS tree, so
-        # 10089 is inside the section, and the identical text also sits at 6138
-        # and 8599 (over `9828250732`'s 6082 / 8459 — the two move at DIFFERENT
+        # lands its +22 above it); and 10132 at the `main` tip `6408da01ce`,
+        # whose +56 came from THREE landings in SIX hunks ABOVE the entry (8 at
+        # 1954, 16 at 2267, 21 at 2316, 8 at 5119, 2 at 9286, 1 at 9289 — again
+        # positions read off `6408da01ce` itself, not off the commits that added
+        # them). Each of those ranges has hunks BELOW the entry too
+        # (`durations:`/`durations_floors:` rows) and those do not move the pin,
+        # which is why they are not in either sum. This branch adds +13 at 2278
+        # (its own `core:` registration), so the tree that adds BOTH parents
+        # reads 10145 = 10132 + 13.
+        # `carve_out:` opens 10019 and `uri_requiring:` 10350 at THIS tree, so
+        # 10145 is inside the section, and the identical text also sits at 6191
+        # and 8652 (over `9828250732`'s 6082 / 8459 — the two move at DIFFERENT
         # rates, because only the hunks above each one count), which is what the
         # 5th element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2248, `sdk:` 8365 at THIS tree) of `surfaces:`, so the
+        # (`core:` 2256, `sdk:` 8418 at THIS tree) of `surfaces:`, so the
         # resolver's nearest-column-zero-key rule reports the PARENT: a cite onto
         # either refuses with `sits in section 'surfaces:', not 'carve_out:'` —
         # measured, so a re-derivation onto it does not get told `sdk:` and
@@ -5350,19 +5355,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # re-derived from THIS merged tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
-            # the merge NOR from a parent's prediction. Measured values, each read
+            # a merge NOR from a parent's prediction. Measured values, each read
             # from the tree it names: 9943 at `9828250732`, 9949 at `ba84fbfabf`
             # (+6 @6721, #11609), 9965 at `e200623286` (+16 @7514, #11926), 9973
             # at `cd22562c24` (+8 @2725, #12060), 9987 at `f1f74135a15b`
             # (+13 @2237 and +1 @9150, #12294), 10022 at `42409813a7` (+1 @2237,
-            # #12348), 10076 at `ca74f2375e`, and 10132 at
-            # `origin/main` tip `6408da01ce`. This branch's
-            # own `core:` registration adds +13, so the tree that adds BOTH reads
+            # #12348), 10076 at `ca74f2375e`, and 10132 at the `origin/main` tip
+            # `6408da01ce`, whose +56 came from THREE landings in SIX hunks ABOVE
+            # the entry (8 at 1954, 16 at 2267, 21 at 2316, 8 at 5119, 2 at 9286,
+            # 1 at 9289 — positions read off `6408da01ce` itself; its other two
+            # hunks are `durations:`/`durations_floors:` rows BELOW the entry and
+            # move the pin not at all). This branch's own `core:` registration
+            # adds +13 at 2278, so the tree that adds BOTH parents reads
             # 10145 = 10132 + 13. ⛔ BOTH sides of this merge carried a stale
-            # number (10035 ours, 10034 main's) and NEITHER describes a tree that
-            # adds both — `main`'s +54 since `42409813a7` came from THREE
-            # landings in FIVE hunks, and moved the entry 10022 -> 10076. ⛔ Naming
-            # only the FIRST hunk above the entry is how
+            # number (10035 ours, 10034 `main`'s) and NEITHER describes a tree
+            # that adds both. ⛔ Naming only the FIRST hunk above the entry is how
             # `9951` stood here — re-derive the SUM of every hunk above it.
             ("10145", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
