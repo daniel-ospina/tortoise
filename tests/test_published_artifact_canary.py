@@ -377,7 +377,16 @@ def test_the_install_cannot_resolve_from_a_configured_MIRROR(tmp_path, monkeypat
         "PIP_CONFIG_FILE",
         "PIP_REQUIRE_VIRTUALENV",
         "PIP_CONSTRAINT",
+        # EVERY proxy spelling: pip has no `trust_env=False`, so proxies are consumed by
+        # its vendored requests OUTSIDE pip's option system and survive `--isolated`.
+        # MEASURED (#12363 round 5): with only `all_proxy` set, `pip download --isolated
+        # --index-url https://pypi.org/simple six` still dialled the fake proxy and then
+        # printed pip's ABSENCE vocabulary — the string the tool has to re-check. Two of
+        # three spellings stripped left that door open.
         "https_proxy",
+        "all_proxy",
+        "ALL_PROXY",
+        "HTTP_PROXY",
     ):
         monkeypatch.setenv(name, "https://mirror.internal/simple")
     captured = {}
@@ -399,7 +408,11 @@ def test_the_install_cannot_resolve_from_a_configured_MIRROR(tmp_path, monkeypat
     assert not [
         k for k in captured["env"] if k.startswith("PIP_") and k != "PIP_DISABLE_PIP_VERSION_CHECK"
     ]
-    assert "https_proxy" not in captured["env"]
+    for spelling in ("https_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+        assert spelling not in captured["env"], (
+            f"{spelling} survived into the child — pip obeys every proxy spelling it "
+            f"finds and --isolated suppresses none of them (#12363 round 5)"
+        )
     assert "--isolated" in captured["cmd"], (
         "`--index-url` alone does not close the config-file class: a config-file "
         "`extra-index-url` MERGES with it, so a runner with a global mirror can resolve "
@@ -1117,3 +1130,70 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
         "the alert body must separate a detector outage from a broken artifact"
     )
     assert "gh issue create" in text and "gh issue close" in text
+
+
+def test_the_canary_cannot_be_SILENCED_without_reding_this_file():
+    """The four "cannot be starved into silence" properties, pinned.
+
+    The workflow header calls them "the load-bearing property (#10109)" and NOTHING
+    measured them: deleting `on.schedule`, flipping `cancel-in-progress: true`, adding a
+    `push: main` trigger, or dropping the tool invocation each left the suite green while
+    the canary stopped firing — the 97-day silence this PR exists to end could return
+    without a single red (#12363 round 5). Pinning the alert (above) is not enough: a
+    detector that no longer RUNS has no red to deliver.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "release-artifact-canary.yml").read_text()
+    )
+    # PyYAML resolves the bare key `on` to the boolean True (YAML 1.1).
+    triggers = workflow.get("on", workflow.get(True))
+    assert isinstance(triggers, dict), triggers
+    schedule = triggers.get("schedule")
+    assert schedule and schedule[0].get("cron"), (
+        "the canary lost its `schedule:` — a detector that never fires cannot notice a "
+        "97-day-old broken artifact"
+    )
+    assert "push" not in triggers, (
+        "a `push:` trigger lets a merge create (and its concurrency group cancel) the "
+        "canary's run — the exact starvation #10109 removed"
+    )
+    assert workflow["concurrency"]["cancel-in-progress"] is False, (
+        "a superseded run is a reading nobody got"
+    )
+    job = workflow["jobs"]["canary"]
+    assert job.get("timeout-minutes"), "the run needs a bound it can finish inside"
+    run_text = " ".join(str(step.get("run", "")) for step in job["steps"])
+    assert "published_artifact_canary.py" in run_text, (
+        "the job no longer invokes the tool — the red would be about nothing"
+    )
+    assert "--transcript-dir" in run_text and "--summary-file" in run_text, (
+        "the evidence and the rendered verdict must both be produced by the run"
+    )
+    smoke = next(step for step in job["steps"] if step.get("id") == "canary")
+    assert "published_artifact_canary.py" in str(smoke.get("run")), (
+        "the `canary` step id must be the step that runs the tool: the alert steps key "
+        "on `steps.canary.outputs.exit_code`"
+    )
+
+
+def test_an_UNWRITABLE_or_UNREADABLE_report_is_an_exit_2_not_a_traceback(monkeypatch, tmp_path):
+    """Every I/O fault in `main` must say "detector", never borrow the release verdict.
+
+    A traceback is exit 1, and exit 1 is what BOTH consumers render as "the published
+    artifact is broken — a release is owed". Round 3 fixed that for the fetch path; the
+    `pyproject.toml` read and the `--summary-file` append were still uncaught (#12363
+    round 5).
+    """
+    offline = lambda package, timeout: (None, "offline", canary.INDEX_UNREADABLE)  # noqa: E731
+
+    # (a) the tree's own pyproject.toml cannot be read
+    monkeypatch.setattr(canary, "fetch_index", offline)
+    monkeypatch.setattr(canary, "REPO_ROOT", tmp_path / "not-a-checkout")
+    assert canary.main(["--json"]) == 2
+    monkeypatch.undo()
+
+    # (b) the summary file cannot be appended to
+    monkeypatch.setattr(canary, "fetch_index", offline)
+    assert canary.main(["--json", "--summary-file", str(tmp_path / "nope" / "s.md")]) == 2
