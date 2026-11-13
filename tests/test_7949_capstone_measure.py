@@ -6110,7 +6110,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         capstone_globs: tuple[str, ...] = ()
     else:
         capstone_globs = tuple(re.findall(r"`\*(\w+)\*`", family_rows[0]))
-        if len(capstone_globs) < 3:
+        # ⛔ `< 4`, NOT `< 3` (#12369 review, P2 — measured). The threshold and the
+        # message have to agree, and an earlier cut of this guard copied `< 3` from
+        # the version whose message said "the family globs this arm reads are gone"
+        # while this one says FOUR. At `< 3` a row narrowed to THREE globs passed
+        # silently, and `_is_capstone` then stopped classifying the two
+        # `graph_census` files — so `uri_requiring:`/`slow_files:` could hold
+        # `test_graph_census_7949.py` with the document's "hold none" FALSE and every
+        # arm below GREEN over it. That is the same fail-open, one edit out. Measured:
+        # dropping ` / `*graph_census*`` from the row above gave `3` and the pin was
+        # GREEN; with this number it REDs, and
+        # `test_each_block_arm_reds_on_the_mutation_it_guards` carries that row.
+        if len(capstone_globs) < 4:
             block_failures.append(
                 f"03-test-design.md's capstone-adjacent row names only "
                 f"{list(capstone_globs)!r} as globs — the family this pin grades is "
@@ -6391,6 +6402,36 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         stray = _stray_entry_finding(doc_hits[0], ENTRY)
         if stray:
             block_failures.append(stray)
+        # ⛔ THE CITATION CLAUSE MUST NAME THE MANIFEST FILE, and this arm is the one
+        # `#12377` carried that a first cut of this resolution DROPPED (#12369 review,
+        # P3 — measured: a row naming only "the BLOCK" left the pin GREEN). Every
+        # other doc-side arm here reads the row's claim ABOUT a file without ever
+        # requiring the file to be ON the line: "`carve_out:` holds **one**: <entry> —
+        # cited by the BLOCK" is TRUE of no tree in particular, and a reader following
+        # it has no file to open. The SECTION alone is not enough either — this
+        # document names five blocks elsewhere, so a sentence naming a section and no
+        # file is a claim this pin cannot bind to the manifest it read.
+        #
+        # ⛔ SCOPED TO THE CLAUSE, NOT THE ROW, and that is the whole arm. The row is
+        # `#12377`'s lesson twice over: asked ROW-WIDE, this arm is inert on the
+        # document, because the row's later prose explains the mechanism and says "the
+        # manifest" there ("`surfaces:` sits ABOVE `carve_out:` in the manifest") — so
+        # deleting the file from the CLAIM left the row-wide test GREEN, which is a
+        # mutation that changes nothing measurable (measured; the case below failed
+        # until the scope was narrowed). The claim is the clause the `_ONE_ENTRY`
+        # grammar above already pins — up to the `**never by**` that opens the row's
+        # explanatory half — so that is the span graded here, with the whole row as the
+        # fallback if the anchor is ever reworded (a wider span can only turn this arm
+        # GREEN, never red a correct document).
+        claim_clause = doc_hits[0].split("**never by", 1)[0]
+        if not re.search(_MANIFEST, claim_clause):
+            block_failures.append(
+                "03-test-design.md's `carve_out:` sentence does not name the manifest "
+                "FILE in its claim — it says which BLOCK and which ENTRY the claim is "
+                "about, but not which tree to open, so the sentence is true of no tree "
+                "in particular and the manifest read this pin does has nothing to bind "
+                "to. Name `config/ci-surfaces.yml` beside the block it names; `_MANIFEST` "
+                "accepts `ci-surfaces.yml`, `ci-surfaces.yaml` or \"the manifest\".")
         # ⛔ scan the sentence with the ENTRY NAME removed: `test_pack_logic_
         # writeprobe_11083.py` carries a 5-digit run that is not a line cite.
         sentence_numbers = _bare_number_hits(doc_hits[0].replace(ENTRY, ""))
@@ -7262,6 +7303,17 @@ def test_the_section_entries_membership_paragraph_is_rederived():
         "\nslow_files:\n",
         "\nslow_files:\n- {test_pack_logic_writeprobe_11083.py: 3.0}\n", 1)),
      "the non-string entry refusal in `_section_entries`"),
+    # ⛔ THE GLOB-COUNT GUARD AND THE FILE-NAMING ARM, both added by this resolution's
+    # own review (#12369, P2 and P3) because a first cut wrote the guard with the
+    # WRONG THRESHOLD and dropped the arm entirely. Each is RED here and GREEN if the
+    # line it names is deleted or loosened — the standard every row above is held to.
+    (lambda doc, man: (doc.replace(
+        " / `*graph_census*`", "", 1), man),
+     "the capstone-glob count guard (a family row narrowed to three globs)"),
+    (lambda doc, man: (doc.replace(
+        "cited by the BLOCK and by `ci-surfaces.yml` / \"the manifest\"",
+        "cited by the BLOCK", 1), man),
+     "the manifest-file arm (the sentence names no file at all)"),
 ])
 def test_each_block_arm_reds_on_the_mutation_it_guards(mutation, arm, monkeypatch,
                                                       tmp_path):
