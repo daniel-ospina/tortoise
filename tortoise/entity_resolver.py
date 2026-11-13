@@ -71,10 +71,19 @@ Blocking, not all-pairs
 Pairwise comparison is `n(n-1)/2`: 872 Subjects is ~380k comparisons per scan,
 and naive transitive closure compounds a single false positive across a whole
 cluster (the #2730 brief's named production failures). Candidate generation is
-therefore **blocked** on ``(label, first 3 folded characters)`` — the standard
-record-linkage reduction. Equal folded names always share a block, so the exact
-rung can never be missed by blocking; the bound is that a pair whose folded names
-share no 3-character prefix is never scored.
+therefore **blocked** — the standard record-linkage reduction — on the MULTI-KEY
+union :func:`tortoise.entity_blocking.block_keys` yields, partitioned per
+``(label, key)``: ``E`` the folded name, ``B`` a path basename, ``P`` the
+``MIN_BLOCK_CHARS`` prefix, one ``T`` per word-prefix, and 8 ``S`` minhash bands.
+Equal folded names always share ``E`` and ``P``, so the exact rung can never be
+missed by blocking. ⛔ The bound the prefix alone imposed is GONE (#12295): a pair
+whose folded names share no 3-character prefix is no longer excluded — that is
+exactly what the ``T`` (word order / transposition) and ``S`` (typo and separator
+classes) keys reach, and `test_the_scan_finds_a_transposition_the_single_prefix_key_could_not`
+pins it. ``P`` is kept byte-identical to the pre-#12295 single key, so the block
+set is a strict superset of `main`'s. The scan applies NO size cap
+(:data:`tortoise.entity_blocking.MAX_BLOCK_SIZE` bounds one QUERY's candidate list
+only, and an oversized block is skipped and REPORTED there).
 """
 from __future__ import annotations
 
@@ -96,9 +105,13 @@ AUTO_MERGE_THRESHOLD = 0.92
 #: Folding: a leading article carries no identity ("the owner" IS "owner").
 _ARTICLES = frozenset({"the", "a", "an"})
 
-#: Blocking width. ``MIN_BLOCK_CHARS`` folded characters is the shortest key that
-#: keeps pair completeness for the damage classes measured on #12047 while still
-#: cutting the 872-Subject scan by ~3 orders of magnitude.
+#: Blocking width for the ``P:`` key. ``MIN_BLOCK_CHARS`` folded characters is the
+#: shortest PREFIX that keeps pair completeness for the damage classes measured on
+#: #12047; since #12295 it is ONE key among the multi-key union
+#: (:func:`tortoise.entity_blocking.block_keys`) rather than the whole scan's
+#: blocking rule, so the reduction it provides is additive — it is no longer the
+#: bound on which pairs are scored. The ~3-orders-of-magnitude figure was measured
+#: for the prefix key against all-pairs, not as the scan's own cost.
 MIN_BLOCK_CHARS = 3
 
 #: The block-size at which the SCAN reports its largest block. Not a cap: the
