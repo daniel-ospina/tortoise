@@ -863,6 +863,50 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
     return node.get(DEFINITION_BOUNDARY_PROP)
 
 
+#: Rows per keyset page of the readings read. It must stay under the server's
+#: ``RESULTSET_SIZE`` (a hosted deployment pins 10000 in
+#: ``apps/graph-viz/docker-compose.yml``; a lane container reports ``-1`` = no
+#: cap), because ONE unbounded query is truncated BY THE SERVER in store order
+#: and says nothing about it — #4233's silent-truncation class, whose remedy is
+#: ``hosted_backup._paged_rows``. ⛔ THE PRECONDITION IS PART OF THE CONTRACT: a
+#: ``RESULTSET_SIZE`` pinned BELOW this number makes a short page ambiguous
+#: ("last page" vs "server-truncated page"), which no caller here can detect —
+#: unlike ``hosted_backup``, this read has no independent row count to compare
+#: against, so an operator who pins the cap lower must lower this too.
+_READINGS_PAGE_SIZE = 1000
+
+
+def _newest_first_key(reading: Reading) -> tuple[int, Any, str]:
+    """Total order for :func:`latest_readings` — by real INSTANT, never by bytes.
+
+    ⛔ THE STORED STRING IS NOT THE ORDER (#12322). A graph holds the same slot
+    spelled ``Z``, ``+00:00``, date-only, and as the ingest producer's
+    ``2026/11/12 (Thu) 01:00``; their byte order DISAGREES with their instant
+    order — ``'…T05:00:00Z'`` sorts above ``'…T01:00:00-05:00'`` although the
+    second is an hour LATER, and ``'/'`` (0x2F) sorts above ``'-'`` (0x2D) at
+    index 4. Ordering a ``LIMIT``ed page by that string cropped the
+    instant-newest reading out of the page a judgement is computed from, and
+    ``compare()`` reported it as the current state: MEASURED at ``cd22562c24``,
+    a ``>= 10`` target went ``unmet`` from a page whose newest row held 5.0 while
+    the graph's newest reading held 12.0.
+
+    The measure is ``search_engine._created_sort_key`` — the repo's ONE notion of
+    "parseable instant" — imported lazily for the same reason
+    :func:`instant_at_or_after` does it: this module must not add a second
+    grammar. That key is ``(0, epoch)`` for a real instant and ``(1, string)``
+    for an unparseable value; the flag returned here INVERTS the bucket so the
+    caller can sort DESCENDING and still leave an undated reading LAST — an
+    unparseable as-of cannot PROVE it is recent, so it must never displace a
+    dated one. ``reading_id`` is the tie-break (the ``e.id DESC`` the query
+    itself used to carry), so equal instants keep a total order and two reads of
+    an unchanged graph agree.
+    """
+    from .search_engine import _created_sort_key
+
+    bucket, measure = _created_sort_key(reading.started_at)
+    return (1 if bucket == 0 else 0, measure, str(reading.reading_id or ""))
+
+
 def latest_readings(
     sdk: Any,
     indicator_id: str,
@@ -871,7 +915,23 @@ def latest_readings(
     limit: int = 100,
     since: Any = None,
 ) -> list[Reading]:
-    """The readings recorded about ``indicator_id``, newest first.
+    """Up to ``limit`` readings recorded about ``indicator_id``, newest first.
+
+    ⛔ ``limit`` IS A CAP, NOT A COURTESY (#11823 / #12322). It is applied to the
+    ORDERED list, so the rows returned are the ``limit`` most recent readings —
+    but a caller reading a bare list still cannot tell that the bound was hit.
+    A caller that needs the whole history must pass a bound it knows exceeds it;
+    the return shape carries no room for a ``truncated`` answer. A NEGATIVE bound
+    is refused rather than sliced: ``out[:-1]`` would silently drop the OLDEST
+    reading while reading as "everything", the same class of silent bound this
+    function exists to remove.
+
+    "Newest first" is ordered by the INSTANT each reading names, using the
+    repo's one instant comparator (``search_engine._created_sort_key``) — never
+    by the stored string, whose byte order disagrees with instant order across
+    the spellings a graph actually holds. :func:`_newest_first_key` carries the
+    measurement and the pathology. A reading that names no parseable instant
+    sorts LAST, deterministically, because it cannot prove it is recent.
 
     A reading is an ``:Event`` wired ``(e)-[:aboutObject]->(indicator)`` — the
     #2782 value shape (a structural ``value`` + ``unit`` on the event, an
@@ -879,6 +939,32 @@ def latest_readings(
     event kind defaults to ``measurement`` but is a parameter because the
     vocabulary for a machine reading is a downstream wave (#11081), and this
     module must not become the thing that decides it.
+
+    The read is scoped to ONE indicator's ``aboutObject`` events — a bounded
+    subgraph, never a full-graph scan — and it is fetched by KEYSET PAGES on
+    ``id(e)`` (see :data:`_READINGS_PAGE_SIZE`) rather than in one query, so a
+    server-side result-set cap cannot silently truncate it in store order
+    (#4233; the page-size PRECONDITION is stated at the constant). Ordering
+    happens in Python because no Cypher-computable instant key exists in this
+    codebase today (measured: no ``startedAtEpoch``/``startedAtMs`` property, and
+    no ``toInteger(substring(…))`` date arithmetic anywhere under ``tortoise/``),
+    so ANY server-side ``ORDER BY … LIMIT`` is a byte-ordered cut. Writing such a
+    key at ingest would store a HOST-DEPENDENT number for the producer's shape
+    (#11646's residual) — a separate, still-open decision — so ordering here is
+    the option that changes no stored byte.
+
+    ⚠️ THE ORDER INHERITS ``_created_sort_key``'s HOST DEPENDENCE for a zone-less
+    value. #3982 records that a date-TIME with no offset is read in the READER's
+    zone (ECMA-262 §21.4.3.2) while a date-only value is pinned to UTC midnight,
+    and #11646 measured the residual: the producer's ``2023/05/20 (Sat) 02:21``
+    lands on ``1684529460`` / ``1684549260`` / ``1684574460`` under
+    Asia/Kolkata / UTC / America/Los_Angeles — a **12.5 h** spread across those
+    three zones (26 h for the full UTC−12…UTC+14 offset range) — so its position
+    against a zoned row can differ between hosts. That divergence already existed
+    on the ``since`` path (:func:`instant_at_or_after`); this read makes it
+    visible in the ORDER too. It is a READ-time residual, not a stored byte: the
+    anchor decision is the one #11646 was closed with UNRESOLVED, and writing an
+    epoch at ingest would make the divergence durable instead of read-time.
 
     ``since`` EXCLUDES the readings taken before an instant — the definition
     boundary (#11926 capability 9). It is applied HERE rather than as a Cypher
@@ -899,33 +985,64 @@ def latest_readings(
     ``mark_definition_change`` refuses to WRITE such a stamp and repairs one it
     finds, so this state is reachable only through an outside write.
     """
-    order = "coalesce(e.startedAt, e.createdAt, '')"
     where = "MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator"
-    params: dict[str, Any] = {"indicator": indicator_id, "lim": limit}
+    params: dict[str, Any] = {"indicator": indicator_id}
     if event_kind:
         where += " AND coalesce(e.eventKind, '') = $kind"
         params["kind"] = event_kind
+    # ⛔ NO INSTANT-ORDERED CUT HERE (#12322). A cut ordered by the stored string
+    # keeps rows by BYTE rank, and that string is not the instant (see
+    # `_newest_first_key`): the page kept the wrong readings and the judgement
+    # was computed from a stale one. The rows are instead fetched by KEYSET PAGES
+    # on `id(e)` — deterministic, and immune to the server's `RESULTSET_SIZE`
+    # truncation, which a single unbounded query is NOT — then ordered in Python
+    # with `limit` applied AFTER that ordering, so no bound can decide WHICH
+    # readings the judgement sees.
     cypher = (
-        f"{where} RETURN e.id, e.value, e.unit, e.startedAt, e.createdAt "
-        f"ORDER BY {order} DESC, e.id DESC LIMIT $lim"
+        f"{where} AND id(e) >= $cursor "
+        "RETURN id(e), e.id, e.value, e.unit, e.startedAt, e.createdAt "
+        "ORDER BY id(e) LIMIT $batch"
     )
-    rows = sdk._get_proj().g.query(cypher, params=params).result_set
+    if limit < 0:
+        raise ValueError(
+            f"limit must be a non-negative cap, got {limit!r} — a negative slice "
+            "would drop the OLDEST reading and read as if nothing was bounded"
+        )
+    g = sdk._get_proj().g
+    rows: list[Any] = []
+    cursor = 0
+    batch = _READINGS_PAGE_SIZE
+    while True:
+        page = g.query(
+            cypher, params={**params, "cursor": cursor, "batch": batch}
+        ).result_set
+        # `if not page` FIRST (the order `_paged_rows` uses): a page size of 0 or
+        # a genuinely empty tail must end the loop, never reach `page[-1]`.
+        if not page or len(page) < batch:
+            rows.extend(page)
+            break
+        rows.extend(page)
+        # `>= last + 1`, never `> last`: ids are non-negative integers, and a
+        # negative comparison against a NODE `id()` answers 0 rows on the v6 core
+        # (measured — `hosted_backup._paged_rows`, #9226).
+        cursor = int(page[-1][0]) + 1
     out: list[Reading] = []
     for row in rows:
-        raw = row[1] if len(row) > 1 else None
+        raw = row[2] if len(row) > 2 else None
         out.append(
             Reading(
                 value=_num(raw),
                 raw_value=raw,
-                reading_id=row[0] if row else None,
-                unit=row[2] if len(row) > 2 else None,
-                started_at=(row[3] if len(row) > 3 else None)
-                or (row[4] if len(row) > 4 else None),
+                reading_id=row[1] if len(row) > 1 else None,
+                unit=row[3] if len(row) > 3 else None,
+                started_at=(row[4] if len(row) > 4 else None)
+                or (row[5] if len(row) > 5 else None),
             )
         )
     if since is not None:
         out = [r for r in out if instant_at_or_after(r.started_at, since)]
-    return out
+    out.sort(key=_newest_first_key, reverse=True)
+    return out[:limit]
 
 
 def live_judgements(
