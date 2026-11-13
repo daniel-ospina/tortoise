@@ -290,7 +290,7 @@ object queries, so pool 40 costs **≈ 3.1 s added per capture** (pool 15 ≈ 1.
 That is the price of the gate, and it is the reason the gate ships **OFF** and
 opt-in rather than default-on.
 
-**Model load is NOT a table cell, because it is not in the artifact.** A one-off observation on this box: ~6.4 s from the local HF cache, once, then cached by name across both gates. Every artifact's `latency.note` says load is EXCLUDED from `ms_per_pair`, so a load figure sits here as prose under the same label this document gives any unartifacted observation — it bounds the mechanism (a cold first call is expensive and one-off), not a number to quote.
+**Model load is NOT a table cell, because it is not in the artifact.** A one-off observation on this box: ~6.4 s from the local HF cache, once, then cached by name across both gates. Both *noun-path* artifacts' `latency.note` says load is EXCLUDED from `ms_per_pair` (the user-search artifact carries no `note` at all — its arithmetic says the same thing: 2,685.59 s / 31,511 pairs = 85.227), so a load figure sits here as prose under the same label this document gives any unartifacted observation — it bounds the mechanism (a cold first call is expensive and one-off), not a number to quote.
 
 This is a **CPU** figure. It is not comparable to the model card's
 "1800 docs/sec" (computed on a **V100**). The comparable number is the measured

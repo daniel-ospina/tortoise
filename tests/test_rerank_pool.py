@@ -540,11 +540,14 @@ def test_the_wiring_is_a_permutation_and_discloses_the_cap(
     assert entry[rerank.RERANK_SCORED_KEY] == min(4, candidates)
     assert (entry[rerank.RERANK_SCORED_KEY]
             + entry[rerank.RERANK_UNSCORED_KEY]) >= candidates
+    # ⛔ NO ``else`` HERE: with ``scored == min(4, candidates)`` already asserted
+    # above, ``scored + unscored >= candidates`` IS ``unscored >= candidates - 4``,
+    # so an else-branch restating it can only fail where the line above already
+    # did — a second guard that guards nothing. The exact form covers the no-cut
+    # case; the ``>=`` form above covers the cut case.
     if candidates < 5:      # no cut, so the candidate set is exactly what shipped
         assert (entry[rerank.RERANK_SCORED_KEY]
                 + entry[rerank.RERANK_UNSCORED_KEY]) == candidates
-    else:                   # the page was cut: rows past it were never scored
-        assert entry[rerank.RERANK_UNSCORED_KEY] >= candidates - 4
     # Degradation is NOT reported through ``degraded``: in a leg trace that flag
     # means "a retrieval leg did not run" and would turn the read STATUS degraded.
     assert entry["degraded"] is False
