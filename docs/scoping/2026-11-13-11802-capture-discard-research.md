@@ -24,10 +24,14 @@ agent-infra#3921.
 >
 > **Citations name SYMBOLS wherever they describe live code** (`list_spool_metas`, `recordSpoolMeta`, …):
 > the first draft transcribed `file:line` offsets against an older revision and only 2 of 11 still
-> resolved, so symbols replaced them and survive the next edit. The two places that still carry line
-> numbers say which tree they are against: the §2.5 PRE-fix table is pinned to the **base**
-> (`origin/main` @ `2dbfb046d7e3`, whose lines are the defect sites this change moves), and the §3
-> copies table describes the **shipping** tree (`8ad837711f`), labelled as such there.
+> resolved, so symbols replaced them and survive the next edit.
+>
+> Line numbers survive only where they name the tree they were measured on — three such groups: the
+> §2.5 PRE-fix table is pinned to the **base** (`origin/main` @ `2dbfb046d7e3`, whose lines are the
+> defect sites this change moves); the §3 copies table is measured on the **shipping** artifact (the
+> repo copy is byte-identical from `8ad837711f` onward) and says so in its own heading; and one live
+> citation, `tortoise/hook_install.py` `PI_EXTENSION_NAME`, keeps a line number because the symbol is
+> a module constant rather than something to quote — safe because this PR does not touch that file.
 
 ---
 
@@ -62,7 +66,7 @@ Now read what the spool meta actually holds (`tortoise/pi-hooks/tortoise-capture
 retry/idempotency state**.
 
 The repo already states this consequence about the same file, in its own words
-(`tortoise/capture_spool.py` `_entry_bytes` area — the "NOT re-fileable" note`):
+(`tortoise/capture_spool.py` `_quarantine_log` docstring, which carries the "NOT re-fileable" note):
 
 > `NOT re-fileable` — … the entry's key is `sha256(session_id)[:32]` and **the corrupt meta (the only
 > copy of the session id) is REMOVED, so no verb can reconstruct the session id the server needs.**
@@ -72,7 +76,7 @@ quarantined `.turns.jsonl.orphan` is **"unreachable to every surface"** and is t
 ahead of both delivery classes**.
 
 > ⚠️ **CORRECTION (2026-11-13, review cycle 1).** The eviction ORDER below was first written inverted.
-> `capture_spool.py` `prune_spool` eviction-order docstring` states the truth: *"A quarantined log goes LAST of the evictable classes,
+> `capture_spool.py` `prune_spool` eviction-order docstring states the truth: *"A quarantined log goes LAST of the evictable classes,
 > not first: a FILED entry's content is already on the wire, so reclaiming it is a CERTAIN zero-cost
 > choice, while an orphan's delivered-ness is unknowable"* — and the code agrees (filed pass, then the
 > orphan pass, then unfiled entries which are never evicted). So an orphan is spent **second, not
@@ -81,7 +85,7 @@ ahead of both delivery classes**.
 > is still reachable by the ceiling and still permanently unfilable, which is what makes quarantine a
 > delayed delete. The order only changes *how long* the delay is.
 
-Confirmed in code: `tortoise/capture_spool.py` `_orphan_paths` (reclaimable-orphan docstring) allows an `.orphan` to be reclaimed because it is
+Confirmed in code: `tortoise/capture_spool.py`'s module docstring allows an `.orphan` to be reclaimed because it is
 "unreachable to every surface". The order is **filed entries → orphans → UNFILED, which are never
 evicted**: there is no unfiled eviction pass at all — the unfiled arm is a bare `continue`
 (`capture_spool.py` `_saturated_for_metas` and the unfiled bare `continue`; TS `pruneSpool`), guarded by *"an UNDELIVERED entry is the only copy of a
@@ -106,7 +110,7 @@ applies them everywhere except here.** The fix introduces no new doctrine.
 
 ### 2.1 The read path already says unreadable ≠ corrupt
 
-`tortoise-capture.ts` `healthScan` — `return undefined; // unreadable is not empty`, on the same files:
+`tortoise-capture.ts` `countPendingEntries` (`// unreadable is not empty`, about an unlistable DIRECTORY) and `healthScan`'s `Math.max(0, onDisk - metas.length)` — an uncounted meta still counts as pending — on the same files:
 
 > A meta we cannot read **still counts as PENDING (it may be waiting)** and is EXCLUDED from the
 > saturation metas.
@@ -122,7 +126,7 @@ contradiction in favour of the position the read path already records.
 > **A refusal is a delay the operator can reverse (`--retry-terminal`), an unlink is a loss nobody
 > can.**
 
-and `tortoise/capture_spool.py` `DISCARD_TRANSCRIPT_TORN` on `DISCARD_TRANSCRIPT_TORN`:
+and `tortoise/capture_spool.py` on `DISCARD_TRANSCRIPT_TORN`:
 
 > The entry is RECORDED and KEPT (marked terminal), NEVER unlinked: … a read/decode failure must
 > never delete user data (#7708 follow-up).
@@ -178,7 +182,9 @@ leg destroying the same files on the next tick.
 
 ## 3 · Which deployed copy is being patched, and how that was proved
 
-**The brief warned not to guess. Measured:**
+**The brief warned not to guess. Measured on the SHIPPING artifact — the repo copy is byte-identical
+from `8ad837711f` onward, so these numbers hold for this branch — and on this box's live install.
+Every number below is a `wc -lc` / `head -1` reading, not an inference:**
 
 | Copy | Path | Size / lines | Marker |
 |---|---|---|---|
@@ -359,7 +365,9 @@ Alternatives considered and **rejected**, with the reason:
 2. **Quarantine the meta as well as the transcript, and record it.** Rejected: §4.1 — quarantine
    requires a successful metadata read to identify the item; and per §1 the meta is the *only* copy of
    the session id, so removing it from the scan path guarantees the entry can never be filed. A
-   quarantined copy of the meta would also be reaped ahead of everything (`capture_spool.py` `_orphan_paths` (reclaimable-orphan docstring)).
+   quarantined copy of the meta would be reaped too — and the quarantine happens at the END of the scan, so
+   the copy would survive exactly one drain and then be gone (`capture_spool.py` module docstring: an
+   `.orphan` is "unreachable to every surface").
 3. **Add a dead-letter queue.** Rejected: the spool already **is** the retry queue with backoff
    (`next_attempt_at_ms`, `attempts`). A DLQ adds machinery and another unreachable surface, which is
    the very failure mode being fixed.
@@ -398,7 +406,7 @@ bounded only because the entry was *destroyed*; the retained path trades that fo
 Review cycle 2 is right that #10175 holds a cap which *refuses rather than deletes*, and that counting
 **more** bytes moves in that same direction, so it is not the obstacle. The repo even has the precedent one
 class over: orphan bytes are already credited to `total` for exactly this reason
-(`capture_spool.py` `prune_spool` eviction-order docstring` — *"the byte ceiling stopped applying the moment a meta was quarantined"*).
+(`capture_spool.py` `prune_spool` eviction-order docstring — *"the byte ceiling stopped applying the moment a meta was quarantined"*).
 The real reason is **risk and scope**: this is a behavioural change to the adjudication inside
 `prune_spool` / `spoolSaturated` (and both TS twins), the highest-consequence function in the module, and it
 needs its own review plus the cap owner's sign-off — not a rider on a data-loss fix. A naive `total +=`
@@ -452,11 +460,11 @@ faithful mirror*, which is false on this axis; the comment now names the diverge
 **Internal (this repo):** `docs/ONTOLOGY.md:59-71` (§2 layers), `:180` (extractedFrom / sourceKind),
 `:461-463` (§4.4 bytes live outside the graph), `:520` (content-addressed `eventId` from session_id +
 captured_at), `:531` (`AgentSession` eventKind), `:1130` (`agentSession` is the provenance bridge) ·
-`tortoise-capture.ts` `SpoolMeta`, `listSpoolEntries` (the conflated catch and the `meta is not valid
-JSON` lie — both removed here), `recordDiscard` (accepts `retained`), the retention doctrine comment,
+`tortoise-capture.ts` `SpoolMeta`, `listSpoolEntries` (the conflated catch, and the "not valid JSON" lie about bytes it never opened —
+ both removed here), `recordDiscard` (accepts `retained`), the retention doctrine comment,
 the two `retained: true` arms, `SPOOL_DIR` (one shared directory), `healthScan` (read path: unread
 meta is PENDING), the `spool DISCARD` warning line ·
-`tortoise/capture_spool.py` `_orphan_paths` (orphans reclaimable), `DISCARD_TRANSCRIPT_UNREADABLE` /
+`tortoise/capture_spool.py` module docstring (orphans reclaimable), `DISCARD_TRANSCRIPT_UNREADABLE` /
 `DISCARD_TRANSCRIPT_TORN`, `RETAINED_DISCARD_REASONS`, `is_lost_discard`, the "NOT re-fileable" note
 (no verb can reconstruct the session id), `list_spool_metas` (the `OSError` catch), the `prune_spool` orphan pass (orphans spent
 AFTER the filed pass, never before it) · `docs/architecture/PI-CAPTURE-ARCHITECTURE.md:160` (orphan unreachable, reaped) ·
