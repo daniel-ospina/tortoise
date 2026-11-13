@@ -860,10 +860,11 @@ def invalidate(
         # `tests/test_11926_derived_invalidation.py:489`) reconciles nothing.
         # That is correct for THIS arm rather than a defect: there is no claim
         # whose `goalId` could have named the goal instead.
-        # ⚠️ The reconcile still RUNS, so the record still says what it did —
-        # `cache` carries `checked: False` WITH its reason instead of the key
-        # being absent, which is what keeps an absent `cache` readable as "no
-        # reconcile was attempted" on every other shape.
+        # ⚠️ The reconcile is still ATTEMPTED, so the record still says what it
+        # did — `cache` carries `checked: False` WITH the guard's own reason
+        # (`no goalId was supplied to the reconcile`) instead of the key being
+        # absent, which is what keeps an absent `cache` readable as "no reconcile
+        # was attempted" on every other shape.
         # ⛔ AND THE RECORD NAMES THE GOAL IT RECONCILED, so the repair route the
         # `reconcile_goal_state_cache` docstring documents ("call this again with
         # the goal's id") is walkable from the record alone (#12315 review cycle
