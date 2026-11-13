@@ -13007,10 +13007,12 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
     # (round 22).
     if time.monotonic() >= deadline:
         return b"".join(chunks), True
-    try:
-        probe = reader(1)
-    except Exception:  # a probe failure cannot prove completeness
-        return b"".join(chunks), True
+    # ⛔ The probe is ONE byte (its wait and its allocation must not scale with
+    # the cap), and a probe that RAISES is not caught: "the body could not be
+    # READ" is a distinct verdict from "it was cut", and the callers already
+    # report read errors as such. Collapsing the two diagnosed a stall or a
+    # premature close as "too big / too slow" (fresh review round 23).
+    probe = reader(1)
     return b"".join(chunks), bool(probe)
 
 
