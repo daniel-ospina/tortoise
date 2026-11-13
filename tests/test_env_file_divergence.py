@@ -1388,10 +1388,66 @@ def test_a_client_error_never_quotes_the_password_prefix():
     """
     from tortoise.__main__ import _scrub_uri_error
 
-    uri = "docker://:Abc#rest@h:6379/g"
-    message = f"bad port in URI '{uri}': Port could not be cast to integer value as 'Abc'"
+    cases = [
+        ("docker://:Abc#rest@h:6379/g", "Abc"),      # empty user part, `#` cut
+        ("docker://u:S3cretPw?x@h/g", "S3cretPw"),   # USER part, `?` cut
+        ("docker://u:S3cretPw#x@h/g", "S3cretPw"),   # USER part, `#` cut
+        ("docker://u:p%2Fw?x@h/g", "p/w"),           # percent-encoded, decoded echo
+    ]
+    for uri, leak in cases:
+        message = f"bad port in URI '{uri}': Port could not be cast to integer value as '{leak}'"
+        scrubbed = _scrub_uri_error(message, uri)
+        assert leak not in scrubbed, (uri, scrubbed)
 
-    scrubbed = _scrub_uri_error(message, uri)
 
-    assert "Abc" not in scrubbed, scrubbed
-    assert "rest" not in scrubbed.split("bad port in URI")[1], scrubbed
+def test_a_file_that_was_never_applied_does_not_claim_it_was():
+    """The non-applied arm must not say "this process applied that file".
+
+    Measured on the documented setup with a file-broken URI and an empty shell:
+    the row printed "this process applied that file at import as well, so the
+    rows below resolved from the same values and graded the store above" — the
+    file was applied only INSIDE the diagnostic's own overlay, and the rows
+    graded the canonical embedded default (#12428 review).
+    """
+    row = _rows_text({"read_by_this_command": False,
+                      "differs": False,
+                      "cli_target": "/tmp/graded-by-the-rows.db",
+                      "daemon_target": None,
+                      "daemon_error": "ValueError: Relative DB path 'relative/x.db' rejected."})
+    assert "applied that file at import as well" not in row, row
+    assert "this command does not read it, so the rows below do not show that error" in row, row
+
+
+def test_a_file_applied_after_grading_does_not_blame_the_rows():
+    """Applied mid-run, but AFTER the store above was resolved: the rows are fine.
+
+    Same shape as the documented setup, except the file was applied during the
+    run. "the rows below resolved from the same values" is false there — they
+    resolved BEFORE the import (#12428 review).
+    """
+    row = _rows_text({"read_by_this_command": True,
+                      "applied_when_graded": False,
+                      "daemon_target": None,
+                      "daemon_error": "ValueError: Relative DB path 'relative/x.db' rejected."})
+    assert "AFTER resolving the store above" in row, row
+    assert "resolved from the same values" not in row, row
+
+
+def test_a_shadowed_shell_value_is_still_the_environment_s(_isolated, monkeypatch):
+    """The probe removes a key only when the FILE's value is the one in effect.
+
+    Popping by NAME also removed a shell value the file merely shadows, so the
+    probe's answer described an environment that does not exist and `config show`
+    blamed the file for an error the environment owned (#12428 review).
+    """
+    from tortoise import dotenv_file
+    from tortoise.__main__ import _dotenv_divergence
+
+    _write_env(_isolated, "TORTOISE_DB_URI=/tmp/ok.db\n")
+    monkeypatch.setenv("TORTOISE_DB_URI", "relative/broken.db")   # the shell's own
+    monkeypatch.setattr(dotenv_file, "LOADED_PATHS", set(), raising=False)
+
+    payload = _dotenv_divergence(graded_target="/tmp/graded.db")
+
+    # The shell value is broken and the file's is not: the ENVIRONMENT owns it.
+    assert payload.get("daemon_error_from_env") is True, payload

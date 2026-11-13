@@ -3165,10 +3165,21 @@ def _scrub_uri_error(text: str, uri: str | None) -> str:
     # above has none left. Supply the bare value so the fragment a client echoed
     # is a fragment we can name.
     for form in list(forms):
-        if "://" in form:
-            tail = form.split("://", 1)[1]
-            if tail.startswith(":") and "@" not in tail and len(tail) > 1:
-                forms.append(tail[1:])
+        if "://" not in form:
+            continue
+        tail = form.split("://", 1)[1]
+        if "@" in tail:
+            continue
+        # No `@` left means the whole remainder IS the userinfo, with or without a
+        # user part: `docker://:pw` and `docker://u:pw` both reach here, and the
+        # credential is what follows the colon (#12428 review).
+        if ":" in tail:
+            from urllib.parse import unquote as _unquote
+
+            secret = tail.split(":", 1)[1]
+            if secret:
+                forms.append(secret)
+                forms.append(_unquote(secret))
     return _scrub(text, *forms)
 
 
@@ -11400,8 +11411,12 @@ def _dotenv_divergence(graded_target: str | None = None, *,
     # review). Hoisted so the "nothing left to overlay" arm — the APPLIED state,
     # where `effective` is empty precisely because the file is already in the
     # environment — attributes its refusal correctly too.
+    # ⛔ Only when the FILE's value is the one in effect: popping by NAME also
+    # removed a shell value the file merely SHADOWS, which made the probe's
+    # answer describe an environment that does not exist (#12428 review).
     _probe_saved = {key: os.environ.pop(key)
-                    for key in list(assignments) if key in os.environ}
+                    for key in list(assignments)
+                    if os.environ.get(key) == assignments.get(key)}
     _env_error_preexists = False
     try:
         daemon_db_target()
@@ -11663,10 +11678,17 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                      if _rows_failed else
                      " — the rows below graded a target of their own"))
 
-        _applied_tail = ("this process applied that file at import as well, so the "
-                         "rows below resolved from the same values" +
-                         (" and fail the same way" if _rows_failed else
-                          " and graded the store above"))
+        if not env_file.get("applied_when_graded", True):
+            # Applied DURING this run, after the store above was resolved — so the
+            # rows did not resolve from the file's values at all (#12428 review).
+            _applied_tail = ("this run applied that file at import AFTER resolving "
+                             "the store above, so the rows below do not show that "
+                             "error")
+        else:
+            _applied_tail = ("this process applied that file at import as well, so "
+                             "the rows below resolved from the same values" +
+                             (" and fail the same way" if _rows_failed else
+                              " and graded the store above"))
         rows.append(("Config: .env", "❌",
                      (f"{path} is disclosed, but the DAEMON's target is unresolvable "
                       f"from the environment itself: "
@@ -11679,9 +11701,18 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                      # applied `.env` with a broken URI and a healthy graded
                      # target printed "so the rows below fail the same way" while
                      # they graded normally (#12428 review).
+                     # ⛔ THREE states, not two: the environment caused it / this
+                     # process had already applied the file / neither (the file
+                     # was only ever applied INSIDE the overlay, so this command
+                     # does not read it). The middle one was lost in an earlier
+                     # round and the NOT-applied arm then claimed "this process
+                     # applied that file at import as well" — measured on the
+                     # documented setup with a file-broken URI (#12428 review).
                      + (_rows_below_fail()
                         if env_file.get("daemon_error_from_env") else
-                        _applied_tail)))
+                        _applied_tail if _applied else
+                        "this command does not read it, so the rows below do not "
+                        "show that error")))
         return rows
     # The store the rows BELOW grade. It is the payload's `cli_target` because
     # `_cmd_doctor` hands `_dotenv_divergence` the target it already resolved —
@@ -14874,6 +14905,13 @@ def _cmd_doctor(args):
         # the RAW URI embedded — mask userinfo so a credential in --db /
         # --path / TORTOISE_DB_URI never reaches the terminal (no-op for
         # plain paths).
+        # ⛔ `_mask_uri_userinfo`, NOT `_scrub`: this message quotes the value the
+        # resolver USED (`Relative DB path 'relative.db' rejected`), and `_scrub`
+        # redacts the whole value — which destroys the one thing the message
+        # exists to say, for a path that is not a secret (the rule
+        # `_redact_db_value`'s docstring states, and two pinned tests enforce).
+        # The CLIENT's echo is a different message and uses `_scrub_uri_error`
+        # in the FalkorDB probe arms below.
         results.append(("Graph: health", "❌", _mask_uri_userinfo(str(e))[:60]))
         target = None
 
