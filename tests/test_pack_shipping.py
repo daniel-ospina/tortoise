@@ -376,6 +376,20 @@ class TestGetRegistryEnvChain:
             return orig_load(self)
 
         monkeypatch.setattr(pack_registry.PackRegistry, "load_all", raisy)
+        # #12060 (round-10 review P3): the S1b FALLBACK registry must get the
+        # guard-table check too. ⛔ Counted, not inferred: `guard_warnings` is set
+        # by `load_all` itself, so asserting the attribute (the first attempt)
+        # passed with the call removed — measured by a reviewer, and it would have
+        # pinned nothing. The counter is the only form that fails on the revert.
+        check_calls = {"n": 0}
+        orig_check = pack_registry.PackRegistry.check_guard_table
+
+        def counting_check(self):
+            check_calls["n"] += 1
+            return orig_check(self)
+
+        monkeypatch.setattr(pack_registry.PackRegistry, "check_guard_table",
+                            counting_check)
         with caplog.at_level(logging.WARNING):
             reg = domain_loader._get_registry()
         assert reg is not None
@@ -384,6 +398,10 @@ class TestGetRegistryEnvChain:
         assert reg.fallback_note is not None
         assert str(env_dir) in reg.fallback_note  # observable, not mechanism
         assert domain_loader._get_registry() is reg  # sticky (no rebuild)
+        assert check_calls["n"] == 1, (
+            "the guard-table check must run on the S1b fallback registry "
+            f"(ran {check_calls['n']} times)")
+        assert reg.guard_warnings == {}   # the fallback catalog declares none
 
 
 # ── Env-var composition (Indicator 1 catalog join, #1930) ─────────────────

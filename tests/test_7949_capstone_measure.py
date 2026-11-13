@@ -5046,6 +5046,18 @@ _EPIC_CITE_DOCS = {
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
     "03-test-design.md":
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+    # ⛔ Registered because this forward merge re-pointed THREE cites in these two
+    # documents and could not have noticed either way: they were in NO table, so
+    # `00-align.md`'s `hierarchies` range kept the +15 arithmetic the branch guessed
+    # (real offset +42) and its `extraction_mode` pair and `04-plan.md`'s
+    # `declared_relation_predicates` cite both went stale under the merge's own
+    # +38 / +157 shifts in `sdk.py`. A document this bundle EDITS is a document this
+    # bundle reads — registering them is what makes the next insertion red instead of
+    # silent (#12138's convention: the row exists so the rot has a reader).
+    "00-align.md":
+        _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-align.md",
+    "04-plan.md":
+        _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md",
     # `docs/evidence/11083/README.md` cites the SAME `relation_write.py` call the
     # RECONCILE row below pins, and was read by nothing at all until #12112. The
     # cite was CORRECT on main (`:631` WAS the call at `aebf91352bfd`, the parent of
@@ -5065,6 +5077,9 @@ _EPIC_CITE_SOURCES = {
     # while the document went on naming 9548, which is the row above — a cite a
     # change moves is exactly the cite no hand-recheck keeps.
     "ci_surfaces": _REPO / "config/ci-surfaces.yml",
+    # `00-align.md` pins the `hierarchies` VALIDATOR by range and nothing read it,
+    # which is how a guessed +15 survived where the tree's real offset is +42.
+    "pack_registry": _REPO / "tortoise/pack_registry.py",
     # ⛔ `relation_write.py`'s `plan_hierarchy_edges` call is cited by two documents
     # (and by an artifact row that talks about the same seam) and by NOTHING else in
     # this file. Measured commit-by-commit across ALL 36 of #12112's commits — every
@@ -5080,6 +5095,11 @@ _EPIC_CITE_SOURCES = {
     # not a move.) The documents trailed by ONE step at two of the three moves and by
     # TWO at the middle one — measured, not uniform, so "one behind at each step"
     # would have been a second wrong number in the comment about wrong numbers.
+    # ⛔ Do not mix denominators: restricted to the 30 SINGLE-PARENT commits the split
+    # is 8 / 18 / 3 / 1, and a draft of this comment took `:631` and `:687` from the
+    # 36-commit population but `:695` and `:700` from the 30-commit one — the
+    # arithmetic closed only because it then asserted two commits predated the call,
+    # which no commit does. One population, or the numbers mean nothing.
     # ⛔ ONE TREE, ONE NUMBER: `:631` is the call at `aebf91352bfd` and is
     # `declared=None,` at the branch's forward merge `5b17de24de42` (that merge is what
     # made the number wrong). Quoting either tree's reading as if it described both is
@@ -5125,13 +5145,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whole sentence's three numbers, so a re-derivation of one cannot leave
         # its neighbours behind the way it did at `a08f7bce3d`.
         ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
-            ("18321", "relation_write = apply_relation_edges("),
+            # 17974 -> 18728: #12060 adds its own lines to sdk.py above this call,
+            # and every forward merge of `origin/main` (`1f28d107cf`, `c7499ac7a7`
+            # carrying #12112/#12111, then `9828250732`) moved the region again, so
+            # every number in this table moved with them. Re-derived off THIS merged
+            # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
+            # never carried forward from either side. The anchors are unchanged —
+            # that is the point of keying a row on the symbol.
+            ("18728", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("18320", "from tortoise.relation_write import apply_relation_edges"),
+            ("18727", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18308", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18715", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5141,8 +5168,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("9612", "subject_binding_available,"),
-            ("9665", "and not subject_binding_available(graph):"),
+            ("9867", "subject_binding_available,"),
+            ("9920", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6607", "def subject_binding_available(graph) -> bool:"),
@@ -5151,13 +5178,56 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("9612", "subject_binding_available,"),
-            ("9665", "and not subject_binding_available(graph):"),
+            ("9867", "subject_binding_available,"),
+            ("9920", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("17968", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18375", "bind_point_subjects(proj, self, point_id=pid,"),
+        ), "sdk"),
+        # The two cites this forward merge re-pointed in the documents no row read —
+        # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
+        # few lines still "contains" the number the document names.
+        # ⛔ RE-DERIVED at the merge of this PR's round-18 code onto the capstone
+        # lane's head, and again after round-19 added eleven lines above the
+        # block: the two branches each re-derived this pair, +5 apart, so the
+        # merged tree's numbers are MEASURED here
+        # (`grep -nF '# Validate hierarchies'` / `grep -nF "hierarchies: entry
+        # missing 'type' field"`) — never one side's value carried over. All
+        # three documents were re-pointed to the same measured pair.
+        ("00-align.md", "the gap is the **declaration → consumer** seam", (
+            ("2489", "# Validate hierarchies"),
+            ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
+        ), "pack_registry"),
+        # The SAME claim in the plan, which no row covered — and it is the proof of
+        # why an unpinned cite is not merely a cosmetic miss: `00-plan.md:158` kept
+        # the relation-semantics lines (2415-2429) through every
+        # merge that re-derived its `00-align.md` sibling, because nothing read it.
+        # Same anchors, same range, so the next insertion above the block reds here
+        # too instead of leaving one document true and the other stale.
+        ("00-plan.md", "**`hierarchies`** — validated only", (
+            ("2489", "# Validate hierarchies"),
+            ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
+        ), "pack_registry"),
+        # ...and the THIRD copy of the same sentence, in the test-design table, where
+        # the range is a bare continuation (`:N-N`) and so is invisible to every
+        # sweep that reads a source-qualified cite. Unpinned, it went stale for the
+        # SAME stretch as its `00-plan.md` sibling — only the pinned `00-align.md`
+        # copy was re-derived at `4ed2eb028d` (measured: at that commit the block sat
+        # at 2439 and both unpinned documents still read 2415-2429) — and being a bare
+        # continuation, no source-qualified sweep could see it either. The phrase is
+        # the document's own words, not a markdown line.
+        ("03-test-design.md", "`hierarchies` (validated only", (
+            ("2489", "# Validate hierarchies"),
+            ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
+        ), "pack_registry"),
+        ("00-align.md", "`llm:deepseek-direct` is what", (
+            ("16251", "The v2 path reports"),
+            ("16252", '"extraction_mode": "llm:<route>"'),
+        ), "sdk"),
+        ("04-plan.md", "operator / label path", (
+            ("25041", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
@@ -5182,22 +5252,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         # and the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # At `0e281a900b` (#12250): entry 9934, `carve_out:` opens 9808,
-        # `uri_requiring:` 10139 — so 9934 is inside the section, and the identical
-        # text also sits at 6073 and 8450, which is what the 5th element exists to
-        # refuse. Every one of those is +1 on the numbers this comment carried at
-        # `63f725cca1`, and the single cause is measured: `#12159` (`33781512b6`)
-        # registered `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`
-        # — ONE insertion above the entry. The file is tool-MAINTAINED, not generated
-        # from a source of truth: `tools/ci_selection.py::register_tests` reads the
-        # text, splices the new entry into the surface's block and writes every other
-        # line back verbatim, which is why it also carries hand-authored prose. Either
-        # way the property this row trips on holds: an insertion anywhere above the
-        # entry moves it. That is the class here — a line-number pin over a number
-        # another tool owns, not a citation anyone mis-copied.
-        # ⚠️ Both of the twins are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8215 at `63f725cca1`) of `surfaces:`, so the
-        # resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8450 refuses
+        # The file is tool-MAINTAINED, not generated from a source of truth:
+        # `tools/ci_selection.py::register_tests` reads the text, splices the new
+        # entry into the surface's block and writes every other line back verbatim,
+        # which is why it also carries hand-authored prose. Either way the property
+        # this row trips on holds: an insertion anywhere above the entry moves it —
+        # measured on `main` as `#12159` (`33781512b6`) registering
+        # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
+        # insertion that moved every number below it. That is the class here — a
+        # line-number pin over a number another tool owns, not a citation anyone
+        # mis-copied. At THIS merge (`main` `9828250732` plus #12060's own 8-line
+        # registration block, which lands above the entry): entry 9951,
+        # `carve_out:` opens 9825, `uri_requiring:` 10156 — so 9951 is inside the
+        # section, and the identical text also sits at 6090 and 8467 (+8 on `main`'s
+        # 6082 / 8459 for the same cause), which is what the 5th element exists to
+        # refuse. ⚠️ Both of those are INDENTED sub-keys
+        # (`core:` 2235, `sdk:` 8233 — the latter also +8, same cause) of `surfaces:`,
+        # so the resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8467 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
@@ -5235,7 +5306,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("705", "`plan_hierarchy_edges` returns one"),
         ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9934", "- test_pack_logic_writeprobe_11083.py"),
+            # 9714 -> 9951: re-derived from THIS merged tree (`awk
+            # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
+            # config/ci-surfaces.yml`), never carried forward from either side of
+            # the merge — `main` read 9943 and the branch read 9941, and neither
+            # number describes a tree that adds BOTH. The 8-line delta over `main`
+            # is #12060's own registration block above the entry.
+            ("9951", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
@@ -11365,7 +11442,7 @@ _CITE_QUALIFIER_PATTERN = (
     # optional `(?:-\d+)?` tail the helper reported BOTH of them as UNQUALIFIED — a
     # false BLOCK of a conformant edit whose own message told the author to add the base
     # they had already added (measured by a fresh-context review at `f885a51663`).
-    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:16529-16543`
+    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:17987-18001`
     # (`A2`'s mint seam) is printed UNQUALIFIED in the record, and that is not a false
     # block — the range arm below reads the range OUT OF THE RECORD and asserts both of its
     # endpoints against `tortoise/sdk.py`, so this cite is pinned by derivation instead of
@@ -12193,7 +12270,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — §2 carries NINE FILE-QUALIFIED
         # cites and only THREE are held (main's enumeration, re-measured on this tree at this
         # merge: 9 found, matching this list exactly). Held: `identity_hold.py:125` and
-        # `tortoise/value_gate.py:81` (`_cite` loop below) and `sdk.py:16529-16543` (the count-3
+        # `tortoise/value_gate.py:81` (`_cite` loop below) and `sdk.py:17987-18001` (the count-3
         # range arm) — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
         # `:9617`, `:11731-11732`, and the `research-brief.md` / `02-research-brief.md` cites.
         # ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's SCOPE paragraph
