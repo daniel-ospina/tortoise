@@ -72,11 +72,16 @@ No graph is needed, but every `pytest` run in this repo needs the lane's DB seam
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
+
+#: The record every figure in this module and in the PR body is quoted FROM.
+ARTIFACT = (REPO / "docs" / "research" / "2026-11-12-11901-candidate-recall"
+            / "measurement-entropy-gate-12294.json")
 
 
 def _instrument():
@@ -127,6 +132,63 @@ def test_entropy_is_over_characters_with_spaces_stripped():
     assert gate._name_char_entropy("ab ab") == pytest.approx(1.0)
     assert gate._name_char_entropy("abab") == pytest.approx(1.0)
     assert gate._name_char_entropy("") == 0.0
+
+
+# ── 1b. the decline's EVIDENCE is read, not merely cited ──────────────────
+
+
+def test_the_declines_artifact_carries_the_invariants():
+    """`ARTIFACT` is the objection standing between a lane and re-arming M-1.
+
+    Until this test existed the committed artifact was referenced by PROSE only
+    — the module header, this module's docstring and the PR body all quote its
+    numbers, and nothing loaded it, so a re-run or an edit could disagree with
+    the shipped code with every test green. `tests/test_candidate_recall_11901.py`
+    sets the precedent for the sibling `measurement.json` ("the tables drift
+    away from the artifact … recomputed … and compared").
+
+    ⛔ INVARIANTS ONLY, never counts: the corpus is LIVE, so a legitimate re-run
+    lands within a name or two (85 vs 86 gated, measured). What this pins is what
+    the module calls run-invariant — 0 gated names unreachable at any k, ~100 %
+    reachable at the widest window, 0 gated variant pairs attaching, every
+    reconciliation identity, and a pooled population that covers the sample.
+    """
+    assert ARTIFACT.exists(), f"missing committed artifact {ARTIFACT}"
+    report = json.loads(ARTIFACT.read_text())
+    assert report["issue"] == 11901, report["issue"]     # the corpus is #11901's
+    arms = report["arms"]
+    sample = report["corpus"]["sample"]
+    assert set(arms["gate"]) == {"shipped", "zep_full_name"}
+
+    for p in ("shipped", "zep_full_name"):
+        g = arms["gate"][p]
+        assert g["names"] == sample, (p, g["names"], sample)
+        # the per-k table and its reconciling sum can never disagree
+        assert sum(g["suppressed_correct_by_k"].values()) == \
+            g["suppressed_correct_k_sum"], p
+        # ⛔ THE HEADLINE: no gated name is one the leg cannot find at any k
+        assert g["gated_and_missed"] == 0, (p, g["gated_and_missed"])
+        # …because the widest window finds ~all of them — the gate removes
+        # CORRECT candidates, which is the whole finding
+        assert g["suppressed_correct_by_k"]["15"] >= 0.9 * g["gated"], p
+        # the gate prevents no duplicate: no gated variant pair attaches today
+        assert arms["gate_variant"][p]["would_attach_before_any_k"] == 0, p
+        # one `gate_gated_names` entry per name; the predicate lists decide the
+        # per-predicate count, so a double-append cannot hide
+        assert len([e for e in arms["gate_gated_names"]
+                    if p in e["predicates"]]) == g["gated"], p
+        # the pooled population is the sample, and every gated name is accounted
+        # for exactly once per window (`unreachable_regardless` is absent from
+        # this pre-split artifact and 0-valued after it, so both shapes pass)
+        assert arms["pooled_gate"][p]["15"]["gated"] == g["gated"], p
+        for k, cell in arms["pooled_gate"][p].items():
+            assert (cell["rescued_by_union"] + cell["lost"]
+                    + cell.get("unreachable_regardless", 0)) == cell["gated"], (p, k)
+
+    # the class the gate was FOR and the class it GATES are disjoint — measured
+    # on #11901 as 81/300 unreachable at any k, 0 of them gated
+    assert arms["exact"]["15"]["miss_absent_at_max_k"] > 0
+    assert arms["gate"]["shipped"]["gated"] < sample
 
 
 # ── 2. why the gate was declined: the premise is false for OUR leg ─────────
