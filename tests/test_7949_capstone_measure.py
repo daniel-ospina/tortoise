@@ -4734,7 +4734,7 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
 #: `…_does_not_fire_on_correct_prose` where the next widening has to keep it green.
 _UNIT_WORDS = (r"s|sec|secs|seconds|ms|us|µs|min|mins|h|hr|hrs|hour|hours|days?|"
                r"weeks?|months?|years?|times?|tests?|pins?|defs?|files|cases|"
-               r"characters?|chars?|bytes|shards|entries|points|modules?|arms?|keys?|nodes?|"
+               r"characters?|chars?|bytes|shards|points|modules?|arms?|keys?|nodes?|"
                r"commits?|sessions?|issues?|prs?|pp|percentage points|(?i:kb|mb|gb|tb)")
 #: ⛔ `lines` / `rows` ARE POSITION NOUNS AS WELL AS UNITS, and that ambiguity is a
 #: FALSE-PASS surface, not only the false-red one this list is usually discussed as.
@@ -4744,14 +4744,22 @@ _UNIT_WORDS = (r"s|sec|secs|seconds|ms|us|µs|min|mins|h|hr|hrs|hour|hours|days?
 #: the benign direction, which is stated here rather than implied: a genuine COUNT
 #: whose noun is `lines`/`rows` on such a line is refused too (`— 155 lines` yields
 #: `['155']` under `_BARE_NUM`, measured), because nothing mechanical separates the
-#: two there. `on 1450 files` stays green, `files` being in the shared list (#12369
+#: two there.
+#: ⛔ `entries` IS THE SAME CASE, one noun later (#12369 review, P1
+#: residual): it was in the SHARED list, so `9987 entries into the manifest`,
+#: `9987 entries deep in the block` and `it sits 9987 entries into the manifest`
+#: were ALL GREEN while `9987 lines` was RED — the block's own noun, and the
+#: spelling this document uses for the block's members, was the one position noun
+#: the guard could not see. It is now positional, and pays the same benign price:
+#: a 3+-digit COUNT spelled `— 1450 entries` on a scanned neighbour line reds too.
+#: `on 1450 files` stays green, `files` being in the shared list (#12369
 #: review, P3: an earlier cut of this comment claimed BOTH stayed green, and the
 #: residual twenty lines below said the opposite about the same example). Measured:
 #: with `lines|rows` in the shared list, EVERY spelling of a line position written
 #: with a unit noun was GREEN while `:9987` was RED — one arm, two spellings,
 #: opposite verdicts (#12369 review, P2).
-_UNIT_POSITION_WORDS = r"lines|rows"
-#: The words that make a `lines`/`rows` phrase a POSITION rather than a count.
+_UNIT_POSITION_WORDS = r"lines|rows|entries"
+#: The words that make a `lines`/`rows`/`entries` phrase a POSITION rather than a count.
 #: ⛔ `in` IS A TAIL ONLY AT THE END OF A CLAUSE (#12369 review, P2). A bare `rows in.`
 #: is a position (`the entry reads 9987 rows in.` — measured GREEN before this), while
 #: `155 lines in the summary` is a COUNT and must stay green. The lookahead is what
@@ -4866,8 +4874,8 @@ _MANIFEST_CITE = re.compile(
     rf"|{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_RANGE_NUMS}{_WRAP}"
     rf"|{_WRAP}{_RANGE_NUMS}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
     rf"|{_MANIFEST}{_GAP}{_WRAP}{_LEADING_NUM_NO_POSITION}{_WRAP}"
-    rf"\s*(?:lines?|rows?)\s*{_POSITION_TAIL}\b"
-    rf"|{_WRAP}{_LEADING_NUM_NO_POSITION}{_WRAP}\s*(?:lines?|rows?)\s*{_POSITION_TAIL}\b"
+    rf"\s*(?:lines?|rows?|entries?)\s*{_POSITION_TAIL}\b"
+    rf"|{_WRAP}{_LEADING_NUM_NO_POSITION}{_WRAP}\s*(?:lines?|rows?|entries?)\s*{_POSITION_TAIL}\b"
     rf"{_GAP}{_MANIFEST}"
 )
 
@@ -5054,7 +5062,6 @@ def _bare_number_hits_neighbour(text: str) -> list[str]:
     tail allow-list was deleted for that reason; the helper is now an alias so the
     two arms cannot drift apart again.
     """
-    return _bare_number_hits(text)
     return _bare_number_hits(text)
 
 
@@ -6295,6 +6302,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     "`config/ci-surfaces.yml` gains 166.0 seconds in the `durations:` map",
     "`config/ci-surfaces.yml`'s `slow_files:` row, measured 2026-11-09",
     "`config/ci-surfaces.yml` carries `test_x_11083.py`",
+    # `entries` in its COUNTING sense — the block's own noun — is not a
+    # position phrase and must stay green (the POSITION spellings are in the
+    # positive table below).
+    "the whole `carve_out:` block holds 60 entries by design",
     "see `config/ci-surfaces.yml` and `tools/ci_selection.py:4140` for the loader",
     "`on_demand:` in `ci-surfaces.yml` excludes `eval/**` from gating (#10194)",
     # …and the shapes a WIDENED matcher has to stay clear of: a duration or a date
@@ -6439,6 +6450,13 @@ def test_the_manifest_line_cite_matcher_catches_every_spelling(prose):
     ("shifting this entry down the file (the entry read 9943 before the re-derivation)", True),
     ("the entry was 9987 at the previous head", True),
     ("the entry sat at `9987` and moved again", True),
+    # ⛔ `entries` IS THE BLOCK'S OWN NOUN, and it was in the shared UNIT list
+    # while only `lines`/`rows` were positional — so all three of these wrote a
+    # POSITION and were GREEN, one noun away from the case the constant exists
+    # for (#12369 review, measured).
+    ("the entry sits 9987 entries into the manifest", True),
+    ("the entry is 9987 entries deep in the block at this head", True),
+    ("and it sits 9987 entries into `config/ci-surfaces.yml`", True),
     # ⛔ a HEAD is refused too, deliberately: the bundle's D5 keeps the head-qualified
     # history AT THE PIN, so the sentence carries neither a line number nor a head.
     # (An earlier message told the maintainer to "describe the history by head", i.e.
@@ -6506,7 +6524,7 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     # ⛔ THE NEIGHBOUR ARM MUST NOT REFUSE ANOTHER FILE'S CITE, and both of these were
     # measured RED before `_neighbour_number_strays` existed. They are the natural
     # prose of a maintainer explaining the block's mechanism — and `03-test-design.md`
-    # is the bundle's cite-heavy document (`sdk.py:9867`/`:9920`, `capstone_run.py`),
+    # is the bundle's cite-heavy document (`sdk.py:9938`/`:9991`, `capstone_run.py`),
     # so its neighbours WILL name other modules with line numbers.
     ("`surfaces:` blocks are spliced by `tools/ci_selection.py::register_tests` (its "
      "`entry_lines` loop, `:4906`) and the entry line moves under them.", []),
@@ -6552,8 +6570,20 @@ def test_the_neighbour_population_includes_the_line_that_names_the_entry():
     entry = "test_pack_logic_writeprobe_11083.py"
     for line in (f"The row `{entry}` sits at `:9987` on this head.",
                  f"The row `{entry}` sits at 9987 on this head.",
-                 "The write-probe row sits at `:9987` on this head."):
-        assert (_BLOCK_WORDS.search(line) or _ENTRY_STEMS.search(line)), (
+                 "The write-probe row sits at `:9987` on this head.",
+                 # ⛔ A line carrying ONLY the BLOCK vocabulary — no entry stem, no
+                 # manifest FILENAME. Without this case the `_BLOCK_WORDS` half of
+                 # `_BLOCK_WORDS_WITH_MANIFEST` was unpinned: narrowing that constant
+                 # to `_MANIFEST` alone left the whole file green while this line
+                 # stopped being scanned and its re-typed `:9987` shipped GREEN
+                 # (#12369 review, measured: 382 passed).
+                 "The `carve_out:` entry sits at `:9987` on this head."):
+        # ⛔ DRIVE THE GATE, NOT THE CONSTANTS (#12369 review). Asserting the two
+        # regexes directly left the function BODY unpinned: deleting either branch
+        # of `_in_neighbour_population` kept this test green while re-opening the
+        # false pass it exists to close. The sibling test below was already fixed to
+        # this pattern (`_in_neighbour_population(line, …)`); this one now matches.
+        assert _in_neighbour_population(line, "the claim line"), (
             f"{line!r} is not in the neighbour population — the entry's own name "
             f"must put a line under the arm, or the rot returns uncaught")
         assert _neighbour_number_strays(line.replace(entry, "")), (
