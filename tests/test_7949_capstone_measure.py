@@ -4773,8 +4773,8 @@ _NUM_NO_POSITION = (
 #: paragraphs up. Reproduced, then closed.
 _LEADING_NUM = rf"(?<![\w#.]){_NUM}"
 _LEADING_NUM_NO_POSITION = rf"(?<![\w#.]){_NUM_NO_POSITION}"
-_WRAP = r"[`*]*"
-_SEP = r"(?::|#L|—|–|\bL\.?|\b(?:at|on|line|lines|row|rows|entry|entries|of)\b)"
+_WRAP = r"[`*#]*"
+_SEP = (r"(?:(?::|#L|—|–|→|\bL\.?|\b(?:at|on|line|lines|row|rows|entry|entries|of)\b)(?:\s+(?:number|no\.?))?)")
 #: ⛔ THE GAP IS BOUNDED, AND THE BOUND USED TO TRUNCATE SILENTLY — the module's own
 #: contract is that a guard may be incomplete but may not be quiet about it. At
 #: `{0,160}` a cite written with more prose than that between the manifest's name and
@@ -6275,6 +6275,15 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     "`config/ci-surfaces.yml` L9987",
     "`config/ci-surfaces.yml` L. 9987",
     "`config/ci-surfaces.yml` row 9987",
+    # ⛔ THE SEPARATOR CARRIES A FILLER WORD IN ORDINARY ENGLISH, and that was the
+    # last reproduced bypass: `… sits at line number 9987 this week` inserted into
+    # `03-test-design.md` left the pin GREEN end-to-end while the arm that claims no
+    # such cite can reappear ANYWHERE in the document stayed silent. `→`, `#` and the
+    # `line number` / `no.` forms are covered by `_SEP`'s optional tail and `_WRAP`.
+    "`config/ci-surfaces.yml` line number 9987",
+    "`config/ci-surfaces.yml` line no. 9987",
+    "`config/ci-surfaces.yml` → 9987",
+    "`config/ci-surfaces.yml` line #9987",
     "`config/ci-surfaces.yml` (entry 9987)",
     "the entry sits at `:9973`, see `config/ci-surfaces.yml`",
     "see `config/ci-surfaces.yml` in its carve-out block; the entry is on line 9973",
