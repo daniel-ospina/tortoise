@@ -214,9 +214,15 @@ separate `facts["alias_recorded"]` fact — `aliases[]` ONLY, never
 `mention_is_alias`, which also covers the candidate's OWN name. A same spelling
 under a different kind is still `kind_conflict`: the model's proposal to bind a
 `plan` "Acme" onto an `org` "Acme" is HELD, with the refusal recorded, because no
-merge ever recorded that the two spellings are one entity. (An exact-name row
-cannot even reach that veto — the exact rungs require equal folded kinds — so the
-same-spelling case arrives through phase 2.) Pinned by
+merge ever recorded that the two spellings are one entity. ⛔ **Phase 1 reaches
+that case too**, through the kind-agnostic alias rung — so a row must never
+ALIAS ITSELF: `_absorb_spellings` unions a folded row's own name into `aliases`
+for the hop, and while it did so unconditionally every folded row claimed its own
+spelling as a "recorded alias", phase 1 reported `mode: "alias"`, and the
+escape stood `kind_conflict` down for exactly this pair (`band: merge`,
+`held: []`, no refusal). A CARRIER's name still folds in — that is the rung's
+purpose — but the row's own name does not. Pinned by
+`test_a_folded_row_does_not_alias_itself`,
 `test_a_same_spelling_different_kind_proposal_is_still_held`,
 `test_a_re_mention_of_a_folded_alias_outranks_an_identifier_veto` and the
 controls in `test_a_name_match_beats_an_alias_match_and_two_aliases_are_ambiguous`.

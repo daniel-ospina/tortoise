@@ -616,6 +616,12 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
                                     # that these ARE one. Keying the spelling
                                     # escape on `mention_is_alias` made that pair
                                     # merge with no hold and no record (round-4
+                                    # review). ⛔ The SHIM guarantees this; a
+                                    # caller that derives it itself must too —
+                                    # phase 1 derives it from `mode == "alias"`
+                                    # AND a fold that differs from the row's own
+                                    # name, because `_absorb_spellings` used to
+                                    # alias every row with its own name (round-5
                                     # review).
 
     Returns the veto codes (empty = no objection). **Order is the published

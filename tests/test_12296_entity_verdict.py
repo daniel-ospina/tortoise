@@ -1217,6 +1217,43 @@ class TestTheResolverBands:
         assert res["held"][0]["reason"] == v2.HOLD_VETOED, res
         assert verdict.VETO_KIND_CONFLICT in res["held"][0]["vetoes"], res
 
+    def test_a_folded_row_does_not_alias_itself(self):
+        """The FOLD's own-name alias re-opened the same-spelling merge (round 5).
+
+        `_absorb_spellings` unioned `row_name` into `aliases` unconditionally, so
+        every folded prior row carried its OWN folded name as an alias. Phase 1's
+        kind-agnostic alias rung then matched a mention spelled exactly like a
+        DIFFERENT-kind row, reported `mode: "alias"`, and phase 1 passed
+        `alias_recorded=True` — so `kind_conflict` stood down on a "recorded alias"
+        that was nothing but the row's own name: a `plan` "Acme" bound to an `org`
+        "Acme" with `band: merge`, `held: []` and no refusal. This test goes
+        through `_absorb_spellings` on purpose: a HAND-BUILT row without the
+        injected alias passes against the bug (that is how it survived round 4).
+        """
+        folded = {"id": "obj-org", "name": "Acme",
+                  "objectKind": "core:org", "aliases": []}
+        v2._absorb_spellings(folded, {"id": "obj-org", "name": "Acme"},
+                             ("resolved_from", "Acme", "core:org", None))
+        res = v2.resolve_entities(
+            [{"name": "Acme", "kind": "core:plan"}],
+            {"entities": [folded], "degraded": False})
+        assert res["map"] == {}, res
+        assert res["records"] == [], res
+        assert folded["aliases"] == [], folded
+        assert v2._find_existing_entity([folded], "Acme", "core:plan") == (
+            None, "none"), "a row's own name must not answer as an ALIAS"
+        # …and the rung keeps the purpose it was added for: a CARRIER's name still
+        # folds into its survivor's aliases, so a re-mention of the variant binds.
+        survivor = {"id": "S", "name": "billing v3 ledger",
+                    "objectKind": "core:plan", "aliases": []}
+        v2._absorb_spellings(survivor, {"id": "S", "name": "billing v3 ledger"},
+                             ("resolved_from", "S", "core:plan",
+                              ["billing v2 ledger"]))
+        assert survivor["aliases"] == ["billing v2 ledger"], survivor
+        hit, mode = v2._find_existing_entity([survivor], "billing v2 ledger",
+                                             "core:plan")
+        assert (hit["id"], mode) == ("S", "alias"), (hit, mode)
+
     def test_an_unfolded_stored_alias_still_resolves(self):
         """`aliases` is undeclared-but-writable, so the stored side must be folded
         too — otherwise `"The Team"` is a spelling nothing resolves and the mention

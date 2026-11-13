@@ -3046,9 +3046,19 @@ def _absorb_spellings(folded_row: dict, row: dict, fact: tuple | None) -> None:
     else:
         stored = []
     row_name = str(row.get("name") or "")
+    # ⛔ A row must never alias ITSELF (round-5 review). Every folded row carries
+    # its own folded name, and the kind-agnostic alias rung of
+    # `_find_existing_entity` then reported `mode: "alias"` for a mention spelled
+    # exactly like a DIFFERENT-kind row — so phase 1 stood its `kind_conflict`
+    # down on a "recorded alias" that was nothing but the row's own name, and a
+    # `plan` "Acme" bound to an `org` "Acme" with `band: merge`, `held: []` and no
+    # refusal. The name rungs already match a row's own name (within their kinds);
+    # a CARRIER's name still differs from the survivor's, so the alias rung keeps
+    # exactly the purpose it was added for.
+    own_fold = normalize_entity_name(str(folded_row.get("name") or ""))
     for source in (row_name, *stored):
         folded = normalize_entity_name(source) if source else ""
-        if folded and folded not in folded_row["aliases"]:
+        if folded and folded != own_fold and folded not in folded_row["aliases"]:
             folded_row["aliases"].append(folded)
 
 
@@ -6514,8 +6524,14 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                 {"name": ex.get("name") or "", "kind": ex.get("kind") or ""},
                 {"retired": cfacts.get("retired"),
                  # `alias_recorded`, NOT `mention_is_alias`: see `hard_vetoes` —
-                 # the own-name half must keep the spelling vetoes alive.
-                 "alias_recorded": mode == "alias"})
+                 # the own-name half must keep the spelling vetoes alive. And a
+                 # row's own name is never a recorded alias, whoever produced the
+                 # `mode` (round-5 review: the fold used to alias every row with
+                 # its own name, so this read `True` for a same-spelling pair).
+                 "alias_recorded": (
+                     mode == "alias"
+                     and normalize_entity_name(name)
+                     != normalize_entity_name(str(ex.get("name") or "")))})
             if refusal:
                 vetoed[name] = (kind, refusal)
                 # The sentence names what actually fired: the veto codes carry the
