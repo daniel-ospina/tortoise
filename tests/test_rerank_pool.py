@@ -561,6 +561,24 @@ def test_the_off_path_writes_no_rerank_trace_entry(sdk, monkeypatch):
     assert _rerank_entries(trace) == []
 
 
+def _candidate_count(sdk, monkeypatch, query, limit):
+    """The pre-rerank candidate count, measured with the gate OFF.
+
+    ⛔ ``unscored > 0`` CANNOT FAIL on a degraded arm: whenever ``applied`` is
+    False the wiring reports ``unscored = len(result_ids)``, and the block only
+    runs when ``result_ids`` is non-empty — so the assertion is satisfied by the
+    branch's own arithmetic rather than by what the read did. The count has to be
+    derived INDEPENDENTLY and compared exactly, which is what this does: the same
+    read with the flag unset returns the pre-rerank list, whose length is the
+    number of candidates the degraded arm must account for.
+    """
+    monkeypatch.delenv(rerank.FUSED_RERANK_ENV, raising=False)
+    try:
+        return len(sdk.tortoise_fts_query(query, entity_type="point",
+                                          limit=limit))
+    finally:
+        monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
+
 def test_an_opted_in_rerank_that_could_not_read_its_texts_says_so(
         sdk, monkeypatch):
     """A silent no-op on an OPTED-IN lever is not allowed to look like "off".
@@ -581,9 +599,12 @@ def test_an_opted_in_rerank_that_could_not_read_its_texts_says_so(
     assert len(entries) == 1, trace
     assert entries[0]["ran"] is False
     assert entries[0]["reason"] == "pool_text_read_failed"
-    # and it still accounts for the candidates it never saw.
+    # and it still accounts for the candidates it never saw — the EXACT count,
+    # not merely "> 0" (see _candidate_count for why that cannot fail).
     assert entries[0][rerank.RERANK_SCORED_KEY] == 0
-    assert entries[0][rerank.RERANK_UNSCORED_KEY] > 0
+    candidates = _candidate_count(sdk, monkeypatch, "zebra migration", 4)
+    assert candidates > 0, "premise: the read must return candidates"
+    assert entries[0][rerank.RERANK_UNSCORED_KEY] == candidates
 
 
 def test_a_read_with_no_text_property_says_that_instead_of_blaming_the_read(
@@ -600,7 +621,9 @@ def test_a_read_with_no_text_property_says_that_instead_of_blaming_the_read(
                            leg_trace=trace)
     entry = _rerank_entries(trace)[0]
     assert entry["reason"] == "no_text_field" and entry["ran"] is False
-    assert entry[rerank.RERANK_UNSCORED_KEY] > 0
+    candidates = _candidate_count(sdk, monkeypatch, "zebra migration", 3)
+    assert candidates > 0, "premise: the read must return candidates"
+    assert entry[rerank.RERANK_UNSCORED_KEY] == candidates
 
 
 def test_a_degraded_scorer_reports_every_candidate_unscored(sdk, monkeypatch):
@@ -618,7 +641,9 @@ def test_a_degraded_scorer_reports_every_candidate_unscored(sdk, monkeypatch):
     entry = _rerank_entries(trace)[0]
     assert entry["ran"] is False
     assert entry[rerank.RERANK_SCORED_KEY] == 0
-    assert entry[rerank.RERANK_UNSCORED_KEY] > 0
+    candidates = _candidate_count(sdk, monkeypatch, "zebra migration", 4)
+    assert candidates > 0, "premise: the read must return candidates"
+    assert entry[rerank.RERANK_UNSCORED_KEY] == candidates
     assert "model unavailable" in entry["reason"]
 
 
@@ -899,4 +924,6 @@ def test_an_ALL_empty_pool_says_nothing_scorable(sdk, monkeypatch):
     assert entry["reason"] == "pool_text_empty", (
         f"an empty-but-successful read must not blame the read itself: {entry}")
     assert entry[rerank.RERANK_SCORED_KEY] == 0, entry
-    assert entry[rerank.RERANK_UNSCORED_KEY] > 0, entry
+    candidates = _candidate_count(sdk, monkeypatch, q, 4)
+    assert candidates > 0, 'premise: the read must return candidates'
+    assert entry[rerank.RERANK_UNSCORED_KEY] == candidates, entry
