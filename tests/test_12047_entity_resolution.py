@@ -5008,8 +5008,12 @@ class TestThe12120ReviewRound20:
 
     Measured on both families at the head that lacked the kwarg: `applied=0,
     skips=[{'reason': 'terminal object target' / 'terminal subject target'}]` plus
-    a keep-first conflict warning, where `main` and the same graph with a
-    same-spelling successor are silent.
+    a keep-first conflict warning, where the same graph with a same-spelling
+    successor is silent. ⚠️ `main` is NOT silent on this graph — it refuses the
+    record earlier, as `dangling successor`, because its raw successor probe cannot
+    resolve a fold-only successor at all (nor a duplicate `Old Co`); that gap is
+    what #12120 exists to close, and this docstring's earlier phrasing claimed
+    otherwise until a reviewer measured `origin/main` directly.
 
     ⛔ Neither half alone reproduces it (a merge-then-supersede target with a
     same-spelling successor is silent either way; so is a fold-only successor on a
