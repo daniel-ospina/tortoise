@@ -6155,7 +6155,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # one, which the manifest arm cannot contradict. The arm therefore
             # requires the row's ACTUAL continuation — the em-dash and the clause
             # the document writes there — and refuses every other tail, because a
-            # qualifier after the name is the case it exists to catch.
+            # qualifier after the name is the case it exists to catch. ⚠️ THE COST
+            # IS PAID IN THE OTHER DIRECTION AND IS NAMED HERE: a TRUE rewrite that
+            # puts any other clause break after the name is refused too (` — and
+            # nothing else`, `, with no other entry`, measured RED), because nothing
+            # mechanical separates "and nothing else" from "and one more" there —
+            # both are one connective away from the entry. Over-catching is the
+            # tolerated direction on this arm (a false red a maintainer rewrites,
+            # against a miss that ships the rot), and the row's shipped continuation
+            # is the one it accepts.
             r"(?=\s*—\s*cited by\b)")
         if not re.search(_ONE_ENTRY, doc_hits[0]):
             block_failures.append(
