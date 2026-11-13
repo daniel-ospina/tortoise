@@ -423,9 +423,13 @@ fan-out respected; C8 holds.
 from `sdk.py`'s point-creation path at `:18547` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
-`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6607` and
-consumed at `sdk.py:9955`/`:10008` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
-this pair is keyed by **symbol**), the slots are absent in the
+`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6629` and
+consumed at `sdk.py:9955`/`:10008` — ⚠️ that consume pair is keyed by LINE NUMBER (like the definition),
+not by symbol, and it is currently STALE: `tortoise/sdk.py` carries those two anchors at `10064`/`10117`.
+That 109-line drift is main's pre-existing cite rot (tracked in #12456 / #12381), NOT re-pointed here
+because it is not this PR's change; the definition above IS this PR's (its +22-line tail to
+`search_engine.py` moved it `6607` -> `6629`, re-derived rather than carried). An earlier version of this
+parenthesis said the pair was keyed by symbol, which nothing implements), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —
 or the honest finding that the corpus has no bindable subjects, recorded as such (**not** a pass).
