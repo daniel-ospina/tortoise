@@ -177,6 +177,28 @@ def test_the_tag_arm_refuses_arguments_it_cannot_apply(stub, argument, value) ->
     assert [c for c in stub.calls if c[0] == "query_points_by_tag"] == [], (
         f"the tag read happened before refusing: {stub.calls}"
     )
+    # The reason must be the TAG arm's, not the structural accessor's — a shared
+    # one-size-fits-all explanation shipped "the structural arms read through
+    # sdk.paginated_query" on a tag= refusal (rounds 4 and 5, both measured).
+    assert "paginated_query" not in result["error"], result["error"]
+
+
+def test_a_falsy_tag_is_still_the_tag_arm(stub) -> None:
+    """`tag=""` is a SET tag, and the arm test must key on `is not None`.
+
+    `tag` is a string, so keying the arm on its truthiness looks harmless — but
+    then `tag=""` is refused with the STRUCTURAL reason ("sdk.paginated_query …")
+    while `query_points_by_tag` is the arm that would have answered (round-5
+    finding 5b: the mutant `if tag` kept the whole suite green). Fails if the arm
+    is decided by truthiness instead of presence.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(tag="", min_confidence=_CONFIDENCE_FLOOR)
+
+    assert _is_refusal(result), "no refusal to read a message off"
+    assert "tag=" in result["error"], result["error"]
+    assert "paginated_query" not in result["error"], result["error"]
 
 
 def test_the_refusal_names_the_argument_it_dropped(stub) -> None:
@@ -550,3 +572,94 @@ def test_the_refusal_never_repeats_its_route_or_says_a_entity_type(stub) -> None
     assert message.count("drop min_confidence for this read") == 1, message
     assert "a entity_type" not in message, message
     assert "an entity_type" in message or "entity_type='document'" in message, message
+
+
+@pytest.mark.parametrize("entity_type", ["document", "source"])
+@pytest.mark.parametrize("order_by", ["relevance", "graph"])
+def test_a_non_confidence_ordering_is_served_for_every_type(
+        stub, entity_type, order_by) -> None:
+    """The refusal is keyed on `order_by == "confidence"`, not on the TYPE (#12500 r5).
+
+    Mutating the condition to `if order_by and entity_type in (…, "source")` left
+    the whole suite green while false-blocking `entity_type="document",
+    order_by="relevance"` — the very fallback the refusal message recommends for
+    a read that works. Fails if the value axis drops out of the condition.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(text="x", entity_type=entity_type, order_by=order_by)
+
+    assert not _is_refusal(result), (
+        f"refused order_by={order_by!r} for entity_type={entity_type!r}: the arm "
+        f"applies any value other than 'confidence'"
+    )
+    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    assert fts and fts[-1][3]["order_by"] == order_by
+
+
+def test_a_refused_floor_and_ordering_do_not_share_one_route(stub) -> None:
+    """`or order_by='relevance'` cannot resolve a refused FLOOR (#12500 r5).
+
+    With both refused on the text= arm the message offered the two alternatives
+    as if either would do, but relevance fixes only the ordering — following it
+    landed on "min_confidence is not applied …" one round trip later. Fails if
+    the both-arguments branch goes back to offering it as an equal alternative.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(text="x", entity_type="document",
+                             min_confidence=_CONFIDENCE_FLOOR,
+                             order_by="confidence")["error"]
+
+    assert "fixes both" in message, message
+    assert "only the ordering" in message, message
+
+
+def test_a_kind_only_refusal_carries_no_filters_advice(stub) -> None:
+    """The `filters=` note must not contradict the route in the same message (r5).
+
+    `tag="t", kind="statement", filters={…}` used to read "No arm applies a
+    property `filters=` together with a confidence floor or an ordering, so drop
+    filters=" and then "pass kind= to the structural arm" — which DOES apply
+    `filters=` with `kind=`. The note is gated on a floor/ordering being refused.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    message = tortoise_query(tag="pricing", kind="statement",
+                             filters={"a": 1})["error"]
+
+    assert "drop filters=" not in message, message
+    assert "kind" in message, message
+
+
+#: Sentences that were TRUE-LOOKING and FALSE, each measured and each shipped at
+#: some point in this PR. The docstring is served product text, so a false claim
+#: in it steers every reader of the tool contract; "the docstring says nothing
+#: wrong" is not decidable, but "these exact claims are gone" is.
+_DOCSTRING_FALSE = (
+    # round-5: order_by is applied for every type but document/source, and
+    # `event`/`subject`/`object`/`operator` DO carry a belief (measured live).
+    "only a Point carries one",
+    'applied on the text= arm for `entity_type="point"`',
+    # round-4: operators are Points, so this reason was self-contradictory.
+    "selects non-Point rows",
+)
+
+
+def test_the_served_docstring_never_restates_a_falsified_claim() -> None:
+    """The false claims this PR shipped, pinned so they cannot come back.
+
+    Both are wrap-insensitive (whitespace-collapsed), because a re-wrap must not
+    silently disarm the pin — the `#12455` lesson. Fails if any reappears in
+    `tortoise_query.__doc__`.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    flat = " ".join((tortoise_query.__doc__ or "").split())
+
+    for claim in _DOCSTRING_FALSE:
+        assert " ".join(claim.split()) not in flat, (
+            f"the docstring restates a falsified claim: {claim!r}"
+        )
+    # …and the TRUE statement is present, so the pin is not satisfied by silence.
+    assert "every type EXCEPT `document`/`source`" in flat, flat[:400]

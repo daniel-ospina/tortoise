@@ -3945,11 +3945,15 @@ def tortoise_query(kind: str | None = None,
       are REFUSED on this arm rather than dropped (#12500): both structural arms
       read through sdk.paginated_query, which declares neither, so an accepted
       value was discarded and rows the caller excluded came back. They
-      are applied on the text= arm for `entity_type="point"` (the fts leg
-      compares the floor against EP belief, and only a Point carries one — a
-      non-Point `entity_type` REFUSES a floor for the same reason); structural
-      filtering by confidence is Phase 2 in the hybrid-search plan, not a
-      shipped feature.
+      are applied on the text= arm, but each on a different condition:
+      `min_confidence` only for `entity_type="point"` (the fts leg gates the
+      floor on the literal `entity_type == "point"`, sdk.py:43206), and
+      `order_by` for every type EXCEPT `document`/`source` (both map to the
+      `Source` label, which the ranker's belief sweep never reads — `event`,
+      `subject`, `object` and `operator` all carry a belief and honour it).
+      A floor on any other `entity_type`, and a confidence ordering on those two,
+      are REFUSED rather than dropped; structural filtering by confidence is
+      Phase 2 in the hybrid-search plan, not a shipped feature.
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
       REFUSES kind/min_confidence/order_by and `filters=` (see the tag= bullet
@@ -4225,7 +4229,15 @@ def tortoise_query(kind: str | None = None,
                 _route = (f"To use {_them}, drop tag= and pass text= — tag= takes "
                           f"precedence, so keeping it re-reads this same arm")
         elif _arm == "text=":
-            if "order_by" in _names:
+            if "order_by" in _names and "min_confidence" in _names:
+                # Offering order_by='relevance' beside "pass entity_type='point'"
+                # implies both fix `them`, but relevance fixes only the ordering
+                # and the floor is still refused — the caller lands on a second
+                # refusal (round-5 P2, measured verbatim).
+                _route = ("Passing entity_type='point' fixes both; "
+                          "order_by='relevance' would fix only the ordering, "
+                          "leaving the floor refused")
+            elif "order_by" in _names:
                 _route = (f"To use {_them}, pass entity_type='point' (whose rows "
                           f"carry a belief) or order_by='relevance'")
             else:
@@ -4233,10 +4245,15 @@ def tortoise_query(kind: str | None = None,
         else:
             _route = (f"To use {_them}, pass text= — the floor and the ordering "
                       f"are applied on that arm")
+        # Only where a floor/ordering is what was refused: the STRUCTURAL arm
+        # applies `filters=` together with `kind=` quite happily, so this note on
+        # a kind-only tag refusal told the caller to drop a filter that another
+        # arm honours — and the route in the same sentence said to use that arm
+        # (round-5 P2, measured).
         _filters_note = (
             " No arm applies a property `filters=` together with a confidence "
             "floor or an ordering, so drop filters= if you need this argument."
-            if filters else ""
+            if filters and ({"min_confidence", "order_by"} & set(_names)) else ""
         )
         return _SafeError({"error": (
             f"{_named} {_verb} not applied on the {_arm} arm (#12500): {_why}. It "
