@@ -146,9 +146,12 @@ failure — on the transcript. The meta is the one sibling that never got the sa
 
 ### 2.4 Discard reasons are not a closed set at the server
 
-Only `tortoise/capture_spool.py`, `tests/test_capture_spool.py` and
-`tests/test_3516_client_captured_at.py` name the `DISCARD_*` values. (By contrast the *closed* sets
-are `CAPTURE_LANES` and `CLIENT_CAPTURED_AT_SOURCES`, `tortoise/capture_spool.py` `CAPTURE_LANES` / `CLIENT_CAPTURED_AT_SOURCES`, which
+Only `tortoise/capture_spool.py`, `tortoise/__main__.py`, `tests/test_capture_spool.py` and
+`tests/test_capture_lane_3516.py` name the `DISCARD_*` values. (`tortoise/__main__.py` names exactly
+one — `DISCARD_SPOOL_SATURATED`, and filters on it; `tests/test_capture_lane_3516.py` names
+`DISCARD_HTTP_REJECTED`; `tests/test_3516_client_captured_at.py` names NONE, though the first draft
+listed it here.) (By contrast the *closed* sets
+are `CAPTURE_LANES` and `CLIENT_CAPTURED_AT_SOURCES` (`tortoise/capture_spool.py`), which
 the server does validate.) So a new reason needs no server change — but it must be added to **both**
 legs, because the two legs drain one shared directory
 (`tortoise-capture.ts` `SPOOL_DIR`, one shared directory for both uids).
@@ -164,8 +167,8 @@ legs, because the two legs drain one shared directory
 
 | Leg | Site | `catch` |
 |---|---|---|
-| TypeScript (the deployed harness seam) | `tortoise-capture.ts` `listSpoolEntries` (main: `:1454`) | `catch { meta = undefined }` — collapses *read failure* and *parse failure* into one outcome, then renders it as `meta is not valid JSON` (`:1456`). |
-| Python (the CLI drain) | `capture_spool.py` `list_spool_metas` (main: `:1372`-`1382`) | `except (OSError, json.JSONDecodeError, UnicodeDecodeError): meta = None` — `OSError` **includes `PermissionError`**. Same collapse, same `corrupt_entry`, same quarantine + unlink (`:1315-1326`). |
+| TypeScript (the deployed harness seam) | `tortoise-capture.ts` `listSpoolEntries` (base `:1453-1457`) | `catch { meta = undefined }` — collapses *read failure* and *parse failure* into one outcome, then renders it as `meta is not valid JSON` (base `:1465`). |
+| Python (the CLI drain) | `capture_spool.py` `list_spool_metas` (base `:1370-1375`) | `except (OSError, json.JSONDecodeError, UnicodeDecodeError): meta = None` — `OSError` **includes `PermissionError`**. Same collapse, same `corrupt_entry`, same quarantine + unlink (base `:1392-1395`). |
 
 The TS comment above `listSpoolEntries`'s parse arm claims the function "Mirrors
 `capture_spool.list_spool_metas`" — it does, which is why fixing one leg alone would leave the other
@@ -455,8 +458,8 @@ the two `retained: true` arms, `SPOOL_DIR` (one shared directory), `healthScan` 
 meta is PENDING), the `spool DISCARD` warning line ·
 `tortoise/capture_spool.py` `_orphan_paths` (orphans reclaimable), `DISCARD_TRANSCRIPT_UNREADABLE` /
 `DISCARD_TRANSCRIPT_TORN`, `RETAINED_DISCARD_REASONS`, `is_lost_discard`, the "NOT re-fileable" note
-session id"), `list_spool_metas` (the `OSError` catch), the `prune_spool` orphan pass (orphans spent
-first) · `docs/architecture/PI-CAPTURE-ARCHITECTURE.md:160` (orphan unreachable, reaped) ·
+(no verb can reconstruct the session id), `list_spool_metas` (the `OSError` catch), the `prune_spool` orphan pass (orphans spent
+AFTER the filed pass, never before it) · `docs/architecture/PI-CAPTURE-ARCHITECTURE.md:160` (orphan unreachable, reaped) ·
 `tortoise/hook_install.py` (`PI_EXTENSION_NAME`, `_pi_artifact_contract()` — the install contract) · issue #11802 §1–§7 (the measured
 root cause and scale — cited, not re-derived).
 
