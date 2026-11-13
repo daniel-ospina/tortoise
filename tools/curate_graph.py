@@ -1016,10 +1016,14 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
     (`{"error": …}`, the text of a `_safe`/`_quota_gated` payload) AND the prose
     refusals listed in `tortoise.mcp_auth.REFUSAL_PROSE_MESSAGES` (all three
     transport wait-bound arms — dispatched, never-dispatched, and a refused WRITE —
-    plus the graph-lookup margin arm, the sensitive-op rate-limit 429, and the
-    GRAPH-TARGET family: a retarget refusal, "No graph … is reachable", a
-    requires-a-workspace refusal, and a graph that cannot be opened) — matched
-    by PREFIX, not equality, because a wrapped message keeps its prefix. A `-32009`
+    plus the graph-lookup margin arm, the sensitive-op rate-limit 429, the four AUTHZ
+    refusals, the graph-target arms and, through `REFUSAL_PROSE_PHRASES`, the two
+    resolver refusals whose graph NAME comes first) — matched by PREFIX for a lead and
+    by interior PHRASE for that last pair, because a wrapped message keeps its prefix
+    and a variable-first message keeps none. ⛔ The cannot-be-opened arm is
+    deliberately OUT — see the note beside `mcp_auth._REFUSAL_GRAPH_TARGET_LEADS`: a
+    lead wide enough to catch it also catches "Graph disclosure: …" and
+    "Graph was purged …", which must stay crash-class. A `-32009`
     prose refusal is the ROUTINE answer for an
     expensive census read, so dropping the prose arm silently turned it back into a
     crash (the round-4 bug); the matched set lives in that one function, and this
@@ -1047,15 +1051,19 @@ def _is_refusal_envelope(text: str) -> bool:
     `content[0].text` = the JSON error dict) PLUS every prose entry in
     `tortoise.mcp_auth.REFUSAL_PROSE_MESSAGES` — the three `-32009` wait-bound arms
     (dispatched, never-dispatched, a refused WRITE), the graph-lookup margin
-    refusal, the sensitive-op rate-limit 429, and the GRAPH-TARGET family (a retarget
-    refusal, "No graph … is reachable", requires-a-workspace, a graph that cannot be
-    opened) — matched by prefix. That list is the ONE registry; do NOT restate a
+    refusal, the sensitive-op rate-limit 429, the four AUTHZ refusals, and the
+    graph-target arms (a retarget refusal, requires-a-workspace, a non-string
+    argument, an empty argument) — matched by prefix, PLUS the two variable-first
+    graph-target arms through `REFUSAL_PROSE_PHRASES` ("is reachable from this
+    workspace.", "graphs in this workspace:"), matched on an interior phrase because
+    their GRAPH NAME comes first. ⛔ The cannot-be-opened arm is deliberately OUT
+    (see the note beside `mcp_auth._REFUSAL_GRAPH_TARGET_LEADS`): a lead wide enough
+    to catch it also catches "Graph disclosure: …" and "Graph was purged…", which
+    must stay crash-class. That registry is the ONE source; do NOT restate a
     count here, because this docstring has already gone stale doing exactly that
-    ("FOUR shapes" while the delegate matched six). Two graph-target arms are OUT on
-    purpose and named beside the tuple; a bare "Graph " lead was tried and REMOVED
-    because it classified "Graph disclosure: …" and "Graph was purged…" as refusals,
-    silencing crashes. Every one of the
-    graph-target entries exists because the census sites that take a graph fallback
+    ("FOUR shapes" while the delegate matched six). A bare "Graph " lead was tried
+    and REMOVED for the reason above. Each
+    graph-target entry exists because the census sites that take a graph fallback
     (`_section`, `read_operators`, `read_events`, and now `read_points`) receive that
     family as `ToolError` and must classify it as a refusal, not a crash. A
     server-side CRASH's text (`Error calling tool: TypeError: …`) matches none and

@@ -882,11 +882,22 @@ _REFUSAL_RATE_LIMIT_LEAD = "Rate limit exceeded for "
 #: `describe_failure`, and no census site would take a graph fallback for them.
 _REFUSAL_GRAPH_TARGET_LEADS = (
     "This credential is bound to one graph and cannot be re-targeted ",
-    "No graph ",
     "The `graph` argument requires a hosted workspace connection ",
     "The `graph` argument must be a graph id or name ",
     "The `graph` argument is empty. ",
-    "Graph name ",
+)
+
+#: Refusals whose VARIABLE comes FIRST, so no prefix can carry their identity: matched
+#: on a stable INTERIOR phrase instead of a lead. Their two messages are the resolver's
+#: (`No graph {ref!r} is reachable from this workspace. Reachable graphs: …` and
+#: `Graph name {ref!r} matches {n} graphs in this workspace: …`), so the only text that
+#: survives a caller-supplied name is in the middle — and a lead that stops at the
+#: variable (`"No graph "`, `"Graph name "`) matches neighbours, which is the measured
+#: failure that removed the bare `"Graph "` lead (see the note beside
+#: `_REFUSAL_AUTHZ_LEADS`).
+_REFUSAL_GRAPH_RESOLVER_PHRASES = (
+    "is reachable from this workspace.",
+    "graphs in this workspace:",
 )
 
 #: The leads of the AUTHORIZATION refusals — the ones a scoped or graph-bound key
@@ -990,6 +1001,14 @@ REFUSAL_PROSE_MESSAGES = (
     _REFUSAL_RATE_LIMIT_LEAD,
     *_REFUSAL_GRAPH_TARGET_LEADS,
     *_REFUSAL_AUTHZ_LEADS,
+)
+
+#: Every DESIGNED refusal whose identity is a stable INTERIOR phrase rather than a lead
+#: — the ones whose producer puts a caller-supplied value first. Read by
+#: `mcp_client.refusal_message` through the same registry path as the leads; kept
+#: SEPARATE so no one "tidies" a free-floating `"No graph "` lead back into the tuple.
+REFUSAL_PROSE_PHRASES = (
+    *_REFUSAL_GRAPH_RESOLVER_PHRASES,
 )
 
 

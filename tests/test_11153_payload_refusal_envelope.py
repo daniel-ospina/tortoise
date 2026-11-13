@@ -686,8 +686,12 @@ def test_the_graph_target_leads_never_swallow_an_unrelated_message():
     reached for this workspace."`` and ``"Graph was purged by an operator."`` — and
     `refusal_message` answering yes there SILENCES a crash page (rc 3 with an
     `isError: true` payload). That is the exact INVERSE of #11153, and worse than a
-    missing lead, so ``"Graph "`` was replaced by ``"Graph name "`` and the
-    cannot-be-opened arm was moved to the named-exclusion list.
+    missing lead. The fix, in two parts (round 12): the arms whose GRAPH NAME comes
+    first cannot carry a lead at all — a lead would stop AT the variable, which is the
+    same over-generic shape — so they moved to `mcp_auth.REFUSAL_PROSE_PHRASES` and are
+    matched on a stable INTERIOR phrase ("is reachable from this workspace.", "graphs in
+    this workspace:"); the cannot-be-opened arm (whose graph name also leads) moved to
+    the named-exclusion list, still crash-class.
 
     Both directions are pinned here: the arms that must classify, and the neighbours
     that must NOT.
@@ -714,6 +718,8 @@ def test_the_graph_target_leads_never_swallow_an_unrelated_message():
 
     # MUST NOT classify: the named exclusions, and the neighbours a bare "Graph "
     # lead used to swallow. A match here reports a crash as a designed refusal.
+    # ⛔ `No graph data available.` is the measured false positive a bare `"No graph "`
+    # lead produced (round 12): the variable-first arms are phrase-matched instead.
     must_not_classify = (
         # the two documented exclusions
         "`tortoise_create_point` does not take a `graph` argument — it targets the "
@@ -725,6 +731,8 @@ def test_the_graph_target_leads_never_swallow_an_unrelated_message():
         "requested graph was not found.",
         "Graph limit reached for this workspace.",
         "Graph was purged by an operator.",
+        # what a bare "No graph " lead wrongly catches: the variable starts at once
+        "No graph data available.",
         # and a genuine crash, which must keep paging on rc 1
         "Error calling tool: TypeError: 'NoneType' is not subscriptable",
     )

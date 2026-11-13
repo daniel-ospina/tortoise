@@ -1166,7 +1166,7 @@ def refusal_message(error: BaseException | str) -> str | None:
     # this module stays importable without fastmcp (script callers degrade
     # gracefully). The prose lives there — one source, not copied here.
     try:
-        from tortoise.mcp_auth import REFUSAL_PROSE_MESSAGES
+        from tortoise.mcp_auth import REFUSAL_PROSE_MESSAGES, REFUSAL_PROSE_PHRASES
     except Exception:  # fastmcp absent; there is no client here to refuse anything
         pass
     else:
@@ -1176,6 +1176,13 @@ def refusal_message(error: BaseException | str) -> str | None:
             # Every entry is prose with a STABLE lead (the rate-limit lead is a
             # lead by construction), so the prefix is the message's identity.
             if text.startswith(prose[:60]):
+                return text
+        for phrase in REFUSAL_PROSE_PHRASES:
+            # The arms whose VARIABLE comes first (`No graph {ref!r} is reachable …`):
+            # their identity is interior, and a lead that stopped at the variable
+            # would match neighbours — the measured false-positive class that removed
+            # the bare `"Graph "` lead. `in`, not `startswith`, for exactly those.
+            if phrase in text:
                 return text
     try:
         payload = json.loads(text)
