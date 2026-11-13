@@ -409,7 +409,8 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
     if not ids:
         summary["reason"] = "no_points"
         return summary
-    # `assemble_why_blocks` is internally fail-open (a graph error returns {}),
+    # `assemble_why_blocks` is internally fail-open (a graph error returns {};
+    # a DIMENSION error is absorbed per label and leaves that key absent),
     # but this function's own contract is "NEVER raises", so a raise from the
     # assembly is absorbed HERE too — and, critically, an absorbed failure is
     # NOT a reason to drop anything: the existence read below decides that,

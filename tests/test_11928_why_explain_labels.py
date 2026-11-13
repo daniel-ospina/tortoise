@@ -792,59 +792,138 @@ def test_the_batch_read_count_is_fixed_for_a_goal_batch(sdk, monkeypatch):
 
 # ── the enriched item + the ask lane carry the dimension ──────────────────
 
-def test_one_labels_read_failure_does_not_empty_another_labels_dimension(
-        sdk, monkeypatch):
-    """Fail-open is per LABEL too, not only per dimension (review round 3).
+def _two_label_batch(dimension, sdk):
+    """A Point id + the ``:Object`` id whose DIMENSION must still be emitted.
+
+    The Point is always the FIRST resolved label (``EPISTEMIC_LABELS`` order), so a
+    Point-side read failure is the one that used to suppress everything after it.
+    Returns ``(proj, point_id, object_id, block_key)``.
+    """
+    claim = sdk.create_point("statement", "the cache is warm")
+    proj = sdk._get_proj()
+    if dimension == "conflicts":
+        _, _, anchor = _world(sdk, tag="legs-conflicts")
+        counter = sdk.create_point("statement", "the cache is cold")
+        proj.g.query(
+            "MATCH (a:Point {id:$a}), (t) WHERE t.id = $t CREATE (a)-[:NAND]->(t)",
+            params={"a": counter["id"], "t": anchor["id"]})
+        return proj, claim["id"], anchor["id"], "conflicts"
+    if dimension == "tradeoffs":
+        anchor = sdk.create_object("how to land it [legs]", objectKind="decision")
+        op_a = sdk.create_object("behind a flag [legs]", objectKind="plan")
+        op_b = sdk.create_object("to everyone [legs]", objectKind="plan")
+        sdk.create_operator("IMPL", anchor["id"], [op_a["id"]])
+        sdk.create_operator("IMPL", anchor["id"], [op_b["id"]])
+        return proj, claim["id"], anchor["id"], "tradeoffs"
+    key = "assessment" if dimension == "assessments" else "support_chain"
+    indicator, target_node, goal = _world(sdk, tag=f"legs-{dimension}")
+    _judge(sdk, indicator, target_node, goal, 8.0, at="2026-05-01T00:00:00Z")
+    return proj, claim["id"], goal["id"], key
+
+
+@pytest.mark.parametrize("dimension,template_attr", [
+    # the two support legs are independent reads and each has its own try
+    ("support", "_SUPPORT_OP_CYPHER"),
+    ("support", "_SUPPORT_DIRECT_CYPHER"),
+    ("conflicts", "_CONFLICTS_CYPHER"),
+    ("tradeoffs", "_TRADEOFFS_CYPHER"),
+    ("assessments", "_ASSESSMENTS_CYPHER"),
+])
+def test_a_point_side_read_failure_does_not_suppress_the_object_dimension(
+        sdk, monkeypatch, dimension, template_attr):
+    """Fail-open is per DIMENSION, per LABEL and per LEG — one pin per site.
 
     Each dimension's ``try`` used to wrap the whole ``for _label, _ids in
-    resolved.items()`` loop. That was equivalent while a dimension was one query
-    over the ONE resolved label; after the #11928 widening it is not: ``Point`` is
-    always FIRST, so a raise on the Point instantiation aborted every remaining
-    label and the Object/Event dimension was never queried — the block survived
-    and answered nothing, which is exactly the trust failure this issue exists to
-    end. Measured as a mutant: restore the outer ``try`` and the Object's
-    ``support_chain`` comes back ``[]`` here.
+    resolved.items()`` loop, and the support dimension's two legs shared one
+    ``try`` inside it. Both were equivalent while every dimension was ONE query
+    over the ONE resolved label; after the #11928 widening neither is, because
+    ``Point`` is always FIRST: a raise there aborted every remaining label AND the
+    support dimension's second leg, so the block survived and answered nothing —
+    the trust failure this issue exists to end.
+
+    ⛔ PARAMETRIZED OVER EVERY SITE ON PURPOSE (review round 4, finding 2). A pin
+    that injects into one dimension leaves the other three revertible green: the
+    first version of this test poisoned only the support direct leg, so moving the
+    ``try`` back outside the loop at the conflicts/tradeoffs/assessment sites kept
+    the suite green — the same "a pin that passes because the other arm fired"
+    shape review round 2 filed. Each ``template_attr`` below names ONE mutant, and
+    each mutant reds its own case and no other.
     """
     from tortoise import why as why_module
     from tortoise.projection import _GuardedGraph
 
-    # Two labels resolve in ONE batch: a Point claim with a supporter (a direct
-    # IMPL edge, the leg this test poisons), and a goal (:Object) whose support
-    # entry is the judgement this fixture records (the operator leg).
-    claim = sdk.create_point("caching", "the cache is warm")
-    supporter = sdk.create_point("cache-hit-rate", "the hit rate is 98%")
-    sdk._get_proj().g.query(
-        "MATCH (a:Point {id:$a}), (t:Point {id:$t}) CREATE (a)-[:IMPL]->(t)",
-        params={"a": supporter["id"], "t": claim["id"]})
-    indicator, target_node, goal = _world(sdk, tag="fail-open")
-    _judge(sdk, indicator, target_node, goal, 8.0, at="2026-05-01T00:00:00Z")
+    proj, point_id, object_id, key = _two_label_batch(dimension, sdk)
+    batch = [point_id, object_id]
 
-    proj = sdk._get_proj()
-    healthy = assemble_why_blocks(proj, [claim["id"], goal["id"]])
-    assert healthy[claim["id"]]["support_chain"], "fixture: the claim lost its support"
-    assert healthy[goal["id"]]["support_chain"], "fixture: the goal lost its support"
+    healthy = assemble_why_blocks(proj, batch)
+    assert healthy[object_id].get(key), (
+        f"fixture: the Object anchor has no {key} before any injection")
 
-    poisoned = why_module._for_label(why_module._SUPPORT_DIRECT_CYPHER, "Point")
+    poisoned = why_module._for_label(getattr(why_module, template_attr), "Point")
     real_query = proj.g.query
 
     def _query(self, cypher, params=None, timeout=None):
         if cypher == poisoned:
-            raise RuntimeError("injected Point support-leg read failure")
+            raise RuntimeError(f"injected Point-side {template_attr} failure")
         return real_query(cypher, params=params, timeout=timeout)
 
     monkeypatch.setattr(_GuardedGraph, "query", _query)
     try:
-        blocks = assemble_why_blocks(proj, [claim["id"], goal["id"]])
+        blocks = assemble_why_blocks(proj, batch)
     finally:
         monkeypatch.setattr(_GuardedGraph, "query", real_query)
 
-    assert blocks[claim["id"]]["support_chain"] == [], (
-        "the injected failure did not take effect on the Point leg: "
-        + repr(blocks[claim["id"]]["support_chain"]))
-    assert blocks[goal["id"]]["support_chain"], (
-        "one label's read failure emptied EVERY label's dimension — the "
-        "Object leg's own query never ran: "
-        + repr(blocks[goal["id"]].get("support_chain")))
+    assert not blocks[point_id].get(key), (
+        "the injection did not take effect on the Point side: "
+        + repr(blocks[point_id].get(key)))
+    assert blocks[object_id].get(key), (
+        f"a Point-side {template_attr} failure suppressed the Object anchor's "
+        f"{key} — its own read never ran: " + repr(blocks[object_id].get(key)))
+
+
+def test_the_support_dimensions_direct_leg_still_runs_when_the_operator_leg_raises(
+        sdk, monkeypatch):
+    """The support dimension's TWO LEGS each have their own try (review round 4).
+
+    ``_SUPPORT_OP_CYPHER`` and ``_SUPPORT_DIRECT_CYPHER`` are independent reads that
+    happened to share one ``try``. A raise in the first (a row-shape or fold error is
+    data-dependent and says nothing about the second) then skipped the second leg's
+    QUERY entirely, and the chain came back empty although a read that would have
+    answered was never run. Measured as a mutant: fold the two legs back into one
+    ``try`` and this pin reports ``[]`` while every other case in this file stays
+    green (the parametrized cases above inject per dimension, not per leg).
+    """
+    from tortoise import why as why_module
+    from tortoise.projection import _GuardedGraph
+
+    proj = sdk._get_proj()
+    claim = sdk.create_point("caching", "the cache is warm")
+    supporter = sdk.create_point("cache-hit-rate", "the hit rate is 98%")
+    proj.g.query(
+        "MATCH (a:Point {id:$a}), (t:Point {id:$t}) CREATE (a)-[:IMPL]->(t)",
+        params={"a": supporter["id"], "t": claim["id"]})
+    healthy = assemble_why_blocks(proj, [claim["id"]])
+    assert [e["content_snippet"] for e in healthy[claim["id"]]["support_chain"]] == [
+        "the hit rate is 98%"], "fixture: the direct supporter is not in the chain"
+
+    poisoned = why_module._for_label(why_module._SUPPORT_OP_CYPHER, "Point")
+    real_query = proj.g.query
+
+    def _query(self, cypher, params=None, timeout=None):
+        if cypher == poisoned:
+            raise RuntimeError("injected operator-leg failure")
+        return real_query(cypher, params=params, timeout=timeout)
+
+    monkeypatch.setattr(_GuardedGraph, "query", _query)
+    try:
+        blocks = assemble_why_blocks(proj, [claim["id"]])
+    finally:
+        monkeypatch.setattr(_GuardedGraph, "query", real_query)
+
+    assert [e["content_snippet"] for e in blocks[claim["id"]]["support_chain"]] == [
+        "the hit rate is 98%"], (
+        "the operator leg's failure skipped the DIRECT leg's read — the two legs "
+        "share one try: " + repr(blocks[claim["id"]].get("support_chain")))
 
 
 def test_the_enriched_item_and_ask_entry_carry_the_assessment(sdk, monkeypatch):

@@ -39,9 +39,11 @@ Contract invariants (plan §3.1.1/§3.1.3/§3.1.4/§6.1 + #2101):
 - **Empty/null/absent (§3.1.3):** ``null`` = unset scalar (e.g.
   ``successor_label: null``); ``[]`` = empty collection; absent key =
   dimension not computed (e.g. ``conflicts`` on an uncontested point,
-  ``tradeoffs`` on a non-decision point). Clean empty is NEVER a
-  degradation — this module raises nothing into the recall turn
-  (fail-open: any assembly error degrades to "no enrichment keys").
+  ``tradeoffs`` on a non-decision point) — or because that dimension's read
+  failed for this label (see ``assemble_why_blocks``' graded fail-open: a
+  dimension error is absorbed per label, so the block survives without that key
+  and, today, without any signal saying so). Clean empty is NEVER a
+  degradation — this module raises nothing into the recall turn.
 - **Bounded reads (S8):** the assembly issues a number of batch Cypher
   queries that is FIXED for a given BATCH COMPOSITION and never grows with batch
   SIZE or with result rows. The unit is the PRESENT EPISTEMIC LABEL, not the
@@ -1078,8 +1080,23 @@ def assemble_why_blocks(
     assessments, each run once per distinct label in the batch — ONE for a
     Point-only batch, as before #11928) plus the supersession read. Persisted
     single-node α/β reads only — never full EP propagation, never a per-result
-    loop. Fail-open: any graph error logs and returns ``{}``
-    (the caller degrades to "no enrichment", never breaks the recall turn).
+    loop. **Fail-open is graded, and this docstring names the grades** (#11928
+    review round 4 — the old "any graph error … returns ``{}``" was false for
+    four of the six arms):
+
+    * the EXISTENCE anchor and the outer guard return ``{}`` — no blocks at all,
+      which the caller reads as "no enrichment";
+    * a dimension's read error is absorbed PER LABEL (and, for the support
+      dimension, PER LEG) and the block is still returned, with THAT dimension
+      absent for that label.
+
+    ⛔ The consequence is stated rather than implied: an absent dimension cannot
+    currently be told apart from an empty one on the wire (``conflicts`` absent
+    because the node is uncontested, or because its read failed for this label),
+    and there is no ``degraded_reason`` signal. That is a KNOWN, ACCEPTED bound of
+    this change, not a measured property — adding a signal is a contract change
+    (``warnings`` is the block's declared home for it in ONTOLOGY §5) and belongs
+    to its own decision.
 
     #11928: an id may be ANY of the four epistemic labels
     (``live.EPISTEMIC_LABELS``), which is what makes a goal (``:Object``) and a
@@ -1095,7 +1112,9 @@ def assemble_why_blocks(
 
     ``conflicts`` / ``tradeoffs`` / ``dig_deeper`` / ``assessment`` are absent
     when their dimension is not computed / empty (uncontested / non-decision /
-    never-judged). ``supersession`` is absent for a NON-Point anchor: its read
+    never-judged) — **or when that dimension's read failed for this label** (see
+    the graded fail-open above; the two are indistinguishable on the wire).
+    ``supersession`` is absent for a NON-Point anchor: its read
     is still ``:Point``-only (#11824's gate), and absent-means-not-computed is
     honest where a fabricated ``live`` would not be.
     """
@@ -1152,13 +1171,20 @@ def assemble_why_blocks(
         #    Point read error emptied an Object's or Event's dimension without
         #    its own query ever running — the block survived and answered
         #    nothing, which is the trust failure this issue exists to end.
-        #    Fail-open is per DIMENSION and per LABEL, and now says so.
+        #    Fail-open is per DIMENSION, per LABEL — and, for this dimension,
+        #    per LEG (review round 4): the operator and direct legs are
+        #    INDEPENDENT reads, so one try per leg. Sharing one meant a raise in
+        #    the operator leg skipped the direct leg's query entirely, and the
+        #    block then reported no supporters although a read that could have
+        #    answered was never run — the same "survived and answered nothing"
+        #    shape one granularity below the per-label fix.
         for _label, _ids in resolved.items():
+            # ONE fusion map per label, shared by both legs: the union is
+            # re-derived and re-capped after each call (see _assemble_supports),
+            # so a leg that runs alone still emits a correct (shorter) chain.
+            _seen: dict[str, dict[str, dict]] = {}
+            _rank: dict[tuple[str, str], tuple[str, str]] = {}
             try:
-                # ONE fusion map per label, shared by both legs: the union is
-                # re-derived and re-capped after each call (see _assemble_supports).
-                _seen: dict[str, dict[str, dict]] = {}
-                _rank: dict[tuple[str, str], tuple[str, str]] = {}
                 _assemble_supports(
                     g.query(_for_label(_SUPPORT_OP_CYPHER, _label),
                             params={"ids": _ids}).result_set,
@@ -1167,6 +1193,10 @@ def assemble_why_blocks(
                     seen=_seen,
                     rank=_rank,
                 )
+            except Exception as e:  # noqa: BLE001, RUF100 — fail-open per leg
+                logger.warning("W4 support-chain OPERATOR leg failed for %s: %s",
+                               _label, e)
+            try:
                 _assemble_supports(
                     g.query(_for_label(_SUPPORT_DIRECT_CYPHER, _label),
                             params={"ids": _ids}).result_set,
@@ -1174,8 +1204,8 @@ def assemble_why_blocks(
                     seen=_seen,
                     rank=_rank,
                 )
-            except Exception as e:  # noqa: BLE001, RUF100 — fail-open per label
-                logger.warning("W4 support-chain read failed for %s: %s",
+            except Exception as e:  # noqa: BLE001, RUF100 — fail-open per leg
+                logger.warning("W4 support-chain DIRECT leg failed for %s: %s",
                                _label, e)
         # 3. NAND conflicts (≤ max_conflicts) — NANDer-only query.
         for _label, _ids in resolved.items():
