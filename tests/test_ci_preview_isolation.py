@@ -761,7 +761,9 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     # supervisor, its two children AND the peer decoy — three 120 s processes in their own
     # sessions — which the comment above used to claim "the later `finally` still reaps on
     # the rest". It did not. This guard covers exactly that window; the `finally` below
-    # covers everything after it, and a double reap is a suppressed no-op.
+    # covers everything from ITS `try:` onward — which is why `stop-all` is the first
+    # statement inside it and nothing sits between the two arms. A double reap is a
+    # suppressed no-op.
     #
     # ⛔ AND IT REAPS THE SESSION, NOT THE ENUMERATION (#12227 review cycle 8). Reaping
     # `own.pid` plus the `children` LIST could not cover this guard's own failure mode:
@@ -785,8 +787,17 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         _reap_group(own.pid)
         _reap(peer.pid)
         raise
-    result = _script("stop-all", env=state)
+    result = None
     try:
+        # ⛔ `stop-all` IS INSIDE THE `try:`, NOT BETWEEN THE GUARD AND IT (#12227 review
+        # cycle 9). It was the one statement between the leak guard's `except` and the
+        # `try:` that owns the `finally`, so its own failure — a `timeout=60` expiring on a
+        # stalled runner, an `OSError` under fork pressure — ran NEITHER teardown and
+        # leaked the supervisor, its two `sleep 120` children and the peer's 120 s
+        # `workerd` decoy. Measured before the move: forcing that call to raise left
+        # `bash -c "sleep 120 & sleep 120"`, two `sleep 120` (ppid 1) and the peer decoy
+        # alive. Nothing may sit between the two arms.
+        result = _script("stop-all", env=state)
         assert result.returncode == 0, result.stderr
         deadline = time.time() + 10
         while time.time() < deadline and _pid_alive(own.pid):
