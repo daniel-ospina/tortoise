@@ -148,6 +148,16 @@ def test_a_slash_spelled_reading_does_not_outrank_a_newer_dashed_one(sdk):
         _reading(sdk, indicator, 1.0, at="2026/11/12 (Thu) 01:00")  # 01:00Z
         newer = _reading(sdk, indicator, 9.0, at="2026-11-12T05:00:00Z")  # 05:00Z
         assert "2026/11/12 (Thu) 01:00" > "2026-11-12T05:00:00Z"
+        # ⛔ The BYTE disagreement above is only half the premise: if the
+        # producer spelling were UNPARSEABLE it would land in the last bucket
+        # and ``limit=1`` would return the dashed row for the WRONG reason —
+        # green, with ``_forces_tz`` inert. So pin the bucket too.
+        from tortoise.search_engine import _created_sort_key
+
+        assert _created_sort_key("2026/11/12 (Thu) 01:00")[0] == 0, (
+            "the producer spelling must PARSE — an unparseable as-of sorts last "
+            "and would satisfy the assertion below without an instant order"
+        )
 
         got = latest_readings(sdk, indicator["id"], limit=1)
     assert [r.reading_id for r in got] == [newer["id"]]
@@ -406,13 +416,22 @@ def test_a_truncated_page_set_raises_instead_of_answering_from_survivors(
 def test_a_reading_whose_event_carries_no_id_still_orders_without_raising(sdk):
     """``reading_id`` may be absent on an outside-written event; the order key
     coerces it (``str(reading_id or "")``) so a null id is a TIE-BREAK value, not
-    a ``TypeError`` inside ``sort``."""
+    a ``TypeError`` inside ``sort``.
+
+    ⛔ SAME INSTANT ON PURPOSE. The tuple is ``(bucket, measure, reading_id)``, so
+    a fixture whose two readings name DIFFERENT instants decides on ``measure``
+    and never reaches the third element — the coercion would then be unpinned.
+    MEASURED at ``a60a64db15``: with the id-less row at ``01:00Z`` and the dated
+    one at ``05:00Z``, deleting the coercion (``reading.reading_id``) left all 14
+    tests GREEN; at a shared instant it raises
+    ``TypeError: '<' not supported between instances of 'str' and 'NoneType'``.
+    """
     indicator = _indicator(sdk, "no-id")
     _reading(sdk, indicator, 9.0, at="2026-11-12T05:00:00Z")
     sdk._get_proj().g.query(
         "MATCH (o) WHERE o.id = $iid "
         "CREATE (e:Event {value: 1.0, unit: 'minutes', "
-        "startedAt: '2026-11-12T01:00:00Z', eventKind: 'measurement'})"
+        "startedAt: '2026-11-12T05:00:00Z', eventKind: 'measurement'})"
         "-[:aboutObject]->(o)",
         params={"iid": indicator["id"]},
     )
