@@ -232,6 +232,20 @@ thread:
 | name-length (~4 words) | **7.5** |
 | passage-length (~150 words) | **62.9** |
 
+⛔ **That table is an AD-HOC observation, not a recorded run** — the same status §6
+gives the 6.4 s model load: it is not in any committed artifact, and it was taken
+at loadavg **2.7** while the §5 run above ran at **14.0**, so it bounds the
+MECHANISM (text length drives the cost) rather than this run's ms/pair. Stated
+here for the same reason this section's provenance paragraph exists: a section may
+not present a number it does not carry as if it were carried.
+
+**And one honest gap in the artifact:** `measurement-user-search.json` was
+produced before `fused_rerank_gate_armed` was added to the report's `config`, so
+it has no such key. The absence is expected rather than a lost record — and the
+numbers are themselves evidence the baseline was not already reranked
+(`gained 165 / lost 0` is not producible by a rerank-vs-rerank comparison).
+A re-run records the field.
+
 So the user-search rerank **improves ranking and is not affordable**: 3.4 s per
 query on CPU, per query, in the interactive search path. **The lever earns its gate
 on the noun path only.** This is a scoped recommendation, not a general one, and

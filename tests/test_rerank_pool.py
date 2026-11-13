@@ -381,17 +381,38 @@ def test_the_wiring_is_a_permutation_and_discloses_the_cap(
     bound stayed silent — and a bound on what the reranker can PROMOTE is a
     result-shaping fact, so the disclosure is part of the contract.
     """
+    _seed(sdk, 5)
+    # The GATE-OFF control FIRST, before the flag is set, so "same rows" is
+    # measured against the shipped order rather than against a second identical
+    # run.
+    off = sdk.tortoise_fts_query("zebra migration", entity_type="point",
+                                 limit=5)
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     # The width knob must reach BOTH the pool text read and the scorer: pin the
     # DEFAULT down and set the knob above it, which is exactly the shape that
     # used to be silently ignored (the read sliced with the constant).
     monkeypatch.setattr(rerank, "DEFAULT_FUSED_RERANK_POOL", 2)
     monkeypatch.setenv(rerank.FUSED_RERANK_POOL_ENV, "4")
-    _inject(rerank.FakeScorer(), monkeypatch)
-    _seed(sdk, 5)
+    # ⛔ OBSERVE THE TEXT-READ WIDTH, do not infer it. Everything else in this test
+    # reads the ENTRY, and the entry's width comes from the resolver. The pre-fix
+    # shape was TWO parts — slice at the constant AND re-assemble `head + rest` —
+    # and restoring that shape left all 37 tests green: the shortened read is
+    # padded back by the empty-content tail, so the lengths still add up and
+    # `FakeScorer`'s empty texts tie and keep their indices. What it really does
+    # is SCORE two candidates on "" instead of on their own text, which is
+    # invisible from lengths — so the ids handed to the batch read are recorded.
+    # (Applying the slice ALONE drops rows outright, and the permutation
+    # assertion below catches that; this one catches the faithful shape.)
+    _real_fetch = sdk_mod._fetch_rerank_pool_texts
+    seen_ids: list[list[str]] = []
 
-    off = sdk.tortoise_fts_query("zebra migration", entity_type="point",
-                                 limit=5)
+    def _recording_fetch(graph, entity_type, graph_label, id_field, ids):
+        seen_ids.append(list(ids))
+        return _real_fetch(graph, entity_type, graph_label, id_field, ids)
+
+    monkeypatch.setattr(sdk_mod, "_fetch_rerank_pool_texts", _recording_fetch)
+    _inject(rerank.FakeScorer(), monkeypatch)
+
     trace: list[dict] = []
     on = sdk.tortoise_fts_query("zebra migration", entity_type="point",
                                 limit=5, leg_trace=trace)
@@ -411,6 +432,12 @@ def test_the_wiring_is_a_permutation_and_discloses_the_cap(
     # legs' own windows decide how many rows fuse, and a hand-written number
     # would pin a property of this fixture instead of the contract.
     candidates = len(off)
+    # ⛔ THE ASSERTION THAT ACTUALLY DEFENDS THE WIDTH FIX: the batch read was
+    # asked for the KNOB's width (4), not the monkeypatched DEFAULT (2). On the
+    # pre-fix slice this reads 2 and reds, while every entry-level assertion
+    # above still passes.
+    assert seen_ids, "the batch text read never ran"
+    assert all(len(ids) == min(4, candidates) for ids in seen_ids), seen_ids
     assert entry[rerank.RERANK_SCORED_KEY] == min(4, candidates)
     assert (entry[rerank.RERANK_SCORED_KEY]
             + entry[rerank.RERANK_UNSCORED_KEY]) >= candidates

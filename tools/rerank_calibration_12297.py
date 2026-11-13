@@ -63,7 +63,12 @@ USAGE
     uv run python tools/rerank_calibration_12297.py --records 400 \\
         --out /tmp/rerank-user-search-12297.json
 
-EXIT CODES: 0 ok · 2 usage · 3 no reachable graph (never a silent skip)
+EXIT CODES: 0 ok · 2 usage · 3 REFUSED — a mis-shaped run, never a
+silent skip: either the read's own rerank gate is armed (the baseline would
+already be reranked, so the comparison is rerank-vs-rerank — pass
+`--allow-reranked-baseline` to measure that on purpose) or no reachable
+FalkorDB is configured. Not exhaustive — an empty harvest, passages that did not
+land, and a cross-encoder that will not load also refuse with 3
 """
 from __future__ import annotations
 

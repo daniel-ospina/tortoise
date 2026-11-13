@@ -108,10 +108,15 @@ DEFAULT_FUSED_RERANK_POOL = 40
 #: why it exceeds ``rerank_pool - rerank_scored`` as soon as the pool is wider
 #: than the bound (a 60-candidate read at width 40 reports
 #: ``pool=40, scored=40, unscored=20``; ``tests/test_rerank_pool.py`` pins that
-#: shape at width 2). The two readings coincide only where nothing was scored:
-#: a degraded arm reads ``pool=<bound>, scored=0, unscored=<candidates>``. Read
-#: the bound as the cap, never as an achievement, and read ``unscored`` as the
-#: rows the reranker could not promote.
+#: shape at width 2). ⛔ The two readings coincide at EXACTLY ONE width —
+#: ``len(candidates) == rerank_pool`` — because ``unscored`` is ``candidates -
+#: scored`` while the entry's ``pool`` is the bound. Below the bound both are 0
+#: and ``pool - scored`` is not; above it ``unscored`` is the remainder and
+#: ``pool - scored`` is 0. The condition is the list's width, never
+#: ``scored == 0``: a degraded arm on a 4-candidate read reports ``pool=40,
+#: scored=0, unscored=4``, where ``pool - scored`` is 40.
+#: Read the bound as the cap, never as an achievement, and read ``unscored`` as
+#: the rows the reranker could not promote.
 #: Rows past the width keep their retrieval order and can never be promoted, so a
 #: caller that opted in must be able to tell "the reranker decided" from "it
 #: never saw that row".
