@@ -184,14 +184,22 @@ def test_the_cap_is_applied_after_the_ordering(sdk):
 
 
 def test_ties_are_broken_deterministically_by_reading_id(sdk):
-    """Same instant, two readings: newest-first must be a total order, or the
-    same graph answers differently between reads."""
+    """Same instant, two readings: the order must be TOTAL, not merely stable.
+
+    The assertion is the tie-break DIRECTION (descending ``reading_id``, the
+    ``e.id DESC`` the Cypher used to carry), not just "two reads agree": a stable
+    sort over an ascending page satisfies mere repeatability while pinning
+    nothing, so deleting the third element of ``_newest_first_key`` would stay
+    green. Rows arrive id-ASCENDING, so the tie-break is the only thing that can
+    put the larger id first.
+    """
     indicator = _indicator(sdk, "tie")
     a = _reading(sdk, indicator, 4.0, at="2026-11-12T05:00:00Z")
     b = _reading(sdk, indicator, 6.0, at="2026-11-12T00:00:00-05:00")  # also 05:00Z
     got = latest_readings(sdk, indicator["id"])
     assert len(got) == 2
     assert {r.reading_id for r in got} == {a["id"], b["id"]}
+    assert [r.reading_id for r in got] == sorted([a["id"], b["id"]], reverse=True)
     # Determinism, not a particular direction: two reads agree.
     assert [r.reading_id for r in latest_readings(sdk, indicator["id"])] == [
         r.reading_id for r in got
@@ -204,8 +212,16 @@ def test_the_read_pages_rather_than_relying_on_one_result_set(sdk, monkeypatch):
 
     The page size is retuned to 2 here — the pattern
     ``tests/test_9226_dump_paging_v6.py`` uses — so paging is exercised without
-    seeding a thousand events. A regression to the PRE-FIX shape (one
-    ``LIMIT $lim`` query) returns 2 of the 5 rows and reds the length assertion.
+    seeding a thousand events.
+
+    TWO assertions, because either alone is weak: (1) the FULL read returns all 5
+    rows, which reds a single-page loop; (2) a ``limit=2`` read returns the two
+    INSTANT-newest values even though they are the LEXICALLY last, which reds a
+    restore of the pre-fix single ``LIMIT $lim`` query — that query would have
+    been asked for 2 rows and answered with the byte-largest two (5.0, 4.0…).
+    Every spelling here is ``Z``, so assertion (1) alone could not tell the old
+    query from the new one at ``limit=100``; (2) is what makes the ordering part
+    of this pin, not only the paging.
 
     ⚠️ Disclosed bound on what this pins: a lane container reports
     ``RESULTSET_SIZE = -1``, so the server-side cap the paging exists for cannot
@@ -223,6 +239,16 @@ def test_the_read_pages_rather_than_relying_on_one_result_set(sdk, monkeypatch):
     assert len(got) == 5, "a page cut lost readings — the read is not paging"
     assert [r.value for r in got] == [5.0, 4.0, 3.0, 2.0, 1.0]
 
+    # …and the same read with offset spellings whose INSTANT order inverts their
+    # BYTE order, so the two newest are the two lexically SMALLEST rows.
+    mixed = _indicator(sdk, "paging-mixed")
+    _reading(sdk, mixed, 1.0, at="2026-11-12T09:00:00Z")
+    _reading(sdk, mixed, 2.0, at="2026-11-12T08:00:00Z")
+    _reading(sdk, mixed, 3.0, at="2026-11-12T07:00:00Z")
+    _reading(sdk, mixed, 8.0, at="2026-11-12T00:20:00-12:00")  # 12:20Z
+    _reading(sdk, mixed, 9.0, at="2026-11-12T00:30:00-12:00")  # 12:30Z
+    assert [r.value for r in latest_readings(sdk, mixed["id"], limit=2)] == [9.0, 8.0]
+
 
 def test_a_negative_limit_is_refused_rather_than_silently_sliced(sdk):
     """A negative bound is a caller error, not a bound.
@@ -237,20 +263,50 @@ def test_a_negative_limit_is_refused_rather_than_silently_sliced(sdk):
         latest_readings(sdk, indicator["id"], limit=-1)
 
 
-def test_a_degenerate_page_size_terminates_instead_of_raising(sdk, monkeypatch):
-    """The loop must end on an EMPTY page before it touches ``page[-1]``.
+def test_a_degenerate_page_size_is_refused_loudly_not_read_as_unmeasured(
+    sdk, monkeypatch
+):
+    """A page size below 1 is a configuration error, and it must be LOUD.
 
-    ``hosted_backup._paged_rows`` checks ``if not rows: return`` first; a loop
-    that checks ``len(page) < page_size`` first raises ``IndexError`` on an empty
-    page when the size is 0 (measured). Unreachable at the shipped 1000, pinned
-    so the next retune cannot resurrect it.
+    ``LIMIT 0`` returns an empty page, so a silent guard would end the loop with
+    no rows and report every indicator as "nothing was ever measured" — the
+    silent-bound conflation this module refuses elsewhere (#11822: a FAILED READ
+    is not "we could not tell"). Refused, therefore, rather than answered.
     """
     import tortoise.goal_judgement as gj
 
     indicator = _indicator(sdk, "degenerate")
     _reading(sdk, indicator, 9.0, at="2026-11-12T05:00:00Z")
     monkeypatch.setattr(gj, "_READINGS_PAGE_SIZE", 0)
-    assert latest_readings(sdk, indicator["id"]) == []
+    with pytest.raises(ValueError, match="_READINGS_PAGE_SIZE must be >= 1"):
+        latest_readings(sdk, indicator["id"])
+
+
+def test_a_doubled_about_object_edge_yields_one_reading_not_two(sdk, monkeypatch):
+    """The query returns one row per MATCH PATH, so a second `aboutObject` edge
+    from the same event would yield the same reading twice — and a single-column
+    `id(e)` cursor could skip the rest of a group straddling a page boundary.
+    The cursor is the pair `(id(e), e.id)` and duplicates are collapsed by id.
+
+    Seeded with the SDK's own edge write (which MERGEs, so a doubled edge is an
+    outside-write shape) plus a direct Cypher `CREATE` to force the second edge.
+    """
+    import tortoise.goal_judgement as gj
+
+    monkeypatch.setattr(gj, "_READINGS_PAGE_SIZE", 2)
+    indicator = _indicator(sdk, "doubled")
+    first = _reading(sdk, indicator, 9.0, at="2026-11-12T05:00:00Z")
+    for hour in (1, 2, 3):
+        _reading(sdk, indicator, float(hour), at=f"2026-11-12T0{hour}:00:00Z")
+    sdk._get_proj().g.query(
+        "MATCH (e:Event), (o) WHERE e.id = $eid AND o.id = $iid "
+        "CREATE (e)-[:aboutObject]->(o)",
+        params={"eid": first["id"], "iid": indicator["id"]},
+    )
+
+    got = latest_readings(sdk, indicator["id"])
+    assert len(got) == 4, "a doubled edge duplicated or dropped a reading"
+    assert len({r.reading_id for r in got}) == 4
 
 
 # ── 3. an unparseable instant sorts LAST, deterministically ─────────────

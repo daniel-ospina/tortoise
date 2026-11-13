@@ -926,6 +926,13 @@ def latest_readings(
     reading while reading as "everything", the same class of silent bound this
     function exists to remove.
 
+    ⚠️ ``limit`` DOES NOT BOUND THE FETCH. The whole per-indicator history is
+    paged and parsed regardless of ``limit``, because the ordering cannot be
+    delegated to the server (see below) — so ``limit=1`` still costs
+    ``ceil(N / _READINGS_PAGE_SIZE)`` round trips and ``N`` instant parses for a
+    history of ``N`` readings. That is the measured price of a correct order
+    (:data:`_READINGS_PAGE_SIZE`); it is not a per-call constant.
+
     "Newest first" is ordered by the INSTANT each reading names, using the
     repo's one instant comparator (``search_engine._created_sort_key``) — never
     by the stored string, whose byte order disagrees with instant order across
@@ -998,42 +1005,72 @@ def latest_readings(
     # truncation, which a single unbounded query is NOT — then ordered in Python
     # with `limit` applied AFTER that ordering, so no bound can decide WHICH
     # readings the judgement sees.
+    #
+    # The cursor is the PAIR `(id(e), e.id)`, not `id(e)` alone: this query
+    # returns one row per MATCH PATH, so an event carrying TWO `aboutObject`
+    # edges to the same indicator yields two rows with the SAME `id(e)`. A
+    # single-column cursor advanced past that id would skip the rest of a group
+    # straddling a page boundary — silently dropping a reading, which is the very
+    # class of loss this read exists to remove. `hosted_backup._paged_rows` is
+    # safe with `id(n)` alone only because its query is `MATCH (n)` (one row per
+    # node). Duplicate rows for one event are then collapsed by `reading_id`
+    # below, so a doubled edge cannot double a reading in the result.
     cypher = (
-        f"{where} AND id(e) >= $cursor "
+        f"{where} AND (id(e) > $cursor_id "
+        "OR (id(e) = $cursor_id AND e.id > $cursor_eid)) "
         "RETURN id(e), e.id, e.value, e.unit, e.startedAt, e.createdAt "
-        "ORDER BY id(e) LIMIT $batch"
+        "ORDER BY id(e), e.id LIMIT $batch"
     )
     if limit < 0:
         raise ValueError(
             f"limit must be a non-negative cap, got {limit!r} — a negative slice "
             "would drop the OLDEST reading and read as if nothing was bounded"
         )
+    batch = int(_READINGS_PAGE_SIZE)
+    if batch < 1:
+        # ⛔ LOUD, NOT EMPTY. A page size of 0 makes the query return no rows on
+        # every page, so the read would answer "nothing was ever measured" —
+        # the silent-bound conflation this module refuses elsewhere (#11822: a
+        # FAILED READ is not "we could not tell").
+        raise ValueError(
+            f"_READINGS_PAGE_SIZE must be >= 1, got {_READINGS_PAGE_SIZE!r} — a "
+            "zero page size would report every indicator as unmeasured"
+        )
     g = sdk._get_proj().g
     rows: list[Any] = []
-    cursor = 0
-    batch = _READINGS_PAGE_SIZE
+    cursor_id = 0
+    cursor_eid = ""
     while True:
         page = g.query(
-            cypher, params={**params, "cursor": cursor, "batch": batch}
+            cypher,
+            params={**params, "cursor_id": cursor_id,
+                    "cursor_eid": cursor_eid, "batch": batch},
         ).result_set
-        # `if not page` FIRST (the order `_paged_rows` uses): a page size of 0 or
-        # a genuinely empty tail must end the loop, never reach `page[-1]`.
+        # `if not page` FIRST (the order `_paged_rows` uses): an empty tail must
+        # end the loop, never reach `page[-1]`.
         if not page or len(page) < batch:
             rows.extend(page)
             break
         rows.extend(page)
-        # `>= last + 1`, never `> last`: ids are non-negative integers, and a
-        # negative comparison against a NODE `id()` answers 0 rows on the v6 core
-        # (measured — `hosted_backup._paged_rows`, #9226).
-        cursor = int(page[-1][0]) + 1
+        # The pair STRICTLY increases, so the loop always terminates — and it
+        # never compares a NODE id() negatively (that answers 0 rows on the v6
+        # core, measured — `hosted_backup._paged_rows`, #9226).
+        cursor_id = int(page[-1][0])
+        cursor_eid = str(page[-1][1])
     out: list[Reading] = []
+    seen: set[str] = set()
     for row in rows:
+        reading_id = row[1] if len(row) > 1 else None
+        identity = str(reading_id if reading_id is not None else f"id:{row[0]}")
+        if identity in seen:
+            continue  # a doubled `aboutObject` edge yields one reading, not two
+        seen.add(identity)
         raw = row[2] if len(row) > 2 else None
         out.append(
             Reading(
                 value=_num(raw),
                 raw_value=raw,
-                reading_id=row[1] if len(row) > 1 else None,
+                reading_id=reading_id,
                 unit=row[3] if len(row) > 3 else None,
                 started_at=(row[4] if len(row) > 4 else None)
                 or (row[5] if len(row) > 5 else None),
