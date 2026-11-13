@@ -16,8 +16,11 @@ asserting a digest that no longer matches the committed code while every check s
 The instrument this bundle exists to preserve would then be silently self-invalidated.
 
 The second drift is a hand-edit of the EVIDENCE: `probe_sha256` does not move when a verdict
-or a count inside `gate.json` is edited, so before the payload binding a green-flipped
-gate.json passed this file unchanged (measured: 3 passed).
+or a count inside `gate.json` is edited. (The VERDICT alone was already caught before the
+payload binding — the `test_the_bundle_records_a_failed_measurement` assertion reds a flipped
+`all_pass`, measured `1 failed, 4 passed` at `bf7b848531`. What passed untouched was a NUMBER:
+`global_worst_composed` 1.0 → 0.10, `items_displaced_from_top_k` 3706 → 3707, and the like, which
+no assertion at that head read.) `provenance.payload_sha256` is what makes every such edit red.
 
 Every test names the mutation that reds it. Hermetic: two probes are hashed and two JSON
 artifacts are parsed, plus one float-pair read from `tortoise.embeddings` (no model, no key, no
@@ -26,7 +29,10 @@ network, no DB).
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -156,11 +162,13 @@ def test_the_declared_bands_are_the_products_bands():
 
 # ---------------------------------------------------------------------------------------
 # The EVIDENCE half of the binding. `probe_sha256` above binds each artifact to the CODE that
-# produced it and says nothing about the numbers the code produced — so before these tests, a
-# hand-edit that flipped `verdict.all_pass` to true (or zeroed a root-cause count) passed the
-# pin unchanged: measured 3 passed on a green-flipped `gate.json`. That is the "false PASS"
-# class, on the one artifact that decides whether `TORTOISE_COMPOSED_EMBED_TEXT` may ship ON
-# (#11739's gate, #12436's acceptance instrument), so it gets its own binding.
+# produced it and says nothing about the numbers the code produced — so a hand-edit of a NUMBER
+# (`global_worst_composed` 1.0 -> 0.10, `items_displaced_from_top_k` 3706 -> 3707) passed the pin
+# unchanged at `bf7b848531`, where every assertion read either a digest, the verdict or a band.
+# That is the "false PASS" class, on the one artifact that decides whether
+# `TORTOISE_COMPOSED_EMBED_TEXT` may ship ON (#11739's gate, #12436's acceptance instrument), so it
+# gets its own binding. The VERDICT was already pinned there — flipping `all_pass` to true reded
+# `test_the_bundle_records_a_failed_measurement` (`1 failed, 4 passed`, measured at that head).
 #
 # `test_the_bundle_records_a_failed_measurement` above owns the VERDICT and
 # `test_the_declared_bands_are_the_products_bands` owns the BANDS; the tests below cover what
@@ -211,6 +219,21 @@ def test_the_headline_figures_are_the_ones_the_index_quotes():
     assert gate["gate3_false_proposal"]["new_proposals"] == 13691
     assert gate["gate3_false_proposal"]["proposals_composed"] == 17305
     assert gate["gate3_false_proposal"]["new_proposals_crossing_0_89"] == 20
+    # The figures the README's GATE block and the `docs/00_index.md` row quote beyond the three
+    # gates' own totals — pinned here so a drift names WHICH figure moved rather than only reding
+    # the payload digest. (`rows_walked`/`live_rows` are equal BY CONSTRUCTION in cache mode; the
+    # README's declared limitation says so, and pinning both is what keeps that sentence true.)
+    identity = _artifact("quote_identity.json")
+    assert identity["of_those_raw_below_0_89"] == 16114
+    assert gate["gate2_rank"]["transitions"]["entered_070_085"] == 2795990
+    assert gate["gate3_false_proposal"]["proposals_raw"] == 10232
+    assert gate["gate3_false_proposal"]["max_similarity_among_new_proposals"] == 1.0
+    assert gate["rows_walked"] == gate["live_rows"] == 15842
+    assert gate["subject_groups"]["session_groups"] == 997
+    assert gate["subject_groups"]["points_in_session_groups"] == 14941
+    assert gate["subject_groups"]["worst_session"]["worst_raw"] == 0.9973
+    assert gate["population"]["encoder_provenance_mean_cosine_vs_stored"] == 1.0
+    assert identity["raw_exact_duplicate_pairs_ge_0_99999"] == 12
 
 
 def test_the_artifacts_name_the_row_cache_and_encoder_the_dates_rest_on():
@@ -259,3 +282,125 @@ def test_the_root_cause_counts_are_the_ones_the_issue_quotes():
     assert identity["of_those_with_same_content"] == 0
     assert identity["largest_group_points"] == 117
 
+
+
+# ---------------------------------------------------------------------------------------
+# `--attest`'s FAIL-CLOSED ARMS. The arms are new code in this PR and they are the only thing
+# standing between a hand-edit and a re-blessed digest, so they are pinned like any other guard:
+# each refusal shape below is driven directly (the refusal lives in `_attest(path)`, a pure
+# function of the path, so no CLI and no measurement is involved) and each case asserts BOTH the
+# exit code and that the file was left byte-identical. Without these, a regression to the
+# fail-open shape the probe's own comment records (`verdict` present, no `gates` -> attested,
+# exit 0) would red nothing.
+# ---------------------------------------------------------------------------------------
+def _load_probe(filename: str):
+    """Import a bundle probe by PATH — its directory name (`11739-composed-gate`) is not a legal
+    module name, so a plain `import` cannot reach it (the sibling census pin's own pattern)."""
+    spec = importlib.util.spec_from_file_location(
+        "bundle_" + filename.removesuffix(".py"), PROBES / filename)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _attest_a_tmp_copy(probe_name: str, artifact_name: str, mutate) -> tuple[int, bytes, bytes]:
+    """Run `<probe>._attest` on a mutated TEMP COPY of a committed artifact.
+
+    Returns (rc, bytes_before, bytes_after) so a test can assert the refusal left the file alone.
+    The committed artifact is only ever READ — a test that mutated it in place would be the very
+    hand-edit these arms exist to refuse.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / artifact_name
+        artifact = _artifact(artifact_name)
+        mutate(artifact)
+        target.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+        before = target.read_bytes()
+        rc = _load_probe(probe_name)._attest(str(target))
+        after = target.read_bytes()
+    return rc, before, after
+
+
+@pytest.mark.parametrize("shape,mutate", [
+    ("no-verdict", lambda a: a.pop("verdict")),
+    ("no-gate1", lambda a: a.pop("gate1_similarity")),
+    ("no-gates-block", lambda a: a["verdict"].pop("gates")),
+    ("all-pass-disagrees", lambda a: a["verdict"].__setitem__("all_pass", True)),
+    ("no-source", lambda a: a.pop("source")),
+])
+def test_composed_gate_attest_refuses_the_tamper_shapes(shape, mutate):
+    """FAILS IF any of `composed_gate.py --attest`'s refusals is weakened into a blessing.
+
+    `no-gates-block` is the arm that was measured fail-open in review (`if gates and ...` skipped
+    the check when a hand-edit DELETED the flags) and `all-pass-disagrees` is the shape a
+    hand-edit to "green" leaves behind — each must exit `2` and leave the bytes untouched.
+    """
+    rc, before, after = _attest_a_tmp_copy("composed_gate.py", "gate.json", mutate)
+    assert rc == 2, f"`{shape}` was attested instead of refused (rc={rc})"
+    assert before == after, f"`{shape}` was refused but the file was REWRITTEN anyway"
+
+
+@pytest.mark.parametrize("shape,mutate", [
+    ("no-measurement", lambda a: a.pop("measured_points")),
+    ("no-groups", lambda a: a.pop("shared_composed_text_groups")),
+    ("no-rows-source", lambda a: a["provenance"].pop("rows_source")),
+])
+def test_quote_identity_attest_refuses_the_tamper_shapes(shape, mutate):
+    """FAILS IF `quote_identity.py --attest` (an arm this PR ADDS) loses a refusal.
+
+    The probe had no `--attest` at all before, so its provenance could only be rebound by a
+    ~30 s re-run against a cache that is not committed.
+    """
+    rc, before, after = _attest_a_tmp_copy("quote_identity.py", "quote_identity.json", mutate)
+    assert rc == 2, f"`{shape}` was attested instead of refused (rc={rc})"
+    assert before == after, f"`{shape}` was refused but the file was REWRITTEN anyway"
+
+
+def test_attest_rewrites_on_a_legitimate_rebind_and_still_carries_the_residual():
+    """Documents — as a MECHANISM, not as prevention — the residual the README discloses.
+
+    A CONSISTENT artifact is attested (rc 0), and `--attest` then blesses the bytes it was handed:
+    a hand-edit that flipped the verdict AND all three gate flags together produces a new, VALID
+    `payload_sha256`. That is the disclosed limit (*"nothing edited this artifact after the attest"*,
+    not *"these numbers came from a run"*), and this test keeps the disclosure honest by showing the
+    mechanism still behaves that way — a future change that silently CLOSED the hole would red here
+    and have to update the README's wording with it.
+    """
+    def green_flip(a):
+        a["verdict"]["all_pass"] = True
+        for k in a["verdict"]["gates"]:
+            a["verdict"]["gates"][k] = True
+
+    rc, before, after = _attest_a_tmp_copy("composed_gate.py", "gate.json", green_flip)
+    assert rc == 0, "a self-CONSISTENT artifact must still be attestable (the documented repair)"
+    assert after != before
+    rebound = json.loads(after)
+    assert rebound["provenance"]["payload_sha256"] == _payload_digest(rebound), (
+        "the rebound payload digest must describe the bytes it was given — this is the residual, "
+        "and it is what makes the README's 'not prevention' wording the correct one")
+    assert rebound["verdict"]["all_pass"] is True
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits the PROBE-WRITE arm needs")
+def test_attest_reports_probe_write_on_an_unwritable_target():
+    """FAILS IF an unwritable target reverts to a bare `PermissionError` traceback (exit 1).
+
+    The arm is `PROBE-WRITE(…): …` with exit 2 — a refusal a caller can act on, not a crash.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        ro = Path(td) / "ro"
+        ro.mkdir()
+        target = ro / "gate.json"
+        target.write_text(json.dumps(_artifact("gate.json"), indent=2) + "\n", encoding="utf-8")
+        before = target.read_bytes()
+        # The FILE's mode, not the directory's: `Path.write_text` truncates the existing file, so a
+        # read-only DIRECTORY still lets the write through (measured -- that was this test's first
+        # version, and it failed for that reason, not because the arm was broken).
+        os.chmod(target, 0o400)
+        try:
+            rc = _load_probe("composed_gate.py")._attest(str(target))
+        finally:
+            os.chmod(target, 0o600)
+        assert rc == 2, f"an unwritable target exited {rc}, not 2 (PROBE-WRITE)"
+        assert target.read_bytes() == before

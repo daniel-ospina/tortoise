@@ -135,10 +135,13 @@ subject a 100-word `content` carried, so distinct facts in the same session crow
 
 ## Reproduce
 
-⚠️ **Needs ~2 GB RSS peak.** `_pair_bands` is chunked (~30 MB), but `_worst_pair` materialises the
-full `n x n` similarity matrix for the whole population — `15,008² x 4 B ≈ 900 MB` — and it runs
-twice (raw, then composed). A 15 GB cell already at load 15 has OOM-killed multi-suite runs; check
-`free -g` / `uptime` before starting, because a run killed at 80 % produces no verdict.
+⚠️ **Needs ~2 GB RSS peak**, composed of ~0.98 GB in `_worst_pair` and ~0.5 GB of
+resident torch/embedder plus overhead. `_pair_bands` is chunked (~30 MB), but `_worst_pair`
+materialises the full `n x n` similarity matrix for the whole population — `15,008² x 4 B ≈ 900 MB`
+(measured `ru_maxrss` 104 MB → 976 MB across the call). It is called twice (raw, then composed),
+**one matrix at a time** — the calls are strictly sequential and the matrix is a local freed at
+return, so the term is never doubled. A 15 GB cell already at load 15 has OOM-killed multi-suite
+runs; check `free -g` / `uptime` before starting, because a run killed at 80 % produces no verdict.
 
 Numbers in `gate.json` (the three gates, ~15 min: it encodes 15,008 composed texts) and in
 `quote_identity.json` (root cause, ~30 s, no encoding — it reads the same row cache):
@@ -188,16 +191,18 @@ Each artifact binds itself twice, and the two bindings answer different question
 definition — in-toto's Statement itself has no build-definition field):
 
 * `provenance.probe_sha256` binds it to the **code** that produced it (gate.json:
-  `129564cd5f931c22ccb91bbc7730af042a0c371bc05f362b56b403518fe2d1b1`; quote_identity.json:
+  `9d3fdb6da097b76f91f9847f37a1bb3d10238f01cfe6f69e7db043125910cf7a`; quote_identity.json:
   `0ef9fe88f04b86b90005a0042afedec6cdc4697098389c6058477b40f5afaf6f`), and
 * `provenance.payload_sha256` binds it to the **numbers** it produced **and to the row cache they
   are attributed to** — sha256 over `{"artifact": <every field except provenance>,
   "rows_source": …}`, canonicalised `indent=2, sort_keys=True` (gate.json:
-  `cfbe7ad4eaee3868ddc52e5432b79fc7baf92a541e581dbcbff6398cf00693be`; quote_identity.json:
-  `31ba4cf0deb6d0bee1f95e0ccf8e66211fe2f0fbb0ba290971f1d735d40dd296`). Without the first half of
-  that, a hand-edit that flipped `verdict.all_pass` to `true` left `probe_sha256` untouched and
-  nothing noticed; without `rows_source` inside it, re-pointing the attribution at another cache
-  left the pin green (measured).
+  `cfbe7ad4eaee3868ddc52e5432b79fc7baf92a541e581dbcbff6398cf00693be`; quote_identity.json: `31ba4cf0deb6d0bee1f95e0ccf8e66211fe2f0fbb0ba290971f1d735d40dd296`). Without the second, a hand-edit of a NUMBER
+  — `gate2_rank.top_k.items_displaced_from_top_k` 3706 → 3707, or `global_worst_composed`
+  1.0 → 0.10 — left the first untouched and passed the pin, which is what the payload binding
+  closes; and without `rows_source` INSIDE it, re-pointing the attribution at another cache also
+  left the pin green (measured). (The VERDICT was already pinned before either half: at
+  `bf7b848531`, flipping `verdict.all_pass` to `true` reded the pin — `1 failed, 4 passed`,
+  measured.)
 
 Neither is a head sha — the repo squash-merges, so a head sha is unverifiable when someone re-runs
 the probe to check it (the same binding the #11838 census uses). `_provenance()` in each probe is
@@ -207,7 +212,9 @@ flag cannot be blessed), `all_pass` disagreeing with the three gate flags (`ATTE
 artifact naming no row source, and an unwritable target (`PROBE-WRITE`) — each exit `2`. It exists
 because a fresh run is ~16 minutes of
 encoding while the binding is a pure function of the probe's bytes and the artifact's own payload;
-it changes ONLY `provenance`, so it cannot move a number.
+it rewrites ONLY `provenance`, so it cannot move a number. What a re-run reproduces is the
+**protocol and the gate logic**; the numbers reproduce from the row cache, not from a fresh walk
+(see the `rows_source` limitation above).
 
 ⚠️ **What none of it proves — and what is bound.** `--attest` blesses the bytes it is handed,
 exactly as `probe_sha256` blesses whatever the probe is — so the guarantee is *"nothing edited this
@@ -218,10 +225,11 @@ Within the artifact, `payload_sha256` covers **every field except `provenance`, 
 `rows_source` those fields are attributed to**, and the pin separately checks the remaining fields
 `provenance` carries that the artifact itself can corroborate: the probe's bytes, the probe's
 basename, a non-empty row source (which must equal the artifact's own `source` where it records
-one) and a non-empty encoder. So a hand-edit of a NUMBER, a count, the VERDICT, the attested probe,
-or the cache the numbers are attributed to each reds (`tests/test_11739_composed_gate_probe.py`);
-what it cannot see is an edit made *and re-attested* in the same commit — that is what the commit
-diff is for.
+one) and a non-empty encoder. It ALSO asserts the figures the README and `docs/00_index.md` quote,
+and DRIVES `--attest`'s refusal arms on temp copies (exit 2, bytes left untouched), so an edit to a
+NUMBER, a count, the VERDICT, the attested probe, or the cache the numbers are attributed to each
+reds (`tests/test_11739_composed_gate_probe.py`). What none of it can see is an edit made *and
+re-attested* in the same commit — that is what the commit diff is for.
 
 What that means for a re-run: the committed numbers are reproducible from the row cache named in
 `provenance.rows_source` (`/tmp/11739-rows.jsonl`, which is **not** committed — see the limitation
