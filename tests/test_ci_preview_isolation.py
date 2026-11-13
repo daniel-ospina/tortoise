@@ -693,9 +693,8 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         tmp_path, executable=sys.executable,
     )
     # ⛔ THE DECOY IS SPAWNED BEFORE THE `try:` THAT OWNS ITS `finally: _reap(...)`
-    # further down, so every assertion added here is a leak path for a 120 s process in
-    # its own session. This guard reaps on those paths only; the later `finally` still
-    # reaps on the rest (a double reap is a suppressed no-op).
+    # further down, so every assertion between the two is a leak path for a 120 s
+    # process in its own session. This guard reaps on those paths only.
     try:
         _await_exec(peer.pid, str(peer_workerd))
     except BaseException:
@@ -742,16 +741,27 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         raise
 
     # Job A: a real tree (a supervisor + two children, like wrangler + workerd).
+    # ⛔ JOB A'S OWN SPAWN IS A LEAK PATH TOO (#12227 review cycle 6). It runs BEFORE the
+    # `try:` below, so a failure in ANY of the three asserts that shape the tree leaks the
+    # supervisor, its two children AND the peer decoy — three 120 s processes in their own
+    # sessions — which the comment above used to claim "the later `finally` still reaps on
+    # the rest". It did not. This guard covers exactly that window; the `finally` below
+    # covers everything after it, and a double reap is a suppressed no-op.
     own = _spawn(["bash", "-c", "sleep 120 & sleep 120"], tmp_path)
-    _wait_alive(own.pid)
-    deadline = time.time() + 5
-    while time.time() < deadline and len(_child_pids(own.pid)) < 2:
-        time.sleep(0.05)
-    children = _child_pids(own.pid)
-    assert len(children) == 2, f"the tree did not form (children={children})"
+    children: list[int] = []
+    try:
+        _wait_alive(own.pid)
+        deadline = time.time() + 5
+        while time.time() < deadline and len(_child_pids(own.pid)) < 2:
+            time.sleep(0.05)
+        children = _child_pids(own.pid)
+        assert len(children) == 2, f"the tree did not form (children={children})"
 
-    recorded = _record_when_running("app", own.pid, env=state)
-    assert recorded.returncode == 0, _recorded(recorded, own.pid, state)
+        recorded = _record_when_running("app", own.pid, env=state)
+        assert recorded.returncode == 0, _recorded(recorded, own.pid, state)
+    except BaseException:
+        _reap(own.pid, *children, peer.pid)
+        raise
     result = _script("stop-all", env=state)
     try:
         assert result.returncode == 0, result.stderr
