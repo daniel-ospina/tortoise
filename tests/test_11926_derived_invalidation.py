@@ -2129,23 +2129,88 @@ def test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_
         "retirement left")
 
 
+#: Every phrase family by which this PR's prose has denied a repair that exists.
+#: Round 29 defeated a literal ban with one inserted word ("no automatic path EVER
+#: repairs it"); round 30 defeated a two-prefix allowlist by stating the falsehood
+#: in a DIFFERENT family, or in the tail of the allowed one. So the pin is a grid:
+#: every family, at every site, each occurrence judged on its own window.
+_REPAIR_DENIALS = (
+    "no automatic path",
+    "no automatic repair",
+    "no later pass",
+    "no later sweep",
+    "nothing else repairs",
+    "nothing else repair",
+    "nothing repairs",
+    "never a finding again",
+    "unrepairable",
+    "no repair route",
+    "cannot be repaired",
+)
+
+#: The qualifiers that make a denial TRUE. The routing fact (#12315/#12336) is
+#: that a goal holding ANY other live claim is reconciled by that claim's own
+#: stale finding, so only the last-claim shape needs the MANUAL route.
+_REPAIR_QUALIFIERS = (
+    "once the goal holds no other live claim",
+    "once its last live claim is gone",
+    "whose last claim is gone",
+    "while a live claim",
+    "while another live claim",
+    'is not "no repair"',  # the rhetorical form, which QUOTES the absolute
+)
+
+
+def _assert_repair_denials_are_qualified(text: str, site: str) -> None:
+    """Every repair denial in ``text`` must carry a qualifier in its OWN window.
+
+    A window, not a prefix: a prefix allowlist is defeated by appending a false
+    clause after the allowed wording, and a blanket ``not in`` is defeated by one
+    inserted word. The window reaches BACKWARDS too, because the true form states
+    the shape first ("a goal whose last claim is gone ... never a finding again").
+    """
+    low = " ".join(text.lower().split())
+    sentences = re.split(r"(?<=[.!?])\s+", low)
+    for family in _REPAIR_DENIALS:
+        for sentence in sentences:
+            if family not in sentence:
+                continue
+            assert any(q in sentence for q in _REPAIR_QUALIFIERS), (
+                f"{site}: {family!r} is stated in a sentence with no qualifier — "
+                "every repair denial must say WHICH shape needs the MANUAL route, "
+                f"in its OWN sentence; found: {sentence[:170]!r}")
+
+
 def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
-    """The absolute regressed THREE times, so pin the PROSE, not only the behaviour.
+    """The absolute regressed FIVE times, so pin the PROSE, not only the behaviour.
 
     `verdicts`' cap is pinned the same way ("the docstring is the only place a
     caller can learn …"), and here the docstrings are likewise the artifact a
     consumer reads: the sweep's `cache` dict is not something a caller can inspect
     for a missing repair. The behaviour is pinned by
     `test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_left`;
-    this pins that the words still agree with it.
-    """
-    import inspect
-    import re
+    this pins that the words still agree with it — as a (site x family) grid,
+    because rounds 27-30 each escaped a narrower form of this assertion.
 
+    ⛔ DECLARED RESIDUAL (round 30, adversarial-bound cycle 2): a false denial
+    inserted INTO a sentence that already carries a qualifier is not caught here.
+    That shape makes the sentence SELF-CONTRADICTORY ("no later pass revisits it
+    once its last live claim is gone, and nothing ever repairs the word
+    afterwards") and no text pin can separate it from legitimate prose without
+    freezing every sentence verbatim — which would false-block benign rewording by
+    the other writer on this branch. Coverage by mutant: 9 of the 10 round-30
+    survivors are killed; that one is this residual, stated rather than hidden.
+    """
     import tortoise.derived_invalidation as di
 
-    # Collapse the source line-wrapping: these are prose contracts, not layout.
     door = " ".join((di.invalidate.__doc__ or "").lower().split())
+    helper = " ".join((di._reconcile_or_report.__doc__ or "").lower().split())
+    cache_doc = " ".join((di.reconcile_goal_state_cache.__doc__ or "").lower().split())
+    # Strip the leading comment markers so a WRAPPED comment reads as one sentence.
+    norm = " ".join(
+        re.sub(r"(?m)^\s*#", "", inspect.getsource(di.invalidate)).lower().split())
+
+    # ---- POSITIVE anchors: zero occurrences must FAIL, never pass vacuously ----
     assert "claims going stale later does repair" in door, (
         "the `alreadyRetired` note must say WHICH shape repairs itself")
     assert "a goal whose last claim is gone is never a finding again" in door, (
@@ -2159,50 +2224,22 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
         "writes nothing (`_write_goal_state_cache` skips a None)")
     assert "no automatic path" not in door, (
         "the door note states the QUALIFIED form; an absolute may not return here")
-
-    cache_doc = " ".join((di.reconcile_goal_state_cache.__doc__ or "").lower().split())
-    assert "archived sweep retires them together" in cache_doc, (
+    assert "no automatic path repairs it once the goal holds no other live claim" in helper
+    assert "no later pass revisiting that goal once its last live claim is gone" in cache_doc, (
         "the archived-goal bullet must say WHY the last-claim shape cannot recur here")
-    # ⛔ PER-OCCURRENCE, not a literal ban: round 29 defeated a `not in` with a
-    # one-word insertion ("no later pass IS able to repair the word") and with a
-    # paraphrase — the SAME false inference, different words. Every occurrence of
-    # the phrase must be the qualified one.
-    for _m in re.finditer(r"no later pass", cache_doc):
-        assert cache_doc[_m.start():].startswith(
-            "no later pass revisiting that goal once its last live claim is gone"), (
-            f"only the QUALIFIED 'no later pass' may stand: "
-            f"{cache_doc[_m.start():][:120]!r}")
-
-    # ⛔ ADJACENCY, not co-presence: the 27th-round version asserted the two
-    # phrases separately, so an absolute with the qualifier parked in an
-    # unrelated sentence passed a mutant that kept the false claim (#12315
-    # review cycle 27). The qualifier has to be IN the sentence.
-    helper = " ".join((di._reconcile_or_report.__doc__ or "").lower().split())
-    assert ("no automatic path repairs it once the goal holds no other live "
-            "claim") in helper, (
-        "an UNQUALIFIED 'no automatic path repairs it' is false while the goal "
-        "still holds a live claim: that claim going stale reconciles the word")
-    # ⛔ Per-occurrence again: a count on the exact string misses "no automatic
-    # path EVER repairs it" (round 29's A.6a mutant), which asserts the same
-    # false absolute. The only two admissible forms are the qualified rule and
-    # the rhetorical "'No automatic path' is not 'no repair'" that quotes it.
-    for _m in re.finditer(r"no automatic path", helper):
-        _tail = helper[_m.start():]
-        assert (_tail.startswith(
-                    "no automatic path repairs it once the goal holds no other live claim")
-                or _tail.startswith('no automatic path" is not')), _tail[:120]
-
-    # The arm COMMENT is the site a maintainer reads while editing exactly that
-    # arm, and the one that has regressed twice — pin it at source level, because
-    # no docstring assertion can see a comment, and by ADJACENCY, because
-    # presence-in-a-214-line-function is what a parked qualifier defeats.
-    norm = " ".join(
-        re.sub(r"(?m)^\s*#", "", inspect.getsource(di.invalidate)).lower().split())
+    assert "archived sweep retires them together" in cache_doc
     assert ("no automatic path repairs it later once the goal holds no other live "
             "claim") in norm, (
-        "the absent-arm comment must keep the qualifier IN the sentence")
+        "the absent-arm COMMENT must keep the qualifier IN the sentence")
     assert norm.count("no automatic path") == 1, (
-        "EXACTLY ONE 'no automatic path' may stand anywhere in `invalidate` — the "
-        "adjacency assertion above finds the arm comment, but cannot see a SECOND "
-        "absolute planted in another comment of the same function (round 29's "
-        "A.6c/A.6d)")
+        "EXACTLY ONE 'no automatic path' may stand in `invalidate`; the adjacency "
+        "assertion above cannot see a second one planted in another comment")
+
+    # ---- the grid: every family, at every site -------------------------------
+    for site, text in (
+        ("invalidate.__doc__", door),
+        ("_reconcile_or_report.__doc__", helper),
+        ("reconcile_goal_state_cache.__doc__", cache_doc),
+        ("invalidate (source + comments)", norm),
+    ):
+        _assert_repair_denials_are_qualified(text, site)
