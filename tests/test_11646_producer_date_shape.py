@@ -750,9 +750,19 @@ def _zone_child_env_base() -> dict[str, str]:
                     from pydantic import (
                 ModuleNotFoundError: No module named 'pydantic'
 
-    The PARENT was importing ``pydantic`` fine at the same moment (it is a module-scope
-    import of ``tortoise.commit_schema``, which this test file already imports at the top),
-    so the interpreter the child was handed resolves the package and a bare env does not.
+    The PARENT already had ``pydantic`` LOADED at that moment — measured in a probe test at this
+    head: ``sys.modules`` holds ``pydantic`` and a full ``tortoise`` import chain, while
+    ``tortoise.commit_schema`` is NOT among them (this file never imports it; only the CHILD's
+    script does). ⛔ No module COUNT is quoted on purpose: the population moves with what has been
+    imported by the time you sample it (the suite's own baseline and this file's imports differ),
+    so a count here would be a number a later reader cannot re-derive — the two BOOLEANS above are
+    the stable part. So the package is installed and this very interpreter resolves it, and the
+    child's failure is about the ENVIRONMENT it was handed — not about a package that is absent
+    from the runner. ⛔ Do NOT read the parent's success as evidence ABOUT
+    ``tortoise.commit_schema``: it says nothing about that module, only about resolution. (An
+    earlier cut of this paragraph named ``tortoise.commit_schema`` as the parent's import site;
+    that was FALSE and was corrected in `6246f633b0c1`'s follow-up — the corrected claim here is
+    the measured one.)
     That is what #11871/#11878 could not name — they established only that the red was
     undiagnosable because ``check=True`` discarded the child's stderr, and the stderr this
     helper now carries is what named it.
