@@ -2507,6 +2507,18 @@ def _results_bearing_fallback(entries: list[dict]) -> dict | None:
     return None
 
 
+#: #12382 — trace entries that DISCLOSE a read-side lever's decision and name no
+#: retrieval leg. They are audit, not legs: they contribute no candidate row and
+#: name no leg, so they can neither EARN :func:`declared_degraded_read`'s
+#: structural-only escape nor DEFEAT it. (The excluded entry may have asked the
+#: store for the pool's TEXT when it ran — that is still not a LEG: the escape is
+#: settled by the legs the read asked, and a ``ran=True`` rerank entry can only
+#: co-occur with a query, i.e. with a text leg, so the escape cannot fire on such
+#: a trace either way.) An unknown vocabulary stays out of this set on purpose,
+#: so a malformed or future leg still fails closed.
+_NON_LEG_TRACE_ENTRIES = frozenset({"rerank"})
+
+
 def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     """(C1) #2952 — explicit single-leg (vector-unavailable) declaration.
 
@@ -2534,6 +2546,12 @@ def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     ``leg_trace_unavailable`` (fail closed). A fallback-only (TF-IDF) trace
     reports a text leg whose vector leg is absent → ``leg_absent``.
 
+    An entry that DISCLOSES a read-side lever and asks no leg
+    (:data:`_NON_LEG_TRACE_ENTRIES` — today only ``rerank``) is audit, not
+    evidence about the read's legs: it neither earns the structural-only
+    escape nor defeats it (#12382). Unknown vocabulary is NOT in that set, so
+    a malformed or future leg still fails closed.
+
     #4199 empty-scope aggregation: ``recall_state(object_centric=True)``
     submits one vector arm per entity, and an arm whose ``scope_kinds``
     selected NO nodes (:data:`VECTOR_SCOPE_EMPTY`) is NEUTRAL — it neither
@@ -2548,7 +2566,19 @@ def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     # structural kind-scan is a single-leg read BY DESIGN (query=None full
     # scan). An unknown/malformed leg vocabulary does NOT earn this escape
     # hatch — it falls through and is declared (C1/C2 consistency, review P2).
-    if entries and all(e.get("leg") == "structural" for e in entries):
+    # ⛔ AN AUDIT-ONLY ENTRY IS NOT A LEG AND MUST NOT DEFEAT THE HATCH (#12382).
+    # ``rerank`` is the fused-rerank lever's DISCLOSURE (``ran=False`` + a
+    # reason when it declined); it names no retrieval leg and asks the store for
+    # nothing. Without this filter, arming an unrelated opt-in lever on a
+    # ``query=None`` full scan added a non-structural entry and the hatch
+    # stopped firing — measured: the same correct 3-row read declared
+    # ``degraded_read: True, vector_leg_unavailable: True, reason: "leg_absent"``
+    # with the gate armed, blaming an embedder the read never consulted. The
+    # rule the hatch exists for is unchanged: a trace that asks a text leg
+    # still cannot escape, and an unknown leg vocabulary still fails closed
+    # (filtering removes only the entries named here).
+    legs = [e for e in entries if e.get("leg") not in _NON_LEG_TRACE_ENTRIES]
+    if legs and all(e.get("leg") == "structural" for e in legs):
         return None
     # A results-bearing TF-IDF fallback is definitive proof the rows are
     # keyword-only — checked BEFORE the healthy-vector early return (a

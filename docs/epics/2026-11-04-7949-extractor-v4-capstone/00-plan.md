@@ -420,16 +420,15 @@ fan-out respected; C8 holds.
 **The contradiction to adjudicate:** `#4889` ("the Subject layer is unpopulated in production") is
 **CLOSED**, and the owner measured **26 Subjects against 19,300 points**. One of those is false.
 **Produces:** the binder's attach rate (`bind_point_subjects`, `tortoise/subject_binding.py:344`, called
-from `sdk.py`'s point-creation path at `:18547` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
+from `sdk.py`'s point-creation path at `:18656` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
-`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6629` and
-consumed at `sdk.py:9955`/`:10008` — ⚠️ that consume pair is keyed by LINE NUMBER (like the definition),
-not by symbol, and it is currently STALE: `tortoise/sdk.py` carries those two anchors at `10064`/`10117`.
-That 109-line drift is main's pre-existing cite rot (tracked in #12456 / #12381), NOT re-pointed here
-because it is not this PR's change; the definition above IS this PR's (its +22-line tail to
-`search_engine.py` moved it `6607` -> `6629`, re-derived rather than carried). An earlier version of this
-parenthesis said the pair was keyed by symbol, which nothing implements), the slots are absent in the
+`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6659` and
+consumed at `sdk.py:10064`/`:10117` — ⚠️ all three are LINE cites, not symbols (nothing in this tree
+keys them by symbol, and an earlier version of this parenthesis said the pair was), so an insert
+above any of them moves the claim: this PR's own +22-line tail to `search_engine.py` moved the definition
+`6637` -> `6659` at the merge of `origin/main` `070d97360c`, re-derived from the merged tree
+rather than carried from either side), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —
 or the honest finding that the corpus has no bindable subjects, recorded as such (**not** a pass).

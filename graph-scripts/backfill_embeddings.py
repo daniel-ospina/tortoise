@@ -102,8 +102,55 @@ DEFAULT_BATCH = 500
 #                   ``IS NOT NULL`` is not the live run's own test (``''`` is
 #                   non-NULL in Cypher) — kept in ONE place so the dry run and
 #                   the live run cannot disagree (#5126).
+#: The Point surface's embedding text — the text the vector DESCRIBES (#4194).
+#:
+#: ``embeddingText`` is a STORED Point property (``tortoise/embed_compose.py``:
+#: "What this text is served as"). It is written by the create door only under
+#: three conditions (``sdk.py``: the composed text DIFFERS from ``content``, a
+#: derived vector exists, and the caller supplied none), so on a graph where
+#: composition never ran the property is absent. The rule is the read/replay
+#: side's, verbatim: ``projection/entities.py`` does
+#: ``p.get("embeddingText") or p.get("content")`` (#8488), so an ABSENT **or
+#: EMPTY** ``embeddingText`` falls back to ``content``.
+#:
+#: ⚠️ ``coalesce(n.embeddingText, n.content)`` is NOT that rule and was measured
+#: to be wrong: ``''`` is non-NULL in Cypher, so an empty-string ``embeddingText``
+#: SHADOWED ``content`` and that row's text became ``''`` — the live pass then
+#: dropped it as text-less, so the row is **never filled** while the surface
+#: still reports the sweep as complete. (It is a SILENT MISS, not a dry-run/live
+#: disagreement: this constant feeds both ``text_expr`` and ``text_pred``, so a
+#: ``coalesce`` mutant moves both and the two passes still agree with each
+#: other — they agree on skipping the row.) The ``CASE`` is the faithful
+#: translation of Python ``or``. (``nullif`` is not available in this Cypher
+#: dialect — measured: “Unknown function 'nullif'”.)
+#:
+#: One constant for BOTH ``text_expr`` and ``text_pred`` on purpose: the file's
+#: own rule is that the two passes share ONE predicate, and two literals would
+#: let them drift apart one edit at a time. (That drift is a REAL measured
+#: shape, separately from the ``coalesce`` defect above: a ``text_expr`` that
+#: disagrees with a CASE-derived ``text_pred`` made the dry run promise 3 rows
+#: and the live pass write 2 — the #5126 failure.)
+_POINT_EMBEDDING_TEXT_EXPR = (
+    "CASE WHEN n.embeddingText IS NULL OR n.embeddingText = '' "
+    "THEN n.content ELSE n.embeddingText END"
+)
+
 LABEL_CONFIG: dict[str, dict[str, str]] = {
-    "Point":    {"label": "Point", "text_prop": "content", "id_prop": "id"},
+    # #12489 / #4194: a Point's vector must describe the text the node HOLDS as
+    # its embedding input. This sweep did not apply the rule the read/replay side
+    # applies when it reads that text back (``projection/entities.py``:
+    # ``p.get("embeddingText") or p.get("content")``, #8488) — it read bare
+    # ``content``: on an armed graph it CLEAR-THEN-SET the composed vector from the
+    # paraphrase and left ``embeddingText`` describing a text the vector no
+    # longer is — while the completeness marker counted the row ``updated``.
+    # ``text_prop`` stays ``content`` as the declared fallback the docstring
+    # above describes; the EXPRESSION carries the identity. Ordering matters:
+    # composition is invariant to which of #12436's three design options lands
+    # (option 3 leaves ``embeddingText`` NULL for a shared quote, which the
+    # fallback catches).
+    "Point":    {"label": "Point", "text_prop": "content", "id_prop": "id",
+                 "text_expr": _POINT_EMBEDDING_TEXT_EXPR,
+                 "text_pred": f"trim({_POINT_EMBEDDING_TEXT_EXPR}) <> ''"},
     "Event":    {"label": "Event", "text_prop": "subject", "id_prop": "eventId"},
     # #5126 / D10 (ONTOLOGY v3.15 §4.4): a document IS a ``:Source``. The
     # pre-fix entry named the retired ``:Document`` LABEL and read the retired
@@ -482,13 +529,65 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     and text-less rows are the unaffected set and are NOT counted. Dry-run
     never computes embeddings and never writes.
 
-    "Text-less" is taken from ``_label_branches``' predicate, so the count and
-    the live pass agree BY CONSTRUCTION wherever a surface declares a
-    ``text_pred`` (the Document surface does: ``''`` is non-NULL in Cypher, so
-    a bare ``IS NOT NULL`` counted rows the live pass skipped — #5126).
-    Residual, recorded rather than silently over-reported: a surface with only
-    a bare property still uses ``IS NOT NULL``, so a *non-empty-check* miss is
-    limited to a whitespace-only value on those surfaces.
+    "Text-less" is taken from ``_label_branches``' predicate, so wherever a
+    surface declares a ``text_pred`` the two passes cannot read DIFFERENT
+    predicates within that surface — they read the surface's ONE (a bare
+    ``IS NOT NULL`` counted rows the live pass skipped because ``''`` is
+    non-NULL in Cypher — #5126, #12489). ⚠️ That is a claim about the PREDICATE,
+    not about agreement: the live guard is still stricter wherever the Cypher
+    construct and Python disagree (residual (b)) and type-strict (residual (c)),
+    so the counts CAN and do differ on those rows. Only the Point surface also
+    derives ``text_expr`` AND ``text_pred`` from ONE constant
+    (``_POINT_EMBEDDING_TEXT_EXPR``), so only there does an edit to the
+    expression move both keys; Document's two keys are separate literals.
+    Residual, recorded rather than silently over-reported, in THREE parts:
+    (a) a surface with only a bare property still uses ``IS NOT NULL``, so a
+    *non-empty-check* miss is limited to an EMPTY or whitespace-only value on
+    those surfaces; (b) even a ``text_pred`` surface is not perfectly aligned with
+    the live guard, because Cypher ``trim()`` strips SPACES only while the live
+    pass's Python ``str.strip()`` also strips tab, NBSP and em-space — measured
+    on this surface: four Points whose ``content`` was ``"\\t"``, ``"\\u00a0"``,
+    ``"\\u2003"``, ``"\\t \\t"`` gave ``dry_total=4`` against ``updated=0,
+    skipped=4``. Pre-existing as a CLASS (the pre-fix bare ``IS NOT NULL``
+    counted the same four), but #12489 WIDENS the population: an ``embeddingText``
+    whose whitespace `trim()` does not strip (tab / NBSP / em-space) over a
+    non-empty ``content`` now takes this skip path, where the pre-fix expression
+    embedded ``content`` (measured: dry 1 / updated 0 with the fix, dry 1 /
+    updated 1 without it). A SPACE-only ``embeddingText`` is excluded by BOTH
+    passes instead (`trim()` does strip a space, so the predicate is false and
+    the dry run never counts it) — a silent miss the dry run does not report at
+    all; the CASE is still faithful there (Python ``or`` also treats ``" "`` as
+    text), the divergence is this same pre-existing live-guard class. (c) TYPE:
+    the predicate calls ``trim()``, which is TYPE-STRICT. Two classes, and they
+    diverge DIFFERENTLY:
+      - a non-``str`` ``content`` (int/list/float/bool) was ALREADY fatal to the
+        live pass — pre-fix it was selected by ``n.content`` and killed at
+        ``text.strip()``, and now it dies earlier, inside the collecting select.
+        It additionally makes ``--dry-run`` raise ``Type mismatch: expected
+        String or Null but was <Type>`` (the message names the instance —
+        ``Integer``, ``List``, ``Float``, ``Boolean``). ⚠️ REACHABLE:
+        ``api.EventAPI.add_point`` passes ``content`` straight through —
+        ``_point`` copies it verbatim with no type check — so a non-``str``
+        ingest payload the store can hold produces exactly this row. (A ``dict``
+        is the exception: the projection's value-shape gate nulls it before
+        dispatch, #7369, so that one lands text-less instead.) That is the
+        hand-edited/foreign-data class ``projection/entities.py`` names for
+        ``content`` (#2958). No SDK door does this (``create_point``/
+        ``update_point`` refuse a non-``str``).
+      - a non-``str`` ``embeddingText`` over a ``str`` ``content`` is the one
+        NEW failure: the pre-fix expression was ``n.content``, so that row
+        embedded NORMALLY; the CASE now selects the non-string and BOTH passes
+        raise ``Type mismatch`` (the live one inside the select, before
+        ``text.strip()`` is reached). It fails CLOSED — an abort, never a
+        silent wrong vector — and no in-tree MINTING writer produces one (the
+        composer returns a ``str`` for every arm; a caller-supplied
+        ``embeddingText`` is refused by ``_sanitize_props``). The REPLAY does
+        write it, though — ``_upsert_point_props`` copies
+        ``p.get("embeddingText")`` verbatim into ``n.embeddingText`` — so a
+        malformed or hand-edited journaled Point produces exactly this row, the
+        same ``#2958`` class named above for ``content``.
+    Hardening this (a predicate or a live guard that skips non-``str`` text) is
+    NOT done here: it widens the change past "which text is embedded".
     """
     g = db.select_graph(graph_name)
     total = 0
