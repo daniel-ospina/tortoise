@@ -1460,7 +1460,7 @@ place a machine reads it.
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
   candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:12730-12752`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:14222`, `:14375`).
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:15149`, `:15302`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -2560,10 +2560,11 @@ to answer.
 
 ### 10.28 — the §11/§9 cite block re-derived for `#12067`'s `+54`, and the `#10360` read-back re-pointed (2026-11-13, `#12067`)
 
-> ⛔ **Superseded for THIS tree by §10.29.** No cite below moved: `34bb716315` inserted `+9`
+> ⛔ **Superseded for THIS tree by §10.29, and then by §10.30 for `main`'s later merges.** No cite below moved: `34bb716315` inserted `+9`
 > inside the same relation-builder hunk and `391313ca9a` then removed it again (the mechanism
 > guard became the DECLARED table in `tortoise/ep.py`), so §10.29 re-measured the same numbers
-> this entry recorded while the branch's total delta grew elsewhere. §10.29 owns them.
+> this entry recorded while the branch's total delta grew elsewhere. §10.29 re-measured them;
+> **§10.30 owns the live values for this tree.**
 >
 > **A successor entry, not an edit to §10.23 or §10.24.** Both of those number the head
 > they name and must stay byte-identical to `main` — §10.19's rule, restated by §10.22
@@ -2695,7 +2696,8 @@ to answer.
 > inserted `+971/-48` inside `tortoise/extractor_v2.py` (net `+923`) and `#12343` then added 48 more,
 > and `#12120` then `#12343` moved the `tortoise/sdk.py` carriers (the meta fold
 > `_capture_stats_with_step_witness(out, len(extracted))`: `18864` → `18942` → `19051`; the write seam
-> `relation_write = apply_relation_edges(`: `18799` → `18900` → `19009`). §10.29's numbers
+> `relation_write = apply_relation_edges(`: `18822` → `18900` → `19009`; `#12348`'s own tree carried
+> it at `18799`, and `#12325` moved both anchors `+23` to `18864`/`18822` before `#12120` ran). §10.29's numbers
 > therefore describe a tree that is no longer the one
 > this record ships with.
 
