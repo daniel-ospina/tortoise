@@ -868,11 +868,14 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
 #: ``apps/graph-viz/docker-compose.yml``; a lane container reports ``-1`` = no
 #: cap), because ONE unbounded query is truncated BY THE SERVER in store order
 #: and says nothing about it — #4233's silent-truncation class, whose remedy is
-#: ``hosted_backup._paged_rows``. ⛔ THE PRECONDITION IS PART OF THE CONTRACT: a
-#: ``RESULTSET_SIZE`` pinned BELOW this number makes a short page ambiguous
-#: ("last page" vs "server-truncated page"), which no caller here can detect —
-#: unlike ``hosted_backup``, this read has no independent row count to compare
-#: against, so an operator who pins the cap lower must lower this too.
+#: ``hosted_backup._paged_rows``. ⛔ A CAP PINNED BELOW THIS NUMBER IS **NOT**
+#: SILENT HERE: :func:`latest_readings` compares the rows it collected against an
+#: independent ``count(e)`` aggregate — the guard ``hosted_backup`` calls "the
+#: load-bearing" one, and the only shape a result-set cap cannot truncate to a
+#: lie, because it is ONE row — and RAISES rather than answering from the part it
+#: managed to read. That direction matters: the pages are id-ASCENDING, so the
+#: rows a truncated tail loses are the NEWEST, i.e. exactly the stale-reading
+#: answer #12322 exists to remove.
 _READINGS_PAGE_SIZE = 1000
 
 
@@ -1007,13 +1010,18 @@ def latest_readings(
     # judgement sees.
     #
     # ONE ROW PER EVENT, so `id(e)` alone is a sufficient cursor. MEASURED on a
-    # lane: an event with TWO `aboutObject` edges to the same indicator gives
-    # `RETURN count(r)` = 2 but `RETURN id(e), e.id` = **1 row** (the pattern is
-    # scoped by node PAIR, not by relationship), which the doubled-edge test
-    # pins. This is why `hosted_backup._paged_rows`' single-column `id(n)` cursor
-    # (and its `>= last + 1` advance) is the right shape to copy, and why no
-    # Python de-duplication is needed — one would be able to DROP a distinct
-    # reading that legitimately shares an `e.id`.
+    # lane running core `graph ver 42006` (v4): an event with TWO `aboutObject`
+    # edges to the same indicator gives `RETURN count(r)` = 2 but
+    # `RETURN id(e), e.id`, `count(e)` and `count(*)` all = **1** — the pattern is
+    # scoped by node PAIR, not by relationship — which the doubled-edge test
+    # pins. Named with its core because `hosted_backup.py:363-393` records that
+    # the v4 and v6 cores DISAGREE about `id()` semantics; if a v6 core ever
+    # emitted a row per edge, `dwell` could be satisfied by ONE measurement
+    # repeated. The cursor itself is core-independent: distinct events have
+    # distinct `id(e)`, so a duplicate pair is adjacent and at most a DUPLICATE is
+    # dropped, never a distinct reading. This is also why no Python
+    # de-duplication is layered on top — keyed on `reading_id` it could DROP a
+    # distinct reading that legitimately shares an `e.id`.
     cypher = (
         f"{where} AND id(e) >= $cursor "
         "RETURN id(e), e.id, e.value, e.unit, e.startedAt, e.createdAt "
@@ -1035,6 +1043,11 @@ def latest_readings(
             "zero page size would report every indicator as unmeasured"
         )
     g = sdk._get_proj().g
+    # ⛔ THE INDEPENDENT COUNT, and it must be an AGGREGATE: #4233's incident is
+    # a truncated page set that reported nothing, and `tools/turn_parity_census.py`
+    # names the consequence ("silence, not an error"). One row, so a result-set
+    # cap cannot truncate it to a lie.
+    expected = int(g.query(f"{where} RETURN count(e)", params=params).result_set[0][0])
     rows: list[Any] = []
     cursor = 0
     while True:
@@ -1052,6 +1065,18 @@ def latest_readings(
         # that answers 0 rows on the v6 core (measured —
         # `hosted_backup._paged_rows`, #9226).
         cursor = int(page[-1][0]) + 1
+    if len(rows) < expected:
+        # A short page is indistinguishable from a last page by shape alone, and
+        # the rows it costs are the NEWEST (pages ascend by id). Refuse rather
+        # than answer from the part that arrived.
+        raise RuntimeError(
+            f"latest_readings read {len(rows)} of {expected} rows for indicator "
+            f"{indicator_id!r} — a page came back short of {batch}, which a "
+            "server-side RESULTSET_SIZE below _READINGS_PAGE_SIZE causes. The "
+            "missing rows are the NEWEST (pages ascend by id), so answering would "
+            "report a stale reading as the current state; lower "
+            "_READINGS_PAGE_SIZE below the server's cap."
+        )
     out: list[Reading] = []
     for row in rows:
         reading_id = row[1] if len(row) > 1 else None

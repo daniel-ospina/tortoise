@@ -258,13 +258,17 @@ def test_the_read_pages_rather_than_relying_on_one_result_set(sdk, monkeypatch):
     got = latest_readings(sdk, indicator["id"])
     assert len(got) == 5, "a page cut lost readings — the read is not paging"
     assert [r.value for r in got] == [5.0, 4.0, 3.0, 2.0, 1.0]
-    assert len(calls) == 3, (
-        f"5 readings at a page size of 2 must take 3 queries, took {len(calls)} "
-        "— a single unbounded query re-opens #4233's silent truncation"
+    page_calls = [c for c in calls if "LIMIT $batch" in c]
+    count_calls = [c for c in calls if "RETURN count(e)" in c]
+    assert len(page_calls) == 3, (
+        f"5 readings at a page size of 2 must take 3 page queries, took "
+        f"{len(page_calls)} — a single unbounded query re-opens #4233's silent "
+        "truncation"
     )
-    assert all("LIMIT $batch" in c for c in calls)
-    assert all("id(e) >= $cursor" in c for c in calls)
-    calls.clear()
+    assert all("id(e) >= $cursor" in c for c in page_calls)
+    # …and the independent count the truncation guard compares against is asked
+    # for exactly once, as an aggregate.
+    assert len(count_calls) == 1
 
     # …and the same read with offset spellings whose INSTANT order inverts their
     # BYTE order, so the two newest are the two lexically SMALLEST rows.
@@ -349,6 +353,61 @@ def test_a_doubled_about_object_edge_yields_one_reading_not_two(sdk, monkeypatch
     got = latest_readings(sdk, indicator["id"])
     assert len(got) == 4, "a doubled edge duplicated or dropped a reading"
     assert len({r.reading_id for r in got}) == 4
+
+
+def test_a_truncated_page_set_raises_instead_of_answering_from_survivors(
+    sdk, monkeypatch
+):
+    """A server-side cap below the page size truncates EVERY page, and the rows it
+    costs are the NEWEST (pages ascend by id) — so continuing would report a stale
+    reading as the current state, which is the defect #12322 removes arriving
+    through the read's own transport (#4233).
+
+    Reproduced without a server cap (a lane reports ``RESULTSET_SIZE = -1``) by
+    truncating the PAGE query's rows in the client; the ``count(e)`` aggregate is
+    left honest, exactly as it is under a real cap.
+    """
+    import tortoise.goal_judgement as gj
+
+    indicator = _indicator(sdk, "truncated")
+    for hour in (1, 2, 3, 4, 5):
+        _reading(sdk, indicator, float(hour), at=f"2026-11-12T0{hour}:00:00Z")
+
+    real_g = sdk._get_proj().g
+
+    class _TruncatingPage:
+        def __init__(self, rows):
+            self.result_set = rows
+
+    class _TruncatingServer:
+        def query(self, cypher, **kwargs):
+            res = real_g.query(cypher, **kwargs)
+            if "LIMIT $batch" in cypher:
+                return _TruncatingPage(res.result_set[:1])  # a cap of 1 row
+            return res
+
+    monkeypatch.setattr(gj, "_READINGS_PAGE_SIZE", 2)
+    monkeypatch.setattr(sdk._get_proj(), "g", _TruncatingServer(), raising=False)
+    with pytest.raises(RuntimeError, match="came back short"):
+        latest_readings(sdk, indicator["id"])
+
+
+def test_a_reading_whose_event_carries_no_id_still_orders_without_raising(sdk):
+    """``reading_id`` may be absent on an outside-written event; the order key
+    coerces it (``str(reading_id or "")``) so a null id is a TIE-BREAK value, not
+    a ``TypeError`` inside ``sort``."""
+    indicator = _indicator(sdk, "no-id")
+    _reading(sdk, indicator, 9.0, at="2026-11-12T05:00:00Z")
+    sdk._get_proj().g.query(
+        "MATCH (o) WHERE o.id = $iid "
+        "CREATE (e:Event {value: 1.0, unit: 'minutes', "
+        "startedAt: '2026-11-12T01:00:00Z', eventKind: 'measurement'})"
+        "-[:aboutObject]->(o)",
+        params={"iid": indicator["id"]},
+    )
+    got = latest_readings(sdk, indicator["id"])
+    assert [r.value for r in got] == [9.0, 1.0]
+    assert got[1].reading_id is None
 
 
 # ── 3. an unparseable instant sorts LAST, deterministically ─────────────
