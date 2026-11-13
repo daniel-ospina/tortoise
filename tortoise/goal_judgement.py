@@ -1093,6 +1093,28 @@ def latest_readings(
     would restart the trend across a definition change nobody can date.
     ``mark_definition_change`` refuses to WRITE such a stamp and repairs one it
     finds, so this state is reachable only through an outside write.
+
+    Raises
+    ------
+    ValueError
+        ``_READINGS_PAGE_SIZE < 1`` is a local constant an operator fixes, and it
+        is refused BY NAME so they are told which constant; ``limit < 0`` is a
+        caller error, refused so a negative bound cannot silently drop the OLDEST
+        reading instead of capping the newest.
+    RuntimeError
+        The collected rows came back SHORT of the independent ``count(e)``. This
+        is the fail-closed arm: the read refuses rather than answering from an
+        incomplete set. The message enumerates all five causes and states the
+        action each takes, and it is the authority — lowering
+        ``_READINGS_PAGE_SIZE`` under a pinned ``RESULTSET_SIZE``; a re-run for a
+        set that SHRANK (a concurrent DELETE, or an UPDATE that moves a row out of
+        the predicate); OBSERVING rather than retrying when the indicator itself
+        went away or was re-keyed, because a re-run does not raise there — the
+        count is 0 too, so it answers an EMPTY reading set about a node that is no
+        longer the one asked for; and #12511 for a duplicated ``o.id``, which is
+        deterministic. ``judge()`` does not catch it — a judgement computed from a
+        partial set is the defect this guard exists to prevent, and #4515's
+        incident is that it used to be silent.
     """
     where = "MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator"
     params: dict[str, Any] = {"indicator": indicator_id}

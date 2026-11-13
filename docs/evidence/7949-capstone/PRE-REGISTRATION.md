@@ -2640,30 +2640,31 @@ to answer.
 >
 > ⚠️ **The handling is still §10.26→§10.27's**: a new dated entry, never a re-point in place.
 
-- **What moved, and why an offset cannot describe it.** The branch's delta against `origin/main` is
-  now **`+99 / -12` in fifteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
-  read-back (`:10508` on `main`, `:10536` here), and `+54` from `_collect_classify_items`
-  (`:11803` → `:11857`) all the way through the S2.2 VET gate (`:16779` → `:16833`). A single
-  offset applied to the block would be wrong at two of those three regions, which is exactly why
-  every line below was opened instead.
+- **What moved, and why an offset cannot describe it.** The branch's delta against `origin/main` WAS
+  **`+99 / -12` in fifteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
+  read-back (`:10508` on `main`, `:10536` on the branch), and `+54` from `_collect_classify_items`
+  (`:11803` → `:11857`) through the S2.2 VET gate (`:16779` → `:16833`). ⛔ **THE FORWARD MERGE OF
+  `main` (`6408da01ce`) MOVED THE FILE AGAIN — by `+48` — so every number below was opened on the
+  MERGED tree instead of carrying either parent's value or an offset from it.**
 - **New value — measured at this head, by opening each line:** `_collect_classify_items` at
-  `:11857`, extent `:11857-11879` (`def` to `return items`, unchanged in size); the two `if items:`
-  gates at `:14276`/`:14429`; the two fail-open `except` arms at `:14289`/`:14440`; the two result
-  blocks at `:14640` (closing `:14646`) and `:14650` (closing `:14654`); `_run_vet_pass`'s S2.2
-  call at `:16834` and its post-S4 union call at `:14405`; and the `#10360` read-back
-  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:10536`.
-- **Verified by content, not by arithmetic.** `:11857` is
-  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:11879` is `return items`;
-  `:14276`/`:14429` are the two `if items:` gates; `:14289`/`:14440` are the two fail-open
-  `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:14640`
-  opens `result["classify_later"]` and `:14646` closes it (`}`), `:14650` opens `result["vet"]`
-  and `:14654` closes it; `:16834` is
-  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14405` is
-  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:10536` is the read-back assignment.
-  The selection flags this block sits under are at `:13820` (`vet_enabled`), `:13789`
-  (`classify_later`) and `:13814` (its construction-failure arm), and the early return that emits
-  both OFF surfaces is `if not edus:` at `:13824`, with `edus = _edus_from_conversation(...)` at
-  `:13823` above it.
+  `:12730`, extent `:12730-12752` (`def` to `return items`, unchanged in size); the two `if items:`
+  gates at `:15149`/`:15302`; the two fail-open `except` arms at `:15162`/`:15313`; the two result
+  blocks at `:15611` (closing `:15617`) and `:15621` (closing `:15625`); `_run_vet_pass`'s S2.2
+  call at `:17805` and its post-S4 union call at `:15278`; and the `#10360` read-back
+  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:11409` — the record's live
+  `read_back` now carries this value, superseding §10.28's `:10536` sentence.
+- **Verified by content, not by arithmetic.** `:12730` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12752` is `return items`;
+  `:15149`/`:15302` are the two `if items:` gates; `:15162`/`:15313` are the two fail-open
+  `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:15611`
+  opens `result["classify_later"]` and `:15617` closes it (`}`), `:15621` opens `result["vet"]`
+  and `:15625` closes it; `:17805` is
+  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:15278` is
+  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:11409` is the read-back assignment.
+  The selection flags this block sits under are at `:14693` (`vet_enabled`), `:14662`
+  (`classify_later`) and `:14687` (its construction-failure arm), and the early return that emits
+  both OFF surfaces is `if not edus:` at `:14697`, with `edus = _edus_from_conversation(...)` at
+  `:14696` above it.
 - **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
@@ -2734,8 +2735,43 @@ to answer.
 - ⛔ **§10.1–§10.29 are HISTORY and were NOT re-pointed.** Their numbers name the head each entry
   measured, per §10.19/§10.22/§10.24; a re-point in place would be a false record of what was
   measured. The live carriers are §11, §9, §3.4/§3.7/§7 for the `edges.py` windows, §10.29 for
-  the one `record_projection.py` value that has no other carrier, and this entry — including the
+  the one `record_projection.py` value that has no other carrier, and §10.31 — which succeeds this
+  entry for the `sdk.py` carriers — including the
   `#548` window, `projection/__init__.py:14272-14274` (`:14265-14267` at §10.29's head — `d63caecf56`,
   `#12338`, inserted 29 lines above the anchor), whose sentence lives in §10.27.
+- **This entry was LIVE for the merged tree until §10.31**; §10.31 now carries the `sdk.py` values
+  for the next head, and this entry stays true to the `main` it names (`5bacb44e0b`).
+
+### 10.31 — the `sdk.py` carriers re-derived after `#12492`'s `+3` (2026-11-13, `#12266`)
+
+> **A successor entry, not an edit to §10.30.** §10.30 recorded the values at `main` `5bacb44e0b`
+> and stays true to that head. `main` has since advanced: `cca42fa599` (`#12492`) inserted a net
+> **`+3`** above `_extract_session_v2` in `tortoise/sdk.py` (5 insertions, 2 deletions), which moved
+> **every** `sdk.py` carrier below it by exactly `+3`. Measured per commit: `18022` at `89c41ad8ba`,
+> `c2e579e629`, `017a9af331` and `adb6800c1e`; `18025` at `cca42fa599` and after.
+> `tortoise/extractor_v2.py`, `tortoise/projection/`, `tortoise/search_engine.py` and
+> `tortoise/pi-hooks/tortoise-capture.ts` did **not** move — re-measured, not assumed: `12730`,
+> `15149`, `15277`, `15302`, `15611`, `15621`, `17804`, `6637` and `955`/`947` all still open on the
+> content they claim.
+
+- **The move is uniform for THIS wave, which is why a mapping is legitimate here and was not at
+  §10.30.** `+3` describes every one of the thirteen carriers; the §10.30 wave was the one where an
+  offset could not work (`+971` vs `+873` in one file). Each new value was still confirmed by opening
+  the line, never by adding three.
+- **The mapping**, all thirteen, old (at `5bacb44e0b`) → new (this tree):
+  `_extract_session_v2` `18022`→`18025`; `proj.link_source_to_event(` `19449`→`19452`;
+  `relation_write = apply_relation_edges(` `19009`→`19012`; `from tortoise.relation_write import
+  apply_relation_edges` `19008`→`19011`; the `#10999` TRANSPORT-ONLY comment `18996`→`18999`;
+  `"stats": _capture_stats_with_step_witness(...)` `19051`→`19054`;
+  `bind_point_subjects(proj, self, point_id=pid,` `18656`→`18659`;
+  `The v2 path reports` `16455`→`16458`; `"extraction_mode": "llm:<route>"` `16456`→`16459`;
+  `extracted, meta = self._extract_session_v2(` `16911`→`16914`;
+  `declared = declared_relation_predicates()` `25393`→`25396`; the kind→label write seam
+  `18203-18227`→`18206-18230`.
+- **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
+  threshold, class set or corpus pin changes; `document_sha256` is re-cut in the same commit, per §8.
+- ⛔ **§10.1–§10.30 stay HISTORY.** §10.30's `18799`/`18822`/`18900`/`19009`/`19051` chain is a
+  per-commit record of ITS wave and must keep those numbers even though `19009` and `19051` now name
+  different lines on this tree — that is the whole point of recording a head.
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
   supersede marker.
