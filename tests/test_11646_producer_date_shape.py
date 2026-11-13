@@ -827,15 +827,32 @@ def test_the_zone_child_gets_the_parents_sys_path_not_just_the_repo_root() -> No
     # ⛔ ORDER, not just membership (#12330 review, P3). `sys.path` order IS the
     # resolution order, so a dedupe that sorts — or that moves an entry — changes WHICH
     # module a child resolves, and NO assertion above can see it: first-position,
-    # membership and uniqueness all survive a pure reordering. ⚠️ The mutant that proves
-    # it is `sorted({p for p in sys.path if p})` — with NO `repo_root` prefix. Adding one
-    # does NOT prove this: `tests/conftest.py:121` already inserts the repo root into
-    # `sys.path` at import, so the prefix becomes a DUPLICATE and reds the uniqueness
-    # assert above, leaving the order assert unexercised (measured; the same class this
-    # file's own `MEMORY.md` `[pin-defensive-claim]` row names — a falsifier entry must
-    # name the assert its mutant actually reds). Measured with the correct mutant:
-    # 1 failed at `assert tail == sorted(tail)`.
-    position = {p: i for i, p in enumerate(sys.path)}
+    # membership and uniqueness all survive a pure reordering. ⚠️ The mutant must leave
+    # those three untouched, so it keeps `repo_root` FIRST and reorders only the tail:
+    #
+    #     [repo_root, *sorted(p for p in sys.path if p and p != repo_root)]
+    #
+    # ⛔ `sorted({p for p in sys.path if p})` with NO `repo_root` prefix does NOT reliably
+    # isolate this assertion, and an earlier cut of this comment wrongly called it "the
+    # correct mutant". It reds `entries[0] == repo_root` whenever some `sys.path` entry
+    # sorts before the repo root — a macOS `/Library/Frameworks/...` against a repo under
+    # `/Users/...`, or a user-site `/home/<u>/.local/...` against `/home/<u>/tortoise`
+    # (`.` < `t`) — so on those boxes the order assert is never reached and this entry is
+    # not re-derivable. It reproduced HERE only because this box's repo root happens to be
+    # the lexicographically smallest `sys.path` entry: same class as this repo's
+    # `MEMORY.md` `[pin-defensive-claim]` row — a falsifier entry must name the assert its
+    # mutant actually reds, on the box the next reader runs. Measured with the isolating
+    # mutant above: `1 failed` at `assert tail == sorted(tail)`, and no other assertion.
+    #
+    # ⛔ FIRST occurrence, not last: `entries` is built with `dict.fromkeys`, which keeps
+    # each path's FIRST position, so a `sys.path` carrying a non-adjacent duplicate
+    # (`[root, "X", "Y", "Y", "X"]`) would invert the indices under a last-wins map and
+    # red this assertion on a CORRECT helper (measured: tail `[4, 3]` against sorted
+    # `[3, 4]`). No `sys.path.append` exists in `tests/` today, so the realistic trigger is
+    # a `.pth`/site or plugin re-adding an earlier path after a later one.
+    position: dict[str, int] = {}
+    for i, p in enumerate(sys.path):
+        position.setdefault(p, i)
     tail = [position[p] for p in entries[1:]]
     assert tail == sorted(tail), (
         "the child's PYTHONPATH does not preserve the PARENT's `sys.path` order — that "

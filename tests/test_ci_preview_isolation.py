@@ -735,9 +735,13 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     #
     # ⛔ THE POLL IS INSIDE THE GUARD, NOT ONLY THE `assert` (#12330 REVIEW). The `ps`
     # call has NO `timeout=`, so its realistic failure is an `OSError` under fork pressure
-    # (EAGAIN/ENOMEM) — the exact trigger the JOB-A guard below names — and it runs up to
-    # 250 times (5 s at 0.02 s) on every Linux leg. With the `try:` around the assertion
-    # alone, that raise ran no teardown and leaked this 120 s decoy in its own session.
+    # (EAGAIN/ENOMEM) — the exact trigger the JOB-A guard below names — and it runs for a
+    # bounded 5 s on every Linux leg. ⛔ That bound is ~80 iterations, not the 250 a bare
+    # `5 s / 0.02 s` suggests: this block's own measurement puts a `ps -o comm=` sample at
+    # ~42 ms, so each iteration costs ~62 ms, and two claims in one sentence that cannot
+    # both hold is the count class this PR already corrects elsewhere. With the `try:`
+    # around the assertion alone, that raise ran no teardown and leaked this 120 s decoy in
+    # its own session.
     # Measured: injecting `OSError` from the `ps` call left the decoy alive, reparented to
     # pid 1. Nothing between the spawn and its reaper may be unguarded.
     if Path("/proc").is_dir():
