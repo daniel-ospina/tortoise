@@ -170,7 +170,11 @@ def _rendered_heading_lines(doc: str, skip_through: int = 0) -> list[int]:
     """
     return [tok.map[0] for tok in MarkdownIt("commonmark").parse(doc)
             if tok.type == "heading_open" and tok.map
-            and tok.map[0] > skip_through]
+            # ⛔ `> skip_through` dropped LINE 0 of a document with no
+            # frontmatter (`skip == 0`), so arm 1 never saw a heading on the
+            # first line — and the enclosing-section arm below depends on
+            # seeing it (round 24).
+            and tok.map[0] > (skip_through if skip_through else -1)]
 
 
 def _unscoped_heading_forms(doc: str,
@@ -231,7 +235,27 @@ def _unscoped_heading_forms(doc: str,
         reported.add(i)
         bad.append(f"line {i + 1}: {lines[i][:60]!r} {why}")
 
+    # ⛔ THE ENCLOSING SECTION NUMBER (#12349 round 24, P1). `_scope_slice` keeps
+    # every `###` inside the enclosing `##` slice, so a `### 3.9 …` heading written
+    # INSIDE §2 is absorbed by §2's scope — and `_READABLE_BRIEF` has to accept
+    # `### \d+.\d+ ` for the REAL subsections, so arm 1 cannot refuse it on shape
+    # alone. The predicate needs the number, not a wider regex: a subsection is
+    # readable only when its major number is the enclosing section's. Measured:
+    # falsify §2, restate under `### 3.9 Restated finding` -> 117 passed.
+    enclosing_major: list[str | None] = []
+    cur: str | None = None
+    for ln in lines:
+        major = re.match(r"^## (\d+)\. ", ln)
+        if major:
+            cur = major.group(1)
+        enclosing_major.append(cur)
     for i in _rendered_heading_lines(doc, skip):
+        minor_h3 = re.match(r"^### (\d+)\.\d+ ", lines[i])
+        if (minor_h3 and enclosing_major[i] is not None
+                and minor_h3.group(1) != enclosing_major[i]):
+            flag(i, "is a subsection heading numbered for a DIFFERENT section — "
+                    "`_scope_slice` keeps every `###` inside the enclosing `##` "
+                    "slice, so its body satisfies the PRECEDING section's pins")
         if not readable.match(lines[i]):
             # ⚠️ `# ` is accepted by every document's pattern on purpose, and the
             # reason is a property of `_scope_slice`, not of markdown: an `h1`
@@ -1433,7 +1457,7 @@ def test_the_heading_guard_accepts_every_form_the_helper_can_read() -> None:
     for doc in (
             "# M3 — the FTS leg\n\nintro\n\n## 2. Method\n\nbody\n\n### 2.1 Why\n\nx\n",
             "## 2. Method\n\nbody\n\n## 3. Results\n\nprose\n",
-            "## 2. Method\n\nbody\n\n### 3.1 Recall@k\n\n## 4. Verdict\n"):
+            "## 2. Method\n\nbody\n\n### 2.1 Recall@k\n\n## 4. Verdict\n"):
         assert not _unscoped_heading_forms(doc), doc
     # `# ` mid-document is accepted: it BOUNDS a level-2 slice (`end` is
     # `^#{1,2} `), so it cannot absorb the preceding §, and a `# ` section is
@@ -1447,6 +1471,10 @@ def test_the_heading_guard_accepts_every_form_the_helper_can_read() -> None:
         "## 2. Method\n\n§2 body.\n\n## 3. Results\n\n§3 BODY\n", "2")
     # and `---` used as a THEMATIC BREAK after a heading is not a setext underline
     assert not _unscoped_heading_forms("## 2. Method\n---\n\nbody\n")
+    # a subsection numbered for a DIFFERENT section is refused; the enclosing
+    # number is what decides (#12349 round 24, P1)
+    assert _unscoped_heading_forms("## 2. Method\n\nbody\n\n### 3.9 R\n\nx\n")
+    assert not _unscoped_heading_forms("## 2. Method\n\nbody\n\n### 2.9 R\n\nx\n")
 
 
 
