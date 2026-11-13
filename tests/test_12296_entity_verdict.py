@@ -1098,6 +1098,58 @@ class TestTheResolverBands:
         hit = v2._resolve_superseded("The Team", {"entities": folded})
         assert hit is not None and hit["id"] == "obj-live", (hit, folded)
 
+    def test_a_withheld_spelling_is_held_even_when_the_resolver_raises(self):
+        """The hold must not be gated on `resolve_entities` returning.
+
+        The withheld-name seeding lived INSIDE the resolver's `try`, so a raising
+        resolver left `resolution_held == []` and `execute_embed` created every
+        spelling the fold had refused to resolve — the duplicate the fold exists
+        to prevent.
+        """
+        from tortoise import extractor_v2 as _v2
+
+        class _Boom(Exception):
+            pass
+
+        def _raise(*_a, **_kw):
+            raise _Boom("resolution blew up")
+
+        embed = {"entities": [{"name": "the team", "kind": "core:plan"}],
+                 "events": [], "points": [], "operators": [],
+                 "chain_notes": [], "link_before_create": []}
+        empty_gaps = {"entities": [], "events": [], "points": [],
+                      "operators": [], "chain_notes": [],
+                      "link_before_create": []}
+
+        def responder(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "the team shipped."
+            if "GRAPH MAPPER" in system:
+                return json.dumps(embed)
+            if "GAP REVIEWER" in system:
+                return json.dumps(empty_gaps)
+            raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+        class _M:
+            def complete(self, *, system: str, user: str):
+                return responder(system, user)
+
+        import pytest as _pytest
+        with _pytest.MonkeyPatch.context() as mp:
+            mp.setattr(_v2, "resolve_entities", _raise)
+            mp.setattr(_v2, "search_graph",
+                       lambda sdk, embed_list, story, **kw: {
+                           "entities": [], "points": [], "events": [],
+                           "degraded": False,
+                           "entities_unresolved": ["the team"]})
+            out = _v2.extract_session_v2(
+                _M(), [{"role": "user", "content": "the team shipped."}],
+                session_id="s1")
+        assert [h["name"] for h in out.get("resolution_held") or []] == [
+            "the team"], out.get("resolution_held")
+        assert [e["name"] for e in out["payload"]["entities"]] == [], (
+            out["payload"]["entities"])
+
     def test_a_supersedes_ref_spelled_as_the_merged_variant_still_resolves(
             self, sdk_factory):
         """The fold replaces the carrier's row, so its SPELLING lives in `aliases[]`

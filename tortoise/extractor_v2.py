@@ -15299,9 +15299,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                         "name": _name, "kind": "",
                         "reason": HOLD_DISAMBIGUATION_UNDECIDED, "vetoes": []})
                     _held_names.add(_name)
-                if resolution_held:
-                    # §4.4's *"recorded loudly, never only in `warnings`"*: one deterministic census class per run, with the reasons and the candidates named on `result["resolution_held"]`.
-                    _bump_census_class(error_census, "entity_identity_held")
+                # (the `entity_identity_held` census class is bumped ONCE for the
+                # run, at the shared site after this try/except — §4.4's *"recorded
+                # loudly, never only in `warnings`"* — so a run that both resolved
+                # holds and had a withheld spelling is not counted twice)
                 if res.get("map"):
                     complete_list = _apply_entity_resolution(
                         complete_list, res["map"])
@@ -15320,6 +15321,25 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # D1 (#1746): deterministic class for the previously-
                 # uncensused resolution failure path.
                 _bump_census_class(error_census, "entity_resolution_failed")
+                # ⛔ #12296: the fold withheld these spellings whether or not the
+                # resolver got to run. Seeding the hold only on the SUCCESS path
+                # left this arm with `resolution_held == []`, so `execute_embed`
+                # created every spelling the D-1 fold refused to resolve — the
+                # duplicate the fold exists to prevent, reached by a raising
+                # resolver. Nothing resolved here, so no `map` filter is needed.
+                resolution_held.extend(
+                    {"name": n, "kind": "",
+                     "reason": HOLD_DISAMBIGUATION_UNDECIDED, "vetoes": []}
+                    for n in _unresolved_names
+                    if all(str(h.get("name") or "").strip() != n
+                           for h in resolution_held))
+                # (the census class is bumped once, at the shared site below —
+                # not here: a second bump on the same run double-counts)
+    # One census bump for the run, on BOTH arms: the resolver's own holds and the
+    # spellings the D-1 fold withheld land in the same population, and a per-arm
+    # bump double-counted a run that had both.
+    if resolution_held:
+        _bump_census_class(error_census, "entity_identity_held")
     # #3359: roll the D3 resolution stage's cost driver into the session
     # roll-up — outside the try/except so the spend already made is reported
     # even when the resolution itself failed. A resolve_entities call that
