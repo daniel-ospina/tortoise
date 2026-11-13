@@ -891,8 +891,10 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
 #: lie, because it is ONE row — and RAISES rather than answering from the part it
 #: managed to read. ⛔ THE LOSS IS ARBITRARY BY INSTANT, WHICH IS THE POINT, and
 #: ``id(e)`` is CREATION order only while nothing has been deleted: the engine
-#: REUSES a freed node id (MEASURED on a lane, `graph ver 42006`: create A, B, C
-#: -> ids 2, 3, 4; delete the middle one and create D -> D holds id 3). So a
+#: REUSES a freed node id (MEASURED on a FRESH lane graph, `graph ver 42006`:
+#: create A, B, C -> ids 0, 1, 2; delete the middle one and create D -> D takes
+#: id 1, the id that was freed — so the ids are relative to what the graph
+#: already held, and only the REUSE is the point). So a
 #: truncated tail costs whatever currently holds the HIGHEST LIVE ids, not the
 #: newest reading — and a backfilled row can be instant-OLD while landing last
 #: (MEASURED: create the 12.0/newest-instant reading first, an older one second,
