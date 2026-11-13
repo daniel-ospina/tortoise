@@ -1073,7 +1073,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_query
 - name: tortoise_belief_timeline
-  served_from: tortoise/mcp_server.py:c98791122a8ac095
+  served_from: tortoise/mcp_server.py:4621a01b4e854e34
   served_attributes: 4480c4f834b1425d
   family: memory
   family_rank: 1
@@ -1085,7 +1085,8 @@ rows:
   cluster: null
   canonical: null
   job: Dated, ordered belief chain for a topic — decision Points with validFrom, NAND/CORRECTS links, superseded
-    priors visible.
+    priors visible. Returns an object envelope whose `result` key holds the rows — see the wrapper's note
+    (#12364).
   dependency: declares TortoiseSDK.belief_timeline (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -2953,7 +2954,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_list_dedup_candidates
-  served_from: tortoise/mcp_server.py:602d6df36e624084
+  served_from: tortoise/mcp_server.py:f16dc0eb5bd37c4b
   served_attributes: 99ff1f4787995a66
   family: review
   family_rank: 9
@@ -2964,7 +2965,8 @@ rows:
   keyword_rank: 5
   cluster: null
   canonical: null
-  job: Review queue for dedup/temporal candidates (candidate_type=content|temporal|entity).
+  job: Review queue for dedup/temporal candidates (candidate_type=content|temporal|entity). Returns an object
+    envelope whose `result` key holds the rows — see the wrapper's note (#12364).
   dependency: declares TortoiseSDK.list_dedup_candidates (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
