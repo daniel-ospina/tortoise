@@ -2373,6 +2373,10 @@ def removal_report(
 
     def _waived_by_bare(symbol: str) -> bool:
         return any(c is None and s == symbol for c, s in entries)
+
+    def _waived_by_qualified(symbol: str, cls: str) -> bool:
+        """Does a waiver that NAMES this surface cover it?"""
+        return any(c == cls and s == symbol for c, s in entries)
     problems: list[str] = []
     accounting: dict[tuple[str, str], str] = {}
     # `{(symbol, class): …}` — ONE entry per REMOVAL, not per symbol. Keyed by symbol (as it
@@ -2455,12 +2459,14 @@ def removal_report(
             accounting[(symbol, cls)] = found[0]
             continue
         if _waived(symbol, cls):
-            if _waived_by_bare(symbol):
-                # ONLY a bare waiver can be ambiguous. An explicitly named surface is the
-                # remedy the ambiguity refusal prescribes, so `tool:X` + `sdk:X` must NOT be
-                # counted as one waiver covering two removals — that refused the very case
-                # the grammar exists for, and reported it as "dropped with no record"
-                # (review of PR #12313, round 9).
+            if _waived_by_bare(symbol) and not _waived_by_qualified(symbol, cls):
+                # ONLY a bare waiver can be ambiguous — and only for the classes it is the
+                # sole authority over. `--allow-removal x --allow-removal sdk:x` names the
+                # sdk surface explicitly, so the bare entry covers ONLY the tool removal:
+                # counting both against it refused a legitimate invocation and printed
+                # "one `--allow-removal x` would waive 2 removals", which is false for that
+                # command and whose prescribed remedy the operator had already applied
+                # (review of PR #12313).
                 waived.setdefault(symbol, []).append(cls)
             accounting[(symbol, cls)] = (
                 "`--allow-removal` (deliberate rename, stated in the PR)"
@@ -2612,7 +2618,12 @@ def cmd_cut(args: argparse.Namespace) -> int:
               "below and belongs in the PR body.")
         return 1
 
-    if prior_doc is not None and prior_doc.get("retired") is None:
+    # An ABSENT retired half and an EMPTY one are the same absence in two spellings — the
+    # `is None` test saw only the first, so a baseline whose `retired:` list had been emptied
+    # (a splice or merge artefact) was compared silently while `tortoise_get` leaving the
+    # declaration in that same cut went ungraded (review of PR #12313). The disclosure is what
+    # that arm exists for, so it fires on emptiness, not on a missing key.
+    if prior_doc is not None and not prior_doc.get("retired") and doc.get("retired"):
         print("  WARNING the committed baseline carries no `retired:` list, so the retired "
               "half could not be compared — a retired name that also left the declaration is "
               "NOT graded by this cut (and `check` reds the shape; reconcile, then re-cut)")

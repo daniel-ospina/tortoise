@@ -5741,6 +5741,18 @@ def test_a_baseline_with_NO_retired_half_is_SAID_not_silent(monkeypatch, tmp_pat
     assert rc == 0, out
     assert "WARNING the committed baseline carries no `retired:` list" in out, out
 
+    # An EMPTY `retired:` is the same absence in another spelling, and it used to be graded
+    # silently: the disclosure fired on `is None` only, so a baseline whose list had been
+    # emptied (a splice or union-merge artefact) compared nothing and said nothing while a
+    # retired name left the declaration in the same cut (review of PR #12313).
+    emptied = copy.deepcopy(derived_baseline)
+    emptied["retired"] = []
+    path.write_text(yaml.safe_dump(emptied, sort_keys=False, allow_unicode=True, width=110))
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "WARNING the committed baseline carries no `retired:` list" in out, out
+
 
 def test_an_SDK_archive_entry_without_the_map_entry_is_REFUSED_by_both_gates():
     """`cut` and `archive_surface.check` must not disagree about one shape.
@@ -5798,3 +5810,26 @@ def test_an_SDK_rows_identity_is_its_NAME_not_its_derived_method_cell():
     sm = _load_manifest_tool()
     prior = {"rows": [{"name": "sdk:tortoise_vanished", "method": "something_else"}]}
     assert sm.surface_symbols(prior) == {("tortoise_vanished", "sdk")}
+
+
+def test_a_bare_waiver_beside_a_QUALIFIED_one_is_not_the_two_surface_ambiguity():
+    """`--allow-removal x --allow-removal sdk:x`: the bare entry covers only the TOOL.
+
+    The ambiguity refusal ("one `--allow-removal x` would waive 2 removals") counted every
+    class the bare entry MATCHED, including the one a qualified entry already names — so a
+    legitimate command was refused, with a reason that is false for it and whose prescribed
+    remedy the operator had already half-applied (review of PR #12313). Only a class whose
+    sole authority is the bare entry counts toward the ambiguity.
+    """
+    sm = _load_manifest_tool()
+    records = {"archived": set(), "forward": set(), "forward_raw": set(), "sdk_retired": set()}
+    problems, accounting = sm.removal_report(
+        {("x", "tool"), ("x", "sdk")}, set(), records, allowed={"x", "sdk:x"}
+    )
+    assert problems == [], problems
+    assert set(accounting) == {("x", "tool"), ("x", "sdk")}, accounting
+
+    # …and a BARE waiver alone is still the ambiguity (non-vacuity: the refusal still fires
+    # for the command that really does collapse two removals into one record).
+    problems, _ = sm.removal_report({("x", "tool"), ("x", "sdk")}, set(), records, allowed={"x"})
+    assert len(problems) == 1 and "would waive 2 removals" in problems[0], problems
