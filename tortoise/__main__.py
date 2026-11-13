@@ -14018,7 +14018,8 @@ def _cmd_doctor(args):
         # row; reaching here means the block itself failed.
         results.append(("Hosted", "❌",
                         f"the hosted check could not run "
-                        f"({type(e).__name__}: {str(e)[:80]}) — the hosted half of "
+                        f"({type(e).__name__}: {_printable(str(e)[:80])}) — the "
+                        "hosted half of "
                         "this setup is UNGRADED; `tortoise config show` for detail"))
 
     # Print results

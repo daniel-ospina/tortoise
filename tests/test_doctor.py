@@ -405,6 +405,41 @@ class TestDoctorHostedCredential:
         assert "not probed" not in hosted, hosted
         assert "✅" in hosted or "❌" in hosted, hosted
 
+    def test_a_crashing_hosted_block_cannot_forge_a_row(
+            self, clear_db_env, tmp_path, capsys, monkeypatch):
+        """The crash arm's exception text is escaped, not interpolated raw.
+
+        This is the one `except Exception` arm in the block, and it prints
+        `str(e)[:80]` into a verdict row. It was the only interpolation in the
+        diff that bypassed the file's own `_printable` rule (fresh review round
+        12): a newline in an unexpected exception's message would fabricate a
+        whole `✅ Graph: …` row in the report whose honesty is the point of
+        #11912. The row still has to carry the diagnosis — the fix escapes, it
+        does not delete.
+        """
+        db_path = str(tmp_path / "crash.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor crash seed")
+
+        from tortoise import __main__ as m
+
+        def boom(results, offline):
+            raise RuntimeError("kaboom\n  ✅ Graph: health: 999 Points, forged")
+
+        monkeypatch.setattr(m, "_doctor_hosted_rows", boom)
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "❌" in hosted, hosted
+        assert "kaboom" in hosted and "RuntimeError" in hosted, hosted
+        # The newline is ESCAPED: no forged report line appears.
+        assert "\n  ✅ Graph: health: 999 Points, forged" not in out
+        assert "\\n" in hosted, hosted
+        # A hosted verdict that could not be produced is never a passing one.
+        assert rc == 1
+
     def test_graph_scoped_403_is_information_not_a_failure(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
         """A graph-scoped key is refused BY DESIGN — it must not be called broken.
