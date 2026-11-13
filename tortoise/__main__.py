@@ -4255,8 +4255,14 @@ def _cmd_config(args) -> int:
             if env_file.get("daemon_error"):
                 print("  ⛔ the daemon's target does not RESOLVE with this file:")
                 print(f"     {_printable(env_file['daemon_error'])}")
-                print("     this command does not read it, so the target above does")
-                print("     not show that error")
+                if env_file.get("read_by_this_command"):
+                    # The process applied the file, so ITS OWN resolution ran on
+                    # the same values — the target above fails the same way.
+                    print("     this process applied that file at import as well, so")
+                    print("     the target above fails the same way")
+                else:
+                    print("     this command does not read it, so the target above does")
+                    print("     not show that error")
             else:
                 if env_file.get("daemon_rung") == "refuses":
                     print("  daemon        (none — `tortoise serve` REFUSES to")
@@ -4266,9 +4272,20 @@ def _cmd_config(args) -> int:
                     print(f"  daemon        {_printable(env_file['daemon_target'] or '(unresolved)')}"
                           "   (what `tortoise serve` resolves)")
                 if env_file.get("differs"):
-                    print("  ⚠️  the daemon loads that file at import, so it serves a")
-                    print("      DIFFERENT graph than the target above — this command")
-                    print("      resolved from the environment only")
+                    # ⛔ The CAUSE is conditional: in the applied state the two
+                    # entry points read the SAME environment, so the difference
+                    # comes from the two LADDERS ranking its keys differently —
+                    # "the daemon loads that file at import, so it serves a
+                    # DIFFERENT graph" described a file-read difference that does
+                    # not exist there (measured, #12428 review).
+                    if env_file.get("read_by_this_command"):
+                        print("  ⚠️  both entry points read the SAME environment here, so")
+                        print("      they differ only through the two LADDERS ranking")
+                        print("      its keys differently")
+                    else:
+                        print("  ⚠️  the daemon loads that file at import, so it serves a")
+                        print("      DIFFERENT graph than the target above — this command")
+                        print("      resolved from the environment only")
                     if env_file.get("difference_is_masked"):
                         print(f"      ({_printable(env_file['difference_is_masked'])})")
                 elif env_file.get("daemon_rung") == "refuses":
@@ -4305,7 +4322,7 @@ def _cmd_config(args) -> int:
                          or key in env_file.get("shadowed_graph_keys") or ()),
                         None)
                     if _deciding and _deciding not in env_file["graph_keys"]:
-                        print(f"  →  the same graph target as above: the ENVIRONMENT's")
+                        print("  →  the same graph target as above: the ENVIRONMENT's")
                         print(f"     {_printable(_deciding)} decides it for the daemon,")
                         print("     so the file's "
                               f"{_printable(', '.join(env_file['graph_keys']))}"
@@ -11469,8 +11486,8 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
         else:
             what = "the daemon's target does not resolve either"
         rows.append(("Config: .env", "⚠️",
-                     f"{path} is not read by this command (the daemon reads it), "
-                     f"and this run's own target did not resolve, so the rows "
+                     f"{path} sets the daemon's store, and {_read_clause} — "
+                     f"this run's own target did not resolve, so the rows "
                      f"below grade NO store — {what}. The two cannot be compared"))
         return rows
     if env_file.get("daemon_rung") == "refuses":
@@ -11488,11 +11505,17 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                      + _applied_note))
         return rows
     if env_file.get("daemon_error"):
+        # ⛔ The clause is conditional here too: when this process applied the
+        # file, the rows below resolved from the SAME values and DO show the
+        # error, so the round-4 sentence was false in that state (#12428 review).
         rows.append(("Config: .env", "❌",
                      f"{path} makes the DAEMON's target unresolvable: "
-                     f"{_printable(str(env_file['daemon_error'])[:90])} — this "
-                     "command does not read it, so the rows below do not show "
-                     "that error"))
+                     f"{_printable(str(env_file['daemon_error'])[:90])} — "
+                     + ("this process applied that file at import as well, so "
+                        "the rows below fail the same way"
+                        if _applied else
+                        "this command does not read it, so the rows below do not "
+                        "show that error")))
         return rows
     # The store the rows BELOW grade. It is the payload's `cli_target` because
     # `_cmd_doctor` hands `_dotenv_divergence` the target it already resolved —

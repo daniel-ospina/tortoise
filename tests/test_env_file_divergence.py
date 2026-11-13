@@ -974,3 +974,71 @@ def test_config_show_does_not_credit_an_inert_file_key(capsys, _isolated, monkey
     assert "TORTOISE_DB_URI decides it" in out, out
     # The file's inert key is still DISCLOSED BY NAME (never its value).
     assert "TORTOISE_DB_PATH" in out, "the file's inert key was not named at all"
+
+
+def test_doctor_error_arm_does_not_deny_an_applied_read(capsys, _isolated, monkeypatch):
+    """The ❌ arm of the row: applied ⇒ the rows below DO show that error.
+
+    Measured before the fix: `.env` applied, daemon target unresolvable, and the
+    row still said "this command does not read it, so the rows below do not show
+    that error" — while the rows below resolved from the same values and showed
+    exactly that error (#12428 review).
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/a.db")
+    _write_env(_isolated, "TORTOISE_DB_URI=relative/path.db\n")
+    _load_dotenv(str(_isolated))
+
+    _run(("doctor",))
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+
+    assert "❌ Config: .env" in row, row
+    assert "do not show that error" not in row, row
+    assert "fail the same way" in row, row
+
+
+def test_doctor_unresolved_arm_does_not_deny_an_applied_read(capsys, _isolated,
+                                                             monkeypatch):
+    """The "rows grade NO store" arm: same conditional clause.
+
+    Measured before the fix: applied state + an unresolvable OWN target, and the
+    row said "is not read by this command (the daemon reads it)" (#12428 review).
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    monkeypatch.setenv("FALKORDB_PORT", "notaport")
+    _write_env(_isolated, "TORTOISE_DB_PATH=/tmp/daemon-side.db\n")
+    _load_dotenv(str(_isolated))
+
+    _run(("doctor",))
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+
+    assert "is not read by this command" not in row, row
+    assert "applied it at import as well" in row, row
+    assert "grade NO store" in row, row
+
+
+def test_config_show_names_the_LADDERS_as_the_cause_when_it_applied_the_file(
+        capsys, _isolated):
+    """The applied+divergent `config show` block must not blame a file read.
+
+    Measured before the fix: the header correctly said "and THIS PROCESS applied
+    it at import", and three lines later the block said "the daemon loads that
+    file at import, so it serves a DIFFERENT graph … this command resolved from
+    the environment only" — a cause that cannot operate, since both read the same
+    environment (#12428 review).
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    _write_env(_isolated,
+               "TORTOISE_DB_URI=/tmp/daemon-side.db\n"
+               "TORTOISE_DB_PATH=/tmp/cli-side.db\n")
+    _load_dotenv(str(_isolated))
+
+    out = _show_text(capsys)
+
+    assert "they differ only through the two LADDERS ranking" in out, out
+    assert "resolved from the environment only" not in out, out
