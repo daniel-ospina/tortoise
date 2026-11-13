@@ -172,6 +172,25 @@ which): when the key *and* the `api_url` match, a refusal applies to both; a dif
 — or the same key pointed at a different host — means a refusal on one says nothing about
 the other. `--json` gives the same report to a script.
 
+**`tortoise doctor` is the same question with a verdict.** Alongside its local rows it
+reports a `Credentials` row (the winning store, a masked key and a fingerprint) and a
+`Hosted` row: `GET /health` reachable with the measured latency, and `GET /v1/team`
+**accepted** or the server's exact refusal — so a revoked key reads `❌ Hosted: … 401
+Invalid API key` with the re-mint remedy, instead of a green report on a box whose
+every hosted command fails. With **no** credential configured it prints one
+`ℹ️` line (`self-hosted only`) and makes no request at all; `--offline` skips the two
+**hosted** requests and says `not probed`, which is the answer for a proxy or an
+air-gapped runner (the local graph-health probe still dials the configured DB target). A `403`/`GRAPH_SCOPED_TEAM_SURFACE` refusal is reported as information, not a
+failure — the key is valid, its scope is narrower by design — and a `503`/`429` from
+`/v1/team` is reported as a *service* refusal (capacity or rate limit) that leaves the key
+unproven rather than wrong, so a capacity blip does not red a healthy setup. When the
+identity comes from the checkout-local `./.tortoise` that `init --api-key` wrote, the
+`Hosted` row says so and names the file instead of implying it is your global one. That
+file is what `doctor` (and the ordinary CLI commands) resolve here — it is **not** a
+transmission credential: `session capture`/`probe`/`verify`/`list`/`view`/`drain` and
+`sessions import` deliberately skip a repo-supplied `./.tortoise` (#3660), so pointing one
+does not route your transcripts anywhere.
+
 Everyday commands:
 
 ```bash
