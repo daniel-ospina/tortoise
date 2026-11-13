@@ -503,7 +503,11 @@ def _shape(text: str, values: tuple[str, ...] = (),
     value/word (say `count is asserted` → `count is not compared`) no longer
     matches the shape, so it reds only while the true text is ABSENT. A shape
     cannot anticipate text it cannot name; the claim is that the pin covers the
-    content named here, not that it can recognise arbitrary rewording.
+    content named here, not that it can recognise arbitrary rewording. ⛔ That
+    includes DELETION of a free word — a shape can only match text that is
+    PRESENT, so a pivot word removed outright (`not significant` → `significant`)
+    is invisible here and needs the file's negative-assertion treatment at the
+    call site instead (see §6.2's status note).
 
     ⛔ A SIGN is part of the value, not part of the wording (#12349 round-24
     reviewer, P2): every caller passes the MAGNITUDE, so with an unsigned token a
@@ -2270,20 +2274,32 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         f"{abs(k5['delta_pts']):.2f} pts (the shipped leg ahead "
         f"{k5['only_a']}\u20130)",
         "§0's k=5 reading",
-        values=(f"{abs(k5['delta_pts']):.2f}", str(k5["only_a"])))
+        # ⛔ BOTH halves of the N–0 split are values (round-24 reviewer, cycle 3):
+        # naming `only_a` and not `only_b` left the `–0` literal, so `ahead 2–1`
+        # with the truth restated was GREEN — the same asymmetry the sign fix
+        # removed. `"0"` wildcards the `–0` token only; `−0.67` is one signed
+        # token whose magnitude is already named, and `k=5` stays literal.
+        values=(f"{abs(k5['delta_pts']):.2f}", str(k5["only_a"]),
+                str(k5["only_b"])))
 
     # §0's Reading-1 figure — the falsifier's own numbers, quoted verbatim by
     # every downstream reader, and unpinned until round 24 (ONE edit was green).
     assert dep["mcnemar_p_two_sided"] < 1e-6, (
         "§0 quotes the deployable comparison as p < 1e-6; the artifact now "
         f"records p = {dep['mcnemar_p_two_sided']}")
+    # ⛔ The THRESHOLD is the claim's content too (round-24 reviewer, cycle 3):
+    # `p < 1e-6` is not a `_SIGNED_NUMBER` token, so it stayed literal and a
+    # `p < 0.5` rewrite with the truth restated beside it was GREEN. It is now a
+    # `free` word, and the claim carries a trailing literal (`On that`) so the
+    # `\S+` wildcard cannot swallow the sentence's own period.
     _only_claim(
         plain,
         f"{dep['recall_at_3']:.4f} vs {dep['recall_at_3_base']:.4f}, "
-        f"+{dep['delta_pts']:.2f} pts, p < 1e-6",
+        f"+{dep['delta_pts']:.2f} pts, p < 1e-6. On that",
         "§0's Reading-1 falsifier figure",
         values=(f"{dep['recall_at_3']:.4f}", f"{dep['recall_at_3_base']:.4f}",
-                f"{dep['delta_pts']:.2f}"))
+                f"{dep['delta_pts']:.2f}"),
+        free=("1e-6",))
 
     shipped = artifact["arms"]["falkordb_tfidf"]["ranks"]
     tokens = artifact["arms"]["postgres_bm25/tokens"]["ranks"]
@@ -2368,6 +2384,19 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
         text, f"by ~{round(k3['delta_pts'])} point (not significant)",
         "the status note's '~N point (not significant)'",
         values=(str(round(k3["delta_pts"])),), free=("not",))
+    # ⛔ `free` covers a word SUBSTITUTED; it cannot see one DELETED, and `not` is
+    # the word whose deletion INVERTS this claim while leaving it grammatical
+    # (round-24 reviewer, cycle 3: `(not significant)` → `(significant)` with the
+    # truth restated was GREEN, and a wildcard wide enough to catch it spans
+    # sentences and false-reds five other claims). So the inverted phrasing gets
+    # the file's own NEGATIVE-assertion treatment — the same pattern
+    # `test_the_falsifier_predicate_is_stated_the_same_way_in_every_document`
+    # uses for the inverted C3 reading.
+    assert not re.search(r"by ~\d+ point \(significant\)", text), (
+        "the status note asserts the primary comparison is SIGNIFICANT; the "
+        f"artifact records p = {k3['mcnemar_p_two_sided']} (> 0.05) and §0/§4.1 "
+        "say FAIL — the inverted reading is the one this decision document must "
+        "not carry")
     _only_claim(text, f"by **zero** at k={15}",
                 "the status note's 'zero at k=15'", free=("zero",))
     assert k15["delta_pts"] == 0.0
