@@ -314,6 +314,11 @@ else
   bad "case 1's fixture holds an invalid UTF-8 sequence or exceeds the cap — the no-drop pin below would be vacuous"
 fi
 assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "NOT byte-identical" "and the body does NOT claim a drop it did not measure (a measure, not a constant)"
+# ⛔ AND THE SAME FOR THE UNMEASURED-LOSS SENTENCE (case 17p review round 2, P2): 17p's fixtures all
+# DROP a character, so the measured `if` shadows the `elif` and an `elif true` mutant — a body that
+# publishes "could NOT be measured" on every alert — stayed green on all 247 rows. This state is
+# under the cap and decodes, so both counts resolve and the sentence must be ABSENT.
+assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "could NOT be measured" "and it does NOT claim an UNMEASURED comparison in a state it measured (an unconditional disclosure reds here)"
 
 echo "── case 1b: a >6000-byte report keeps its ACTIONABLE TAIL ─────────────"
 # The gate prints its context (remote-ahead, non-conforming files, the
@@ -1252,6 +1257,28 @@ assert_eq "$(count_creates)" "1" "case 17p: an out-of-range count still files th
 assert_not_contains "$OUT" "integer expression expected" "case 17p: and an int64-overflowing count emits no arithmetic diagnostic"
 WC_OVERFLOW_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
 assert_contains "$WC_OVERFLOW_BODY" "could NOT be measured" "case 17p: and it is declared UNMEASURED rather than treated as a comparable length"
+
+# A 19-DIGIT count that is INSIDE int64 (`1e18`) is a number the guard still declines (its bound is
+# a LENGTH bound, deliberately conservative). That is over-disclosure, never a hidden loss — but the
+# sentences must describe it: "could not be measured, or was not comparable". A prose-only fact, so
+# this row pins the STATE handling (no diagnostic, one issue filed, same sentence), not the wording.
+WC_INRANGE_DIR="$FIX/bin-wc-inrange"
+mkdir -p "$WC_INRANGE_DIR"
+cat > "$WC_INRANGE_DIR/wc" <<'WC_INRANGE_EOF'
+#!/usr/bin/env bash
+echo 1000000000000000000
+exit 0
+WC_INRANGE_EOF
+chmod +x "$WC_INRANGE_DIR/wc"
+export PATH="$WC_INRANGE_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$(count_creates)" "1" "case 17p: a 19-digit in-range count still files the alert"
+assert_not_contains "$OUT" "integer expression expected" "case 17p: and it emits no arithmetic diagnostic"
+WC_INRANGE_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$WC_INRANGE_BODY" "could NOT be measured" "case 17p: and the guard's conservative answer is DECLARED, not silent"
+assert_contains "$WC_INRANGE_BODY" "or was not comparable" "case 17p: and the window names BOTH reasons a size is not used"
 
 reset_case
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
