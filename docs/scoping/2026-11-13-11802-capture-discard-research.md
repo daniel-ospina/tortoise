@@ -26,12 +26,18 @@ agent-infra#3921.
 > the first draft transcribed `file:line` offsets against an older revision and only 2 of 11 still
 > resolved, so symbols replaced them and survive the next edit.
 >
-> Line numbers survive only where they name the tree they were measured on — three such groups: the
-> §2.5 PRE-fix table is pinned to the **base** (`origin/main` @ `2dbfb046d7e3`, whose lines are the
+> Code line numbers survive only where they name the tree they were measured on — three such groups:
+> the §2.5 PRE-fix table is pinned to the **base** (`origin/main` @ `2dbfb046d7e3`, whose lines are the
 > defect sites this change moves); the §3 copies table is measured on the **shipping** artifact (the
-> repo copy is byte-identical from `8ad837711f` onward) and says so in its own heading; and one live
+> repo copy is byte-identical from `8ad837711f` onward) and says so in its own lead-in; and one live
 > citation, `tortoise/hook_install.py` `PI_EXTENSION_NAME`, keeps a line number because the symbol is
 > a module constant rather than something to quote — safe because this PR does not touch that file.
+>
+> A **fourth** group is offsets into two documents this PR never edits: `docs/ONTOLOGY.md` (§1's layer,
+> `eventId` and `AgentSession` anchors) and `docs/architecture/PI-CAPTURE-ARCHITECTURE.md` (the orphan
+> reap note). Those are safe *only* because the files are untouched here, and they are the group most
+> likely to drift next — every one was resolved against a HEAD checkout when this note was written,
+> so re-check them if either document is ever edited.
 
 ---
 
@@ -121,7 +127,7 @@ contradiction in favour of the position the read path already records.
 
 ### 2.2 The doctrine is already written down, verbatim, for a neighbouring case
 
-`tortoise-capture.ts` (the retention doctrine comment above `healthScan`'s neighbours):
+`tortoise-capture.ts` (the retention doctrine comment in `writeSpoolEntry`'s growth-refusal arm):
 
 > **A refusal is a delay the operator can reverse (`--retry-terminal`), an unlink is a loss nobody
 > can.**
