@@ -802,9 +802,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # Python's last-wins dict semantics made that broad row DEAD (it never applied),
     # so removing it changes no exemption, while MERGING the two would silently
     # re-widen the shape the entry below deliberately narrows. ⛔ `ruff`'s `F601`
-    # flagged the SURVIVING (narrow) row, not this dead one — see the `F601` note above
-    # (the one that explains the direction): following "which one did ruff flag" finds
-    # the row that WON, never the loser.
+    # flagged the SURVIVING (narrow) row, not this dead one — see the `#9219` note
+    # further up this dict, which states it: following "which one did ruff flag"
+    # finds the row that WON, never the loser. ⛔ No line OFFSET is stated here on
+    # purpose: an offset rots on the next insertion above it (this one was "130
+    # lines up" and the block it meant sat 156 lines up), which is the same
+    # stale-figure defect class the `#12265` scan exists to close.
     # Same behaviour, one row, no reading that says otherwise.
     "test_9079_event_writers_journal.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],

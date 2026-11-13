@@ -8264,7 +8264,16 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #
 #   * `tools/` — 140 of 195 DO reach it; 55 do not (measured:
 #     `select(["tools/min_signal.py"], "pull_request")` → 90 test files, this one
-#     absent; `tools/claim_lanes.py`, `tools/ask_spotcheck.py` likewise). `tools/dod_5090_probe.py`
+#     absent — a `tools/`-only diff matching NO pattern is swallowed by
+#     NON_PYTHON_PREFIXES before the `core` fallback runs, and
+#     `tools/merge_throughput.py` measures the same 90; `tools/ask_spotcheck.py`
+#     misses by the OTHER mechanism (`tools/ci_selection.py:1147` makes it an `sdk`
+#     named surface, which REPLACES the fallback → 197 test files, this one absent)).
+#     ⛔ Do NOT name `tools/who_is_on.py` here — this bullet did, and it is the
+#     OPPOSITE of a miss: an UNCLASSIFIED path selects in FULL, so this test DOES run
+#     on that diff (measured: `full=True`, `test_files == "ALL"`). `tools/claim_lanes.py`
+#     is not a file in this repo (agent-infra's is `tools/fleet/claim_lanes.py`), so it
+#     could not have been the one measured. `tools/dod_5090_probe.py`
 #     itself does — it is a `CORE_ALSO` entry in `tools/ci_selection.py` (the
 #     instrument has to be selected by its own subject; 830 test files, this one
 #     PRESENT) — which is the file `#11996`'s duplicate lived in, and why a
@@ -8280,7 +8289,8 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 # So the honest bound is per root and NOT a rule you can generalise: any full-lane run
 # (push and schedule select in FULL, which is what makes the born-at-merge case
 # catchable), plus a per-file `pull_request` selection that covers every `tests/`
-# module but one, 140 of 195 `tools/` modules, and 254 of 285 `tortoise/` modules.
+# module but one, 140 of 195 `tools/` modules (`tools/dod_5090_probe.py` — the file
+# `#11996`'s duplicate lived in — among them), and 254 of 285 `tortoise/` modules.
 # Anything outside that is lint's alone.
 
 #: Roots the declaration dicts live under today. ⛔ NOT the whole repo: `battery/`,
@@ -8293,6 +8303,17 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #: that line suppresses it — which is exactly the live shape this change found and
 #: removed in `tests/test_commit_schema.py`. So "lint would still catch it there" is
 #: false for the one shape we have actually observed.
+#:
+#: ⛔ THE CANONICAL ALTERNATIVE, stated so this scan is not read as the only catcher
+#: and not read as a substitute for the linter: the standard answer to a suppressible
+#: rule is to run the rule UNSUPPRESSED — `ruff check --select F601 --ignore-noqa`
+#: (measured on this tree: `All checks passed`, and no `# noqa: F601` DIRECTIVE
+#: survives to un-suppress, so it costs nothing). What this scan adds is what lint
+#: cannot: a red that no marker can defuse, one that runs in the pytest shard without
+#: depending on the lint step's selection, and one whose RED arm is provable by a test
+#: — so it is a COMPLEMENT to lint, never a replacement. ⛔ That step must stay
+#: rule-SCOPED: a repo-wide `--ignore-noqa` would un-baseline the 242 `# noqa`
+#: directives `#1685` recorded, i.e. it would reverse that decision — do not propose it.
 #:
 #: ⛔ NO FILE COUNT IS ASSERTED, here or for the roots outside. A count is a
 #: measurement of the tree it was taken on: a draft of this comment said "254", and by
@@ -8462,11 +8483,20 @@ def _duplicate_key_report(violations: list[str]) -> str:
     when that assert FAILS — so no run ever built it, and changing the prefix or the
     newline-and-indent separator would have left every test green. A message nobody renders is
     not a guard's evidence.
+
+    ⛔ The prose covers BOTH arms this prefixes, because `_scan_declaration_roots` routes
+    three kinds of violation through it: a duplicated key, an UNREADABLE module and an
+    UNPARSEABLE one. A prefix that named only the duplicate would send a reader holding a
+    parse failure looking for a duplicate key that is not there — the misattribution this
+    guard exists to stop, one layer up (review of `#12265`).
     """
     return (
-        "a dict literal declares the same key twice, so the entry that loses the "
-        "last-wins race is DEAD while every test stays green (#12265, root #9314). "
-        "Delete the stale row (or correct the reason) — do not add `# noqa: F601`:\n  "
+        "a duplicate declaration is a SILENT loser: a dict literal that declares the same "
+        "key twice keeps only the LAST binding, so the entry that loses the last-wins race "
+        "is DEAD while every test stays green (#12265, root #9314) — and a module this scan "
+        "could not READ or PARSE is a HOLE in the same guard, not a pass. Delete the stale "
+        "row (or correct the reason) rather than adding `# noqa: F601`, and make an "
+        "UNREADABLE/UNPARSEABLE module readable:\n  "
         + "\n  ".join(violations)
     )
 
@@ -8604,3 +8634,10 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
     assert "tortoise/dup.py:3 re-declares key 'x::y' (first at :2)" in report, report
     assert "tests/broken.py: UNPARSEABLE" in report, report
     assert report.count("\n  ") >= 2, report
+    # ⛔ The wrapper's PROSE must describe EVERY arm it prefixes, not just the duplicate
+    # one: `broken.py`/`binary.py` are not duplicate keys, and a red run whose first line
+    # says "a dict literal declares the same key twice" sends the reader hunting for a
+    # duplicate that does not exist. Asserted on a PARSE-ONLY set, so the arm that has no
+    # duplicate in it is the one the prose has to hold for.
+    parse_only = _duplicate_key_report([v for v in violations if "broken.py" in v])
+    assert "could not READ or PARSE" in parse_only.split("\n  ")[0], parse_only
