@@ -331,8 +331,12 @@ def main() -> int:
             if isinstance(rec.get("point"), dict) else None
         if not vector or width != JOURNAL_VECTOR_WIDTH_F32:
             continue
-        # ⛔ Three DISTINCT links, each computed against something outside the
-        # frame. An earlier version compared `pack_f32(narrow(x)) == pack_f32(x)`,
+        # ⛔ TWO DISTINCT links computed against something OUTSIDE the frame (both
+        # facing the producer); frame-invertibility is their transitive consequence
+        # and is asserted for naming only — it compares the decode to the frame's own
+        # INPUT, so it can add no discriminating power. Saying "three links, each
+        # outside the frame" was false for the third, in this comment, long after the
+        # note was corrected. An earlier version compared `pack_f32(narrow(x)) == pack_f32(x)`,
         # which is an IDENTITY — packing as f32 rounds whether or not you round
         # first — so it held for 384 random floats with no journal at all and the
         # assertion built on it could never fail. The link that matters is against
@@ -435,7 +439,9 @@ def main() -> int:
               [float(x) for x in np.random.default_rng(12459).standard_normal(EMBEDDING_DIM)])
 
     # ── the sign of the trade is a property of the VECTOR ───────────────
-    # The frame costs a flat 5.33 chars/float (f32) / 10.71 (f64), so it is a
+    # The frame costs a flat 5.375 chars/float (f32) / 10.71 (f64) — both the FULL
+    # FRAMED span (2,064/384 and 4,112/384), not the bare base64 5.33 (2,048/384),
+    # so it is a
     # FLOOR the JSON text can fall below. Measured on degenerate shapes:
     print("\n== degenerate vectors: the trade's SIGN depends on the vector "
           "(ratio = text/frame; <1 means the frame is LARGER)")
@@ -506,6 +512,36 @@ def main() -> int:
         else:
             print(f"  {label:<42} ⛔ DECODED — this is a defect")
             return 1
+
+    # ── WHY `validate=True` is MANDATORY — the default decoder accepts an INSERTION
+    # The note states this as measured; until this arm existed no artifact line
+    # measured it (every other call in this probe passes `validate=True`, so the
+    # insertion case only ever printed its REFUSAL). A "(measured: …)" tag with no
+    # line behind it is the same species as a printed-not-asserted control.
+    print("\n== the default decoder vs validate=True (why validate is mandatory)")
+    inserted_body = cases[
+        "non-base64 chars INSERTED (count-clean, validate-only)"].rsplit(":", 1)[1]
+    packed_reference = struct.pack(f"<{len(producer)}f", *producer)
+    default_decoded = base64.b64decode(inserted_body)  # validate=False (the default)
+    strict_raises = False
+    try:
+        base64.b64decode(inserted_body, validate=True)
+    except Exception:
+        strict_raises = True
+    default_silent = (len(default_decoded) % 4 == 0
+                      and default_decoded == packed_reference)
+    print(f"  4 inserted '*' chars: default decode {len(default_decoded):,} B  "
+          f"len%4==0 {len(default_decoded) % 4 == 0}  "
+          f"bits == the packed payload {default_decoded == packed_reference}  "
+          f"validate=True raises {strict_raises}")
+    if not default_silent or not strict_raises:
+        print("  ⛔ the insertion case is no longer count-clean-and-silent under the "
+              "default decoder, or validate=True no longer refuses it — the note's "
+              "justification for validate=True must be re-stated")
+        return 1
+    print(f"  ⇒ only `validate=True` refuses it: an insertion is count-clean "
+          f"({len(default_decoded):,} B, {len(default_decoded) // 4} whole floats, "
+          f"bit-identical to the payload).")
 
     # ── WHY the count is load-bearing: the silent-truncation sweep ──────
     # `b64decode` REFUSES a non-quantum-aligned cut ("Incorrect padding", or

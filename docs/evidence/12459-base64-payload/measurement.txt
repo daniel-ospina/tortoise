@@ -58,6 +58,10 @@
   non-base64 character REPLACING alphabet chars REFUSED (Error)
   non-base64 chars INSERTED (count-clean, validate-only) REFUSED (Error)
 
+== the default decoder vs validate=True (why validate is mandatory)
+  4 inserted '*' chars: default decode 1,536 B  len%4==0 True  bits == the packed payload True  validate=True raises True
+  ⇒ only `validate=True` refuses it: an insertion is count-clean (1,536 B, 384 whole floats, bit-identical to the payload).
+
 == silent truncation: which cuts a LENGTH-ONLY check would accept
    cut   chars%4   decoded    floats   len%4==0   count check (declared n)
    -1    3        refused by b64decode (Incorrect padding)

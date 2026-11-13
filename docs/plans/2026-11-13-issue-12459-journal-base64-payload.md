@@ -349,8 +349,11 @@ case (1,524 B = **381 whole floats**), so a reader checking only `len(decoded) %
 truncated vector**. Only the declared count refuses it. (This is the fail-open direction on the durability
 artifact: a short vector replayed into the graph is a wrong graph with no error anywhere.) `validate=True`
 is still mandatory — the default `False` **discards** characters outside the alphabet instead of refusing, so
-an **insertion** into the body is count-clean and decodes to the *right* vector *silently* (measured: 4
-inserted `*` → default `b64decode` gives 1,536 B, count-clean, bit-identical; `validate=True` raises). That is
+an **insertion** into the body is count-clean and decodes to the *right* vector *silently* — measured, not
+argued: the probe's `== the default decoder vs validate=True` section prints, for 4 inserted `*` characters,
+`default decode 1,536 B  len%4==0 True  bits == the packed payload True  validate=True raises True`. Until
+that arm existed the claim rested on the case's LABEL, and every other call in the probe passes
+`validate=True`, so nothing measured the default decoder at all. That is
 why the probe has **two** character cases, not one: a *replacement* is caught by the count, and only an
 *insertion* is caught by `validate`. The probe asserts both halves: every multiple-of-4 cut decodes silently,
 and — *of the cuts measured (−1…−20)* — `−16` is the only one whose decoded length passes a `%4` check
@@ -407,7 +410,7 @@ perturbation** of one element flips it to `False`. ⚠️ **The first draft of t
 it printed `float(np.float64(v)) == v` over the producer with `decoded` ABSENT, under a label naming
 `decoded==producer`, so it was a widening identity that no input can falsify and the guard under it could
 never fire: the same class as the tautological control an earlier review round of this note had to
-fix (its round 14 replaced a printed control with an asserted one), one control down again. Both arms
+fix (round 14 printed a control, and round 15 is what made it asserted), one control down again. Both arms
 are now driven from a real verified vector and a `False` / `True` where this text says otherwise returns 1.
 The bits are the property because the bits are what the graph stores.
 
