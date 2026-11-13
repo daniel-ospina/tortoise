@@ -8282,11 +8282,13 @@ def test_the_census_has_no_DUPLICATE_dict_key_in_its_source() -> None:
     # ⚠️ What this scope is NOT: a duplicate fail-open fix. `assert not dupes` below fires PER
     # VISITED NODE, so a duplicate in the real table reds whether or not a decoy literal exists —
     # re-measured on the pre-`tree.body` version: real duplicate plus a 23-key decoy → RED, not
-    # clean. `seen` is last-wins, so a decoy can only shadow the TRAILING count-agreement check,
-    # which compares a literal's key count against the runtime dict. Narrowing the scan removes that
-    # window; it does not close a duplicate fail-open, because there was none. What a walk DOES get
-    # wrong in the other direction: a 5-key function-local literal bearing the same name FALSE-BLOCKS
-    # on the floors below (measured), so the narrowing is not cosmetic either.
+    # clean. `seen` is last-wins, so a decoy CAN shadow the TRAILING checks that read it — the
+    # key-count comparison against the runtime dict AND the per-literal key floors below — while a
+    # decoy naming a table ABSENT from the top level also satisfies the vacuity `set(seen) == wanted`.
+    # Narrowing the scan removes that window; it does not close a duplicate fail-open, because there
+    # was none. What a walk DOES get wrong in the other direction: a 5-key function-local literal
+    # bearing the same name FALSE-BLOCKS on the floors below (measured), so the narrowing is not
+    # cosmetic either.
     # ⚠️ And this is a DIRECTIVE, not a pin: restoring `ast.walk` leaves this file GREEN (measured),
     # so nothing reds if a later lane widens it back. Re-derive the reason before changing the scope.
     for node in tree.body:
@@ -8308,8 +8310,9 @@ def test_the_census_has_no_DUPLICATE_dict_key_in_its_source() -> None:
     # A vacuous pass is the failure mode of a source-reading test: if none of the three literals was
     # found AT TOP LEVEL, nothing was checked. All three exist there today, so a MISS means a table
     # was moved into a scope this detector no longer reads — re-derive it deliberately, do not widen
-    # it back to `ast.walk` (a decoy literal would then also feed `seen`, masking the count check,
-    # and a smaller one would false-block on the floors).
+    # it back to `ast.walk` (a decoy literal would then also feed `seen`, masking the vacuity check
+    # below and the floor/count assertions that read it, and a smaller one would false-block on the
+    # floors).
     assert set(seen) == wanted, (
         f"these census dict literals were not found in {probe.__file__}: "
         f"{sorted(wanted - set(seen))} — the detector checked nothing for them")
