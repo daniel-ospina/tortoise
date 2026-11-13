@@ -725,6 +725,54 @@ def _identity_row(graph, node_id: str, var: str, projection: str):
     return None
 
 
+def _entity_label(graph, node_id: str) -> str | None:
+    """Which identity label carries ``node_id`` — the fixed two-label probe.
+
+    Needed because ``follow_resolved_from`` is LABEL-scoped and a merge caller
+    supplies only an id. The order is ``("Object", "Subject")``, the same one
+    ``_identity_row`` uses, so the two cannot disagree about which node a
+    projection read.
+    """
+    for label in ("Object", "Subject"):
+        rows = graph.query(
+            f"MATCH (n:{label} {{id:$id}}) RETURN n.id",
+            params={"id": node_id}).result_set
+        if rows:
+            return label
+    return None
+
+
+def _survivor_fixpoint(graph, survivor_id: str) -> tuple[str, int]:
+    """``(id, hops)`` of the entity ``survivor_id`` finally names (#12296, M-4).
+
+    ``apply_entity_merge`` must write the redirect onto an entity that is not
+    itself retired. Writing ``candidate -> survivor`` where the survivor already
+    carries ``resolved_from`` creates a CHAIN — ``candidate -> survivor ->
+    fixpoint`` — which ``follow_resolved_from`` then collapses silently
+    (``entity_resolver.py:556-577``), so a second hop the reviewer never saw is
+    applied by every identity read from then on. `#12186` round 2 measured the
+    consequence: nothing in this tree bounds or reports chain length.
+
+    Hopping the survivor first makes the invariant hold BY CONSTRUCTION — after
+    this, no merge can create a chain of length >= 2 — which is also what makes
+    ``entity_verdict.group_join``'s ``dependents >= 1`` a reliable reading of
+    "this target is a group".
+
+    ``hops`` is returned rather than only applied: it is the evidence that a
+    chain existed (`#12186` M-10's *reporting* half), and a caller that expected a
+    live survivor learns it was redirected rather than discovering it from a
+    later read. A single-label probe means a lookup that cannot resolve the label
+    returns ``(survivor_id, 0)`` — the caller's own ``_identity_row`` read then
+    raises ``No entity``, which is the honest answer for an id that is not an
+    entity.
+    """
+    label = _entity_label(graph, survivor_id)
+    if label is None:
+        return str(survivor_id), 0
+    fixed = follow_resolved_from(graph, label, survivor_id)
+    return str(fixed), 0 if str(fixed) == str(survivor_id) else 1
+
+
 def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
                        method: str, similarity: float) -> dict:
     """Fold ``candidate_id`` onto ``survivor_id`` WITHOUT deleting either node.
@@ -758,6 +806,14 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     if candidate_id == survivor_id:
         raise ValueError("a merge needs two distinct entities")
     graph = sdk._get_proj().g
+    # #12296 (M-4's positive half): a merge must not CREATE a chain. Detected by
+    # hopping the survivor to its fixpoint BEFORE any write, so the redirect this
+    # function records always points at an entity that is not itself retired.
+    survivor_id, survivor_hops = _survivor_fixpoint(graph, survivor_id)
+    if str(candidate_id) == str(survivor_id):
+        raise ValueError(
+            "a merge needs two distinct entities — the requested survivor was "
+            f"itself retired and resolves onto the candidate {survivor_id!r}")
     # LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id` (this module's own
     # rule — an unlabelled id probe full-scans every label in the graph, and
     # `id` is a natural key on exactly two of them).
@@ -805,9 +861,15 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     if not candidate_canonical:
         _candidate_props["canonical_name"] = folded
     sdk.update_entity(candidate_id, **_candidate_props)
-    return {"survivor_id": survivor_id, "candidate_id": candidate_id,
-            "aliases": alias_list, "method": method,
-            "similarity": round(float(similarity), 4)}
+    out = {"survivor_id": survivor_id, "candidate_id": candidate_id,
+           "aliases": alias_list, "method": method,
+           "similarity": round(float(similarity), 4)}
+    if survivor_hops:
+        # Evidence, not a warning: the merge LANDED, on the entity the graph says
+        # survives. A caller comparing this id with the one it passed can see the
+        # redirect; nothing here is silent.
+        out["survivor_hopped"] = True
+    return out
 
 
 def entity_pair_for(graph, candidate_id: str, *,

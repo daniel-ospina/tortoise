@@ -1,0 +1,414 @@
+"""The verdict step over noun candidates — three bands, hard vetoes, closure
+re-verification (#12296).
+
+**Stdlib only, no model call, no graph read.** This module decides *what a
+proposal means*; it never produces a proposal. The candidate set is supplied by
+`extractor_v2.search_graph` (S3) and the proposal — when the resolver is armed —
+by the phase-2 prompt (`extractor_v2._resolution_prompt`). Everything here is a
+pure function over the mention, the candidate and a small fact dict, so every
+rule below is testable without a graph or a provider.
+
+Vocabulary
+----------
+Three bands, and only three::
+
+    merge   — the mention IS this existing entity. The mention binds to it.
+    review  — undecidable at this layer: HELD, never asserted new (§4.4 I1).
+    new     — the run measured ABSENCE (no candidate of that name), which is the
+              one state that licenses a create (#11653).
+
+⛔ **`link` is NOT a band, and this is a deliberate record-shape decision
+(issue #12296 scope 1).** Round 3 (`12186` comment `6839898289`, Half-A.1) found
+exactly one non-retiring pointer in the tree — `aliases[]` on the SURVIVOR
+(`entity_resolver.py:784`, `:792`), which leaves the other node live,
+search-visible and still a dedup candidate (`_ENTITY_READ` filters on
+`resolved_from`, `entity_resolver.py:207`). Two reasons it is not shipped as a
+verdict value here:
+
+* **a pointer is not a verdict.** `aliases[]` records *addressability* ("this
+  spelling names that entity"). It carries no evidence, no score and no inverse:
+  from an alias you cannot recover the variant that produced it. A band must be
+  able to say *"these two are probably one thing, and here is why"*; an alias
+  cannot.
+* **⛔ writing `dedup_reviewed='link'` is worse than inert — it silently
+  DEQUEUES.** The write is one call (`sdk.py:51584` → `SET n += $props`), but
+  the content review queue filters `dedup_reviewed IS NULL`
+  (`sdk.py:24256-24257`), so ANY non-NULL value removes the row from review with
+  no verdict applied. A band that wrote `'link'` today would delete a review
+  nobody counts.
+
+So a proposal that is neither provable identity nor measured absence leaves as
+`review` (held) — which is the same disposition the pointer would have produced,
+minus the lost review.
+
+Hard vetoes
+-----------
+The expensive direction is a FALSE MERGE: it retires a node other paths keep
+reading. The bands are therefore **precision-first**, in the field's own words —
+*"precision needs hard rule-based vetoes"* (arXiv:2607.26298 lesson 2, quoted
+from round 1's stage-B row). A veto can only ever move a proposal from `merge`
+to `review`; it never licenses `new`, because a conflict is not an absence.
+
+The four deterministic vetoes, each with the substrate it reads:
+
+``identifier_conflict``
+    Both sides carry identifier-shaped tokens and the sets are disjoint
+    (`billing v2 ledger` vs `billing v3 ledger`). Separator and case are folded,
+    so the #8933 class (`ERR-4032` → `err4032`) does NOT fire — a deliberate
+    property: the fold that makes the identifier class measurable also makes its
+    variants agree.
+
+``date_conflict``
+    Both sides carry a year and/or a quarter token and the like-kind sets are
+    disjoint (`the Q3 plan` vs `the Q4 plan`). Evaluated per kind, so a side with
+    a year does not conflict with a side carrying only a quarter.
+
+``kind_conflict``
+    Both sides carry a SPECIFIC kind and they differ. `other`/empty is the
+    coalesce default (`entities.py:5086`) and is treated as *unknown*, never as a
+    conflicting value — a default must not become evidence.
+
+``target_suppressed``
+    The candidate carries a rejection that named no survivor — `_pair_reviewed`'s
+    documented "suppresses the candidate outright" case
+    (`entity_resolver.py:236-250`): the reviewer already answered the question,
+    against an ambiguous set, and re-asking it against one survivor is not a
+    different question.
+
+⛔ **On the issue's "an explicit `DIFFERENT_FROM`" veto: that predicate does not
+exist in this tree.** `grep -rn 'DIFFERENT_FROM' tortoise/ tests/` → 0 hits;
+`_VALID_EDGE_PREDICATES` (`projection/edges.py:717-730`) has no such edge. The
+recorded analogue is the persisted no-merge verdict — `dedup_reviewed='reject'`
+plus `dedup_target_id` / `dedup_rejected_targets` — and it is **PAIR-scoped
+between two NODES**. A name-only mention has no node, so the pair form is not
+evaluable at this layer: the verdict defers to it by leaving `target_suppressed`
+here (the target-less form, which suppresses regardless of pair) and by never
+re-offering a reviewed pair (the queue's own universe). Stated rather than
+approximated: a rejection that names a survivor is honoured by the merge verb
+(`sdk.py:24861-24879`), not by this module.
+
+Closure re-verification (M-4)
+-----------------------------
+*"One false-positive link can silently merge unrelated entities — assuming 'A
+matches B' and 'B matches C' implies 'A matches C' lets a single bad link chain
+hundreds of records together, so every cross-group merge must be actively
+re-verified"* (arXiv:2607.26298 lesson 3, round 1's M-4).
+
+In this tree the chain is a `resolved_from` path, and it is **walked on the
+identity path** — `follow_resolved_from` follows to a fixpoint
+(`entity_resolver.py:556-577`), so a chain is silently collapsed rather than
+reported. Two closure vetoes make that hazard decidable at the verdict:
+
+``target_retired``
+    The target itself carries `resolved_from`. Binding a mention to it is
+    binding to a node the merge already retired — defect **D-1**
+    (`12186` comment `6839898289`), which the S3 candidate-set guard also
+    prevents; this is the belt-and-braces half for any caller that builds a
+    candidate table by another route.
+
+``group_join``
+    The target is itself a SURVIVOR of an earlier merge (`dependents >= 1`). The
+    target then stands for a group, and binding a new mention to it asserts
+    "mention matches group" from a pairwise comparison that was never made
+    against the group's other members. That is the transitive-closure hazard, and
+    the precision-first answer is `review`: a human can accept it, the band may
+    not infer it.
+
+⚠️ **The guard's other half is positive, and it lives in the merge verb.**
+`entity_resolver.apply_entity_merge` hops the survivor to its fixpoint before
+writing, so no merge can ever CREATE a chain of length >= 2. With that, "no
+`resolved_from` chain longer than 1" is an invariant rather than a hope, and
+`dependents >= 1` is a reliable reading of "this target is a group".
+
+Contradiction test
+------------------
+**No recorded decision reaches this work.** V1 (`SEARCH-ARCHITECTURE.md` 1-4)
+gates the index location; §12.2/§12.2c gate what earns a vector; §14.3 V3 + the
+`#11395` KEEP ruling (`6781921075`) gate the embeddings' existence; §2.0 gates
+the record/cache split; §7 + §17.4.6 ban the read ledger as an admission-control
+signal; `#11901`'s conclusion leaves the window untouched — this module changes
+no window, no index, no vector, and reads no ledger. The band structure is new
+ground: nothing recorded covers it, so the external convergence (Zep's four
+rungs then a select-over-supplied-list prompt, Mem0's boost that never decides
+identity) is informative and not authoritative.
+"""
+from __future__ import annotations
+
+import re
+
+# ── Bands ────────────────────────────────────────────────────────────────
+
+BAND_MERGE = "merge"
+BAND_REVIEW = "review"
+BAND_NEW = "new"
+
+#: The three bands, and the order a caller should read them in: a `merge` is the
+#: only one that writes, a `review` is the only one that waits, a `new` is the
+#: only one that creates.
+BANDS: tuple[str, ...] = (BAND_MERGE, BAND_REVIEW, BAND_NEW)
+
+# ── Veto codes ───────────────────────────────────────────────────────────
+#: Every veto is a REASON a proposal is not a `merge`. The vocabulary is closed
+#: and published so a record can be read without the code that wrote it.
+
+VETO_IDENTIFIER_CONFLICT = "identifier_conflict"
+VETO_DATE_CONFLICT = "date_conflict"
+VETO_KIND_CONFLICT = "kind_conflict"
+VETO_TARGET_SUPPRESSED = "target_suppressed"
+VETO_TARGET_RETIRED = "target_retired"
+VETO_GROUP_JOIN = "group_join"
+
+VETO_CODES: tuple[str, ...] = (
+    VETO_IDENTIFIER_CONFLICT,
+    VETO_DATE_CONFLICT,
+    VETO_KIND_CONFLICT,
+    VETO_TARGET_SUPPRESSED,
+    VETO_TARGET_RETIRED,
+    VETO_GROUP_JOIN,
+)
+
+#: Kinds that mean "not stated". `other` is the write-time coalesce default
+#: (`projection/entities.py:5086`), so treating it as a value would make the
+#: default act as evidence on every entity that never declared a kind.
+_UNSTATED_KINDS = frozenset({"", "other", "none", "unknown"})
+
+# ── Token extraction ─────────────────────────────────────────────────────
+
+_SEPARATORS = re.compile(r"[^0-9a-z]+")
+#: A token is scanned as a whole: identifier-ness is a property of the TOKEN
+#: (`ERR-4032`), never of a fragment (`4032`) — a bare number is a quantity or a
+#: date, and folding it to an identifier would veto `the top 3 accounts` against
+#: `the top 5 accounts` for the wrong reason.
+_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-/]*")
+_YEAR = re.compile(r"\b(1[89]\d\d|2\d\d\d)\b")
+_QUARTER = re.compile(r"\bq([1-4])\b")
+#: Tokens that LOOK identifier-shaped (letter+digit) but are temporal, so they
+#: belong to `date_tokens` and not here: `Q3`/`q4` and a bare four-digit year. Left
+#: in, `the Q3 plan` complained about a contradicting IDENTIFIER — the right band
+#: reached by the wrong reason, and a record whose reason names the wrong rule is
+#: worse than no record.
+_TEMPORAL_TOKENS = re.compile(r"^(q[1-4]|1[89]\d\d|2\d\d\d)$")
+_MONTHS = {
+    name: idx for idx, name in enumerate(
+        ("january", "february", "march", "april", "may", "june", "july",
+         "august", "september", "october", "november", "december"), start=1)
+}
+
+
+def identifier_tokens(name: str) -> set[str]:
+    """Identifier-shaped tokens in ``name``, separator- and case-folded.
+
+    A token qualifies when it carries a DIGIT **and** (a letter or a separator) —
+    so `ERR-4032`, `v2`, `2026-11`, `abc123` and `x.y` qualify, while `4032`,
+    `billing` and `the` do not. Folding drops separators and case, which is what
+    makes `ERR-4032` and `err4032` the SAME identifier: the #8933 separator class
+    is a *variant* class, and a veto that fired across it would refuse exactly
+    the merges the fold exists to enable.
+    """
+    out: set[str] = set()
+    for tok in _TOKEN.findall(str(name or "")):
+        has_digit = any(ch.isdigit() for ch in tok)
+        if not has_digit:
+            continue
+        has_alpha = any(ch.isalpha() for ch in tok)
+        has_sep = any(ch in tok for ch in "-_./")
+        if not (has_alpha or has_sep):
+            continue
+        folded = _SEPARATORS.sub("", tok.casefold())
+        if not folded or _TEMPORAL_TOKENS.match(folded):
+            continue
+        out.add(folded)
+    return out
+
+
+def date_tokens(name: str) -> dict[str, set[str]]:
+    """Temporal tokens in ``name``, keyed by KIND: ``year``, ``quarter``,
+    ``month`` and — when both a year and a quarter are present — ``year_quarter``.
+
+    Keyed by kind on purpose: the veto compares like with like, so `Q3 plan`
+    against `2026 plan` is not a conflict (one side states a quarter, the other a
+    year; nothing is contradicted), while `Q3 plan` against `Q4 plan` is.
+    """
+    text = str(name or "").casefold()
+    years = set(_YEAR.findall(text))
+    quarters = {f"q{q}" for q in _QUARTER.findall(text)}
+    months = {f"{m:02d}" for m, label in _MONTHS.items()
+              if re.search(rf"\b{label}\b", text)}
+    out: dict[str, set[str]] = {}
+    if years:
+        out["year"] = years
+    if quarters:
+        out["quarter"] = quarters
+    if months:
+        out["month"] = months
+    if years and quarters:
+        out["year_quarter"] = {f"{y}-{q}" for y in years for q in quarters}
+    return out
+
+
+def _fold_kind(kind) -> str:
+    """The BARE, case-folded kind — namespace prefix dropped.
+
+    ⛔ Not a detail: `core:person` and `ops:person` are the same kind surface,
+    and the tree already keys on the bare form (`extractor_v2._norm_kind`,
+    *"The model may emit 'plan' where the backend stores 'core:plan'; both must
+    resolve to the same key or link-before-create misses and a duplicate :Object
+    is created"*). A veto comparing the SPELLED kind would refuse exactly the
+    cross-namespace resolutions the phase-2 prompt exists to decide — measured,
+    it turned `tests/test_11653_s3_hold_not_add.py::
+    TestTheOtherArms::test_the_resolver_may_still_pick_one_of_the_collision`
+    red. The namespace is an emission-time spelling, not identity.
+    """
+    return str(kind or "").strip().rsplit(":", 1)[-1].strip().casefold()
+
+
+# ── Vetoes ───────────────────────────────────────────────────────────────
+
+
+def hard_vetoes(mention: dict, candidate: dict,
+                facts: dict | None = None) -> list[str]:
+    """The vetoes that refuse ``candidate`` as the entity ``mention`` names.
+
+    ``mention`` / ``candidate`` are ``{name, kind}`` dicts — the same shape the
+    resolution table carries (`extractor_v2._resolution_prompt`). ``facts`` is
+    what the graph adds about the CANDIDATE, all optional so a caller with no
+    graph read gets the name/kind vetoes only::
+
+        {"retired": bool,        # candidate carries `resolved_from`
+         "dependents": int,      # nodes whose `resolved_from` is the candidate
+         "suppressed": bool}     # `dedup_reviewed='reject'` naming no survivor
+
+    Returns the veto codes (empty = no objection). **Order is the published
+    ``VETO_CODES`` order**, so two runs over the same inputs produce the same
+    record — a record whose reason list reorders between runs cannot be compared.
+    """
+    facts = facts or {}
+    got: list[str] = []
+
+    m_ids = identifier_tokens(mention.get("name", ""))
+    c_ids = identifier_tokens(candidate.get("name", ""))
+    if m_ids and c_ids and not (m_ids & c_ids):
+        got.append(VETO_IDENTIFIER_CONFLICT)
+
+    m_dates = date_tokens(mention.get("name", ""))
+    c_dates = date_tokens(candidate.get("name", ""))
+    for kind in ("year_quarter", "year", "quarter", "month"):
+        mine, theirs = m_dates.get(kind), c_dates.get(kind)
+        if mine and theirs and not (mine & theirs):
+            got.append(VETO_DATE_CONFLICT)
+            break
+
+    m_kind, c_kind = _fold_kind(mention.get("kind")), _fold_kind(candidate.get("kind"))
+    if (m_kind not in _UNSTATED_KINDS and c_kind not in _UNSTATED_KINDS
+            and m_kind != c_kind):
+        got.append(VETO_KIND_CONFLICT)
+
+    if facts.get("suppressed"):
+        got.append(VETO_TARGET_SUPPRESSED)
+    if facts.get("retired"):
+        # D-1 at the candidate-table layer. The S3 guard
+        # (`extractor_v2._live_entity_priors`) already rewrites such a row onto
+        # its survivor, so this fires only for a table built another way — and
+        # when it does, the correct answer is a refusal, not a hop: a caller
+        # that reached here lost the evidence the hop needs.
+        got.append(VETO_TARGET_RETIRED)
+    if int(facts.get("dependents") or 0) >= 1:
+        got.append(VETO_GROUP_JOIN)
+
+    return [code for code in VETO_CODES if code in got]
+
+
+def judge(mention: dict, candidate: dict,
+          facts: dict | None = None) -> dict:
+    """The band for one (mention, candidate) proposal.
+
+    ``{"band": ..., "vetoes": [...], "reasons": [...]}`` where ``reasons`` are
+    readable sentences — the record a later reader needs in order to know *why*
+    without re-running the rule.
+
+    ⛔ A veto produces ``review``, NEVER ``new``: a contradiction between two
+    spellings is evidence that they are different, which says nothing about
+    whether the entity exists somewhere else. Conflating the two is how a
+    precision fix becomes a duplicate-manufacturing fix (§4.4 I1).
+    """
+    vetoes = hard_vetoes(mention, candidate, facts)
+    band = BAND_REVIEW if vetoes else BAND_MERGE
+    return {"band": band, "vetoes": vetoes,
+            "reasons": [VETO_REASONS[v] for v in vetoes]}
+
+
+#: One readable sentence per veto code. Kept beside the codes rather than at the
+#: call sites: a second description of the same veto is how two readers start
+#: disagreeing about what fired.
+VETO_REASONS: dict[str, str] = {
+    VETO_IDENTIFIER_CONFLICT: (
+        "the two spellings carry disjoint identifier tokens — the identifier is "
+        "a contradicting identity, so this is not a merge"),
+    VETO_DATE_CONFLICT: (
+        "the two spellings carry disjoint date tokens of the same kind — the "
+        "dates contradict, so this is not a merge"),
+    VETO_KIND_CONFLICT: (
+        "the two spellings declare different kinds — a typed identity conflict, "
+        "so this is not a merge"),
+    VETO_TARGET_SUPPRESSED: (
+        "the candidate carries a rejection that named no survivor, which "
+        "suppresses it outright rather than for one pair"),
+    VETO_TARGET_RETIRED: (
+        "the candidate carries resolved_from — a merge already retired it, so "
+        "binding here would bind to a retired carrier"),
+    VETO_GROUP_JOIN: (
+        "the candidate is itself a merge survivor, so binding to it asserts "
+        "membership of a group this mention was never compared against "
+        "(cross-group merge re-verification, M-4)"),
+}
+
+
+# ── Closure re-verification (M-4) ────────────────────────────────────────
+
+
+def chain_length(node_id: str, edges) -> int:
+    """How many `resolved_from` hops separate ``node_id`` from its fixpoint.
+
+    ``edges`` is an iterable of ``(retired_id, survivor_id)`` pairs. The walk is
+    cycle-guarded (`follow_resolved_from`'s own rule, `entity_resolver.py:552`)
+    because a corrupt record must not hang a report, and it stops on a cycle
+    rather than reporting an infinite length.
+    """
+    survivor_of = {str(a): str(b) for a, b in edges}
+    current, seen = str(node_id), {str(node_id)}
+    hops = 0
+    while True:
+        nxt = survivor_of.get(current)
+        if not nxt or nxt in seen:
+            return hops
+        current, hops = nxt, hops + 1
+        seen.add(nxt)
+
+
+def dependents_of(node_id: str, edges) -> set[str]:
+    """The ids whose `resolved_from` names ``node_id`` — its merge group."""
+    return {str(a) for a, b in edges if str(b) == str(node_id)}
+
+
+def closure_vetoes(candidate_id: str, survivor_id: str, edges) -> list[str]:
+    """M-4 re-verification for ONE proposed merge, over the current edge set.
+
+    Refuses to create a chain or to silently absorb a group:
+
+    * ``target_retired`` — the SURVIVOR is itself retired. Merging onto it would
+      write ``candidate -> survivor -> fixpoint``: a chain, and a second hop the
+      reviewer never saw. (`apply_entity_merge` also hops the survivor to its
+      fixpoint, so this refusal exists for callers that construct the pair
+      themselves.)
+    * ``group_join`` — the CANDIDATE is a survivor of an earlier merge, so it
+      carries dependents. Retiring it drags those dependents across a boundary
+      their own pairwise verdict never covered: ``A matches B`` plus ``B matches
+      C`` is not a verdict on ``A``/``C``.
+    """
+    pairs = [(str(a), str(b)) for a, b in edges]
+    got: list[str] = []
+    if chain_length(survivor_id, pairs) >= 1:
+        got.append(VETO_TARGET_RETIRED)
+    if dependents_of(candidate_id, pairs):
+        got.append(VETO_GROUP_JOIN)
+    return [code for code in VETO_CODES if code in got]
