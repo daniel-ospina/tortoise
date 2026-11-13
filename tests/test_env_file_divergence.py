@@ -1970,11 +1970,21 @@ def test_a_blank_env_uri_beside_a_broken_file_key_is_not_reported_as_both(
     The file's value therefore cannot be a co-cause: the source is `env`, not
     `both`, even though the file's key is broken too (#12441 item 6).
 
-    Pinned in BOTH attribution scans on purpose — they are separate code paths
-    (one runs while the file still has pending keys, the other in the applied
-    state where `effective` is empty), and a pin on one says nothing about the
-    other. The surviving `both` arm has its own test; the NARROWING did not, so a
-    later reader could restore `both` and nothing would fail.
+    ⛔ WHAT IS ACTUALLY NEW HERE — corrected after review, because the first
+    version of this docstring overstated it. `test_a_whitespace_only_ladder_key_
+    is_attributed_to_the_ENVIRONMENT` already pins `daemon_error_source == "env"`
+    for this same environment state in BOTH scans — but with a HEALTHY file key
+    (`/tmp/file-path.db`), where `both` is not a plausible answer anyway. The
+    additive part is the state where `both` IS plausible: the file's own key is
+    broken (`relative/x.db`), so only the ladder's own truthiness test keeps the
+    attribution on `env`. Plus the two quoted-value assertions below, which are
+    the diagnostic-precision gain: the message must quote the value of the rung
+    that RAISED, and never the file's.
+
+    The applied half is kept as DELIBERATE duplication of that older test's
+    applied assertion: the narrowed boundary is the property under test, and a
+    future split of the two scans must not be able to redden one and leave this
+    state's answer unchecked in the other.
     """
     monkeypatch.setenv("TORTOISE_DB_URI", "   ")
     _write_env(_isolated, "TORTOISE_DB_PATH=relative/x.db\n")
@@ -2000,14 +2010,19 @@ def test_the_mixed_shadowed_doctor_row_credits_the_FILE_when_its_key_is_the_top_
     """The `doctor` surface's FILE-wins half, which no test reached at all.
 
     `_dotenv_rows` derives two mixed sentences and only the env-wins one was
-    pinned. Measured by injecting `raise SystemExit` at the file-wins arm:
-    `test_env_file_divergence` + `test_doctor` + `test_cli_config_show` — 434
-    tests — stayed fully GREEN. The sentence is true in every state a review
-    reached; only its pin was missing, the same class as the `file_graph_keys`
-    clause (#12441 item 6's companion, found by #12428's round-11 review).
+    pinned. Measured by injecting `raise SystemExit` at the file-wins arm in the
+    #12428 round-11 review: `test_env_file_divergence` + `test_doctor` +
+    `test_cli_config_show` — 434 tests at that head — stayed fully green. (With
+    this PR's two cases the same three files collect 437, so the figure is not
+    reproducible here; the substantive claim is: the mutant reddens exactly ONE
+    test, the new one.) The sentence is true in every state a review reached;
+    only its pin was missing, the same class as the `file_graph_keys` clause.
 
-    Same construction as its env-wins sibling: the payload is the graded state,
-    so the assertion is on the sentence `_dotenv_rows` builds from it.
+    ⛔ The payload must be one `_dotenv_divergence` can actually emit, including
+    its own `differs` computation — a fixture with `differs: False` beside two
+    DIFFERENT targets would pin the sentence against a state the product cannot
+    produce, and a later `_dotenv_rows` change keyed off `differs` would then be
+    validated against fiction (review, P3). Both targets are therefore equal.
     """
     row = _rows_text({"differs": False,
                       "keys": ["TORTOISE_DB_URI"],
@@ -2015,7 +2030,11 @@ def test_the_mixed_shadowed_doctor_row_credits_the_FILE_when_its_key_is_the_top_
                       "shadowed_graph_keys": ["TORTOISE_DB_PATH"],
                       "applied_graph_keys": ["TORTOISE_DB_URI"],
                       "keys_in_effect": ["TORTOISE_DB_URI"],
-                      "graph_keys": []})
+                      "graph_keys": [],
+                      # Equal on purpose: this is the state `_dotenv_divergence`
+                      # computes `differs: False` FOR.
+                      "cli_target": "/tmp/from-file.db",
+                      "daemon_target": "/tmp/from-file.db"})
 
     assert ("which the daemon ranks above the environment's own "
             "TORTOISE_DB_PATH") in row, row
