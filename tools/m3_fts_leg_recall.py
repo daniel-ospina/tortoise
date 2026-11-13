@@ -562,9 +562,11 @@ def _refuse_degraded_legs(trace: list[dict], query: str) -> None:
     ``index_missing`` degradation in ``search_engine`` is reachable only through
     a driver ERROR whose message names an index, which this engine does not
     produce per query. The index's PRESENCE and its KIND are therefore
-    ``_wait_indexed``'s job (it reads ``CALL db.indexes()`` before any query is
-    issued and refuses a row that does not carry a FULLTEXT index over
-    ``name``); do not read a clean trace as proof that an index exists.
+    ``_wait_indexed``'s job (it reads ``CALL db.indexes()`` before any
+    **measured** query is issued — the warm query and the bookkeeping reads above
+    it are deliberate and are not part of the sweep — and refuses a row that does
+    not carry a FULLTEXT index over ``name``); do not read a clean trace as proof
+    that an index exists.
     """
     entries = [e for e in trace
                if isinstance(e, dict) and e.get("leg") == "fts"]
@@ -767,17 +769,18 @@ def _object_row_fulltext_name(row) -> bool:
     """Does this ``CALL db.indexes()`` row carry a FULLTEXT index over ``name``?
 
     ⛔ The FIELD NAME alone is not the question (#12349 review, P2).
-    ``Projection._ensure_indexes`` always creates ``("Object", "name",
+    ``FalkorProjection._ensure_indexes`` always creates ``("Object", "name",
     "RANGE")`` — it is in ``_REQUIRED_RANGE_INDEXES``
-    (``tortoise/projection/__init__.py:20304``), so EVERY Tortoise graph indexes
-    that name — and the catalogue reports a labelled row's field names beside a
-    per-property KINDS map. ``index_row_has_field(row, "name")`` therefore
-    answers True on a graph with NO fulltext index at all: the run proceeds,
-    every query returns ``[]`` without raising, and the shipped baseline
-    publishes as 0.0 with every guard green. The KIND is what separates them.
+    (``tortoise/projection/__init__.py:20305``, the tuple itself starting at
+    ``:20285``) — so EVERY Tortoise graph indexes that name — and the catalogue
+    reports a labelled row's field names beside a per-property KINDS map.
+    ``index_row_has_field(row, "name")`` therefore answers True on a graph with
+    NO fulltext index at all: the run proceeds, every query returns ``[]``
+    without raising, and the shipped baseline publishes as 0.0 with every guard
+    green. The KIND is what separates them.
 
     So the question asked is the triple the repo's own schema probe asks
-    (``projection._schema_is_current`` builds ``(label, prop, kind)`` from
+    (``FalkorProjection._schema_is_current`` builds ``(label, prop, kind)`` from
     ``row[2]`` and requires ``("Object", "name", "FULLTEXT")``). There is no
     shared helper for the kind-aware question — ``index_catalogue``'s public
     predicates are field-only — so the cell is read through the module's shared
@@ -785,7 +788,8 @@ def _object_row_fulltext_name(row) -> bool:
     the record of why the predicate is local.
 
     A row that cannot PROVE the kind fails CLOSED, the same way the schema probe
-    treats a row without a kinds map: an unprovable catalogue is not a pass.
+    treats a row shorter than three cells (``len(row) < 3`` is its fail-closed
+    branch): an unprovable catalogue is not a pass.
     """
     from tortoise.index_catalogue import catalogue_cell
 

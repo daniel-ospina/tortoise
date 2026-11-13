@@ -2918,9 +2918,15 @@ def test_the_index_wait_refuses_an_object_row_without_a_fulltext_index_on_name(
     refuses([["Object", ["id"], {"id": ["FULLTEXT"]}, stats]],
             "full-text-indexes `id` instead of `name`")
     # …and a row that cannot PROVE the kind fails CLOSED, the way
-    # `_schema_is_current` treats a row without a kinds map.
-    refuses([["Object", ["name"], stats]],
-            "reports `name` but carries no kinds map at all")
+    # `_schema_is_current` fails closed on a row shorter than three cells
+    # (`len(row) < 3`, `tortoise/projection/__init__.py:20465`). ⛔ `["Object",
+    # ["name"]]` — NOT a two-cell row whose third cell is the stats dict: that
+    # one DOES carry a dict in the kinds column, and `_schema_is_current` raises
+    # TypeError on it rather than failing closed, so it is a different case and
+    # not the one the prose names.
+    refuses([["Object", ["name"]]],
+            "has no kinds column at all (the shape `_schema_is_current` fails "
+            "closed on)")
 
 
 def test_the_reuse_count_guard_is_wired(tool_mod) -> None:
