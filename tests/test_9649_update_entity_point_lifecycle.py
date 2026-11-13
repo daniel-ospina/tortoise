@@ -43,6 +43,7 @@ Runnable (docker lane):
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -282,17 +283,36 @@ def test_the_refusal_carries_the_three_parts(env):
         f"the refusal must not tell the caller to supersede a claim it has "
         f"just called terminal — `supersede_point` refuses a terminal SOURCE, "
         f"so that prescription cannot be run: {text!r}")
-    # ⛔ Review round 12d, and this is a pin, not a preference: the denial must
-    # be scoped to a claim whose RECORDED STATUS is terminal. The absolute form
-    # ("no SDK door re-livens a dead claim") is measurably FALSE on the flag-dead
-    # shape this same arm fires for — `update_point(<status NULL, outdated=true>,
-    # status='live')` stores `status='live'`, the residual recorded beside
-    # `_promote_incident_operators` — and a refusal whose subject is repair
-    # accuracy cannot itself overstate what is possible.
-    assert "re-livens a dead claim" not in text, (
-        f"the one-way denial must name its scope (a RECORDED terminal status), "
-        f"not deny an absolute that a measured door contradicts: {text!r}",
-    )
+    # ⛔ Review round 12d/12e, and this is a pin, not a preference: the denial
+    # must be scoped to a claim whose RECORDED STATUS is terminal — in EVERY
+    # clause. The absolute form ("no SDK door re-livens a dead claim") is
+    # measurably FALSE on the flag-dead shape this same arm fires for —
+    # `update_point(<status NULL, outdated=true>, status='live')` stores
+    # `status='live'`, the residual `update_point`'s own promote-arm comment
+    # records — and a refusal whose subject is repair accuracy cannot itself
+    # overstate what is possible.
+    #
+    # ⛔ The check reads the DENIAL, it does not match one phrasing: round 12d's
+    # first form was `"re-livens a dead claim" not in text`, which a message
+    # naming NO scope (`re-livens a claim, or …`) and a one-word paraphrase of
+    # the same absolute (`re-livens any dead claim`) both satisfied — an
+    # assertion claiming more than it enforced, the exact class this PR closes.
+    # The shape asserted is the PROPERTY: the one-way sentence names a scope
+    # keyed to the recorded status, and carries no unscoped dead-claim absolute.
+    # ⛔ The sentence is selected by the DENIAL VERB, not by "one-way": the
+    # guard's own interpolated message also says "one-way" (`… terminalization is
+    # one-way`), and selecting on that pulled the outer prefix "on a dead claim:"
+    # into the check (measured: the pin red on its own correct message).
+    _denial = [s for s in re.split(r"(?<=[.;])\s+", text) if "re-livens" in s]
+    assert _denial, f"the one-way denial is missing: {text!r}"
+    _denial = " ".join(_denial)
+    assert "dead claim" not in _denial, (
+        f"the one-way denial must not state the absolute a measured door "
+        f"contradicts (a flag-dead point takes `status='live'` through "
+        f"`update_point`): {_denial!r}")
+    assert re.search(r"recorded[^.;]{0,24}terminal", _denial), (
+        f"the one-way denial must name its scope (a claim whose RECORDED status "
+        f"is terminal), not merely assert one-wayness: {_denial!r}")
 
     # ...and the assertion above is not vacuous: superseding the dead id really
     # does raise, which is WHY the old prescription was wrong.
