@@ -5082,6 +5082,15 @@ _EPIC_CITE_DOCS = {
 _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "search_engine": _REPO / "tortoise/search_engine.py",
+    # `00-align.md`'s A-d row cites the fleet's real capture transport OUTSIDE
+    # every sweep `_BUNDLE_CITE` can see (it resolves `sdk|edges|extractor_v2`
+    # only), so its two `.ts` numbers had no reader at all and were stale: the row
+    # named `:948`/`:938` for the plain `postCapture` and its `install-probe`
+    # sibling while the tree carries those two `def`s at `:955`/`:947`. Registered
+    # here because a repaired cite that nothing pins is a repair the next move of
+    # the symbol undoes silently — the same reason `pack_registry` and
+    # `ci_surfaces` are keys.
+    "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
     # `03-test-design.md` cites the manifest's OWN `carve_out:` entry — by SYMBOL
     # since #12266 (`_assert_carve_out_entry_is_pinned_by_symbol`, called from
     # `test_the_epic_bundle_cites_the_branch_rederived_resolve` BEFORE its epic-cite
@@ -5245,6 +5254,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("16455", "The v2 path reports"),
             ("16456", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
+        # ...and THAT sentence names a second file, so its `.ts` pair takes its
+        # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
+        # the row's prose names (`postCapture` and its `install-probe` sibling),
+        # never a bare offset — the pair had rotted by nine lines while every sdk
+        # cite beside it was re-derived (#12545 review, P2), because nothing read
+        # a `.ts` file at all.
+        ("00-align.md", "`llm:deepseek-direct` is what", (
+            ("955", "export function postCapture("),
+            ("947", "export function postInstallProbe("),
+        ), "pi_hooks"),
         ("04-plan.md", "operator / label path", (
             ("25393", "declared = declared_relation_predicates()"),
         ), "sdk"),
