@@ -952,8 +952,9 @@ def test_a_raising_tokeniser_leaves_a_held_surface_with_no_offset(monkeypatch):
     capture), and it is also the ONLY way ``if _phrase else None`` is taken:
     without that guard, ``re.search`` over an empty pattern matches the first
     position whose neighbours are both non-word (94 on this fixture) — a real
-    coordinate pointing into the section, which is not where the surface is. ``None`` (absent) and ``0``
-    (the first character) are different claims, and only one of them is true.
+    coordinate pointing into the section, which is not where the surface is.
+    ``None`` (absent) and ``94`` (a real coordinate inside the section) are
+    different claims, and only one of them is true.
 
     Measured at the #12102 mutation pass (agent-infra#3442): deleting EITHER guard
     left the suite fully green (24 passed) before this test existed.
@@ -975,8 +976,8 @@ def test_a_raising_tokeniser_leaves_a_held_surface_with_no_offset(monkeypatch):
     assert len(held) == 1
     assert held[0]["rule_id"] == referentiality.RULE_PRONOUN
     assert held[0]["phrase_offset"] is None, (
-        "an untokenisable phrase has no locatable occurrence; 0 is a coordinate "
-        "into the section, not an absence")
+        "an untokenisable phrase has no locatable occurrence; the unguarded path "
+        "lands on 94 — a coordinate into the section — not an absence")
 
 
 def test_a_raising_cue_emits_a_warning_naming_the_surface(monkeypatch, caplog):

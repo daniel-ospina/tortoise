@@ -5261,10 +5261,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         # and the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # At THIS merged tree (`main` `cd22562c24` + this PR): entry 10012,
-        # `carve_out:` opens 9886, `uri_requiring:` 10217 — so 10012 is inside the
-        # section, and the identical text also sits at 6090 and 8528, which is what
-        # the 5th element exists to refuse.
+        # At THIS merged tree (`main` `d571adef87` + this PR): entry 10026,
+        # `carve_out:` opens 9900, `uri_requiring:` 10231 — so 10026 is inside the
+        # section, and the identical text also sits at 6103 and 8541, which is what
+        # the 5th element exists to refuse. ⚠️ The `d571ade` advance is the one `main`
+        # commit in this range that does NOT touch `config/ci-surfaces.yml`
+        # (`git show --stat d571adef87 -- config/ci-surfaces.yml` is empty), so THIS
+        # merge moved the entry by 0: `b08ff33bbc` already read 10026 and the merged
+        # tree reads 10026. The last +14 belongs to the `abf186f1109a` merge below,
+        # not to this one.
         # ⛔ THE ANCHOR IS THIS TREE, not either side of the merge, and the
         # decomposition is measured rather than asserted. The rebase base
         # `f33f5e2c32` read 9949 / 9823 / twins 6082 + 8465. THIS PR alone puts the
@@ -5281,7 +5286,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # (+14), `carve_out:` 9847 -> 9861 and `uri_requiring:` 10178 -> 10192 (+14
         # each), while the FIRST twin moves 6090 -> 6103 and the sdk twin 8489 -> 8502
         # (+13 each) — one of its fourteen inserted lines lands below the first twin.
-        # Measured on the merged tree, not added up: 10012 + 14 = 10026 for the entry,
+        # Measured on the tree each value came from, not added up: at the
+        # `abf186f1109a` merge, 10012 + 14 = 10026 for the entry,
         # 8528 + 13 = 8541 for the sdk twin, 6090 + 13 = 6103 for the first twin, and
         # 9987 + 39 = 10026 checks the same entry from `main`'s side.
         # ⛔ The pin this branch carried before the merge (9982) was ALSO wrong on
@@ -5345,10 +5351,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # of the merge. ⛔ Neither 9982 nor 9951 was ever a MEASUREMENT of any tree
             # in this PR's history — both were arithmetic carried forward from
             # `0e281a900b` — which is why the deleted sentence is not preserved here.
-            # What the trees actually measure: `main` `cd22562c24` alone reads 9973,
-            # this branch alone (`9b6025e6`) reads 9988, and 9973 + 39 (this PR's
-            # `core` registration block) = 10012 = 9988 + 24 (`main`'s advance).
-            ("10012", "- test_pack_logic_writeprobe_11083.py"),
+            # What the trees actually measure, as values and not as a delta: `main`
+            # alone read 9943 at `9828250732`, 9949 at `ba84fbfabf`, 9965 at
+            # `e200623286`, 9973 at `cd22562c24` and at `c17e3c5f78`, and 9987 at
+            # `abf186f1109a`; this branch alone (`9b6025e6`) reads 9988; this branch's
+            # head before the `abf186f1109a` merge read 10012, that merge produced
+            # 10026, and the later `d571ade` merge left it at 10026 — it does not
+            # touch `config/ci-surfaces.yml` at all, so THIS merge moved it 0 lines.
+            # ⛔ `9951` is in that history only because this row printed it — a
+            # predicted merge-tree value (9943 + 8), never a line any commit on
+            # `main` carried.
+            # 9987 + 39 (this PR's `core` registration block) = 10026 = 10012 + 14
+            # (`main`'s last advance), which is why neither side's number describes a
+            # tree that adds BOTH.
+            ("10026", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
