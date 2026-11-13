@@ -164,7 +164,7 @@ that returns fewer rows while still reporting the full count is caught by equali
 short layer with NO reported count is only noted (below) — and carried as a field,
 `operators_reconciled: false` (see the guarantees table), because a note is not something a driver
 can switch on. The guard still refuses on any mismatch — a diagnosable refusal beats a
-silent short census — and its message names all three candidate causes so the difference can be
+silent short census — and its message names all FOUR candidate causes so the difference can be
 attributed instead of re-derived. Equality held on `live-v4` on 2026-11-13 (3,727 = 3,727), which
 is what the numbers here rest on.
 

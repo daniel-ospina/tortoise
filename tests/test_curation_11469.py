@@ -3961,3 +3961,33 @@ def test_the_plan_payload_carries_the_layers_three_fields(monkeypatch, tmp_path)
     assert reconciled["operators_read"] == len(OPERATOR_ROWS)
     assert reconciled["operators_total_reported"] == len(OPERATOR_ROWS)
     assert reconciled["operators_reconciled"] is True
+
+
+@pytest.mark.parametrize("verb", ["inventory", "plan"])
+def test_a_structure_refusal_is_the_designed_refusal_on_BOTH_verbs(monkeypatch, capsys,
+                                                                  tmp_path, verb):
+    """`plan` reads `structure` too, so it needs the same arm `inventory` has.
+
+    `test_every_census_read_answers_the_designed_refusal` is parametrized over the
+    sections but only ever runs `inventory`, and the window commit added `plan`'s
+    `structure` read outside that test's reach — moving it outside the `try` made an
+    armed `plan` exit 1 (traceback) instead of the documented 3, with the suite green.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        args = args or {}
+        if args.get("section") == "structure":
+            return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
+        return _operator_surface()(name, args)
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    if verb == "inventory":
+        rc = mod.main(["inventory", "--graph", "org_x_g_old", "--no-verify-read",
+                       "--out", str(tmp_path / "i.json")])
+    else:
+        rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                       "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                       "--out", str(tmp_path / "p.json")])
+    assert rc == 3, (verb, rc, capsys.readouterr())
+    assert "REFUSED" in capsys.readouterr().err
