@@ -732,15 +732,23 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     # luck of relative latency. It fails deterministically on a faster process table
     # (measured: 4/4 reds in a PID namespace where `ps` takes ~4 ms). The poll still reds
     # if `prctl` never runs at all.
+    #
+    # ⛔ THE POLL IS INSIDE THE GUARD, NOT ONLY THE `assert` (#12330 REVIEW). The `ps`
+    # call has NO `timeout=`, so its realistic failure is an `OSError` under fork pressure
+    # (EAGAIN/ENOMEM) — the exact trigger the JOB-A guard below names — and it runs up to
+    # 250 times (5 s at 0.02 s) on every Linux leg. With the `try:` around the assertion
+    # alone, that raise ran no teardown and leaked this 120 s decoy in its own session.
+    # Measured: injecting `OSError` from the `ps` call left the decoy alive, reparented to
+    # pid 1. Nothing between the spawn and its reaper may be unguarded.
     if Path("/proc").is_dir():
-        deadline, comm = time.time() + 5.0, ""
-        while time.time() < deadline:
-            comm = subprocess.run(["ps", "-o", "comm=", "-p", str(peer.pid)],
-                                  capture_output=True, text=True).stdout.strip()
-            if comm == "workerd":
-                break
-            time.sleep(0.02)
         try:
+            deadline, comm = time.time() + 5.0, ""
+            while time.time() < deadline:
+                comm = subprocess.run(["ps", "-o", "comm=", "-p", str(peer.pid)],
+                                      capture_output=True, text=True).stdout.strip()
+                if comm == "workerd":
+                    break
+                time.sleep(0.02)
             assert comm == "workerd", (
                 f"the peer decoy is named {comm!r}, not `workerd` — the shape #10283's "
                 "pre-fix machine-global `pkill workerd` matched is not reproduced"
