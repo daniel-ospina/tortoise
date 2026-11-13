@@ -1811,3 +1811,25 @@ def test_a_short_password_is_redacted_too():
         assert secret not in _redact_db_value(described, value), value
         assert secret not in _redact_credential_fragments(
             f"Port could not be cast to integer value as '{secret}'", value), value
+
+
+def test_a_file_supplied_bad_value_is_not_called_an_unloadable_file(capsys, _isolated,
+                                                                    monkeypatch):
+    """"cannot be loaded at all" belongs to the file-unloadable state, not this one.
+
+    Measured on `config show` with `.env` = `TORTOISE_DB_URI=relative/x.db` and an
+    empty shell: "…Relative paths are never permitted. — this `.env` cannot be
+    loaded at all", while the NEXT line said "the value it rejects is the one this
+    `.env` supplied" — the overlay DID load the file, so the first sentence was
+    false and contradicted the second (#12428 review). `doctor`'s row truncates
+    the clause away with its 90-character cut, which is why this pin reads
+    `config show`.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+    _write_env(_isolated, "TORTOISE_DB_URI=relative/x.db\n")
+
+    out = _show_text(capsys)
+
+    assert "cannot be loaded at all" not in out, out
+    assert "the value it rejects is the one this `.env` supplied" in out, out

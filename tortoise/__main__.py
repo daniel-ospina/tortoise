@@ -11618,10 +11618,15 @@ def _dotenv_divergence(graded_target: str | None = None, *,
                     daemon_target, daemon_rung = daemon_db_target()
                 except ValueError as exc:
                     # `RELATIVE_PATH_ERROR` quotes the offending value.
+                    # ⛔ NOT "cannot be loaded at all" here: this arm runs INSIDE
+                    # the overlay, so the file WAS loaded — its value is the one
+                    # the resolver rejected. That phrase belongs to the
+                    # `file-unloadable` state (a file that cannot be applied at
+                    # all), and reusing it here made the row say "cannot be loaded
+                    # at all" and "the value it rejects is the one this `.env`
+                    # supplied" in the same breath (#12428 review).
                     daemon_error = _redact_db_value(
-                        f"{type(exc).__name__}: {exc}"
-                        + ("" if _env_error_preexists else
-                           " — this `.env` cannot be loaded at all"),
+                        f"{type(exc).__name__}: {exc}",
                         os.environ.get("TORTOISE_DB_URI"),
                         os.environ.get("TORTOISE_DB_PATH"),
                     )
@@ -11900,9 +11905,14 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
             _why = "this `.env` cannot be applied at all, so none of its values is in effect"
         else:
             _why = "the message above names the value that failed"
+        # ⛔ Cut at a WORD boundary with an ellipsis: a flat `[:90]` ended
+        # mid-word, so the row read "…(no-arg  — the value it rejects…" with the
+        # clause welded onto a half sentence (#12428 review).
+        _err = str(env_file["daemon_error"])
+        if len(_err) > 90:
+            _err = _err[:90].rsplit(" ", 1)[0] + "…"
         rows.append(("Config: .env", "❌",
-                     _lead + f"{_printable(str(env_file['daemon_error'])[:90])} — "
-                     + _why))
+                     _lead + f"{_printable(_err)} — " + _why))
         return rows
     # The store the rows BELOW grade. It is the payload's `cli_target` because
     # `_cmd_doctor` hands `_dotenv_divergence` the target it already resolved —
