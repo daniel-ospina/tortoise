@@ -286,8 +286,8 @@ count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 `tortoise/hosted_backup.py` — a file the population had not previously reached,
 carrying no `:Document` mention at `4f68a2aa7`, whose served-label bound added
 the pre-D10 dump/restore refusal and repair prose — and #11682's BM25 corpus-join
-comment (`tortoise/search_engine.py:2109` — the counted `:Document` line; the block opens at
-`:2107`, one added line in an existing file) — and #11928's three lines in
+comment (`tortoise/search_engine.py:3337` — the counted `:Document` line; the block opens at
+`:3335`, one added line in an existing file) — and #11928's three lines in
 `tortoise/live.py` and `tortoise/why.py`, which are the two files this
 population had never reached: the KIND and STATUS rules that now say which
 layers carry a `status` family, and name the retired label where they say what
