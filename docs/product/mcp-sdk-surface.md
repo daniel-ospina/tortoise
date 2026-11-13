@@ -104,11 +104,12 @@ scope from this summary.
 **What is not a gate failure: an added field on an existing response.** A field that is off
 by default, and leaves the response unchanged when it is off, is neither a new tool nor a new
 endpoint, so it is not a name-level change and does not gate **as an addition**. The precedent
-is in the tree: the W4 why-layer key on the `tortoise_analyze` response is written only when
-`TORTOISE_W4_ENRICHMENT` is truthy (1/true/yes/on; unset or `0` means off) — and every
-other field stays byte-identical when it is absent (`tortoise/mcp_server.py`,
-`tortoise/why.py`). That is a different `why` key from
-the one on `volunteer_context`, which is present by default.
+is in the tree: the W4 why-layer key on the `tortoise_search` / `tortoise_query` response
+is written only when `TORTOISE_W4_ENRICHMENT` is truthy (1/true/yes/on; unset or `0` means
+off) — and every other field stays byte-identical when it is absent (`tortoise/why.py`).
+(The example used to be `tortoise_analyze`, whose door #11609 batch 1 ARCHIVED — a
+generated doc must not teach a reader a call that answers "Unknown tool".) That is a
+different `why` key from the one on `volunteer_context`, which is present by default.
 
 **One qualification, because the gate also fingerprints implementations.** The gate records a
 digest of each registered tool's own code object, so a field added *inside a tool's handler*

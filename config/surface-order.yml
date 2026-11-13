@@ -128,10 +128,13 @@ family_rank:
 # ADVERTISED set, 72 -> 68. They are ARCHIVED, not retired-forward (owner ruling
 # 2026-11-12, comment 6831894340: anything outside the approved 27 is removed and its code
 # kept only in `archive/`), so no shim serves them and the SERVED set drops by the same
-# four. Each removal moves exactly one keyword: create 15->14 (`pack_install`), list
-# 8->7 (`packs_list`), find 5->4 (`analyze`), operate 5->4 (`backfill_v25`); fetch /
-# update / delete / check / link / trace unmoved. Re-derived from the registry by
-# `tools/surface_manifest.py check`, which reds on any disagreement.
+# four. Each removal moves exactly one keyword, and the attribution below is the one the
+# registry DERIVES (measured per row: `tortoise_analyze` -> find, `tortoise_backfill_v25` ->
+# create, `tortoise_packs_list` -> list, `tortoise_pack_install` -> operate):
+# create 15->14 (`backfill_v25`), list 8->7 (`packs_list`), find 5->4 (`analyze`),
+# operate 5->4 (`pack_install`); fetch / update / delete / check / link / trace unmoved.
+# Re-derived from the registry by `tools/surface_manifest.py check`, which reds on any
+# disagreement.
 baseline_counts:
   fetch: 14
   create: 14

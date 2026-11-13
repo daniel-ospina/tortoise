@@ -3501,8 +3501,19 @@ NON_CODE_DOC_PATHS = frozenset({
     ".github/pull_request_template.md",
     "CHANGELOG.md",
     "CLAUDE.md",
-    "CONTRIBUTING.md",
 })
+
+# ⛔ `CONTRIBUTING.md` LEFT THIS TUPLE (#12313's read landed after the entry did). The reprieve
+# is "no guard reads its CONTENT", and that stopped being true: `#12237` added
+# `test_surface_manifest.py::test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES`,
+# which reads CONTRIBUTING's "**To REMOVE a symbol**" paragraph and reds if it names a removal
+# route the archive writer refuses. Reprieving a file a guard reads is the silent-hole class
+# (`test_non_code_doc_paths_have_no_content_reader` states the rule) — it drops the changed
+# path to tier-1 smoke, so the guard never runs on the PR that edits the paragraph it pins.
+# Measured before this line: that ratchet red at `origin/main` and on this branch, i.e. the
+# entry had been stale since #12313 and `main` was already failing its own selection suite.
+# A CONTRIBUTING.md edit therefore keeps the fail-closed FULL matrix, like any root doc a
+# test reads; the three members above keep the reprieve (and its non-vacuity pin) alive.
 
 
 def _is_non_code_doc(path: str) -> bool:
