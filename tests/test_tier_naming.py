@@ -405,8 +405,8 @@ class TestNoDocDeniesABuilderPlanExists:
                 low = sentence.lower()
                 if "builder" not in low:
                     continue
-                if "plan" not in low and "tier" not in low:
-                    continue
+                if "plan" not in low and "tier" not in low and "buys" not in low:
+                    continue  # "buys" covers the "a builder buys pro or team" shape
                 if _denial_in(sentence):
                     offenders.append(
                         f"{doc.relative_to(REPO_ROOT)}:{lineno}: "
@@ -415,9 +415,10 @@ class TestNoDocDeniesABuilderPlanExists:
             "doc(s) assert that a Builder plan does not exist, contradicting #4336 "
             "(Builder IS the `pro` tier) and #12444:\n  "
             + "\n  ".join(offenders)
-            + "\n\nFix the naming, keep the substance. If the sentence is quoting a "
-              "RETRACTED claim, paraphrase it (\"the doc previously denied the plan "
-              "existed\") rather than restating the denial.")
+            + "\n\nFix the naming, keep the substance. A doc that RECORDS the "
+              "retraction is exempt — but only with a cue AND a citation of what it "
+              "retracts (an issue/PR, a date, or an attribution verb introducing the "
+              "quoted claim). A cue word alone does not exempt a live denial.")
 
     def test_the_beta_sdk_tenancy_passage_keeps_its_substance(self):
         """#12444 corrected the naming in this passage and must not have softened
