@@ -1814,6 +1814,25 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
             continue
         if re.match(r"^\d*[<>]", text):
             continue
+        # ⛔ A TRAILING CLOSING OPERATOR IS NOT AN OPERAND (#12279 REVIEW 8, P1,
+        # measured FAIL-OPEN — pre-existing on `main`, not introduced here, and
+        # still in the declared surface). The segment a subshell owns ends with the
+        # `)` that closes it, and `_SEGMENT_SPLIT_RE` does not split on parens, so
+        # the final token was the bare `)` — the destination was no longer LAST and
+        # a wrapped replacement went GREEN:
+        #
+        #     ( cd /tmp && cp -a "$b/17/bin/." "$b/16/bin/" )      -- bash REPLACES
+        #     out=$( cd /tmp && cp -a "$b/17/bin/." "$b/16/bin/" )  -- bash REPLACES
+        #
+        # Its GLUED spelling (`…"$b/16/bin/" )`) was refused only because the `)`
+        # rode on the destination token, so whitespace decided the verdict. The
+        # terminator reader already had this rule (`_TERMINATOR_TRAILING_OPERATORS`)
+        # and the destination reader had none. Only a token that is ENTIRELY
+        # closing operators is skipped: a QUOTED `')'` is an ordinary word, and a
+        # lone backtick or quote is not a closer but an unterminated construct, so
+        # the class is `)]` and not the whole terminator set.
+        if not text.strip(")]"):
+            continue
         this = (token_start + seg_start, token_end + seg_start)
         last = this
         if primary:
@@ -6036,6 +6055,39 @@ BINARY_MUTATION_POLARITY = [
         False,
         "#12279 P3 CONTROL: a BARE-find READ stays GREEN — narrowing the find "
         "segment to `find` must not lose the ordinary spelling",
+    ),
+    # ⛔ A TRAILING CLOSING OPERATOR IS NOT THE DESTINATION (#12279 REVIEW 8, P1,
+    # measured FAIL-OPEN; pre-existing on `main`, fixed here because it is on the
+    # declared surface and the replacement is IDIOMATIC — a wrapped step is how this
+    # would actually be written). The subshell's `)` was read as the last operand, so
+    # a complete replacement went GREEN.
+    (
+        '( cd /tmp && cp -a "$b/17/bin/." "$b/16/bin/" )',
+        True,
+        "#12279 R8: the subshell's closing `)` is not an operand — the destination "
+        "is still the last PATH token and bash copies",
+    ),
+    (
+        'out=$( cd /tmp && cp -a "$b/17/bin/." "$b/16/bin/" )',
+        True,
+        "#12279 R8: the same `)` inside a command-substitution assignment",
+    ),
+    (
+        '( cp -a "$b/17/bin/." "$b/16/bin/" )',
+        True,
+        "#12279 R8: the wrapped spelling needs no `cd` to reach the same state",
+    ),
+    (
+        '( rsync -a "$b/17/bin/" "$b/16/bin/" )',
+        True,
+        "#12279 R8: verb-independent — the reader is shared, so a second verb pins "
+        "that the fix is in the reader and not in the `cp` rule",
+    ),
+    (
+        '( cat "$b/17/bin/pg_dump" )',
+        False,
+        "#12279 R8 CONTROL: a wrapped READ stays GREEN — skipping a closing "
+        "operator must not skip the destination",
     ),
 ]
 
