@@ -4733,7 +4733,17 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     #
     # The check is therefore per-CLAUSE on emphasis-normalised text, EXCLUDING clauses whose
     # history marker is attached to the SIZING — so recorded history stays writable and a
-    # present-tense prescription reds in any emphasis or word order.
+    # present-tense prescription of `counts.Event + 1` reds under emphasis, clause splits and
+    # verb inflection.
+    # ⛔ ITS SCOPE IS `counts.Event + 1`, AND THAT IS NARROWER THAN "any wrong sizing"
+    # (review cycle 12, measured). A differently-SPELLED wrong sizing — `reported + 1`, or
+    # `EVENT_READ_CEILING + 1` — prescribes the same defect and this detector does NOT see
+    # it, because `_SIZING` matches one token. That is a STATED GAP, not a covered case:
+    # the CODE forms of both are pinned by the `limit_sent` assertions further down, so a
+    # lane cannot ship them; only a prose resurrection of them would pass here. Closing it
+    # by widening `_SIZING` was NOT done deliberately — the plan doc discusses these numbers
+    # constantly, so a wider pattern reds on the doc's own recorded history and trades a
+    # narrow gap for a false-RED loop.
     # ⚠️ NOT per-sentence: this paragraph still said "per-SENTENCE" for several commits after
     # the unit became a clause, contradicting the rule documented nine lines below it — and
     # describing exactly the SENTENCE-WIDE EXEMPTION the clause rule was written to close, so
@@ -4773,7 +4783,11 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     # stayed GREEN — while the CODE pin below already guards the `sizes each request to`
     # phrasing. Two pins disagreeing about what a prescription IS means a
     # lane reconciling the plan in the code's own voice evades the plan pin.
-    _SIZING = _re.compile(r"siz\w*[^.;:]{0,40}?`counts\.Event \+ 1`", _re.I)
+    _SIZING = _re.compile(r"siz\w*[^.;:]{0,40}?`counts\.Event\s*\+\s*1`", _re.I)
+    # ⚠️ `\s*` around the `+` (review cycle 12, measured): the literal-space form missed
+    # "sized to `counts.Event+1`" — the spelling Python code itself uses — so the pin was
+    # evadable by dropping two spaces. Relaxing only the spacing inside this one token
+    # cannot introduce a false positive: it matches the same numerator, more loosely.
 
     def _prescribes(text: str) -> list[str]:
         """Clauses that state the withdrawn sizing as if it were current.
@@ -4808,6 +4822,12 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         "The read is therefore sized to `counts.Event + 1`, which is the smallest "
         "request that PROVES non-truncation."), (
         "the plan-doc detector cannot see the withdrawn sentence it exists for")
+    # ⛔ THE NO-SPACE SPELLING (review cycle 12, measured GREEN before the `\s*` relaxation):
+    # `counts.Event+1` is how the code is written, so a lane quoting code into the plan would
+    # have evaded the pin while prescribing the defect.
+    assert _prescribes(
+        "The read is sized to `counts.Event+1` so a filled response proves growth."), (
+        "the no-space spelling of the withdrawn sizing evades the plan pin")
     assert _prescribes(
         "Earlier revisions aside, the read is no longer sized to the bound, it is sized "
         "to `counts.Event + 1` today."), (
