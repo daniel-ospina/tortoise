@@ -32,6 +32,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -193,6 +194,43 @@ def test_artifact_evidence_is_the_evidence_that_was_attested(name: str):
     assert artifact["provenance"]["payload_sha256"] == _payload_digest(artifact), (
         f"{name}'s numbers changed after it was attested — restore the artifact, or re-run "
         "the probe (or `--attest` it, deliberately) rather than editing the digest")
+
+
+def test_the_readme_quotes_each_probes_digest_in_its_own_context():
+    """FAILS IF the README's two quoted `probe_sha256` values are stale or SWAPPED.
+
+    The README's binding paragraph is the human-readable half of `provenance.probe_sha256`:
+    it prints one digest per artifact, each after its own `gate.json:` / `quote_identity.json:`
+    label. Nothing pinned that before this test, and the failure it guards is not hypothetical —
+    it happened WHILE the digests were being refreshed by a script in #12490: the refresh mapped
+    the old values by SORTED order rather than by artifact, so `b66f8a17…` (quote_identity's)
+    landed after the `gate.json:` label and `4f066693…` (gate.json's) after
+    `quote_identity.json:` — every digest PRESENT, correct in count, and each attached to the
+    wrong artifact. `payload_sha256` cannot see it (the README is not inside the artifact), and
+    the suite stayed green. So: parse the digest that FOLLOWS each label and require it to be
+    that artifact's own.
+    """
+    readme = (BUNDLE / "README.md").read_text(encoding="utf-8")
+    assert "`provenance.probe_sha256`" in readme, (
+        "the README no longer carries the probe-digest binding paragraph this test parses")
+    paragraph = readme.split("`provenance.probe_sha256`", 1)[1].split("payload_sha256", 1)[0]
+    for label, name in (("gate.json:", "gate.json"),
+                        ("quote_identity.json:", "quote_identity.json")):
+        assert label in paragraph, f"the README's binding paragraph lost its `{label}` label"
+        quoted = _first_hex_after(paragraph, label)
+        own = _artifact(name)["provenance"]["probe_sha256"]
+        assert quoted == own, (
+            f"the README quotes {quoted[:12]}… after `{label}`, but {name}'s attested probe digest "
+            f"is {own[:12]}… — refresh the README from the artifacts (and check the two did not "
+            "get swapped while being refreshed)")
+
+
+def _first_hex_after(text: str, label: str) -> str:
+    """The first 64-hex token after `label` — the digest that label presents."""
+    tail = text.split(label, 1)[1]
+    match = re.search(r"\b[0-9a-f]{64}\b", tail)
+    assert match is not None, f"no 64-hex digest follows `{label}` in the README"
+    return match.group(0)
 
 
 def test_the_headline_figures_are_the_ones_the_index_quotes():

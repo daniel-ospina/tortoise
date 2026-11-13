@@ -197,8 +197,8 @@ Each artifact binds itself twice, and the two bindings answer different question
 definition — in-toto's Statement itself has no build-definition field):
 
 * `provenance.probe_sha256` binds it to the **code** that produced it (gate.json:
-  `de163c255d5d3511b4f8122a98cd6b30f893590507b7537cff2ca300c9eb4111`; quote_identity.json:
-  `c77c0bc924541f8ff7b74f694ae57dd3dbda03ee9f6111a753c7c90737967d69`), and
+  `4f066693fbc1c742e36d29875f4b970af7ee12df264217cf95911f480b47a411`; quote_identity.json:
+  `b66f8a174708f855501ac02ae3e5da57dd9e7ae62fac5721cb77c2036f3dfc65`), and
 * `provenance.payload_sha256` binds it to the **numbers** it produced **and to the row cache they
   are attributed to** — sha256 over `{"artifact": <every field except provenance>,
   "rows_source": …}`, canonicalised `indent=2, sort_keys=True` (gate.json:

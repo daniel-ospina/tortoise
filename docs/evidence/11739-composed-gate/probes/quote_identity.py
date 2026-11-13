@@ -38,7 +38,6 @@ import collections
 import hashlib
 import itertools
 import json
-import os
 import pathlib
 import sys
 
@@ -212,7 +211,8 @@ def main(argv: list[str]) -> int:
     if args.attest:
         return _attest(args.attest)
     try:
-        rows = [json.loads(line) for line in open(args.rows, encoding="utf-8")]
+        with open(args.rows, encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f]
     except OSError as e:
         _say(f"IDENTITY-NO-ROWS({args.rows}): {e}\n")
         return 3
