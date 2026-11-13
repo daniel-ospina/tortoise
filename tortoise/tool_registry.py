@@ -568,7 +568,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_list_dedup_candidates",
         id="surface.list_dedup_candidates",
         description="Review queue for dedup/temporal candidates "
-                    "(candidate_type=content|temporal|entity).",
+                    "(candidate_type=content|temporal|entity). Returns an object "
+                    "envelope whose `result` key holds the rows — see the "
+                    "wrapper's note (#12364).",
         risk="read",
         http_policy=True,
         sdk_method="list_dedup_candidates",
@@ -610,7 +612,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.belief_timeline",
         description="Dated, ordered belief chain for a topic — decision "
                     "Points with validFrom, NAND/CORRECTS links, superseded "
-                    "priors visible.",
+                    "priors visible. Returns an object envelope whose `result` key "
+                    "holds the rows — see the wrapper's note (#12364).",
         risk="read",
         http_policy=True,
         sdk_method="belief_timeline",

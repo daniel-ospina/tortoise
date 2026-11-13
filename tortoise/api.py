@@ -19,6 +19,12 @@ from .ids import now_iso, ulid
 # shared with the SDK doors and the hosted surfaces — see the leaf module.
 from .kind_fallbacks import named_kind
 
+# #11825: an :Event carries no lifecycle, so this door — the THIRD one onto an
+# Event node, after `create_entity` and `_update_entity` — refuses the terminal
+# half of the status vocabulary too. `live` is the leaf status module (it
+# imports nothing from here), so this adds no cycle.
+from .live import label_names_an_event, refuse_terminal_event_state
+
 # #2782: the money value's WRITE gate, at the one seam that bypasses
 # `_sanitize_props`. `money` imports only `numeric_domain` (no cycle).
 from .money import refuse_malformed_money_in_payload
@@ -29,7 +35,17 @@ from .money import refuse_malformed_money_in_payload
 from .percent import refuse_malformed_percent_in_payload
 
 # #7951 §17.1: the live-write scope the journal-first doors open around the fold.
-from .projection import EVIDENCE_FOLD_KEY, _live_write_scope, fold
+# ⛔ BOTH sides added a name to THIS import, so the resolution is the UNION:
+# the state-op vocabulary constant is this branch's (#11825's state-op arm
+# reads the fold's op vocabulary) and the EVIDENCE_FOLD_KEY is main's
+# (#7951's reader spelling). Neither side's addition may be dropped, and both
+# are used in this module.
+from .projection import (
+    _ENTITY_MUTATION_STATE_OPS,
+    EVIDENCE_FOLD_KEY,
+    _live_write_scope,
+    fold,
+)
 
 # #5140: the `documents` METER KEY's defender for THIS producer. `quota` is a
 # leaf module (stdlib-only at import time), so this adds no cycle.
@@ -1610,6 +1626,117 @@ class EventAPI:
         #     refuses a caller's version of it is `add_point`.
         _refuse_non_str_keys(payload, f"the `{type_}` envelope")
         _refuse_caller_named_record_keys(payload, f"the `{type_}` envelope")
+        # ── #11825: the `EventRecorded` CHOKEPOINT ──
+        # A record-gated guard on the ONE seam every record must pass. The three
+        # tenant doors each call `refuse_terminal_event_state` as well, for a
+        # refusal that NAMES the door the caller used — but a door list is not a
+        # boundary, and this seam is what makes the answer independent of it:
+        # measured at the previous head (review cycle 2, P0), a fourth caller
+        # (``emit_belief("EventRecorded", …, status='superseded')``) reached the
+        # fold with no guard at all, on the same public class this change declares
+        # in scope.
+        #
+        # It unwraps the ``event`` key because the fold does: `_upsert_event`
+        # reads ``inner = event.get("event", event)``, so a caller map named
+        # ``event`` is the map that lands on the node. A top-level-only check was
+        # bypassable through exactly that key (measured, same cycle, P0). Both
+        # channels are swept: the kwargs payload and a positional record, since
+        # `_emit` accepts either.
+        if type_ == "EventRecorded":
+            for _map in (payload, *record):
+                if not isinstance(_map, dict):
+                    continue
+                _inner = _map.get("event")
+                refuse_terminal_event_state(
+                    _inner if isinstance(_inner, dict) else _map,
+                    door=f"the `{type_}` envelope")
+        # ── #11825 (review cycle 3, P1; moved to this chokepoint in cycle 6) ──
+        # The FIFTH shape — a STATE OP on an `:Event`. Gating on
+        # `type_ == "EventRecorded"` left the seam open one record type over. A
+        # caller can hand a record the canonical state-op shape for ANY label:
+        # `_emit("EntityMutated", id=<event id>, label="Event", op="restatus",
+        # state={"status": "superseded"})` is exactly what
+        # `projection._journal_entity_mutation` emits, the fold reads it through
+        # `state["status"]` → `restatus` (`projection._fold_entity_mutation`,
+        # the `EntityMutated` state arm), and it stored a terminal `:Event` status
+        # with no refusal.
+        # ⛔ HERE, not only at `emit_belief`: this is the seam the
+        # `EventRecorded` refusal above already argues is "what makes the answer
+        # independent of a door list", and a cycle-6 measurement showed the one
+        # record type over slipping past a door-only guard —
+        # `_emit("EntityMutated", …, label="Event", op="restatus",
+        # state={"status": "superseded"})` was ACCEPTED and the node carried
+        # `status: 'superseded'`. `emit_belief` calls this same predicate too, so
+        # the forwarding door still gets a refusal that NAMES it before the
+        # best-effort `except` can swallow anything (a deterministic payload
+        # refusal inside that `try` would be a silently DROPPED record).
+        # ⛔ Scoped to EVENT targets and to STATE OPS, deliberately. A state op on
+        # a Point / Subject / Object / Source is accepted by its own door, and
+        # `op` must be one the fold's `_ENTITY_MUTATION_STATE_OPS` reads `state`
+        # for — a `delete`/unknown-op record writes no status at all, so refusing
+        # it would be an over-block with a WRONG diagnosis (measured, cycle 6).
+        # ⛔ THE LABEL TEST IS DELIBERATELY WIDER THAN THE FOLD'S, and that is an
+        # accepted over-block, not a claim of equivalence: the fold matches
+        # `label` by EXACT membership (`projection._CANONICAL_ENTITY_LABELS`), so
+        # `event` / `EVENT` / `:Event` records are dropped there and never reach a
+        # node. Refusing a TERMINAL state on one of those spellings therefore
+        # refuses a record that would have written nothing (measured, cycle 6 P3 —
+        # the previous wording claimed "the same tolerances the writers use", which
+        # was false). The trade is chosen because the alternative is to miss the
+        # spelling a caller actually uses: fail-closed on a dead record beats
+        # fail-open on a live one.
+        # ⛔ BOTH CHANNELS. `_emit` accepts a keyword payload OR one positional
+        # record, and the positional one is spliced into `payload["point"]`
+        # further down — reading only the keyword payload left the record channel
+        # open, exactly as it did for the `EventRecorded` arm above. Measured,
+        # review cycle 5 P1: `_emit("EntityMutated", {…op: restatus, state:
+        # {status: superseded}})` was ACCEPTED, stored the terminal status on the
+        # node AND journalled a record that reproduces it on replay.
+        # ⛔ AND THE SPLICE: sweeping each channel SEPARATELY still leaves the
+        # SPLIT shapes open — the map the fold reads is `projection._norm`'s
+        # `{**ev, **ev["point"]}`, not either channel on its own, so a record
+        # that puts `label`+`op` positionally and `state` in the kwargs presents
+        # every field the refusal needs while neither map does (measured,
+        # review cycle 7 P1: both split shapes stored a terminal `:Event`).
+        # ⛔ THE SPLICE IS BUILT ONLY FOR A MAPPING RECORD. Building it inline in
+        # the tuple below evaluations it BEFORE the loop's `isinstance` test and
+        # before the `record[0] is not dict` refusal further down, so a non-mapping
+        # record raised a bare ``TypeError: 'str' object is not a mapping`` out of
+        # the splat — the un-named 500-class this box exists to replace with a
+        # diagnosis, and a REGRESSION against ``main``, which validates the record
+        # before it reads it and answers the same inputs with its named
+        # ``ValueError`` (``_emit's record payload must be an exact dict``).
+        # Measured at the head that added the splice (review: conflict-sweep lane F):
+        # ``'a string'``/``42``/``None`` each raised ``TypeError``, and the guard
+        # whose comment explains why such a container is refused was unreachable.
+        _guards = [payload, *record]
+        if record and isinstance(record[0], dict):
+            _guards.append({**payload, **record[0]})
+        for _map in _guards:
+            if not isinstance(_map, dict):
+                continue
+            # ``op`` must be a STRING before the set membership: an unhashable
+            # value raised a bare ``TypeError: unhashable type`` out of
+            # ``emit_belief`` (measured, review cycle 6 P3) — the un-named
+            # 500-class this gate exists to replace with a diagnosis.
+            # ⛔ THE LABEL IS ASKED UNDER BOTH RENDERERS, for the reason the
+            # `EventRecorded` arm above states about KEYS: the live writers
+            # interpolate `str(label)` while the JOURNAL keeps a `str` subclass by
+            # its CONTENT, so a label whose content is `Event` and whose
+            # `__str__` says `harmless` passed a `str(label)` test, landed on
+            # `n:harmless` live, and REPLAYED as a terminal `:Event` (measured,
+            # review cycle 8 P1 — the journal carried `"label": "Event"` and
+            # folding it stored `status='superseded'`). `live.label_names_an_event`
+            # is that union, shared with the Phase-1 arm in `sdk._validate_bundle`
+            # so the two cannot disagree.
+            _op = _map.get("op")
+            if (isinstance(_op, str)
+                    and label_names_an_event(_map.get("label"))
+                    and _op in _ENTITY_MUTATION_STATE_OPS):
+                _state = _map.get("state")
+                refuse_terminal_event_state(
+                    _state if isinstance(_state, dict) else {},
+                    door=f"the `{type_}` envelope")
         if record:
             if len(record) > 1:
                 raise TypeError(
@@ -2143,6 +2270,76 @@ class EventAPI:
         # journal delta 0). `_emit` re-runs the full gate inside the arm, at its
         # commit point, so the graph is read once per record and not twice.
         self._refuse_unapproved_kinds(payload, graph_reads=False)
+        # ── #11825: the belief seam is a FOURTH door onto an `:Event` ──
+        # `type_` is a free string and `**payload` is splatted onto the record, so
+        # `emit_belief("EventRecorded", id=…, status='superseded')` wrote a
+        # terminal Event with no guard (measured, review cycle 2 P0). The
+        # check runs HERE, before the arm below, for the reason the money/percent/
+        # kind gates above do: `_emit`'s chokepoint raises inside the `try`, and
+        # this door's `except` exists to swallow I/O — a deterministic payload
+        # refusal swallowed there is the same record silently DROPPED (the F2
+        # divergence this docstring already records three times). Same unwrap as
+        # `_emit`, so the two cannot disagree about which map is the record.
+        if type_ == "EventRecorded":
+            _inner = payload.get("event")
+            refuse_terminal_event_state(
+                _inner if isinstance(_inner, dict) else payload,
+                door="EventAPI.emit_belief")
+        # ── #11825 (review cycle 3, P1): the FIFTH shape — a STATE OP on an `:Event` ──
+        # Gating on `type_ == "EventRecorded"` left the seam open one record type
+        # over. A caller can hand this door the canonical state-op record for ANY
+        # label: `emit_belief("EntityMutated", id=<event id>, label="Event",
+        # op="restatus", state={"status": "superseded"})` is exactly the shape
+        # `projection._journal_entity_mutation` emits, the fold reads it through
+        # `state["status"]` → `restatus` (`projection._fold_entity_mutation`, the `EntityMutated` state arm),
+        # and it stored a terminal `:Event` status with no refusal at all — the
+        # same half-state this change exists to make unwritable, reached through
+        # the door the change declared in scope (measured: the node carried
+        # `status: 'superseded'` afterwards).
+        # ⛔ Scoped to EVENT targets, deliberately: a state op on a Point / Subject /
+        # Object / Source is accepted by its own door, and a bundle-wide refusal
+        # here would be the over-rejection class T5's pins exist to catch. The
+        # label is read through the same tolerances the writers use — `Event`,
+        # `:Event`, any case — so a caller cannot slip past it by spelling the
+        # label differently from the fold's.
+        # ⛔ HERE, not only at `_emit`: the same predicate now also sits on the
+        # `_emit` chokepoint (see the state-op block there), because a cycle-6
+        # measurement showed the door-only placement let the identical record
+        # reach the fold through `_emit` directly. This call is what gives the
+        # caller a refusal that NAMES the door they used, before the
+        # best-effort `except` below can swallow it — a deterministic payload
+        # refusal swallowed there is the same record silently DROPPED (the F2
+        # divergence this docstring already records three times). Scoped to the
+        # label and to the ops the fold actually reads `state` for; it does NOT
+        # read a flat `restatus` payload key, because the fold does not: it reads
+        # `state` only (`SET n += $s` over `ev["state"]`), and no producer in the
+        # tree emits that spelling (the only `"restatus"` string in the tree is
+        # the `op` VALUE). A check on a key nothing writes would be a guard
+        # against a spelling no reader reads (measured, cycle 6 P2).
+        # ⛔ `op` is type-checked before the set membership: an unhashable value
+        # escaped this door as a bare ``TypeError: unhashable type`` (measured,
+        # cycle 6 P3), which is the un-named 500-class the eager refusal exists to
+        # replace.
+        # ⛔ A SEPARATE `if`, NOT an `elif` on the EventRecorded arm (review: conflict-sweep
+        # lane F, P1). An `EventRecorded` record CAN also carry the state-op shape —
+        # `emit_belief("EventRecorded", id=…, label="Event", op="restatus",
+        # state={"status": "superseded"})` — and with the `elif` the arm above matched
+        # first, so this check never ran. The record then reached `_emit`, whose
+        # chokepoint runs its state-op loop UNCONDITIONALLY, raised there — inside the
+        # `except Exception` below, which re-raises only `UnapprovedKindNamespace` — and
+        # was logged and DROPPED. Measured: that call returned None with the node and
+        # the journal both unchanged, i.e. exactly the F2 divergence the door's own
+        # comment says it exists to prevent, reached through a public method.
+        # The eager check is what gives the caller a refusal NAMING the door they used;
+        # making it unconditional is also what keeps the two predicates identical rather
+        # than one being shadowed for a record type both accept.
+        if label_names_an_event(payload.get("label")) \
+                and isinstance(payload.get("op"), str) \
+                and payload.get("op") in _ENTITY_MUTATION_STATE_OPS:
+            _state = payload.get("state")
+            refuse_terminal_event_state(
+                _state if isinstance(_state, dict) else {},
+                door="EventAPI.emit_belief")
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100
@@ -2809,8 +3006,30 @@ class EventAPI:
         ``**extra`` and cannot collide — the passthrough set names it for the
         doors whose ``id=`` means something ELSE (``add_object``'s
         ``add_object(id=…, event_id=…)``).
+
+        ⛔ ``**extra`` is also a straight line onto the EVENT NODE's property
+        map, so it can carry lifecycle STATE, which an :Event does not have
+        (ONTOLOGY §4.5). Measured at #11825's head: ``add_event(id, kind,
+        status='superseded')`` stored the status, and ``add_event(id, kind,
+        outdated=True)`` stored the flag — the two markers `ep.py` reads
+        label-blindly to strip a node from every factor, while every retrieval
+        leg keeps serving it. Both are refused here, through the ONE shared
+        predicate the SDK doors use (`live.refuse_terminal_event_state`), so a
+        fourth door cannot be wired with half of it. The rule is the terminal
+        half only: a non-terminal ``status`` rides the prop lane exactly as it
+        did (and as #2788 pins).
+
+        ⛔ This door is not "internal": `EventAPI` is a shipped public class,
+        the MCP server constructs it for `mine_conversation`, and
+        ``add_event`` itself has one in-tree caller (``ingest.py``). It is also
+        the only `:Event` writer that bypasses ``_sanitize_props``, which is why
+        the non-boolean half of the `outdated` contract is enforced by the
+        shared helper rather than by intake.
         """
         _refuse_caller_named_funnel_keys(extra, "`add_event`")
+        # #11825: refused BEFORE the emit, so a refused call appends nothing to
+        # the journal and writes nothing to the graph.
+        refuse_terminal_event_state(extra, door="EventAPI.add_event")
         self._emit("EventRecorded",
                    id=event_id,
                    eventKind=event_kind,

@@ -1143,29 +1143,6 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "are prose — the DOCSTRING reproducing the measured `_emit(...)` calls and the body "
         "comments recording later measured cases — because `_EMBED_WRITE` reads raw source, as "
         "it does for `tortoise.projection::_prewipe_synthetic_write_scope`'s"),
-    # ⛔ ONE entry per name: a second literal key for the same name SILENTLY OVERRIDES the
-    # first (Python's last-wins dict semantics — the LATER row wins and the earlier one is
-    # dead; an active override, not a harmless no-op). `ruff`'s F601 is the only LINTER that
-    # catches it, and it caught this one only post-merge on `main` — the pytest lane could
-    # not, until `#9314`'s pin
-    # (`tests/test_dod_5090_probe.py::test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently`).
-    # Provenance and the carrier rationale are merged into this row so neither reading is lost.
-    "tortoise.sdk::create_source": (
-        CENSUS_EXEMPT,
-        "`tortoise/sdk.py::create_source` — the `#11858` guard's OWN message is the only "
-        "match: its `ValueError` text says \"pass `embedding=` and it declares the truth\", "
-        "and `_EMBED_WRITE` reads raw source, so prose quoting the key enrols the function. "
-        "This door writes no vector of its own — it refuses a caller-supplied MARKER before "
-        "the props write, and the vector it stores is the caller's `embedding`, carried by "
-        "the same `_emit_event` / `_create_entity` path every other `:Source` writer uses; "
-        "it names no label of its own (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`). "
-        "⛔ Arrived at `origin/main` in `18d43e0462` (`#12113`) WITHOUT a census entry, so the "
-        "probe was red on `main` before this branch touched it (measured: 5 failures whose "
-        "only unclassified name is this one). Exempt as a CARRIER on `#5004`, the same "
-        "disposition `tortoise.api::add_point` carries — the store is DELEGATED to "
-        "`tortoise/projection/entities.py::_upsert_source`, whose passthrough legitimately "
-        "stores `s.embedding` for the vector retrieval leg to read — NOT because no store is "
-        "reachable through it"),
     "tortoise.api::_int_is_float_exact": (
         CENSUS_EXEMPT,
         "`tortoise/api.py::_int_is_float_exact` — a pure PREDICATE (`float(value) == value`, "
@@ -1301,6 +1278,32 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "chain — the same direction, and for the same reason, as "
         "`_journal_event_raw_write`: its record IS what the rebuild reads the "
         "vector back from (`#8488`), not a store reached around the gate"),
+    # ⛔ ONE entry per name: a second literal key for the same name SILENTLY OVERRIDES the
+    # first (Python's last-wins dict semantics — the LATER row wins and the earlier one is
+    # dead; an active override, not a harmless no-op). `ruff`'s F601 is the only LINTER that
+    # catches it, and it caught this one only post-merge on `main` — the pytest lane could
+    # not, until `#9314`'s pin
+    # (`tests/test_dod_5090_probe.py::test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently`).
+    # Provenance and the carrier rationale are merged into this row so neither reading is lost.
+    "tortoise.sdk::create_source": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::create_source` — the instrument's match is an operator-facing "
+        "REFUSAL message, not a write clause: the only `embedding=` in the body is the "
+        "`#11858` guard's own `ValueError`, whose text says \"pass `embedding=` and it "
+        "declares the truth\" — it names the keyword to say the "
+        "`_SERVER_MANAGED_EMBEDDING_MARKERS` family may NOT be set by hand, and it refuses "
+        "a caller-supplied MARKER before the props write. `_EMBED_WRITE` reads raw SOURCE, "
+        "so that prose enrols the function. The door computes no vector of its own: a "
+        "caller-supplied `embedding` is CARRIED into `_create_entity`'s `:Source` write, by the "
+        "same `_emit_event` / `_create_entity` path every other `:Source` writer uses — the "
+        "`#5004` caller-vector contract — and it names no label of its own "
+        "(`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`). Exempt as a CARRIER — the "
+        "same disposition `tortoise.api::add_point` carries, and the reason "
+        "`tortoise/projection/entities.py::_upsert_source`'s passthrough legitimately stores "
+        "`s.embedding` for the vector retrieval leg to read — NOT because no store is "
+        "reachable through it. ⛔ Arrived on `origin/main` in `18d43e0462` (`#12113`) WITHOUT "
+        "a census entry, so the probe was red on `main` before this branch touched it "
+        "(measured: 5 failures whose only unclassified name is this one)"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
         "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
@@ -1328,6 +1331,10 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("tortoise/api.py", "add_point",
          'p["embedding"] = fields["embedding"]'),),
     "tortoise.sdk::create_source": (
+        # ⛔ #11996 landed a DUPLICATE of this same evidence (byte-identical, so it
+        # only shadowed) and `ruff check .` F601 caught it on main; its one distinct
+        # sentence: deleting the guard (the `raise`) takes the needle AND the
+        # population entry away together, so a stale exemption cannot outlive it.
         # Needle 1 is the REFUSAL's own prose — the whole reason this name enrols, and the
         # only `_EMBED_WRITE` match in the body: delete the `raise` and it goes, taking the
         # population entry with it. Needle 2 is the guard's CONDITION

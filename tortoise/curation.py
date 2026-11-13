@@ -194,7 +194,23 @@ class Row:
 
     @property
     def stable_key(self) -> str:
-        """Content-addressed key: the same row read twice yields the same key."""
+        """Content-addressed key: the same row read twice yields the same key.
+
+        ⛔ EXCEPT for an operator, whose identity is NOT its text. ``create_operator``
+        identifies a relationship by ``(op_type, source, targets, label)``, and the
+        layer's meaning is its EDGES — the read surface that enumerates it in bulk
+        (``tortoise_search(entity_type="operator")``) serves the operator's ``label``
+        as ``content`` and exposes no endpoints at all. Content-addressing that class
+        folds every label-less operator onto ONE keeper the moment the labels are
+        empty (measured on live-v4, 2026-11-13: the layer's first row is an ``IMPL``
+        with ``content: ""``), so 3,727 distinct relationships were reported as one
+        row plus 3,726 "exact content duplicates" — the reasoning layer summarised as
+        a single claim. Nothing is written from this class (it is ``undecidable`` —
+        see :func:`classify_point`), so an id-scoped key costs no idempotency: this
+        key never reaches a ``migrationKey`` or the ledger.
+        """
+        if self.node_type == "operator":
+            return f"{MIGRATION_KEY_PREFIX}{self.node_type}:{self.kind or '-'}:id:{self.node_id}"
         basis = self.content_hash or hashlib.sha256(
             (self.content or "").strip().encode("utf-8")
         ).hexdigest()
@@ -345,7 +361,12 @@ def classify_point(
     # one. Never the disposition — that is what the reason already says.
     who = keeper_id if keeper_id is not None else "a row this pass did not name"
 
-    if duplicate_of is not None and content_mismatch:
+    if duplicate_of is not None and row.node_type != "operator" and content_mismatch:
+        # An operator is never folded on content: its key is id-scoped (its text is a
+        # label, routinely empty), so a `duplicate_of` on ONE operator row can only come
+        # from a shared node id — and a "content hash" reason would then assert a
+        # relation that was never computed (round-5 review). The operator branch below
+        # decides every operator row unconditionally.
         # A content hash that TWO rows share while their CONTENT differs is not a
         # duplicate relation — it is a hash that cannot be trusted for this pair. Rows
         # are folded by hash alone, so the second text used to be reported as an "exact
@@ -359,18 +380,34 @@ def classify_point(
                         "text has no row of record and needs a per-row decision",
                         pack, key, row.content)
 
-    if duplicate_of == CARRY:
+    # ⛔ Reachability of the `!= "operator"` clauses in this block, so none of them
+    # reads as protection it does not provide (round-7 review, corrected round-2). ALL
+    # FOUR are DEAD for an operator row — each carries `row.node_type != "operator"`,
+    # so the operator branch at the bottom decides every operator row unconditionally.
+    # `build_plan` is the only caller that passes `duplicate_of`, and it passes a
+    # KEEPER's disposition; an operator's keeper can only be another operator under the
+    # id-scoped key, which is classified `UNDECIDABLE`, so an operator's `duplicate_of`
+    # would be `UNDECIDABLE` — and even that never reaches the `UNDECIDABLE` arm below.
+    # They are kept as DEFENCE IN DEPTH, for the day the operator branch moves or is
+    # narrowed: without them an operator would silently inherit a content fold (a
+    # "duplicate" reason computed over a label) or a keeper's `CARRY`. The
+    # `content_mismatch` arm ABOVE and the `UNDECIDABLE` and generic arms here are
+    # pinned by the synthetic `duplicate_of=` calls in
+    # `test_two_operator_rows_sharing_an_id_do_not_get_a_content_duplicate_reason`; the
+    # `CARRY` arm is pinned there too, by its own call — it is the one this block's
+    # first wording wrongly called "live", and pinning it is what keeps the claim true.
+    if duplicate_of == CARRY and row.node_type != "operator":
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
                         "exact content duplicate of a carried row (same content hash); "
                         f"the keeper {who} carries it. MERGE of near-duplicates is #5006's scope, "
                         "not this pass's", pack, key, row.content)
-    if duplicate_of == UNDECIDABLE:
+    if duplicate_of == UNDECIDABLE and row.node_type != "operator":
         return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
                         "exact content duplicate of a row that is itself undecidable — the "
                         f"content has no carry candidate yet (the keeper {who} is undecidable "
                         "too), so this row is not carried either",
                         pack, key, row.content)
-    if duplicate_of is not None:
+    if duplicate_of is not None and row.node_type != "operator":
         # The keeper was not carried: neither is its duplicate, and the reason names
         # the keeper rather than claiming a carry that did not happen.
         body = (
@@ -388,21 +425,49 @@ def classify_point(
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
                         body, pack, key, row.content)
 
+    if row.node_type == "operator":
+        # ⛔ REACHED, and NOT a carrier. Two corrections to what this branch used to
+        # say, both measured on live-v4 2026-11-13 and recorded in
+        # `docs/architecture/CURATION-11469.md`:
+        #
+        # 1. The layer IS readable. `tortoise_search(entity_type="operator",
+        #    limit=5000)` answers **3,727 rows in one call**, an exact match with
+        #    `structure.operators`, with no vector leg. The old note's escape hatch —
+        #    "unless an operator kind is requested" — returns `total: 0` for both
+        #    `kind="operator"` and `kind="IMPL"`, so it named a door that is not a
+        #    door. `tools/curate_graph.py` reads the layer now.
+        # 2. Reading it does NOT make it carryable. An operator's meaning is its
+        #    ENDPOINTS — `label` + `op_type` + the source/target ids its edges bind —
+        #    and the bulk ENUMERATION does not carry them: `relationships` is decorated
+        #    only for `entity_type="point"` (`sdk.py` step 7.5), so the empty list on an
+        #    operator row is a construction artifact, not a measurement, and
+        #    `audit.edge_count` is a count only. The endpoints ARE readable one operator
+        #    at a time (`tortoise_expand_relationships`), which is 3,727 calls this pass
+        #    does not fan out. A carried operator therefore arrives in the clean graph
+        #    as a FLOATING node, which is the one shape this issue forbids ("Every
+        #    retained fact is connected ... not a floating node"). The write side is not
+        #    short of a section either: `ingest` has had `connections` since #888 W4 —
+        #    what is missing is the endpoint data to build them from, at this fan-out.
+        #
+        # Checked BEFORE the empty-content gate on purpose: an operator's `content` is
+        # its label, and an empty label says nothing about whether the relationship
+        # matters — so "nothing to carry" is the wrong answer for it. It is undecidable
+        # until the endpoints are readable.
+        return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
+                        "operator (IMPL/NAND/composedOf) — the reasoning layer, and NOT "
+                        "carried: its meaning is its endpoints, and the bulk enumeration "
+                        "does not carry them (relationships are decorated for "
+                        "entity_type='point' only, and audit.edge_count is a count only); "
+                        "they are readable one operator at a time via "
+                        "tortoise_expand_relationships, which this pass does not fan out. "
+                        "Carrying it as a point would arrive as a floating node. Needs "
+                        "endpoint data #888 W4's ingest `connections` section writes from",
+                        pack, key, row.content)
+
     if not (row.content or "").strip():
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
                         "empty content — nothing to carry (checked before every kind rule: an "
                         "empty row would otherwise be carried as an empty point)", pack, key, row.content)
-
-    if row.node_type == "operator":
-        # NOTE: the MCP read path excludes operator Points unless an operator
-        # kind is requested (sdk._operator_scope_clauses, #7108), so this branch
-        # is unreachable from `tools/curate_graph.py` today. It stays because the
-        # rule is right, and it is marked unreachable in the inventory rather
-        # than presented as a measured count.
-        return Decision(row.node_id, row.node_type, row.kind, CARRY,
-                        "operator (IMPL/NAND/composedOf) — the reasoning layer; the row is "
-                        "carried as a claim, its edges are the ingest contract's job (#888 W4)",
-                        pack, key, row.content)
 
     if row.bare_kind in SIGNAL_KINDS:
         return Decision(row.node_id, row.node_type, row.kind, CARRY,
@@ -583,9 +648,15 @@ class Plan:
 
         ``content`` is not optional — ``sdk._check_item_shape`` refuses a point
         item without it (Phase 1, so a whole bundle is rejected, not one row).
-        Connection wiring (which claim serves as evidence for which) is the ingest
-        contract's job (#888 W4), and is NOT built here: the bundle is rows, not
-        edges. Never a deletion.
+        Connection wiring (which claim serves as evidence for which) is NOT built
+        here: the bundle is rows, not edges. ⚠️ That is no longer because the write
+        side is missing — ``ingest`` has carried a ``connections`` section since #888
+        W4, which landed — but because the READ side does not carry the endpoints the
+        connections would be built from in bulk: the operator layer enumerates (3,727
+        rows, 2026-11-13) with its ``label`` as content, ``relationships`` is decorated
+        for ``entity_type="point"`` only, and ``audit.edge_count`` is a count only. An
+        operator is therefore ``undecidable`` (see :func:`classify_point`), never a
+        floating point. Never a deletion.
         """
         representable = {"point", "operator", "source"}
         strays = sorted({d.node_id for d in self.carry_rows() if d.node_type not in representable})
