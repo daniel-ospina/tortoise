@@ -107,6 +107,7 @@ from .validity import (  # #2350: the ONE home for the precision PROP NAMES
     FROM_PRECISION_PROP,
     TO_PRECISION_PROP,
 )
+from .live import lifecycle_props_by_rendering, keys_rendering_as  # #9649 review 13: shape-independent presence
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
@@ -10339,6 +10340,13 @@ _TEMPORAL_RESTAMP_PROPS = frozenset({
     "validFrom", "validTo", FROM_PRECISION_PROP, TO_PRECISION_PROP,
     "expiredAt", "when",
 })
+
+# The lifecycle fields a Point write must not move without a guarded verdict:
+# the status word plus every window field. Kept as ONE set because the guard
+# reads its subject from `lifecycle_props_by_rendering`, and the test that asks
+# "did this call ask for a lifecycle change?" must cover exactly what the
+# refusal covers (#9649 review 13).
+_GUARDED_LIFECYCLE_PROPS = frozenset({"status"}) | _TEMPORAL_RESTAMP_PROPS
 
 
 def _shape_or_refuse_caller_end(props: dict) -> dict | None:
@@ -47441,9 +47449,9 @@ class TortoiseSDK:
         # instrument still answers terminality; only the wording is local. The
         # `except` cannot catch an absent/operator verdict — `missing_ok=True` and
         # `allow_operator=True` leave terminality as the guard's only raise.
-        _lifecycle_fields = sorted(
-            ({"status"} if "status" in props else set())
-            | (_TEMPORAL_RESTAMP_PROPS & set(props)))
+        _lifecycle_rendered = lifecycle_props_by_rendering(
+            props, _GUARDED_LIFECYCLE_PROPS)
+        _lifecycle_fields = sorted(_lifecycle_rendered)
         _lifecycle_ids: list = []
         if _lifecycle_fields:
             # ── #9649 review F1: resolve the ADDRESS before the verdict ─────────
@@ -47599,10 +47607,10 @@ class TortoiseSDK:
             # makes `props["status"]` below safe to read without a guard. A
             # mutation that deletes it is an EQUIVALENT mutant, not a hole.)
             _status_entailed = (
-                "status" in props
-                and not (_TEMPORAL_RESTAMP_PROPS & set(props))
+                "status" in _lifecycle_rendered
+                and not (_TEMPORAL_RESTAMP_PROPS & set(_lifecycle_rendered))
                 and not _bound_null_statuses
-                and _pt_statuses == (props["status"],))
+                and _pt_statuses == (_lifecycle_rendered["status"],))
             for _lifecycle_id in (() if _status_entailed else _lifecycle_ids):
                 try:
                     # ⛔ `refuse_event_terminalization=False` (#11825 merge): this
@@ -47684,7 +47692,7 @@ class TortoiseSDK:
         if isinstance(props.get("name"), str) and props["name"].strip():
             self._refuse_ambiguous_rename(id_val, props["name"])
 
-        if "status" in props:
+        if "status" in _lifecycle_rendered:
             # ⛔ Review F3-1: this arm is keyed on the ADDRESS the guard resolved,
             # not on `{id: $id}`. With `eventId`/`url` addressing, a `{id:$id}`
             # read found no Point, so BOTH the vocabulary check and the declared
@@ -47704,7 +47712,7 @@ class TortoiseSDK:
             # into the sibling arm and journalled `restatus` against the wrong
             # label (which makes `rebuild_all` raise). Measured. `_lifecycle_ids`
             # is non-empty exactly when a Point is bound.
-            _status = props["status"]
+            _status = _lifecycle_rendered["status"]
             if _lifecycle_ids:
                 if (not isinstance(_status, str)
                         or _status not in POINT_STATUS_VALUES):
@@ -47848,7 +47856,17 @@ class TortoiseSDK:
                         self._journal_entity_mutation(
                             "Point", _lifecycle_id, "restatus",
                             state={"status": _status})
-                props = {k: v for k, v in props.items() if k != "status"}
+                # ⛔ #9649 review 13: drop EVERY key that renders as `status`,
+                # not the literal name. `k != "status"` hashes the name, so a
+                # `str` SUBCLASS key survived the drop and the generic label-loop
+                # write below re-wrote the field — and because the guard's
+                # presence test missed the same key class, the value it re-wrote
+                # was one the guard never saw (measured: `KHash("status")`
+                # resurrected a superseded claim, window closed, zero journal
+                # delta).
+                _status_key_ids = {id(k) for k in keys_rendering_as(props, {"status"})}
+                props = {k: v for k, v in props.items()
+                         if id(k) not in _status_key_ids}
 
         # #1423 (review P1): the `status` guard above is POINT-gated (its
         # predicate is `MATCH (n:Point {id:$id})`), so a `:Subject` `status`
@@ -47865,13 +47883,14 @@ class TortoiseSDK:
         # with a status: the Point arm above already validated it against the
         # Point vocabulary and dropped the key from `props` (the Point-
         # precedence rule #3311 established).
-        if "status" in props:
+        _subject_status_rendered = lifecycle_props_by_rendering(props, {"status"})
+        if _subject_status_rendered:
             _subj_hits = proj.g.query(
                 "MATCH (n:Subject {id:$id}) RETURN count(n)",
                 params={"id": id_val},
             ).result_set[0][0]
             if _subj_hits:
-                _status = props["status"]
+                _status = _subject_status_rendered["status"]
                 if (not isinstance(_status, str)
                         or _status not in _SUBJECT_STATUS_VALUES):
                     raise ValueError(

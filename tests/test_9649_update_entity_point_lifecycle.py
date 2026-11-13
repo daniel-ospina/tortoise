@@ -1103,10 +1103,128 @@ def test_the_transition_refusal_names_the_RESOLVED_id_not_the_typed_address(env)
         f"the typed address must still be shown, so the caller recognises its "
         f"own call: {text!r}")
 
-    # ...and the call the message names really resolves (non-vacuity).
-    assert sdk.get_point(pid)["id"] == pid
+    # ...and the prescribed call really runs from the RESOLVED id (non-vacuity:
+    # an assertion that the message contains an id proves nothing about whether
+    # that id can be handed to the verb — review round 13, P3).
+    fresh = _live(sdk, "the successor the message tells me to mint")
+    sdk.supersede_point(pid, fresh)
+    assert _row(sdk, pid)["status"] == "superseded", (
+        "the route the refusal names must be performable exactly as written, "
+        "with the resolved id it interpolates")
 
 
+# ══════════════════════════════════════════════════════════════════════
+# Review round 13 — the guard's PRESENCE TEST is shape-independent
+# ══════════════════════════════════════════════════════════════════════
+#
+# Measured at the review head, after the guard landed: a `str` SUBCLASS key that
+# overrides `__hash__` is missed by `"status" in props` (and by `set(props)`),
+# while the WRITE still files it under `status` — the live transport inlines
+# `str(key)` and the journal writes the key's content. So the guard was skipped
+# and the value it exists to refuse landed anyway:
+#
+#   update_entity(<superseded>, **{KHash("status"): "live"})  -> ACCEPTED
+#     after: ['live', validTo=<the closed instant>, outdated=True], delta 0
+#
+# The sibling #11825 guard 70 lines above refuses the identical call on a
+# `:Point:Event`, because it iterates the keys and asks the renderer union
+# (`live.declares_event_state_key`). Same door, two presence tests, one hole —
+# which is why the guard now reads its subject through
+# `live.lifecycle_props_by_rendering` and drops through `live.keys_rendering_as`.
+# These pins keep that from regressing on either axis (presence AND drop).
+
+class _KHash(str):
+    """A `status` key the literal `in` test cannot find (hash-only deviation)."""
+
+    __hash__ = lambda s: 424242  # noqa: E731 — the whole point of the fixture
+
+
+class _KStr(str):
+    """A key whose CONTENT is not `status` but whose `__str__` renders as it.
+
+    The live transport writes `str(key)`, so this key stores `status` — the
+    harder half of the class, because a guard that only reads the content form
+    sees an ordinary, harmless property name.
+    """
+
+    def __str__(self):
+        return "status"
+
+
+def test_a_hash_overriding_status_key_cannot_resurrect_a_dead_claim(env):
+    """P1 (review round 13): the presence test, not just the refusal, is guarded."""
+    sdk, _ = env
+    old, _new = _superseded(sdk)
+    before = _row(sdk, old)
+
+    with pytest.raises(ValueError, match="superseded"):
+        sdk.update_entity(old, **{_KHash("status"): "live"})
+
+    after = _row(sdk, old)
+    assert after == before, f"the refusal must leave the row untouched: {after}"
+    assert _mutations(env[1], old) == [], (
+        "a refused write must not be journaled — a journaled record replays the "
+        "very state the guard refused")
+
+
+def test_a_str_rendered_status_key_cannot_resurrect_a_dead_claim(env):
+    """The other renderer: content `q`, `__str__` returns `status`."""
+    sdk, _ = env
+    old, _new = _superseded(sdk)
+    before = _row(sdk, old)
+
+    with pytest.raises(ValueError, match="superseded"):
+        sdk.update_entity(old, **{_KStr("q"): "live"})
+
+    assert _row(sdk, old) == before
+    assert _mutations(env[1], old) == [], "nothing may be journaled for a refusal"
+
+
+def test_a_hash_overriding_window_key_cannot_rewrite_a_closed_window(env):
+    """Probe 2's axis, in the same key class: `validTo` must be guarded too."""
+    sdk, _ = env
+    old, _new = _superseded(sdk)
+    before = _row(sdk, old)
+    assert before["validTo"], "the fixture must be a CLOSED window"
+
+    with pytest.raises(ValueError, match="validTo"):
+        sdk.update_entity(old, **{_KHash("validTo"): "2030-01-01T00:00:00Z"})
+
+    assert _row(sdk, old) == before, "the closed window must survive the refusal"
+
+
+def test_a_hash_overriding_status_key_cannot_store_an_undeclared_word(env):
+    """The #3311 vocabulary half: `status='garbage'` was STORED, not refused."""
+    sdk, _ = env
+    pid = _live(sdk, "a live claim")
+
+    with pytest.raises(ValueError, match="Invalid status"):
+        sdk.update_entity(pid, **{_KHash("status"): "garbage"})
+
+    assert _row(sdk, pid)["status"] == "live", (
+        "an undeclared status word must never reach the node, whichever name it "
+        "was filed under")
+
+
+def test_a_plain_status_key_still_gets_the_documented_answer(env):
+    """Non-vacuity control: the ordinary spelling must behave, not be refused.
+
+    Without this, every pin above would pass on a guard that refused every write.
+    """
+    sdk, _ = env
+    pid = _live(sdk, "a live claim")
+
+    sdk.update_entity(pid, status="superseded")
+    assert _row(sdk, pid)["status"] == "superseded", (
+        "a DECLARED transition must still land — the arm is not simply closed")
+
+    # ...and the plain spelling is then refused on the SAME guarantee the exotic
+    # keys were refused on, so the family is one rule and not two.
+    with pytest.raises(ValueError, match="superseded"):
+        sdk.update_entity(pid, status="live")
+
+
+# ══════════════════════════════════════════════════════════════════════
 def test_the_id_less_refusal_prescribes_no_unperformable_route(env):
     """Review round 12 (P3, AX rule 2): no repair the caller cannot execute.
 
