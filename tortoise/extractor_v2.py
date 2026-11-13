@@ -3083,10 +3083,15 @@ class _PriorFoldUnresolvable(RuntimeError):
     """
 
     def __init__(self, message: str, *, folded: list[dict],
-                 unresolved: list[str]) -> None:
+                 unresolved: list[str],
+                 unresolved_names: list[str] | None = None) -> None:
         super().__init__(message)
         self.folded = folded
         self.unresolved = unresolved
+        #: The withheld rows' SPELLINGS. The caller needs them: a row that left the
+        #: candidate set un-named reads downstream as measured absence, and that is
+        #: the one state §4.4 I1 makes license a CREATE.
+        self.unresolved_names = list(unresolved_names or [])
 
 
 def _current_entity_priors(sdk, rows: list[dict],
@@ -3175,6 +3180,7 @@ def _current_entity_priors(sdk, rows: list[dict],
     #: downstream as measured absence, which licenses a duplicate for entities that
     #: have nothing to do with the bad row.
     unresolved: list[str] = []
+    unresolved_names: list[str] = []
     for row in rows:
         rid = str(row.get("id") or "")
         label = labels.get(rid) if rid else None
@@ -3205,6 +3211,7 @@ def _current_entity_priors(sdk, rows: list[dict],
             # still-retired carrier (the exact node this guard exists to exclude)
             # with no marker; the row is withheld and named instead.
             unresolved.append(rid)
+            unresolved_names.append(str(row.get("name") or ""))
             continue
         if current in emitted:
             _absorb_spellings(emitted[current], row, fact)
@@ -3221,6 +3228,7 @@ def _current_entity_priors(sdk, rows: list[dict],
                 # `link_before_create` would record `found: True … existing
                 # <carrier> — connect, do not re-create`.
                 unresolved.append(rid)
+                unresolved_names.append(str(row.get("name") or ""))
                 continue
             # Nothing hopped: the id is in the FTS result but not on its label (a
             # row that vanished between the two reads). Kept AS IT CAME rather than
@@ -3256,7 +3264,8 @@ def _current_entity_priors(sdk, rows: list[dict],
             "; ".join(unresolved) + " — could not be resolved to a fixpoint "
             "(a dangling `resolved_from` or a chain longer than "
             f"{_PRIOR_HOP_BOUND}); refusing to return a pre-hop row (#12296 D-1)",
-            folded=list(out), unresolved=unresolved)
+            folded=list(out), unresolved=unresolved,
+            unresolved_names=[n for n in unresolved_names if n])
     return out
 
 
@@ -3399,11 +3408,16 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     # honest grade is PARTIAL (#5095 §4.4 G3): keep the rows the fold did resolve,
     # report the entity legs as failed, and record a reason.
     reason: str | None = None
+    #: Spellings the fold withheld. A withheld row is NOT the same as an absent
+    #: one: the caller must HOLD these names rather than let them read as measured
+    #: absence, or the run creates the duplicate the fold exists to prevent.
+    entities_unresolved: list[str] = []
     try:
         entities = _current_entity_priors(
             sdk, list(results["entities"].values()), entity_labels)
     except Exception as e:  # noqa: BLE001, RUF100 — degrade the leg, not capture
         entities = list(getattr(e, "folded", None) or [])
+        entities_unresolved = list(getattr(e, "unresolved_names", None) or [])
         reason = ("S3 partial: the entity prior-set fold could not resolve every "
                   f"row ({type(e).__name__}: {e}) — refusing pre-hop rows")
         for _leg in ("object", "subject"):
@@ -3437,7 +3451,7 @@ def search_graph(sdk, embed_list: dict, story: str, *,
             "query_coverage": coverage,
             "query_results": {"ran": [], "failed": []},
         }
-    return {
+    out = {
         "mode": mode, "degraded": False, "reason": reason,
         "entities": entities,
         "points": list(results["points"].values()),
@@ -3446,6 +3460,9 @@ def search_graph(sdk, embed_list: dict, story: str, *,
         "query_coverage": coverage,
         "query_results": {"ran": ran_keys, "failed": failed_keys},
     }
+    if entities_unresolved:
+        out["entities_unresolved"] = entities_unresolved
+    return out
 
 
 def _candidate_covered(search: dict, entity_type: str, raw: str) -> bool:
@@ -9545,10 +9562,16 @@ def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | Non
     # at all. Same rule as `_find_existing_entity`: fold both sides, and never
     # guess when more than one row answers.
     want = normalize_entity_name(ref)
-    named = [e for e in entities
-             if _norm(e.get("name", "")) == _norm(ref)
-             or normalize_entity_name(e.get("name", "")) == want
-             or _alias_hit_for(want, e.get("aliases"))]
+    # ⛔ NAME FIRST, fold/alias only as the FALLBACK — the same ladder
+    # `_find_existing_entity` uses. In one match list, a rival row that merely
+    # folds or aliases to the ref made the set ambiguous and a supersession that
+    # previously landed was DROPPED (the entity that should be retired stayed
+    # live), while nothing about the ref's own spelling had changed.
+    named = [e for e in entities if _norm(e.get("name", "")) == _norm(ref)]
+    if not named:
+        named = [e for e in entities
+                 if normalize_entity_name(e.get("name", "")) == want
+                 or _alias_hit_for(want, e.get("aliases"))]
     matches = [e for e in named
                if (not kind
                    or _norm_kind(e.get("kind", "")) == _norm_kind(kind))]
@@ -15213,7 +15236,16 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # candidates, the only state in which a DISAMBIGUATION can happen at all.
     # A run whose lookup did not run has nothing to disambiguate, and its create
     # gate is §4.4's separate S3-lookup row (#10998), not this one.
-    if search and not search.get("degraded") and (search.get("entities") or []):
+    #: Spellings the D-1 fold WITHHELD (a dangling `resolved_from`, a corrupt
+    #: chain). They are not absent — they are unreadable — so they are HELD below
+    #: rather than left to read as measured absence, and the pass still runs even
+    #: when the fold withheld every row (an empty candidate set must not turn a
+    #: partial lookup into a create window).
+    _unresolved_names = [str(n).strip()
+                         for n in (search or {}).get("entities_unresolved") or []
+                         if str(n or "").strip()]
+    if search and not search.get("degraded") and (
+            (search.get("entities") or []) or _unresolved_names):
         ent_refs = [{"name": str(e.get("name", "")).strip(),
                      "kind": str(e.get("kind", "")).strip()}
                     for e in (complete_list.get("entities") or [])
@@ -15255,6 +15287,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 resolution_records = res.get("records") or []
                 resolution_warnings = res.get("warnings") or []
                 resolution_held = res.get("held") or []
+                # #12296: the fold withheld these spellings, so their identity was
+                # never resolved — HOLD them (never create). Same disposition the
+                # facts-reader failure gets, for the same reason.
+                _held_names = {str(h.get("name") or "").strip()
+                               for h in resolution_held}
+                for _name in _unresolved_names:
+                    if _name in res.get("map", {}) or _name in _held_names:
+                        continue
+                    resolution_held.append({
+                        "name": _name, "kind": "",
+                        "reason": HOLD_DISAMBIGUATION_UNDECIDED, "vetoes": []})
+                    _held_names.add(_name)
                 if resolution_held:
                     # §4.4's *"recorded loudly, never only in `warnings`"*: one deterministic census class per run, with the reasons and the candidates named on `result["resolution_held"]`.
                     _bump_census_class(error_census, "entity_identity_held")

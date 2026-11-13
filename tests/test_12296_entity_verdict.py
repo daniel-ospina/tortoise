@@ -1078,6 +1078,26 @@ class TestTheResolverBands:
         assert res["records"][0]["mode"] == "alias", res
         assert res["held"] == [], res
 
+    def test_a_folding_rival_does_not_make_a_supersede_ref_ambiguous(
+            self, sdk_factory):
+        """NAME first, fold/alias only as the FALLBACK — the ladder
+        `_find_existing_entity` uses.
+
+        In one match list, a rival row that merely folds or aliases to the ref made
+        the set ambiguous, and `_resolve_superseded` returned None — so a
+        supersession that previously landed was DROPPED and the entity that should
+        be retired stayed live. Nothing about the ref's own spelling had changed.
+        """
+        sdk = sdk_factory()
+        _merged_pair(sdk)                       # "the team" -> "Acme Holdings"
+        _create_object(sdk, "obj-live", "The Team")
+        folded = v2._current_entity_priors(
+            sdk, [{"id": "obj-carrier", "name": "the team", "kind": "core:plan"},
+                  {"id": "obj-live", "name": "The Team", "kind": "core:plan"}],
+            {"obj-carrier": "Object", "obj-live": "Object"})
+        hit = v2._resolve_superseded("The Team", {"entities": folded})
+        assert hit is not None and hit["id"] == "obj-live", (hit, folded)
+
     def test_a_supersedes_ref_spelled_as_the_merged_variant_still_resolves(
             self, sdk_factory):
         """The fold replaces the carrier's row, so its SPELLING lives in `aliases[]`
@@ -1359,6 +1379,33 @@ class TestTheResolverBands:
                        "suppressed": False, "aliases": ["The Team"]}}
         derived = v2._verdict_facts(facts, "A", "the team")
         assert derived["mention_is_alias"] is True, derived
+
+    def test_a_withheld_spelling_is_held_rather_than_read_as_absent(
+            self, sdk_factory, monkeypatch):
+        """A row the fold WITHHELD must not read as measured absence.
+
+        `delete_entity` `DETACH DELETE`s a survivor and leaves every carrier's
+        `resolved_from` dangling, so the fold refuses the row — correctly, it will
+        not return a pre-hop carrier. But then the name left the candidate set
+        un-named: with the fold withholding EVERY row, `search_graph` returned an
+        empty `entities`, the D3 pass was skipped outright, `resolution_held` was
+        `[]` and the run CREATED the entity. The withheld spelling is carried on
+        the PARTIAL exit and HELD by the orchestrator.
+        """
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-orphan", "the team",
+                       resolved_from="obj-deleted")
+        monkeypatch.setattr(v2, "_is_searchable_backend",
+                            lambda mode, sdk=None: True)
+        monkeypatch.setattr(
+            v2, "_fts_rows",
+            lambda *a, **kw: [{"id": "obj-orphan", "name": "the team",
+                               "kind": "core:plan"}])
+        search = v2.search_graph(sdk, {"entities": [{"name": "the team"}]},
+                                 "the story", max_queries=1, limit=3)
+        assert search["degraded"] is False, search
+        assert search["entities"] == [], search
+        assert search.get("entities_unresolved") == ["the team"], search
 
     def test_the_orchestrator_passes_the_facts_reader_output_to_the_resolver(
             self, monkeypatch):
