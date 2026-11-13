@@ -5,8 +5,8 @@
 
 ## Confirmed problem
 
-`tools/curate_graph.py` performs the #11469 census over Points, Sources and (since PR
-#12380) the operator layer. The **Event layer — 4,670 rows on `live-v4`, exactly
+`tools/curate_graph.py` performs the #11469 census over Points, Sources and (since
+PR #12380) the operator layer. The **Event layer — 4,670 rows on `live-v4`, exactly
 `counts.Event` — is never read**, and the harness records that omission in
 `NOT_ENUMERABLE["event"]` (`curate_graph.py:640`) as *"READABLE but NOT read by this
 pass"*. The layer is reachable in one advertised call:
@@ -188,6 +188,7 @@ red when reverted, and the change goes to the code-review gate (a separate, fres
 budget) at the final head. This gate exits CAPPED, not clean.
 
 ### Review Scope Contract
+
 **Class:** code
 
 **Risk surface** — what this change can break, each with the check that would catch it:
