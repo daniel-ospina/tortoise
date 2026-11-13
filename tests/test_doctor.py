@@ -444,8 +444,11 @@ class TestDoctorHostedCredential:
         truncates a leg (`min(own, left)`), printing the configured 30 s reports
         a wait that never happened — an over-claim inside the verdict report, the
         surface a user reads to decide whether to re-run (fresh review round 14).
-        Here the budget is 6 s and the `/health` leg used its own 5 s, so the
-        retry can only be 6 s: the row must say 6, never 30.
+        Here the budget is 6 s. The stub raises without consuming its bound, so
+        the retry's bound is the whole remaining budget (6 s) — and the row must
+        say 6, never the configured 30. (A first leg that really spent its 5 s
+        would leave ~1 s; the property under test is the same either way: the row
+        names the bound it applied, not the constant.)
         """
         _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
 

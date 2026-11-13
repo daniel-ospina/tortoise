@@ -13210,7 +13210,8 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                             f"({_printable(_scrub(str(retry_reason), api_url, api_key))})"
                             ". The credential is UNGRADED (nothing was asked of "
                             "it) — check https://api.premiselabs.co/health or your "
-                            "TORTOISE_API_URL, then `tortoise config show`"))
+                            f"TORTOISE_API_URL, then `tortoise config show`"
+                            f"{_provenance_note}"))
             return
 
     # ── the `/health` verdict, computed ONCE (#11912 review round 5) ──
@@ -13320,7 +13321,8 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                         "unlikely — but the key is UNPROVEN, not verified: only "
                         "an authenticated read can prove it. Re-run; if it "
                         "persists, look for a proxy that rewrites `Authorization`. "
-                        "`tortoise config show` reports what this machine knows"))
+                        "`tortoise config show` reports what this machine knows"
+                        f"{_provenance_note}"))
         return
 
     health_part = (f"/health {health_code}"
