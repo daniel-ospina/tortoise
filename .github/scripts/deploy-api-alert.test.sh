@@ -878,9 +878,11 @@ assert_not_contains "$BIGTAIL_BODY" '```' "case 17k: and it pastes no fenced blo
 # The empty-fallback sentence used to name two causes — no `iconv`, or one that refused — while
 # a THIRD is reachable and needs no broken converter at all: the tail's last 6000 bytes are
 # entirely undecodable, so `iconv -c` emits ZERO bytes and the ASCII fallback finds nothing to
-# keep either. ⚠️ Its STATUS there is 1, not 0 (measured on glibc 2.39: `printf '\x92' | iconv
-# -c` → rc 1, 0 bytes; `printf 'A\xffB' | iconv -c` → rc 0, 2 bytes, so a converter returns 0
-# only when it emitted something) — an earlier draft of this comment said it "succeeds", which
+# keep either. ⚠️ Its STATUS there is 1, not 0 (measured on glibc 2.39: `printf '\x92' | iconv -c`
+# → rc 1, 0 bytes; `printf 'A\xffB' | iconv -c` → rc 0, 2 bytes — glibc reports a drop it emitted
+# nothing for with status 1, and the ONE input that returns 0 with no output is an EMPTY one,
+# which the `raw_tail`-empty arm handles before this branch is reached, so it cannot smear this
+# claim) — an earlier draft of this comment said it "succeeds", which
 # is false on every host the suite runs on, and the alert does not read that status (`if !
 # excerpt=…; then :`). On such a host the old sentence told the on-call reader the converter
 # was missing while it had just run. The row pins the STATE ("emitted nothing it could convert")
