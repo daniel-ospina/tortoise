@@ -2214,6 +2214,237 @@ def test_a_meta_without_a_usable_session_id_is_corrupt_not_a_crash(tmp_path):
     assert discards[0]["reason"] == "corrupt_entry"
 
 
+# ── #11802: an entry we could not READ is not an entry we may DESTROY ────────
+# Both directions are pinned on purpose: a change that stops destroying
+# unreadable entries but also stops quarantining genuinely corrupt ones has not
+# fixed this — it has moved the loss.
+
+
+def test_an_unreadable_meta_is_kept_and_retried_never_quarantined(tmp_path):
+    """A meta the process is not allowed to read must survive, be RECORDED, and
+    be retried — never be treated as corruption.
+
+    The measured defect (#11802): a root-owned spool entry met by a user-owned
+    drain raised `PermissionError` at `open`. One `except OSError` collapsed
+    that with `JSONDecodeError`, recorded "meta is not valid JSON" about bytes
+    the process never opened, quarantined the transcript and unlinked the meta —
+    so the entry could never be filed by any verb, again. 1,356 of 3,384 lost
+    sessions were this class.
+
+    MUTATION THAT REDS THIS: put the read back inside the parsing `try`
+    (`json.loads(path.read_text(...))`) so an OSError falls into the corrupt arm;
+    or drop `"retained": True`; or move `continue` below the quarantine/unlink.
+    """
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    meta_path = entries / "locked.meta.json"
+    log_path = entries / "locked.turns.jsonl"
+    body = json.dumps({"version": 1, "session_id": "sess-locked", "harness": "pi"})
+    meta_path.write_text(body, encoding="utf-8")
+    log_path.write_text('{"role":"user","content":"keep me"}\n', encoding="utf-8")
+    meta_path.chmod(0o000)
+    try:
+        from tortoise.capture_spool import is_lost_discard, list_spool_metas
+        metas, discards = list_spool_metas(tmp_path)
+        assert metas == [], "an unreadable meta is not a readable meta"
+        assert len(discards) == 1, "a read refusal must still be RECORDED, never silent"
+        assert discards[0]["reason"] == "meta_unreadable"
+        assert discards[0]["retained"] is True, \
+            "retained: the entry survives, so this is not a lost capture"
+        assert "cannot read" in discards[0]["detail"], "the detail must name the READ refusal"
+        assert "not valid JSON" not in discards[0]["detail"], \
+            "the lie #11802 is about: json.loads was never reached"
+        assert is_lost_discard(discards[0]) is False, \
+            "the ledger must not report a destroyed capture when nothing was destroyed"
+
+        # NOTHING was destroyed.
+        assert meta_path.exists(), "the meta must NOT be unlinked"
+        assert log_path.exists(), "the live turn log must NOT be quarantined"
+        assert not (entries / "locked.turns.jsonl.orphan").exists()
+    finally:
+        # Guard the teardown: under a regression that UNLINKS the meta there is
+        # nothing to restore, and a teardown exception would hide which
+        # assertion actually failed.
+        if meta_path.exists():
+            meta_path.chmod(0o600)
+
+    assert meta_path.read_text(encoding="utf-8") == body, "and must be byte-identical"
+    assert log_path.read_text(encoding="utf-8") == '{"role":"user","content":"keep me"}\n'
+
+    # RETRYABLE: the very next drain, now able to read, sees it as pending again.
+    from tortoise.capture_spool import list_spool_metas
+    metas, discards = list_spool_metas(tmp_path)
+    assert [m["session_id"] for m in metas] == ["sess-locked"], \
+        "a read refusal is a delay, not a loss"
+    assert discards == []
+
+
+def test_a_meta_that_cannot_be_opened_is_kept_regardless_of_errno(tmp_path):
+    """uid-independent companion to the EACCES row: the arm keys on "the read
+    threw", not on a hard-coded permission errno. A root-owned drain never sees
+    EACCES at all — which is exactly how the original defect stayed invisible."""
+    entries = tmp_path / "entries"
+    (entries / "adir.meta.json").mkdir(parents=True)
+    from tortoise.capture_spool import list_spool_metas
+    metas, discards = list_spool_metas(tmp_path)
+    assert metas == []
+    assert len(discards) == 1
+    assert discards[0]["reason"] == "meta_unreadable"
+    assert discards[0]["retained"] is True
+    assert (entries / "adir.meta.json").exists(), "a read failure must never remove the entry"
+
+
+def test_a_corrupt_meta_still_quarantines_after_the_read_parse_split(tmp_path):
+    """The other direction. A fix that made everything "retryable" would leave a
+    genuinely corrupt meta wedging the drain on every pass forever."""
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    (entries / "bad.meta.json").write_text("{not json", encoding="utf-8")
+    (entries / "bad.turns.jsonl").write_text("{}\n", encoding="utf-8")
+    from tortoise.capture_spool import is_lost_discard, list_spool_metas
+    metas, discards = list_spool_metas(tmp_path)
+    assert metas == []
+    assert len(discards) == 1
+    assert discards[0]["reason"] == "corrupt_entry", \
+        "bytes that were READ and rejected keep the corrupt classification"
+    assert "not valid JSON" in discards[0]["detail"], \
+        "here the claim is true: the bytes really were read and really did not parse"
+    assert "retained" not in discards[0], "corrupt entries are still a loss"
+    assert is_lost_discard(discards[0]) is True
+    assert not (entries / "bad.meta.json").exists()
+    assert not (entries / "bad.turns.jsonl").exists()
+    assert (entries / "bad.turns.jsonl.orphan").read_text(encoding="utf-8") == "{}\n", \
+        "the intact transcript is still QUARANTINED, never deleted"
+
+
+def test_a_non_utf8_meta_is_corrupt_not_unreadable(tmp_path):
+    """Non-UTF-8 bytes were READ IN FULL — they are a property of the CONTENT,
+    so they keep the corrupt path. Only a refusal to hand over the bytes is
+    `meta_unreadable` (#11802)."""
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    (entries / "latin.meta.json").write_bytes(b'{"session_id":"caf\xe9"}')
+    from tortoise.capture_spool import list_spool_metas
+    metas, discards = list_spool_metas(tmp_path)
+    assert metas == []
+    assert discards[0]["reason"] == "corrupt_entry"
+    # …and the REASON must name the real failure. Claiming "not valid JSON" for
+    # bytes `json.loads` never saw is the same false-reason class #11802 is
+    # about, one arm over.
+    assert "not valid UTF-8" in discards[0]["detail"]
+    assert "not valid JSON" not in discards[0]["detail"]
+    assert not (entries / "latin.meta.json").exists()
+
+
+def test_a_repeatedly_unreadable_meta_records_ONCE_not_once_per_turn(tmp_path):
+    """The repairing scan runs on the per-TURN write path as well as every
+    drain, and the entry never becomes readable — so an unconditional record
+    appends one ledger line per turn, forever, into a file that lives in the
+    spool root and is counted against no ceiling (#4714's amplification class).
+
+    MUTATION THAT REDS THIS: use `record_discard` instead of `record_refusal`, or
+    key the dedupe on `_entries_dir_stamp` instead of the unreadable stem set.
+
+    ⚠️ Each iteration writes a NEW (readable) meta first, because that is what a
+    real turn does — and it moves `entries/` mtime. Asserting the dedupe on a
+    STATIC directory passes against a dir-stamp key that suppresses NOTHING on
+    the per-turn path this exists for (found in review cycle 2).
+    """
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    meta_path = entries / "locked.meta.json"
+    meta_path.write_text(json.dumps({"version": 1, "session_id": "s"}), encoding="utf-8")
+    meta_path.chmod(0o000)
+    try:
+        from tortoise.capture_spool import list_spool_metas, read_discards
+        for turn in range(5):
+            # a new session spooled this turn — readable, exactly as in production
+            (entries / f"live{turn}.meta.json").write_text(
+                json.dumps({"version": 1, "session_id": f"live{turn}"}), encoding="utf-8")
+            list_spool_metas(tmp_path)
+        lines = [line for line in read_discards(tmp_path) if line.get("reason") == "meta_unreadable"]
+        assert len(lines) == 1, f"one event, not one per scan — got {len(lines)}"
+        assert lines[0]["retained"] is True
+        assert "cannot read 1 spool meta" in lines[0]["detail"]
+    finally:
+        if meta_path.exists():
+            meta_path.chmod(0o600)
+
+
+def test_repair_false_records_and_touches_nothing_for_an_unreadable_meta(tmp_path):
+    """`list_spool_metas(root, repair=False)` is the READ-ONLY reader the health
+    line uses. It must not write a ledger line, a refusal stamp, or touch the
+    entry for the unreadable arm either — a health check must not mutate what it
+    describes, and `unreadable counts as pending` is how that path already reads
+    it.
+
+    The TS leg has the twin (`repair:false neither records nor touches an
+    unreadable meta`). This row exists because without it, dropping the
+    `if repair:` guard on the unreadable collection passes the WHOLE Python suite
+    on the leg that carries most of the new code — and would make the health line
+    start writing ledger lines (review cycle 4).
+
+    MUTATION THAT REDS THIS: collect/record the unreadable arm without the
+    `if repair:` guard.
+    """
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    meta_path = entries / "locked.meta.json"
+    meta_path.write_text(json.dumps({"version": 1, "session_id": "s"}), encoding="utf-8")
+    meta_path.chmod(0o000)
+    try:
+        from tortoise.capture_spool import list_spool_metas
+        metas, discards = list_spool_metas(tmp_path, repair=False)
+        assert metas == []
+        assert discards == [], "a read-only reader writes no ledger line"
+        assert meta_path.exists()
+        assert not (tmp_path / "discarded.jsonl").exists()
+        assert not (tmp_path / ".refusal-stamp.json").exists()
+    finally:
+        if meta_path.exists():
+            meta_path.chmod(0o600)
+
+
+def test_an_ALTERNATING_unreadable_set_does_not_re_record_forever(tmp_path):
+    """Each distinct unreadable SET is recorded ONCE, even when the set alternates.
+
+    Only one observation is remembered per (session_id, reason), so a FIXED
+    aggregate id would remember just the newest set — and an alternating set
+    (the ENOENT race this arm names, or real prune churn) would re-record both
+    directions on every alternation, without bound. The set digest is therefore
+    part of the pair key (review cycle 3).
+
+    MUTATION THAT REDS THIS: use a constant `session_id: "unreadable"` → the
+    line count grows by one on every alternation.
+    """
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    first = entries / "a.meta.json"
+    second = entries / "b.meta.json"
+    for p in (first, second):
+        p.write_text(json.dumps({"version": 1, "session_id": p.stem}), encoding="utf-8")
+        p.chmod(0o000)
+    hidden = second
+    try:
+        from tortoise.capture_spool import list_spool_metas, read_discards
+        for turn in range(10):
+            # alternate the SET: b invisible on even turns, present on odd ones
+            if turn % 2 == 0:
+                if hidden.exists():
+                    hidden.rename(tmp_path / "parked.b")
+            else:
+                if (tmp_path / "parked.b").exists():
+                    (tmp_path / "parked.b").rename(hidden)
+            list_spool_metas(tmp_path)
+        lines = [line for line in read_discards(tmp_path) if line.get("reason") == "meta_unreadable"]
+        assert len(lines) == 2, (
+            f"one line per DISTINCT set (2), not one per alternation — got {len(lines)}")
+    finally:
+        for p in (first, hidden):
+            if p.exists():
+                p.chmod(0o600)
+
+
 def test_a_spool_directory_that_cannot_be_created_is_discarded_with_a_reason(tmp_path):
     """The spool path's parent is a regular FILE, so `mkdir` raises ENOTDIR.
 
