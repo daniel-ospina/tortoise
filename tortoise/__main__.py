@@ -13194,6 +13194,18 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         v = float(value)
         return f"{v:.0f}" if v.is_integer() else f"{v:.1f}"
 
+    def _reason_text(reason: object) -> str:
+        """The scrubbed reason — or its TYPE when the exception stringifies empty.
+
+        `http.client.RemoteDisconnected()` (the peer accepted and closed without
+        a response) has `str() == ""`, so the row rendered a dangling em dash on
+        the first attempt (`cannot reach … — .`) and an empty parenthesis on a
+        retry (`… timed out at 5s ().`): a diagnostic that carries no diagnosis,
+        on a common proxy/restart shape (fresh review round 18).
+        """
+        return (_printable(_scrub(str(reason), api_url, api_key))
+                or type(reason).__name__)
+
     def _retry_wait_claim(reason: object, silent: str, refused: str,
                           failed: str) -> str:
         """What a retry row may CLAIM about the retry (fresh review rounds 16/17).
@@ -13213,7 +13225,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         Only `ConnectionRefusedError` is a refusal; the rest say the retry
         FAILED, and the scrubbed reason carries what actually happened.
         """
-        scrubbed = _printable(_scrub(str(reason), api_url, api_key))
+        scrubbed = _reason_text(reason)
         if _is_timeout_reason(reason):
             return f"{silent} ({scrubbed})"
         if isinstance(reason, ConnectionRefusedError):
@@ -13394,7 +13406,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             # fragments, the one rule #5109 established for this file.
             results.append(("Hosted", "⚠️",
                             f"cannot reach {base} — "
-                            f"{_printable(_scrub(str(reason), api_url, api_key))}"
+                            f"{_reason_text(reason)}"
                             ". The credential is UNGRADED (nothing was asked of "
                             "it) — check https://api.premiselabs.co/health or your "
                             "TORTOISE_API_URL, then `tortoise config show`"
@@ -13509,7 +13521,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     except (OSError, http.client.HTTPException, ValueError) as exc:
         reason = getattr(exc, "reason", None) or exc
         if not _is_timeout_reason(reason):
-            reach_error = _printable(_scrub(str(reason), api_url, api_key))
+            reach_error = _reason_text(reason)
         else:
             # Cold start, not a broken credential: retry once, bounded.
             _team_retry_budget = _leg_budget(_DOCTOR_TEAM_RETRY_TIMEOUT_S)

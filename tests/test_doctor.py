@@ -1175,12 +1175,21 @@ class TestDoctorHostedCredential:
                           api_url="https://api.example.test")
         seen_health: list[str] = []
 
+        from urllib.error import URLError
+
         def handler(url, req):
             if url.endswith("/health"):
                 seen_health.append(url)
                 if len(seen_health) == 1:
                     raise TimeoutError("timed out")
-                raise ConnectionRefusedError("[Errno 111] Connection refused")
+                # ⛔ The WRAPPED shape `urlopen` actually raises on the wire: a
+                # refusal arrives as `URLError(ConnectionRefusedError(...))`, and
+                # `isinstance(URLError(...), ConnectionRefusedError)` is False —
+                # so the bucket is only right because of the caller's `.reason`
+                # unwrap. Injecting the bare exception let that unwrap be deleted
+                # with the suite green (fresh review round 18).
+                raise URLError(ConnectionRefusedError(
+                    "[Errno 111] Connection refused"))
             return _FakeResponse(200, b'{"org_id":"org-r"}')
 
         _stub_hosted(monkeypatch, handler)
@@ -1197,6 +1206,9 @@ class TestDoctorHostedCredential:
         assert "refused on retry" in hosted, hosted
         assert "and none in" not in hosted, hosted
         assert "Connection refused" in hosted, hosted
+        # The FIRST bound, not the retry's: naming the 30 s retry bound here
+        # would report a wait the reader cannot map to an attempt (round 14).
+        assert "timed out at 5s" in hosted, hosted
         assert rc == 0, out[-800:]
 
     def test_a_refused_team_retry_is_not_reported_as_a_wait(
@@ -1218,7 +1230,9 @@ class TestDoctorHostedCredential:
             seen_team.append(url)
             if len(seen_team) == 1:
                 raise TimeoutError("timed out")
-            raise ConnectionRefusedError("[Errno 111] Connection refused")
+            from urllib.error import URLError
+            raise URLError(ConnectionRefusedError(
+                "[Errno 111] Connection refused"))
 
         _stub_hosted(monkeypatch, handler)
         db_path = str(tmp_path / "team-refused-retry.db")
@@ -1238,8 +1252,10 @@ class TestDoctorHostedCredential:
         assert "and none in" not in hosted, hosted
         assert rc == 0, out[-800:]
 
+    @pytest.mark.parametrize("leg,first_bound", [("health", "5s"), ("team", "10s")])
     def test_a_non_refusal_retry_failure_is_not_called_a_refusal(
-            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+            self, leg, first_bound, clear_db_env, tmp_path, capsys, monkeypatch,
+            _hermetic_hosted_identity):
         """A DNS/TLS/closed-connection failure is not the endpoint REFUSING.
 
         Splitting the world into "timeout" and "refused" replaced one
@@ -1248,8 +1264,55 @@ class TestDoctorHostedCredential:
         and the row's remedy then blames the endpoint/proxy while the real cause
         needs a different fix (fresh review round 17). Only
         `ConnectionRefusedError` is a refusal.
+
+        Parametrised over BOTH legs, and each leg asserts the FIRST bound in the
+        sentence: the `failed=` strings were the other unpinned half — a row
+        claiming "timed out at 30s" shipped with the suite green (round 18).
         """
         import socket
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url="https://api.example.test")
+        seen: list[str] = []
+
+        def handler(url, req):
+            is_health = url.endswith("/health")
+            if (leg == "health") != is_health:
+                return (_FakeResponse(200, b'{"status":"ok"}') if is_health
+                        else _FakeResponse(200, b'{"org_id":"org-g"}'))
+            seen.append(url)
+            if len(seen) == 1:
+                raise TimeoutError("timed out")
+            raise socket.gaierror(-2, "Name or service not known")
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / f"dns-retry-{leg}.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, f"doctor dns retry {leg} seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert len(seen) == 2, f"the {leg} retry must still be attempted"
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "the retry failed" in hosted, hosted
+        assert "refused on retry" not in hosted, hosted
+        assert "Name or service not known" in hosted, hosted
+        assert f"timed out at {first_bound}" in hosted, hosted
+        assert rc == 0, out[-800:]
+
+    def test_an_empty_reason_names_the_exception_type(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """`RemoteDisconnected` stringifies EMPTY — the row must still say what.
+
+        A peer that accepts and closes without a response raises
+        `http.client.RemoteDisconnected` whose `str()` is `''` (verified against
+        the real `urllib`), so the row rendered `cannot reach … — .` on the first
+        attempt and `… timed out at 5s ().` on a retry: a diagnostic carrying no
+        diagnosis, on a common proxy/restart shape (fresh review round 18).
+        """
+        import http.client
 
         _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
                           api_url="https://api.example.test")
@@ -1260,23 +1323,22 @@ class TestDoctorHostedCredential:
                 seen_health.append(url)
                 if len(seen_health) == 1:
                     raise TimeoutError("timed out")
-                raise socket.gaierror(-2, "Name or service not known")
-            return _FakeResponse(200, b'{"org_id":"org-g"}')
+                raise http.client.RemoteDisconnected()
+            return _FakeResponse(200, b'{"org_id":"org-e"}')
+
 
         _stub_hosted(monkeypatch, handler)
-        db_path = str(tmp_path / "dns-retry.db")
+        db_path = str(tmp_path / "empty-reason.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
-        _seed_db(db_path, "doctor dns retry seed")
+        _seed_db(db_path, "doctor empty reason seed")
 
-        rc = _run_doctor([])
+        _run_doctor([])
         out = capsys.readouterr().out
 
         hosted = _row(out, "Hosted")
         assert hosted is not None, out[-1500:]
-        assert "the retry failed" in hosted, hosted
-        assert "refused on retry" not in hosted, hosted
-        assert "Name or service not known" in hosted, hosted
-        assert rc == 0, out[-800:]
+        assert "RemoteDisconnected" in hosted, hosted
+        assert "()" not in hosted, hosted
 
     def test_control_bytes_in_api_url_cannot_forge_a_row(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
