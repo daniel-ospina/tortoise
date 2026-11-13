@@ -560,16 +560,20 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     text), the divergence is this same pre-existing live-guard class. (c) TYPE:
     the predicate calls ``trim()``, which is TYPE-STRICT. Two classes, and they
     diverge DIFFERENTLY:
-      - a non-``str`` ``content`` (int/list/dict) was ALREADY fatal to the live
-        pass — pre-fix it was selected by ``n.content`` and killed at
+      - a non-``str`` ``content`` (int/list/float/bool) was ALREADY fatal to the
+        live pass — pre-fix it was selected by ``n.content`` and killed at
         ``text.strip()``, and now it dies earlier, inside the collecting select.
         It additionally makes ``--dry-run`` raise ``Type mismatch: expected
-        String or Null but was Integer``. ⚠️ REACHABLE: ``api.EventAPI.add_point``
-        stores whatever ``content`` it is handed — ``_point`` copies it verbatim
-        with no type check — so a non-``str`` ingest payload produces exactly
-        this row. That is the hand-edited/foreign-data class
-        ``projection/entities.py`` names for ``content`` (#2958). No SDK door
-        does this (``create_point``/``update_point`` refuse a non-``str``).
+        String or Null but was <Type>`` (the message names the instance —
+        ``Integer``, ``List``, ``Float``, ``Boolean``). ⚠️ REACHABLE:
+        ``api.EventAPI.add_point`` passes ``content`` straight through —
+        ``_point`` copies it verbatim with no type check — so a non-``str``
+        ingest payload the store can hold produces exactly this row. (A ``dict``
+        is the exception: the projection's value-shape gate nulls it before
+        dispatch, #7369, so that one lands text-less instead.) That is the
+        hand-edited/foreign-data class ``projection/entities.py`` names for
+        ``content`` (#2958). No SDK door does this (``create_point``/
+        ``update_point`` refuse a non-``str``).
       - a non-``str`` ``embeddingText`` over a ``str`` ``content`` is the one
         NEW failure: the pre-fix expression was ``n.content``, so that row
         embedded NORMALLY; the CASE now selects the non-string and BOTH passes
