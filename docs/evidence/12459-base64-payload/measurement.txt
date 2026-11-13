@@ -1,0 +1,45 @@
+== corpus
+  supabase/tests/fixtures/record_projection_journal.jsonl: 39 records, 29 types
+  vector: 384-d, float32, produced by 384-wide generator (same vector as the P0 probe)
+
+== tools/journal_growth.py on the P0 journal (the committed instrument)
+  39 records  32,130 B  mean 823.8 B  p95 5,148 B  max 5,423 B
+  ⚠️ the tool's `embedding` share is a SPACED re-serialisation (#11886) — not used for any vector figure below.
+
+== per class, vector-bearing records (bytes on disk, JSON line + terminator)
+   class                 P0 rec   P0 vector   P2 vector   P2 rec   rec ratio
+   PointAdded             5,423      4,689      2,064    2,798   1.94x
+   OperatorAdded          5,124      4,689      2,064    2,499   2.05x
+   PointPromoted          4,936      4,689      2,064    2,311   2.14x
+   OperatorPromoted       4,924      4,689      2,064    2,299   2.14x
+
+== a creating record (PointAdded), the acceptance surface
+  record              5,423 B → 2,798 B  (1.94x)
+  its vector payload  4,689 B → 2,064 B  (2.27x)
+  chars/float         12.2 → 5.4
+  raw float32 packed  1,536 B  (base64 is +33.3 % framing over raw: 2,048 B string − 1,536 B raw = 512 B)
+  pre-#11821 baseline  9,176 B → 2,798 B  (3.28x)
+
+== whole corpus
+  P0  39 records  32,130 B
+  P2  39 records  19,005 B  (1.69x vs P0, 2.70x vs pre-P0)
+  delta 13,125 B — all of it in the 5 vector-bearing records
+
+== decode equivalence (float32 bits, not float64 values)
+  PointAdded           base64→f32 bits == P0 text→f32 bits: True   (P0 text→f32 == producer f32: True)
+  OperatorAdded        base64→f32 bits == P0 text→f32 bits: True   (P0 text→f32 == producer f32: True)
+  PointPromoted        base64→f32 bits == P0 text→f32 bits: True   (P0 text→f32 == producer f32: True)
+  OperatorPromoted     base64→f32 bits == P0 text→f32 bits: True   (P0 text→f32 == producer f32: True)
+
+== the caller-owned / preserved population (#5004 round-7)
+  float64 frame round-trip bit-identical: True
+  …and it is genuinely off the float32 grid: True  (so a narrowing WOULD be visible)
+  f64 spans: today (JSON text) 5,770 B → frame 4,112 B  (1.40x)
+
+== the reader refuses (each raises, none decodes silently short)
+  truncated body, padding intact             REFUSED (ValueError)
+  one element short, count unchanged         REFUSED (ValueError)
+  unknown version                            REFUSED (ValueError)
+  non-base64 character in body               REFUSED (Error)
+
+VERDICT: measured. The frame is 2.27x the P0 vector span on a creating record, the float32 bits are unchanged, and the f64 population is preserved at its own width.
