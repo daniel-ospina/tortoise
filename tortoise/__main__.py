@@ -12999,6 +12999,28 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         return
     results.append(("Credentials", "✅", detail))
 
+    # The credential's PROVENANCE, disclosed on every row that names the target.
+    # ⛔ The probe DOES obey the ladder including `<cwd>/.tortoise`, deliberately:
+    # `tortoise init --api-key` — the documented hosted setup — writes `./.tortoise`
+    # and the quickstart tells the user to run the CLI from that directory, so
+    # skipping it left the most common hosted layout with "not probed" and exit 0
+    # on a REVOKED key, i.e. #11912's own target broken on the documented path
+    # (fresh review round 4). What the note must NOT claim is that this file
+    # authorizes TRANSMISSION: the transmitting verbs deliberately exclude it
+    # (#3660, D1b/D1.2), and saying otherwise would contradict a recorded
+    # decision on the very surface a user consults to ask "who am I" (round 10).
+    _cwd_provenance = False
+    try:
+        _cwd_store: Path | None = Path.cwd() / ".tortoise"
+    except OSError:
+        _cwd_store = None
+    if winner_path is not None and _cwd_store is not None and _same_path(winner_path, _cwd_store):
+        _cwd_provenance = True
+    _provenance_note = (
+        " (the credential is the checkout-local `./.tortoise` — a file this"
+        " directory controls; the transmitting verbs skip it by design, #3660)"
+        if _cwd_provenance else "")
+
     if offline:
         # Not probed is NOT "healthy". ⚠️ rather than ℹ️ is deliberate: `_cmd_doctor`
         # counts ℹ️ in NEITHER the pass nor the warn column, so on an otherwise
@@ -13010,31 +13032,8 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         results.append(("Hosted", "⚠️",
                         f"{_printable(_mask_display_target(api_url or ''))} — "
                         "not probed (`--offline`); hosted reachability and key "
-                        "validity were NOT tested"))
+                        f"validity were NOT tested{_provenance_note}"))
         return
-
-    # ⛔ THE PROBE DOES OBEY THE LADDER — INCLUDING `<cwd>/.tortoise` — AND THAT IS
-    # DELIBERATE. The first version of this change refused to dial a
-    # checkout-supplied credential (the transmitting surfaces exclude that
-    # candidate, D1b/D1.2, so a repo can name a host = a beacon). But
-    # `tortoise init --api-key` — the DOCUMENTED hosted setup — writes `./.tortoise`
-    # and `docs/quickstart-cloud.md` tells the user to run the CLI from that same
-    # directory, so skipping it left the most common hosted layout with a `⚠️`
-    # "not probed" and exit 0 on a REVOKED key: #11912's own target broken again,
-    # on the documented path (fresh review round 4). A diagnostic's job is to
-    # report what THIS shell would actually use, so the store is dialled and its
-    # PROVENANCE is disclosed instead of the verdict being withheld.
-    _cwd_provenance = False
-    try:
-        _cwd_store: Path | None = Path.cwd() / ".tortoise"
-    except OSError:
-        _cwd_store = None
-    if winner_path is not None and _cwd_store is not None and _same_path(winner_path, _cwd_store):
-        _cwd_provenance = True
-    _provenance_note = (
-        " (the credential is the checkout-local `./.tortoise` — a file this directory"
-        " controls, and the identity every command run HERE would use)"
-        if _cwd_provenance else "")
 
     # ── the reachability read (no credential in the request) ──
     # `_printable` is not cosmetic here: `api_url` is store-supplied (a
@@ -15498,8 +15497,9 @@ def main(argv: list[str] | None = None) -> int:
     # air-gapped runner). `not probed` is reported, never rendered as healthy.
     doctor.add_argument(
         "--offline", action="store_true", default=False,
-        help="Do not probe the hosted endpoint: report the resolved credential "
-             "and the local checks only (no network requests)",
+        help="Do not probe the HOSTED endpoint (no request to it): report the "
+             "resolved credential and the local checks. The graph-health probe "
+             "still dials the configured DB target",
     )
     doctor.add_argument(
         "--db", default=None,

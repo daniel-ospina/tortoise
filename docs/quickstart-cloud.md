@@ -175,8 +175,8 @@ reports a `Credentials` row (the winning store, a masked key and a fingerprint) 
 Invalid API key` with the re-mint remedy, instead of a green report on a box whose
 every hosted command fails. With **no** credential configured it prints one
 `ℹ️` line (`self-hosted only`) and makes no request at all; `--offline` skips the two
-requests and says `not probed`, which is the answer for a proxy or an air-gapped
-runner. A `403`/`GRAPH_SCOPED_TEAM_SURFACE` refusal is reported as information, not a
+**hosted** requests and says `not probed`, which is the answer for a proxy or an
+air-gapped runner (the local graph-health probe still dials the configured DB target). A `403`/`GRAPH_SCOPED_TEAM_SURFACE` refusal is reported as information, not a
 failure — the key is valid, its scope is narrower by design — and a `503`/`429` from
 `/v1/team` is reported as a *service* refusal (capacity or rate limit) that leaves the key
 unproven rather than wrong, so a capacity blip does not red a healthy setup. When the

@@ -343,7 +343,11 @@ class TestDoctorHostedCredential:
 
         The row says "not probed" so "untested" can never be read as "fine".
         """
-        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        import json as _json
+        from pathlib import Path as _Path
+
+        (_Path.cwd() / ".tortoise").write_text(_json.dumps(
+            {"api_key": _FAKE_HOSTED_KEY, "api_url": "https://cwd.example.test"}))
         calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
             f"--offline must make no request — dialled {url}"))
         db_path = str(tmp_path / "offline.db")
@@ -357,6 +361,9 @@ class TestDoctorHostedCredential:
         hosted = _row(out, "Hosted")
         assert hosted is not None and "not probed" in hosted, out[-1500:]
         assert "--offline" in hosted
+        # The docs say BOTH rows disclose a checkout-local credential; the offline
+        # arm was the one that did not (fresh review round 10).
+        assert "checkout-local" in hosted, hosted
         # The credential row is still resolved and printed — the offline answer
         # is "what would I send", which needs no network.
         assert _row(out, "Credentials") is not None
@@ -813,7 +820,11 @@ class TestDoctorHostedCredential:
         was NOT tested" is #11912's target reachable through the new flag (fresh
         review round 3).
         """
-        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        import json as _json
+        from pathlib import Path as _Path
+
+        (_Path.cwd() / ".tortoise").write_text(_json.dumps(
+            {"api_key": _FAKE_HOSTED_KEY, "api_url": "https://cwd.example.test"}))
         calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
             f"--offline must make no request — dialled {url}"))
         db_path = str(tmp_path / "offline-summary.db")
@@ -942,6 +953,26 @@ class TestDoctorHostedCredential:
         _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
         caps_seen: list[int | None] = []
 
+        import io as _io
+
+        class _BoundedStream(_io.BytesIO):
+            """A real file-like body that RECORDS the size of each read.
+
+            `io.BytesIO` on purpose: `HTTPError` wraps its `fp` in
+            `tempfile._TemporaryFileWrapper`, whose finalizer calls `close()` —
+            a duck-typed object without it raises an unraisable AttributeError on
+            every run (fresh review round 10), which is also why this test was
+            the only thing blocking `-W error::PytestUnraisableExceptionWarning`.
+            """
+
+            def __init__(self, data: bytes, sink: list):
+                super().__init__(data)
+                self._sink = sink
+
+            def read(self, n=-1):
+                self._sink.append(None if n is None or n < 0 else n)
+                return super().read(n)
+
         class _BoundedResponse(_FakeResponse):
             def read(self, n=None):
                 # RECORD, never raise: a raise here happens INSIDE production
@@ -950,8 +981,8 @@ class TestDoctorHostedCredential:
                 # removing the cap stayed green through that path (fresh review
                 # round 6). Asserting on the recorded values afterwards is the
                 # only shape that can fail.
-                caps_seen.append(n)
-                return self._body[:n] if n is not None else self._body
+                return _BoundedStream(self._body, caps_seen).read(
+                    -1 if n is None else n)
 
         def handler(url, req):
             if url.endswith("/health"):
@@ -961,7 +992,7 @@ class TestDoctorHostedCredential:
             # for, and it was unpinned.
             from urllib.error import HTTPError
             raise HTTPError(url, 400, "Bad Request", {},
-                            _BoundedResponse(400, b"x" * 100))
+                            _BoundedStream(b"x" * 100, caps_seen))
 
         _stub_hosted(monkeypatch, handler)
         db_path = str(tmp_path / "bounded.db")
