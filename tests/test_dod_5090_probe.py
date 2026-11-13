@@ -3324,7 +3324,7 @@ def test_the_per_file_caveat_names_the_MEASURED_build_edge(tmp_path, monkeypatch
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["deployment"]["builds_from"] == {
-        "docker-compose.yml": "Dockerfile.selfhost"}, shipped["deployment"]
+        "docker-compose.yml": ["Dockerfile.selfhost"]}, shipped["deployment"]
     # The per-FILE reading still holds the row: the compose file itself declares
     # nothing, and the walk does not model the merge (`#12022` keeps that boundary).
     assert shipped["deployment"]["files"] == {
@@ -3344,10 +3344,85 @@ def test_the_per_file_caveat_names_the_MEASURED_build_edge(tmp_path, monkeypatch
         encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["deployment"]["builds_from"] == {
-        "docker-compose.yml": "docker/Dockerfile.prod"}, shipped["deployment"]
+        "docker-compose.yml": ["docker/Dockerfile.prod"]}, shipped["deployment"]
     assert "docker/Dockerfile.prod" not in shipped["deployment"]["files"], shipped
     caveat = probe.per_file_scope_note(shipped["deployment"])
     assert "OUTSIDE the walked population" in caveat, caveat
+
+    # ⛔ EVERY service's build reference (fresh review of PR #12474, P3): a compose file
+    # is multi-service, so keeping only the first presented a PARTIAL set as the edge
+    # set while the note said "measured".
+    (tmp_path / "Dockerfile.worker").write_text("FROM python:3.12\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
+        "  worker:\n    build:\n      dockerfile: Dockerfile.worker\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["builds_from"] == {
+        "docker-compose.yml": ["Dockerfile.selfhost", "Dockerfile.worker"]}, shipped
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "BUILDS from Dockerfile.selfhost" in caveat, caveat
+    assert "BUILDS from Dockerfile.worker" in caveat, caveat
+
+
+def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
+        tmp_path, monkeypatch):
+    """A compose entry with NO value DISARMS the container — the direction that costs.
+
+    ⛔ Measured (fresh review of PR #12474, P2): `environment: - FLAG` / `FLAG:` /
+    `FLAG: null` REMOVES the variable from the container, so the caveat's
+    "inheritance can only ADD an arm" was false on a reachable shape — and the line
+    landed in NO bucket, so nothing a reader could consult said so. It is now reported,
+    the caveat names the bound, and the file still reads silent on that line (which is
+    right: it declares no value to arm with).
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
+        "    environment:\n      - TORTOISE_EMBED_GATE\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE="1"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["unset_declarations"], shipped
+    assert shipped["deployment"]["files"]["docker-compose.yml"] == "OFF", shipped["deployment"]
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "UNSETS it" in caveat, caveat
+    assert "never unsets" not in caveat, caveat
+    note = _gate_note(shipped)
+    assert "compose declarations that UNSET it: ['docker-compose.yml:" in note, note
+    # …the map spellings too.
+    for spelling in ("TORTOISE_EMBED_GATE:", "TORTOISE_EMBED_GATE: null"):
+        (tmp_path / "docker-compose.yml").write_text(
+            f"services:\n  tortoise:\n    environment:\n      {spelling}\n",
+            encoding="utf-8")
+        assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+            "unset_declarations"], spelling
+
+
+def test_the_LEGACY_ENV_space_form_is_a_deployment_hit(tmp_path, monkeypatch):
+    """`ENV KEY value` (no `=`) sets KEY — the third form the Dockerfile grammar has.
+
+    ⛔ Measured (fresh review of PR #12474, P3, pre-existing): `ENV
+    TORTOISE_EMBED_GATE 1` read OFF with nothing reported, while `ENV KEY=1` read ON —
+    a false HOLD on the deployment channel this PR widened, on the same
+    instruction/spacing axis as the case and tab fixes. Scoped to `ENV`: no other
+    surface has this form, and `ARG` never reaches the process.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE 1\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+    # …an OFF value in the same form is still OFF, and a multi-word value is not truthy.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE 0\n", encoding="utf-8")
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "per_surface"]["Dockerfile"]["state"] == "OFF"
+    # …and the ARG space form is still BUILD-TIME, not a hit.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nARG TORTOISE_EMBED_GATE 1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
 
 
 
@@ -8570,7 +8645,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `204 + 1` and `203 + 2` at THIS tree, both equal to the `205` the pin re-derives
+    count: `206 + 1` and `205 + 2` at THIS tree, both equal to the `207` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.

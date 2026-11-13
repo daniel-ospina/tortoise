@@ -2339,15 +2339,20 @@ def _compose_build_refs() -> dict[str, str]:
 
     Both compose `build:` spellings are read (`build: <file>` and a `build:` map
     carrying `dockerfile:`), and a value that names no file in this tree is dropped
-    — an unresolvable reference is not an edge.
+    — an unresolvable reference is not an edge. ``{compose file: [image, …]}``: a
+    compose file is multi-service, so EVERY reference is kept.
     """
-    refs: dict[str, str] = {}
+    # ⛔ EVERY reference, not the first one (fresh review of PR #12474, P3): a compose
+    # file is multi-service by definition, so one image per file presented a PARTIAL set
+    # as "the edge set" — an armed image reached through the second service's `build:`
+    # was invisible while the note said "measured".
+    refs: dict[str, list[str]] = {}
     for manifest in _compose_files():
         try:
             text = manifest.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        found: str | None = None
+        found: list[str] = []
         for match in re.finditer(
                 r"^\s*(?:dockerfile|build)\s*:\s*(?P<value>[^\s#]+)\s*(?:#.*)?$",
                 text, re.MULTILINE):
@@ -2355,15 +2360,16 @@ def _compose_build_refs() -> dict[str, str]:
             if not value or value in ("true", "false") or value.startswith("{"):
                 continue
             candidate = Path(value)
+            resolved: str | None = None
             if (REPO_ROOT / candidate).is_file() and candidate.name.startswith("Dockerfile"):
-                found = candidate.as_posix()
+                resolved = candidate.as_posix()
             elif re.match(r"^[A-Za-z0-9_./-]+$", value):
                 named = [p for p in _image_build_files()
                          if p.name == Path(value).name]
                 if named:
-                    found = named[0].relative_to(REPO_ROOT).as_posix()
-            if found:
-                break
+                    resolved = named[0].relative_to(REPO_ROOT).as_posix()
+            if resolved and resolved not in found:
+                found.append(resolved)
         if found:
             refs[manifest.relative_to(REPO_ROOT).as_posix()] = found
     return refs
@@ -2435,6 +2441,34 @@ def _shell_line_is_exported(line: str, flag: str,
     if not match or match.group("name") != flag:
         return False
     return flag in exported
+
+
+def _is_unset_declaration(line: str, flag: str) -> bool:
+    """A compose `environment:` entry that DECLARES ``flag`` with no value → UNSETS it.
+
+    ⛔ Compose's own semantics (and this module's `_assigned_value` docstring): a bare
+    `- FLAG` array item, or a `FLAG:` / `FLAG: null` map entry, REMOVES the variable
+    from the container — the one direction that can DISARM an armed image. Counting it
+    as silence made the per-file caveat's "inheritance can only ADD an arm" false on a
+    reachable shape (fresh review of PR #12474, P2), so it is reported in its own bucket
+    and the caveat names the bound.
+    """
+    stripped = line.strip()
+    if not stripped or stripped[0] in "#;":
+        return False
+    stripped = stripped.lstrip("-").lstrip()
+    if stripped.startswith("#"):
+        return False
+    name, colon, value = stripped.partition(":")
+    if name.strip().strip("'\"") != flag:
+        return False
+    if not colon:                      # `- FLAG` (array form): no value at all
+        return True
+    void = value.strip()
+    # `FLAG: ""` is SET-to-empty, not unset, so the quoting is read before the test.
+    if void in ('""', "''"):
+        return False
+    return void.lower() in ("", "null", "~")
 
 
 def _resolved_assignment(value: str, flag: str) -> tuple[bool, str]:
@@ -2609,8 +2643,10 @@ def _assigned_value(line: str, flag: str) -> str | None:
     # `export` case-SENSITIVELY (shell) — matching the uppercased line would have made
     # the lowercase literal `export` unmatchable, which is the same reading-in-the-wrong-
     # case defect the Dockerfile arm was fixed for.
-    dockerfile_instruction = re.match(r"^(?:ENV|ARG)[ \t]+", stripped, re.IGNORECASE)
+    dockerfile_instruction = re.match(r"^(?P<kw>ENV|ARG)[ \t]+", stripped, re.IGNORECASE)
+    legacy_value_form = False
     if dockerfile_instruction:
+        legacy_value_form = dockerfile_instruction.group("kw").upper() == "ENV"
         stripped = stripped[dockerfile_instruction.end():].lstrip()
     else:
         shell_export = re.match(r"^export[ \t]+", stripped)
@@ -2623,9 +2659,19 @@ def _assigned_value(line: str, flag: str) -> str | None:
         return None
     # `KEY : value` is valid YAML (the space before the indicator is not part
     # of the key), so the separator is looked for after an `lstrip`.
-    rest = stripped[len(flag):].lstrip()
+    rest_raw = stripped[len(flag):]
+    rest = rest_raw.lstrip()
     if rest[:1] not in ("=", ":"):
-        return None
+        # ⛔ The LEGACY Dockerfile form, `ENV KEY value`, sets KEY to the REST OF THE
+        # LINE — it is the same instruction/spacing axis as the case and tab fixes, and
+        # reading it as a mention published "silent" over an image that has the flag
+        # (fresh review of PR #12474, P3; measured `ENV FLAG 1` → OFF). The separator is
+        # tested on the RAW remainder, because `lstrip` is what erased it. Scoped to
+        # ENV: no other surface has this form, and `ARG` never reaches the process.
+        if not (legacy_value_form and rest_raw[:1] in (" ", "\t")):
+            return None
+        legacy = rest.split(" #", 1)[0].strip().strip("'\"")
+        return legacy or None
     value = rest[1:].strip()
     # A genuine assignment's value is ONE token, optionally followed by a
     # comment (`FLAG=1  # enable`). Words after it mean the line is prose
@@ -2738,6 +2784,9 @@ def flag_in_shipped_configs(flag: str) -> dict:
     # reading "silent" would be a claim about a line the walk did not understand.
     indeterminate: list[str] = []
     outside_runtime: list[str] = []
+    # ⛔ The DISARMING direction, reported separately: a compose `environment:` entry
+    # that declares the flag with no value removes it from the container.
+    unset_declarations: list[str] = []
     per_surface: dict[str, dict] = {}
     for rel in CONFIG_SURFACES:
         target = REPO_ROOT / rel
@@ -2818,6 +2867,14 @@ def flag_in_shipped_configs(flag: str) -> dict:
                         and _assigned_value(line, flag) is not None):
                     outside_runtime.append(
                         f"{posix}:{number}: {line.strip()[:90]} (build-time ARG)")
+                    continue
+                # ⛔ Checked BEFORE the assignment reader: a bare `FLAG:` parses as an
+                # assignment with an EMPTY value (`_assigned_value` returns `""`), so the
+                # unset arm placed after it never ran for the map spellings (measured).
+                if (posix.startswith("docker-compose")
+                        and _is_unset_declaration(line, flag)):
+                    unset_declarations.append(
+                        f"{posix}:{number}: {line.strip()[:90]}")
                     continue
                 value = _assigned_value(line, flag)
                 if value is None:
@@ -2937,6 +2994,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # Reported, never silently dropped — see the declarations above.
             "indeterminate": indeterminate,
             "outside_runtime": outside_runtime,
+            "unset_declarations": unset_declarations,
             "surfaces": list(CONFIG_SURFACES),
             "per_surface": per_surface,
             "armed": _rels("ON", CONFIG_SURFACES),
@@ -2984,15 +3042,18 @@ def per_file_scope_note(deployment: dict) -> str:
             f"{compose} BUILDS from {image}"
             + (" (that image is OUTSIDE the walked population, so its arm state is "
                "NOT reported here)" if image not in files else "")
-            for compose, image in sorted(edges.items()))
+            for compose, images in sorted(edges.items())
+            for image in ([images] if isinstance(images, str) else images))
     else:
         edge_note = ("; measured build edge(s): none — no compose file in this tree "
                      "declares a `build:`/`dockerfile:` that names an image build file")
     return (
         "this reading is PER FILE and does not model the MERGE: a compose file's "
-        "`environment:` mapping adds to or overrides the image's `ENV` and never "
-        "unsets it, so a silent compose file that BUILDS from an ARMED image build "
-        "file still yields an ARMED deployment — it INHERITS that image's `ENV`"
+        "`environment:` mapping ADDS TO or OVERRIDES the image's `ENV`, so a silent "
+        "compose file that BUILDS from an ARMED image build file INHERITS that image's "
+        "`ENV` — unless the compose file DECLARES the flag with no value, which "
+        "UNSETS it, and this reading does not model that direction (see "
+        "`unset declarations`)"
         + edge_note
     )
 
@@ -3108,6 +3169,10 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
         f"indeterminate assignments: {shipped.get('indeterminate') or 'none'}; "
         f"assignments a deployed process never reads: "
         f"{shipped.get('outside_runtime') or 'none'}; "
+        # ⛔ The DISARMING direction, named: a value-less compose `environment:` entry
+        # UNSETS the variable, which this per-file reading does not model.
+        f"compose declarations that UNSET it: "
+        f"{shipped.get('unset_declarations') or 'none'}; "
         f"mentioning it: {shipped['mentions'] or 'none'}"
         f"; set ON in: {shipped['files'] or 'none'})"
     )
