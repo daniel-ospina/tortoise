@@ -1466,7 +1466,16 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # would certify "the pre-fix prose is gone" over a still-present sentence.
     from tortoise.sparse import MAX_COMPOSITE_RUN_LEN
 
-    if deferred and max((len(r) for r in runs), default=0) > MAX_COMPOSITE_RUN_LEN:
+    # ⛔ MEASURE THE COMPOSITE, NOT A SEGMENT (#12360 review round 9, P2). The
+    # bound is on the maximal ``[A-Za-z0-9_]`` run, and for a `deferred` token that
+    # run IS the whole token (no other separator) — while ``runs`` splits ON ``_``,
+    # so ``max(len(r) …)`` is strictly smaller and let through every input whose
+    # length comes from `_` separation rather than from one long segment. MEASURED
+    # before this: `'a'*128 + '_b'` (130) and `'a_'*70 + 'b'` (141) were ACCEPTED,
+    # and against the lane their own names return ZERO rows from
+    # `run_fts_query`/`queryNodes` while a 128-char name returns one — the same
+    # false PASS this branch exists to prevent.
+    if deferred and len(token) > MAX_COMPOSITE_RUN_LEN:
         return (f"its `_` run is longer than {MAX_COMPOSITE_RUN_LEN} characters, "
                 f"the bound at which the read stops emitting the composite "
                 f"(#12360) — so the query is ONE literal term the index cannot "

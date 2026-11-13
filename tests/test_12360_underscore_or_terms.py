@@ -338,9 +338,13 @@ class TestPin:
         # …and a run past the composite bound cannot be one term the index holds
         # (measured: a 128-char term is returned, 129/131/200 are not), so it is
         # refused rather than certified as a probe that matches nothing.
-        too_long = "a" * 129 + "_b"
-        refusal = probe_phrase_rejection(too_long)
-        assert refusal is not None and "128" in refusal, refusal
+        # ⚠️ EVERY length past the bound, not just the one with a long segment
+        # (round 9: the first cut measured a SEGMENT, so `_`-separated shapes
+        # were accepted at any length).
+        for too_long in ("a" * 129 + "_b", "a" * 128 + "_b", "a_" * 70 + "b",
+                         "_" * 129):
+            refusal = probe_phrase_rejection(too_long)
+            assert refusal is not None and "128" in refusal, (len(too_long), refusal)
         # a `_` run that the read DOES expand is still refused — by the read's
         # own answer (`_café` -> `_café|_caf`), not by run count.
         refusal = probe_phrase_rejection("_café")
@@ -371,7 +375,9 @@ class TestRunTerms:
         """LOSSY on purpose, and the reason is SIGNAL — not that it cannot match.
 
         MEASURED (#12360 review round 8): the index holds `___` as a term, so a
-        multi-token query `'foo ___'` loses that alternative. The drop is still
+        multi-token query (`'foo bar ___'` -> `'foo|bar'`) loses that
+        alternative; `'foo ___'` is not the example, because only one plain token
+        survives there and the read sends the raw string as an implicit AND. The drop is still
         right — an all-underscore run is punctuation, and spending OR budget on
         it is what makes the tail's bound meaningless — but it is not the
         "lossless" the first cut claimed.

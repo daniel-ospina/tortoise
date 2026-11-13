@@ -469,8 +469,10 @@ def underscore_run_terms(text: str) -> list[str]:
       **LOSSY TOO** — corrected by measurement (#12360 review round 8): the
       index DOES hold ``___`` (``queryNodes('Object','___')`` returns a record
       named exactly that, as do ``____``/``_____``), so in a multi-token query
-      (``'foo ___'`` -> ``foo``) the alternative is dropped and that record
-      stops matching. What justifies the drop is SIGNAL, not safety: an
+      (``'foo bar ___'`` -> ``foo|bar``) the alternative is dropped and that
+      record stops matching. (``'foo ___'`` is NOT the example: only one plain
+      token survives there, so the read sends the raw string as an implicit
+      AND.) What justifies the drop is SIGNAL, not safety: an
       all-underscore run is punctuation, so keeping it spends OR budget on a
       term nobody types as a search. A single-token ``___`` query is still
       reachable through the degenerate literal;
