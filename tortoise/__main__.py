@@ -13162,6 +13162,21 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         v = float(value)
         return f"{v:.0f}" if v.is_integer() else f"{v:.1f}"
 
+    def _retry_wait_claim(reason: object, silent: str, refused: str) -> str:
+        """What a retry row may CLAIM about the retry (fresh review round 16).
+
+        A retry is only ENTERED because the first attempt timed out, but the
+        retry's OWN failure was never classified — so an instant `ECONNREFUSED`
+        printed "and none in 30s on retry", asserting a wait that did not happen
+        and sending the reader after a slow network when the endpoint is refusing
+        in microseconds. Same family as round 14's fix, which corrected WHICH
+        number is printed but left the wait claim unconditional.
+        """
+        scrubbed = _printable(_scrub(str(reason), api_url, api_key))
+        if _is_timeout_reason(reason):
+            return f"{silent} ({scrubbed})"
+        return f"{refused} ({scrubbed})"
+
     def _read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
         """Read at most `cap` bytes, stopping when `deadline` passes.
 
@@ -13333,10 +13348,8 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         except (OSError, http.client.HTTPException, ValueError) as retry_exc:
             retry_reason = getattr(retry_exc, "reason", None) or retry_exc
             results.append(("Hosted", "⚠️",
-                            f"cannot reach {base} — no answer in "
-                            f"{_fmt_bound(health_first_bound)}s, and none in "
-                            f"{_fmt_bound(health_retry_bound)}s on retry "
-                            f"({_printable(_scrub(str(retry_reason), api_url, api_key))})"
+                            f"cannot reach {base} — "
+                            f"{_retry_wait_claim(retry_reason, silent=(f'no answer in {_fmt_bound(health_first_bound)}s, and none in {_fmt_bound(health_retry_bound)}s on retry'), refused=(f'refused on retry after the first attempt timed out at {_fmt_bound(health_first_bound)}s'))}"
                             ". The credential is UNGRADED (nothing was asked of "
                             "it) — check https://api.premiselabs.co/health or your "
                             f"TORTOISE_API_URL, then `tortoise config show`"
@@ -13437,10 +13450,12 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                                   time.monotonic() + _team_retry_budget))
             except (OSError, http.client.HTTPException, ValueError) as retry_exc:
                 retry_reason = getattr(retry_exc, "reason", None) or retry_exc
-                reach_error = (
-                    f"no answer in {_fmt_bound(team_first_bound)}s, and none "
-                    f"in {_fmt_bound(team_retry_bound)}s on retry "
-                    f"({_printable(_scrub(str(retry_reason), api_url, api_key))})")
+                reach_error = _retry_wait_claim(
+                    retry_reason,
+                    silent=(f"no answer in {_fmt_bound(team_first_bound)}s, and none "
+                            f"in {_fmt_bound(team_retry_bound)}s on retry"),
+                    refused=(f"refused on retry after the first attempt timed out "
+                             f"at {_fmt_bound(team_first_bound)}s"))
 
     if reach_error is not None:
         # ⛔ The credential is UNPROVEN, NOT wrong — and that is a ⚠️ (fresh review

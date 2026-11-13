@@ -1054,6 +1054,45 @@ class TestDoctorHostedCredential:
         assert len([ln for ln in out.splitlines() if " Hosted:" in ln]) == 1, out[-1500:]
         assert rc == 0
 
+    def test_a_refused_retry_is_not_reported_as_a_wait(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A retry exists because the FIRST attempt timed out — that says nothing
+        about why the retry failed, and the row must not assume it timed out too.
+
+        The row printed "and none in 30s on retry" for an instant
+        `ECONNREFUSED`, asserting a wait that never happened and sending the
+        reader after a slow network when the endpoint is refusing in
+        microseconds (fresh review round 16; round 14 fixed which NUMBER the row
+        prints, not this claim).
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY,
+                          api_url="https://api.example.test")
+        seen_health: list[str] = []
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                seen_health.append(url)
+                if len(seen_health) == 1:
+                    raise TimeoutError("timed out")
+                raise ConnectionRefusedError("[Errno 111] Connection refused")
+            return _FakeResponse(200, b'{"org_id":"org-r"}')
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "refused-retry.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor refused retry seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert len(seen_health) == 2, "the retry must still be attempted"
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "refused on retry" in hosted, hosted
+        assert "and none in" not in hosted, hosted
+        assert "Connection refused" in hosted, hosted
+        assert rc == 0, out[-800:]
+
     def test_control_bytes_in_api_url_cannot_forge_a_row(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
         """`api_url` comes from a store; a newline in it must not fabricate rows.
