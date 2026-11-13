@@ -458,6 +458,19 @@ def _scoped(brief: str, heading: str) -> str:
     return " ".join(_scope_slice(brief, heading).split())
 
 
+# A numeric token as it appears in these documents: an OPTIONAL sign (`-`, `+`,
+# U+2212) and a decimal. The sign is part of the VALUE — `_magnitude` strips it
+# when matching `values`, so a caller keeps passing the magnitude it derives from
+# the artifact while the shape still matches (and therefore counts) a falsified
+# copy whose sign was flipped (#12349 round-24 reviewer, P2).
+_SIGNED_NUMBER = r"[-\u2212+]?\d+(?:\.\d+)?"
+
+
+def _magnitude(token: str) -> str:
+    """The unsigned form of a numeric token — what `values` carries."""
+    return token.lstrip("-\u2212+")
+
+
 def _shape(text: str, values: tuple[str, ...] = (),
            free: tuple[str, ...] = ()) -> str:
     """`text` as a SHAPE: the CLAIM'S OWN content becomes wildcards, nothing else.
@@ -491,10 +504,17 @@ def _shape(text: str, values: tuple[str, ...] = (),
     matches the shape, so it reds only while the true text is ABSENT. A shape
     cannot anticipate text it cannot name; the claim is that the pin covers the
     content named here, not that it can recognise arbitrary rewording.
+
+    ⛔ A SIGN is part of the value, not part of the wording (#12349 round-24
+    reviewer, P2): every caller passes the MAGNITUDE, so with an unsigned token a
+    `−0.67` → `+0.67` rewrite stopped matching and the plant went green — in the
+    four sentences this file calls "the sentence that turns a sign change into a
+    floor". So the numeric token is signed (`_SIGNED_NUMBER`) and matching is by
+    magnitude (`_magnitude`), which puts the sign inside the wildcard.
     """
     pattern = "(" + "|".join(
         [re.escape(f) for f in sorted(free, key=len, reverse=True)]
-        + [r"\d+(?:\.\d+)?"]) + ")"
+        + [_SIGNED_NUMBER]) + ")"
     out = []
     for part in re.split(pattern, text):
         if part is None:
@@ -505,8 +525,8 @@ def _shape(text: str, values: tuple[str, ...] = (),
             # `\w+` wildcard there matched nothing at all (measured: the pin
             # reddened on the TRUE sentence).
             out.append(r"\S+")
-        elif part in values and re.fullmatch(r"\d+(?:\.\d+)?", part):
-            out.append(r"\d+\.\d+" if "." in part else r"\d+")
+        elif _magnitude(part) in values:
+            out.append(_SIGNED_NUMBER)
         else:
             out.append(re.escape(part))
     return "".join(out)
@@ -550,9 +570,14 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     values = ("0.67", "2")
     # 1. the true claim alone is accepted
     _only_claim(claim, claim, "scope", values=values)
-    # 2. a SECOND, DIFFERENT claim about another window is NOT a duplicate
+    # 2. a SECOND, DIFFERENT claim about another window is NOT a duplicate.
+    #    ⛔ The sentence must share the claim's WORDING — otherwise it cannot
+    #    collide under any digit policy and the case proves nothing (round-24
+    #    reviewer, P2: the first cut used "At k=10 the arms are tied", which
+    #    matched under the wildcard-every-digit shape too, so the guard was a
+    #    NO-OP for the defect its docstring names).
     _only_claim(
-        claim + " At k=10 the arms are tied (+0.00 pts, 0 discordant pairs).",
+        claim + " while at k=10 it is \u22120.67 pts (the shipped leg ahead 2\u20130).",
         claim, "scope", values=values)
     # 3. falsified in place -> red
     with pytest.raises(AssertionError):
@@ -852,14 +877,20 @@ def test_artifact_carries_the_rule_as_the_harness_constant(
     # beside it.
     threshold = re.search(r"p\s*<\s*\d+(?:\.\d+)?",
                           artifact["decision_rule"]).group(0)
-    for clause in ("strictly greater", "exact two-sided McNemar", threshold):
+    # ⛔ Each clause names its PIVOT word, and only that: free-ing every word of a
+    # two-word claim turns the shape into `\S+ \S+`, which matched every
+    # two-word pair in §4.1 (measured: 145 matches).
+    for clause, pivot in (("strictly greater", ("greater",)),
+                          ("exact two-sided McNemar", ("exact",)),
+                          (threshold, ())):
         assert clause in artifact["decision_rule"], clause
         # §4.1 is where the brief states the rule's clauses (#12349 round 19).
         # The threshold's own digits are its VALUES (derived from the rule), so a
         # falsified copy still matches the shape.
         _only_claim(_scoped(brief_text, "4.1"), clause,
                     f"§4.1's rule clause {clause!r}",
-                    values=tuple(re.findall(r"\d+(?:\.\d+)?", clause)))
+                    values=tuple(re.findall(r"\d+(?:\.\d+)?", clause)),
+                    free=pivot)
 
 def test_artifact_population_is_the_committed_pin(artifact, population) -> None:
     assert artifact["population_digest"] == population["digest"]
@@ -1123,7 +1154,10 @@ def test_the_tie_rule_is_matched(tool_mod, artifact, brief_text) -> None:
     assert "o.createdAt=coalesce($ca, $now)" in entities, (
         "the :Object upsert no longer stamps createdAt on create — the brief's "
         "declared residual for the recency half is now wrong")
-    assert "ascending id order" in _scoped(brief_text, "2")
+    # ⛔ SHAPE-UNIQUE (#12349 round-24 reviewer, P2): `ascending` → `descending`
+    # with the truth restated in §2 was green under the presence form.
+    _only_claim(_scoped(brief_text, "2"), "ascending id order",
+                "§2's write-order claim", free=("ascending",))
 
 
 def test_the_scorers_do_not_rank_identically(artifact, brief_text) -> None:
@@ -2143,10 +2177,15 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     assert round(total, 1) == 73.5
     assert round(100 - total, 1) == 26.5
     _s43 = _scoped(brief_text, "4.3")
-    assert "73.5 %" in _s43 and "26.5 %" in _s43, (
-        "§4.3's own share row must sum to its published total — a document-wide "
-        "substring is satisfied by any other section restating the figures "
-        "(#12349 round 19: falsifying only this sentence stayed green)")
+    # ⛔ SHAPE-UNIQUE (#12349 round 24): §4.3-scoped but still a PRESENCE pair, so
+    # a falsified total with the true one restated inside §4.3 stayed green. ⛔ The
+    # claim carries its own words — a bare `73.5 %` shape (`\d+\.\d+ %`) matches
+    # every other percentage in the section, which is a false red, not a pin.
+    _only_claim(_s43, f"the rows above sum to {total:.1f} %",
+                "§4.3's published share total", values=(f"{total:.1f}",))
+    _only_claim(_s43, f"i.e. **{100 - total:.1f} %**",
+                "§4.3's published remainder",
+                values=(f"{100 - total:.1f}",))
 
     # ⛔ The Δ COLUMN, in its own cells — a whole-document `"91.8" in brief` is a
     # substring that §3.3's sentence and `share × 91.8` both satisfy, so the two
@@ -2168,7 +2207,10 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
         f"is now {path_delta:.1f} pts")
     _only_claim(_scoped(brief_text, "4.3"),
                 "any non-zero path share adds on top of it.",
-                "§4.3's second-positive-term claim")
+                "§4.3's second-positive-term claim",
+                # ⛔ `adds` is the pivot: `adds` → `costs` planted green without
+                # it (round-24 reviewer, P2).
+                free=("adds",))
 
 
 def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> None:
@@ -2208,7 +2250,12 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         values=(f"{k3['delta_pts']:.2f}", f"{k3['mcnemar_p_two_sided']:.2f}",
                 f"{subset['delta_pts']:.2f}",
                 f"{subset['mcnemar_p_two_sided']:.2f}",
-                f"{k15['delta_pts']:.2f}", str(k15["discordant"])))
+                f"{k15['delta_pts']:.2f}", str(k15["discordant"])),
+        # ⛔ The formatting branch emits the WORD when the count is zero, so the
+        # passed magnitude (`str(0)`) can never match a token in the claim — the
+        # word IS the value there (round-24 reviewer, P2: `ZERO` → `two` with the
+        # truth restated was green).
+        free=("ZERO",) if k15["discordant"] == 0 else ())
     k5 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k5"]
     assert k5["only_b"] == 0 and k5["only_a"] > 0, (
         "the k=5 comparison no longer favours the shipped leg \u2014 the bullet's "
@@ -2265,7 +2312,10 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         f"{'zero' if inplace['only_a'] == 0 else inplace['only_a']} regressions)",
         "§0's recovery bullet",
         values=(f"{recovery['delta_pts']:.2f}", f"{dep['recall_at_3']:.4f}",
-                str(inplace["only_a"])))
+                str(inplace["only_a"])),
+        # ⛔ Same shape as the scorer bullet's ZERO: when the count is 0 the claim
+        # says `zero`, so the word is the value (round-24 reviewer, P2).
+        free=("zero",) if inplace["only_a"] == 0 else ())
 
     # §4's verdict line restates the same two deltas; it is the sentence a reader
     # quotes as the RESULT, so it is pinned with them rather than left as prose.
@@ -2279,7 +2329,12 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         "§4's Result line",
         values=(f"{k3['delta_pts']:.2f}", f"{k3['mcnemar_p_two_sided']:.3f}",
                 f"{subset['delta_pts']:.2f}",
-                f"{subset['mcnemar_p_two_sided']:.3f}"))
+                f"{subset['mcnemar_p_two_sided']:.3f}"),
+        # ⛔ The VERDICT WORD is the claim (round-24 reviewer, P2): `Result: FAIL`
+        # → `Result: PASS` with the truth restated beside it was green, i.e. the
+        # document's single most quotable word was the one token the pin could not
+        # distinguish.
+        free=("FAIL",))
 
 
 def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arch: str) -> None:
@@ -2303,25 +2358,32 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
     assert k3["mcnemar_p_two_sided"] > 0.05, (
         "the primary comparison is now significant — the status note's "
         "'not significant' is wrong; re-measure and re-decide")
-    assert f"by ~{round(k3['delta_pts'])} point (not significant)" in text, (
-        "the status note's '~N point (not significant)' must be the primary "
-        f"comparison's delta {k3['delta_pts']} and p {k3['mcnemar_p_two_sided']}")
-    assert f"by **zero** at k={15}" in text, (
-        "the status note's 'zero at k=15' must be the k=15 delta "
-        f"{k15['delta_pts']}")
+    # ⛔ SHAPE-UNIQUE (#12349 round-24 reviewer, P2): these four were §6.2-scoped
+    # PRESENCE checks, so each could be falsified in place with the true text
+    # restated inside the same § — measured GREEN for the `~N point` figure, the
+    # `zero` at k=15, the SIGN of the k=5 sentence and the 25-point swing. The note
+    # is the decision document; a presence pin over it is the class this round
+    # exists to close, and `**zero**` / `−0.67` are exactly its content.
+    _only_claim(
+        text, f"by ~{round(k3['delta_pts'])} point (not significant)",
+        "the status note's '~N point (not significant)'",
+        values=(str(round(k3["delta_pts"])),), free=("not",))
+    _only_claim(text, f"by **zero** at k={15}",
+                "the status note's 'zero at k=15'", free=("zero",))
     assert k15["delta_pts"] == 0.0
     k5 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k5"]
     assert k5["only_b"] == 0 and k5["only_a"] > 0, (
         "the k=5 comparison no longer favours the shipped leg \u2014 the status "
         "note's k=5 sentence needs re-deriving")
-    assert (
-        f"**{'\u2212' if k5['delta_pts'] < 0 else '+'}{abs(k5['delta_pts']):.2f} pts at k=5**"
-    ) in text, (
-        "the status note does not state the k=5 direction \u2014 the only width "
-        "where the shipped leg leads, and the reason 'a sign change, not a "
-        "floor' is written there")
-    assert f"the whole {dep['delta_pts']:g}-point swing" in text, (
-        f"the status note's swing must be the deployable arm's {dep['delta_pts']}")
+    _only_claim(
+        text,
+        f"**{'\u2212' if k5['delta_pts'] < 0 else '+'}"
+        f"{abs(k5['delta_pts']):.2f} pts at k=5**",
+        "the status note's k=5 direction",
+        values=(f"{abs(k5['delta_pts']):.2f}",))
+    _only_claim(text, f"the whole {dep['delta_pts']:g}-point swing",
+                "the status note's swing",
+                values=(f"{dep['delta_pts']:g}",))
     assert recovery["delta_pts"] == dep["delta_pts"], (
         "the recovery arm no longer reproduces the deployable arm's swing, so the "
         "status note's 'reproduces inside the current index' is now false")
