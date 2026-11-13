@@ -5445,10 +5445,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("03-test-design.md", "`carve_out:` holds **one**", (
             # re-derived from THIS merged tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
-            # config/ci-surfaces.yml`), never carried forward from either side of
-            # The value this row pins is MEASURED on the tree that merges, never
-            # predicted: `10186` at the merge of `main` `2dbfb046d7` into this branch
-            # (`awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
+            # config/ci-surfaces.yml`). The value this row pins is MEASURED on the
+            # tree that merges, never predicted: `10186` at the merge of `main`
+            # `2dbfb046d7` into this branch (`awk
+            # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`). ⛔ Neither side of this conflict described this
             # tree, which is why the number was re-derived rather than chosen: the
             # branch head `fa6854e50b` reads 10115 and `origin/main` at `2dbfb046d7`
