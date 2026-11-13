@@ -6456,7 +6456,15 @@ def resolve_entities(entity_refs: list[dict], search: dict,
             # deliberately does NOT apply is `group_join`: an exactly-equal
             # spelling (or one the survivor's `aliases[]` already records) is the
             # strongest evidence the tree has, and `_pair_reviewed`'s own rule
-            # already lets an exact re-mention bind. `retired` DOES apply: this is
+            # already lets an exact re-mention bind. `target_suppressed` is not
+            # applied here either, and for a stated reason: a target-less `reject`
+            # was recorded against an ambiguous SET rather than this spelling, so
+            # an exact/alias re-mention does not re-ask it — and an entity hold is
+            # not carried forward, so refusing here would DROP every re-mention of
+            # that candidate for the life of the rejection. The rejection keeps
+            # its own homes: the merge queue never re-offers the pair
+            # (`_pair_reviewed`), and a phase-2 PROPOSAL to bind it is refused.
+            # `retired` DOES apply: this is
             # D-1's second door, because a `search` dict built by another caller (a
             # test, `_index_search`, a replayed run) carries whatever that caller
             # fetched.

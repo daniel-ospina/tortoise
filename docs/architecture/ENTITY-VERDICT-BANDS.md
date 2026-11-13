@@ -93,7 +93,14 @@ Four properties are load-bearing and each is pinned by a test:
   fold, and drops the entity legs from `query_results.ran` so
   an entity candidate whose fixpoint was not established is recorded
   `found: None`, never `found: false`. Pinned by
-  `test_a_fold_failure_is_PARTIAL_and_keeps_the_rows_it_did_resolve`. The only
+  `test_a_fold_failure_is_PARTIAL_and_keeps_the_rows_it_did_resolve`. ⚠️ **The
+  other arm of the same `except` is narrower, and is stated rather than implied:
+  a read that fails BEFORE any hop resolves** (a query error, not a per-row
+  unresolvable) **has no `folded` rows to carry, so `entities` comes back EMPTY**
+  — `search_graph` withholds every entity prior, `extract_session_v2` therefore
+  skips D3 for that run entirely (the pre-`#12296` behaviour: no resolution, plus
+  this reason and the impaired-leg counters), and no pre-hop row is emitted by
+  either arm. The only
   client skipped is one with no projection at all (a test double: no
   `resolved_from` state exists to withhold).
 * **A chain the bound cannot resolve is cannot-answer, not a carrier.**
@@ -167,7 +174,7 @@ not a shared threshold — precision needs hard rule-based vetoes"*
 
 | veto | tests | why it is safe |
 |---|---|---|
-| `identifier_conflict` | both sides carry identifier-shaped tokens, the sets are disjoint, **and the two names are otherwise identical** (`billing v2 ledger` / `billing v3 ledger`) — "identical" after the tree's own fold, so a leading article (`the billing v3 ledger`) does not defeat it | a **path is scanned by component** (`entity_verdict._scan`): the directory parts are literals and the basename is tokenised like any name, so two spellings of ONE file stay silent (`tortoise/extractor_v2.py` → `extractor_v2.py`) while two different files still veto (`tortoise/extractor_v2.py` vs `.../extractor_v3.py`). Dropping a path token wholesale satisfied the first and lost the second — which a silence-only corpus test cannot tell apart | Separator/case folding means the `#8933` class (`ERR-4032` ≡ `err4032`) never fires. A `#`-prefixed reference (`#11901`) is an identifier: it is the corpus's dominant spelling and the hash form is not a bare number, so `#11901 plan` / `#11905 plan` veto |
+| `identifier_conflict` | both sides carry identifier-shaped tokens, the sets are disjoint, **and the two names are otherwise identical** (`billing v2 ledger` / `billing v3 ledger`) — "identical" after the tree's own fold, so a leading article (`the billing v3 ledger`) does not defeat it | a **path is scanned by component** (`entity_verdict._scan`): the directory parts are literals and the basename is tokenised like any name, so two spellings of ONE file stay silent (`tortoise/extractor_v2.py` → `extractor_v2.py`) while two different files still veto (`tortoise/extractor_v2.py` vs `.../extractor_v3.py`). Dropping a path token wholesale satisfied the first and lost the second — which a silence-only corpus test cannot tell apart. Separator/case folding means the `#8933` class (`ERR-4032` ≡ `err4032`) never fires. A `#`-prefixed reference (`#11901`) is an identifier: it is the corpus's dominant spelling and the hash form is not a bare number, so `#11901 plan` / `#11905 plan` veto |
 | `date_conflict` | both sides carry date tokens, values are disjoint **for a shared kind**, names otherwise identical (`the Q3 plan` / `the Q4 plan`) | per-kind comparison: `Q3 plan` vs `2026 plan` is not a contradiction and those two spellings can name one entity. Temporal compounds (`YYYY-MM`, `YYYY-MM-DD`, `YYYY-Qn`, `Qn-YYYY`) are their own kinds and are excluded from the identifier class, so a date disagreement is reported as a DATE conflict — the rule that fired — rather than under `identifier_conflict` |
 | `kind_conflict` | both sides declare a SPECIFIC kind and they differ | `other`/empty is the write-time coalesce default (`projection/entities.py:5086`) and is treated as *unknown*, never as a value; so is `unclassified`, the #1695 classify-later SENTINEL the S2 prompt instructs the model to emit and `execute_embed` repairs later — treated as a declared kind it conflicts with every real kind and vetoes every merge in classify-later mode. The comparison is on the BARE kind (`extractor_v2._norm_kind`), so `core:person` vs `ops:person` is not a conflict — the namespace is an emission-time spelling |
 | `target_suppressed` | the candidate carries a `reject` that named no survivor | `_pair_reviewed`'s documented case (`entity_resolver.py:236-250`): the reviewer answered, against an ambiguous set, and re-asking against one survivor is not a different question |
@@ -206,7 +213,15 @@ the two spellings differ by more than separators, so `identifier_conflict` /
 that actually fired, never a retirement that did not happen). `group_join` is
 deliberately NOT applied in phase 1: an exactly-equal spelling, or one the merge
 recorded as an alias, is the strongest evidence the tree has, and the merge
-queue's own rule lets an exact re-mention bind.
+queue's own rule lets an exact re-mention bind. `target_suppressed` is NOT applied
+there either, and the asymmetry is stated rather than left to inference: a
+`reject` that named no survivor was recorded against an ambiguous SET, not against
+this spelling, so an exact/alias re-mention is not re-asking it — and because an
+entity hold is not carried forward, refusing there would drop every re-mention of
+that candidate for the life of the rejection. The persisted rejection remains
+honoured where it was made: the merge queue (`entity_resolver._pair_reviewed`)
+never re-offers it, and a phase-2 PROPOSAL to bind it is refused
+(`target_suppressed`).
 
 Name hits outrank alias hits, and an alias tie is `ambiguous` — the reverse (one
 undifferentiated "matched" answer plus `[0]`) made the answer depend on candidate
