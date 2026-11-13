@@ -226,17 +226,19 @@ Otherwise it is a Tier E test, and it must **name the tier in its docstring** so
 4. **`test_graph_census_7949.py`'s live half moves to Tier E** — the only existing-test change this epic
    requires, and it is a *move*, not a deletion.
 
+
 ---
 
 ## Provenance of the numbers in this document
 
-**Read every `file:line` here as a STAMP, not as an address.** The **symbol** is authoritative; the number
-is as-of the head it was read at — `a577d0e25c` unless the row says otherwise — so a number can land on a
-different line at a later head *deliberately*. That policy is recorded in `05-verify.md` D5.
+**Read every `file:line` here as a STAMP, not as an address** — the **symbol** is authoritative. ⛔ **Two
+classes of number live in this file, and neither is "the" right one:** the rows re-pointed by a review
+resolve at the head their repair was measured at (and so at the current head), while the **stamp-bound**
+rows carry the head they were read at, `a577d0e25c`. `:82`'s `hosted_api.py:18494` and `:147`'s
+`hosted_api.py:18205` are the **same guard** (`if count + est > max_points`) read 289 commits apart — not a
+contradiction to fix. The full record, including why re-pointing rots, is `05-verify.md` D5.
 
-⛔ **Do not re-point one in passing.** Re-pointing has been tried and the next forward merge rots it again;
-the repairs marked in the rows above are the ones a review measured, each at the head it names. This note
-lives at the *end* of the file on purpose: a note at the top would shift every number below it, including
-the `line 81 of the document` that `05-verify.md` D5 itself names. A lane that "fixes" a stale number reads
-this file — that is how the two citations on lines 81 and 147 were re-pointed and then reverted
-(`8aeb35399c`) by a lane that had not read D5.
+⛔ **Do not re-point in passing.** This note is a pointer to D5, not a second copy of it: a lane that
+"fixed" these two cites without reading D5 had to revert itself (`813e8d9297` → `8aeb35399c`). It sits at
+the end of the file on purpose — a note at the top would shift every number below it, including the
+`line 81 of the document` that D5 names as its own worked example.
