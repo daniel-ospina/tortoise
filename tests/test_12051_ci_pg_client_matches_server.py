@@ -6423,6 +6423,19 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
             'echo "$(echo ")")"; sudo rsync -a "$b/17/bin/" "$b/16/bin/" # keep in sync',
             "the rsync carriage after a balanced nested string",
         ),
+        # ⛔ AND THE EVERY-`#` CUT NEEDS ITS OWN ROW, because the one above does NOT
+        # grade it (#12279 REVIEW 11, P2, measured: truncating `_ambiguous_comment_cuts`
+        # to `cuts[:1]` left the module at 397 passed, and the row above is refused by
+        # the FIRST cut alone, so it never exercises the mechanism). These two spellings
+        # are the ones that separate the readings: the first word-position `#` sits
+        # INSIDE a nested double-quoted string, so cutting there erases the replacement
+        # and only a cut at the SECOND `#` — the real comment — refuses them. 48
+        # bash-live spellings depended on this and 397 passed with it reverted.
+        ('echo "$(echo " #note")"; cp -a "$b/17/bin/." "$b/16/bin/" # x', "a nested string before the comment"),
+        (
+            'echo "$(echo " #note")"; sudo rsync -a "$b/17/bin/" "$b/16/bin/" # 16 gets 17',
+            "the rsync carriage after a nested string",
+        ),
         # ⛔ AND A DATA `#` EARLIER ON THE LINE MUST NOT BE THE ONLY CUT (#12279
         # FINAL REVIEW 3, P0, measured 40 RED→GREEN spellings): with only the FIRST
         # word-position `#` cut, `echo "old $(pg_dump --version) # was"; cp … # pin`
