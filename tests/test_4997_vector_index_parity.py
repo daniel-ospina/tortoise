@@ -475,8 +475,7 @@ def test_none_result_set_means_not_measured():
     non-catalogue query. The single behaviour this test relies on is the one
     `_NoneCatalogueGraph` exists to carry: the engine ANSWERS, and the answer's
     `result_set` is `None`. The empty-catalogue arm stays a DIFFERENT answer,
-    reached through `_RecordingGraph(index_rows=[])` in
-    `test_empty_result_set_means_measured_and_empty`.
+    reached through `_bare([])` in `test_empty_result_set_means_measured_and_empty`.
 
     ⛔ The "lane must have RUN" assertion is what makes this able to fail: on a
     VIRGIN projection `_bare()` already leaves `_vector_indexed_labels` as
@@ -486,11 +485,16 @@ def test_none_result_set_means_not_measured():
 
     ⛔ The pair's COHERENCE (both halves `None`, never half-populated) is
     deliberately NOT asserted here: on a virgin projection `_bare()` leaves the
-    served half `None` too, so that assertion could not fail on the mutation it
-    would look like it guards — the same unable-to-fail shape as above. Its real
-    guards are `test_unmeasured_pair_is_none_in_both_halves` and
+    served half `None` too, so the assertion cannot catch the mutation that
+    matters in this method — a dropped `self._vector_index_served_labels = None`
+    reset. It WOULD red a lane that clears the indexed half while leaving the
+    served half populated, and that is a real shape; it just belongs to a pin
+    that populates the pair first. The guards are
+    `test_unmeasured_pair_is_none_in_both_halves`, which proves each `None` lane
+    RAN from its own log line (`"inventory read failed"` /
+    `"inventory unavailable (empty response)"`), and
     `test_a_re_read_that_cannot_measure_clears_an_already_populated_pair`, which
-    populate the pair BEFORE the failing read.
+    populates the pair BEFORE the failing read.
     """
     proj = _bare()
     proj.g = _NoneCatalogueGraph()
