@@ -1951,6 +1951,14 @@ surfaces:
   # tortoise/session_verify.py, which select `api`. Same dual registration as
   # test_session_verify.py.
   - test_session_confirm.py
+  # #12379: the NON-PRICED trace for a capture whose extraction outcome the
+  # server never recorded. Its sources are tortoise/capture_spool.py (the
+  # per-entry marker + the drain counter), tortoise/session_events_drain.py,
+  # and the drain/health print paths in tortoise/__main__.py, which select
+  # `api`. Same dual registration as test_session_confirm.py: an exact `api`
+  # source match REPLACES the `core` fallback, so registering only `core` would
+  # run this guard in no job at all on a `__main__.py`-only diff.
+  - test_12379_unrecorded_trace.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -2255,7 +2263,38 @@ surfaces:
   # cases build under `tmp_path`: no docker, no Postgres, no network, no model.
   - test_11892_health_quota.py
   - test_12364_mcp_list_return_annotations.py
+  # #12372: the `tortoise_query` `entity_type` guard, its per-type remedies and
+  # the refusals that keep a caller from being served the Points population while
+  # asking for another layer. `tortoise/mcp_server.py` is a SHARED_MODULE, so its
+  # own diffs already take the full matrix — this row is the CLASSIFICATION
+  # `tools/ci_selection.integrity()` requires of every `tests/**/test_*.py`
+  # (measured: unclassified, `--integrity` reported the file as manifest drift
+  # and every `test_integrity_covers_all_test_files`-shaped pin in
+  # `tests/test_ci_selection.py` redded, which would have failed `test-slow`
+  # BEFORE the merge could happen). Its only SELECTION effect is on a diff to the
+  # test file itself, which selects `core` (measured: `--changed-files
+  # tests/test_12372_entity_type_dropped.py` -> `surfaces=['core']`); an
+  # `mcp_server.py` diff reaches every test file through the FULL matrix that a
+  # SHARED_MODULES path forces (`--changed-files tortoise/mcp_server.py` ->
+  # `full: true, test_files: ALL`), not through this row.
+  - test_12372_entity_type_dropped.py
   - test_candidate_recall_11901.py
+  # #12297: the rerank wiring's own pins — the slot-preserving reorder, the
+  # textless-pool load guard, the width resolver reaching BOTH the batch read
+  # and the scorer, the trace accounting, the recency/opt-out arms, and the
+  # from-the-AST census of every ``tortoise_fts_query`` mention. `core` is what
+  # classifies it, and it is the ONLY row that does: a ``tortoise/rerank.py``-only
+  # diff measured `surfaces: ['core']`, 833 files, and this file ABSENT from the
+  # selection before this row — i.e. this file's pins for `rerank.py` ran ZERO
+  # times on exactly the diff they exist for (the #12294 class, one container
+  # over). ⛔ No case count here: `tools/ci_selection.py --integrity` is the
+  # authority for what runs, and a hand-written number re-stales every round (the
+  # sibling `durations` row for this file says the same). Same reasoning and same
+  # repair as `test_name_entropy_12294.py` below.
+  - test_rerank_pool.py  # #12297
+  - test_rerank_calibration_12297.py  # #12297 — core classifies it; `tier1`
+    # beside it is what makes it RUN on an artifact/brief diff (both take the
+    # docs-only early return and select no surface), dual-registered
   # #12294: the ported predicate and the falsification that declined it. `core`
   # classifies it (the guard is a product-surface one: `_derive_queries` must
   # keep deriving a query for every entity name and no `gated_entities` key may
@@ -2289,6 +2328,27 @@ surfaces:
   # `test_9664_premise_census.py` precedent). ⛔ NOT in `battery`: a docs census
   # has no business running on a battery-only diff.
   - test_11739_quote_population_probe.py
+  # #11739/#12436: the COMPOSED-TEXT gate bundle
+  # (`docs/evidence/11739-composed-gate/`) — the measurement that decides whether
+  # `TORTOISE_COMPOSED_EMBED_TEXT` may ship ON, which was run for the first time on 2026-11-13 and
+  # FAILED all three gates, and whose probes are therefore the acceptance instrument for the fix
+  # (#12436: *the same gate re-run, no threshold, band or test adjusted*). The bundle ships probes
+  # instead of a head sha (the repo squash-merges), so its provenance is TWO digests —
+  # `provenance.probe_sha256` over the probe's bytes (the CODE that produced it) and
+  # `provenance.payload_sha256` over every field except `provenance` PLUS the `rows_source` those
+  # fields are attributed to (the NUMBERS, and where they came from) —
+  # and this pin recomputes the first from the committed BYTES and the second from each artifact's
+  # PARSED FIELDS plus its `rows_source` (a reformat does not red; a changed number does), so an
+  # edit to either probe (re-tuning the 0.89 band being the move #12436 forbids) OR a hand-edited
+  # verdict/count/cache attribution reds here instead of silently re-pointing the evidence. It also pins the recorded FAIL verdict against an
+  # in-place flip (a passing re-run is a NEW artifact — this one is the baseline #12436 is scoped
+  # against) and binds the recorded 0.89 / 0.72 bands to
+  # `tortoise.embeddings.NEAR_DUPLICATE_THRESHOLD` / `DEFAULT_THRESHOLD`. Hermetic: two probe files
+  # hashed, two JSON artifacts parsed, one float pair imported — no DB, no graph, no network, no
+  # key, no model.
+  # `tier1` below is LOAD-BEARING, because every guarded artifact is under `docs/` and a docs-only
+  # diff runs `tier1` only (the `test_11739_quote_population_probe.py` precedent above).
+  - test_11739_composed_gate_probe.py
   # #12051: the record drill's PostgreSQL CLIENT major must equal the servers'
   # major. A newer client writes a preamble the RESTORE target cannot execute
   # (`SET transaction_timeout`, PG17 client into the pg16 scratch server), and
@@ -5071,6 +5131,14 @@ surfaces:
   # refusal handlers) — the latter selects `api`. See the core entry for the
   # mechanism half.
   - test_session_confirm.py
+  # #12379: the trace half of the same wire event — the spool entry's durable
+  # `extraction_outcome` marker, the drain summaries that count it, and the
+  # `session health` line that survives the hook's `2>/dev/null`. Its mechanism
+  # sources are `tortoise/capture_spool.py` and
+  # `tortoise/session_events_drain.py` (both `core` via the `tortoise/`
+  # fallback); the CLI print paths are `tortoise/__main__.py`, which selects
+  # `api`. See the api entry for the dual-registration mechanism.
+  - test_12379_unrecorded_trace.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
@@ -9269,7 +9337,10 @@ surfaces:
   # (#2938).
   - test_session_schema_3554.py
 tier1:
+- test_rerank_calibration_12297.py  # #12297: the calibration harness's own pins (`run()` driven over fake objects: exit codes, the resolved model handed to BOTH the load and the timed call, the degrade refusal, the wired width, the landing check) and, in the committed artifacts, the `ms_per_pair` IDENTITY in EVERY latency block (three artifacts, five blocks: `1000 * score_s / pairs_scored`) plus the two §5 cost figures against the brief. ⛔ The SIBLING row below owns the other artifact claims (the pair count, the ceiling note the TOOL emits, the lexical control's label); this row is not a claim about those, and stating it as one was itself a coverage claim with no pin behind it (measured: wronging the generator's denominator red nothing). The guarded artifacts live under `docs/research/2026-11-12-12297-rerank-calibration/`, and a docs-only diff runs `tier1` ONLY and selects no surface — so a `core`-only row ran these pins ZERO times on the diff that re-stales them (measured: `--changed-files docs/research/.../measurement-noun-path.json` -> `surfaces: []`, 91 files, pin absent). Hermetic, no DB, no graph, no model load (the scorer is stubbed); dual-registered with `core`.
+- test_candidate_recall_11901.py  # #12297: the same shape — this module pins `docs/research/2026-11-12-11901-candidate-recall/research-brief.md` against its two committed artifacts and pins the rerank arm's semantics (it now DRIVES `rerank.rerank_pool` rather than re-implementing it). A docs-only edit of either artifact or that brief selects no surface and runs `tier1` only; Hermetic, no DB, no graph; dual-registered with `core`.
 - test_11739_quote_population_probe.py  # #11739: the `quote` population evidence bundle's arithmetic + fail-closed walk (whitespace is not a quote, the embedded-only denominator, the endpoint shaping, and exit 4 on an unprovable walk) — a docs-only diff runs tier1 only, and every guarded artifact is under `docs/`; dual-registered with `core`
+- test_11739_composed_gate_probe.py  # #11739/#12436: the composed-text gate bundle's binding, in THREE layers — `provenance.probe_sha256` on each artifact vs the sha256 of the probe as committed; `provenance.payload_sha256` vs a recomputation over `{"artifact": <each artifact's own fields>, "rows_source": …}`, so a hand-edited verdict, count, or a RE-POINTED row cache reds too; and the probe-basename / row-source / encoder anchors inside `provenance` that no digest can cover (before those halves a green-flipped `gate.json` red only on the verdict assertion, and a NUMBER or `rows_source` edit passed — measured). It also pins the recorded FAIL verdict against an in-place flip, binds the recorded 0.89 / 0.72 bands to the product's `NEAR_DUPLICATE_THRESHOLD` / `DEFAULT_THRESHOLD`, asserts the figures the README and `docs/00_index.md` quote, and DRIVES both probes' `--attest` refusal arms on temp copies (exit 2, bytes untouched) so those arms cannot regress to fail-open — the bundle ships probes instead of a head sha because the repo squash-merges. A docs-only diff runs tier1 only and every guarded artifact is under `docs/`, so a `core`-only row would run the pin ZERO times on exactly the change class it exists for (#12436's acceptance is this file's subject: the same gate re-run, nothing tuned); hermetic — probe files hashed, JSON artifacts parsed, one float pair imported (numpy only: no DB, no graph, no network, no key, no model) — dual-registered with `core`
 - test_name_entropy_12294.py  # #12294: the name-entropy gate's ported predicate, the falsification that DECLINED it, and the invariants of the `docs/` artifact the decline rests on. `core` classifies it; tier1 is what makes it RUN — the two things it guards are `tools/candidate_recall_11901.py` and that artifact, and neither selects a surface (both take the docs-only tier1 early return), so a `core`-only row ran the pin ZERO times on exactly the change class it exists for (measured: `--changed-files <artifact>` → `surfaces: []`, 90 files, pin absent). Hermetic, no DB, no graph; dual-registered with `core`
 - test_11656_endpoint_kind_binding_scope.py  # #11656 review F1: this pin's own docstring says it exists so "a manifest edit that makes a scope claim false reds here instead of rotting in prose", and it also pins the two DOC defects (the `docs/00_index.md` row, the ambiguous bare citation). Before this row it was registered in `core` ONLY, and `core` is the not-found FALLBACK — so a docs-only diff took the tier1 early return and ran it ZERO times (measured: `--changed-files docs/plans/2026-11-09-11656-endpoint-kind-binding.md` → `surfaces: []`, 84 files, pin absent; `docs/research/…` likewise) while the `docs/00_index.md` edit DID select `core` and reach it. That is the silent-drop class this manifest documents at `test_10156_alert_registers.py` above, and the exact change class that re-stales the figures a lane implements against. Same shape and reasoning as `test_8093_registry_namespace_doc.py`, `test_extractor_v4_doc_citations.py`, `test_7949_capstone_measure.py`, `test_capstone_*` — every sibling doc/citation pin is dual-registered. Import weight is not a reason to withhold tier1 (`test_config.py`/`test_ids.py`/`test_taxonomy.py` already import `tortoise.*`); hermetic, ~5s, no DB, no graph. — dual-registered with `core`
 - test_8093_registry_namespace_doc.py  # #8093: `docs/registry-graph-schema.md` §Graph namespace cell vs the derived namespace (hermetic doc↔code pin; a docs-only diff runs tier1 only) — dual-registered with `core`
@@ -12022,6 +12093,8 @@ durations:
   # artifact + installer + parser, one node --test subprocess, and one real
   # `tortoise install openclaw` CLI run into a temp HOME.
   test_openclaw_seam.py: 0.7  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.6
+  test_rerank_pool.py: 2.0  # new in #12297 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the durations refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`. ⛔ No local timing is quoted beside this weight on purpose — a seconds figure copied next to a shard-layout weight re-stales against the run it came from; the readings live in `WORKTREE-REPORT.md` beside the verbatim commands. What the weight covers: hermetic unit + embedded-engine arms over the rerank wiring (no docker, no network, no model load — the scorer is always stubbed), so the flat 2.0 may UNDERSTATE it on the fast pool until a sweep re-bases it, exactly as every embedded-fixture row here records. ⛔ The CASE COUNT is deliberately not quoted: `tools/ci_selection.py --integrity` is the authority and a hand-written count re-stales on every review round.
+  test_rerank_calibration_12297.py: 2.0  # new in #12297 — the same #3400/#4348 trap and the same flat `DEFAULT_FAST_WEIGHT` for the same reason; the `core`/`tier1` registrations above put it in `fast_pool()`. Hermetic: `run()` is driven over fake SDK/graph objects with a stubbed scorer and a stubbed model resolver, plus JSON reads of all three committed artifacts (five latency blocks) — no docker, no graph, no model load, no network. ⛔ No local timing and no case count are quoted here, for the two reasons the sibling row states.
   test_product_rerank.py: 0.1
   test_projection_maxmemory_message.py: 0.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 0.2
   test_provenance_extractedfrom_3263.py: 14.4  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 4.2; The prohibition applies here too, not only one row up: this row is the one most likely to tempt a re-write with a measured number, and the RULE outranks the number. The local whole-file reading is stated precisely because it must NOT be substituted, which is the `test_9836_id_addressed_repoint.py` pattern: 54 top-level `def test_` (`grep -c '^def test_'` -> 54; 25 at the 2026-11-02 sample, 48 until #11038's #10063 read-side pins landed — `test_query_answers_for_a_folded_ref_from_another_source`, `test_query_answers_for_every_ref_of_a_sequence_born_point`, `test_a_prop_only_ref_still_answers_by_equality`, `test_scalar_property_filters_keep_EXACT_equality` — and 53 once the `extractedFromAll` ref-family pin did, `test_the_accumulated_refs_filter_answers_for_every_carried_ref`, which the review recorded as the family's one UNPINNED key) and 54 once the 11038 review's UNVERIFIED probe landed as `test_a_LIST_filter_value_answers_or_is_empty_but_never_raises` (a LIST ref filter must answer or return `[]`, never raise — measured: the edge arm degrades to false); several of them driving `rebuild_all(..., confirm_destructive=True)` + `check_consistency`, measured at the #10010 head on an isolated docker lane (`tools/test_lane.py uri`, falkordb-server v4.20.6, private container) -> **48 passed in 138.44s**, on a box under fleet load, so it is an UPPER bound and 138.4 is the direction that OVER-packs. Consequence, stated rather than hidden: 2.4 was measured against the 25-case file and is known to under-declare this file ~57x (138.4 / 2.4) until a push-to-main sweep includes it and `--refresh-durations` re-bases the row — the sweep is the fix, a hand edit is not. The count stays cited in the instrument's own spelling on purpose: `tests/test_ci_selection.py::test_no_durations_row_states_a_stale_case_count` reads exactly that spelling, so this row's one re-derivable claim reds instead of drifting — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.4
@@ -12844,6 +12917,7 @@ durations:
   # not the weight: "33 passed in 6.46s" (33 cases from 22 `def test_`,
   # embedded SDK fixture, this host, this head) — a later junit sweep re-cuts it.
   test_11739_composed_embed_text.py: 2.0
+  test_11739_composed_gate_probe.py: 2.0  # new in #12436 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: FOURTEEN test functions (24 collected cases at the head that added the `--attest` arms, their discriminating cases, and the `ATTEST-UNREADABLE` arm on BOTH probes) — four sha256 digests (two probe digests recomputed from the committed BYTES, two payload digests recomputed from each artifact's PARSED FIELDS plus its `rows_source`), two committed JSON artifacts parsed with their quoted figures asserted, the probe-basename/row-source/encoder anchors checked, both probes’ `--attest` refusal arms DRIVEN on temp copies of each artifact (exit 2 and the bytes untouched), including each probe’s own PROBE-WRITE arm, and one float-pair read from `tortoise.embeddings` (`NEAR_DUPLICATE_THRESHOLD`/`DEFAULT_THRESHOLD`; numpy only, no torch, no model, no key, no network, no DB). The local reading — "24 passed in 4.9s" — is CONTEXT and not the weight: the map's own rule gives a PR-added file the flat default, and the `--attest` cases add probe imports to what was ~0.1 s. `tools/ci_selection.py --integrity` is the authority and replaces this from junit once a push-to-main sweep includes it.
   test_next_work.py: 7.5
   test_oauth_stray_code_refusal.py: 2.3
   test_reader_aggregation_aware.py: 0.1

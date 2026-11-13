@@ -1469,6 +1469,11 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
             # measurement of the product behaviour; the arm's own prefer-latest
             # placement is unchanged.
             _valid_time_rerank=False,
+            # #12297: the SAME reasoning, for the fused rerank — this lane is
+            # the last order-owner of its measured surface and its numbers are
+            # compared to a sealed arm, so a pre-cut reorder would move the
+            # page composition unmeasured.
+            _rerank_candidates=False,
             **_sdk_kwargs,
         ):
             merged[h["id"]] = h

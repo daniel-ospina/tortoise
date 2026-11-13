@@ -75,20 +75,32 @@ def main() -> int:
         core_point = sdk.create_point("decision", "We will adopt staged rollout")
 
         # ── Tier 1b: entity_type + kind filter (kind tier) ──
+        # #12297: every read below is an ACCEPTANCE or MEMBERSHIP probe on a
+        # small graph (``limit`` of 5-10, far inside the pool width), so an armed
+        # rerank would re-pick the page and turn a healthy graph into a false
+        # FAIL. The census in ``tests/test_rerank_pool.py`` pins this file.
         print("\n== Tier 1b: entity_type + kind filter ==")
-        res = sdk.tortoise_fts_query(None, kind="product-strategy:feature", limit=10)
+        res = sdk.tortoise_fts_query(None, kind="product-strategy:feature", limit=10,
+                                     _rerank_candidates=False)
         ids = {r["id"] for r in res}
         check("kind filter product-strategy:feature returns feature", feature["id"] in ids, f"{ids}")
 
-        res = sdk.tortoise_fts_query(None, kind="product-strategy:customerSegment", limit=10)
+        res = sdk.tortoise_fts_query(
+            None, kind="product-strategy:customerSegment", limit=10,
+            _rerank_candidates=False)
         ids = {r["id"] for r in res}
         check("kind filter product-strategy:customerSegment", cust_seg["id"] in ids, f"{ids}")
 
-        res = sdk.tortoise_fts_query(None, kind="decision", limit=10)
+        res = sdk.tortoise_fts_query(None, kind="decision", limit=10,
+                                     _rerank_candidates=False)
         ids = {r["id"] for r in res}
         check("core kind filter 'decision' returns core point", core_point["id"] in ids, f"{ids}")
 
-        res = sdk.tortoise_fts_query("reporting", kind="product-strategy:feature", limit=10)
+        # #12297: a MEMBERSHIP probe (limit=10, far inside the pool width), so an
+        # armed rerank would re-pick which rows are in the page and turn this into
+        # a false FAIL on a healthy graph.
+        res = sdk.tortoise_fts_query("reporting", kind="product-strategy:feature",
+                                     limit=10, _rerank_candidates=False)
         ids = {r["id"] for r in res}
         check(
             "text+kind: 'reporting' within product-strategy:feature",
@@ -100,7 +112,9 @@ def main() -> int:
         print("\n== Tier 2: cross-entity entity_type search (abstract) ==")
         for et in ("point", "event", "subject", "document", "object", "operator", "source"):
             try:
-                r = sdk.tortoise_fts_query("test", entity_type=et, limit=5)
+                r = sdk.tortoise_fts_query(
+                    "test", entity_type=et, limit=5,
+                    _rerank_candidates=False)
                 ok = isinstance(r, list)
                 check(f"entity_type={et} accepted", ok, f"returned {len(r) if isinstance(r, list) else 'err'} results")
             except Exception as e:
@@ -108,7 +122,8 @@ def main() -> int:
 
         # `action` is DEAD in v3.2 (Action dissolved in v3.0) — must reject
         try:
-            sdk.tortoise_fts_query("test", entity_type="action", limit=5)
+            sdk.tortoise_fts_query("test", entity_type="action", limit=5,
+                                   _rerank_candidates=False)
             check("entity_type='action' REJECTED (dead type)", False, "accepted — action is dead per v3.2")
         except ValueError as e:
             check("entity_type='action' REJECTED (dead type)", True, f"ValueError: {e}")
@@ -156,12 +171,14 @@ def main() -> int:
         res = sdk.tortoise_fts_query(
             None, kind="product-strategy:feature",
             relationship_filter=f"addresses:{cust_seg['id']}", limit=10,
+            _rerank_candidates=False,
         )
         ids = {r["id"] for r in res}
         check("relationship_filter addresses:seg returns feature", feature["id"] in ids, f"{ids}")
 
         # traversal_path resolves via pack registry
-        res = sdk.tortoise_fts_query("reporting", traversal_path="Feature→CustomerSegment", limit=10)
+        res = sdk.tortoise_fts_query("reporting", traversal_path="Feature→CustomerSegment",
+                                     limit=10, _rerank_candidates=False)
         ids = {r["id"] for r in res}
         check("traversal_path Feature→CustomerSegment returns feature", feature["id"] in ids, f"{ids}")
 
