@@ -3513,6 +3513,94 @@ def test_the_LAST_assignment_in_a_file_decides_its_arming(tmp_path, monkeypatch)
         "per_surface"]["Dockerfile"]["state"] == "ON"
 
 
+def test_a_file_with_NO_decision_of_its_own_does_not_inherit_the_PREVIOUS_file(
+        tmp_path, monkeypatch):
+    """The deployment population is per FILE — one file's arming never greens its neighbour.
+
+    ⛔ Measured (fresh review of PR #12474, P1): `decisions` was initialised OUTSIDE the
+    per-file loop and flushed per file, so a file that appended no decision inherited the
+    PREVIOUS file's — reported `ON` with that file's hit text, dropped out of `silent`, and
+    flipped `deployment["on"]` on the ORDER the filenames happen to sort in. Both orders
+    are reachable with this repo's own names (`Dockerfile.hosted` < `Dockerfile.selfhost`),
+    so the walk's verdict depended on a `glob` sort. This is the fail-open the PR exists to
+    close, one axis over: a build-time-only `ARG` file was greened by a neighbour.
+    """
+    armed = 'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
+    argonly = 'FROM python:3.12\nARG TORTOISE_EMBED_GATE=1\n'
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    # …the build-time-only file sorts FIRST: it must be OFF and SILENT, and the surface
+    # must carry exactly ONE hit (a duplicate was how the inherited decision showed up).
+    (tmp_path / "Dockerfile.a_argonly").write_text(argonly, encoding="utf-8")
+    (tmp_path / "Dockerfile.z_armed").write_text(armed, encoding="utf-8")
+    first = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    files = first["per_surface"]["Dockerfile"]["files"]
+    assert files["Dockerfile.a_argonly"]["state"] == "OFF", files
+    assert files["Dockerfile.z_armed"]["state"] == "ON", files
+    assert first["per_surface"]["Dockerfile"]["hits"] == [
+        "Dockerfile.z_armed: ENV TORTOISE_EMBED_GATE=1"], (
+            first["per_surface"]["Dockerfile"]["hits"])
+    assert "Dockerfile.a_argonly" in first["deployment"]["silent"], first["deployment"]
+    # …a build-time `ARG` is reported as outside the runtime, never as an arm.
+    assert any("build-time ARG" in entry for entry in first["outside_runtime"]), (
+        first["outside_runtime"])
+
+    # …and the SAME two files with the sort order reversed must read IDENTICALLY. Before
+    # the fix this order reported BOTH files `ON` and `deployment["on"] is True`.
+    (tmp_path / "Dockerfile.a_argonly").unlink()
+    (tmp_path / "Dockerfile.z_armed").unlink()
+    (tmp_path / "Dockerfile.a_armed").write_text(armed, encoding="utf-8")
+    (tmp_path / "Dockerfile.z_argonly").write_text(argonly, encoding="utf-8")
+    second = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    files = second["per_surface"]["Dockerfile"]["files"]
+    assert files["Dockerfile.z_argonly"]["state"] == "OFF", files
+    assert files["Dockerfile.a_armed"]["state"] == "ON", files
+    assert "Dockerfile.z_argonly" in second["deployment"]["silent"], (
+        second["deployment"])
+    # …the verdict is ORDER-INVARIANT, which is the property the sort broke.
+    assert first["deployment"]["on"] == second["deployment"]["on"] is False, (
+        first["deployment"]["on"], second["deployment"]["on"])
+    assert (len(first["per_surface"]["Dockerfile"]["hits"])
+            == len(second["per_surface"]["Dockerfile"]["hits"]) == 1), (
+        first["per_surface"]["Dockerfile"]["hits"],
+        second["per_surface"]["Dockerfile"]["hits"])
+
+
+def test_an_INDETERMINATE_last_assignment_holds_the_file_UNMEASURED(tmp_path, monkeypatch):
+    """An unresolvable assignment is the LAST word — it cannot leave an earlier arm standing.
+
+    ⛔ Measured (fresh review of PR #12474, P2): the indeterminate line took a bare
+    `continue`, appending no decision, so `decisions[-1]` stayed on the earlier truthy
+    value and `ENV FLAG=1` then `ENV FLAG="${OTHER}"` published `ON` with
+    `measured: True` — while `flag_in_shipped_configs`' own docstring promises an
+    assignment the walk cannot resolve holds the file UNMEASURED. The neighbouring
+    indirection test only covers a file whose ONLY line is indeterminate, so it could
+    not see this. The reverse order stays ON, because a LATER resolvable truthy value
+    genuinely decides it.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
+        'ENV TORTOISE_EMBED_GATE="${OTHER}"\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "UNMEASURED", (
+        shipped["per_surface"]["Dockerfile"])
+    assert shipped["deployment"]["measured"] is False, shipped["deployment"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert any("${OTHER}" in entry for entry in shipped["indeterminate"]), shipped
+
+    # …the CONTROL direction: an indeterminate line FOLLOWED by a resolvable truthy one
+    # leaves the file's effective value known, so it is ON — the fix must not swallow it.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE="${OTHER}"\n'
+        'ENV TORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", (
+        shipped["per_surface"]["Dockerfile"])
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+
+
 def test_the_LEGACY_ENV_space_form_is_a_deployment_hit(tmp_path, monkeypatch):
     """`ENV KEY value` (no `=`) sets KEY — the third form the Dockerfile grammar has.
 
@@ -8776,7 +8864,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `207 + 1` and `206 + 2` at THIS tree, both equal to the `208` the pin re-derives
+    count: `209 + 1` and `208 + 2` at THIS tree, both equal to the `210` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.

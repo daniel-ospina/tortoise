@@ -321,11 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 208 collected
-                                 # (docker lane: 207 passed, 1 skipped)
+                                 # this tree: 210 collected
+                                 # (docker lane: 209 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **208 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **210 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -369,7 +369,7 @@ holds both rows AND whose diff selects this file, including the MERGE tree, wher
 actually born and where
 `main-lint.yml`'s ruff gate (`#2174`) only reds it after the fact; the scan also found the live
 `# noqa: F601` duplicate in `tests/test_commit_schema.py`, which the census-scoped pin cannot see —
-and which lint itself does NOT catch, because the suppression is on the repeated line), and twenty-one by
+and which lint itself does NOT catch, because the suppression is on the repeated line), and twenty-three by
 `#12022`/`#12054`/`#12070`/`#12312` together (four DEPLOYMENT-CHANNEL falsifiers (among them: a `fly.toml` `[env]`
 key arms while a `[build.args]` one does not, a second `fly*.toml` is discovered rather than listed, and the
 entrypoint is found through the image's `ENTRYPOINT` and its `export`/`${VAR:-default}` read, and an
@@ -390,8 +390,12 @@ legacy `ENV KEY value` form is a hit, and one that the LAST assignment in a file
 decides its arming (an earlier truthy value does not survive a later non-truthy one);
 two on the shared per-file caveat both row-1 notes now call, one of them naming the MEASURED
 compose→image build edge; and two CITATION guards, one asserting every `test_…` citation this family
-makes resolves and one driving the guard against the stale stem `#12312` was filed for)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 21 = 208`). ⚠️ No figure here names what `main` collects TODAY:
+makes resolves and one driving the guard against the stale stem `#12312` was filed for; and two
+SCORING-SCOPE falsifiers the rebase review measured (PR #12474, P1/P2) — that a file appending no
+decision of its own does not INHERIT the previous file's, so `deployment["on"]` cannot move with the
+`glob` sort order, and that an INDETERMINATE last assignment holds its file `UNMEASURED` instead of
+leaving an earlier truthy value standing — each shown RED against the pre-fix walk)
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 23 = 210`). ⚠️ No figure here names what `main` collects TODAY:
 which of those additions are already merged moves with `main`, so any "`main` at N" would be a moving
 reference this paragraph forbids — the total is bound to THIS TREE alone): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
@@ -431,7 +435,7 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
-collected count — `207 passed, 1 skipped` and `206 passed, 2 skipped` here, both adding to the same `208` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+collected count — `209 passed, 1 skipped` and `208 passed, 2 skipped` here, both adding to the same `210` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
 `186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch

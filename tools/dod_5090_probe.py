@@ -2880,11 +2880,17 @@ def flag_in_shipped_configs(flag: str) -> dict:
         # Dockerfile and shell readers (fresh review of PR #12474, P2). The decisions are
         # DEFERRED so the file's state is the LAST one, and a shadowing assignment is
         # reported instead of vanishing.
-        decisions: list[tuple[bool, str, str]] = []
+        # ⛔ AND THE STATE IS PER FILE, so the decision list is REBUILT for each one: it
+        # used to be initialised outside this loop and flushed per file, so a file that
+        # appended NO decision inherited the PREVIOUS file's — reported `ON` with that
+        # file's hit text, dropped from `silent`, and flipping `deployment["on"]` on the
+        # ORDER the filenames sort in. Both orderings were reachable with this repo's own
+        # `Dockerfile.hosted` / `Dockerfile.selfhost` names (fresh review of PR #12474, P1).
         for path in candidates:
             if not path.is_file():
                 continue
             posix = path.relative_to(REPO_ROOT).as_posix()
+            decisions: list[tuple[bool | None, str, str]] = []
             try:
                 if path.stat().st_size > 2_000_000:
                     unreadable.append(posix)
@@ -2999,6 +3005,17 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 if not resolved:
                     indeterminate.append(f"{posix}:{number}: {line.strip()[:90]}")
                     surface_indeterminate.append(posix)
+                    # ⛔ A DEFERRED DECISION, not a `continue`: the value this line gives
+                    # the flag is UNKNOWN, and it is the LAST assignment, so the file's
+                    # effective value is unknown — the earlier truthy line does not
+                    # survive it. Skipping the append left `decisions[-1]` on the earlier
+                    # truthy value, so `ENV FLAG=1` then `ENV FLAG="${OTHER}"` published
+                    # `ON` with `measured: True` while the walk's own docstring promises
+                    # an unresolvable assignment holds the file UNMEASURED (fresh review
+                    # of PR #12474, P2).
+                    decisions.append((None,
+                                      f"{posix}: {line.strip()[:90]}",
+                                      f"{posix}:{number}: {line.strip()[:90]}"))
                     continue
                 # ⛔ Deferred, never applied here: the FILE's state is its LAST
                 # runtime-relevant assignment (`is_truthy` is decided per line).
@@ -3008,18 +3025,23 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # ── the file's effective value, once its lines are read (LAST WINS) ──
             if decisions:
                 effective_truthy, hit_text, plain_text = decisions[-1]
-                if effective_truthy:
+                if effective_truthy is None:
+                    # The LAST assignment is unreadable, so the file's effective value is
+                    # UNKNOWN — it cannot be reported arming the flag. `surface_indeterminate`
+                    # already holds this file, so the UNMEASURED downgrade below applies.
+                    pass
+                elif effective_truthy:
                     hits.append(hit_text)
                     surface_hits.append(hit_text)
                     surface_file_hits.setdefault(posix, []).append(hit_text)
                     for truthy, _hit, earlier in decisions[:-1]:
-                        if not truthy:
+                        if truthy is False:
                             disarming_assignments.append(
                                 earlier + " (shadowed by a later truthy value)")
                 else:
                     disarming_assignments.append(
                         plain_text + (" (OVERRIDES an earlier truthy value)"
-                                      if any(truthy for truthy, _h, _l in decisions[:-1])
+                                      if any(t is True for t, _h, _l in decisions[:-1])
                                       else ""))
         if not present:
             state = "ABSENT"
