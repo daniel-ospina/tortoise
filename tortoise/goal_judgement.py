@@ -1224,7 +1224,8 @@ def latest_readings(
         # incomplete set. Refuse rather than answer from the part that arrived.
         raise RuntimeError(
             f"latest_readings read {len(rows)} of {expected} rows for indicator "
-            f"{indicator_id!r} — a page came back short of {batch}. FIVE causes, "
+            f"{indicator_id!r} at a page size of {batch} — {expected - len(rows)} "
+            f"row(s) never arrived. FIVE causes, "
             "FOUR of which have a remedy: a server-side RESULTSET_SIZE pinned below "
             "_READINGS_PAGE_SIZE (lower the constant below the cap), or the "
             "matched set SHRANK after the count was taken — a concurrent DELETE "

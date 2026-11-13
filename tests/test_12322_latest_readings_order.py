@@ -412,8 +412,8 @@ def test_a_degenerate_page_size_is_refused_by_name(sdk, monkeypatch):
 
     ⛔ The failure it prevents is a MISATTRIBUTION, not silence. ``LIMIT 0``
     returns an empty page on every page, so without this guard a MEASURED
-    indicator would reach the truncation check and raise ``RuntimeError`` ("a page
-    came back short") — blaming a server cap for a local misconfiguration — while
+    indicator would reach the truncation check and raise ``RuntimeError`` ("N
+    row(s) never arrived") — blaming a server cap for a local misconfiguration — while
     an indicator with NO readings would return ``[]``, which is the correct
     answer. (The independent ``count(e)`` guard means "nothing was ever measured"
     can no longer be reported for an indicator that has readings; that claim was
@@ -519,7 +519,7 @@ def test_a_truncated_page_set_raises_instead_of_answering_from_survivors(
 
     monkeypatch.setattr(gj, "_READINGS_PAGE_SIZE", 2)
     monkeypatch.setattr(sdk._get_proj(), "g", _TruncatingServer(), raising=False)
-    with pytest.raises(RuntimeError, match="came back short"):
+    with pytest.raises(RuntimeError, match="never arrived"):
         latest_readings(sdk, indicator["id"])
 
 
