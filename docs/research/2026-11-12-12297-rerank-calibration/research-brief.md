@@ -254,9 +254,11 @@ says it may not carry. Removed rather than defended.)
 
 ⛔ **This table IS carried** — each figure is a field in a committed artifact
 (named in its own row), which is the only reason it may stand here. What it does
-NOT carry is a load-matched comparison: the two runs were taken on different boxes
-under different load, so the RATIO bounds the mechanism (text length drives the
-cost) and neither absolute is a clean-box latency. (An earlier version of this
+NOT carry is a load-matched comparison: both runs were taken on **this same box**
+(§0, and each artifact records ``device = "cpu (this box has no GPU)"``) but under
+different load — the user-search run recorded ``loadavg_1m = 14.0`` and the noun-path
+run recorded none — so the RATIO bounds the mechanism (text length drives the cost)
+and neither absolute is a clean-box latency. (An earlier version of this
 paragraph called the table "an AD-HOC observation … at loadavg 2.7" — true of the
 7.5 / 62.9 ms micro-benchmark the table REPLACED, false of the table itself, and it
 contradicted the provenance paragraph seven lines above.)

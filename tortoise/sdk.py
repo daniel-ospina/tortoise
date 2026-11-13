@@ -40354,9 +40354,11 @@ class TortoiseSDK:
         #   * RECORDED-BASELINE HARNESSES — ``tools/longmem_eval/retrieve.py``,
         #     ``tools/fusion_formula_ab.py``, ``tools/ask_pool_admission_probe.py``,
         #     ``benchmarks/run_report.py`` and ``benchmarks/load_test.py``; also the
-        #     ``docs/runbook`` diagnostics whose entire output IS a rank (``w6c``,
-        #     ``w7a``, ``5534``, ``4107``) and ``docs/evidence``'s cost probes. They
-        #     pin it for comparability against RECORDED numbers — and ⛔ only the
+        #     ``docs/runbook`` diagnostics whose output IS the measurement — for
+        #     ``w6c``/``w7a`` the gold row's POSITION, for ``5534`` an id-set delta,
+        #     for ``4107`` the gold turn's fused rank and rendered block — and
+        #     ``docs/evidence``'s cost probes. They pin it for comparability
+        #     against RECORDED numbers — and ⛔ only the
         #     first three of those also pin ``_valid_time_rerank``, so that
         #     comparison holds for the ``tools/`` harnesses and not for the
         #     ``docs/`` and ``benchmarks/`` halves: the harm here is a baseline that
@@ -40372,7 +40374,8 @@ class TortoiseSDK:
         #     false diagnosis.
         # Composition can only move when ``limit < _pool_n``, so a large-pool
         # caller (the evals' ``pool_size`` reads) is safe by construction — but
-        # "safe today because of an arithmetic accident" is not an opt-out. ⛔ The two opt-outs are SEPARATE on purpose: the capture path
+        # "safe today because of an arithmetic accident" is not an opt-out. ⛔ The two
+        # levers are SEPARATE on purpose: the capture path
         # (``extractor_v2._fts_rows``) deliberately KEEPS the rerank — it has a
         # measured recall@3 delta and its own ``OVERRIDES:`` record — while
         # opting out of the valid-time selection. One flag for both would force
