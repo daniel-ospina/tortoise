@@ -181,6 +181,34 @@ def test_a_report_with_no_gated_arm_is_never_green():
     assert canary.Report().exit_code == 2
 
 
+def test_an_UNRECOGNISED_gated_status_is_never_green():
+    """ALLOW-LIST polarity: only an explicit `OK` is green (#12422 review, P2).
+
+    `Report.verdict` used to end in `return OK` — a DENY-list, so any gated status outside
+    `{FAIL, UNKNOWN}` reported GREEN. Measured before the fix: `Arm("engine-init", s)` gave
+    `"OK"/exit 0` for `s` in `{"PASS", "SKIPPED", "Ok", "ok", ""}`, and `PASS` is the word
+    `render_summary` prints as the report's own heading — the spelling that greens the gate is
+    the one this tool renders. AGENTS.md's polarity rule ("EVERY OTHER CONCLUSION IS RED —
+    including one GitHub has not documented yet, and a null one") forbids the gap.
+
+    Unreachable through today's producers; pinned anyway, because a structural guarantee must
+    not depend on the discipline of every future call site.
+    """
+    for spelling in ("PASS", "SKIPPED", "Ok", "ok", "", "SUCCESS"):
+        report = canary.Report()
+        report.add(canary.Arm("engine-init", spelling, "an unrecognised status"))
+        assert report.verdict != canary.OK, (
+            f"a gated arm carrying {spelling!r} reported {report.verdict!r}/exit "
+            f"{report.exit_code} — an unnamed status fell into the green gap"
+        )
+        assert report.exit_code != 0, spelling
+    # …and the recognised all-clear is still green, so this is polarity and not a lockdown.
+    ok_report = canary.Report()
+    ok_report.add(canary.Arm("engine-init", canary.OK, "a real pass"))
+    assert ok_report.verdict == canary.OK
+    assert ok_report.exit_code == 0
+
+
 def test_index_metadata_without_a_version_is_red():
     report = canary.build_report(
         engine_doc={"info": {}, "releases": {}},
@@ -1049,6 +1077,26 @@ def test_the_publish_time_smoke_resolves_EXACTLY_ONE_wheel_before_it_runs():
         "the pre-upload step no longer asserts that the glob matched EXACTLY ONE wheel — with "
         "no count guard `--wheel` receives whatever the glob produced, including nothing"
     )
+
+    # ⛔ (i-b) AND THE GUARD MUST NOT BE DEFANGABLE BY A PIPELINE (#12422 review cycle 3,
+    # P1, MEASURED). The first cut of this pin asserted only `"-ne 1" in run`, and
+    # `whl=$(ls dist/*.whl | head -1)` keeps that literal while making it VACUOUS: the
+    # pipeline always emits exactly one line, so `wc -l` is always 1 and the guard can never
+    # fire. Measured: that edit left `61 passed`, exit 0 — the pin stayed green under the
+    # very edit its own docstring names as the threat (`head -1`smuggles an arbitrary wheel
+    # into `--wheel` while `publish` uploads both). A count taken from a possibly-truncated
+    # variable cannot police arity, so the glob line must be pipeline-free.
+    glob_lines = [line for line in run.splitlines() if "dist/*.whl" in line]
+    assert glob_lines, "the step no longer mentions the wheel glob"
+    for line in glob_lines:
+        # ⛔ A PIPE, not shell's `||`: `whl=$(ls dist/*.whl 2>/dev/null) || whl=""` is the
+        # CORRECT line and carries a `|`. Only a single, unpaired `|` is a pipeline (measured
+        # on the first cut of this clause, which red on the correct code).
+        assert not re.search(r"(?<!\|)\|(?!\|)", line), (
+            f"the wheel-glob line takes a pipeline ({line.strip()!r}) — a truncating pipe "
+            f"(\`| head -1\`) makes the `-ne 1` count guard vacuous while leaving it in the "
+            f"text, so exactly one arbitrary wheel is smoked and every wheel is uploaded"
+        )
 
     # (ii) it is a REFUSAL, not a warning: the step must exit non-zero.
     assert re.search(r"^\s*exit 1\s*$", run, re.MULTILINE), (

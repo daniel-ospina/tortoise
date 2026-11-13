@@ -292,7 +292,18 @@ class Report:
             return FAIL
         if any(a.status == UNKNOWN for a in gated):
             return UNKNOWN
-        return OK
+        # ⛔ ALLOW-LIST POLARITY: only an EXPLICITLY-`OK` all-clear is green (#12422 review,
+        # P2, measured). This was a `return OK` — a DENY-list, so any gated status outside
+        # {FAIL, UNKNOWN} reported GREEN: `Arm("engine-init", s)` returned `"OK"/exit 0` for
+        # `s` in {`"PASS"`, `"SKIPPED"`, `"Ok"`, `"ok"`, `""`}, and the spelling that greens
+        # it — `PASS` — is the very word `render_summary` prints as this report's heading.
+        # AGENTS.md's "Decide the verdict by POLARITY, not by vocabulary" rule (adopted after a
+        # real incident where an unrecognised conclusion let a merge through) says an unnamed
+        # value must never fall into a gap; UNKNOWN is that gap's fail-closed landing place,
+        # because it is non-zero at every consumer and renders as "detector outage", never as
+        # a release order. Unreachable through today's producers — which is exactly why it must
+        # be structural rather than a property of the current call sites.
+        return OK if all(a.status == OK for a in gated) else UNKNOWN
 
     @property
     def exit_code(self) -> int:
