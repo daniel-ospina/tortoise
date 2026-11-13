@@ -2083,8 +2083,12 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #:   reads every deployment file as an independent "does this file arm it" question
 #:   (the reading the compose→image INHERITANCE above also needs), which is the wrong
 #:   question for a patch — globbing the family in would make a SILENT override red
-#:   the deployment reading while the merged view is armed. Doing it right needs
-#:   compose merge semantics, which is `#12022`'s shape (it already owns the other
+#:   the deployment reading while the merged view is armed. ⛔ AND THE INVERSE
+#:   DIRECTION FAILS OPEN, which is the one that costs a false PASS (`#12070` item 8):
+#:   an override that DISARMS an armed base merges LAST, so the deployed process has
+#:   the gate OFF while this per-file reading sees the base's `ON` and reports
+#:   `deployment["on"] is True`. Doing it right needs compose merge ORDER, which is
+#:   `#12022`'s shape (it already owns the other
 #:   channels a deployed process's environment comes from), so it is a named gap here
 #:   rather than a half-implemented glob. Latent today: `git ls-files | grep -iE
 #:   'compose\.(override|prod|dev|local)'` is empty.
@@ -2138,6 +2142,13 @@ FLY_MANIFEST_GLOB = "fly*.toml"
 #: `docker-compose.<stage>.yml` are PATCHES that compose merges over a base (see the
 #: boundary in `DEPLOYMENT_SURFACES`), so globbing the family in would read a
 #: silent override as an unarmed deployment while the MERGED view is armed.
+#: ⛔ AND THE OTHER DIRECTION IS THE ONE THAT FAILS OPEN (`#12070` item 8, fresh
+#: review of PR #12474): an override that DISARMS an armed base merges LAST, so the
+#: real deployment has the gate OFF while this per-file reading sees the base's `ON`
+#: and publishes `deployment["on"] is True`. Excluding the family is what keeps that
+#: false PASS out of the verdict, and it is why the exclusion is a documented
+#: boundary rather than an oversight — a later "completeness" fix that globbed the
+#: family in would have to model merge ORDER before it could be correct.
 COMPOSE_BASE_NAMES: tuple[str, ...] = ("docker-compose.yml", "docker-compose.yaml")
 
 #: The TOML table a deployed process's environment comes from. Fly reads `[env]`
@@ -2198,15 +2209,22 @@ def _exec_script_names(text: str, instructions: tuple[str, ...]) -> set[str]:
     `command:` overrides, by taking every token that names a `.sh` file. A
     non-script form (`CMD ["uvicorn", …]`) yields nothing, which is the honest
     answer: that deployment has no entrypoint SCRIPT, so there is nothing to walk.
+
+    ⛔ The instruction match is CASE-INSENSITIVE: Dockerfile instructions are, and
+    a compose key never is uppercase at all — the first version uppercased the line
+    and compared it to the RAW instruction, so the compose call site (which passes
+    `("entrypoint:", "command:")`) could never match and that whole route was dead
+    code behind a docstring claiming it worked (fresh review of PR #12474, P2).
     """
     names: set[str] = set()
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
+        head = stripped.upper()
         for instruction in instructions:
-            upper = stripped.upper()
-            if upper.startswith(instruction + " ") or upper.startswith(instruction + "\t"):
+            if (head.startswith(instruction.upper() + " ")
+                    or head.startswith(instruction.upper() + "\t")):
                 rest = stripped[len(instruction):]
                 break
         else:
@@ -2295,9 +2313,12 @@ def _toml_table_lines(text: str) -> dict[int, str]:
     """1-based line number → the TOML TABLE that line lives in (lowercased).
 
     A TOML file is a sequence of tables, and only ONE of them is a runtime
-    environment (`[env]`). Scanning `fly.toml` line-by-line read `[build.args]`
-    entries as if they were the machine's environment, so the table a key lives in
-    is what makes an assignment a shipped default or not.
+    environment (`[env]`). ⛔ A line-by-line scan would read a `[build.args]` key
+    EXACTLY like an `[env]` one — both are `KEY = "value"` — while a build argument
+    reaches the build and never the process; the table a key lives in is what makes
+    an assignment a shipped default or not. (This is a constraint the reader
+    enforces, not a defect it fixes: before `#12022` this file did not read
+    `fly.toml` at all.)
 
     Top-level keys (before any header) map to `""`; `[[array.of.tables]]` is
     recorded under its name like a table, because the caller tests for ONE name.
@@ -2701,6 +2722,20 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     if _assigned_value(line, flag) is not None:
                         outside_runtime.append(f"{posix}:{number}: {line.strip()[:90]}")
                     continue
+                # ⛔ A Dockerfile `ARG` is BUILD-TIME: it can feed a later `ENV`, but it
+                # never reaches the running container's environment on its own, so
+                # `ARG FLAG=1` is not a deployment that carries the flag. Counting it as
+                # a hit was a false PASS in the other direction from the ones `#12022`
+                # closes — the reader answered "a deployed process never reads this"
+                # for `[build.args]` and for unexported shell variables, and answered
+                # nothing for the one Dockerfile instruction that has the same property
+                # (fresh review of PR #12474, P2, measured: `ARG FLAG=1` read `ON`).
+                if (posix.startswith(IMAGE_BUILD_GLOB.rstrip("*"))
+                        and line.strip().upper().startswith("ARG ")
+                        and _assigned_value(line, flag) is not None):
+                    outside_runtime.append(
+                        f"{posix}:{number}: {line.strip()[:90]} (build-time ARG)")
+                    continue
                 value = _assigned_value(line, flag)
                 if value is None:
                     continue
@@ -2794,11 +2829,13 @@ def flag_in_shipped_configs(flag: str) -> dict:
         "silent": [p for p in deployment_present if deployment_files[p] == "OFF"],
         "absent": _rels("ABSENT", DEPLOYMENT_SURFACES),
         "unmeasured": deployment_unmeasured,
-        # MEASURED requires at least one deployment surface FILE to exist and every
-        # existing one to be READABLE: a tree that ships no deployment config
-        # cannot answer "what does a deployment get", and that is UNMEASURED —
-        # never a pass, and never a `False` that blames the product.
-        "measured": bool(deployment_present) and not deployment_unmeasured,
+        # MEASURED requires at least one deployment surface FILE to exist, every
+        # existing one to be READABLE and every assignment of the flag in it to be
+        # RESOLVABLE: a tree that ships no deployment config cannot answer "what does
+        # a deployment get", and neither can one whose flag line the walk could not
+        # read (`${OTHER}`). Both are UNMEASURED — never a pass, and never a `False`
+        # that blames the product.
+        "measured": (bool(deployment_present) and not deployment_unmeasured),
     }
     deployment["on"] = (deployment["measured"] and not deployment["silent"]
                         and not deployment_unmeasured)
@@ -2848,9 +2885,20 @@ def per_file_scope_note(deployment: dict) -> str:
     it described, and no fixture could express it.
     """
     edges = deployment.get("builds_from") or {}
-    if edges:
+    files = deployment.get("files") or {}
+    if "builds_from" not in deployment:
+        # ⛔ ABSENT IS NOT EMPTY (fresh review of PR #12474, P3): a reading that did not
+        # carry the measurement must not publish "no compose file declares a build:"
+        # — that is the `#12016` `False`-for-UNMEASURED defect, one field down.
+        edge_note = (
+            "; build edge: UNMEASURED — this reading carries no `builds_from`, so "
+            "'no compose inheritance' is NOT a claim it makes")
+    elif edges:
         edge_note = "; measured build edge(s): " + ", ".join(
-            f"{compose} BUILDS from {image}" for compose, image in sorted(edges.items()))
+            f"{compose} BUILDS from {image}"
+            + (" (that image is OUTSIDE the walked population, so its arm state is "
+               "NOT reported here)" if image not in files else "")
+            for compose, image in sorted(edges.items()))
     else:
         edge_note = ("; measured build edge(s): none — no compose file in this tree "
                      "declares a `build:`/`dockerfile:` that names an image build file")
@@ -2907,10 +2955,29 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
                 "to a question the tree cannot ask"
             )
         else:
+            # ⛔ The CAUSE is named, and it is not always readability (`#12022`, fresh
+            # review of PR #12474): an indeterminate assignment puts a file the walk
+            # READ SUCCESSFULLY into `unmeasured`, so calling it "unreadable" published
+            # "unreadable deployment file(s) ['entrypoint.sh']" beside its own
+            # "unreadable: none" — a misattribution a reader would chase as a
+            # permissions or size problem on a file that was read.
+            unreadable_files = [p for p in deployment["unmeasured"]
+                                if p in (shipped.get("unreadable") or [])]
+            unresolved_files = [p for p in deployment["unmeasured"]
+                                if p not in unreadable_files]
+            causes: list[str] = []
+            if unreadable_files:
+                causes.append(
+                    f"UNREADABLE deployment file(s) {unreadable_files} — an unread "
+                    "file could arm the gate")
+            if unresolved_files:
+                causes.append(
+                    f"deployment file(s) whose assignment could not be RESOLVED "
+                    f"{unresolved_files} — a value this walk cannot read may arm it "
+                    f"(see `indeterminate assignments`)")
             deployment_reading = (
-                f"UNMEASURED — unreadable deployment file(s) "
-                f"{deployment['unmeasured']}: an unread file could arm the gate, so "
-                "this is NOT a measurement of silence"
+                "UNMEASURED — " + "; and ".join(causes)
+                + ", so this is NOT a measurement of silence"
             )
     elif deployment["on"]:
         deployment_reading = (
@@ -3504,12 +3571,15 @@ def score_rule_bullet() -> Row:
             # ⛔ NO consequence is asserted from the assignment (fresh review of PR
             # #12016, P3): the walk's per-file verdict is "some line of this file
             # ASSIGNS the flag a truthy value", which is not "a build using this file
-            # carries the flag". Both divergence shapes are reachable and the walk
-            # reads them ON: an `ARG TORTOISE_EMBED_GATE=1` is build-time only and never
-            # reaches the container's environment, and `ENV …=1` followed by `ENV …=0`
-            # is last-wins, so a build from that file carries 0. The claim is deleted
-            # rather than qualified — a second arm here would be another sentence to
-            # falsify, and the per-FILE caveat below already carries the meaning.
+            # carries the flag". ⛔ `ARG TORTOISE_EMBED_GATE=1` is no longer one of the
+            # divergence shapes READ ON — it is build-time only and never reaches the
+            # container's environment, so `#12022` routes it to `outside_runtime`
+            # (a deployed process never reads it) instead of counting it as a hit. The
+            # remaining shape is `ENV …=1` followed by `ENV …=0`: last-wins, so a build
+            # from that file carries 0, and the walk still reads the file ON. The claim
+            # is deleted rather than qualified — a second arm here would be another
+            # sentence to falsify, and the per-FILE caveat below already carries the
+            # meaning.
             armed_clause = (
                 f"the flag is armed in deployment file(s) "
                 f"({', '.join(armed_deployment_files)}) — this reading is per FILE and "

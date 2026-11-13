@@ -3009,7 +3009,107 @@ def test_a_shell_indirection_is_UNMEASURED_never_silent(tmp_path, monkeypatch):
     assert shipped["indeterminate"], shipped
     note = _gate_note(shipped)
     assert "gate enabled by default: UNMEASURED" in note, note
+    assert "could not be RESOLVED" in note, note
     assert "indeterminate assignments: [" in note, note
+
+
+def test_a_COMPOSE_named_entrypoint_is_discovered_too(tmp_path, monkeypatch):
+    """The compose `entrypoint:` route is not decoration — it is a second name source.
+
+    ⛔ Measured dead before this arm (fresh review of PR #12474, P2): the matcher
+    uppercased the LINE and compared it to the RAW instruction, so the compose call
+    site's `("entrypoint:", "command:")` could never match — the whole route was
+    unreachable behind a docstring claiming it worked, and a deployment whose only
+    naming manifest is compose reported `entrypoint` ABSENT while its script armed
+    the gate. This fixture's ONLY manifest is the compose file, so the Dockerfile
+    route cannot rescue it.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
+        '    entrypoint: ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        'FROM python:3.12\nCMD ["uvicorn", "tortoise.selfhost:app"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped["deployment"]
+    # …and the compose `command:` spelling too, since compose accepts either key.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    command: /entrypoint.sh\n", encoding="utf-8")
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+
+
+def test_a_Dockerfile_ARG_is_build_time_and_never_a_deployment_hit(
+        tmp_path, monkeypatch):
+    """`ARG FLAG=1` must not read as an armed deployment; `ENV FLAG=1` must.
+
+    ⛔ Measured before this arm (fresh review of PR #12474, P2, pre-existing): `ARG
+    TORTOISE_EMBED_GATE=1` read `ON`, because `_assigned_value` strips the `ARG `
+    prefix like any other. A build argument never reaches the running container's
+    environment, so that was a FALSE PASS in the exact direction `#12022` closes for
+    `[build.args]` and for unexported shell variables — the reader answering "a
+    deployed process never reads this" for two formats and nothing for the third.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nARG TORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert any("build-time ARG" in hit for hit in shipped["outside_runtime"]), \
+        shipped["outside_runtime"]
+
+    # The runtime spelling is still a hit — the fix narrows the reader to the
+    # instruction that really does reach the process, it does not disarm the channel.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+
+
+def test_a_reading_with_NO_builds_from_measurement_says_UNMEASURED():
+    """An absent `builds_from` is not "no compose file declares a build:" (#12070).
+
+    `deployment.get("builds_from") or {}` makes a MISSING measurement print the same
+    sentence as a measured none — the `#12016` `False`-for-UNMEASURED defect one field
+    down (fresh review of PR #12474, P3). `_fake_shipped` is exactly that shape, so it
+    is the fixture: every pre-existing note test runs this branch, which is why the
+    two readings have to be distinguishable.
+    """
+    deployment = _fake_shipped(False)["deployment"]
+    assert "builds_from" not in deployment
+    caveat = probe.per_file_scope_note(deployment)
+    assert "build edge: UNMEASURED" in caveat, caveat
+    assert "measured build edge(s): none" not in caveat, caveat
+    # …and a MEASURED none still says none, so the two do not collapse.
+    caveat_none = probe.per_file_scope_note({**deployment, "builds_from": {}})
+    assert "measured build edge(s): none" in caveat_none, caveat_none
+
+
+def test_an_UNDETERMINED_assignment_is_named_as_unresolved_not_unreadable(
+        tmp_path, monkeypatch):
+    """The UNMEASURED sentence must name the CAUSE it actually measured.
+
+    ⛔ Measured (fresh review of PR #12474, P2/P3): an indeterminate assignment puts a
+    file the walk READ SUCCESSFULLY into `deployment["unmeasured"]`, and the sentence
+    went on calling it "unreadable deployment file(s) ['entrypoint.sh']" while printing
+    `unreadable: none` in the same string — a reader would chase permissions or size on
+    a file that was read fine.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        '#!/bin/bash\nexport TORTOISE_EMBED_GATE="${SOME_OTHER_FLAG}"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    note = _gate_note(shipped)
+    assert "could not be RESOLVED" in note, note
+    assert "UNREADABLE deployment file(s)" not in note, note
+    assert "unreadable: none" in note, note
 
 
 def test_a_deployment_channel_that_arms_NOTHING_holds_row_one_and_is_NAMED(
@@ -3126,6 +3226,22 @@ def test_the_per_file_caveat_names_the_MEASURED_build_edge(tmp_path, monkeypatch
     assert shipped["deployment"]["on"] is False, shipped["deployment"]
     caveat = probe.per_file_scope_note(shipped["deployment"])
     assert "docker-compose.yml BUILDS from Dockerfile.selfhost" in caveat, caveat
+
+    # ⛔ …and when the image the compose file names is OUTSIDE the walked population
+    # (a nested `docker/Dockerfile.prod`, which the root glob cannot see), the caveat
+    # says so instead of printing an edge whose arm state the note never reports
+    # (fresh review of PR #12474, P3).
+    (tmp_path / "docker").mkdir()
+    (tmp_path / "docker" / "Dockerfile.prod").write_text("FROM python:3.12\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    build:\n      dockerfile: docker/Dockerfile.prod\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["builds_from"] == {
+        "docker-compose.yml": "docker/Dockerfile.prod"}, shipped["deployment"]
+    assert "docker/Dockerfile.prod" not in shipped["deployment"]["files"], shipped
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "OUTSIDE the walked population" in caveat, caveat
 
 
 
@@ -4627,7 +4743,7 @@ def test_row_one_is_PARTIAL_because_ONE_writer_embeds_outside_the_gate(
     outside-gate writer holds the row **while the product does not name it**.
     The injected writer here is UNDECLARED on purpose (the register is empty),
     so this falsifier keeps its teeth; the DECLARED direction — the same writer,
-    named — is `test_naming_a_LIVE_undeclared_writer_is_the_acceptance_reading_b_describes`
+    named — is `test_a_named_UNGATED_writer_is_the_accepted_exception_reading_b`
     below. Dropping `undeclared` from the verdict reds this test.
     """
     _fake_rule_tree(tmp_path)
@@ -8348,7 +8464,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `186 + 1` and `185 + 2` at THIS tree, both equal to the `187` the pin re-derives
+    count: `197 + 1` and `196 + 2` at THIS tree, both equal to the `198` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
@@ -9456,11 +9572,17 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
 
 
 #: ── `#12312`: the citations this family makes are CHECKED, not trusted ───────
-#: The defect: a docstring cited `test_a_named_ungated_writer_is_the_accepted_
-#: exception_reading_b`, which no `def` under `tests/` declares — the test it meant
-#: is `test_naming_a_LIVE_undeclared_writer_is_the_acceptance_reading_b_describes`,
-#: named correctly nineteen lines away. Nothing red, and the stale stem had already
-#: survived one rename on `main`.
+#: ⛔ THE CAUSE IS A CASE TYPO, NOT A RENAME — `#12312`'s own CORRECTION comment
+#: records it, and this file records it too rather than repeating the body's first
+#: guess. The docstring wrote `test_a_named_ungated_writer_is_the_accepted_
+#: exception_reading_b`, lowercase; the `def` spells it `…_UNGATED_…`
+#: (`tests/test_dod_5090_probe.py` — `def test_a_named_UNGATED_writer_…`). Python
+#: identifiers are case-sensitive, so the citation resolved to nothing. Nothing red,
+#: because nothing checked. (An earlier draft of THIS comment called it a stale stem
+#: that had "survived one rename", and repointed the sentence at
+#: `test_naming_a_LIVE_undeclared_writer_is_the_acceptance_reading_b_describes` —
+#: the remedy the issue's correction explicitly falsifies, since that is a different
+#: test. The fix is one character's case, and the check below catches that class.)
 #:
 #: ⛔ The checker asserts RESOLVABILITY, never truth — the same thing every citation
 #: checker in the field asserts (rustdoc's `broken_intra_doc_links`, Sphinx
@@ -9468,14 +9590,18 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
 #: must resolve to a symbol that exists. It is deliberately lexical and cheap.
 #:
 #: ⚠️ THE BOUND, declared rather than implied, because the honest measurement is
-#: that repo-WIDE is NOT cheap today: over `tools/`, `tortoise/`, `tests/` and
-#: `docs/` there are **157** node-id citations that name an existing test file and
-#: a test that file does not define — almost all of them a line-WRAPPED citation
-#: whose stem is truncated (`…test_the_INDENT_pops_DECLARED_`), so the fix is a
-#: continuation-aware extractor plus a triage of 157 rows, not a rename. This check
-#: therefore covers the FAMILY that produced the defect — `tools/dod_5090_probe.py`,
-#: this file, and this epic's two artifacts — and reports 0 violations there. The
-#: repo-wide item stays open in `#12312` with that cost stated.
+#: that repo-WIDE is NOT cheap today. Re-derived with this file's OWN extractor over
+#: `tools/`, `tortoise/`, `tests/` and `docs/` (the `_test_symbols` +
+#: `_unresolved_citations` pair below): **193 occurrences / 157 unique
+#: `file::name` pairs** name an existing test file and a test it does not define, of
+#: which **86 are wrap-shaped** (the truncated stem is a PREFIX of a real test —
+#: `…test_the_INDENT_pops_DECLARED_`) and **71 are neither**: documentation EXAMPLES
+#: (a `…::test_x` off a file that does ship) plus names that resolve nowhere.
+#: So the cost is a continuation-aware extractor AND an example-exclusion rule AND a
+#: genuine-stale-name triage — not one parser change. This check therefore covers
+#: the FAMILY that produced the defect — `tools/dod_5090_probe.py`, this file, and
+#: this epic's two artifacts — where it reports 0 violations, and the repo-wide item
+#: stays open in `#12312` with that cost stated.
 CITATION_SURFACES = (
     "tools/dod_5090_probe.py",
     "tests/test_dod_5090_probe.py",
@@ -9487,6 +9613,14 @@ _NODE_ID_CITATION = re.compile(r"([\w./-]+\.py)::(test_[A-Za-z0-9_]+)")
 _BARE_CITATION = re.compile(r"`(test_[A-Za-z0-9_]+)`")
 
 
+#: Memo for `_test_symbols`, keyed by the resolved root: the scan parses ~1500 files
+#: and measured **15.7 s per call**, and BOTH citation tests need it (fresh review of
+#: PR #12474, P3). A module-level cache is safe here because every caller asks about
+#: the same tree within a session; a test that monkeypatches `REPO_ROOT` is not a
+#: citation test and never reads this.
+_TEST_SYMBOLS_CACHE: dict[Path, tuple[set[str], set[str], dict[str, set[str]]]] = {}
+
+
 def _test_symbols(root: Path) -> tuple[set[str], set[str], dict[str, set[str]]]:
     """``(every test def name, every test MODULE stem, {path: names})``.
 
@@ -9496,6 +9630,9 @@ def _test_symbols(root: Path) -> tuple[set[str], set[str], dict[str, set[str]]]:
     false REDs. Both trees this repo keeps test tooling in are scanned — `tests/`
     for the defs, `tests/` and `tools/` for the module stems.
     """
+    cached = _TEST_SYMBOLS_CACHE.get(root)
+    if cached is not None:
+        return cached
     defined: set[str] = set()
     modules: set[str] = set()
     by_file: dict[str, set[str]] = {}
@@ -9507,6 +9644,12 @@ def _test_symbols(root: Path) -> tuple[set[str], set[str], dict[str, set[str]]]:
         try:
             tree_ast = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
         except (OSError, SyntaxError):
+            # ⛔ A file that will not PARSE is a hole in the universe, not a file with
+            # no tests: its citations would then resolve to nothing and be SKIPPED
+            # (fail-open). Named rather than dropped — `by_file` keeps the key with an
+            # empty set, which makes a node-id citation into it UNRESOLVED (fail-closed
+            # on the citation) instead of silently unchecked.
+            by_file[rel] = set()
             continue
         names = {
             node.name for node in ast.walk(tree_ast)
@@ -9516,6 +9659,7 @@ def _test_symbols(root: Path) -> tuple[set[str], set[str], dict[str, set[str]]]:
         defined |= names
         modules.add(path.stem)
         by_file[rel] = names
+    _TEST_SYMBOLS_CACHE[root] = (defined, modules, by_file)
     return defined, modules, by_file
 
 
@@ -9591,7 +9735,12 @@ def test_the_citation_check_REDS_on_a_deliberately_broken_citation():
     # A NODE-ID citation is checked against the FILE's defs, not the whole universe:
     # `<this file>::<a name this file does not declare>` is wrong even when the name
     # exists elsewhere, and that is the shape a rename produces.
-    misplaced_name = "test_the_working_tree_report_records" + "_every_suite"
+    # ⛔ The name must exist in SOME OTHER file, or the arm cannot discriminate a
+    # file-scoped lookup from a universe-scoped one (fresh review of PR #12474, P3:
+    # the first version used a name that exists in NO file, so it passed either way).
+    misplaced_name = [n for n in by_file["tests/test_lane_stash.py"] if n.startswith("test_")][0]
+    assert misplaced_name in defined and misplaced_name not in by_file[
+        "tests/test_dod_5090_probe.py"], misplaced_name
     misplaced = f"`tests/test_dod_5090_probe.py::{misplaced_name}`"
     assert _unresolved_citations(misplaced, defined, modules, by_file) == [
         f"tests/test_dod_5090_probe.py::{misplaced_name}"], misplaced
