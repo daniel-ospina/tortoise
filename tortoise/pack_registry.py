@@ -3571,7 +3571,11 @@ class PackRegistry:
             confusions: list = []
             for ns in sorted(self.packs):
                 declared = getattr(self.packs[ns], "guards", None)
-                if declared:
+                # `is not None`: one gate for all three callers of `pack_guards`
+                # (a manifest cannot carry a falsy non-sequence — `_validate`
+                # refuses it — but three spellings of the same gate is how the
+                # reader's warning became unreachable once already).
+                if declared is not None:
                     confusions.extend(pack_guards(ns, declared))
             if not confusions:
                 # ⛔ NO DECLARED GUARDS IS THE COMMON CASE, and the table compile
