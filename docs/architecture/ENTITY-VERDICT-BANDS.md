@@ -95,15 +95,17 @@ Four properties are load-bearing and each is pinned by a test:
   an entity candidate whose fixpoint was not established is recorded
   `found: None`, never `found: false`. Pinned by
   `test_a_fold_failure_is_PARTIAL_and_keeps_the_rows_it_did_resolve`. ⚠️ **The
-  other arm of the same `except` is narrower, and is stated rather than implied:
-  a read that fails BEFORE any hop resolves** (a query error, not a per-row
-  unresolvable) **has no `folded` rows to carry, so `entities` comes back EMPTY**
-  — `search_graph` withholds every entity prior, `extract_session_v2` therefore
-  skips D3 for that run entirely (the pre-`#12296` behaviour: no resolution, plus
-  this reason and the impaired-leg counters), and no pre-hop row is emitted by
-  either arm. The only
-  client skipped is one with no projection at all (a test double: no
-  `resolved_from` state exists to withhold).
+  other arm of the same `except` withholds EVERYTHING, by name.** A read that fails
+  BEFORE any hop resolves (a query error, not a per-row unresolvable) has no
+  `folded` rows to carry — so `entities` comes back EMPTY and every prior row's
+  spelling is named on `entities_unresolved`. The pass therefore still runs (the
+  gate accepts the named set), the resolver declares those spellings unmatched,
+  and the run appends one HOLD per fold: `payload["entities"]` is empty and nothing
+  is created. No pre-hop row is emitted by either arm. Pinned by
+  `test_a_prior_set_read_failure_withholds_every_row_by_name` (producer) and by
+  the withheld-hold tests (consumer: `…is_held_rather_than_read_as_absent`,
+  `…is_held_even_when_the_resolver_raises`). The only client skipped is one with
+  no projection at all (a test double: no `resolved_from` state to withhold).
 * **A chain the bound cannot resolve is cannot-answer, not a carrier.**
   `_PRIOR_HOP_BOUND` (8) exists because the walk is batched;
   `apply_entity_merge` cannot create a chain ≥ 2, so a longer one is a

@@ -15277,10 +15277,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     #: chain). They are not absent — they are unreadable — so they are HELD below
     #: rather than left to read as measured absence, and the pass still runs even
     #: when the fold withheld every row: an empty candidate set from THIS cause
-    #: must not turn a partial lookup into a create window. Scope: the fold's own
-    #: withholding exit only. Any OTHER raise inside `_current_entity_priors`
-    #: (e.g. a failed `_entity_facts` read) still leaves `entities == []` with no
-    #: unresolved key — the general S3-lookup PARTIAL arm is #10998's row.
+    #: must not turn a partial lookup into a create window. BOTH fold arms name
+    #: their withheld rows: the per-row one carries the spellings it refused, and a
+    #: PLAIN pre-hop read failure (no `folded` payload to carry) names EVERY prior
+    #: row on `entities_unresolved`, so this gate still fires and the run HOLDS
+    #: them. What #10998 still owns is narrower: a lookup that produced no rows at
+    #: all, or a client with no projection.
     _unresolved_names = [str(n).strip()
                          for n in (search or {}).get("entities_unresolved") or []
                          if str(n or "").strip()]
