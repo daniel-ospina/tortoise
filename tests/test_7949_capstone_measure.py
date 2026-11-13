@@ -5292,7 +5292,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # measured on `main` as `#12159` (`33781512b6`) registering
         # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
         # insertion that moved every number below it. That is the class here — a
-        # line-number pin over a number another tool owns, not a citation anyone
+        # line-number pin over a number other merges move, not a citation anyone
         # mis-copied. The entry is NOT pinned here any more (#12266): its line is MOVED
         # by any insertion above it, so a number in this table re-stales on somebody
         # else's merge — `tools/ci_selection.py::register_tests`' registration splices
@@ -5382,7 +5382,8 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
         after 9973's repair merged (`f1f74135a1`, #12294 / PR #12302, +14 lines)
 
     Four re-points of one number in a day, each red on a shard whose diff was
-    unrelated to it — a line-number pin over a number another tool owns. So the
+    unrelated to it — a number no single tool moves (`register_tests`' registration
+    splices, plus hand-authored rows). So the
     entry is pinned where the ownership sits: it must be the ONLY occurrence in
     `carve_out:`, and the document must not print a `ci-surfaces.yml:<N>` cite,
     which is the qualified form a reader would follow.
@@ -5500,8 +5501,9 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
         "not the claim this pin reads")
     stale = re.findall(r"ci-surfaces\.yml:\d+", rows[0])
     assert not stale, (
-        f"the `carve_out:` row prints {stale} — that number is owned by "
-        "`tools/ci_selection.py::register_tests`, so it re-stales on somebody "
+        f"the `carve_out:` row prints {stale} — no single tool owns that position "
+        "(43 of the 44 lines by `tools/ci_selection.py::register_tests`' registration "
+        "splices, the last by a hand-authored `tier1:` row), so it re-stales on somebody "
         "else's merge and reds a shard whose diff is unrelated (#12266 settled "
         "this four times by hand). Cite the symbol and the section instead.")
 
