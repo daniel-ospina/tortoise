@@ -5242,3 +5242,76 @@ class TestThe12120ReviewRound19:
             assert msgs, "the Subject divergence emitted no warning"
         finally:
             sdk.close()
+
+
+class TestThe12120ReviewRound21:
+    """Two defects the round-20 fixes left behind.
+
+    (1) P1 — the Subject keep-first arm read `_subj_target_rows`, bound only in the
+        name-ref branch, so an ID-matched terminal Subject RAISED
+        `UnboundLocalError` out of `apply_supersessions` (outside the per-record
+        `try`), aborting the batch and 500-ing the hosted §6b caller after its
+        earlier steps had written.
+    (2) P3 — the gone-survivor dedup answered "already applied?" from EVERY entity
+        the widened probe matched, so one unrelated dangling incarnation storing
+        this successor absorbed a genuine divergence with no warn and no
+        `skipped` entry (#5365).
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r21",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_an_id_matched_terminal_subject_never_raises(self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_subject("New Acme", "organization")
+            created = sdk.create_subject("Old Acme", "organization")
+            _tid = (created.get("id") if isinstance(created, dict)
+                    else created)
+            assert isinstance(_tid, str) and _tid, created
+            g.query(
+                "MATCH (s:Subject {id:$i}) SET s.status='superseded', "
+                "s.supersededBy='Other Corp'", params={"i": _tid})
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": _tid, "supersedes_by": "New Acme",
+                 "evidence": "r21"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips and skips[0]["reason"] == "terminal subject target", (
+                "an id-matched terminal Subject must be REFUSED with a report, "
+                f"not raised: {skips!r} {msgs!r}")
+        finally:
+            sdk.close()
+
+    def test_a_gone_survivor_dedup_cannot_span_two_entities(self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("New Co", "document")
+            # Two entities, both with a deleted survivor: the first stores THIS
+            # record's successor, the second a DIVERGENT one.
+            g.query(
+                "CREATE (a:Object {id:'r21-a', name:'Shared Co', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'New Co', resolved_from:'r21-gone-1'}) "
+                "CREATE (b:Object {id:'r21-b', name:'Shared Co', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Other Co', resolved_from:'r21-gone-2'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Shared Co", "supersedes_by": "New Co",
+                 "evidence": "r21"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips, (
+                "one unrelated dangling incarnation absorbed a genuine "
+                f"divergence silently: {skips!r} {msgs!r}")
+        finally:
+            sdk.close()

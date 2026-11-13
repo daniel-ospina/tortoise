@@ -1415,11 +1415,13 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
     # re-ingest silent when the entity's representative (the SURVIVOR) stores
     # something else (rounds 19-20).
     _subj_raw: list = []
-    # ⛔ Bound HERE, not inside the name arm (review round 20, second pass): the
+    # ⛔ Bound HERE, not inside the name arm (review round 20/21, P1): the
     # keep-first arm below reads it from EITHER arm, so an ID-matched terminal
     # Subject with a divergent successor hit `UnboundLocalError` — and because an
     # exception is not a refusal, one such record aborted the whole batch (the
-    # module's contract is the opposite) instead of warning + `_skip`ing.
+    # module's contract is the opposite), 500-ing the hosted §6b caller whose
+    # earlier steps had already written. The name branch narrows it to the
+    # target's own group.
     _subj_target_rows = list(by_id)
     if len(by_id) > 1:
         # #1423 review P2: the Object twin records this refusal durably
@@ -1536,12 +1538,18 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
             # successor's CARRIER spellings, flattened from the probe's groups —
             # never the representatives, whose spelling this record may never have
             # resolved.
-            if any(_same_successor(
+            # ⛔ ONE ENTITY only (review round 21, P3 — the Object twin below):
+            # this set is the whole widened probe, so an unrelated dangling
+            # incarnation storing this successor must not answer for the record.
+            _matched_is_one_entity = (
+                len({_k for _rep, _k, _m in _subj_raw}) <= 1
+                and len({r[1] for r in _matched_subj if r[1]}) <= 1)
+            if (_matched_is_one_entity and any(_same_successor(
                     str(r[4] or ""), supersedes_by,
                     candidate_names=[mname
                                      for _rep, _key, members in sb_entities
                                      for _mid, mname, _mst in members])
-                   for r in _matched_subj if len(r) > 4):
+                   for r in _matched_subj if len(r) > 4)):
                 return False
             if _matched_subj:
                 record_non_folded(
@@ -2044,6 +2052,11 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             [_row for _row in _name_rows if _row[0] not in _id_node_keys],
             with_groups=True)
         _name_arm_rows, _name_widened = _ref_candidates(_name_entities, "Object")
+        # Does every matched row belong to ONE entity? The gone-survivor dedup
+        # below may only answer for a single entity (review round 21, P3).
+        _name_is_one_entity = (
+            len({_k for _rep, _k, _m in _name_entities}) <= 1
+            and len({r[1] for r in _name_rows if r[1]}) <= 1)
         if (not rows and _name_rows and not _name_arm_rows
                 and not _subject_family_holds_ref(proj, ref)):
             # #12120 review: the name arm DID match carriers and every one of
@@ -2082,9 +2095,18 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # a durable `unaddressable-name` entry (the round-18 class, for the
             # shape where the stored spelling happens to equal the record's, was
             # fixed the same way).
-            if any(_same_successor(str(r[4] or ""), supersedes_by,
-                                   candidate_names=_sb_carrier_spellings)
-                   for r in _name_rows):
+            # ⛔ ONE ENTITY only (review round 21, P3): `_name_rows` is the whole
+            # widened probe — multi-entity by construction — so one unrelated
+            # dangling incarnation storing this successor must not answer for the
+            # record. Measured: two gone-survivor entities, one storing this
+            # successor and one storing another, were absorbed SILENTLY
+            # (`applied=0, skips=[], warns=[]`) where `main` refused with
+            # `ambiguous object name` — a divergence with no `skipped` entry, which
+            # is the one-entry-per-unapplied-record contract (#5365).
+            if (_name_is_one_entity
+                    and any(_same_successor(str(r[4] or ""), supersedes_by,
+                                            candidate_names=_sb_carrier_spellings)
+                            for r in _name_rows)):
                 continue
             # The entry is the record (review round 18): both twin refusals
             # (`unaddressable-name` on the Subject lane and on the Object id arm)
