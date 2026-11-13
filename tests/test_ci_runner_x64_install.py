@@ -3887,9 +3887,9 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: `test-concurrency-falkor` install step) so a reader has a grep-able handle that outlives any
 #: number — the number is the checkable claim, the construct name is the map.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4726", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:4751", ("pip install -e '.[test,postgres]'",)),
     ("python-ci.yml:2949-2954", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4718-4720", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:4743-4745", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
     ("python-ci.yml:3230", ("cache: pip",)),
     # #11273 review (P1): the three citations that PR's correction ADDED. A citation outside this
     # register is an unchecked claim — the doc's arms only ever resolved the registered ones — so

@@ -1281,6 +1281,38 @@ def _reset_egress() -> None:
     EGRESS_RESPONSE_BYTES.clear()
 
 
+# ── #12060: the per-kind write guard tally ─────────────────────────────────────
+#
+# The guard path is stdlib-only and dependency-free ON PURPOSE (it runs on every
+# entity write), so the tally lives in `kind_guards` and this is a PASS-THROUGH,
+# not a second counter. One tally means the snapshot cannot drift from the
+# metric — the same rule `egress_bytes_by_org` states one section up. Reading it
+# here (rather than growing `metrics()`'s dict) keeps the write path free of a
+# `prometheus_client` import; nothing scrapes the guard path today, and a
+# counter that exists only to be scraped by nothing is ceremony.
+
+
+def kind_guard_counts() -> list[dict]:
+    """The per-kind guard tally — ``(rule, from → to, accepted|overridden|skipped)``.
+
+    #12060 indicator 5, and the reason it exists: *a guard that is wrong becomes
+    countable, not arguable*. A rule whose top pair is ``overridden`` often is a
+    defect with a number attached.
+
+    Three outcomes, and the first is named ``accepted`` on purpose — it means
+    "the guard was accepted and applied" (a redirect happened), which is not the
+    same as the no-op ``accept`` decision and is deliberately NOT counted: every
+    ordinary write takes that path, and tallying it would bury the signal.
+
+    Derived from `tortoise.kind_guards.kind_guard_counts` — never a second
+    source. In-process only: nothing scrapes it, so this direct read is the only
+    queryable form, exactly as `egress_bytes_by_org` states.
+    """
+    from tortoise.kind_guards import kind_guard_counts as _snapshot
+
+    return _snapshot()
+
+
 # ── #4490: HOSTED-API COMPUTE (machine time) per org — the request-time dimension ──
 #
 # #4490: Fly machine time is a flat shared cost with NO per-org driver. Nothing

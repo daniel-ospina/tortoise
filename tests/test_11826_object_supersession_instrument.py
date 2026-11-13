@@ -260,8 +260,14 @@ def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
     # ⛔ The repair must not send the reader to a node that does not exist, and it
     # must name the step that DOES exist (name the successor).
     assert "successor named by its supersededBy" not in issue.fix, issue.fix
-    assert "No :Object answers the successor name" in issue.fix, issue.fix
-    assert "If a Subject or Point carries that name" in issue.fix, issue.fix
+    # ⛔ This fixture writes NO ``supersededBy`` at all, so the fix must not assert a
+    # successor NAME it does not carry ("No :Object answers the successor name this one
+    # carries" — the old needle, which pinned the false lead) and must not offer the
+    # "if a Subject or Point carries that name" escape for a name that does not exist
+    # (#12210 review, P3).
+    assert "carries NO successor name" in issue.fix, issue.fix
+    assert "the successor name this one carries" not in issue.fix, issue.fix
+    assert "If a Subject or Point carries that name" not in issue.fix, issue.fix
     assert "'supersededBy': '<the successor name>'" in issue.fix, issue.fix
     # The door's own signature form (props as ONE dict), pinned again here because
     # this arm is new: a keyword spelling raises TypeError at the caller.
@@ -483,6 +489,14 @@ def test_a_successorless_neutral_operator_loses_no_belief_by_archiving(sdk):
     # the safe direction until the aggregation is redesigned.
     assert issues[0].severity == "high", issues[0].severity
     assert "ONTOLOGY §3.1's per-edge triage" in fix, fix
+    # ⛔ ...and the INSTRUCTION must not order the repair the triage forbids: this
+    # arm is a different string from the resolvable one, and it carried the
+    # re-point with no neutral guard — measured, following it produced exactly the
+    # state §3.1's DROP forbids, and the next audit (now resolvable) said DELETE
+    # (#12111 review round 22).
+    assert "re-point the input onto it" not in fix, (
+        "a neutral edge transfers nothing, so the instruction is DELETE: " + fix)
+    assert "delete this edge: §3.1's disposition here is DROP" in fix, fix
     # ...and the triage must NOT offer a carry this operator cannot perform.
     assert "may CARRY to the successor" not in fix, (
         "a neutral operator carries nothing, so §3.1's disposition here is DROP: "
@@ -641,7 +655,11 @@ def test_a_shaped_and_neutral_endpoint_gets_the_shape_clause_not_the_neutral_one
     assert "in EITHER arm" in fix, (
         "the shape clause is the one that explains this row: " + fix)
     assert "clearing the shape alone restores nothing" in fix, fix
-    assert "EP never reaches the direction test for this endpoint" in fix, fix
+    # ⛔ The parenthetical this used to pin was FALSE on the path the same string
+    # prescribes: clearing the shape makes EP reach the direction test, and a `-`
+    # edge then transfers nothing (measured — a bare prior after the move, versus a
+    # real transfer on the flowing control). #12210 review, P3.
+    assert "A neutral direction DOES matter once the shape is cleared" in fix, fix
     # ⛔ The needle must be the text the NEUTRAL arm actually emits, or the
     # assertion cannot fail (it pinned a phrasing no arm ever produced; measured on
     # a genuinely neutral row, where the neutral clause IS emitted and the old
@@ -1382,7 +1400,12 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
     assert "write the equivalent edge" not in fix, (
         "the detail says no factor exists in either arm, so an edge rewrite cannot "
         "help: " + fix)
-    assert "no edge rewrite repairs this" in fix, fix
+    assert "no edge rewrite ALONE repairs this" in fix, fix
+    # ⛔ …and the LEADING instruction must carry the shape step, or it orders the
+    # re-point this clause denies: measured — follow the bare re-point and the row goes
+    # QUIET over ``confidences {}``; adding the shape call restores it
+    # (``effective_n 2.5255``) (#12210 review, P2).
+    assert "AND re-point the edge onto it" in fix, fix
     # ⛔ The shape belongs to the ACTIVE endpoint, never to the superseded anchor: a
     # call on the anchor sets the flag on a node that never carried it, so APPLY the
     # emitted call and re-measure rather than string-matching it (#12111 review).
@@ -1406,11 +1429,16 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
         "the shape is cleared, so this row is a DIRECT row now: " + after[0].fix)
     # The archive sentence must not claim a strip that never happens either.
     assert "EP strips a terminal input either way" not in fix, fix
-    # ⛔ §3.1's disposition on a neither-arm row is DROP: this fix says no edge
-    # rewrite repairs it, so offering a CARRY in the appended triage would
-    # contradict the repair it rides on (#12111 review).
-    assert "may CARRY to the successor" not in fix, fix
-    assert "the disposition here is DROP" in fix, fix
+    # ⛔ §3.1's disposition here is CARRY, and that is a MEASURED correction to what
+    # this test pinned at #12111: on this row the string orders "name the successor,
+    # then re-point the input onto it", and performing exactly that restores the belief
+    # (measured: clear the shape, name a live successor, re-point → ``effective_n
+    # 2.5236`` on both endpoints, re-audit 0 rows), so a DROP beside it denied the
+    # repair the same string prescribes (#12210 review, P3).
+    assert "may CARRY to the successor" in fix, fix
+    assert "the disposition here is DROP" not in fix, (
+        "the string's own repair measurably works, so the disposition cannot be DROP: "
+        + fix)
 
 
 def test_a_flag_dead_successor_names_the_flag_not_none(sdk):
@@ -2155,7 +2183,7 @@ def test_a_refused_carry_is_not_offered_on_a_direct_edge(sdk):
                if i.node_id == o["id"]).fix
     assert "OPERATOR-SHAPED" in fix, fix
     assert "may CARRY" not in fix, fix
-    assert "the disposition for this edge is DROP" in fix, fix
+    assert "the disposition for the edge AS NAMED is DROP" in fix, fix
 
 
 def test_an_op_type_only_successor_is_READ_by_the_operator_input_arm(sdk):
@@ -2404,7 +2432,13 @@ def test_an_ambiguous_successor_name_is_not_called_refused(sdk):
         "fixture drifted: the name must be ambiguous: " + issue.fix)
     assert "NOT the one it names" not in issue.fix, (
         "the row cannot say WHICH of the two EP refuses: " + issue.fix)
-    assert "the disposition for this edge is DROP" not in issue.fix, (
+    # ⛔ The AS NAMED sentence requires carrier_count == 1 on BOTH of its emitters
+    # (`_succ_refused` arm: `carrier_count == 1 and …`; `neither_drops`: `unread`,
+    # which is `carrier_count == 1 and …`), so asserting its ABSENCE on a 2-carrier
+    # row could never fail. Assert the property instead — an ambiguous name keeps the
+    # carry triage, because the check declines to attribute a refusal (#12210 review,
+    # P3).
+    assert "may CARRY to the successor" in issue.fix, (
         "an ambiguous name keeps the carry/drop triage: " + issue.fix)
 
 
@@ -2470,3 +2504,1556 @@ def test_a_dead_SOURCE_is_not_an_active_edge(sdk):
         f"ARCHIVE, not here: {[i.detail for i in rows]}")
     assert audit_graph(sdk._get_proj()).check_counts[
         "superseded_object_active_edges"] == 0
+
+
+def test_a_successorless_neutral_direct_edge_is_not_told_to_rewire(sdk):
+    """The successorless DIRECT arm must drop "write the equivalent edge" on a neutral row.
+
+    ``create_direct_edge(..., direction='-')`` transfers nothing, so an equivalent
+    edge onto a successor transfers nothing either: the repair is the delete, which
+    is what the appended §3.1 triage already said. Measured (#12111 round 22).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"], direction="-")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
+            "o.supersededBy = 'PolicyGone'", {"i": v1["id"]})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "No :Object answers the successor name" in fix, fix
+    assert "write the equivalent edge onto that successor" not in fix, (
+        "a neutral edge's equivalent is equally inert: " + fix)
+    assert "equivalent edge onto that successor transfers nothing" in fix or \
+        "delete it: it is neutral" in fix, fix
+    assert "may CARRY to the successor" not in fix, fix
+
+
+def test_an_id_less_neutral_row_is_told_to_delete(sdk):
+    """The `sup_id is None` arm needs the same neutral guard as its sibling.
+
+    Only a raw ``REMOVE o.id`` reaches this state, but the string is read by whoever
+    audits a repaired graph: on a neutral row it ordered "re-point this IMPL input
+    onto that successor" while its own archive clause and §3.1 triage said
+    re-pointing restores nothing and the disposition is DROP (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
+    assert _q(sdk, "MATCH (o {id:$i}) RETURN o.direction", {"i": op["id"]}) == [["-"]]
+    _obj(sdk, "PolicyV2")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "No id-keyed repair is possible" in fix, fix
+    # ⛔ The needle has to be the phrase the arm emits for ONE carrier: "that
+    # successor" is emitted only for a 0- or ≥2-carrier row, so on this fixture the
+    # old needle could never match (a blind assertion) (#12210 review, P3).
+    assert "re-point this IMPL input onto the successor ('PolicyV2')" not in fix, (
+        "a neutral edge transfers nothing, so the instruction is DELETE: " + fix)
+    assert "delete this edge: §3.1's disposition here is DROP" in fix, fix
+
+
+def test_a_NEUTRAL_neither_arm_row_scopes_the_DROP_to_here(sdk):
+    """The DROP's SCOPE is neutral-aware too, and that guard was unpinned.
+
+    ``neither_drops`` is true on a neutral neither-arm row whose successor is unread
+    and whose chain has no live head, so the scope expression has to exclude it: with
+    ``(neither_drops and not neutral)`` reduced to ``neither_drops`` the triage says
+    "the disposition for the edge AS NAMED is DROP" — inviting a carry to a
+    differently-named successor — on the one row whose own ``fix`` says DELETE and
+    adds "Clearing the shape is NOT required to DELETE it". Measured: removing the
+    ``not neutral`` from the scope leaves the whole suite green (mutant M4), so this
+    fixture is what pins it (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    # Terminal AND chainless: `neither_drops` needs an unread successor with no live
+    # head, and an archived Object with no ``supersededBy`` has neither.
+    sdk.update_entity(v2["id"], status="archived")
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
+              {"i": v2["id"]}) == [[None]], "fixture drifted: the successor has a chain"
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "DELETE it instead" in fix, fix
+    assert "the disposition here is DROP" in fix, (
+        "a neutral edge's DROP is the edge's own, so its scope is 'here': " + fix)
+    assert "AS NAMED" not in fix, (
+        "'AS NAMED' invites the carry this row's own fix calls inert: " + fix)
+
+
+def test_a_shaped_neutral_row_is_not_told_to_move_the_edge(sdk):
+    """The resolvable SHAPE arm needs the neutral guard too.
+
+    Clearing the active endpoint's shape leaves the edge ending at the superseded
+    Object, so the string pairs it with a move — but a `direction='-'` edge transfers
+    nothing after the move either (measured: clearing alone restored NO belief, and
+    the re-pointed neutral edge carried none: bare prior, `effective_n 2.0`, versus a
+    real transfer on the flowing control). So the instruction must be DELETE, not a
+    move (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    # ⛔ A SECOND carrier of the successor name, so the ambiguity ``prefix`` exists
+    # at all: on a single-carrier row ``prefix`` is "" by construction, and the
+    # prefix-suppression assertion below could not fail (#12210 review, P3).
+    _q(sdk, "CREATE (:Object {id:'twin-PolicyV2', name:'PolicyV2', "
+            "objectKind:'other', status:'live'})", {})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) RETURN count(o)",
+              {}) == [[2]], "fixture drifted: the twin was upserted into one node"
+    assert v2["id"] != "twin-PolicyV2"
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "No edge rewrite ALONE repairs this" in fix, fix
+    assert "move this IMPL edge off" not in fix, (
+        "a neutral edge transfers nothing even after the move: " + fix)
+    assert "DELETE it instead — §3.1's disposition here is DROP" in fix, fix
+    # ⛔ The JUNCTION: the "flag is only HALF the repair" frame is suppressed on a
+    # neutral row, so the continuation must open its own sentence — it used to emit
+    # "…refuses an operator-shaped endpoint). this edge is '-' (neutral)…" (#12210
+    # review, P3).
+    assert "endpoint). This edge is" in fix, fix
+    # ⛔ Neither the ambiguity prefix nor the chain tail: both are written for a
+    # RE-POINT, and this string says DELETE (#12210 review, P3).
+    assert "re-point onto the intended one by ID" not in fix, fix
+    assert "target THAT, not the immediate successor" not in fix, fix
+    assert "target a CLAIM successor" not in fix, fix
+    assert "EP never reaches the direction test for this endpoint" not in fix, (
+        "once the shape is cleared EP DOES reach the direction test: " + fix)
+
+
+def test_a_shaped_row_does_not_name_a_refused_successor(sdk):
+    """The shape arm used to return BEFORE the destination routing.
+
+    Measured on a flowing direct edge with a shaped active endpoint and an
+    operator-shaped successor: the same string said "move this edge onto the
+    successor ('PolicyV2')" and "the re-point moves no belief either way … target a
+    CLAIM successor", and performing it left ``confidences {}`` with the row quiet —
+    the false CLEAN the routing exists to prevent (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2", is_operator=True)
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "No edge rewrite ALONE repairs this" in fix, fix
+    assert "onto the successor ('PolicyV2')" not in fix, (
+        "the named successor is refused by EP, so it cannot be the destination: "
+        + fix)
+    assert "NOT the one it names ('PolicyV2')" in fix, fix
+
+
+def test_a_neutral_shaped_row_gets_no_chain_tail(sdk):
+    """The shape arm's ``tail`` is re-point advice, and a neutral row says DELETE.
+
+    ``_chain_tail`` appends "target THAT, not the immediate successor" / "target a
+    CLAIM successor", and the ambiguity ``prefix`` says "re-point onto the intended
+    one by ID" — both order a transfer a neutral edge cannot perform. Measured on a
+    neutral shaped row with a third link in the chain (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    _obj(sdk, "PolicyV3")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "DELETE it instead — §3.1's disposition here is DROP" in fix, fix
+    # ⛔ ``prefix`` needs TWO carriers of the successor name and this fixture has one,
+    # so a prefix assertion here could not fail — the twin-carrying
+    # ``test_a_shaped_neutral_row_is_not_told_to_move_the_edge`` is where it lives
+    # (#12210 review, P3). The ``tail`` needles below ARE reachable: `_chain_tail`
+    # emits for this row (sufficient carrier_count, a DRAFT/terminal status).
+    for advice in ("target THAT, not the immediate successor",
+                   "target a CLAIM successor"):
+        assert advice not in fix, (
+            f"{advice!r} is re-point advice on a row whose instruction is DELETE: "
+            + fix)
+
+
+DRAFT_TIER = "draft"
+
+
+def test_a_non_live_successor_is_not_the_destination(sdk):
+    """A successor EP cannot read must not be NAMED as the destination either.
+
+    The routing withdrew a SHAPE-refused successor; a NON-LIVE one (terminal or
+    draft) is refused just as firmly by EP's input selection, so naming it left the
+    reader performing a re-point that builds no factor: measured — an archived
+    successor, a retracted one, and a draft one each gave ``confidences {}`` and a
+    QUIET re-audit after the prescribed edge write (#12210 review, P2).
+    """
+    for lane, status in (("direct", "archived"), ("direct", "draft"),
+                         ("operator", "retracted"), ("operator", "draft")):
+        # ⛔ A DRAFT is the boundary case: EP refuses it AS-IS, and promoting it
+        # measurably repairs (measured ``effective_n 2.263`` after the promotion,
+        # ``confidences {}`` without it) — so it is named, with the promotion as the
+        # precondition, and never withdrawn (#12210 review, P2).
+        promote = status == DRAFT_TIER
+        p = sdk.create_point("statement", f"gateway {lane} {status}")
+        v1 = _obj(sdk, f"PolicyV1-{lane}-{status}")
+        v2 = _obj(sdk, f"PolicyV2-{lane}-{status}")
+        if lane == "direct":
+            sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+        else:
+            sdk.create_operator("IMPL", p["id"], [v1["id"]])
+        _supersede_object(sdk, f"PolicyV1-{lane}-{status}",
+                          f"PolicyV2-{lane}-{status}")
+        sdk.update_entity(v2["id"], status=status)
+
+        issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                     if i.node_id == v1["id"])
+        fix = issue.fix
+        named = f"PolicyV2-{lane}-{status}"
+        if promote:
+            assert f"to the successor ('{named}')" in fix, (
+                f"a '{status}' successor IS the destination once promoted: " + fix)
+            assert f"NOT the one it names ('{named}')" not in fix, (
+                "a draft is promoted, not withdrawn: " + fix)
+            assert "ONCE PROMOTED" in fix, fix
+        else:
+            assert f"NOT the one it names ('{named}')" in fix, fix
+            assert f"the successor ('{named}')" not in fix.split("NOT the one")[0], (
+                f"a '{status}' successor is not a destination EP reads: " + fix)
+
+
+def test_an_id_less_flowing_row_also_routes_the_destination(sdk):
+    """The id-less arm returns early, so it used to name any successor as-is."""
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "No id-keyed repair is possible" in fix, fix
+    assert "NOT the one it names ('PolicyV2')" in fix, (
+        "an archived successor is not a destination EP reads: " + fix)
+    # ⛔ Same blind-needle class: with ONE carrier the arm never emits "that
+    # successor" — the phrase it would emit if the routing regressed is the named
+    # destination below (#12210 review, P3).
+    assert "onto the successor ('PolicyV2')" not in fix, fix
+
+
+def test_an_id_less_direct_row_is_called_an_edge_not_an_input(sdk):
+    """The id-less arm's noun must follow the LANE, as `_triage`'s already does.
+
+    A direct edge has no operator input slot, and every other direct arm in
+    `_active_edge_fix` says "edge" / "write the equivalent edge" — the id-less arm
+    said "re-point this IMPL input" on both lanes (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == "PolicyV1").fix
+    assert "No id-keyed repair is possible" in fix, fix
+    assert "re-point this IMPL input" not in fix, (
+        "a DIRECT edge has no operator input slot: " + fix)
+    assert "re-point this IMPL edge onto" in fix, fix
+
+
+def test_a_terminal_successor_does_not_get_the_carry_disposition(sdk):
+    """§3.1's triage must agree with the withdrawn destination.
+
+    The destination withdrawal covers a terminal successor, but `_triage` tested only
+    the SHAPE, so one string said "NOT the one it names ('PolicyV2'), because it is
+    'retracted', which EP does not read as an input" and then "an IMPL may CARRY to
+    the successor". Measured: performing that carry left `rows: 0` with the belief
+    still gone (#12210 review, P2). A DRAFT keeps CARRY on purpose — the chain tail
+    offers "promote it to live as well", and promote-then-re-point measurably
+    repairs.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="retracted")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "NOT the one it names ('PolicyV2')" in fix, fix
+    # ⛔ The successor is terminal, NOT operator-shaped, so the shape wording must
+    # not be reused for it: a terminal successor has no shape at all (measured:
+    # ``is_operator NULL``, no ``op_type``). And the disposition is CARRY onto the
+    # node that holds the claim — NOT DROP, which would discard a belief that a carry
+    # measurably restores (#12210 review, P2).
+    # ⛔ Split on a DELIBERATE marker: the only "ONTO" in the string was inside
+    # "ONTOLOGY" in the triage lead, so the scope was an accident waiting to change
+    # (#12210 review, P3).
+    assert "operator-shaped" not in fix.split("⛔ Dispose of this")[0], (
+        "a terminal successor is not operator-shaped: " + fix)
+    assert "CARRY the IMPL" in fix, (
+        "the belief is restorable by carrying onto the live carrier: " + fix)
+
+    # ...and a DRAFT keeps the carry, because promoting it repairs (measured).
+    q = sdk.create_point("statement", "second policy")
+    w1 = _obj(sdk, "DraftV1")
+    w2 = _obj(sdk, "DraftV2")
+    sdk.create_operator("IMPL", q["id"], [w1["id"]])
+    _supersede_object(sdk, "DraftV1", "DraftV2")
+    sdk.update_entity(w2["id"], status="draft")
+    draft_fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                     if i.node_id == w1["id"]).fix
+    assert "promote" in draft_fix.lower(), draft_fix
+
+
+def test_a_direct_draft_successor_states_the_direct_mechanism(sdk):
+    """The draft arm's mechanism must split by lane, as `_chain_tail` already does.
+
+    One emitted string said "EP EXCLUDES from a direct edge before evaluation — no
+    factor, no skipped-factor record" (`_chain_tail`) AND "EP instead drops that input
+    and re-scores over whatever remains (the arity ladder stated above)" (`_triage`) on
+    the SAME direct row — the second sentence is the OPERATOR lane's, and a direct row
+    has neither an input nor an arity ladder. Measured per lane: the direct lane's
+    ``skipped_factors`` is ``None`` at every step (2 confidences live → 0 at the draft
+    → 0 after the un-promoted carry → 2 after the promotion), while the operator lane
+    reports ``['degenerate']`` while the successor is a draft (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "ONCE PROMOTED" in fix, fix
+    assert "drops that input and re-scores" not in fix, (
+        "a DIRECT edge has no input and no arity ladder: " + fix)
+    assert "arity ladder" not in fix, fix
+    assert "EXCLUDES from a direct edge before evaluation" in fix, fix
+
+    # ⛔ …and the OPERATOR lane KEEPS the ladder, so the split cannot collapse back to
+    # one lane's wording.
+    q = sdk.create_point("statement", "the second policy")
+    w1 = _obj(sdk, "DraftV1")
+    w2 = _obj(sdk, "DraftV2")
+    sdk.create_operator("IMPL", q["id"], [w1["id"]])
+    _supersede_object(sdk, "DraftV1", "DraftV2")
+    sdk.update_entity(w2["id"], status=DRAFT_TIER)
+    op_fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                  if i.node_id == w1["id"]).fix
+    assert "arity ladder stated above" in op_fix, op_fix
+
+
+def test_an_all_dead_ambiguous_name_warns_the_reader(sdk):
+    """With N≥2 carriers the refusal cannot be attributed — but it must be flagged.
+
+    `carrier_status` is one arbitrary row, so the check must not name a refusal (round
+    19); an all-archived population is still reachable, and a re-point onto a dead
+    carrier builds no factor (measured: the row goes quiet with the belief gone).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    # …then EVERY carrier goes dead, and a second genuine node carries the name.
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "CREATE (:Object {id:'dead-twin', name:'PolicyV2', objectKind:'other', "
+            "status:'archived'})", {})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "carried by 2 Objects" in fix, fix
+    assert "confirm THAT one is live and one EP reads as an input" in fix, (
+        "an all-dead ambiguous population must not be re-pointed onto blindly: " + fix)
+
+
+def test_a_neutral_row_with_a_TERMINAL_successor_keeps_DROP(sdk):
+    """The terminal-CARRY disposition is for a FLOWING edge only.
+
+    A neutral edge transfers nothing, so "CARRY the IMPL onto whatever node now
+    carries the claim" is false there — measured: carrying a neutral input onto a
+    live node leaves both posteriors at the bare prior (`effective_n 2.0`), exactly
+    as deleting it does. The branch must not fire on a neutral row (#12210 review,
+    P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
+    assert _q(sdk, "MATCH (o {id:$i}) RETURN o.direction", {"i": op["id"]}) == [["-"]]
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "the disposition here is DROP" in fix, (
+        "the triage's own sentence, not the fix's prefix clause: " + fix)
+    assert "may CARRY to the successor" not in fix, (
+        "a neutral edge transfers nothing, so the carry disposition is false: " + fix)
+
+
+def test_a_neutral_row_with_a_SHAPED_successor_keeps_the_NEUTRAL_drop(sdk):
+    """A neutral edge is DROP because of the EDGE, not because of the successor.
+
+    The refused-carrier arm's rationale is the successor's — "a carry needs a
+    successor EP actually reads" — and it scopes the DROP "for the edge AS NAMED",
+    which invites a carry to a differently-named successor. On a NEUTRAL edge that
+    carry is inert: measured `effective_n 2.0` (the bare prior), exactly as deleting
+    the edge is, while the same row's `fix` orders DELETE and says "§3.1's
+    disposition is DROP". So the neutral arm must take the row whichever shape the
+    successor has (#12210 review, P3).
+
+    The successor here is operator-SHAPED on purpose: that is the carrier shape that
+    made the refused arm pre-empt the neutral one.
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2", is_operator=True)
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    # The instruction this triage is appended to: DELETE.
+    assert "Delete this IMPL edge" in fix, fix
+    assert "the disposition here is DROP" in fix, (
+        "a neutral edge's DROP is the edge's own, not the successor's: " + fix)
+    assert "AS NAMED" not in fix, (
+        "'AS NAMED' invites a carry to a differently-named successor, which a "
+        "neutral edge cannot perform (measured effective_n 2.0): " + fix)
+    assert "a carry needs a successor EP actually reads" not in fix, (
+        "that is the successor's rationale, and it is not why this row is DROP: "
+        + fix)
+
+
+def test_the_neutral_shaped_prefix_clause_is_operator_lane_accurate(sdk):
+    """An ambiguous OPERATOR row must not be told an ``op_type`` carrier is unread.
+
+    EP's ``_non_operator`` ADMITS an ``op_type``-only node as an operator input, so
+    the confirm-clause may only demand "no ``op_type``" on the DIRECT lane
+    (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "CREATE (:Object {id:'live-twin', name:'PolicyV2', objectKind:'other', "
+            "status:'live', op_type:'IMPL'})", {})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "carried by 2 Objects" in fix, fix
+    assert "an ``op_type`` only is ADMITTED here" in fix, (
+        "the operator lane must SAY that an op_type-only carrier is readable, "
+        "rather than inherit the direct lane's demand: " + fix)
+    assert "no ``op_type`` set" not in fix, (
+        "the operator lane reads an op_type-only carrier: " + fix)
+
+
+def test_the_direct_ambiguous_confirm_clause_demands_no_op_type(sdk):
+    """…and the DIRECT lane must demand it: ``_non_op`` refuses an ``op_type``.
+
+    Measured on an ambiguous direct row whose intended carrier is
+    ``op_type='IMPL'``: following the clause's only stated test and writing the
+    equivalent edge there leaves `confidences {}` — a false CLEAN — while the
+    plain-live control on the same shape restores `effective_n 2.5255`
+    (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    dec = sdk.create_point("statement", "the policy is sound")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    sdk.create_direct_edge("IMPL", dec["id"], v1["id"])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.op_type = 'IMPL'", {"i": v2["id"]})
+    _q(sdk, "CREATE (:Object {id:'live-twin2', name:'PolicyV2', objectKind:'other', "
+            "status:'live'})", {})
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues, "the row must report"
+    fix = max(issues, key=lambda i: len(i.fix)).fix
+    assert "carried by 2 Objects" in fix, fix
+    assert "no ``op_type`` set" in fix, (
+        "a direct edge refuses an op_type-only carrier, so the clause must say so: "
+        + fix)
+
+
+def test_a_neutral_row_with_a_DRAFT_successor_keeps_DROP(sdk):
+    """Promote-then-carry is a FLOWING repair; on a neutral row it restores nothing.
+
+    The draft arm was added for a flowing row (promoting measurably repairs there),
+    but ``_triage`` fires on carrier state alone, so a neutral row got BOTH the DROP
+    sentence and "CARRY the IMPL … onto it". Measured: promote the draft, then carry
+    the neutral input → ``effective_n 2.0`` (the bare prior), against ``2.5236`` for
+    the flowing control after the same two steps (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
+    assert _q(sdk, "MATCH (o {id:$i}) RETURN o.direction", {"i": op["id"]}) == [["-"]]
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "the disposition here is DROP" in fix, (
+        "the triage's own sentence, not the fix's prefix clause: " + fix)
+    assert "may CARRY to the successor" not in fix, (
+        "promote-then-carry transfers nothing on a neutral edge: " + fix)
+    assert "ONCE PROMOTED" not in fix, fix
+
+
+def test_a_neutral_id_less_row_gets_no_chain_tail(sdk):
+    """The id-less arm's ``tail`` is live, and must be suppressed on a neutral row.
+
+    ``sup_id is None`` is not ``carrier_count == 0``: the ``supersededBy`` NAME still
+    resolves, so ``_chain_tail`` emits "re-point onto whatever now carries the claim"
+    / "promote it to live as well" / "target a CLAIM successor" beside this arm's own
+    DROP (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "No id-keyed repair is possible" in fix, fix
+    assert "delete this edge: §3.1's disposition here is DROP" in fix, fix
+    for advice in ("re-point onto whatever now carries the claim",
+                   "target a CLAIM successor", "promote it to live"):
+        assert advice not in fix, (
+            f"{advice!r} is transfer advice on a row whose instruction is DELETE: "
+            + fix)
+
+
+def test_an_id_less_row_never_names_a_dangling_successor(sdk):
+    """`dest` is built for ``carrier_count == 1``; the id-less arm must not reuse it.
+
+    On a dangling ``supersededBy`` the arm asserted "re-point … onto the successor
+    ('PolicyGhost')" while its own ``detail`` said no Object answers that name — a
+    destination that does not exist, in the one string the reader acts on
+    (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyGhost' REMOVE o.id", {"i": v1["id"]})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyGhost'}) RETURN count(o)",
+              {}) == [[0]]
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "No id-keyed repair is possible" in fix, fix
+    assert "onto the successor ('PolicyGhost')" not in fix, (
+        "no Object answers that name, so it cannot be the destination: " + fix)
+    assert "onto that successor" in fix, fix
+
+
+def test_an_id_less_row_with_an_ambiguous_successor_asks_which_one(sdk):
+    """…and with N≥2 carriers it must carry the SAME "name the one meant" demand.
+
+    The other arms build ``prefix`` long after the id-less arm has returned, so an
+    ambiguous id-less row named a single successor that the repair cannot pick —
+    while its own ``detail`` said the repair must name the Object meant
+    (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+    _q(sdk, "CREATE (:Object {id:'twin-idless', name:'PolicyV2', "
+            "objectKind:'other', status:'live'})", {})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) RETURN count(o)",
+              {}) == [[2]]
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "carried by 2 Objects" in fix, (
+        "an ambiguous name needs the same demand in this arm: " + fix)
+    assert "onto the intended one by ID" in fix, fix
+    assert "onto the successor ('PolicyV2')" not in fix, (
+        "the repair cannot pick one, so it must not name one: " + fix)
+
+
+def test_a_neither_arm_draft_row_names_the_promotion_as_a_precondition(sdk):
+    """On a neither-arm row the promotion is a PRECONDITION — not the repair, and not a denial.
+
+    Measured: clearing the shape and moving the edge onto a draft → `iterations 0`,
+    `confidences {}`; the same two steps plus `status='live'` → `effective_n 2.5255`.
+    So the sentence must name the ORDER, and must not claim (as an earlier revision
+    did) that "promoting it does NOT repair this" (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "EP builds NO factor in either arm" in fix, fix
+    assert "PRECONDITION of this repair" in fix, (
+        "clearing the shape alone builds no factor: " + fix)
+    assert "does NOT repair this" not in fix, (
+        "the promotion IS needed here, as a precondition: " + fix)
+    assert "ONCE PROMOTED" in fix, (
+        "and the §3.1 disposition says so too: " + fix)
+
+
+def test_a_neither_arm_row_with_a_TERMINAL_successor_keeps_DROP(sdk):
+    """A dead successor on a neither-arm row: nothing was assembled and nothing is readable.
+
+    Measured: the shape must be cleared AND the edge moved onto a LIVE carrier; a
+    terminal successor leaves `confidences {}` and a quiet re-audit, so the
+    disposition is DROP (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "EP builds NO factor in either arm" in fix, fix
+    # ⛔ "AS NAMED", not "here": this row's fix DOES order a move onto a CLAIM
+    # successor, so the disposition has to be scoped to the successor the string
+    # withdraws — the same wording the shape-refused arm already carries (#12210
+    # review, P3).
+    assert "the disposition for the edge AS NAMED is DROP" in fix, fix
+    assert "NOT the one it names ('PolicyV2')" in fix, fix
+
+
+def test_a_draft_successor_carrying_the_legacy_outdated_flag_is_not_promoted(sdk):
+    """`status='draft'` + `outdated=true` is TERMINAL — a promotion does not clear it.
+
+    The draft branch fired on the status alone, so one string both withdrew the name
+    ("because it is 'draft(outdated)') and told the reader to promote it. Measured:
+    after `status='live'` the node still reads `('live', True)`, the factor holds only
+    the surviving input (`effective_n 2.0` — the bare prior) and the belief returns
+    only once `outdated` is cleared too (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.outdated = true", {"i": v2["id"]})
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.outdated", {"i": v2["id"]}) == [[True]]
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "NOT the one it names ('PolicyV2')" in fix, fix
+    assert "ONCE PROMOTED" not in fix, (
+        "a promotion does not clear the legacy terminal flag: " + fix)
+    # ⛔ …and NO promote instruction anywhere: measured, `status='live'` leaves the
+    # node reading ('live', True), `iterations 0` and ``confidences {}`` — the belief
+    # returns only once `outdated` is cleared too (#12210 review, P2).
+    assert "promot" not in fix.lower(), (
+        "a promotion cannot repair a successor the legacy flag keeps terminal: " + fix)
+    # ⛔ …AND THE DETAIL, which is the string this guard actually gates: the mutation
+    # that deletes `and not s["carrier_terminal"]` from `_successor_note`'s draft arm
+    # leaves every `fix` assertion above green, because `_successor_note` feeds
+    # `detail` only — so the guard was unpinned until this assertion existed
+    # (#12210 review, P3).
+    assert "ITSELF 'draft(outdated)'" in issue.detail, issue.detail
+    assert "promot" not in issue.detail.lower(), (
+        "the detail must not offer the promotion the fix denies: " + issue.detail)
+
+
+def test_the_operator_lane_states_no_CONFIDENCE_COUNT(sdk):
+    """The trailing measurement is a DIRECT-lane figure; the operator lane has no arity.
+
+    ``sup_refused`` is reachable on BOTH lanes (``_4b_state``: the operator lane's is
+    the flag test), so an operator row whose superseded endpoint is operator-shaped
+    used to inherit the direct-lane parenthetical "restores two confidences,
+    ``effective_n 2.5255``". Measured on the same repair: two inputs →
+    ``[2.5255, 2.5255]``; three inputs → ``[2.2627, 2.5256, 2.2629]`` — n_conf 3, not
+    2. This check deliberately does not project the factor's arity (see the module's
+    own "The strings therefore do not assert an arity"), so the operator lane states
+    the OUTCOME and defers the ladder to `_dropped_input` (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1-opsup")
+    v2 = _obj(sdk, "PolicyV2-opsup")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    # The SUPERSEDED endpoint is one EP's input selection refuses: an operator-shaped
+    # (flag present, not ``false``) Object is not an admitted input.
+    sdk.update_entity(v1["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1-opsup", "PolicyV2-opsup")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "no confidence was ever carried through this edge" in issue.detail, (
+        "this row's superseded endpoint is refused, so nothing was carried: "
+        + issue.detail)
+    assert "restores two confidences" not in fix, (
+        "a count is an arity claim, and this check does not project the arity: "
+        + fix)
+    assert "the factor runs again once the edge lands on a node EP reads" in fix, fix
+
+
+def test_a_SOURCE_slot_input_with_a_dead_successor_is_told_a_CLAIM_successor(sdk):
+    """The idx-0 arm's `refused` gate: a dead successor is never written into slot 0.
+
+    ``dest``/``refused`` are computed above every arm, but the idx-0 SOURCE-slot arm
+    was the one arm no fixture reached with a dead successor — every source-slot row
+    superseded into a LIVE one, and the non-live fixtures build bidirectional
+    operators, where ``fwd != bwd`` is false and this arm never runs. Measured with
+    the gate reverted: the arm emits "Write the successor ('PolicyV2') into the
+    SOURCE slot … Re-point idx 0 onto the successor" while the same string's tail
+    says the name resolves to nothing — the pair this check refuses (#12210 review,
+    P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    # The SUPERSEDED Object is the operator itself, so its IMPL edge into ``p`` is
+    # idx 0 — the source slot ``ep.py`` reads its forward message from.
+    op = sdk.create_operator("IMPL", v1["id"], [p["id"]], direction="->")
+    assert _q(sdk, "MATCH (o:Point {id:$i})-[r:IMPL]->(c:Object) RETURN r.idx",
+              {"i": op["id"]}) == [[0]], \
+        "fixture drifted: the superseded Object is no longer the idx-0 source"
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "SOURCE slot" in fix, fix
+    assert "Write a CLAIM successor into the SOURCE slot" in fix, (
+        "an archived successor builds no factor, so slot 0 must not name it: " + fix)
+    assert "Write the successor ('PolicyV2')" not in fix, (
+        "the dead name must not be the SOURCE-slot write target: " + fix)
+
+
+def test_a_neither_arm_row_with_a_LIVE_head_is_told_to_carry(sdk):
+    """A dead successor whose chain ends LIVE is a readable destination.
+
+    Measured: clear the shape and move the edge onto that live head →
+    `effective_n 2.5255` from a bare prior — so "the disposition here is DROP" beside
+    the tail's "target THAT" denied the repair the same string ordered
+    (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    v3 = _obj(sdk, "PolicyV3")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='live'", {"i": v3["id"]})
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.status", {"i": v3["id"]}) == [["live"]]
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "target THAT" in fix, fix
+    assert "the disposition here is DROP" not in fix, (
+        "a live head is a readable destination, so the disposition is CARRY: " + fix)
+
+
+def test_a_neither_arm_draft_row_is_told_to_clear_the_shape_too(sdk):
+    """Promotion alone is not the repair when the ROW's own endpoint is shaped.
+
+    Measured: promote the draft and move the edge onto it with the endpoint still
+    shaped → `confidences {}`, `iterations 0`; both steps (promote AND clear the
+    shape) → `effective_n 2.5255`. The disposition named only the promotion
+    (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "ONCE PROMOTED" in fix, fix
+    assert "Clear the shape on the endpoint EP refuses too" in fix, (
+        "the promotion alone builds no factor while the endpoint is shaped: " + fix)
+    # ⛔ The clause must be its OWN sentence, and must count its own steps:
+    # ``_draft_mech``'s neither-arm text ends with a declarative, so splicing
+    # " AND clear the shape …" welded an imperative onto it, and "only both steps"
+    # named two while the instruction lists three (promote, clear the shape, move)
+    # (#12210 review, P3).
+    assert "re-scored. Clear the shape on the endpoint EP refuses too" in fix, (
+        "the shape step must start a new sentence: " + fix)
+    assert "re-scored AND clear the shape" not in fix, (
+        "an imperative welded onto a declarative: " + fix)
+    assert "ALL THREE steps are needed" in fix, (
+        "the instruction lists three steps, so the count must say three: " + fix)
+
+
+def test_a_dead_input_on_a_three_input_operator_is_not_told_it_builds_no_factor(sdk):
+    """ "Builds no factor" is an ARITY claim: two surviving inputs still run.
+
+    Measured on `create_operator("IMPL", p, [v1, p2])` with `v1 → v2('archived')`:
+    carrying the input onto the archived `v2` leaves the factor running over the two
+    survivors (`effective_n 2.5255` each, `skipped: None`), so the absolute claim was
+    false there (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    p2 = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"], p2["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "CARRY the IMPL" in fix, fix
+    assert "builds no factor" not in fix, (
+        "with two inputs left the factor still runs, so the absolute claim is false: "
+        + fix)
+
+
+def test_the_ambiguous_operator_clause_states_the_arity_ladder(sdk):
+    """ "an edge written to a dead node builds no factor" is false at operator arity ≥ 3.
+
+    Measured on a three-input operator (`create_operator("IMPL", p, [v1, p2])`) with
+    the successor name carried by two Objects, one dead: writing the edge onto the dead
+    carrier leaves the factor running over the two survivors (`effective_n 2.52`,
+    `skipped: None`), so the absolute claim is false where the ladder holds
+    (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    p2 = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"], p2["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "CREATE (:Object {id:'dead-twin', name:'PolicyV2', "
+            "objectKind:'other', status:'retracted'})", {})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "carried by 2 Objects" in fix, fix
+    assert "builds no factor" not in fix, (
+        "with two inputs left the factor still runs, so the absolute is false: " + fix)
+    assert "TWO OR MORE run without it" in fix, (
+        "the operator lane states the arity ladder: " + fix)
+
+
+def test_the_draft_strings_state_the_arity_ladder(sdk):
+    """The draft consequence is the ladder too, on a three-input operator.
+
+    Measured: with three inputs, writing the edge onto a draft BEFORE promoting it
+    leaves the factor running (`effective_n 2.5246` on both survivors), and promoting
+    first leaves the same two running — so neither "builds none before it" nor
+    "``confidences {}``" holds once two inputs survive the strip
+    (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    p2 = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"], p2["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "ONCE PROMOTED" in fix, fix
+    assert "builds none before it" not in fix, (
+        "two survivors keep the factor running, so 'builds none' is false: " + fix)
+    assert "the arity ladder stated above" in fix, (
+        "the draft consequence must defer to the ladder, not restate an absolute: "
+        + fix)
+    assert "promotion alone leaves the stale edge where it is (measured: ``confidences {}``)" \
+        not in fix, (
+        "the measured outcome at this arity is not an empty confidence set: " + fix)
+
+
+def test_a_neither_arm_draft_row_states_the_three_way_mechanism(sdk):
+    """Round-2 findings: the draft row's mechanism must be THREE-way, not two.
+
+    Measured: promoting the draft and moving the edge while the endpoint still carries
+    the shape builds no factor (``confidences {}``, ``iterations 0``); both steps
+    restore it (``effective_n 2.5255``). So on a neither-arm row "``confidences {}``
+    while it is a draft and TWO ONCE IT IS LIVE" contradicted the ``_shape_too`` clause
+    appended right after it in the same string, and the DETAIL prescribed the
+    readable-endpoint repair (promotion + re-point, ``2.9296``) that measures nothing
+    there (#12210 review round 2, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix, detail = issue.fix, issue.detail
+    assert "ONCE PROMOTED" in fix, fix
+    assert "PRECONDITION" in fix, fix
+    assert "two once it is live" not in fix, (
+        "the promotion alone restores nothing while the endpoint is still shaped: "
+        + fix)
+    # …and the DETAIL must not prescribe the readable-endpoint repair either.
+    assert "PRECONDITION" in detail, detail
+    assert "effective_n 2.9296" not in detail, (
+        "a readable-endpoint measurement on a neither-arm row: " + detail)
+
+
+def test_a_neutral_neither_arm_row_does_not_offer_a_dead_write(sdk):
+    """A neutral row may still offer "make the edge flow" — onto a READABLE successor.
+
+    The successor-state clause is suppressed on a neutral row (it is re-point advice),
+    so the flowing alternative used to be offered with no statement that the successor
+    must be live and readable: a write onto a draft/terminal/shaped one builds no
+    factor, the old edge is gone, and the finding goes QUIET — the false CLEAN this
+    check exists to prevent (#12210 review round 2, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "DELETE it instead — §3.1's disposition here is DROP" in fix, fix
+    # ⛔ UNGUARDED: behind `if "FLOWING" in fix` the whole test passed by DELETING the
+    # sentence it exists to check (#12210 review, P3).
+    assert "FLOWING" in fix, fix
+    assert "live and readable FIRST" in fix, (
+        "the flowing alternative writes onto the successor, so it must state that the "
+        "successor has to be readable: " + fix)
+    assert "builds no factor" in fix, fix
+
+
+def test_a_dangling_successor_on_a_direct_row_is_not_called_an_input(sdk):
+    """The zero-carrier arm keyed its noun on ``neutral``, not on the LANE.
+
+    A flowing DIRECT row with a dangling successor name emitted "there is no Object to
+    re-point this IMPL input onto … re-point the input onto it" and then "this is a
+    DIRECT edge, so there is no factor to re-point" — two mechanisms in one string
+    (#12210 review round 2, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='NopeNothingCarriesThis'", {"i": v1["id"]})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "No :Object answers the successor name" in fix, fix
+    assert "re-point this IMPL input" not in fix, (
+        "a DIRECT edge has no operator input slot: " + fix)
+    assert "re-point the input onto it" not in fix, fix
+    assert "re-point this IMPL edge onto" in fix, fix
+
+
+def test_the_id_less_arm_separates_the_tail_and_puts_the_prefix_first(sdk):
+    """Round-2 P3s: a glued ``tail``+archive clause, and a mid-sentence prefix.
+
+    ``_chain_tail`` arms end without punctuation and ``_archive_clause`` opens with
+    "Archiving it instead", so a bare concatenation emitted
+    "…only onto a live claimArchiving it instead …"; and the ambiguity prefix
+    ("FIRST name the successor meant") was spliced after a conjunction, so its own
+    ordering claim came after two instructions (#12210 review round 2, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == "PolicyV1").fix
+    at = fix.index("Archiving it instead")
+    # ⛔ A SPACE is not enough: the tail has no terminator, so a space-only pad still
+    # ran the sentences together ("…live claim Archiving it instead…"). Assert the
+    # BOUNDARY this test is named for (#12210 review, P3).
+    assert fix[:at].endswith(". "), (
+        "the archive clause must open a new sentence: " + fix[at - 40:at + 25])
+    assert ".  " not in fix, "no doubled space after a terminator: " + fix[at - 40:at + 30]
+
+    # …and the ambiguity prefix comes FIRST, as its own `FIRST` demands.
+    q = sdk.create_point("statement", "the second policy")
+    w1 = _obj(sdk, "TwinV1")
+    _obj(sdk, "TwinV2")
+    sdk.create_direct_edge("IMPL", q["id"], w1["id"])
+    _q(sdk, "CREATE (:Object {id:'twin-TwinV2', name:'TwinV2', "
+            "objectKind:'other', status:'live'})", {})
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='TwinV2' REMOVE o.id", {"i": w1["id"]})
+    twin_fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                    if i.node_id == "TwinV1").fix
+    assert twin_fix.startswith("FIRST name the successor meant"), twin_fix
+    assert "and FIRST name" not in twin_fix, twin_fix
+    assert ". Delete the edge into the old endpoint" in twin_fix, twin_fix
+def test_a_direct_row_whose_SUPERSEDED_endpoint_is_shaped_claims_no_belief(sdk):
+    """No belief was EVER carried through an edge into a shaped superseded endpoint.
+
+    Measured on `p --IMPL--> V1(op_type='IMPL')` before the supersession:
+    `confidences {}`, `skipped_factors None` — so "the direct edge carried belief into
+    the superseded endpoint while it was live … that belief is NOT moved" is false
+    there, and it contradicted this finding's own `detail` ("no confidence was ever
+    carried through this edge") (#12210 review, P2).
+    """
+    for shape in ("op_type", "is_operator"):
+        p = sdk.create_point("statement", f"gateway {shape}")
+        v1 = _obj(sdk, f"PolicyV1-{shape}")
+        v2 = _obj(sdk, f"PolicyV2-{shape}")
+        sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+        if shape == "op_type":
+            _q(sdk, "MATCH (o:Object {id:$i}) SET o.op_type = 'IMPL'", {"i": v1["id"]})
+        else:
+            _q(sdk, "MATCH (o:Object {id:$i}) SET o.is_operator = true", {"i": v1["id"]})
+
+        # ⛔ The measurement is taken BEFORE the supersession — the audit row only
+        # exists once the anchor is superseded, so the "was any belief ever carried"
+        # question has to be answered from EP, not from the finding.
+        before = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+        assert before["confidences"] == {}, (
+            f"a shaped superseded endpoint never carried belief ({shape}): {before}")
+
+        _supersede_object(sdk, f"PolicyV1-{shape}", f"PolicyV2-{shape}")
+        sdk.update_entity(v2["id"], status="archived")
+        after = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                     if i.node_id == v1["id"])
+        fix = after.fix
+        assert "no confidence was EVER carried" in fix, (
+            f"the {shape} endpoint never carried belief, so the fix must not claim it "
+            "did: " + fix)
+        assert "carried belief into the superseded endpoint" not in fix, fix
+
+
+def test_the_direct_and_neither_arm_draft_rows_cite_no_ladder(sdk):
+    """EP builds NO factor on those lanes, so nothing is dropped or re-scored.
+
+    Measured: `direct/bid/draft` → `compute_confidence(anchors=[sup])` is `{}` and the
+    row is excluded before evaluation (the string's own `_chain_tail` says so), and the
+    neither-arm row emits "builds no factor either" nine words later. Citing "the arity
+    ladder stated above" there was false twice: the ladder is absent from the text and
+    the lane has no factor to drop an input from (#12210 review, P2).
+    """
+    # direct lane
+    p = sdk.create_point("statement", "the direct draft gateway")
+    v1 = _obj(sdk, "PolicyV1-direct-draftladder")
+    v2 = _obj(sdk, "PolicyV2-direct-draftladder")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _supersede_object(sdk, "PolicyV1-direct-draftladder", "PolicyV2-direct-draftladder")
+    sdk.update_entity(v2["id"], status="draft")
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    assert "ONCE PROMOTED" in issue.fix, issue.fix
+    assert "the arity ladder stated above" not in issue.fix, (
+        "the direct lane has no factor to drop an input from: " + issue.fix)
+    assert "nothing is dropped or re-scored" in issue.fix, issue.fix
+
+    # neither-arm lane
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    w1 = _obj(sdk, "PolicyW1")
+    w2 = _obj(sdk, "PolicyW2")
+    sdk.create_direct_edge("IMPL", actor["id"], w1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyW1", "PolicyW2")
+    sdk.update_entity(w2["id"], status="draft")
+    issue2 = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                  if i.node_id == w1["id"])
+    assert "ONCE PROMOTED" in issue2.fix, issue2.fix
+    assert "still shaped builds no factor either" in issue2.fix, issue2.fix
+    assert "the arity ladder stated above" not in issue2.fix, (
+        "the neither-arm row builds no factor, so no input is dropped: " + issue2.fix)
+
+
+def test_a_shaped_superseded_endpoint_is_told_what_the_repair_RESTORES(sdk):
+    """The trailing measurement must match the lane: nothing existed, so nothing is kept.
+
+    Measured: with an EP-refused superseded endpoint the prescribed repair (edge onto a
+    live claim successor) restores two confidences (`effective_n 2.5255`), so "the same
+    posteriors as before the supersession" was false and contradicted the same
+    sentence's "would establish one" (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1-supshaped")
+    v2 = _obj(sdk, "PolicyV2-supshaped")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.op_type = 'IMPL'", {"i": v1["id"]})
+    before = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+    assert before["confidences"] == {}, before
+    _supersede_object(sdk, "PolicyV1-supshaped", "PolicyV2-supshaped")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "no confidence was EVER carried" in fix, fix
+    assert "the same posteriors as before the supersession" not in fix, (
+        "no belief existed, so nothing can be 'the same': " + fix)
+    assert "restores two confidences" in fix, fix
+
+
+def test_a_neither_arm_re_point_moves_no_belief_only_WHILE_shaped(sdk):
+    """Clearing the shape makes the re-point carry, so the clause must be conditional.
+
+    Measured on a neither-arm row whose successor chain ends LIVE: clear the shape on the
+    subject and write the edge onto that head → `effective_n 2.5255`, re-audit 0 rows —
+    so the absolute "the re-point moves no belief either way" contradicted the repair the
+    same string ordered (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    v3 = _obj(sdk, "PolicyV3")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='live'", {"i": v3["id"]})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "target THAT" in fix, fix
+    assert "moves no belief until the shape is cleared" in fix, (
+        "the re-point DOES carry once the shape is cleared: " + fix)
+    assert "moves no belief either way" not in fix, fix
+
+
+def test_a_neither_arm_row_never_quotes_a_measurement_from_a_readable_lane(sdk):
+    """Neither-arm rows: no factor ever ran, so "the same posteriors" is unavailable.
+
+    Measured on `shaped Subject → IMPL → V1`, V2 archived with a LIVE chain head:
+    `compute_confidence(factors=[src])` is `n=0 iters=0` before the supersession, after
+    it, and only becomes `n=2 iters=12` once the shape is cleared and the edge carried
+    onto the head — so the readable-lane parenthetical ("the same posteriors") and the
+    `2.9296` figure are both false on this row (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    v3 = _obj(sdk, "PolicyV3")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='live'", {"i": v3["id"]})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "target THAT" in fix, fix
+    assert "the same posteriors as before the supersession" not in fix, (
+        "no factor ever ran on this row, so nothing can be 'the same': " + fix)
+    assert "restores two confidences" in fix, fix
+
+
+def test_a_neither_arm_draft_detail_quotes_no_readable_lane_figure(sdk):
+    """The draft `detail` must not quote `2.9296` where the shape blocks the repair.
+
+    Measured: promote the draft and move the edge with the endpoint still shaped →
+    `confidences {}`, `iterations 0`; adding `is_operator=false` → two confidences,
+    `effective_n 2.5255` (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    assert "2.9296" not in issue.detail, (
+        "that figure is the readable-endpoint measurement: " + issue.detail)
+    assert "PRECONDITION of this repair" in issue.detail, (
+        "the promotion is a precondition here, and the shape must be cleared too: "
+        + issue.detail)
+
+
+def test_one_row_quotes_one_measurement_for_one_operation(sdk):
+    """The `detail` and the `fix` must not quote two different figures for one operation.
+
+    Measured on `direct/flowing/draft`: promotion + edge write is a single operation, so
+    at most one of `2.9296` / `2.263` can be this row's measurement (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    figures = [n for n in ("2.9296", "2.263") if n in issue.detail or n in issue.fix]
+    assert len(figures) <= 1, (
+        "one operation, one measured figure — got " + repr(figures) + " in: "
+        + issue.detail + " / " + issue.fix)
+
+
+def test_a_withdrawn_operator_successor_is_not_the_write_target(sdk):
+    """`dest` withdraws a successor EP cannot read; the call must not name it back.
+
+    The default operator arm said "an explicit edge write against **the successor's ID**"
+    while `dest` in the same sentence said "a CLAIM successor — NOT the one it names
+    ('PolicyV2')" — the repair named onto the node the string refuses, which leaves
+    `confidences {}` and a quiet re-audit. The sibling arms already gate this noun on
+    `refused` (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "NOT the one it names ('PolicyV2')" in fix, fix
+    assert "against the successor's ID" not in fix, (
+        "the withdrawn successor is not the write target: " + fix)
+    assert "against a CLAIM successor's ID" in fix, fix
+
+
+def test_the_next_hop_consequence_is_about_the_next_hop(sdk):
+    """`_dropped_input` is called from hop 2 too; its subject must follow the call site.
+
+    With a shaped SUPERSEDED endpoint and a successor whose own successor is
+    operator-shaped, the hop-2 clause read "…which is OPERATOR-SHAPED … so EP's
+    direct-edge arm refuses the superseded endpoint itself…": the consequence of the
+    NEXT link's shape was stated about the wrong node (and repeated the detail's earlier
+    clause). `_dropped_input`'s `sup_refused` sentence now names its own cause and
+    subject, so it stays true at the hop-2 call site (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    _obj(sdk, "PolicyV3", is_operator=True)
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.op_type = 'IMPL'", {"i": v1["id"]})
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "which is OPERATOR-SHAPED" in fix, fix
+    # ⛔ The consequence clause is spliced after "…the next link is operator-shaped,
+    # so …", so it must be self-contained: it names its OWN cause (the superseded
+    # endpoint's shape) instead of inheriting the next link's.
+    assert "no confidence was EVER carried through this edge, because EP's " \
+           "direct-edge arm refuses the superseded endpoint itself" in fix, fix
+
+
+def test_a_neither_arm_draft_fix_does_not_claim_the_edge_write_alone_repairs(sdk):
+    """On a neither-arm row the promotion is a PRECONDITION; the edge write alone builds nothing.
+
+    Measured: promote the draft and move the edge with the endpoint still shaped →
+    `iterations 0`, `confidences {}`; adding `is_operator=false, op_type=None` →
+    `effective_n 2.5255` on both endpoints (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "PRECONDITION" in fix, fix
+    assert "builds the factor after the promotion" not in fix, (
+        "the edge write alone builds nothing while the endpoint is shaped: " + fix)
+
+
+def test_a_neither_arm_successorless_repair_restores_the_belief(sdk):
+    """Perform the emitted instruction end to end; the belief must come back.
+
+    Measured on `shaped Subject → IMPL → V1` with no `supersededBy`: naming a live
+    successor and moving the edge WITHOUT clearing the shape leaves `confidences {}`
+    and the row QUIET; the same plus the shape call restores `effective_n 2.5255`
+    (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2-successor")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded'", {"i": v1["id"]})
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
+              {"i": v1["id"]}) == [[None]]
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "AND re-point the edge onto it" in fix, fix
+    assert f"tortoise_update_entity('{actor['id']}', " in fix, fix
+
+    # Perform exactly what the string orders.
+    sdk.update_entity(v1["id"], supersededBy="PolicyV2-successor")
+    sdk.update_entity(actor["id"], is_operator=False, op_type=None)
+    sdk.create_direct_edge("IMPL", actor["id"], v2["id"])
+    _q(sdk, "MATCH (a {id:$a})-[r:IMPL]->(o:Object {id:$v}) DELETE r",
+       {"a": actor["id"], "v": v1["id"]})
+
+    run = sdk.compute_confidence(anchors=[actor["id"]], require_calibration=False)
+    assert run["confidences"], (
+        "the emitted repair must restore the belief: " + fix + " → " + repr(run))
+    assert _issues(sdk, "superseded_object_active_edges") == []
+
+
+def test_a_neither_arm_terminal_detail_names_the_shape_precondition(sdk):
+    """The DETAIL must not order the bare re-point its own FIX calls insufficient.
+
+    Measured on a neither-arm row whose archived successor chains to a LIVE head:
+    `compute_confidence(factors=[src])` is `n=0 iters=0` before, after, and only becomes
+    `n=2 iters=12` once the shape is cleared and the edge carried onto the head — so a
+    detail that says only "target THAT" orders the edge rewrite its own `fix` refuses
+    (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    _obj(sdk, "PolicyV3")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    assert "target THAT" in issue.detail, issue.detail
+    assert "PRECONDITION of the re-point this finding\'s repair orders" in \
+        issue.detail, (
+        "the shape has to be cleared before that re-point, and the detail must say "
+        "so: " + issue.detail)
+    # ⛔ The subject the sibling arm supplies ("and it") must survive the splice:
+    # "— then names NO successor" dropped it (#12210 review, P3).
+    assert "then it names" in issue.detail, issue.detail
+
+
+def test_an_ambiguous_name_is_not_asserted_as_a_single_destination(sdk):
+    """With N≥2 carriers the check cannot pick one, so `dest` must not name it.
+
+    The ambiguity prefix demands the reader "name the successor meant ... by ID"; the
+    destination clause then said "the successor ('name')" — a single destination this
+    check explicitly declines to resolve (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _q(sdk, "CREATE (:Object {id:'twin-PolicyV2', name:'PolicyV2', "
+            "objectKind:'other', status:'live'})", {})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "carried by 2 Objects" in fix, fix
+    assert "the successor you named by ID" in fix, (
+        "the destination must defer to the reader's choice: " + fix)
+
+
+def test_the_successorless_neither_arm_orders_the_shape_as_an_imperative(sdk):
+    """`_shape_repair` is a noun phrase; after "then " the arm needs an imperative.
+
+    Splicing the noun form emitted "name the successor — … — then clearing the shape —
+    … — AND re-point the edge onto it" (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded'", {"i": v1["id"]})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "then clear the shape" in fix, fix
+    assert "then clearing the shape" not in fix, fix
+
+
+def test_an_id_less_repair_does_not_emit_a_triple_space(sdk):
+    """The tail padding degenerated to two extra spaces when `_chain_tail` was empty.
+
+    Emitted "…Delete the edge into the old endpoint.   Archiving it instead …" on an
+    id-less row whose successor resolves live (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == "PolicyV1").fix
+    assert ".   Archiving" not in fix, (
+        "no clause is padded with extra spaces when the tail is empty: " + fix)
+    assert "endpoint. Archiving" in fix, fix
+
+
+def test_an_id_less_neither_arm_row_names_the_shape_step(sdk):
+    """The id-less arm's bare re-point leaves the row QUIET over an absent belief.
+
+    Measured on `shaped Subject → IMPL → V1` (id removed, `supersededBy` a live
+    `PolicyV2`): restore the id, name the successor, re-point and delete the old edge →
+    `confidences {}`, `iterations 0`, and `superseded_object_active_edges` rows → 0;
+    adding `{'is_operator': False, 'op_type': None}` restores it
+    (`effective_n 2.5255`, 12 iterations) (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")  # the live successor the name resolves to
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "No id-keyed repair is possible" in fix, fix
+    assert "AND re-point this IMPL edge onto" in fix, (
+        "the bare re-point cannot restore the belief on a neither-arm row: " + fix)
+    assert f"tortoise_update_entity('{actor['id']}', " in fix, fix
+    # ⛔ The JUNCTION this test is named for: `_shape_repair` is a NOUN phrase, so
+    # splicing it after "the successor on it and " emitted "…and clearing the shape —
+    # … — AND re-point", coordinating a gerund with an imperative. Both needles above
+    # match either form, so this arm needs its own assertion (#12210 review, P3).
+    assert "and clearing the shape" not in fix, fix
+    assert "and clear the shape" in fix, fix
+
+
+def test_an_id_less_neither_arm_repair_restores_the_belief(sdk):
+    """Perform it end to end: the belief must come back and the row must clear.
+
+    Measured: restore the id + `supersededBy`, write the edge onto the live successor,
+    delete the old edge, and clear the shape → `effective_n 2.5255` on both endpoints,
+    rows 0. Without the shape call the belief stays at `confidences {}`
+    (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    sdk.update_entity(actor["id"], is_operator=False, op_type=None)
+    sdk.create_direct_edge("IMPL", actor["id"], v2["id"])
+    _q(sdk, "MATCH (a {id:$a})-[r:IMPL]->(o:Object {name:'PolicyV1'}) DELETE r",
+       {"a": actor["id"]})
+
+    run = sdk.compute_confidence(anchors=[actor["id"]], require_calibration=False)
+    assert run["confidences"], run
+    assert _issues(sdk, "superseded_object_active_edges") == []
+
+
+def test_the_direct_draft_detail_quotes_this_rows_own_figure(sdk):
+    """`2.9296` needs a SECOND live support; the single-edge row measures 2.5255.
+
+    Measured on the fixture the sentence is emitted for: promote the draft, write the
+    equivalent edge, delete the old one → `effective_n 2.5255`, 12 iterations
+    (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    assert "2.9296" not in issue.detail, issue.detail
+    assert "effective_n 2.5255" in issue.detail, issue.detail
+
+    # …and that figure is the one the emitted repair produces.
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='live'", {"i": v2["id"]})
+    sdk.create_direct_edge("IMPL", p["id"], v2["id"])
+    _q(sdk, "MATCH (a {id:$a})-[r:IMPL]->(o:Object {id:$v}) DELETE r",
+       {"a": p["id"], "v": v1["id"]})
+    run = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+    assert run["confidences"], run
+    assert round(run["confidences"][v2["id"]]["effective_n"], 4) == 2.5255, run

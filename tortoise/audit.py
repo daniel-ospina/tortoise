@@ -1122,16 +1122,50 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         ``degenerate``.
         """
         if s["shape"] and not s["is_operator"]:
-            return ("EP assembles no factor for this endpoint in either arm, so the "
-                    "re-point moves no belief either way")
+            # ⛔ …and it is TRUE only WHILE the endpoint stays shaped: measured on a
+            # neither-arm row whose chain has a live head, clearing the shape and
+            # writing the edge onto that head restores the belief (``effective_n
+            # 2.5255``, re-audit 0 rows) — so the old absolute ("the re-point moves no
+            # belief either way") contradicted the repair the same string ordered
+            # (#12210 review, P2).
+            return ("EP assembles no factor for this endpoint in either arm WHILE it "
+                    "stays shaped, so the re-point moves no belief until the shape is "
+                    "cleared; once it is cleared, an edge onto a readable successor "
+                    "does carry it (measured: ``effective_n 2.5255``)")
         fwd, bwd = direction_flows(s["direction"])
         if not (fwd or bwd):
             return (f"this edge is {_quoted(s['direction'])} (neutral), so no "
                     "confidence transfers through it by design and the re-point "
                     "moves no belief either way")
         if not s["is_operator"]:
+            # ⛔ …and the DIRECT arm has its own split, on the endpoint that was
+            # superseded: where that endpoint is one EP refuses (``op_type`` only, or
+            # ``is_operator`` true), NO belief was ever carried through this edge —
+            # measured: ``confidences {}`` and ``skipped_factors None`` BEFORE the
+            # supersession, in both shapes — so "the direct edge carried belief … that
+            # belief is NOT moved" contradicted the same finding's own ``detail``
+            # ("no confidence was ever carried through this edge"), and only this
+            # helper failed to consult the flag every other consequence helper reads
+            # (#12210 review, P2).
+            # ⛔ SELF-CONTAINED SUBJECT: this sentence is spliced after clauses about a
+            # DESTINATION ("…the next link is operator-shaped, so …", "a carry onto the
+            # dead name itself changes nothing: …"), so it must name its own cause and
+            # subject rather than relying on the splice — otherwise it asserted the
+            # NEXT link's shape as the reason the SUPERSEDED endpoint was refused, and
+            # repeated a clause the ``detail`` already stated (#12210 review, P3).
+            if s["sup_refused"]:
+                # ⛔ ``sup_flag_shaped`` implies this on BOTH lanes (``_4b_state``:
+                # the operator lane's ``sup_refused`` IS the flag test, and the direct
+                # lane's is the flag OR an ``op_type``), so naming it beside the flag
+                # is a conjunction that can never change the branch — and it read as
+                # if the lanes needed separate treatment (#12210 review, P3).
+                return ("no confidence was EVER carried through this edge, because "
+                        "EP's direct-edge arm refuses the superseded endpoint itself "
+                        "(it is operator-shaped) — measured ``confidences {}`` and "
+                        "``skipped_factors None`` before the supersession — so an edge "
+                        "onto a live claim successor is what would establish one")
             # ⛔ Every caller is an "EP will not read it" arm (an operator-shaped or
-            # draft successor — a neutral edge returns at the rung above and never
+            # dead successor — a neutral edge returns at the rung above and never
             # reaches this one), so the honest sentence is that the belief this edge
             # DID carry is NOT moved by the repair named — measured:
             # a direct edge re-pointed onto an operator-shaped successor leaves
@@ -1187,7 +1221,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "excludes from a factor's inputs "
                     "(#9269) — " + _dropped_input(s) + ", and a re-audit reads "
                     "CLEAN over it. Target a CLAIM successor")
-        if (s["carrier_status"] or "") == DRAFT_STATUS:
+        if (s["carrier_status"] or "") == DRAFT_STATUS and not s["carrier_terminal"]:
+            # ⛔ …and NOT when the legacy ``outdated`` flag already makes it TERMINAL:
+            # ``ep.py`` computes ``is_terminal = status in TERMINAL_EXCLUDED_STATUSES
+            # or bool(outdated)``, so a ``draft(outdated)`` successor is not repaired by
+            # a promotion at all (measured: ``status='live', outdated=true`` →
+            # ``iterations 0``, ``confidences {}``; clearing ``outdated`` alone →
+            # ``effective_n 2.5255``). The terminal arm below states it instead
+            # (#12210 review, P2).
             # ⛔ A DRAFT successor is not terminal, so without this arm it takes the
             # ordinary one — but EP strips a draft input exactly as it strips a
             # terminal input (#780). The re-point would then read CLEAN on a
@@ -1204,18 +1245,55 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # (``ep.py`` Batch 3's ``live_a``/``live_b``, in Cypher, with no record) —
             # so "EP strips like a terminal input" contradicted this row's own
             # preceding clause ("the row is excluded before evaluation").
+            # ⛔ AND SPLIT BY ROW on the direct lane, as ``_chain_tail`` is: on a
+            # NEITHER-arm row (the active endpoint is shaped) the promotion alone
+            # repairs nothing either — measured ``confidences {}`` with promotion and
+            # move both while the shape is still there, so the ``2.9296`` sentence
+            # (a readable-endpoint measurement) must not be emitted here (#12210
+            # review, P2).
+            if s["shape"] and not s["is_operator"]:
+                _draft_repair = (
+                    "excludes from a direct edge before evaluation — the same "
+                    "exclusion a terminal endpoint gets, and no skipped-factor "
+                    "record exists (measured: no factor, no record): promoting it "
+                    "to live is a PRECONDITION of this repair, not the repair on "
+                    "its own — promote it FIRST, then clear the shape and move the "
+                    "edge (measured: either step alone leaves ``confidences {}``)")
+            elif not s["is_operator"]:
+                _draft_repair = (
+                    "excludes from a direct edge before evaluation — the same "
+                    "exclusion a terminal endpoint gets, and no skipped-factor "
+                    "record exists (measured: no factor, no record): promote it "
+                    "to live **and then re-point onto it** — promotion alone "
+                    "repairs nothing, because the stale edge still ends at the "
+                    # ⛔ NOT ``2.9296``: that figure needs a SECOND live support
+                    # on the claim; on the single-edge row this sentence is emitted
+                    # for, promotion + re-point measures ``effective_n 2.5255``
+                    # (#12210 review, P3).
+                    "superseded Object (measured on this row: ``effective_n 2.5255`` "
+                    "once the edge moves too)")
+            else:
+                _draft_repair = (
+                    "strips like a terminal input (#780) — promote it to live "
+                    "**and then re-point onto it**: promotion alone leaves the "
+                    "stale edge where it is, and the unread input is one EP "
+                    "drops")
             return (f"; the successor it names is '{DRAFT_STATUS}', which EP "
-                    + ("excludes from a direct edge before evaluation — the same "
-                       "exclusion a terminal endpoint gets, and no skipped-factor "
-                       "record exists (measured: no factor, no record): promote it "
-                       "to live instead of re-pointing onto it"
-                       if not s["is_operator"] else
-                       "strips like a terminal input (#780) — it needs promoting "
-                       "to live as well") + "; " + _dropped_input(s))
+                    + _draft_repair + "; " + _dropped_input(s))
         if s["carrier_terminal"]:
+            # ⛔ On a NEITHER-arm row the detail's "target THAT" would order a bare
+            # edge rewrite that the SAME finding's `fix` says repairs nothing until
+            # the shape is cleared (measured: ``confidences {}`` until both steps) —
+            # the detail/fix contradiction ``_head_fact`` exists to prevent. The shape
+            # step is stated here as a precondition, as the draft arm above does
+            # (#12210 review, P2).
+            _pre = (" ⛔ and this endpoint is in NEITHER EP arm, so clearing its shape "
+                    "is a PRECONDITION of the re-point this finding's repair orders — "
+                    "then it "
+                    if s["shape"] and not s["is_operator"] else " and it ")
             return ("; the successor it names is ITSELF "
                     f"{_quoted(_status_or_flag(s['carrier_status'], s['carrier_outdated']))}"
-                    f", and it {_head_fact(s)}")
+                    + _pre + _head_fact(s))
         return ""
 
     def _head_fact(s: dict) -> str:
@@ -1397,6 +1475,39 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                        "by the repair")
         return detail
 
+    def _ambiguity_prefix(s: dict) -> str:
+        """The "FIRST name the successor meant" demand, for N≥2 carriers.
+
+        ⛔ One source, because TWO arms name a destination: the resolvable one and the
+        id-less one, which returns before the resolvable arm's ``prefix`` was ever
+        built — so it asserted a single successor for an ambiguous name whose own
+        ``detail`` says the repair must pick one (#12210 review, P3). With N≥2 the
+        refusal cannot be ATTRIBUTED to the name (``carrier_status`` is one arbitrary
+        row — round 19), but an all-archived population is reachable and a re-point
+        onto a dead carrier builds no factor (measured: the row goes quiet with the
+        belief still gone).
+        """
+        if s["carrier_count"] <= 1:
+            return ""
+        return (f"FIRST name the successor meant: {_quoted(s['sup_sb'])} is "
+                f"carried by {s['carrier_count']} Objects (#3573) and this "
+                "check cannot pick one, so re-point onto the intended one "
+                "by ID — and confirm THAT one is live and one EP reads as an "
+                "input (``is_operator`` absent or ``false``"
+                + (" and no ``op_type`` set), because an edge written to a dead "
+                   "or shaped node builds no factor. " if not s["is_operator"]
+                   # ⛔ The operator-lane qualifier sits NEXT TO the test it modifies:
+                   # emitted after the whole arity ladder it read as a stray remark
+                   # about skipped-factor records (#12210 review, P3).
+                   # ⛔ The operator lane's consequence is the ARITY LADDER, not an
+                   # absolute: measured on a three-input operator, writing the edge
+                   # onto a dead carrier leaves the factor running over the two
+                   # survivors (``effective_n 2.52``, ``skipped: None``)
+                   # (#12210 review, P2).
+                   else " — an ``op_type`` only is ADMITTED here), because an edge "
+                        "written to a dead node is an input EP drops: "
+                        + _dropped_input(s) + ". "))
+
     def _chain_tail(s: dict) -> str:
         """What to do when the named successor is not a live target.
 
@@ -1414,7 +1525,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             return (f" ⛔ {succ} is OPERATOR-SHAPED " + _succ_test(s) +
                     ", which EP excludes from a factor's inputs (#9269): "
                     f"{_dropped_input(s)} — target a CLAIM successor")
-        if (status or "") == DRAFT_STATUS:
+        if (status or "") == DRAFT_STATUS and not s["carrier_terminal"]:
             # ⛔ SPLIT BY MECHANISM — the same split ``_successor_note`` already
             # carries: EP STRIPS a draft on the OPERATOR lane (``ep.py`` Batch 2, in
             # Python, with a record) and EXCLUDES the row on the DIRECT lane before
@@ -1423,18 +1534,56 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # a direct row: 2 confidences live, 0 after the supersession, ``skipped:
             # None``; so "EP strips the same way (#780)" was false there (round 19,
             # #12111).
+            # ⛔ SPLIT between the two rows: on a NEITHER-arm row the promotion is a
+            # PRECONDITION of the repair (measured: clearing the shape and moving the
+            # edge onto a draft → ``confidences {}``; the same plus ``status='live'``
+            # → ``effective_n 2.5255``), while on a readable-endpoint row it is a step
+            # the RE-POINT must accompany (measured: promotion alone → ``confidences
+            # {}``, because the stale edge still ends at the superseded Object;
+            # promotion + re-point → ``effective_n 2.9296``). Neither sentence may say
+            # promotion repairs on its own (#12210 review, P2/P3).
+            if s["shape"] and not s["is_operator"]:
+                # ⛔ On a NEITHER-arm row the promotion is a PRECONDITION, not a
+                # repair on its own: clearing the shape and moving the edge onto a
+                # draft builds no factor (measured ``iterations 0``, ``confidences
+                # {}``), and the same two steps plus ``status='live'`` DO (measured
+                # ``effective_n 2.5255``) — so the sentence names the order rather
+                # than denying the step (#12210 review, P2).
+                return (f" ⛔ {succ} is '{DRAFT_STATUS}', so promoting it to live is "
+                        "a PRECONDITION of this repair, not a substitute for it — "
+                        "promote it FIRST, then clear the shape and move the edge "
+                        "(moving onto it while it is a draft builds no factor: "
+                        "measured ``confidences {}``)")
             return (f" ⛔ {succ} is '{DRAFT_STATUS}', which EP "
                     + ("strips the same way (#780): promote it to live as well — "
                        if s["is_operator"] else
                        "EXCLUDES from a direct edge before evaluation — no factor, "
-                       "no skipped-factor record (measured), so promoting it to live "
-                       "is the repair: ")
+                       "no skipped-factor record (measured), so promote it to live "
+                       "AND re-point (promotion alone leaves the stale edge where it "
+                       "is): ")
                     + _dropped_input(s))
         if not s["carrier_terminal"]:
             return ""
         return (f" ⛔ {succ} is ITSELF "
                 f"{_quoted(_status_or_flag(status, s['carrier_outdated']))} "
                 f"and it {_head_fact(s)}")
+
+    def _succ_unread(s: dict) -> bool:
+        """Is the named successor one EP cannot read as an input?
+
+        ⛔ ONE source for the two emitted strings that must agree about it: the
+        repair's DESTINATION and §3.1's CARRY/DROP disposition BOTH call this
+        function (the destination directly, ``_triage`` through its own ``unread``
+        local) — so the two cannot disagree. A SHAPE refusal
+        (``_succ_refused``) and a TERMINAL successor are both unreadable, so a
+        "carry to the successor" in the same string as "NOT the one it names … which
+        EP refuses" is one false claim beside one true one — measured: the carry onto
+        a retracted successor left ``rows: 0`` with the belief still gone (#12210
+        review, P2). A DRAFT is deliberately NOT folded in here: ``_chain_tail``
+        offers "promote it to live as well", and promote-then-re-point measurably
+        repairs, so a draft keeps the CARRY disposition.
+        """
+        return _succ_refused(s) or s["carrier_terminal"]
 
     def _triage(s: dict) -> str:
         """ONTOLOGY §3.1's per-edge DISPOSITION, appended to every 4b repair.
@@ -1484,7 +1633,53 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         fwd, bwd = direction_flows(s["direction"])
         neither_arm = s["shape"] and not s["is_operator"]
         neutral = not (fwd or bwd)
-        if s["carrier_count"] == 1 and _succ_refused(s):
+        # ⛔ ONE derivation of "the successor is one EP cannot read", and the SAME
+        # predicate the destination consults (``carrier_unread`` → ``_succ_unread``).
+        # Re-deriving it here in two places is how the DRAFT branch ended up
+        # contradicting the destination on a draft that also carries the legacy
+        # ``outdated`` flag (#12210 review, P2).
+        unread = s["carrier_count"] == 1 and _succ_unread(s)
+        # ⛔ A neither-arm row is DROP *because nothing was assembled* — but once the
+        # shape is cleared the edge DOES carry, measured (clear shape + move →
+        # ``effective_n 2.5255``; before → ``confidences {}``), so where the destination
+        # is readable the disposition is CARRY, matching the repair the same string
+        # prescribes. Only a neither-arm row with nothing readable to carry onto is
+        # DROP (#12210 review, P3).
+        # ⛔ …and a LIVE HEAD of the successor's chain is a readable destination too:
+        # measured on a neither-arm row whose successor is archived but whose chain
+        # ends in a live Object — clearing the shape and moving the edge onto that head
+        # restores the belief (`effective_n 2.5255` from a bare prior), while the same
+        # string said "the disposition here is DROP" (#12210 review, P2). An ambiguous
+        # name (N≥2) has no single head to test, and the prefix already demands the
+        # reader pick a live one, so it is not a DROP either.
+        # ⛔ …and a DRAFT next hop is NOT a live head, by this module's own
+        # ``_head_fact`` ("a ``draft`` is not terminal … so neither is a head"): the
+        # CARRY text would otherwise name "a live one, named by ID" on a chain whose
+        # only node is a draft, while the same string's tail says "it needs promoting
+        # to live as well" (#12210 review, P3).
+        live_head = (s["next_count"] == 1 and not s["next_terminal"]
+                     and not _next_refused(s)
+                     and (s["next_status"] or "") != DRAFT_STATUS)
+        # ⛔ …and NOT a row with no successor name at all: naming a live successor,
+        # clearing the shape and re-pointing measurably restores the belief
+        # (`effective_n 2.5236`, re-audit 0 rows) — measured on the successorless
+        # neither-arm row, whose own leading instruction orders exactly that
+        # (#12210 review, P3).
+        neither_drops = (neither_arm and unread and not live_head)
+        # ⛔ NOT ON A NEUTRAL ROW. This arm's rationale is about the SUCCESSOR ("a
+        # carry needs a successor EP actually reads"), which simply is not why a
+        # neutral edge is DROP — that edge transfers nothing in either direction
+        # (``ep.py``'s ``if not (fwd or bwd)``), so the question never arises and the
+        # fix for the same row orders DELETE. Firing here put three disagreeing
+        # statements in one finding: the fix says "§3.1's disposition is DROP" and
+        # orders the delete, this triage said the DROP is only "for the edge AS
+        # NAMED" and named "a carry needs a successor EP actually reads" (inviting a
+        # carry to a differently-named successor), while the module's own measurement
+        # (the ``unread`` note below) records that carrying a neutral input onto a
+        # live node leaves the bare prior (``effective_n 2.0``) — inert, exactly as
+        # deleting it is. Reachable: a `-` DIRECT edge, or a ``semantics='related'``
+        # operator, whose successor is operator-shaped (#12210 review, P3).
+        if s["carrier_count"] == 1 and _succ_refused(s) and not neutral:
             # ⛔ A CARRY needs a successor EP actually reads — and the check may only
             # say so when the name resolves to ONE carrier (an ambiguous name is the
             # repair's first problem, not a refusal). Where the successor is
@@ -1496,26 +1691,166 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "a carry needs a successor EP actually reads, and this successor is "
                 "one EP REFUSES (operator-shaped on the operator lane, or "
                 "operator-shaped OR carrying an ``op_type`` on a direct edge) — so "
-                "the disposition for this edge is DROP, or `pend` (the non-voting "
-                "placeholder) if the claim may still be revisited, and no door "
-                "implements `pend` today. ⛔ A refutation that STILL APPLIES is "
-                "kept, not dropped: carry it where EP can read it (a :Point "
+                "the disposition for the edge AS NAMED is DROP, or `pend` (the "
+                "non-voting placeholder) if the claim may still be revisited, and "
+                "no door implements `pend` today. ⛔ A refutation that STILL APPLIES "
+                "is kept, not dropped: carry it where EP can read it (a :Point "
                 "operator the engine evaluates), never by re-attaching it to a "
                 "successor that cannot carry it")
-        elif neither_arm or neutral:
-            why = ("EP assembles no factor for this endpoint in either arm, so the "
-                   "support never counted"
-                   if neither_arm else
-                   f"this edge is {_quoted(s['direction'])} (neutral), so no "
-                   "confidence transfers through it by design")
+        elif neither_drops or neutral:
+            # ⛔ ``neutral`` FIRST, and it decides the SCOPE as well as the reason: on
+            # a neutral edge the successor's readability cannot change the disposition
+            # (the edge transfers nothing either way), so "AS NAMED" would invite a
+            # carry that measures ``effective_n 2.0`` — the bare prior — on the very
+            # row whose ``fix`` says DELETE (#12210 review, P3).
+            why = (f"this edge is {_quoted(s['direction'])} (neutral), so no "
+                   "confidence transfers through it by design"
+                   if neutral else
+                   "EP assembles no factor for this endpoint in either arm, so the "
+                   "support never counted")
             disposal = (
-                f"{why} — the disposition here is DROP, or `pend` (the non-voting "
+                f"{why} — the disposition "
+                f"{'for the edge AS NAMED' if (neither_drops and not neutral) else 'here'} is DROP, "
+                "or `pend` (the non-voting "
                 "placeholder) if the claim may still be revisited, and no door "
                 "implements `pend` today. ⛔ A refutation that STILL APPLIES is "
                 "kept, not dropped: carry it where EP can actually read it (a "
                 ":Point operator the engine evaluates), and never by re-attaching "
                 "it to a successor that cannot carry it — only a refutation that "
                 "MOTIVATED the correction is dropped")
+        elif (s["carrier_count"] == 1 and not unread
+              and (s["carrier_status"] or "") == DRAFT_STATUS):
+            # ⛔ Neutral rows never reach here: the ``neither_drops or neutral`` arm
+            # above consumes EVERY neutral row, which is where the DROP sentence for
+            # a neutral edge actually comes from — a ``not neutral`` conjunct here
+            # was dead and its comment credited a guard that cannot fire
+            # (#12210 review, P3).
+            # ⛔ The DRAFT row contradicted itself: the destination withdrew the name
+            # ("NOT the one it names … because it is 'draft'") while THIS disposition
+            # said "an IMPL may CARRY to the successor" and ``_chain_tail`` said
+            # "promoting it to live is the repair" (#12210 review, P2). Measured: the
+            # edge write onto the draft as-is builds no factor (`confidences {}`, the
+            # node absent), and the SAME write after `status='live'` restores it
+            # (`effective_n 2.263`) — so the draft IS the destination, one promotion
+            # away, and the disposition names that precondition instead of denying it.
+            # ⛔ …and NOT on a NEUTRAL row: promote-then-carry on a neutral edge
+            # restores nothing (measured ``effective_n 2.0``, the bare prior, versus
+            # ``2.5236`` for the flowing control), so the DROP sentence stands
+            # (#12210 review, P2).
+            # ⛔ …and on a NEITHER-arm row the promotion ALONE is not the repair: with
+            # the endpoint still shaped, promoting and moving the edge builds NO factor
+            # either (measured ``confidences {}``, ``iterations 0``); the belief needs
+            # the shape cleared too (``effective_n 2.5255`` after both). Naming only the
+            # promotion put a true instruction beside a false one in one string
+            # (#12210 review, P2).
+            # ⛔ ITS OWN SENTENCE, and it counts its own steps. Splice-joined with
+            # " AND " it followed ``_draft_mech``'s declarative ("…so nothing is
+            # dropped or re-scored") as one clause — "re-scored AND clear the shape"
+            # — the same gerund/imperative weld the sibling arms were fixed for; and
+            # "only both steps" named TWO while the instruction lists three (promote,
+            # clear the shape, move the edge) (#12210 review, P3).
+            _shape_too = (". Clear the shape on the endpoint EP refuses too "
+                          "(``tortoise_update_entity(<the active endpoint>, "
+                          "{'is_operator': False, 'op_type': None})``) — promoting it "
+                          "and moving the edge WHILE that endpoint is still shaped "
+                          "builds no factor either (measured ``confidences {}``), so "
+                          "ALL THREE steps are needed: promote, clear the shape, then "
+                          "move the edge"
+                          if neither_arm else "")
+            # ⛔ SPLIT BY MECHANISM, as `_chain_tail`/`_successor_note` already do: on
+            # the OPERATOR lane the draft is STRIPPED and the factor re-scored over
+            # what remains (the same arity ladder stated above in `_dropped_input`),
+            # while on the DIRECT lane EP EXCLUDES the row before evaluation — no
+            # factor, no skipped-factor record — and the promotion restores the
+            # BELIEF, it never builds a factor. Measured on one fixture per lane
+            # (direct edge + draft successor): direct `skipped_factors` is ``None`` at
+            # every step (2 confidences live → 0 at the draft → 0 after the
+            # un-promoted carry → 2 after the promotion); the operator lane reports
+            # ``['degenerate']`` while the successor is a draft. Stating the operator
+            # mechanism on a direct row is the "send the reader to a diagnostic that
+            # never exists" defect this module refuses elsewhere — and it
+            # contradicted `_chain_tail` inside the same emitted string (#12210
+            # review, P2).
+            # ⛔ THREE-WAY, not two: on the NEITHER arm the promotion ALONE restores
+            # nothing (the endpoint's shape is still there — measured ``confidences
+            # {}`` with the promotion AND the move, both), so "two once it is live"
+            # contradicted the ``_shape_too`` clause appended right after it in the
+            # same string (#12210 review, P2).
+            _draft_mech = (
+                "the same edge write is ADMITTED after the promotion and, before "
+                "it, EP strips that input and re-scores over whatever remains "
+                "(the arity ladder stated above)"
+                if s["is_operator"] else
+                "``confidences {}`` while it is a draft and while the endpoint still "
+                "carries the shape: the promotion is a PRECONDITION, not the repair "
+                "— EP builds no factor for this endpoint at all (the row is "
+                "excluded before evaluation), so nothing is dropped or re-scored"
+                if neither_arm else
+                "``confidences {}`` while it is a draft and two once it is live, "
+                "because EP builds no factor for this endpoint at all (the row is "
+                "excluded before evaluation), so nothing is dropped or re-scored")
+            disposal = (
+                "a DRAFT successor is the destination ONCE PROMOTED: set it "
+                "``status='live'`` first, then CARRY the IMPL (and any NAND that "
+                "STILL APPLIES) onto it — measured, " + _draft_mech + _shape_too
+                + ". Drop only a refutation that MOTIVATED the correction")
+        elif unread:
+            # ⛔ Neutral rows never reach here either — the ``neutral`` arm above has
+            # already taken them (same note as the DRAFT arm): a ``not neutral``
+            # conjunct here was dead (#12210 review, P3): the claim it encoded was
+            # false (measured: carrying a neutral input onto a live node leaves both
+            # posteriors at the bare prior, ``effective_n 2.0``) and contradicted the
+            # DROP the same string states (#12210 review, P2).
+            # ⛔ A TERMINAL successor is unreadable for a different reason, and the
+            # SHAPE wording above is false about it — measured: an 'archived'
+            # successor has ``is_operator NULL`` and no ``op_type``, yet the string
+            # called it "operator-shaped" beside the same string's `_chain_tail`
+            # naming the LIVE head of its chain, whose carry measurably restores the
+            # belief (#12210 review, P2). So: CARRY, onto the live carrier — never
+            # the dead one — and DROP only a refutation that no longer applies.
+            disposal = (
+                f"the successor it names is "
+                f"{_quoted(_status_or_flag(s['carrier_status'], s['carrier_outdated']))}"
+                ", which EP reads no input through — so CARRY the IMPL (or the NAND "
+                "that STILL APPLIES) onto whatever node now carries the claim (a "
+                "live one, named by ID), and drop only a refutation that MOTIVATED "
+                "the correction. A carry onto the dead name itself changes nothing: "
+                + _dropped_input(s)
+                # ⛔ …and this parenthetical is only true where the edge DID carry
+                # belief before the supersession: with a shaped superseded endpoint it
+                # never did (measured ``confidences {}`` before, ``effective_n 2.5255``
+                # after the prescribed repair), so "the same posteriors" contradicted
+                # the same sentence's "would establish one" (#12210 review, P2).
+                # ⛔ THREE-WAY, ONE FIGURE. A NEITHER-arm row gets a parenthetical that
+                # states the OUTCOME and NOT the figure, because its ``_dropped_input``
+                # already emitted ``effective_n 2.5255`` earlier in this same string:
+                # quoting the number twice is what the review rejected, not restating
+                # the result (the sibling draft-row test pins this phrase)
+                # (#12210 review, P3). A refused SUPERSEDED endpoint never carried
+                # belief, so "the same posteriors" is false there; every other row
+                # keeps it.
+                # ⛔ THE OPERATOR LANE MAKES NO ARITY CLAIM. ``sup_refused`` is
+                # reachable on BOTH lanes (``_4b_state``: the operator lane's is the
+                # flag test), and the figure below is a DIRECT-lane measurement — on
+                # an operator row the SAME repair restores one confidence per input
+                # that survives, which this check deliberately does not project
+                # (measured: two inputs → ``[2.5255, 2.5255]``; three inputs →
+                # ``[2.2627, 2.5256, 2.2629]``, i.e. n_conf 3, not 2). Stating a
+                # count there is the arity assertion ``audit.py`` refuses to make
+                # ("The strings therefore do not assert an arity"), and the operator
+                # lane already carries the arity-safe ladder in ``_dropped_input``
+                # (#12210 review, P3).
+                + (" (measured: the carry described above restores two confidences)"
+                   if neither_arm else
+                   " (measured: the factor runs again once the edge lands on a "
+                   "node EP reads)"
+                   if s["is_operator"] else
+                   " (measured: the prescribed edge onto a live claim successor "
+                   "restores two confidences, ``effective_n 2.5255``)"
+                   if s["sup_refused"] else
+                   " (measured: the same posteriors as before the supersession once "
+                   "the edge lands on the node that carries it)")
+                )
         else:
             disposal = (
                 "an IMPL may CARRY to the successor, and so may a NAND that STILL "
@@ -1576,8 +1911,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "over a claim whose support was never there — and the claim's "
                 "support has to be wired through a :Point operator regardless: "
                 "clearing the shape alone restores nothing while this edge still "
-                "ends at the superseded Object. (A neutral direction does not change "
-                "this: EP never reaches the direction test for this endpoint)")
+                "ends at the superseded Object. (A neutral direction DOES matter "
+                "once the shape is cleared: EP then reaches the direction test and "
+                "a `-` edge transfers nothing, so the moved edge must also flow)")
         if not (fwd or bwd):
             return lead + (
                 "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this edge is "
@@ -1673,6 +2009,54 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             _shape_repair = ("clearing the shape on the endpoint that carries it "
                              "(which carries no identity, so no repair can name "
                              "it)")
+        # ⛔ …and the IMPERATIVE form, for the arms that follow "then ": splicing the
+        # noun phrase there emitted "then clearing the shape — … — AND re-point …"
+        # (#12210 review, P3).
+        _shape_repair_imp = _shape_repair.replace("clearing the shape",
+                                                  "clear the shape", 1)
+        # ⛔ ONE place that decides the DESTINATION, above EVERY arm that names one —
+        # including the id-less arm, which used to return before it. A successor EP
+        # cannot READ must never be the destination: a SHAPE refusal (operator-shaped,
+        # or an ``op_type`` on a direct edge) and a TERMINAL one both mean the moved
+        # edge builds no factor, so performing the leading instruction leaves
+        # ``confidences {}`` and a QUIET re-audit — measured on an archived successor,
+        # on a retracted one and on the idx-0 arm (#12210 review, P2). ``_chain_tail``
+        # still names the specific live head when the successor's own chain has one.
+        # ⛔ A DRAFT is NOT in that set — see the ``carrier_unread`` note below.
+        successor = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "its successor"
+        tail = _chain_tail(s)
+        neutral = s["neutral_row"]
+        # ⛔ A DRAFT is deliberately NOT folded in here, for the same reason
+        # ``_succ_unread`` excludes it: promoting it measurably repairs (measured
+        # ``effective_n 2.263`` after the promotion, ``confidences {}`` without it),
+        # so the draft IS the destination — one promotion away. Withdrawing the name
+        # here made the string deny the node its OWN triage and ``_chain_tail`` send
+        # the reader to (#12210 review, P2).
+        # ⛔ ``not s["neutral_row"]`` IS DEFENSIVE, and that is stated rather than
+        # implied: every neutral path in this function RETURNS before it consumes
+        # ``dest``/``refused`` (the shape arm guards them with ``"" if neutral``, the
+        # direct arm and the operator arm each hit their own `return … DELETE` first),
+        # so removing the conjunct changes no emitted string and no test can see it —
+        # a mutation that drops it leaves the suite green. It stays so that a future
+        # arm cannot name a RE-POINT destination on a neutral row, where no carry can
+        # transfer anything (#12210 review, P3).
+        carrier_unread = (s["carrier_count"] == 1 and not s["neutral_row"]
+                          and _succ_unread(s))
+        if carrier_unread:
+            _why = ("it is operator-shaped, which EP refuses as a factor input"
+                    if _succ_refused(s) else
+                    f"it is {_quoted(_status_or_flag(s['carrier_status'], s['carrier_outdated']))}"
+                    ", which EP does not read as an input")
+            dest = (f"a CLAIM successor — NOT the one it names ({successor}), because "
+                    f"{_why}")
+        elif s["carrier_count"] == 1:
+            dest = f"the successor ({successor})"
+        else:
+            # ⛔ N≥2 carriers: this check cannot pick one (the ambiguity ``prefix``
+            # already demands the reader name it), so a destination sentence must not
+            # assert "the successor ('name')" (#12210 review, P3).
+            dest = "the successor you named by ID"
+        refused = carrier_unread
         if s["sup_id"] is None:
             # ⛔ ``tortoise_update_entity`` keys on the ID, so embedding a NAME in its
             # first argument addresses a key that does not exist. Only a raw
@@ -1680,12 +2064,70 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # Object), but the string must not hand out a call that cannot work —
             # 4c already answers this state in prose, and the two checks must not
             # disagree about it.
+            # ⛔ …and the SAME neutral guard as the successorless arm below: on a
+            # neutral row "re-point this input onto that successor" orders the repair
+            # this arm's own archive clause and appended §3.1 triage forbid. Only a
+            # raw ``REMOVE o.id`` reaches this state, but the string is still read by
+            # whoever runs the audit against a repaired graph (#12210 review, P3).
             return (
-                f"No id-keyed repair is possible for the superseded Object named "
+                (_ambiguity_prefix(s) if not s["neutral_row"] else "")
+                + f"No id-keyed repair is possible for the superseded Object named "
                 f"{_named(s['sup_name'])} (it carries no id, so "
                 "tortoise_update_entity cannot address it): give it one, then name "
-                f"the successor on it and re-point this {s['edge_type']} input onto "
-                "that successor, deleting the edge into the old endpoint. "
+                "the successor on it and "
+                + ("delete this edge: §3.1's disposition here is DROP, and a "
+                   "re-point would keep the same inert connection, because a "
+                   "neutral edge transfers no confidence in either direction"
+                   if s["neutral_row"] else
+                   # ⛔ …and the DESTINATION routing, which this arm used to return
+                   # before: on a flowing row it named the successor unconditionally,
+                   # so an archived / retracted / draft one left the row quiet over a
+                   # claim whose support was never carried (measured, #12210 review).
+                   # ⛔ ``dest`` is built for ``carrier_count == 1`` — it either
+                   # names the single successor or withdraws it. Interpolating it
+                   # here asserted a destination for a DANGLING name (count 0, while
+                   # this finding's own ``detail`` says no Object answers it) and for
+                   # an AMBIGUOUS one (count ≥ 2, while the other arms demand the
+                   # reader pick one first). Measured on both (#12210 review, P3).
+                   # ⛔ The deletion is its OWN sentence, after ``dest``: joined with
+                   # ", deleting …" it attached to the appositive whenever the
+                   # destination was WITHDRAWN ("… because it is operator-shaped,
+                   # which EP refuses as a factor input, deleting the edge into the
+                   # old endpoint") (#12210 review, P3).
+                   # ⛔ …and the NEITHER-arm step, mirroring the sibling arms
+                   # (``{_shape_repair} AND re-point …``): measured — perform this
+                   # bare re-point on a shaped-endpoint row and the belief stays at
+                   # ``confidences {}`` while the finding goes QUIET (0 rows); add
+                   # ``{'is_operator': False, 'op_type': None}`` and it returns
+                   # (``effective_n 2.5255``) (#12210 review, P2).
+                   ((f"{_shape_repair_imp} AND re-point this {s['edge_type']} "
+                     f"{'input' if s['is_operator'] else 'edge'} onto "
+                     + (dest if s["carrier_count"] == 1 else "that successor")
+                     + ". Delete the edge into the old endpoint")
+                    if (s["shape"] and not s["is_operator"]) else
+                    (f"re-point this {s['edge_type']} "
+                     f"{'input' if s['is_operator'] else 'edge'} onto "
+                     + (dest if s["carrier_count"] == 1 else "that successor")
+                     + ". Delete the edge into the old endpoint")))
+                + ". "
+                # ⛔ ``tail`` IS guarded here, and the guard is live: this arm is
+                # ``sup_id is None``, not ``carrier_count == 0`` — the
+                # ``supersededBy`` NAME can still resolve to one Object, in which
+                # case ``_chain_tail`` emits ("re-point onto whatever now carries the
+                # claim", "promote it to live as well", "target a CLAIM successor")
+                # beside this arm's own DROP. Measured on neutral id-less rows with an
+                # archived / draft / operator-shaped successor: every one of those
+                # clauses was emitted and none of them can transfer anything
+                # (#12210 review, P3). An earlier comment here claimed the tail was
+                # "" by construction — it is not, and that claim cost a round.
+                # ⛔ A TERMINATOR, not just a space: no ``_chain_tail`` arm ends in
+                # punctuation and ``_archive_clause`` opens with "Archiving it
+                # instead", so a bare concatenation emitted "…only onto a live
+                # claimArchiving it instead…"; padding with a space alone still ran the
+                # two sentences together ("…live claim Archiving it instead…") and
+                # doubled the space after "endpoint." (#12210 review, P3).
+                + ("" if s["neutral_row"] or not tail.strip()
+                   else tail.strip() + ". ")
                 + _archive_clause(s))
         if not s["carrier_count"]:
             # ⛔ "Nothing to re-point onto" would be FALSE whenever a :Subject or
@@ -1693,13 +2135,54 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # input, and this check's carrier probe is ``:Object``-scoped. State the
             # fact it measured and name that escape, rather than sending the reader
             # to mint a second successor.
+            # ⛔ The NEUTRAL guard belongs on THIS arm too: a neutral edge carries
+            # nothing in either direction (``ep.py``'s ``if not (fwd or bwd)``
+            # returns before any transfer), so "then re-point the input onto it"
+            # ordered the reader to perform exactly the repair this same string's
+            # archive clause and its appended §3.1 triage forbid ("the disposition
+            # here is DROP"). Measured on a ``semantics='related'`` operator and on a
+            # ``direction='-'`` direct edge: following the leading instruction
+            # produced the state the triage forbids, and the next audit — now
+            # resolvable — told the reader to DELETE, so two rounds of advice
+            # disagreed (#12111 review round 22).
             fix = (
-                f"No :Object answers the successor name this one carries, so there "
-                f"is no Object to re-point this {s['edge_type']} input onto: name "
-                f"the successor — tortoise_update_entity({q}, {{'supersededBy': "
-                f"'<the successor name>'}}) — then re-point the input onto it and "
-                f"delete the edge into {q}. If a Subject or Point carries that "
-                f"name, re-point onto THAT node instead and delete this edge. "
+                ((f"No :Object answers the successor name this one carries, so "
+                  f"there is no Object to re-point this {s['edge_type']} "
+                  f"{'input' if s['is_operator'] else 'edge'} onto: ")
+                 if bool(s["sup_sb"]) else
+                 # ⛔ A row with NO ``supersededBy`` at all (reachable: a bare
+                 # ``status='superseded'`` write) carries no successor NAME, and the
+                 # old lead asserted one while the same finding's ``detail`` said
+                 # "(none)" (#12210 review, P3).
+                 (f"This Object carries NO successor name, so there is no Object to "
+                  f"re-point this {s['edge_type']} "
+                  f"{'input' if s['is_operator'] else 'edge'} onto: "))
+                + f"name the successor — "
+                f"tortoise_update_entity({q}, {{'supersededBy': "
+                f"'<the successor name>'}}) — then "
+                + ("delete this edge: §3.1's disposition here is DROP, and a "
+                   "re-point would keep the same inert connection, because a neutral "
+                   "edge transfers no confidence in either direction"
+                   if neutral else
+                   # ⛔ On a NEITHER-arm row a bare re-point moves nothing: the
+                   # endpoint is in neither EP arm, so the shape has to be cleared in
+                   # the SAME instruction. Measured: follow the bare re-point and the
+                   # row goes QUIET over ``confidences {}``; adding the shape call
+                   # restores it (``effective_n 2.5255``). The resolvable neither-arm
+                   # arm already states this order — this one did not, then denied
+                   # the re-point three clauses later (#12210 review, P2).
+                   (f"{_shape_repair_imp} AND re-point the edge onto it, then "
+                    f"delete the edge into {q}"
+                    if (s["shape"] and not s["is_operator"]) else
+                    f"re-point the "
+                    f"{'edge' if not s['is_operator'] else 'input'} onto it and "
+                    f"delete the edge into {q}"))
+                + ("" if not bool(s["sup_sb"]) else
+                   ". If a Subject or Point carries that name, "
+                   + ("delete the edge and wire the support through a node EP reads, "
+                      "not by re-attaching it" if neutral else
+                      "re-point onto THAT node instead and delete this edge"))
+                + ". "
                 # ⛔ ONE source for the archive clause (``_archive_clause``): the
                 # mechanism is a property of the ROW — a DIRECT edge assembles no
                 # factor at all, a NEUTRAL operator loses nothing, an OPERATOR
@@ -1717,10 +2200,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # EP arm, so "write the equivalent edge" (the direct-edge sentence)
                 # changes nothing and a re-audit reads CLEAN over a claim whose
                 # support was never there.
-                fix += ("; and no edge rewrite repairs this — EP builds NO factor "
-                        "in EITHER arm (the operator arm needs the :Point LABEL and "
-                        "(``is_operator = true`` or an ``op_type``), the "
-                        "direct-edge arm refuses an operator-shaped endpoint). "
+                fix += ("; and no edge rewrite ALONE repairs this — EP builds NO "
+                        "factor in EITHER arm (the operator arm needs the :Point "
+                        "LABEL and (``is_operator = true`` or an ``op_type``), the "
+                        "direct-edge arm refuses an operator-shaped endpoint)"
+                        + ("" if neutral else ", which is why the shape call above is "
+                                            "part of the instruction")
+                        + ". "
                         "Clearing the shape is NOT sufficient on its own — this edge "
                         "still ends at the superseded Object, so what restores the "
                         f"support is the wiring, not the flag: {_shape_repair} AND "
@@ -1730,17 +2216,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                         "because the flag was already false)")
             elif not s["is_operator"]:
                 fix += ("; and this is a DIRECT edge, so there is no factor to "
-                        "re-point — write the equivalent edge onto that successor "
-                        "and delete this one")
+                        "re-point — "
+                        + ("delete it: it is neutral (``direction='-'``), so an "
+                           "equivalent edge onto that successor transfers nothing "
+                           "either and §3.1's disposition is DROP"
+                           if neutral else
+                           "write the equivalent edge onto that successor and "
+                           "delete this one"))
             return fix
-        prefix = ""
-        if s["carrier_count"] > 1:
-            prefix = (f"FIRST name the successor meant: {_quoted(s['sup_sb'])} is "
-                      f"carried by {s['carrier_count']} Objects (#3573) and this "
-                      "check cannot pick one, so re-point onto the intended one "
-                      "by ID. ")
-        successor = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "its successor"
-        tail = _chain_tail(s)
+        prefix = _ambiguity_prefix(s)
         if s["shape"] and not s["is_operator"]:
             # ⛔ NEITHER arm: "write the equivalent edge" would change nothing, so the
             # repair is to clear the SHAPE **and** move the edge — measured: clearing
@@ -1752,36 +2236,49 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # anchor ``q`` (``active_id`` differs by construction: the anchor is
             # ``status='superseded'`` while ``active`` must be live), so a call on
             # ``q`` would set the flag on a node that never carried it.
-            return prefix + (
+            # ⛔ …AND the NEUTRAL guard, for the same reason its siblings carry it:
+            # a neutral edge transfers nothing (``ep.py`` returns before any pair
+            # math), so "move this edge onto the successor" is HALF a repair that
+            # restores no belief — measured on a ``direction='-'`` direct edge with a
+            # shaped active endpoint: clearing the shape alone restored NO belief and
+            # the re-pointed neutral edge carried none either (bare prior,
+            # ``effective_n 2.0``, versus a real transfer on the flowing control).
+            # ⛔ NO ``prefix``/``tail`` on a NEUTRAL row, for the reason the neutral
+            # DIRECT arm records: both are written for a RE-POINT ("so re-point onto
+            # the intended one by ID", "target THAT, not the immediate successor") and
+            # this string now says DELETE (#12210 review, P3).
+            return (("" if neutral else prefix) + (
                 "No edge rewrite ALONE repairs this: EP builds NO factor in either "
                 "arm (the operator arm needs the :Point LABEL and "
                 "(``is_operator = true`` or an ``op_type``), the direct-edge arm "
-                "refuses an operator-shaped endpoint). The flag is only HALF the "
-                f"repair — {_shape_repair} AND move this "
-                f"{s['edge_type']} edge off {q} onto the successor ({successor}) — "
-                "or wire the claim through a :Point operator: clearing the FLAG "
-                "alone restores nothing while the edge still ends at the "
-                "superseded Object (measured: ``confidences {}``, and the row comes "
-                "back exactly as it was where the shape came from ``op_type``, "
-                "because the flag was already false)" + tail)
-        # ⛔ WHERE THE REPAIR SENDS THE EDGE, and the one place it must not: a
-        # successor EP REFUSES is named by the row's own `fix` as the destination
-        # while the same string says the belief is NOT moved and the §3.1 triage
-        # says DROP — performing the leading instruction produced exactly the false
-        # CLEAN this check exists to prevent (measured: re-pointing onto the shaped
-        # successor leaves ``confidences {}`` and the row quiet; review round 17,
-        # #12111). So the destination is a CLAIM successor and the named one is
-        # explicitly withdrawn.
-        # ⛔ SINGLE CARRIER ONLY: with N≥2 Objects carrying the name the row cannot
-        # say WHICH one EP refuses (``carrier_is_operator`` is ``head(collect(...))``
-        # — one arbitrary row), so asserting a refusal there can be false of the
-        # intended successor and withdraws a carry the check itself declines to
-        # arbitrate. Measured: an ambiguous name with one plain and one shaped
-        # carrier flipped its verdict with the MINT ORDER (round 19, #12111).
-        refused = s["carrier_count"] == 1 and _succ_refused(s)
-        dest = (f"a CLAIM successor — NOT the one it names ({successor}), which EP "
-                f"refuses as a factor input" if refused
-                else f"the successor ({successor})")
+                "refuses an operator-shaped endpoint). "
+                # ⛔ The "flag is only HALF the repair — {shape call} AND …" frame is for
+                # rows whose repair is a WRITE. On a NEUTRAL row the instruction is
+                # DELETE, and the same string then says the shape is NOT required to
+                # delete — emitting the frame there produced "The flag is only HALF the
+                # this edge is '-' (neutral)…" (last round removed only its tail)
+                # (#12210 review, P3).
+                + ("" if neutral else f"The flag is only HALF the repair — "
+                    f"{_shape_repair} AND ")
+                + ("This edge is "
+                   f"{_quoted(s['direction'])} (neutral), so a moved edge would "
+                   "transfer nothing either: DELETE it instead — §3.1's disposition "
+                   "here is DROP. ⛔ Clearing the shape is NOT required to DELETE "
+                   "it (this finding anchors on the edge's endpoint, not on the "
+                   "endpoint's shape); it is required only for the OTHER route — "
+                   "keep the endpoint and write a FLOWING edge onto a successor — "
+                   "and then the successor must be live and readable FIRST, because "
+                   "a write onto a draft, terminal or operator-shaped one builds no "
+                   "factor (measured ``confidences {}``) while this finding goes "
+                   "quiet, which is the false CLEAN this check exists to prevent"
+                   if neutral else
+                   f"move this {s['edge_type']} edge off {q} onto {dest}")
+                + " — or wire the claim through a :Point operator: clearing the "
+                  "FLAG alone restores nothing while the edge still ends at the "
+                  "superseded Object (measured: ``confidences {}``, and the row "
+                  "comes back exactly as it was where the shape came from "
+                  "``op_type``, because the flag was already false)"
+                + ("" if neutral else tail)))
         if not s["is_operator"]:
             # ⛔ The NEUTRAL test belongs HERE too, not only below: it used to sit
             # after this branch, so a `-` direct edge got "re-point it onto the
@@ -1870,7 +2367,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"targets. No SDK door rewires an operator's inputs" + tail)
         return prefix + (
             f"Re-point this {s['edge_type']} input from {q} to {dest}: an "
-            f"explicit edge write against the successor's ID "
+            f"explicit edge write against "
+            f"{'a CLAIM successor' if refused else 'the successor'}'s ID "
             f"that PRESERVES the edge idx (the slot EP reads), then delete the "
             f"edge into {q}. A successor that ALREADY carries an equivalent input "
             f"needs only that delete. No SDK door rewires an operator's inputs"

@@ -87,6 +87,11 @@ def test_counts_match_an_independent_query(sdk):
     it and only `test_an_edged_but_unreachable_claim_is_not_invisible` reddened,
     which is the §6 defect one file over (a test credited with a pin it does not
     hold). With the claim present, that mutation reds HERE.
+
+    ⛔ And it carries a far endpoint that is NOT a `:Point` (a live `:Subject`),
+    so the label list below is EXERCISED rather than merely spelled: drop
+    `:Subject` from the epistemic set and this fixture's edge stops resolving
+    (#12138 §2).
     """
     _chain(sdk, 3)
     _islands(sdk, 4)
@@ -94,13 +99,18 @@ def test_counts_match_an_independent_query(sdk):
     draft = sdk.create_point("statement", "draft neighbour", dedup=False,
                              status="draft")["id"]
     sdk.create_direct_edge("IMPL", unclassified, draft)
+    # a far endpoint that is NOT a `:Point`: reachable only because `:Subject`
+    # is in the epistemic set, so the spelled-out membership is live.
+    to_subject = _claim(sdk, "edged to a subject")
+    subject = sdk.create_subject("doctrine", "a live subject", dedup=False)["id"]
+    sdk.create_direct_edge("IMPL", to_subject, subject)
     p = _prop(sdk)
     g = sdk._get_proj().g
     live = int(g.query(
         "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) "
         "AND (n.status IS NULL OR n.status <> 'draft') RETURN count(n)"
     ).result_set[0][0])
-    assert p["graph_live_claims"] == live == 8
+    assert p["graph_live_claims"] == live == 9
     # The denominator's rule, spelled from the LABEL LIST rather than from
     # `epistemic_disjunction`'s own text, so this is an independent statement of
     # it. The presence half uses `ep_has_belief_cypher` ON PURPOSE: #11702 makes
@@ -122,12 +132,12 @@ def test_counts_match_an_independent_query(sdk):
         f"WITH DISTINCT n, ({ep_has_belief_cypher('n')}) AS has_belief "
         "RETURN count(n), sum(CASE WHEN has_belief THEN 1 ELSE 0 END)"
     ).result_set[0]
-    assert p["ep_reachable_claims"] == int(reach[0]) == 3
+    assert p["ep_reachable_claims"] == int(reach[0]) == 4
     assert p["belief_present"] == int(reach[1]) == 1
     assert p["operator_less_claims"] == live - edged == 4
-    # THE discrimination §2 needs: `points_edged` (4) and the denominator (3)
+    # THE discrimination §2 needs: `points_edged` (5) and the denominator (4)
     # are DIFFERENT, so the mixed-population mutation cannot satisfy both.
-    assert edged == 4 > int(reach[0]) == 3
+    assert edged == 5 > int(reach[0]) == 4
     assert p["unclassified_claims"] == edged - int(reach[0]) == 1
     assert p["unavailable"] is None
 
@@ -135,15 +145,18 @@ def test_counts_match_an_independent_query(sdk):
 def test_no_belief_stays_inside_its_invariants(sdk):
     """RANGES catch ONE direction of a mixed population, not both (#12138 §2).
 
-    A NARROWER (or label-blind) denominator is the direction a range CAN see:
-    the numerator can exceed it, so `no_belief` goes negative (measured -8.0)
-    or the ratio exceeds 1.0.
+    A NARROWER denominator (or a label-blind NUMERATOR over a narrower one) is
+    the direction a range CAN see: the numerator can exceed it, so `no_belief`
+    goes negative (measured -8.0) or the ratio exceeds 1.0. ⛔ A label-blind
+    DENOMINATOR is the opposite case — that set is a SUPERSET of the `:Point`
+    reach, so it is WIDER and belongs to the paragraph below, not this one.
 
     The direction this fixture is about is the WIDER one, and it is INVISIBLE
     to the ranges: with `belief_present` fixed, a larger denominator makes the
     ratio FALL and `no_belief` RISE, and both stay inside
-    `0 <= no_belief <= ep_reachable_claims` / `0 <= pct <= 1` (measured: a
-    denominator inflated by 4 gives `pct 0.2`, `no_belief +4` — in range).
+    `0 <= no_belief <= ep_reachable_claims` / `0 <= pct <= 1` — on this
+    fixture's numbers (`belief_present=1`) a denominator 4→5 moves `pct`
+    0.25→0.2 and `no_belief` 3→4, all of them in range.
 
     So the ranges are a cheap lower bound here, not the control: an inflated
     denominator is caught by pinning both counts against independently written
@@ -386,6 +399,13 @@ def test_an_operator_less_pass_does_not_report_full_coverage(sdk):
     p = _prop(sdk)
     last = p["last_pass"]
     assert last["affected"] >= 1               # the pass really ran over them
+    # ⛔ #12138 §1 — PIN the exact reach the comment in `sdk.py` cites
+    # (`affected=5, window_reachable=5, graph_ep_reachable=3`). Without these two
+    # numbers that citation is unpinned: a fixture edit would silently falsify the
+    # "the graph denominator can be SMALLER than the window's" evidence while every
+    # test stayed green.
+    assert last["affected"] == 5
+    assert last["window_reachable"] == 5
     assert p["ep_reachable_claims"] == 3
     assert p["operator_less_claims"] == 5
     assert p["unclassified_claims"] == 0
@@ -425,7 +445,7 @@ def test_the_census_bound_cannot_be_disabled_by_a_junk_value(sdk, monkeypatch):
     """
     _chain(sdk, 2)
     env = "TORTOISE_PROPAGATION_CENSUS_MAX_POINTS"
-    for junk in ("not-a-number", "0", "-5", "", "  "):
+    for junk in ("not-a-number", "0", "-5", "", "  ", "2.5"):
         monkeypatch.setenv(env, junk)
         assert (sdk._propagation_census_cap()
                 == DEFAULT_PROPAGATION_CENSUS_MAX_POINTS), junk
@@ -702,9 +722,9 @@ def test_the_three_counts_partition_the_live_points(sdk):
 
 
 def test_untested_operator_less_population_matches_trivial_stamp(sdk):
-    """#12116 A-P3: the block's operator-less count IS `_trivial_stamp`'s
-    population — a VALUE agreement, checked against a query built from the
-    CONSTANT ITSELF.
+    """#12116 A-P3 + #12138 §6: the block's operator-less count IS
+    `_trivial_stamp`'s population — a VALUE agreement, checked against a query
+    built from the CONSTANT ITSELF.
 
     ⛔ Two earlier versions were wrong in opposite directions. The first made
     this a shared SPELLING inside the census and was reverted in review P2:
@@ -718,8 +738,10 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     `NOT (n)-[:IMPL|NAND]-()` regardless of its status, and a fixture with no
     NAND edge cannot observe the NAND half either). So the fixture now carries
     the observables the constant's two vocabularies need: an UN-EDGED draft
-    Point (status drift reddens) and a NAND-only-edged claim (narrowing
-    `IMPL|NAND` to `IMPL` reddens).
+    Point (a REMOVED or RE-SPELLED status reddens; an ADDITIVE widening reddens
+    only when the newly-excluded status is one this fixture CARRIES — see the
+    body comment below) and a NAND-only-edged claim (narrowing `IMPL|NAND` to
+    `IMPL` reddens).
 
     ⛔ What that fixture CANNOT observe is named too, rather than implied away:
     every Point here carries an explicit status, so the constant's `status IS
@@ -727,7 +749,19 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     status <> 'draft'` stays GREEN) — and it is load-bearing, being what keeps a
     status-absent Point in BOTH populations; and every operator Point is edged,
     so the `is_operator` conjunct is indistinguishable from the negated pattern
-    (measured: dropping the conjunct stays GREEN).
+    (measured: dropping the conjunct stays GREEN). The edge-less `is_operator`
+    shape exists and is one public call away (`create_point(...,
+    is_operator=True)`; `create_operator` always wires an edge), and it has
+    **NO pin** today: no test that OBSERVES the trivial-stamp population carries
+    one, so WIDENING the conjunct is silent here (measured: dropping the
+    conjunct leaves the count at 2). ⛔ A fixture gap, not an unfixable
+    residual — one edge-less operator node keeps the count at 2 as written and
+    moves it 2→3 under the widened conjunct (measured), so a single node pins
+    it. What IS pinned is the opposite edge — NARROWING
+    `= false` to `IS NULL` drops every `is_operator: false` claim, and the
+    passes that must trivially stamp an isolated claim redden
+    (`tests/test_epic903_freshness.py`); that mutation says nothing about an
+    edge-less operator, so it is not a pin for this drift.
 
     The census keeps DERIVING its number (`graph_live - points_edged`, a
     positive traversal): the negated pattern is a production cost, and a
@@ -740,8 +774,12 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
                              status="draft")["id"]
     sdk.create_operator("IMPL", live, [draft])
     # The STATUS observable: a draft with NO edge, so only the status conjunct
-    # can keep it out of the constant's population (a widened status vocabulary
-    # would count it and redden the equality below).
+    # can keep it out of the constant's population. ⛔ RE-SPELLING the excluded
+    # status counts it and reddens the equality below (measured: `<> 'draft'` →
+    # `<> 'archived'` gives 2 vs 3). An ADDITIVE widening reddens only for a
+    # status this fixture CARRIES (measured: also excluding `'live'` gives 2 vs
+    # 0) and is INVISIBLE for one it does not (`'archived'` leaves the count at
+    # 2 and this test GREEN) — see `dream.py`'s residual note.
     sdk.create_point("statement", "un-edged draft", dedup=False,
                      status="draft")
     # The NAND observable: a claim whose only `IMPL|NAND` edge is a NAND one, so
@@ -749,6 +787,8 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     a, b = _islands(sdk, 2)
     sdk.create_operator("NAND", a, [b])
     prop = _prop(sdk)
+    # The query is built from the CONSTANT, so a drift that moves this
+    # population changes this count and reddens the assertion below.
     rows = sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE "
         f"{TRIVIAL_STAMP_PREDICATE} "
