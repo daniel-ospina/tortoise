@@ -1961,6 +1961,69 @@ def test_the_mixed_shadowed_row_names_each_half_by_its_origin(
     assert "now sets TORTOISE_DB_PATH" in out, out
 
 
+def test_a_blank_env_uri_beside_a_broken_file_key_is_not_reported_as_both(
+        capsys, _isolated, monkeypatch):
+    """The `both` arm is NARROWED: a whitespace env URI decides, so the file is no cause.
+
+    `config.daemon_db_target` tests `if uri:`, so `TORTOISE_DB_URI='   '` is a
+    DECIDING rung that raises BEFORE the file's `TORTOISE_DB_PATH` is ever read.
+    The file's value therefore cannot be a co-cause: the source is `env`, not
+    `both`, even though the file's key is broken too (#12441 item 6).
+
+    Pinned in BOTH attribution scans on purpose — they are separate code paths
+    (one runs while the file still has pending keys, the other in the applied
+    state where `effective` is empty), and a pin on one says nothing about the
+    other. The surviving `both` arm has its own test; the NARROWING did not, so a
+    later reader could restore `both` and nothing would fail.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "   ")
+    _write_env(_isolated, "TORTOISE_DB_PATH=relative/x.db\n")
+
+    # The state where the file still has a PENDING ladder key.
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "env", payload.get("daemon_error")
+    # The quoted value belongs to the rung that RAISED (the environment's), never
+    # to the file's — naming the file's value would send the user to the wrong one.
+    assert "'   '" in (payload.get("daemon_error") or ""), payload["daemon_error"]
+    assert "relative/x.db" not in (payload.get("daemon_error") or ""), (
+        payload["daemon_error"])
+
+    # …and the APPLIED state, which reaches the OTHER attribution scan.
+    dotenv_file.load_dotenv()
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "env", payload.get("daemon_error")
+    assert "the value is the one this" not in (payload.get("daemon_error") or ""), (
+        payload["daemon_error"])
+
+
+def test_the_mixed_shadowed_doctor_row_credits_the_FILE_when_its_key_is_the_top_rung():
+    """The `doctor` surface's FILE-wins half, which no test reached at all.
+
+    `_dotenv_rows` derives two mixed sentences and only the env-wins one was
+    pinned. Measured by injecting `raise SystemExit` at the file-wins arm:
+    `test_env_file_divergence` + `test_doctor` + `test_cli_config_show` — 434
+    tests — stayed fully GREEN. The sentence is true in every state a review
+    reached; only its pin was missing, the same class as the `file_graph_keys`
+    clause (#12441 item 6's companion, found by #12428's round-11 review).
+
+    Same construction as its env-wins sibling: the payload is the graded state,
+    so the assertion is on the sentence `_dotenv_rows` builds from it.
+    """
+    row = _rows_text({"differs": False,
+                      "keys": ["TORTOISE_DB_URI"],
+                      "file_graph_keys": ["TORTOISE_DB_URI"],
+                      "shadowed_graph_keys": ["TORTOISE_DB_PATH"],
+                      "applied_graph_keys": ["TORTOISE_DB_URI"],
+                      "keys_in_effect": ["TORTOISE_DB_URI"],
+                      "graph_keys": []})
+
+    assert ("which the daemon ranks above the environment's own "
+            "TORTOISE_DB_PATH") in row, row
+    assert "is the one this file selects" in row, row
+    # The env-wins sentence must NOT be the one printed for this ordering.
+    assert "cannot change the target" not in row, row
+
+
 def test_the_mixed_shadowed_doctor_row_names_each_half_by_its_origin():
     """The `doctor` row is a SECOND surface over the same payload (#12428).
 
