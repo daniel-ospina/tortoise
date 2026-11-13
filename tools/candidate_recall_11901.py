@@ -872,18 +872,24 @@ def run(args: argparse.Namespace) -> int:
         # The FTS candidate set a capture sees is the POOLED union over its
         # derived queries (`search_graph`, `extractor_v2.py:3074`), not `limit`.
         _pool3 = arms["pooled"][KS[0]]
+        #: ⛔ A run with ZERO capture groups measured no pooled set, so publishing
+        #: ``0.0`` would read as "a capture sees zero candidates" — the same false
+        #: label the `reduction_ratio` arm refuses 80 lines above. `None` is the
+        #: honest value, and it propagates to the per-mention derivation below.
         _pool_mean = (_pool3["set_sum"] / _pool3["captures"]
-                      if _pool3["captures"] else 0.0)
+                      if _pool3["captures"] else None)
         #: PER CAPTURE — a union over ~15 mentions, NOT a per-mention cost. Kept
         #: beside its per-mention derivation because the two were once compared
         #: to each other as if they were one quantity.
-        arms["blocking"]["fts_only"]["pooled_candidates_per_capture"] = round(
-            _pool_mean, 2)
+        arms["blocking"]["fts_only"]["pooled_candidates_per_capture"] = (
+            None if _pool_mean is None else round(_pool_mean, 2))
         #: `budget` is the production `max_queries` (15) the pooled groups are
         #: built at, so dividing by it is the per-mention derivation of the
-        #: per-capture union.
-        arms["blocking"]["fts_only"]["pooled_candidates_per_mention"] = round(
-            _pool_mean / 15, 2)
+        #: per-capture union. ⛔ DIVIDE BY `budget`, never by the literal: the
+        #: groups above are built at `budget`, so a literal would publish a
+        #: per-mention derivation of a different quantity the day it moves.
+        arms["blocking"]["fts_only"]["pooled_candidates_per_mention"] = (
+            None if _pool_mean is None else round(_pool_mean / budget, 2))
         arms["blocking"]["fts_only"]["candidate_set"] = (
             "pooled union over a capture's derived queries (max_queries=15); "
             "the per-query window is `k` candidates per mention")
