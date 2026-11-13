@@ -6295,12 +6295,7 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         # the only thing between a space-derived boundary and a fail-open. Measured:
         # bash prints ` # y` (or `a # b`) and runs the replacement.
         "unset x; echo ${x:- # y}",
-        # ⛔ AND A `}` INSIDE A NESTED `$( … )` IS DATA, NOT THE FRAME'S CLOSER
-        # (#12279 FINAL REVIEW 4, P2, measured FAIL-OPEN — pre-existing, a new
-        # spelling of #12292): it used to decrement the `${…}` counter, so the
-        # still-open expansion stopped protecting the ` #` after it and the live
-        # copy was erased.
-        "unset x; echo ${x:-$(echo }) #y}",
+
         "unset x; echo ${x:-a # b}",
         # ⛔ A NESTED QUOTING CONTEXT INSIDE A DOUBLE-QUOTED SPAN (#12279 FINAL
         # REVIEW, P1, measured FAIL-OPEN on main AND on this head before the fix):
@@ -7534,7 +7529,6 @@ def _strip_trailing_comment(line: str) -> str:
         # group frame it used to open let its `)` set a boundary and the `#`, which
         # bash keeps as DATA, was read as a comment that erased the live line.
         if char == "$" and index + 1 < len(line) and line[index + 1] == "{":
-            stack.append("brace")
             # ⛔ A NESTED QUOTING CONTEXT ENDS THE OUTER SPAN'S AUTHORITY (#12279
             # FINAL REVIEW, P1). Inside `$( … )` and `${…}` bash opens a NEW quoting
             # context, so `echo "$(echo " #note")"` prints ` #note` — the inner `"`
@@ -7550,20 +7544,17 @@ def _strip_trailing_comment(line: str) -> str:
             boundary = False
             index += 2
             continue
-        # ⛔ ONLY THE `}` THAT MATCHES THE OPEN `${` CLOSES IT (#12279 FINAL REVIEW 4,
-        # P2, measured FAIL-OPEN — pre-existing, a new spelling of #12292). A `}`
-        # inside a nested `$( … )` is DATA to bash, but it used to decrement the
-        # counter, so the still-open `${…}` stopped protecting the ` #` after it and
-        # a live `cp` was erased:
-        #     echo ${x:-$(echo }) #y}; cp -a "$b/17/bin/." "$b/16/bin/"
-        # A `}` that is not the frame's own closer is therefore DATA, not a closer.
-        if char == "}" and braces and stack and stack[-1] == "brace":
-            stack.pop()
-            braces -= 1
-            boundary = False
-            index += 1
-            continue
+        # ⛔ `}` CLOSES THE EXPANSION COUNTER, AND THE "OWN CLOSER" VARIANT WAS
+        # REVERTED (#12279 FINAL REVIEW 5, P2, measured). Requiring a matching
+        # `brace` frame is unreachable whenever the `${…}` interior opened a paren
+        # frame (`$(…)`, `(…)`, `$((…))`), because `)` deliberately pops only
+        # `group`/`extglob` (R8) — so `${x:-$(date)} # comment` stopped stripping
+        # its real trailing comment: 25 measured FALSE REDs against `main`, on
+        # lines bash comments out. An over-block is worse than the pre-existing
+        # fail-open it would have closed (a `}` inside `$( … )` releasing the
+        # frame), so the gap stays OPEN and its evidence is recorded on #12292.
         if char == "}" and braces:
+            braces -= 1
             boundary = False
             index += 1
             continue
