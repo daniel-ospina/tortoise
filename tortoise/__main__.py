@@ -12882,12 +12882,17 @@ _DOCTOR_BODY_CAP = 65536
 #: The hosted probe's wall-clock budget (#11912). It bounds leg STARTS, caps each
 #: leg at `min(its own bound, what is left)`, AND is passed into every body read
 #: as a deadline (`_read_capped`), so a leg already inside `resp.read(...)` stops
-#: at it too — the residual in-leg hang filed as tortoise#12398 is closed here
-#: rather than documented (a dripping server that held one leg for ~200 s now
-#: returns in ~18 s total). Why the budget exists at all: without it a spent
-#: socket bound was invisible and `min()` had nothing to subtract from, so
-#: `doctor` (and `onboard`'s last step) could chain four slow legs on exactly the
-#: network `--offline` exists for.
+#: at it too: a dripping server that held one leg for ~200 s now returns in
+#: ~18 s total, because the deadline is checked BETWEEN chunks rather than only
+#: between legs. ⛔ What it is NOT: a hard interrupt. A `read1` already blocked
+#: when the deadline passes still runs to its own socket bound, so the honest
+#: worst case is ~budget + ONE leg bound per leg — the 105 s an outer watchdog
+#: must use, per the constant block above (measured: 84.8 s with the budget at
+#: 75, fresh review at `e19d160c27`). tortoise#12398 stays OPEN for that residue;
+#: the drip-hang it was filed for is what `_read_capped` closes. Why the budget
+#: exists at all: without it a spent socket bound was invisible and `min()` had
+#: nothing to subtract from, so `doctor` (and `onboard`'s last step) could chain
+#: four slow legs on exactly the network `--offline` exists for.
 _DOCTOR_TOTAL_BUDGET_S = 75
 
 #: The key prefixes a HOSTED mint produces (`signup`, `key create`). #11912 uses
@@ -12900,6 +12905,13 @@ _DOCTOR_TOTAL_BUDGET_S = 75
 #: `tests/test_doctor.py::test_the_hosted_prefixes_match_the_auth_contract` pins
 #: the two definitions together.
 _HOSTED_KEY_PREFIXES = ("tt_", "tk_")
+
+#: The prefix of an OAuth 2.1 ACCESS TOKEN — a Bearer family this tree accepts at
+#: the MCP boundary only (`tortoise/mcp_auth.py:1251-1258`), never on REST
+#: `/v1/*` (ADR-010: "`oat_` tokens are MCP-only"). The hosted probe asks REST,
+#: so an `oat_` identity must be refused with its OWN remedy rather than aimed
+#: at an endpoint that answers 401 by design.
+_OAUTH_ONLY_KEY_PREFIX = "oat_"
 
 
 def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> None:
@@ -13087,7 +13099,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     # ⛔ An env-only `TORTOISE_API_KEY` is NOT proof of a HOSTED identity, and
     # probing one sends a LOCAL SECRET off the box (#11912 review round 15).
     # `TORTOISE_API_KEY` is also the documented shared key for a self-hosted
-    # `serve --http --auth static` (`.env.example:152-153`, `tortoise/auth.py`
+    # `serve --http --auth static` (`.env.example:149-150`, `tortoise/auth.py`
     # `require_auth`, `docs/quickstart-selfhosted.md:65`), and the resolver aims
     # ANY env key at `TORTOISE_API_URL` or the production default:
     # `_resolve_config_path` computes
@@ -13119,16 +13131,36 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         # ⚠️, not ℹ️: the `--offline` arm above is ⚠️ for the reason recorded
         # there, and it applies identically — ℹ️ counts in neither column, so the
         # summary could read `All checks passing!` beside an untested credential.
+        #
+        # ⛔ The remedy is SPLIT BY FAMILY, because one of the three Bearer
+        # families this tree accepts is hosted-only and would be LIED TO by the
+        # generic text. `oat_` tokens are OAuth 2.1 access tokens, "hosted-only,
+        # introspected … at the MCP boundary" (`tortoise/mcp_auth.py:1251-1258`),
+        # and REST `/v1/*` "stays key/JWT-only — `oat_` tokens are MCP-only"
+        # (`docs/adr/ADR-010-auth-planes-session-agent-key.md:62-64`). So telling
+        # that user to "set TORTOISE_API_URL" would aim a working OAuth token at
+        # a REST endpoint that answers 401 BY DESIGN and then print
+        # `❌ … re-mint it` — a false FAIL for a correct setup, which is the same
+        # defect class as the gate itself (fresh review at `e19d160c27`).
+        if api_key.startswith(_OAUTH_ONLY_KEY_PREFIX):
+            why = ("`TORTOISE_API_KEY` holds an OAuth access token (`oat_`), which "
+                   "the REST endpoint this probe uses does not accept by design "
+                   "— `oat_` tokens are MCP-only (ADR-010), so probing here "
+                   "would read 401 for a working setup")
+            remedy = ("Use the MCP endpoint with this token, or store a `tt_` "
+                      "key with `tortoise signup` if you want the REST verdict")
+        else:
+            why = ("`TORTOISE_API_KEY` is set with no `TORTOISE_API_URL`, and it "
+                   "is not a hosted-shaped key (`tt_`/`tk_`) — that is also the "
+                   "documented self-host `serve --http --auth static` secret, "
+                   "and sending a local auth secret to a hosted endpoint is not "
+                   "this verb's call")
+            remedy = ("If it IS a hosted key, set `TORTOISE_API_URL` (or store "
+                      "it with `tortoise signup`)")
         results.append(("Hosted", "⚠️",
                         f"{_printable(_mask_display_target(api_url or ''))} — not "
-                        "probed: `TORTOISE_API_KEY` is set with no "
-                        "`TORTOISE_API_URL`, and it is not a hosted-shaped key "
-                        "(`tt_`/`tk_`), so no request was made. That is also the "
-                        "documented self-host `serve --http --auth static` "
-                        "secret, and sending a local auth secret to a hosted "
-                        "endpoint is not this verb's call. If it IS a hosted "
-                        "key, set `TORTOISE_API_URL` (or store it with `tortoise "
-                        f"signup`); `tortoise config show` names which store won"
+                        f"probed: {why}, so no request was made. {remedy}; "
+                        f"`tortoise config show` names which store won"
                         f"{_provenance_note}"))
         return
 
@@ -13162,8 +13194,9 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         v = float(value)
         return f"{v:.0f}" if v.is_integer() else f"{v:.1f}"
 
-    def _retry_wait_claim(reason: object, silent: str, refused: str) -> str:
-        """What a retry row may CLAIM about the retry (fresh review round 16).
+    def _retry_wait_claim(reason: object, silent: str, refused: str,
+                          failed: str) -> str:
+        """What a retry row may CLAIM about the retry (fresh review rounds 16/17).
 
         A retry is only ENTERED because the first attempt timed out, but the
         retry's OWN failure was never classified — so an instant `ECONNREFUSED`
@@ -13171,11 +13204,21 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         and sending the reader after a slow network when the endpoint is refusing
         in microseconds. Same family as round 14's fix, which corrected WHICH
         number is printed but left the wait claim unconditional.
+
+        ⛔ THREE buckets, not two. "Everything that is not a timeout" is not one
+        event: a DNS failure, an expired certificate, a closed connection and a
+        malformed status line all reach this handler, and calling them all
+        "refused" replaced one unmeasured claim with another (measured: a
+        `gaierror` and an `SSL` cert error both rendered "refused on retry").
+        Only `ConnectionRefusedError` is a refusal; the rest say the retry
+        FAILED, and the scrubbed reason carries what actually happened.
         """
         scrubbed = _printable(_scrub(str(reason), api_url, api_key))
         if _is_timeout_reason(reason):
             return f"{silent} ({scrubbed})"
-        return f"{refused} ({scrubbed})"
+        if isinstance(reason, ConnectionRefusedError):
+            return f"{refused} ({scrubbed})"
+        return f"{failed} ({scrubbed})"
 
     def _read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
         """Read at most `cap` bytes, stopping when `deadline` passes.
@@ -13359,7 +13402,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             retry_reason = getattr(retry_exc, "reason", None) or retry_exc
             results.append(("Hosted", "⚠️",
                             f"cannot reach {base} — "
-                            f"{_retry_wait_claim(retry_reason, silent=(f'no answer in {_fmt_bound(health_first_bound)}s, and none in {_fmt_bound(health_retry_bound)}s on retry'), refused=(f'refused on retry after the first attempt timed out at {_fmt_bound(health_first_bound)}s'))}"
+                            f"{_retry_wait_claim(retry_reason, silent=(f'no answer in {_fmt_bound(health_first_bound)}s, and none in {_fmt_bound(health_retry_bound)}s on retry'), refused=(f'refused on retry after the first attempt timed out at {_fmt_bound(health_first_bound)}s'), failed=(f'the retry failed after the first attempt timed out at {_fmt_bound(health_first_bound)}s'))}"
                             ". The credential is UNGRADED (nothing was asked of "
                             "it) — check https://api.premiselabs.co/health or your "
                             f"TORTOISE_API_URL, then `tortoise config show`"
@@ -13465,7 +13508,9 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                     silent=(f"no answer in {_fmt_bound(team_first_bound)}s, and none "
                             f"in {_fmt_bound(team_retry_bound)}s on retry"),
                     refused=(f"refused on retry after the first attempt timed out "
-                             f"at {_fmt_bound(team_first_bound)}s"))
+                             f"at {_fmt_bound(team_first_bound)}s"),
+                    failed=(f"the retry failed after the first attempt timed out "
+                            f"at {_fmt_bound(team_first_bound)}s"))
 
     if reach_error is not None:
         # ⛔ The credential is UNPROVEN, NOT wrong — and that is a ⚠️ (fresh review
