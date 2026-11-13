@@ -615,7 +615,30 @@ def render_summary(report: Report) -> str:
 #: reach the index at all and prints pip's ABSENCE vocabulary — routed to FAIL/exit 1,
 #: "a release is owed", an irreversible upload, on every daily run. Proxy-only egress must
 #: read INDEX_UNREADABLE (exit 2, detector outage), which is the truth about it.
-_INDEX_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def _build_index_opener() -> urllib.request.OpenerDirector:
+    """Build the index opener with an EMPTY `ProxyHandler`, stamped with its policy.
+
+    ⛔ A FACTORY, not an inline expression, so the policy is MEASURABLE (#12422 review, P1).
+    `OpenerDirector.add_handler` appends a handler only when it contributes an
+    `*_open`-shaped method, and it SKIPS `proxy_open` by name — so a `ProxyHandler` whose
+    `proxies` mapping is EMPTY contributes nothing and is never appended. Consequence:
+    with no proxy environment, `build_opener()` and `build_opener(ProxyHandler({}))`
+    produce the SAME empty handler list, and an assertion reading the module-level
+    opener's handlers cannot tell them apart on a runner without a proxy — i.e. on CI,
+    which is where the pin has to be able to fail. Built through this seam AFTER the
+    environment is set, the two differ (measured: `build_opener()` ->
+    `[{'http': 'http://127.0.0.1:9', ...}]`, `build_opener(ProxyHandler({}))` -> `[]`).
+
+    The `_tortoise_index_policy` stamp is what lets the pin assert that PRODUCTION goes
+    through this function: an assertion on the handler list alone passes for a bare
+    `build_opener()` too, so a revert of the line below would leave it green.
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener._tortoise_index_policy = "no-proxy"
+    return opener
+
+
+_INDEX_OPENER = _build_index_opener()
 
 
 def _proxy_hint() -> str:
