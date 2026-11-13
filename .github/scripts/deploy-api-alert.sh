@@ -203,6 +203,24 @@ failed_step_from() { # <"id=outcome id=outcome …">
   printf ''
 }
 
+# ⛔ STRIP THE ENDS ONLY, NEVER THE INTERIOR (#12340). A `wc` count is normalised before it is
+# compared, because some implementations PAD the field (`wc -c < file` is space-padded by BSD's
+# `wc`), and a padded count is still a number. Stripping whitespace EVERYWHERE was the earlier
+# form, and it turned a `wc` that printed `1 2` into the comparable count `12` on BOTH sides of
+# the comparison — so a genuinely shortened excerpt resolved to "identical" and NONE of the three
+# disclosure sentences fired: the silent-loss state this guard exists to remove, reached by one
+# more `wc` shape (measured end-to-end by the #12272 cycle-12 reviewer). An interior separator now
+# stays non-numeric and lands on the existing "could NOT be measured" arm.
+# The two expansions are the ends-only idiom: `%%[![:space:]]*` leaves the LEADING run, which `#`
+# then removes; `##*[![:space:]]` leaves the TRAILING run, which `%` then removes. The patterns
+# stay UNQUOTED on purpose — a quoted one is a literal and matches nothing.
+trim_count() { # <captured count> -> the count with only its LEADING/TRAILING whitespace removed
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
 # The stable dedupe key (issue title). NO run id, NO timestamp, NO count.
 alert_key() { # <job> <step-id>
   if [ -n "$2" ]; then
@@ -230,7 +248,8 @@ USAGE
 
 build_body() { # <out-file> <job> <step-id> <failed-step-raw>
   local out="$1" job="$2" sid="$3" raw="$4" label excerpt
-  local raw_tail squeeze_incomplete report_bytes report_bytes_known cut_note
+  local raw_tail squeeze_incomplete squeeze_unmeasured report_bytes report_bytes_known cut_note
+  local excerpt_bytes raw_tail_bytes
   local failed_names="" pair id outcome pretty
   if [ -n "$raw" ]; then
     for pair in $raw; do
@@ -354,8 +373,9 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # these arms describe are exactly the ones where a converter or the ASCII fallback is
         # broken, and a `| tr -d ' '` here FAILED under `pipefail` in case 17h's state (broken
         # `tr`), silently setting the size to 0 and reverting to the cut-undeclared sentence —
-        # measured. Parameter expansion strips a right-padded `wc` count without a subprocess;
-        # the guard maps "no size to be had" to 0. What is MEASURED to reach that arm:
+        # measured. Parameter expansion strips a right-padded `wc` count without spawning an
+        # EXTERNAL tool (`trim_count` is parameter expansion inside a subshell — no `tr`, no
+        # `sed`); the guard maps "no size to be had" to 0. What is MEASURED to reach that arm:
         #   · the property check refuses (`-f` false — a directory, a device);
         #   · the READ fails before `wc` starts (an unreadable regular file: bash's `<` fails and `wc`
         #     is never invoked — a logging `wc` on PATH logs 0 calls for a `chmod 000` file);
@@ -406,7 +426,9 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         if [ -f "$DRIFT_REPORT_FILE" ]; then
           report_bytes="$(wc -c 2>/dev/null < "$DRIFT_REPORT_FILE")" || report_bytes=""
         fi
-        report_bytes="${report_bytes//[[:space:]]/}"
+        # ⛔ ENDS ONLY (#12340) — see `trim_count`. The whole-string strip this replaced turned a
+        # `wc` printing `1 2` into `12`, i.e. an unmeasurable count into a comparable one.
+        report_bytes="$(trim_count "$report_bytes")"
         # ⛔ A DIGIT-ONLY COUNT PAST int64 IS NOT COMPARABLE EITHER (verification round 2): bash's
         # `[` refuses it (`integer expression expected`, status 2), so the numeric tests below
         # would error and the body would describe a state nobody measured. 18 digits cannot
@@ -551,8 +573,11 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # comparison could not be made and must open the run link to check.
           excerpt_bytes="$(printf '%s' "$excerpt" | wc -c 2>/dev/null)" || excerpt_bytes=""
           raw_tail_bytes="$(printf '%s' "$raw_tail" | wc -c 2>/dev/null)" || raw_tail_bytes=""
-          excerpt_bytes="${excerpt_bytes//[[:space:]]/}"
-          raw_tail_bytes="${raw_tail_bytes//[[:space:]]/}"
+          # ⛔ ENDS ONLY (#12340), the same fix as the size probe's: a `wc` printing `1 2` used to
+          # normalise to `12` on both sides here, so the comparison ran on a number nobody
+          # measured and the disclosure was cleared. See `trim_count`.
+          excerpt_bytes="$(trim_count "$excerpt_bytes")"
+          raw_tail_bytes="$(trim_count "$raw_tail_bytes")"
           # Each count is checked on its OWN: a combined "a:b" test has to tolerate the
           # separator, and a `wc` printing `1:2` would then slip through to the numeric
           # compare and print the very diagnostic this guard exists to remove (measured by
