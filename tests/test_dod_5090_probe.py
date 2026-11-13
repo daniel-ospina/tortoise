@@ -4229,7 +4229,7 @@ def test_row_one_is_PARTIAL_because_ONE_writer_embeds_outside_the_gate(
     outside-gate writer holds the row **while the product does not name it**.
     The injected writer here is UNDECLARED on purpose (the register is empty),
     so this falsifier keeps its teeth; the DECLARED direction — the same writer,
-    named — is `test_a_named_ungated_writer_is_the_accepted_exception_reading_b`
+    named — is `test_a_named_UNGATED_writer_is_the_accepted_exception_reading_b`
     below. Dropping `undeclared` from the verdict reds this test.
     """
     _fake_rule_tree(tmp_path)
