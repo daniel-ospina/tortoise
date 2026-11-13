@@ -1378,6 +1378,65 @@ def test_the_POST_EXCEPTION_terminal_arm_reconciles_too(sdk, monkeypatch):
         f"{sdk.get_entity(g['id']).get('goalState')!r}")
 
 
+def test_a_claim_that_vanishes_BEFORE_the_retirement_lands_is_alreadyRetired(
+        sdk, monkeypatch):
+    """The SECOND vanish window (#12315 review, P1): the claim is deleted between
+    the read at the top of ``invalidate`` and ``retract_point``, so the refusal
+    comes back for a claim that is no longer there.
+
+    ⛔ IT IS NOT A SECOND DEFECT CLASS. An absent claim cannot be stale — the rule
+    the MISSING arm states — and this arm only reaches the same fact by a longer
+    route: the claim WAS live when ``invalidate`` read it, and a peer's purge
+    landed inside the call. Collapsing the post-raise re-read to ``None`` reported
+    that benign no-op as ``failed`` AND skipped the goal's reconcile, which is the
+    #12336 residual this module closes for every other already-retired arm:
+    measured before this round, ``goalState`` stayed ``met`` naming a claim that no
+    longer existed, and no later sweep can repair it — ``invalidate_stale`` scans
+    LIVE claims, so that goal is never a finding again.
+
+    ⚠️ ``found`` here is ``False``, not ``None``, and that is the point: ``None``
+    is reserved for a re-read that could not answer (``after is None``). "Gone" is
+    an answer, and it is the one this race produces.
+    """
+    i, t, g = _world(sdk, tag="vanish-before-retract")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"]).get("goalState") == "met"
+
+    def purged_by_a_PEER(point_id, **_kwargs):
+        sdk.delete_entity(point_id)          # the peer's cleanup, then its refusal
+        raise ValueError(f"no such point {point_id}")
+
+    monkeypatch.setattr(sdk, "retract_point", purged_by_a_PEER)
+    report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
+                                          goal_id=g["id"],
+                                          reason="target-revised", detail="…"))
+    assert report["invalidated"] is False, report
+    assert report["alreadyRetired"] is True, report
+    assert report["found"] is False, report
+    # a cancel is never a failure: no `error` key, so `counts.failed` cannot see it
+    assert "error" not in report, report
+    assert report["cache"]["checked"] is True, report["cache"]
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
+
+    # ...and the same race reached through a SWEEP lands in `alreadyRetired`, never
+    # in `failed`. The sweep is where #12315's bucket-totality rule lives, and this
+    # arm is only reachable with a claim that was STALE when the scan read it.
+    i2, t2, g2 = _world(sdk, tag="vanish-before-retract-sweep")
+    _judge(sdk, i2, t2, g2)
+    sdk.update_entity(t2["id"], threshold=12.0)  # a real stale finding
+    report2 = invalidate_stale(sdk, goal_id=g2["id"])
+    counts = report2["counts"]
+    assert counts["stale"] == 1, counts
+    assert counts["alreadyRetired"] == 1, counts
+    assert counts["retired"] == 0 and counts["failed"] == 0, counts
+    assert report2["invalidated"][0]["found"] is False, report2["invalidated"][0]
+    assert sdk.get_entity(g2["id"]).get("goalState") is None, (
+        "the sweep's finding vanished and the goal's word was never reconciled: "
+        f"{sdk.get_entity(g2['id']).get('goalState')!r}")
+
+
 def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
     """``_reconcile_or_report``'s contract: the idempotent retirement outcome is
     never discarded because the cache follow-up broke.

@@ -872,6 +872,25 @@ def invalidate(
         # genuine refusal by its TYPE. "Already terminal now" is the idempotent
         # outcome; anything else keeps its original trace.
         after = _read_claim(sdk, judgement_id)
+        if after is MISSING:
+            # ⛔ THE SECOND VANISH WINDOW, and it is the SAME fact as the MISSING
+            # arm above (#12315 review, P1). A claim deleted between the read at
+            # the top of this function and `retract_point` makes the retraction
+            # refuse (`sdk.py` raises `ValueError` for a missing point), so this
+            # re-read is the ONE place the race is visible. Collapsing it to
+            # `None` reported a benign no-op as `failed` AND skipped the goal's
+            # reconcile — the #12336 residual every other already-retired arm
+            # closes. An absent claim cannot be stale, so it takes the same
+            # idempotent reading and the same reconcile: an absent outcome is
+            # never a failure. The absent arm above has no claim, so it keeps
+            # `invalidation.goal_id` alone; this one never read a claim's
+            # `goalId` either (the claim it read is gone), so it does the same.
+            return {"invalidated": False, "judgementId": judgement_id,
+                    "alreadyRetired": True, "status": None, "found": False,
+                    "reason": invalidation.reason,
+                    "cache": _reconcile_or_report(sdk, invalidation.goal_id),
+                    "detail": "the judgement vanished before the retirement "
+                              "landed — nothing to retire"}
         after_status = after.get("status") if isinstance(after, dict) else None
         after_flag = bool(after.get("outdated")) if isinstance(after, dict) else False
         if (isinstance(after_status, str)
@@ -1033,12 +1052,15 @@ def invalidate_stale(
     PRESENT on every shape, so ``record["found"]`` never raises: ``False`` is the
     absent arm, ``True`` a claim the retirement read, ``None`` the refusal. Never
     test falsiness — ``None`` and ``False`` are different facts. ⚠️ ``None`` here
-    means the sweep could not tell, NOT that the answer is in principle unknown: a
-    raise out of :func:`invalidate` is either an unreadable claim (``claim is
-    None`` — genuinely unknown) or a ``retract_point`` refusal, where the claim HAD
-    been read as live (answer ``True``) unless the re-read that follows found it
-    gone or unreadable — the exception does not carry which, so the conservative
-    value is ``None`` and ``error`` names the raise),
+    means the sweep could not tell: a raise out of :func:`invalidate` is either an
+    unreadable claim (``claim is None`` BEFORE the retirement — genuinely unknown)
+    or a ``retract_point`` refusal, and the re-read that follows the refusal DOES
+    answer which — the claim came back terminal (``found: True``), came back GONE
+    (``found: False``: it was deleted between the read and the retirement, so the
+    idempotent reading applies and the goal's cache is reconciled — the second
+    vanish window #12315 closes), or could not be read at all (``found: None``, and
+    ``error`` names the raise). ⛔ The exception does not carry which; ``after``
+    does, and reading it is what keeps a benign no-op out of ``failed``),
     ``undecidable`` (verdicts the module could not decide — surfaced, never
     dropped), ``counts`` (including ``failed`` and ``gone``) and ``truncated``
     (true when the scan hit ``limit``, i.e. the sweep did not see the whole graph).
