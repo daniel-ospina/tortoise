@@ -8899,7 +8899,9 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
     assert any(
         v.startswith("tortoise/dup.py:3 re-declares key 'x::y' (first at :2)") for v in violations
     ), violations
-    assert any(v.startswith("tests/broken.py: UNPARSEABLE") for v in violations), violations
+    assert any(
+        v.startswith("tests/broken.py: UNPARSEABLE") and "at line 1" in v for v in violations
+    ), violations
     assert any(
         v.startswith("tools/adir.py: UNREADABLE (IsADirectoryError)") for v in violations
     ), violations
@@ -8918,6 +8920,10 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
     ), violations
     assert not any("at line None" in v for v in violations), violations
     assert not any("at line 0" in v for v in violations), violations
+    # ⛔ …and the TRUTHY branch — a real line number — must still render it: without this
+    # pin `where = "?"` unconditionally is GREEN on every other assertion here (measured),
+    # so the one branch that prints a usable location would be the one the suite cannot
+    # see. `def (:` yields `lineno == 1`; `binary.py`'s codec failure yields 1 as well.
     # …and the clean module contributes nothing: the report is specific, not a roll-up.
     assert not any("clean.py" in v for v in violations), violations
     # ⛔ And the guard's OWN message — the one `test_no_module_declares_the_same_dict_key_twice`
