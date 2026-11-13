@@ -15,6 +15,7 @@ import dataclasses
 import difflib
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -1497,6 +1498,19 @@ class PackManifest:
     # [{id, name?, description?, steps[], enforcement?, edges?}]
     chains: list[dict] = dataclasses.field(default_factory=list)
 
+    # Per-kind write guards (#12060) — OPTIONAL, sibling to kindDefs / relations /
+    # chains. `[{kind, layer, onConfusion: [{when, pattern, redirect, fallback,
+    # reason, fromKinds?, fromLayers?, linkPredicate?}]}]`.
+    #
+    # Carried here (not merely validated) because the WRITE path reads it:
+    # `tortoise.kind_guards` compiles this block into redirections for a write
+    # whose name matches a declared confusion. Absent means "no redirects" —
+    # exactly today's behaviour, which is why third-party packs may omit it.
+    # `packs/_template/` ships a worked example so a new pack starts with the
+    # shape. The rules (target closure / required core fallback) are enforced in
+    # `_validate` — at INSTALL, never at write (R3).
+    guards: list[dict] = dataclasses.field(default_factory=list)
+
     # The pack's DECLARED business hierarchy: [{path: 'Theme → Epic', type: hasPart}].
     #
     # ⛔ Carried, not just validated (#11001). `_validate` has shape-checked this
@@ -1823,6 +1837,7 @@ class PackRegistry:
         self.errors = {}
         self.unresolved_refs = {}
         self.lifecycle_warnings = {}
+        self.guard_warnings: dict[str, list[str]] = {}
         self._pending_lifecycle_warnings = {}
         self._status_fold_index = None
         count = 0
@@ -1962,6 +1977,7 @@ class PackRegistry:
             relations=ont.get("relations", []),
             kind_defs=ont.get("kindDefs", {}),
             chains=ont.get("chains", []),
+            guards=ont.get("guards", []) or [],
             hierarchies=ont.get("hierarchies", []),
             extraction=self._normalize_extraction(raw.get("extraction")),
             kind_subclasses=ont.get("subclassOf", {}),
@@ -2025,11 +2041,53 @@ class PackRegistry:
             errors.append("namespace must not contain whitespace")
 
         ont = raw.get("ontology", {})
+        # ⛔ A MALFORMED `ontology` OR MEMBER NAMES THE FIELD (round-13 review P3,
+        # measured): `objectKinds:` null surfaced `"'NoneType' object is not
+        # iterable"` and `relations: nope` surfaced `"'str' object has no
+        # attribute 'get'"` — a stack trace with a status code, on the CLI gate
+        # the guide tells authors to trust. The hosted pre-check had grown its own
+        # duplicate of these checks; the duplication is gone and this is the ONE
+        # place that refuses them, so the two surfaces cannot word it differently.
+        if not isinstance(ont, dict):
+            errors.append(
+                "ontology must be a mapping (extends / objectKinds / "
+                f"documentKinds / guards / …) — got {type(ont).__name__}")
+            return errors
+        for _kf in KIND_FIELDS:
+            if _kf in ont and not isinstance(ont[_kf], list):
+                errors.append(f"ontology.{_kf} must be a list — got "
+                              f"{type(ont[_kf]).__name__}")
+        for _kf in ("relations", "chains", "hierarchies"):
+            if _kf in ont and not isinstance(ont[_kf], list):
+                errors.append(f"ontology.{_kf} must be a list — got "
+                              f"{type(ont[_kf]).__name__}")
+        for _kf in ("kindDefs", "subclassOf", "equivalentTo"):
+            if _kf in ont and not isinstance(ont[_kf], dict):
+                errors.append(f"ontology.{_kf} must be a mapping — got "
+                              f"{type(ont[_kf]).__name__}")
+        # ⛔ AND THE ELEMENTS, one level below the container (round-13 review P3,
+        # measured): `relations: [1]` passed the list arm and then surfaced
+        # `"'int' object has no attribute 'get'"` from the loop below — the exact
+        # stack-trace-with-a-status-code the block above exists to close, on the
+        # surface the guide tells authors to trust. `chains`/`hierarchies`/
+        # `kindDefs` already name their element/key defects; `relations` was the
+        # single hole.
+        _rels = ont.get("relations")
+        if isinstance(_rels, list):
+            for _i, _rel in enumerate(_rels):
+                if not isinstance(_rel, dict):
+                    errors.append(f"ontology.relations[{_i}]: expected a "
+                                  f"mapping, got {type(_rel).__name__}")
+        if errors:
+            return errors
 
         # Collect all pack-declared kinds (used by relation + subclassOf +
         # kindDefs + extraction validation). Empty when ontology is absent.
         all_pack_kinds: set[str] = set()
         seen_chain_ids: set[str] = set()
+        # names an axis declared but REFUSED as invalid (see the element loop);
+        # consumed by the relation self-reference message below.
+        _refused_axis_names: set[str] = set()
 
         # Validate ontology section
         if ont:
@@ -2040,13 +2098,33 @@ class PackRegistry:
                 errors.append("ontology.extends must be 'core'")
 
             for kind_field in KIND_FIELDS:
+                # ⛔ THE TYPE IS ALREADY SETTLED ABOVE — this loop's old
+                # `not isinstance(kinds, list)` arm became unreachable the moment
+                # the block that returns early on a non-list landed (round-13
+                # review P3): two gates where only one runs. Elements only.
                 kinds = ont.get(kind_field, [])
-                if not isinstance(kinds, list):
-                    errors.append(f"ontology.{kind_field} must be a list")
-                    continue
                 for k in kinds:
                     if not isinstance(k, str) or not k:
                         errors.append(f"ontology.{kind_field}: invalid kind value: {k}")
+                        # ⛔ REMEMBER WHAT WAS REFUSED (round-16 review P3,
+                        # measured): the relation self-reference check re-derived
+                        # "declared badly" by SHAPE, which is type-sensitive, so
+                        # the scalar spellings (`objectKinds: [1]` + a relation to
+                        # `acme:1`) still got the false "not declared in this pack"
+                        # beside the real error. Recording the name here is exact
+                        # and shape-independent.
+                        if isinstance(k, str):
+                            _refused_axis_names.add(k)
+                        elif isinstance(k, list):
+                            # ⛔ NOT `if isinstance(x, str)` (round-17 review P3,
+                            # measured): `[[widget, 1]]` + a relation to `acme:1`
+                            # still said "not declared in this pack" for one
+                            # member of a declaration it had just refused. Every
+                            # member is recorded, stringified the way the message
+                            # renders it.
+                            _refused_axis_names.update(str(x) for x in k)
+                        else:
+                            _refused_axis_names.add(str(k))
                         continue
                     if k[0].isupper():
                         errors.append(
@@ -2125,8 +2203,20 @@ class PackRegistry:
 
             # Collect all pack-declared kinds (used by relation, subclassOf,
             # kindDefs, and extraction validation)
+            #
+            # ⛔ ONLY STRINGS — an unhashable element (`objectKinds: [[widget]]`)
+            # passed every container arm and then raised `TypeError: unhashable
+            # type: 'list'` straight out of `_validate`, whose `-> list[str]`
+            # contract forbids it (#8661, the "validator not total" class);
+            # `load_all`'s except turned it into
+            # `✗ acme: unhashable type: 'list'` — no field, no index (round-14
+            # review P2, measured). The element loop above already refuses a
+            # non-string with a NAMED message, so this filter stops the set-build
+            # from outrunning it. This closes the KIND-AXIS half of #8661; the
+            # relations/namespace shapes of that class are recorded there.
             for kf in KIND_FIELDS:
-                all_pack_kinds.update(ont.get(kf, []))
+                all_pack_kinds.update(
+                    k for k in (ont.get(kf) or []) if isinstance(k, str))
 
             # Pre-built core kind set for relation validation
             ALL_CORE_KINDS = CORE_KINDS
@@ -2158,8 +2248,19 @@ class PackRegistry:
                     # Cross-pack refs validated in load_all() after all packs loaded.
                     for direction, kind_val in [("fromKind", rel.get("fromKind", "")),
                                                  ("toKind", rel.get("toKind", ""))]:
-                        if not kind_val:
-                            continue  # already caught above
+                        # ⛔ `not kind_val` WAS NOT "caught above" (round-18
+                        # review P3, measured): the arm above tests KEY PRESENCE,
+                        # not the value, so `fromKind: 0` / `false` / `''` / `[]`
+                        # / `{}` / `null` validated `✓ Clean` and loaded, and the
+                        # SDK read path then raised `TypeError: argument of type
+                        # 'int' is not iterable` on a LATER traversal. The shape
+                        # check belongs here, where the field is named.
+                        if not isinstance(kind_val, str) or not kind_val.strip():
+                            errors.append(
+                                f"relation '{pred}': {direction} must be a "
+                                f"non-empty string — got "
+                                f"{type(kind_val).__name__}")
+                            continue
                         if kind_val[0].isupper():
                             # Core PascalCase kind — must be in canonical vocab
                             if kind_val not in ALL_CORE_KINDS:
@@ -2178,10 +2279,25 @@ class PackRegistry:
                             elif ref_ns == ns:  # noqa: SIM102
                                 # Self-reference — must be in this pack's kinds
                                 if ref_kind not in all_pack_kinds:
+                                    # ⛔ "NOT DECLARED" IS FALSE WHEN IT IS
+                                    # declared INVALIDLY (round-15 review P3,
+                                    # measured): `objectKinds: [["widget"]]` plus a
+                                    # relation to `acme:widget` printed this
+                                    # alongside the real `invalid kind value`
+                                    # error, sending the author to look for a
+                                    # missing declaration that is right there.
+                                    _declared_badly = ref_kind in \
+                                        _refused_axis_names
                                     errors.append(
                                         f"relation '{pred}': {direction} '{kind_val}' "
-                                        f"references '{ref_kind}' which is not "
-                                        f"declared in this pack"
+                                        f"references '{ref_kind}' "
+                                        + (
+                                            "which is declared on a *Kinds axis "
+                                            "but is not a VALID kind there (see "
+                                            "the ontology.*Kinds error above)"
+                                            if _declared_badly else
+                                            "which is not declared in this pack"
+                                        )
                                     )
                             # Cross-pack refs (ref_ns != ns): validate in load_all()
                         else:
@@ -2424,15 +2540,22 @@ class PackRegistry:
                         errors.append(
                             f"kindDefs '{kind}': 'extractable' must be a boolean"
                         )
+                    # ⛔ isinstance FIRST — `storeAs: [[1]]` raised `TypeError:
+                    # unhashable type: 'list'` out of `_validate` (measured,
+                    # round-16 review residual; the same class as the four
+                    # membership tests below, which now guard it).
                     if ("storeAs" in spec
-                            and spec["storeAs"] not in VALID_STORE_AS):
+                            and (not isinstance(spec["storeAs"], str)
+                                 or spec["storeAs"] not in VALID_STORE_AS)):
                         errors.append(
                             f"kindDefs '{kind}': 'storeAs' must be one of "
                             f"{', '.join(sorted(VALID_STORE_AS))}, "
                             f"got {spec['storeAs']!r}"
                         )
                     if ("enforcement" in spec
-                            and spec["enforcement"] not in VALID_ENFORCEMENT_LEVELS):
+                            and (not isinstance(spec["enforcement"], str)
+                                 or spec["enforcement"]
+                                 not in VALID_ENFORCEMENT_LEVELS)):
                         errors.append(
                             f"kindDefs '{kind}': 'enforcement' must be one of "
                             f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}, "
@@ -2509,7 +2632,9 @@ class PackRegistry:
                             f"list of kind names"
                         )
                     if ("enforcement" in chain
-                            and chain["enforcement"] not in VALID_ENFORCEMENT_LEVELS):
+                            and (not isinstance(chain["enforcement"], str)
+                                 or chain["enforcement"]
+                                 not in VALID_ENFORCEMENT_LEVELS)):
                         errors.append(
                             f"chains: '{cid or i}': 'enforcement' must be one of "
                             f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}"
@@ -2571,7 +2696,9 @@ class PackRegistry:
                             f"(allowed: default, kinds, relations, chains)"
                         )
                 if ("default" in enforcement
-                        and enforcement["default"] not in VALID_ENFORCEMENT_LEVELS):
+                        and (not isinstance(enforcement["default"], str)
+                             or enforcement["default"]
+                             not in VALID_ENFORCEMENT_LEVELS)):
                     errors.append(
                         f"extraction.enforcement.default must be one of "
                         f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}, "
@@ -2595,7 +2722,8 @@ class PackRegistry:
                         )
                         continue
                     for key, level in mapping.items():
-                        if level not in VALID_ENFORCEMENT_LEVELS:
+                        if (not isinstance(level, str)
+                                or level not in VALID_ENFORCEMENT_LEVELS):
                             errors.append(
                                 f"extraction.enforcement.{section}: level for "
                                 f"'{key}' must be one of "
@@ -2871,6 +2999,16 @@ class PackRegistry:
                     )
                     continue
                 for target in targets:
+                    if not isinstance(target, str):
+                        # `equivalentTo: {widget: [1]}` raised `TypeError:
+                        # argument of type 'int' is not iterable` out of
+                        # `_validate` — the neighbouring subclassOf loop already
+                        # guards this shape (round-14 review P3, measured).
+                        errors.append(
+                            f"equivalentTo: target for '{kind}' must be a "
+                            f"'namespace:kind' string — got "
+                            f"{type(target).__name__}")
+                        continue
                     if ":" not in target:
                         errors.append(
                             f"equivalentTo: '{target}' must use 'namespace:kind' format"
@@ -2890,9 +3028,627 @@ class PackRegistry:
                 "depends_on must be a list of non-empty pack namespaces"
             )
 
+        errors.extend(self._validate_guards(ont, ns, depends_on, all_pack_kinds))
+
+        return errors
+
+    # ── manifest guards (#12060) ───────────────────────────────────────
+
+    def _validate_guards(self, ont: dict, ns: str, depends_on: object,
+                         all_pack_kinds: set[str]) -> list[str]:
+        """``ontology.guards`` — R1/R3 enforcement, at INSTALL and not at write.
+
+        Two refusals, and they are exactly the two failure modes that would
+        otherwise surface as a broken write months later (#12060 R3):
+
+        * **R3a target closure** — every ``redirect`` target must resolve into
+          ``core``, THIS pack's own namespace, or a pack named in ``depends_on``.
+          A target resolved from the catalog instead would name a kind the graph
+          cannot legally write, because the catalog is a SUPERSET of any one
+          graph's partition (#5163).
+        ⛔ R3a CLOSES TWO DIFFERENT THINGS AND BOTH ARE CHECKED HERE, but not at
+        the same place, because only one of them has an answer at install:
+
+        * the target's **NAMESPACE** — here, below; and
+        * the target's **KIND** — here for THIS pack's own namespace, because it
+          is the one kind list a single manifest can answer for (and only its
+          ROUTING axes: ``objectKinds``/``documentKinds`` are the homes
+          ``entity_route`` maps, while ``eventKinds``/``pointKinds``/
+          ``actionKinds`` declare no layer at all);
+        * the ``core`` KIND and the ``depends_on`` KIND — in
+          ``guard_table_problems()``, which ``tortoise pack validate`` runs over
+          the whole validated directory and ``domain_loader`` reports as
+          ``guard_warnings`` after a catalog load. (The hosted
+          ``validate_manifest`` route does not ask: it refuses an
+          ``ontology.guards`` block outright, because a tenant manifest's guards
+          never reach the write-time table.) It abstains only for a pack target whose namespace
+          is NOT loaded (``_layer_of_kind`` reads the process's ambient catalog,
+          so a pack kind invisible to it would false-refuse every legitimate
+          cross-pack guard — round-2 review P1).
+
+        Both gaps were measured before they were closed (round-7 review), each as
+        "installs ``✓ Clean``, then degrades to ``fallback`` on every match":
+        ``redirect: acme:konpekt`` (nobody's question) and ``redirect:
+        core:WrokItem`` on the hosted route (the table had no caller there).
+
+        * **R3b a core fallback** — every ``onConfusion`` entry must declare a
+          ``fallback`` that is a CORE kind. The fallback is what the write-time
+          ladder degrades to when the target's pack is not installed (R4), so a
+          guard without one can only abstain — and an installable guard that can
+          never act is a declaration that lies.
+
+        Everything else here is SHAPE (so a malformed entry is a schema error
+        instead of a silently dead guard). ⛔ A guard is never a reason to refuse
+        a WRITE (#1934) — this runs once, in front of the person who chose the
+        dependency, which is the only place a cross-pack error belongs.
+
+        Both spellings of a kind are accepted in ``redirect``/``fallback``: bare
+        means this pack's kind (the convention every other manifest reference
+        follows), EXCEPT for a core kind, which manifests spell bare
+        (``core:WorkItem`` and ``WorkItem`` both resolve to core).
+        """
+        from tortoise.kind_guards import (
+            WHEN_PREDICATES,
+            _pattern_needs_compile,
+            core_kind_names,
+            kind_forms,
+        )
+        from tortoise.kind_layers import (
+            LAYERS,
+            NIL_KINDS,
+            SECTION_LAYERS,
+            core_sections,
+        )
+
+        # The CLOSED key sets of a guard entry and of one `onConfusion` entry —
+        # exactly the keys `pack_guards` reads, so "parsed" and "accepted" cannot
+        # drift. `message` is there because `pack_guards` takes it as an alias of
+        # `reason`; anything NOT here is a typo that would otherwise be read as
+        # absent (see the loud refusal at both levels).
+        # ⛔ EVERY CORE KIND A WRITE MAY NAME — the UNION of both sources, and
+        # neither alone. `CORE_KINDS` misses the entire §5 SUBJECT vocabulary
+        # (`organization`, `team`, `role`, `naturalPerson`, `legalPerson`, …):
+        # measured, 33 forms live only in `core_kind_names()`. `core_kind_names()`
+        # in turn misses 44 forms — the SECTION names (`Object`, `Subject`,
+        # `Document`, …) among them, alongside the event/document/action/point
+        # kinds. Round 6 used `CORE_KINDS`
+        # alone and therefore REFUSED `fromKinds: [core:organization]` — a live
+        # scope, and precisely the misfiling vocabulary this feature exists to fix
+        # (round-7 review P1, measured: the redirect fires and the same file
+        # accepts `core:organization` as a `fallback`).
+        # ⛔ AND NOT THE NIL BUCKET. `other`/`core:other` are in the vocabulary but
+        # no write can DECLARE one — `_named_layer_kinds({'objectKind': 'other'})`
+        # is empty, so the door hands the guard NO declared kind — which means a
+        # scope on it can never fire. It is refused below, with the empty-list
+        # form named as the way an author actually asks for the NIL mode.
+        _CORE_ANY_FORM = ({f"core:{k}" for k in CORE_KINDS} | set(CORE_KINDS)
+                          | set(core_kind_names()))
+        _NIL_FORMS = frozenset(NIL_KINDS)
+        _GUARD_KEYS = frozenset({"kind", "layer", "onConfusion"})
+        _CONFUSION_KEYS = frozenset({
+            "rule", "when", "pattern", "redirect", "fallback", "reason",
+            "message", "fromKinds", "fromLayers", "linkPredicate",
+        })
+
+        errors: list[str] = []
+        guards = ont.get("guards")
+        if guards is None:
+            return errors
+        if not isinstance(guards, list):
+            return ["ontology.guards must be a list"]
+
+        core_names = core_kind_names()
+        core_layer = {k: SECTION_LAYERS[sec]
+                      for k, sec in core_sections().items()}
+        # The pack's OWN declared kinds, by the axis that declares them. An axis
+        # IS a layer for the object/point/event axes. Two axes declare NO layer,
+        # and a guard may not claim one for a kind they own:
+        #   * `documentKinds` — a SOURCE genre (D10), not a layer;
+        #   * `actionKinds` — ONTOLOGY v3.0 dissolved Action, so a kind declared
+        #     there names a declared kind and never a node label (`VALID_ENTITY_
+        #     TYPES` records the same fact), and `kind_layers.LAYERS` has no
+        #     action layer to route it to.
+        # Leaving the second out of this map made the manifest's `layer` the one
+        # guard field NOTHING verified for such a kind — a wrong value installed
+        # clean (round-3 review P3).
+        own_layer: dict[str, str] = {}
+        for kind_field, layer in (("objectKinds", "object"),
+                                  ("pointKinds", "point"),
+                                  ("eventKinds", "event")):
+            for k in ont.get(kind_field, []) or []:
+                if isinstance(k, str) and k:
+                    own_layer[k] = layer
+        allowed_ns = {"core"} | {str(d).strip() for d in (depends_on or [])
+                                 if isinstance(d, str) and d.strip()}
+        if ns:
+            allowed_ns.add(str(ns))
+
+        def _resolve_ref(ref: str) -> tuple[str, str | None]:
+            """``(qualified kind, namespace-or-None)`` for a manifest reference."""
+            if ":" in ref:
+                _ns = ref.split(":", 1)[0]
+                return ref, (None if _ns == "core" else _ns)
+            if ref in core_names:
+                return f"core:{ref}", None
+            return f"{ns}:{ref}", (ns or None)
+
+        def _layer_of(ref: str) -> str | None:
+            """The layer the declaration under validation says ``ref`` has."""
+            bare = ref.split(":", 1)[-1]
+            if ref in core_names or f"core:{ref}" in core_layer or ref in core_layer:
+                return core_layer.get(ref) or core_layer.get(f"core:{ref}")
+            return own_layer.get(bare)
+
+        seen_rules: set[str] = set()
+        for i, entry in enumerate(guards):
+            where = f"ontology.guards[{i}]"
+            if not isinstance(entry, dict):
+                errors.append(f"{where}: expected a map, got "
+                              f"{type(entry).__name__}")
+                continue
+            # ⛔ THE KEY NAMES ARE PART OF THE SCHEMA, not just the values.
+            # A misspelled key is invisible to every `.get()` below, so the entry
+            # validates clean and compiles with that feature silently OFF —
+            # worse than a bad value, which at least abstains. Measured:
+            # `linkpredicate:` (lowercase) shipped a guard that redirected to a
+            # role kind with NO abstention, and `fromKind:` (no `s`) turned a
+            # scoped guard into a NIL-mode one, both with `✓ Clean` and rc 0.
+            _unknown = sorted(set(entry) - _GUARD_KEYS)
+            if _unknown:
+                errors.append(
+                    f"{where}: unknown key(s) "
+                    f"{', '.join(repr(k) for k in _unknown)} — a misspelled key "
+                    f"is read as absent, so the guard compiles with that feature "
+                    f"silently OFF (known: {', '.join(sorted(_GUARD_KEYS))})")
+            kind_ref = entry.get("kind")
+            if not isinstance(kind_ref, str) or not kind_ref.strip():
+                errors.append(f"{where}: missing required 'kind'")
+                kind_ref = None
+            else:
+                qualified, _kns = _resolve_ref(kind_ref.strip())
+                bare = qualified.split(":", 1)[-1]
+                if not (qualified in core_names
+                        or f"core:{qualified}" in core_names
+                        or bare in all_pack_kinds):
+                    errors.append(
+                        f"{where}: kind '{kind_ref}' is neither a core kind nor "
+                        f"a kind this pack declares — a guard must be about a "
+                        f"kind the pack owns")
+            layer = entry.get("layer")
+            if layer not in LAYERS:
+                errors.append(
+                    f"{where}.layer: must be one of "
+                    f"{', '.join(LAYERS)} (got {layer!r})")
+            elif isinstance(kind_ref, str) and kind_ref.strip():
+                # ⛔ The documentKinds refusal was DEAD CODE where it used to
+                # live — one `elif` further down, behind a branch that had
+                # already claimed every non-empty `kind_ref`, so a pack that
+                # declared `documentKinds: [contract]` AND a guard on `contract`
+                # validated CLEAN (round-2 review P2, measured). A document is a
+                # `:Source` (D10), not an entity layer, so there is nothing a
+                # guard could redirect; the check now runs FIRST, where it can
+                # fire.
+                if (":" not in kind_ref.strip()
+                        and kind_ref.strip() in (ont.get("documentKinds") or [])):
+                    errors.append(
+                        f"{where}.layer: '{kind_ref}' is a documentKind (a "
+                        f":Source genre, D10) — not a guardable entity layer")
+                elif (":" not in kind_ref.strip()
+                        and kind_ref.strip() in (ont.get("actionKinds") or [])
+                        and kind_ref.strip() not in own_layer):
+                    # ⛔ The SAME shape as the documentKinds refusal above, and the
+                    # same verdict. `actionKinds` declares no layer — ONTOLOGY
+                    # v3.0 dissolved Action, so no door writes an action kind and
+                    # no layer can be verified for one — so a guard on a kind
+                    # declared ONLY on that axis claimed a layer nothing would
+                    # ever check (round-3 review P3, measured: a manifest whose
+                    # guard said `layer: object` for an `actionKinds` kind
+                    # validated CLEAN). A bare kind the pack ALSO declares on a
+                    # real axis keeps its ordinary layer check and is not refused
+                    # here — the refusal is only for a kind that axis alone owns.
+                    errors.append(
+                        f"{where}.layer: '{kind_ref}' is an actionKind — that "
+                        f"axis declares no layer (ONTOLOGY v3.0 dissolved "
+                        f"Action), so a guard cannot claim a layer for it")
+                else:
+                    declared_layer = _layer_of(kind_ref.strip())
+                    if declared_layer is not None and declared_layer != layer:
+                        errors.append(
+                            f"{where}.layer: '{kind_ref}' is declared on the "
+                            f"{declared_layer} layer, not '{layer}'")
+
+            confusions = entry.get("onConfusion")
+            if not isinstance(confusions, list) or not confusions:
+                errors.append(f"{where}.onConfusion: must be a non-empty list")
+                continue
+            for j, c in enumerate(confusions):
+                cw = f"{where}.onConfusion[{j}]"
+                if not isinstance(c, dict):
+                    errors.append(f"{cw}: expected a map")
+                    continue
+                # ⛔ `is None`, NOT `or` (round-16 review P3, measured): `or`
+                # conflated ABSENT with FALSY, so `rule: []` / `{}` / `0` / `false`
+                # slipped past the refusal below and silently got the synthetic id
+                # — 4 of 7 malformed shapes bypassing a guard whose own message
+                # says "must be a non-empty string".
+                rule = c.get("rule")
+                if rule is None:
+                    rule = f"{ns}:{kind_ref}:{j}"
+                elif not isinstance(rule, str) or not rule.strip():
+                    # ⛔ `rule: [r1]` raised `TypeError: unhashable type: 'list'`
+                    # out of `_validate` — on THIS feature's own surface, one
+                    # side of the seen_rules dedupe (round-15 review P2,
+                    # measured). The id is echoed into every problem string, so a
+                    # non-string one breaks the report as well as the dedupe.
+                    errors.append(
+                        f"{cw}.rule: must be a non-empty string — got "
+                        f"{type(rule).__name__}")
+                    rule = f"{ns}:{kind_ref}:{j}"
+                if rule in seen_rules:
+                    errors.append(f"{cw}: duplicate rule id '{rule}'")
+                seen_rules.add(str(rule))
+                when = c.get("when", "nameMatches")
+                if when not in WHEN_PREDICATES:
+                    errors.append(
+                        f"{cw}.when: must be one of "
+                        f"{', '.join(WHEN_PREDICATES)} (got {when!r})")
+                pattern = c.get("pattern")
+                # ⛔ ONE PREDICATE, BOTH GATES (review P2, measured): the
+                # runtime skips a blank pattern (`re.compile("")` matches every
+                # name, one guard then redirecting every write that declares no
+                # kind), so accepting `"   "` here blessed a guard that could
+                # never fire — `pack validate` said `✓ Clean` over a rule the
+                # runtime dropped with only a log line.
+                if not isinstance(pattern, str) or not pattern.strip():
+                    errors.append(f"{cw}.pattern: required non-empty string")
+                elif _pattern_needs_compile(str(when)):
+                    # Only a REGEX predicate is compiled. `nameStartsWith` reads
+                    # its pattern as a LITERAL (the runtime does not compile it),
+                    # so compiling here refused a prefix that happens to contain
+                    # a metacharacter — a legal rule rejected at install while
+                    # the guard's own spec says the prefix is literal.
+                    try:
+                        re.compile(pattern, re.IGNORECASE)
+                    except re.error as exc:
+                        errors.append(f"{cw}.pattern: does not compile ({exc})")
+                # ⛔ `message` IS AN ACCEPTED ALIAS (round-18 review P3, measured):
+                # `_CONFUSION_KEYS` includes it precisely because `kind_guards`
+                # reads `reason or message`, and the comment above that set says
+                # the two cannot drift — but this arm demanded `reason` alone, so
+                # a manifest spelling only `message` was refused at install while
+                # the runtime would have honoured it. One owner of "which key
+                # carries the reason", not two.
+                _reason = c.get("reason")
+                if _reason is None:
+                    _reason = c.get("message")
+                if not isinstance(_reason, str) or not _reason.strip():
+                    errors.append(
+                        f"{cw}.reason: required — a redirect the caller cannot "
+                        f"explain is a redirect it cannot judge")
+
+                target = c.get("redirect")
+                if not isinstance(target, str) or not target.strip():
+                    errors.append(f"{cw}.redirect: required")
+                else:
+                    _qualified, tns = _resolve_ref(target.strip())
+                    _bare = _qualified.split(":", 1)[-1] if ":" in _qualified \
+                        else _qualified
+                    # ⛔ ONLY TWO AXES ARE HOMES. `entity_route` maps
+                    # `objectKinds` and `documentKinds` into the entity layer;
+                    # an `eventKinds`/`pointKinds`/`actionKinds` declaration is
+                    # NOT a routable home (`actionKinds` contributes no spec entry
+                    # at all). Measured, round-7 review: `redirect: acme:activate`
+                    # with `actionKinds: [activate]` validated `✓ Clean` and then
+                    # resolved to `fallback` with `skipped.reason =
+                    # 'no-usable-home'` — the dead-guard shape this arm exists to
+                    # close, reachable through three of the five axes. The SCOPE
+                    # check (`fromKinds`, below) stays on `all_pack_kinds` on
+                    # purpose: a scope is matched by the declared STRING (open
+                    # vocabulary), a target needs a HOME.
+                    #
+                    # ⛔ AND `documentKinds` IS BOTH A HOME *AND* NOT A GUARDABLE
+                    # LAYER, which looks contradictory until you ask which
+                    # authority is speaking: `entity_route("dev:architectureDoc")
+                    # == "object"` — the kind INDEX puts document kinds in the
+                    # entity partition — while the guard-ON-a-kind check above
+                    # refuses a `documentKinds` kind because D10 says a document
+                    # write routes to a `:Source` keyed `url` on the DIRECT write
+                    # path. A redirect HOME is a classifier target; D10 governs
+                    # the write that a caller issues directly. Both hold, and the
+                    # next reader holding D10 must not "tidy" the other away.
+                    _routable_own = {
+                        k for axis in ("objectKinds", "documentKinds")
+                        for k in (ont.get(axis) or [])
+                        if isinstance(k, str) and k}
+                    if tns is not None and tns not in allowed_ns:
+                        errors.append(
+                            f"{cw}.redirect: '{target}' targets namespace "
+                            f"'{tns}', which this pack neither owns nor declares "
+                            f"in depends_on — either add the dependency or "
+                            f"redirect to a core kind (R1/R3)")
+                    elif tns is not None and tns == (ns or None) \
+                            and _bare not in _routable_own:
+                        # THIS PACK'S OWN NAMESPACE IS THE ONE KIND LIST INSTALL
+                        # HAS IN HAND, so a typo here is knowable and must be
+                        # refused — nothing else asks (the installed-set check is
+                        # write-time, and it silently degrades). Measured before
+                        # the arm: `redirect: acme:konpekt` printed `✓ Clean`,
+                        # exit 0. A `core` typo is the TABLE's question, and a
+                        # `depends_on` namespace belongs to the install route,
+                        # which has every pack loaded (`guard_table_problems(
+                        # pack_kinds=…)`) — so each defect has exactly ONE gate.
+                        _axis = next(
+                            (kf for kf in KIND_FIELDS
+                             if _bare in (ont.get(kf) or [])), None)
+                        if _axis and _axis not in ("objectKinds",
+                                                   "documentKinds"):
+                            errors.append(
+                                f"{cw}.redirect: '{target}' is declared under "
+                                f"ontology.{_axis}, which routes to no entity "
+                                f"layer — it cannot be a redirect home, so the "
+                                f"guard would degrade to its fallback on every "
+                                f"match")
+                        else:
+                            errors.append(
+                                f"{cw}.redirect: '{target}' is this pack's own "
+                                f"namespace but names no kind it declares — the "
+                                f"guard would degrade to its fallback on every "
+                                f"match, and a redirect that never happens is a "
+                                f"declaration that lies")
+                fb = c.get("fallback")
+                if not isinstance(fb, str) or not fb.strip():
+                    errors.append(
+                        f"{cw}.fallback: required — a guard whose target is "
+                        f"unavailable must degrade to a CORE kind (R3)")
+                else:
+                    _fq, fns = _resolve_ref(fb.strip())
+                    if fns is not None or not (
+                            kind_forms(_fq) & core_names):
+                        errors.append(
+                            f"{cw}.fallback: '{fb}' is not a core kind — the "
+                            f"fallback is the one home that always exists, so it "
+                            f"cannot itself depend on a pack (R3)")
+                # ⛔ THE CONTAINER FIRST (round-17 review P2, measured):
+                # `fromKinds: 7` raised `TypeError: 'int' object is not
+                # iterable` out of `_validate`, rendered by `load_all` as
+                # `✗ acme: 'int' object is not iterable` — no field, no index.
+                # And `or []` conflated FALSY with ABSENT exactly as the
+                # `rule` arm above ONCE did (round 16 fixed it there; that arm
+                # now refuses a falsy id by name):
+                # `fromKinds: 0` / `false` / `{}`
+                # loaded `✓ Clean` as NIL mode, and a scalar `'widget'` was
+                # char-split into six one-letter "kinds".
+                _fk_list = c.get("fromKinds")
+                if _fk_list is not None and not isinstance(_fk_list, list):
+                    errors.append(
+                        f"{cw}.fromKinds: must be a list — got "
+                        f"{type(_fk_list).__name__}")
+                    _fk_list = []
+                for fk in _fk_list or []:
+                    if not isinstance(fk, str) or not fk.strip():
+                        errors.append(f"{cw}.fromKinds: entries must be kinds")
+                        continue
+                    # ⛔ THE R1 CLOSURE, applied to the SCOPE and not only to the
+                    # target. A bare entry means this pack's own kind (the
+                    # manifest convention, and the spelling the `kind:` field of
+                    # this same entry uses) — so qualify it exactly as
+                    # `kind_guards._qualify` will, then hold it to the same
+                    # closure `redirect` is held to. Unqualified, `fromKinds:
+                    # [invoice]` compiled to a form no write can declare and the
+                    # guard was DEAD in every mode while this gate printed
+                    # `✓ Clean` — a false PASS on the gate whose own docstring
+                    # says an installable guard that can never act is a
+                    # declaration that lies (`kind_guards` round-3 review).
+                    _fkq, _fkns = _resolve_ref(fk.strip())
+                    if _fkns is not None and _fkns not in allowed_ns:
+                        errors.append(
+                            f"{cw}.fromKinds: '{fk}' names namespace "
+                            f"'{_fkns}', which this pack neither owns nor "
+                            f"declares in depends_on (R1)")
+                    # ⛔ ``all_pack_kinds`` — every kind ANY axis of ANY pack
+                    # declares — and NOT ``own_layer``. Round-5 narrowed this to
+                    # the entity axes on the theory that ``_named_layer_kinds``
+                    # (which does exclude ``documentKinds``/``actionKinds``)
+                    # proved no write could declare one. It does not: that
+                    # function reads the layer PROP's VALUE, and the value is
+                    # caller input over a deliberately OPEN vocabulary. Measured
+                    # (round-6 review P2): with
+                    # ``documentKinds: [brief]`` + ``fromKinds: [brief]``,
+                    # ``sdk.create_object('brief-9', objectKind='acme:brief')``
+                    # REDIRECTED — the scope was live — while the narrowed gate
+                    # had refused it at install. A gate that refuses a scope the
+                    # runtime demonstrably fires is a FALSE BLOCK, the same
+                    # category of lie as the dead guard it was meant to catch.
+                    elif (_fkns is not None and _fkns == (ns or None)
+                          and _fkq.split(":", 1)[-1] not in all_pack_kinds):
+                        errors.append(
+                            f"{cw}.fromKinds: '{fk}' is this pack's own "
+                            f"namespace but no kind it declares — a scope no "
+                            f"write to this pack can ever match")
+                    # ⛔ AND A CORE SCOPE THAT NAMES NO CORE KIND — against the
+                    # UNION of both core vocabularies (`_CORE_ANY_FORM`), never
+                    # one of them: `core:brief` and `core:organization` are both
+                    # declared core kinds, so a scope on either can fire and
+                    # refusing it would be the same false block as the arm above.
+                    # ``ns`` must be non-empty or `_resolve_ref` answers `":kind"`
+                    # for a bare name and this arm would report a missing
+                    # namespace as a core typo (round-6 review P3).
+                    elif (_fkns is None and ns
+                          and _fkq not in _CORE_ANY_FORM
+                          and _fkq.split(":", 1)[-1] not in _CORE_ANY_FORM):
+                        errors.append(
+                            f"{cw}.fromKinds: '{fk}' is a core scope but names "
+                            f"no core kind — a scope no write can ever match")
+                    # ⛔ AND THE NIL BUCKET IS NOT A SCOPE. `other`/`core:other`
+                    # ARE in the vocabulary, so the arm above accepts them — but
+                    # no write can DECLARE one: `_named_layer_kinds` drops the NIL
+                    # and the door hands the guard no declared kind, so a scope on
+                    # it can NEVER fire (measured, round-7 review P2). The author
+                    # who wanted the NIL mode wrote the wrong thing sympathetically:
+                    # the empty list IS that mode, so the refusal names it.
+                    elif (_fkq.split(":", 1)[-1] in _NIL_FORMS
+                          or _fkq in _NIL_FORMS):
+                        errors.append(
+                            f"{cw}.fromKinds: '{fk}' is the NIL bucket — no write "
+                            f"can DECLARE 'other', so this scope can never fire; "
+                            f"an empty fromKinds is how a guard asks for the "
+                            f"unnamed/NIL mode")
+                # ⛔ A `linkPredicate` the runtime does not know is a guard that
+                # abstains for ever, and one that names no key of
+                # `LINK_PREDICATES` at all is a typo the install gate used to
+                # accept (`holdRole` vs `holdsRole`) with a `✓ Clean` verdict.
+                _lp = c.get("linkPredicate")
+                if _lp is not None:
+                    from tortoise.kind_guards import LINK_PREDICATES
+                    if not isinstance(_lp, str) or _lp not in LINK_PREDICATES:
+                        errors.append(
+                            f"{cw}.linkPredicate: {_lp!r} is not a predicate the "
+                            f"write path knows ({', '.join(sorted(LINK_PREDICATES))}) "
+                            f"— an unknown one abstains for ever")
+                # ⛔ AND THE KEY ITSELF. Checking the VALUE only covers the typo
+                # the round set out to fix and not the one beside it: a
+                # misspelled KEY (`linkpredicate:`, `fromKind:`) is invisible to
+                # `c.get(...)`, so the entry validates clean and compiles with
+                # the feature OFF — worse than a bad value, which at least
+                # abstains. `linkpredicate:` therefore shipped a guard that
+                # redirected to a role kind with NO abstention (measured: `✓
+                # Clean`, rc 0, `link_predicate = None`, redirect applied), and
+                # `fromKind:` (no `s`) turned a scoped guard into a NIL-mode one
+                # silently. Unknown keys are refused, exactly as `pack_values`
+                # refuses an unknown entry key.
+                _unknown = sorted(set(c) - _CONFUSION_KEYS)
+                if _unknown:
+                    errors.append(
+                        f"{cw}: unknown key(s) {', '.join(repr(k) for k in _unknown)} "
+                        f"— a misspelled key is read as absent, so the guard "
+                        f"compiles with that feature silently OFF (known: "
+                        f"{', '.join(sorted(_CONFUSION_KEYS))})")
+                _fl_list = c.get("fromLayers")
+                if _fl_list is not None and not isinstance(_fl_list, list):
+                    errors.append(
+                        f"{cw}.fromLayers: must be a list — got "
+                        f"{type(_fl_list).__name__}")
+                    _fl_list = []
+                elif isinstance(_fl_list, list) and not _fl_list:
+                    # ⛔ AN EMPTY SCOPE IS A DEAD GUARD (round-19 review P2,
+                    # measured): `fromLayers: []` matched no layer, so
+                    # `from_layers=()` compiled a confusion that could never
+                    # fire — and BOTH gates called it `✓ Clean`. `fromKinds: []`
+                    # is different and stays legal: there `()` is the documented
+                    # NIL mode, a real scope.
+                    errors.append(
+                        f"{cw}.fromLayers: must name at least one entity layer "
+                        f"— an empty list can never match, so the guard would be "
+                        f"dead; omit the key to guard both layers")
+                for fl in _fl_list or []:
+                    if fl not in ("subject", "object"):
+                        errors.append(
+                            f"{cw}.fromLayers: '{fl}' is not an entity layer")
         return errors
 
     # ── Cross-pack validation ──────────────────────────────────────────
+
+    def check_guard_table(self) -> dict[str, list[str]]:
+        """#12060 — the guard TABLE's coherence for the packs just loaded.
+
+        ⛔ NOT inside :meth:`load_all`, and that is not style: the table's
+        ``_layer_of_kind`` compiles the kind-index spec, which builds its OWN
+        ``PackRegistry(...).load_all()`` (``value_extractor.compile_kind_index_spec``)
+        — measured as a ``RecursionError`` that isolated two shipped packs and
+        timed out every test that touched the catalog. Call it AFTER the load,
+        where every pack is present, which is what ``domain_loader`` does.
+        (That call site holds a NON-reentrant lock, so nothing on this path may
+        call back into ``_get_registry``: it would deadlock rather than raise.)
+
+        Covers the two questions ONE manifest cannot answer: the ``core`` target
+        kind and the ``depends_on`` target kind (both need the table and the
+        loaded set). ``_validate_guards`` answers the rest per manifest.
+
+        NON-BLOCKING on purpose — the catalog load is deliberately fail-open for
+        cross-pack questions (``unresolved_refs`` reports, ``validate_manifest``
+        refuses, and ``tortoise pack validate`` is what gates). Silence is not an
+        option either: a pack dropped into ``$TORTOISE_PACKS_DIR`` used to load
+        clean with a guard that could never fire (round-8 review P2).
+        """
+        self.guard_warnings = {}
+        try:
+            from tortoise.kind_guards import guard_table_problems, pack_guards
+
+            confusions: list = []
+            for ns in sorted(self.packs):
+                declared = getattr(self.packs[ns], "guards", None)
+                # `is not None`: one gate for all three callers of `pack_guards`
+                # (a manifest cannot carry a falsy non-sequence — `_validate`
+                # refuses it — but three spellings of the same gate is how the
+                # reader's warning became unreachable once already).
+                if declared is not None:
+                    confusions.extend(pack_guards(ns, declared))
+            if not confusions:
+                # ⛔ NO DECLARED GUARDS IS THE COMMON CASE, and the table compile
+                # is not free: `_layer_of_kind` builds its own registry to read
+                # the kind-index spec (measured +0.40 s per process on the 7-pack
+                # catalog, and two extra `load_all` calls — a fallback-chain test
+                # counts them). Nothing declared ⇒ nothing PACK-side to report.
+                # ⛔ AND THAT INCLUDES THE CORE TABLE, deliberately: the core
+                # confusions are a CONSTANT validated by this repo's own test
+                # suite, not something a user's catalog load can answer for, so a
+                # load does not pay the compile to re-check a static table. A
+                # BROKEN core entry is still reported — by the leftover arm below —
+                # as soon as any pack declares a guard.
+                return self.guard_warnings
+            kinds = {
+                ns: list(getattr(self.packs[ns], "object_kinds", None) or [])
+                + list(getattr(self.packs[ns], "document_kinds", None) or [])
+                for ns in self.packs
+            }
+            # ⛔ ATTRIBUTED BY `declaring_pack`, NEVER BY STRING PREFIX (round-10
+            # review P2, measured): the manifest's `rule` id is echoed verbatim
+            # into every problem string and a BARE id is legitimate — the docs'
+            # own example is `rule: repo-slug-is-not-a-person` — so a prefix match
+            # on `"<ns>:"` found no owner and silently DROPPED the problem
+            # (`guard_warnings == {}` for a guard with an unrouted target). Asking
+            # the table one namespace at a time makes the attribution structural.
+            #
+            # ⛔ AND THE CORE TABLE'S OWN PROBLEMS ARE NOT A PACK'S (round-11
+            # review P3, measured): `guard_table_problems` always seeds
+            # `CORE_CONFUSIONS`, so the per-namespace call returns the core
+            # problems too — they were appended to EVERY pack's bucket and logged
+            # as `pack <ns>: guard — …`, blaming `acme` and `beta` for a defect in
+            # neither manifest, and making the leftover arm below unreachable
+            # (every core problem counted as "attributed"). Asked once, logged
+            # once by the leftover arm; never bucketed to a pack.
+            core_only = {p for p in guard_table_problems(
+                [], include_catalog=False, pack_kinds=kinds)}
+            # ⛔ `attributed` MUST START EMPTY. Seeding it with `core_only` was
+            # the round-12 shape's own defect (round-12 review P2, measured): the
+            # full-list call returns exactly `core_only ∪ ⋃_ns own(ns)`, so every
+            # core problem counted as "already attributed" and the leftover arm —
+            # the ONLY reporter a core problem has — became unreachable. The fix
+            # moved core problems from *mis-blamed on every pack* to *silent*,
+            # which is worse. They are excluded from every pack bucket above and
+            # logged exactly once by the leftover arm below.
+            attributed: set[str] = set()
+            for ns in sorted(self.packs):
+                own = [c for c in confusions if c.declaring_pack == ns]
+                if not own:
+                    continue
+                for problem in guard_table_problems(
+                        own, include_catalog=False, pack_kinds=kinds):
+                    if problem in core_only:
+                        continue
+                    self.guard_warnings.setdefault(ns, []).append(problem)
+                    attributed.add(problem)
+            for problem in guard_table_problems(
+                    confusions, include_catalog=False, pack_kinds=kinds):
+                if problem not in attributed:
+                    log.warning("pack catalog: guard — %s", problem)
+        except Exception as exc:  # noqa: BLE001, RUF100 — advisory, never raises
+            log.debug("pack_registry: guard-table check skipped (%s)", exc)
+            return self.guard_warnings
+        for ns in sorted(self.guard_warnings):
+            for msg in self.guard_warnings[ns]:
+                log.warning("pack %s: guard — %s", ns, msg)
+        return self.guard_warnings
 
     def _validate_cross_pack_refs(self) -> None:
         """Validate that all kind references resolve across packs.

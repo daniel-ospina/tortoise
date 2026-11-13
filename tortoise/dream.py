@@ -145,12 +145,43 @@ EMBEDDED_LATENCY_BUDGET_S = 0.5
 # not by text, and `tests/test_11823_propagation_cap_signal.py`
 # (`test_untested_operator_less_population_matches_trivial_stamp`) is what keeps
 # them equal. ⛔ That test builds ITS query FROM this constant (#12138 §6), so a
-# drift in the status VOCABULARY or in the `IMPL|NAND` alternation reddens it.
+# drift that REMOVES or RE-SPELLS the excluded status, NARROWS the `IMPL|NAND`
+# alternation, or un-negates/removes the edge term reddens it — measured on this
+# fixture, whose true count is 2: dropping the status clause 2→3, substituting
+# the excluded status (`<> 'draft'` → `<> 'archived'`) 2→3, narrowing the
+# alternation to `IMPL` 2→4, and un-negating the edge term 2→6 (removing that
+# term entirely 2→8). ⛔ A WIDENING is INVISIBLE only for a value this fixture
+# does not CARRY: widening the alternation to `IMPL|NAND|INPUT` leaves the count
+# at 2 and the test GREEN (the two counted nodes are edge-free, so no widening of
+# the EDGE pattern can touch them), as does excluding a status no node here
+# carries (`'archived'`). Excluding one it DOES carry reddens — measured: also
+# excluding `'live'` gives 2→0. Before #12138 the test compared against a third
+# hand-copied literal and could not see this constant move at all.
 # Two of this constant's clauses are NOT observable on that fixture, measured:
 # every Point there carries an explicit status (so the `status IS NULL` arm is
 # invisible — and it is load-bearing, since it is what keeps a status-absent
-# Point in BOTH populations), and every operator Point is edged (so the
-# `is_operator` conjunct is indistinguishable from `NOT (n)-[:IMPL|NAND]-()`).
+# Point in BOTH populations; the fix is a status-ABSENT node here, NOT a node of
+# some other status, which cannot tell the two spellings apart), and every
+# operator Point is edged (so the `is_operator` conjunct is indistinguishable
+# from `NOT (n)-[:IMPL|NAND]-()`). An EDGE-LESS operator
+# (`create_point(..., is_operator=True)` builds one where `create_operator`
+# always wires an edge) has **NO pin** today: nothing that OBSERVES the
+# trivial-stamp population carries one, so WIDENING the conjunct stays green on
+# this fixture — measured: dropping the conjunct leaves the count at 2. ⛔ That is
+# a FIXTURE gap, not an unfixable residual: adding ONE edge-less operator node
+# keeps the count at 2 as written and moves it 2→3 under the widened conjunct
+# (measured), so a single node pins it. (What IS pinned is the OPPOSITE edge of the
+# same conjunct: NARROWING `= false` to `IS NULL` drops every
+# `is_operator: false` claim, and the passes that must trivially stamp an
+# isolated claim redden — `tests/test_epic903_freshness.py`. That mutation says
+# nothing about an edge-less operator, which is why it is not a pin for this
+# drift.)
+# ⛔ And the additive-widening class is pinned only for a status this fixture
+# CARRIES — measured: widening the clause to exclude `'live'` as well reddens it
+# (2→0), while excluding `'archived'`, which no node here carries, leaves it
+# GREEN. Whoever widens the vocabulary to exclude a status that appears in real
+# graphs must add a node of that status to this fixture; until then that
+# widening is silent (measured: `'archived'` → count stays 2).
 # The block keeps deriving its own number because the negated pattern is a
 # production cost and that test's handful of nodes is the only place it is
 # affordable.

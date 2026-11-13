@@ -119,7 +119,7 @@ from typing import Any
 
 #: The bound on the pre-wipe count read. Imported from the sibling verb that
 #: bounds the SAME full-graph shape, so the two cannot drift apart.
-from tortoise.cache_projection import NODE_TABLES
+from tortoise.cache_projection import NODE_TABLES, is_relationship_target
 from tortoise.record_reconcile import CACHE_READ_TIMEOUT_MS
 from tortoise.residency import COVERAGE_COMPLETE
 
@@ -220,14 +220,20 @@ class RestoreOutcome:
     #: :attr:`nodes_selected` can be below ``record_nodes`` without anything
     #: being lost, and they are reported so the difference is auditable.
     refused_keys: tuple[tuple[str, str], ...] = ()
-    #: `#11747` — vectors the projection REFUSED to store, and the labels they
-    #: were on. The projection drops a vector on a label no query leg serves
+    #: `#11747` — vectors the projection REFUSED to store (a record LABEL, or since
+    #: `#12015` a ``<relationship:TYPE>`` entry for an EDGE). The projection drops a vector on a label no query leg serves
     #: (``cache_projection.UNSERVED_VECTOR_LABELS``), so a restore over a record
     #: whose rows carry one DELETES it from the cache. ⛔ Reported, never silent:
     #: without this the run prints the same clean line as a restore that lost
     #: nothing, and no re-run can bring the vector back — the record row is the
     #: only carrier and it is what the drop was applied to.
     dropped_vectors: int = 0
+    #: The targets behind :attr:`dropped_vectors` — RECORD LABELS, and since
+    #: `#12015` a ``<relationship:TYPE>`` entry for an EDGE vector
+    #: (``cache_projection.relation_vector_declined_properties``). ⛔ A relationship
+    #: has NO LABEL, so a consumer that prints or classifies these must go through
+    #: ``cache_projection.is_relationship_target`` rather than assume every entry is
+    #: a label: calling an edge a node names the wrong object as the survivor.
     dropped_vector_labels: tuple[str, ...] = ()
     #: ``complete`` / ``partial`` from the projection's own declaration.
     coverage: str | None = None
@@ -368,12 +374,32 @@ class RestoreOutcome:
             # projection, so this restore DELETED it from the cache; the node is
             # kept. Stated because the alternative is a clean-looking restore
             # that quietly lost data, and because no re-run can repair it.
-            labels = ", ".join(self.dropped_vector_labels) or "unrecorded"
+            #
+            # ⛔ `#12015` — and the same line now carries EDGES. A
+            # `<relationship:TYPE>` entry is not a label (a relationship has none),
+            # and the KEPT half is different from a node's: the EDGE is restored,
+            # its vector dropped. Calling it a "node" would tell an operator the
+            # wrong object survived.
+            targets = ", ".join(self.dropped_vector_labels) or "unrecorded"
+            has_node = any(not is_relationship_target(t)
+                           for t in self.dropped_vector_labels)
+            has_edge = any(is_relationship_target(t)
+                           for t in self.dropped_vector_labels)
+            kept = ("The nodes and edges are restored" if has_node and has_edge
+                    else "The edges are restored" if has_edge
+                    else "The nodes are restored" if has_node
+                    # ⛔ `#12015` review round 2 — the claim must not outrun the
+                    # labels. With no labels the targets above read `unrecorded`,
+                    # so defaulting to "the nodes" asserted a survivor in the same
+                    # breath as admitting it is unknown — and an EDGE drop is
+                    # exactly what can be unnamed here.
+                    else "The restored object(s) are unrecorded, so this line "
+                         "cannot name which survived")
             line += (
                 f" — {self.dropped_vectors} vector(s) were DROPPED by the "
-                f"projection on unserved label(s) ({labels}): a vector there has "
-                f"no query path, so the cache must not hold one (#11747). The "
-                f"nodes are restored; re-running cannot bring the vectors back")
+                f"projection on target(s) with no query path ({targets}): a vector "
+                f"there has no query path, so the cache must not hold one "
+                f"(#11747, #12015). {kept}; re-running cannot bring the vectors back")
         if self.unwritten_keys:
             line += (
                 f" — {self.unwritten_keys} record key(s) were NOT written, so a "

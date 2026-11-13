@@ -870,8 +870,14 @@ class _FakeProj:
 
 
 def _drive(tool_mod, monkeypatch, tmp_path, *, stored_names, trace_maker, argv=None,
-           pop=None):
-    """Run `main()` against a fake SDK; return (exit code, out path)."""
+           pop=None, rows_maker=None):
+    """Run `main()` against a fake SDK; return (exit code, out path).
+
+    ``rows_maker`` is optional and defaults to the refusing tests' behaviour (no
+    rows at all). Pass it to drive the SUCCESS path: the arms' accounting only
+    exercises its found-the-canonical branches when the leg returns a row, and
+    `tests/test_name_entropy_12294.py` pins the predicate, not the accounting.
+    """
     monkeypatch.setenv("TORTOISE_DB_URI",
                        "docker://:falkordb@localhost:6379/recall_unit")
     if pop is None:
@@ -899,11 +905,11 @@ def _drive(tool_mod, monkeypatch, tmp_path, *, stored_names, trace_maker, argv=N
         def _get_proj(self):
             return self._proj
 
-        def tortoise_fts_query(self, _q, **kw):
+        def tortoise_fts_query(self, q, **kw):
             trace = kw.get("leg_trace")
             if trace is not None:
                 trace.append(trace_maker())
-            return []
+            return rows_maker(q) if rows_maker is not None else []
 
         def close(self):
             return None
@@ -984,6 +990,146 @@ def test_a_sample_larger_than_the_population_is_refused(tool_mod, monkeypatch, t
                            "--captures", "2", "--out", str(tmp_path / "artifact.json")])
     assert rc == 2, f"a sample larger than the population was not refused (rc={rc})"
     assert not out.exists(), "an artifact was written from a sample larger than the population"
+
+
+# ── the #12294 gate arms' ACCOUNTING ──────────
+
+
+def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatch,
+                                                           tmp_path):
+    """The four `#12294` arms have no other test: pin their accounting to a RUN.
+
+    `tests/test_name_entropy_12294.py` pins the ported predicate and
+    `_pooled_coverage` IN ISOLATION; nothing observed what `run()` accumulates.
+    Measured on this suite: narrowing the pooled loop's bound, or deleting
+    `arms["pooled_coverage"] = _pooled`, left every test green while
+    `pooled_gate`'s quoted share ("1 of 86 rescued at k=3, 6 of 86 at k=15" — the
+    gate's production-truth cost) described a population the artifact would
+    still certify as untruncated: #11823's silent-cap class, inside the
+    instrument whose numbers decline a lever.
+
+    Mutations that must red this: the loop bound no longer following
+    `names_reached`; a `gated` count accumulated once per (name x predicate)
+    instead of once per name; a per-k table that stops summing to its `_k_sum`;
+    a `pooled_gate` cell whose `rescued_by_union + lost + unreachable_regardless`
+    stops equalling its `gated` — and, separately, collapsing
+    `unreachable_regardless` into `lost`, which is the pre-fix defect (it books a
+    gate-independent miss as the gate's cost, inflating this PR's own evidence).
+    ⛔ `rescued_by_union + lost == gated` is DELIBERATELY not the invariant here:
+    the healthy driven cell is `rescued 1 + lost 16 = 17` against `gated 18`.
+    """
+    # The arms' found-branches all execute, so `suppressed_correct` /
+    # `rescued_by_union` are exercised rather than left at their zero defaults.
+    # ⛔ The population must be LARGER THAN ONE POOLED GROUP (15 names), or the
+    # loop's bound is untestable: with three names `range(...)` has a single step
+    # whatever the bound is, and halving `names_reached` left this test green
+    # (measured).
+    pop = ([{"cls": "definite", "name": f"the item{i}"} for i in range(9)]
+           + [{"cls": "ident", "name": f"#{2258 + i}"} for i in range(9)]
+           + [{"cls": "path", "name": f"src/mod{i}.py"} for i in range(9)])
+    names = [r["name"] for r in pop]
+    # The row set is chosen so all three `pooled_gate` branches are exercised at
+    # once: every query returns its OWN name's row — EXCEPT `#2266`, whose row no
+    # query returns, so exactly one gated name is unreachable regardless — and
+    # every query ALSO returns `#2258`'s row, so a gated name whose query is
+    # never issued is still RESCUED when a KEPT name's query returns it. Without
+    # that asymmetry `rescued == gated` and `lost == 0` for every cell, and
+    # swapping the two increments — which inverts "6 of 86 rescued" into "80 of
+    # 86", i.e. the falsifier into an endorsement of the gate — left this test
+    # green (measured).
+    from tortoise.extractor_v2 import _sanitise_query_text
+
+    row_by_name = {n: {"id": f"obj-11901{i:06d}", "content": n,
+                       "point_kind": "core:other"}
+                   for i, n in enumerate(names)}
+    by_query = {_sanitise_query_text(n): n for n in names}
+    _ALIAS = {"id": row_by_name["#2258"]["id"], "content": "2258",
+              "point_kind": "core:other"}
+
+    def _rows(query):
+        # `#2266` is the UNREACHABLE-REGARDLESS case: no query (not even its own)
+        # ever returns its row, so neither the ungated nor the gated union holds
+        # it — the gate costs nothing there and it must NOT book as `lost`.
+        if by_query.get(query) == "#2266":
+            return [row_by_name["#2258"], _ALIAS]
+        own = row_by_name.get(by_query.get(query, ""))
+        rows = [own] if own is not None else []
+        if row_by_name["#2258"] not in rows:
+            rows.append(row_by_name["#2258"])
+        # the hash-dropped surface of `#2258` (`2258`), carrying the entity's own
+        # id, so exactly ONE gated VARIANT pair actually binds in phase 1 — the
+        # `gate_variant` assertions below are exact because of it
+        rows.append(_ALIAS)
+        return rows
+
+    rc, out = _drive(
+        tool_mod, monkeypatch, tmp_path,
+        # `the item0` is gated by `shipped` only (`item0` — 5 chars, 1 token);
+        # `#2258` by BOTH (`2258` — 4 chars, 1 token), so neither predicate's
+        # found-branches are left at their zero defaults.
+        stored_names=names, pop=pop,
+        trace_maker=lambda: {"leg": "vector", "ran": True, "degraded": False},
+        rows_maker=_rows,
+        argv=["--population", "27", "--sample", "27", "--captures", "2",
+              "--out", str(tmp_path / "artifact.json")])
+    assert rc == 0, f"a healthy driven run did not succeed (rc={rc})"
+    arms = json.loads(out.read_text())["arms"]
+
+    # 1. the recorded coverage describes the population the loop ACTUALLY reached
+    BUDGET = 15   # mirrors `run()`'s production ``max_queries`` literal
+    cov = arms["pooled_coverage"]
+    assert cov["names_in_sample"] == arms["gate"]["shipped"]["names"] == 27, cov
+    assert cov["names_measured"] == cov["names_reached"] - cov["skipped_singleton"]
+    groups = [min(BUDGET, cov["names_reached"] - s)
+              for s in range(0, cov["names_reached"], BUDGET)]
+    assert len(groups) == 2, groups          # 15 + 12, so the bound is observable
+    assert arms["pooled"]["3"]["captures"] == sum(1 for n in groups if n >= 2)
+    assert cov["names_measured"] == sum(n for n in groups if n >= 2)
+    assert cov["truncated"] is False
+
+    # 2. per-predicate reconciliation — the three structures must agree
+    for p in ("shipped", "zep_full_name"):
+        g = arms["gate"][p]
+        assert sum(g["suppressed_correct_by_k"].values()) == \
+            g["suppressed_correct_k_sum"], p
+        assert g["gated"] == sum(1 for e in arms["gate_gated_names"]
+                                 if p in e["predicates"]), p
+        # this row set withholds `#2266` from every window, so EXACTLY ONE gated
+        # name is unreachable at any k — the falsifier's headline cannot invert,
+        # and the k it would invert over is pinned by name rather than by count
+        assert g["gated_and_missed"] == 1, p
+        for k, cell in arms["pooled_gate"][p].items():
+            # EXACT, not a sum: this fixture can rescue exactly ONE gated name
+            # (`#2258` — every kept name's query returns its row; no other gated
+            # name's row is ever returned by a kept query). A sum-only assertion
+            # let a SWAP of the two increments pass, and that swap turns "6 of 86
+            # rescued" into "80 of 86" — the falsifier into an endorsement of the
+            # gate (measured: green before this assertion existed).
+            assert cell["rescued_by_union"] == 1, (p, k, cell)
+            # `#2266` is unreachable regardless, so it is NOT in `lost`
+            assert cell["lost"] == cell["gated"] - 2, (p, k, cell)
+            assert cell["unreachable_regardless"] == 1, (p, k, cell)
+            assert (cell["rescued_by_union"] + cell["lost"]
+                    + cell["unreachable_regardless"] == cell["gated"] > 0), (p, k)
+
+    # 3. the FOURTH arm — `gate_variant`, the one whose denominators this file's
+    # own comments record as having been wrong twice (a (surface x k) numerator
+    # over a per-surface denominator, then a per-(pair x k) attach count)
+    assert set(arms["gate_variant"]) == {"shipped", "zep_full_name"}
+    _EXACT_GATED = {"shipped": 27, "zep_full_name": 18}
+    for p in ("shipped", "zep_full_name"):
+        vg = arms["gate_variant"][p]
+        # the denominator is ONE window's pair count. A per-k denominator reads
+        # 157/1676 (9.4 %) instead of 157/419 (37.5 %) on the corpus.
+        assert vg["pairs"] == arms["variant"]["3"]["pairs"] == 36, (p, vg)
+        assert vg["gated_pairs"] == _EXACT_GATED[p], (p, vg)
+        # EXACTLY ONE gated pair binds today (the `#2258` -> `2258` mention).
+        # Inverting the per-PAIR accumulator reports every NON-binding pair
+        # instead (35); accumulating it per (pair x k) over-reports it 4x.
+        assert vg["would_attach_before"] == 1, (p, vg)
+        assert vg["would_attach_before_any_k"] == 1, (p, vg)
+        assert 0 <= vg["would_attach_before"] <= vg["in_window_before"] \
+            <= vg["gated_pairs"] <= vg["pairs"], (p, vg)
 
 
 def test_the_harness_reports_how_much_of_its_own_input_it_discarded(tmp_path):

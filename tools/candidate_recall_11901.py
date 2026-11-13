@@ -6,15 +6,16 @@ HOW TO RUN THE TESTS THAT GUARD THIS DOCUMENT
 ``tests/test_candidate_recall_11901.py`` needs no graph, but every ``pytest`` run
 in this repo needs the lane's DB seam (epic #1647 P4), so a bare
 ``uv run pytest`` reports one ERROR per collected test from
-``tests/_embedded.py`` (29 at this head) — that is the
-repo's gate, not these tests. Use either form:
+``tests/_embedded.py`` — that is the repo's gate, not these tests, and the count
+is whatever this file currently collects, so it is not restated here. Use either
+form:
 ::
 
     uv run python tools/test_lane.py run -- tests/test_candidate_recall_11901.py -q
     TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_candidate_recall_11901.py -q
 
-WHAT THIS MEASURES, AND WHY THE THREE ARMS ARE MEASURED SEPARATELY
----------------------------------------------------
+WHAT THIS MEASURES, AND WHY THE ARMS ARE MEASURED SEPARATELY
+-----------------------------------------------------------
 Every capture derives one ``object`` query per extracted entity name and feeds
 it to the hybrid read at ``limit=3`` (``extractor_v2._derive_queries`` ->
 ``_fts_rows`` -> ``sdk.tortoise_fts_query`` -> ``search_engine.degradation_chain``).
@@ -38,7 +39,8 @@ unusable, and the two failures have different fixes:
 
 This tool measures both, on a real entity-name population, through the real
 code path, so "does the window earn its keep" is answered by a number instead of
-by an argument. Three arms, because the failures have different fixes:
+by an argument. The first three arms exist because the failures have different
+fixes:
 
   ARM 1  RETRIEVAL     a mention that IS the stored name — how often is the node
                        in the window at each k? (widening can help)
@@ -49,6 +51,29 @@ by an argument. Three arms, because the failures have different fixes:
                        point of #11901 is to decide on evidence, not to patch.
   ARM 3  THE UNION     how large is the candidate set a capture actually hands
                        `resolve_entities`? (not `limit` — see below)
+
+  ARM 4  THE GATE      `#12294`'s name-entropy gate: for each name, would the
+                       ported predicate refuse its query, and — the number that
+                       decides the lever — was its CANONICAL in the window the
+                       gate would remove? Two predicates (`zep_full_name`, the
+                       verbatim port, and `shipped`, the same rule applied to
+                       the name's STOPWORD-REMOVED content tokens — the set
+                       that would carry the query if the leg used it, see
+                       `_signal_tokens`), plus
+                       `gate_variant` (what it removes from the variant pairs)
+                       and `pooled_gate` (whether the OTHER names' queries in a
+                       real capture union rescue a gated name). Measured and
+                       DECLINED — the full record is beside the predicate,
+                       further down this file, and in
+                       `tests/test_name_entropy_12294.py`.
+  ARM 5  THE RERANK    `#12297`'s cross-encoder, over the SAME fused
+                       candidates: recall@3 and nDCG@10 before vs after a
+                       permuting rerank at each `--rerank-pool` width, paired
+                       on one pool so `gained`/`lost` are counterfactual.
+                       OPT-IN (`--rerank`) and DEFAULT OFF, so every artifact
+                       committed before it is byte-identical. Its ceiling is
+                       `in_window(P)`, never `miss_past_k` — see
+                       `_rerank_arm`'s own note.
 
 POPULATION — WHAT IS REAL AND WHAT IS NOT (read before quoting a number)
 -----------------------------------------------------------------------
@@ -144,6 +169,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # The window widths #11901 names: today's 3, and the 5/10/15 the issue asks for
 # (15 is Zep/Graphiti's candidate count — research-brief §6.2).
 KS: tuple[int, ...] = (3, 5, 10, 15)
+
+#: The windows the GATE arms account at (#12294). Two, not four: k=3 is what the
+#: capture prior ships and k=15 is the widest window #11901 measured, so the pair
+#: bounds the answer.
+#:
+#: ⛔ DERIVED from ``KS``, and asserted non-empty, because the three readers do
+#: NOT read one thing: the arm's schema drops members outside ``KS``
+#: (``if k in KS``), and the accounting loop iterates ``KS`` and gates on
+#: ``if k in _GATE_KS`` — so a member of this set that is not in ``KS`` is
+#: silently ignored by the loop AND dropped by the schema. If that intersection
+#: were empty, ``_g_hit[p]`` would be ``{}`` for every gated name,
+#: ``not any({})`` is ``True``, and every gated name would book as
+#: ``gated_and_missed`` with ``suppressed_correct_by_k == {}`` — inverting the
+#: headline from "the gate removes correct candidates" to "the gate is exactly
+#: what we need". Deriving (rather than merely hoisting) makes that
+#: unrepresentable; the assert catches an edit that empties it.
+_GATE_KS: tuple[int, ...] = tuple(k for k in (3, 15) if k in KS)
+assert _GATE_KS, f"the gate arms must measure at least one window in KS={KS}"
 
 #: ``the <1-4 tokens>`` — the definite-description class. Bounded to 4 tokens:
 #: longer spans are clauses, not names, and the audit found real names are short.
@@ -455,7 +498,7 @@ def _rerank_arm(
     scorer=None,
     label: str = "rerank",
 ) -> dict:
-    """#12297 arm 4 — the cross-encoder over the SAME fused candidates.
+    """#12297 arm 5 — the cross-encoder over the SAME fused candidates.
 
     For each mention we take the real fused read at pool width ``P`` (wider than
     production's 3), score every candidate with the shipped
@@ -492,7 +535,7 @@ def _rerank_arm(
     # input. A latency figure taken under the default would describe the
     # scheduler, not the model, and would be quoted as if it described the model.
     if threads and threads > 0:
-        import torch  # local: arm 4 is this tool's only torch consumer
+        import torch  # local: arm 5 is this tool's only torch consumer
         torch.set_num_threads(threads)
 
     if scorer is None:
@@ -633,6 +676,219 @@ def _rerank_arm(
             "under fleet load — an unpinned figure describes the "
             "scheduler, not the model")
     return out
+
+# ── the NAME-ENTROPY GATE (#12294) — MEASURED HERE, DECLINED ────────────────
+#
+# Zep/Graphiti refuses its *fuzzy* (MinHash/LSH shingle) matcher for names too
+# short or too repetitive to shingle reliably, and DEFERS those names to the LLM
+# dedupe prompt — it never drops them. Read from
+# `graphiti_core/utils/maintenance/dedup_helpers.py`:
+#
+#   * `_NAME_ENTROPY_THRESHOLD = 1.5` / `_MIN_NAME_LENGTH = 6` /
+#     `_MIN_TOKEN_COUNT = 2` — the three constants at `:31-33`;
+#   * `_has_high_entropy` (`:80-86`) refuses when `len(name) < 6 AND
+#     tokens < 2` (an **AND**, so a long single-token or a short two-token name
+#     passes THAT test) and otherwise requires the Shannon entropy of the name's
+#     CHARACTERS (`_name_entropy`, `:53-77`; spaces stripped, bits/char) to
+#     reach `1.5`;
+#   * the call site (`_resolve_with_similarity`, `:336-354`) runs EXACT
+#     normalised-name matching for **every** name first and gates only the block
+#     below it; a gated name goes to `unresolved_indices`, which
+#     `_resolve_with_llm` (`node_operations.py:649-670`) feeds to the LLM.
+#
+# ⛔ THE GATE IS DECLINED, AND THIS MODULE HOLDS THE EVIDENCE. #12294 proposed
+# porting it to `extractor_v2._derive_queries` (no query for a gated name) and
+# `resolve_entities` (hold, never assert new). Built, measured here, and
+# falsified by the issue's own falsifier on the #11901 corpus:
+#
+#   * ⛔ THE PREMISE IS FALSE, and this is the finding that outlives the lane.
+#     The gate assumes a bare definite description's query degenerates to its
+#     bare content word and returns a near-synonymous cluster. It does not:
+#     for a name carrying NO identifier span, `sparse.build_or_query` builds the
+#     OR-union only when TWO OR MORE tokens survive stopword removal, and a
+#     single surviving token takes the RAW-LITERAL fallback (`sparse.py:590`); a
+#     name WITH an identifier span is the exception (`ERR-4032` keeps the OR
+#     path through its aliases even with one plain token, `sparse.py:570-588`),
+#     and none of these names is one — so `the fix` is queried as `the fix`,
+#     which RediSearch evaluates as an implicit AND over both terms
+#     (`sparse.py:12`). The article is not a wasted term, it is half of the
+#     conjunction.
+#   * the SHIPPED-shaped predicate gates **86 names of 300**, and **86 of 86 are
+#     reachable by the leg at k=15** (74 already at k=3) — so the gate removes a
+#     CORRECT candidate for almost every name it touches;
+#   * the class it was proposed for — names unreachable at ANY k (**81/300**,
+#     `#11901`'s 27 %) — has **zero** overlap with the gated set: the predicate
+#     is anti-correlated with the population it was meant to protect;
+#   * with the real capture UNION (15 names, `max_queries`), the OTHER names'
+#     queries rescue **1 of 86** gated names at k=3 and **6 of 86** at k=15, so
+#     the recall cost is not an artefact of measuring each name in isolation;
+#   * the exact Zep port — including the FUZZY normaliser it actually receives
+#     (`_zep_normalize_for_fuzzy`, `dedup_helpers.py:46-50`) — is narrower and no
+#     better: it gates **15 names, all `#NNNN` identifiers, and 0 of the
+#     bare-definite-description class** (62.3 % of `:Object` names) the issue
+#     targeted, because `the suite` is 9 characters and 2 tokens as written;
+#   * and no duplicate is prevented: gated VARIANT pairs that phase 1 could bind
+#     today = **0** at every k (`would_attach_before_any_k`; `#11901`: variant
+#     attach is 0.0 % before and after), so the gate trades measured recall for
+#     zero duplicate reduction.
+#
+# ⚠️ THE CORPUS IS LIVE. `--sessions-dir` defaults to `~/.tortoise/session-events`,
+# which grows while a lane measures, so two runs a few minutes apart differ by one
+# or two names (measured: 85 vs 86 gated). The committed artifact
+# `docs/research/2026-11-12-11901-candidate-recall/measurement-entropy-gate-12294.json`
+# is the RECORD; quote its numbers, and treat a re-run that lands within a name or
+# two as a reproduction rather than a contradiction. What is invariant across runs
+# is the finding, not the count: 0 gated names are unreachable at any k, ~100 % are
+# reachable at k=15, and 0 gated variant pairs attach.
+#
+# The predicate is kept HERE rather than in `tortoise/`, because it is live
+# measurement code and would be dead product code:
+# `tests/test_name_entropy_12294.py` pins both the port and the falsification, so
+# a future lane re-attempting lever M-1 reds instead of re-deriving it.
+
+#: Zep's three published constants, re-declared so a test can pin the port.
+_NAME_ENTROPY_THRESHOLD = 1.5
+_MIN_NAME_LENGTH = 6
+_MIN_TOKEN_COUNT = 2
+
+
+def _name_char_entropy(normalized_name: str) -> float:
+    """Shannon entropy over the name's CHARACTERS, spaces stripped, bits/char.
+
+    Zep's `_name_entropy` (`dedup_helpers.py:53-77`). Repetition, not length, is
+    what it measures: ``aaaaaaaa`` scores 0.0, ``deadline`` ~2.5 (two chars at
+    1/4 and four at 1/8: 1.0 + 1.5).
+    """
+    cleaned = (normalized_name or "").replace(" ", "")
+    if not cleaned:
+        return 0.0
+    counts: dict[str, int] = {}
+    for char in cleaned:
+        counts[char] = counts.get(char, 0) + 1
+    total = len(cleaned)
+    return -sum((c / total) * math.log2(c / total) for c in counts.values())
+
+
+def _zep_normalize_for_fuzzy(name: str) -> str:
+    """Zep's `_normalize_name_for_fuzzy` (`dedup_helpers.py:46-50`).
+
+    ⛔ THE CALLER'S ARGUMENT, not a detail: Zep passes the FUZZY-normalised name
+    (`re.sub(r"[^a-z0-9' ]", " ", lowercase)`, whitespace collapsed) into
+    `_has_high_entropy`, so its token count is computed on PUNCTUATION-STRIPPED
+    text. Passing the raw lowercased name instead (this arm's first cut) changes
+    the token count for punctuated names (`a-fix` → 1 token raw, 2 tokens fuzzy)
+    and would report a gate Zep does not ship. Re-implemented here because the
+    only way to call theirs is to depend on graphiti.
+    """
+    normalized = re.sub(r"\s+", " ", (name or "").lower()).strip()
+    normalized = re.sub(r"[^a-z0-9' ]", " ", normalized).strip()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def _has_high_entropy(normalized_name: str) -> bool:
+    """Zep's predicate, verbatim in behaviour (`dedup_helpers.py:80-86`).
+
+    ⛔ The conjunction is deliberate and is the part a later "simplification"
+    would break: `len < 6 AND tokens < 2` refuses only names that are BOTH short
+    and single-token, so `fix` is refused, `hotfix` (6 chars, 1 token) is NOT,
+    and `the fix` (7 chars, 2 tokens) is not. As an `or` it would refuse every
+    single-token name — wider than the source ships, and in the direction that
+    removes correct candidates.
+    """
+    token_count = len((normalized_name or "").split())
+    if len(normalized_name or "") < _MIN_NAME_LENGTH and token_count < _MIN_TOKEN_COUNT:
+        return False
+    return _name_char_entropy(normalized_name) >= _NAME_ENTROPY_THRESHOLD
+
+
+def _signal_tokens(name: str) -> list[str]:
+    """The STOPWORD-REMOVED tokens of this name — not the leg's surviving set.
+
+    `sparse.build_or_query` drops `SPARSE_STOPWORDS` before it builds the
+    OR-union (`sparse.py:34-52`), so these are the tokens that would carry the
+    query IF the leg used them.
+
+    ⛔ It is the SPLIT rule that is shared with the leg (lowercase,
+    non-alphanumeric runs), NOT the surviving-token set: `tokenize_sparse_query`
+    additionally drops every token shorter than 2 characters (`:429-430`) and —
+    at `build_or_query`'s default `keep_numeric=False`, which is what the
+    capture path passes — every all-digit token (`:431-432`), then appends
+    identifier aliases (`:441-447`). So `_signal_tokens("#2258") == ["2258"]`
+    while the leg tokenises `2258` to `[]` and takes the escaped raw literal: the
+    "token" this function returns does not exist as one. Nothing measured changes
+    (the 15 ident names are gated by BOTH predicates — `gate_gated_names` records
+    them as the `both` set — so no share moves), but this is not a fidelity
+    guarantee and must not be quoted as one.
+    """
+    from tortoise.sparse import SPARSE_STOPWORDS
+
+    return [t for t in re.split(r"[^a-z0-9]+", (name or "").lower())
+            if t and t not in SPARSE_STOPWORDS]
+
+
+def _name_carries_signal(name: str) -> bool:
+    """Would a gate on this name keep a query that can still discriminate?
+
+    Two ways a name carries no signal, and the second is the one Zep's
+    full-name predicate cannot see through our tokenizer:
+
+    1. **No content token at all** — every token is a `SPARSE_STOPWORDS` member
+       (`the and` — article + connective), so `build_or_query` falls back to the
+       escaped raw string. ⛔ Not `the same` / `the one`: `same` and `one` are NOT
+       `SPARSE_STOPWORDS` members, so those are case-2 names
+       (`_signal_tokens("the same") == ["same"]`), which is what
+       `tests/test_name_entropy_12294.py` pins. This class is EMPTY on the
+       measured corpus (`gate_gated_names` has no entry with `signal_tokens: []`).
+    2. **Zep's predicate on the CONTENT tokens** — refuse a name whose only
+       surviving token is one Zep's rule would refuse on its own. `the fix` →
+       `fix`, three characters and one token, so it is refused by the same rule
+       that refuses `fix` itself. ⚠️ Measured: this is the wrong inference for
+       our leg, because the leg does NOT search that token alone — it searches
+       `the fix` as a two-term implicit AND (see the header).
+
+    ⛔ MEASURED AND DECLINED: see this block's header. The predicate is correct
+    as a port and wrong as a policy here — it selects names the leg CAN find.
+    """
+    tokens = _signal_tokens(name)
+    if not tokens:
+        return False
+    return _has_high_entropy(" ".join(tokens))
+
+
+def _pooled_coverage(sample_size: int, captures: int, budget: int) -> dict:
+    """The population a ``pooled``/``pooled_gate`` arm ACTUALLY measures.
+
+    ⛔ THE CAP IS RECORDED, NOT IMPLIED (#11823's defect class: a cap that
+    truncates without saying so). Both pooled arms are built by one loop that
+    reaches at most ``captures * budget`` names and skips a trailing singleton
+    (``len(group) < 2``), so without this the artifact leaves a reader to
+    reconstruct the denominator from ``captures`` and the ``budget`` literal —
+    and a ``--sample``/``--captures`` edit could narrow the population silently
+    while the arm still reports a share.
+
+    ``truncated`` is the field to read: True means the pooled numbers are about
+    ``names_measured`` names, not ``names_in_sample``. At the committed
+    artifact's shape (300 names, 20 captures, budget 15) it is False.
+
+    ⛔ The COMMITTED artifact ``measurement-entropy-gate-12294.json`` predates
+    this field and does not carry it — its denominator is reconstructible from
+    what it does state (``corpus.sample`` 300 = ``pooled.captures`` 20 x the
+    15-name budget recorded in ``pooled_budget_note``), and back-filling a
+    generated record is worse than the gap: a hand-added field turns the run's
+    own evidence into a hybrid a re-run diff reads as drift. The established
+    precedent in this repo is `test_the_harness_reports_how_much_of_its_own_input_it_discarded`
+    (committed artifacts predate ``corpus.input``; the INSTRUMENT is what is
+    asserted). A fresh run emits the field.
+    """
+    reached = min(sample_size, captures * budget)
+    singleton = 1 if reached % budget == 1 else 0
+    return {
+        "names_in_sample": sample_size,
+        "names_reached": reached,
+        "names_measured": reached - singleton,
+        "skipped_singleton": singleton,
+        "truncated": (reached < sample_size) or bool(singleton),
+    }
 
 
 def _allocate_shares(sample: int, pop: list[dict]) -> dict[str, int]:
@@ -837,6 +1093,57 @@ def run(args: argparse.Namespace) -> int:
         exact = {k: {"in_window": 0, "rank_sum": 0, "attached": 0,
                      "miss_absent_at_max_k": 0, "miss_past_k": 0,
                      "rows_zero": 0} for k in KS}
+        # ── ARM 4 (this change, #12294): the ENTROPY GATE, measured on the SAME
+        # names, windows and graph as ARM 1 — folded into this loop so the arm
+        # costs ZERO extra queries, which is the only way its "before" is the
+        # "before" the other arms report.
+        #
+        # Two predicates, because the issue asks what the ported gate ACTUALLY
+        # tests and whether it reaches our population:
+        #   ``zep_full_name`` — `_has_high_entropy` applied to the whole name,
+        #                       exactly as Zep does (`dedup_helpers.py:80-86`).
+        #   ``shipped``       — `_name_carries_signal`, i.e. the same predicate
+        #                       applied to the name's STOPWORD-REMOVED content
+        #                       tokens — the set that WOULD carry the query if the
+        #                       leg used it, which is not the leg's surviving set
+        #                       (`_signal_tokens` says why: the leg also drops
+        #                       <2-char and all-digit tokens and the query may
+        #                       take the raw-literal path instead).
+        # For each: how many names it gates, and — the number that decides the
+        # issue — how many of them had the CANONICAL in the window, i.e. correct
+        # candidates the gate would suppress.
+        #: ``suppressed_correct_k_sum`` is a SUM OVER THE MEASURED WINDOWS — a
+        #: (name × k) count, so a name found at both k=3 and k=15 counts twice.
+        #: ``suppressed_correct_by_k`` carries the per-window number, which is
+        #: the one to quote ("74 of 86 names at k=3, 86 of 86 at k=15"); the sum
+        #: is kept only so the artifact totals reconcile. There is no separate
+        #: ``in_window_before`` field: it was incremented in the SAME branch and
+        #: could therefore never disagree with this one, i.e. it was not an
+        #: independent check.
+        gate: dict[str, dict] = {
+            p: {"names": 0, "gated": 0, "gated_and_missed": 0,
+                "suppressed_correct_k_sum": 0,
+                "suppressed_correct_by_k": {str(k): 0 for k in _GATE_KS
+                                            if k in KS},
+                #: ⛔ A SUM OVER THE MEASURED WINDOWS, like
+                #: ``suppressed_correct_k_sum`` above and for the same reason:
+                #: a gated name missed at BOTH k=3 and k=15 contributes twice.
+                #: There is no per-k sibling for this field (none is quoted
+                #: anywhere), so read it as an event count, never as a count of
+                #: names — the 184 %-ratio and 4×-over-report defects this
+                #: module records twice are exactly this key's failure mode.
+                "noise_rows_freed": 0}
+            for p in ("zep_full_name", "shipped")}
+        #: per gated name, the evidence the falsifier needs: ONE entry per name,
+        #: listing which predicates gate it. ⛔ It was appended inside the
+        #: per-predicate loop, so a name gated by BOTH predicates appeared TWICE
+        #: (98 entries for 85 names) and every "N of 98 rows" figure read off it
+        #: was inflated by the overlap. Capped only by the sample, never sliced.
+        gate_gated: list[dict] = []
+        gate_by_class: dict[str, dict[str, dict[str, int]]] = collections.defaultdict(
+            lambda: {c: {"names": 0, "gated": 0, "suppressed_correct_k_sum": 0}
+                   for c in ("zep_full_name", "shipped")})
+
         exact_by_class: dict[str, dict[str, dict[str, int]]] = collections.defaultdict(
             lambda: {str(k): {"n": 0, "in_window": 0, "rows_zero": 0} for k in KS})
         exact_misses: list[dict] = []
@@ -855,10 +1162,29 @@ def run(args: argparse.Namespace) -> int:
             # fold-equal groups), and 'was the canonical returned' is a question
             # about a node, not a string.
             wide = window(name, max(KS))
+            _g_pred = {"zep_full_name": not _has_high_entropy(_zep_normalize_for_fuzzy(name)),
+                       "shipped": not _name_carries_signal(name)}
+            _g_hit: dict[str, dict[int, bool]] = {
+                p: {} for p in _g_pred if _g_pred[p]}
             for k in KS:
                 rows = window(name, k)
                 exact_by_class[row["cls"]][str(k)]["n"] += 1
                 hit = next((i for i, r in enumerate(rows) if r["id"] == row["id"]), None)
+                # #12294 gate accounting, on THIS window — no extra queries.
+                if k in _GATE_KS:
+                    for p, is_gated in _g_pred.items():
+                        if not is_gated:
+                            continue
+                        _g_hit[p][k] = hit is not None
+                        if hit is not None:
+                            # per-k AND the reconciling sum: the per-class table
+                            # must not read 0 beside a non-zero total (it did).
+                            gate[p]["suppressed_correct_by_k"][str(k)] += 1
+                            gate[p]["suppressed_correct_k_sum"] += 1
+                            gate_by_class[row["cls"]][p][
+                                "suppressed_correct_k_sum"] += 1
+                        else:
+                            gate[p]["noise_rows_freed"] += len(rows)
                 if hit is not None:
                     exact[k]["in_window"] += 1
                     exact_by_class[row["cls"]][str(k)]["in_window"] += 1
@@ -888,6 +1214,8 @@ def run(args: argparse.Namespace) -> int:
                             "returned": len(rows),
                             "wide_returned": len(wide),
                             "tokens": len(toks),
+                            "signal_tokens": len(_signal_tokens(name)),
+                            "gated": _name_carries_signal(name) is False,
                             "siblings_2tok": _siblings.get(name, 0),
                             "tokens_kept_numeric": len(
                                 [t for t in toks if not t.isdigit()]) != len(toks),
@@ -904,6 +1232,40 @@ def run(args: argparse.Namespace) -> int:
                 cand, _mode = _find_existing_entity(rows, name, "core:other")
                 if cand is not None:
                     exact[k]["attached"] += 1
+            # #12294: one row per name, so `names`/`gated` counts are names and
+            # the per-class denominator is readable.
+            for p, is_gated in _g_pred.items():
+                gate[p]["names"] += 1
+                gate_by_class[row["cls"]][p]["names"] += 1
+                if is_gated:
+                    gate[p]["gated"] += 1
+                    gate_by_class[row["cls"]][p]["gated"] += 1
+                    if not any(_g_hit[p].values()):
+                        # gated AND the canonical was reachable at NO window —
+                        # the class the gate is FOR (a query that cannot find it)
+                        gate[p]["gated_and_missed"] += 1
+            _g_names = [p for p, g in _g_pred.items() if g]
+            if _g_names:
+                gate_gated.append({
+                    "name": name, "cls": row["cls"],
+                    # which predicates gate this name — the field whose absence
+                    # made the double-append above invisible
+                    "predicates": sorted(_g_names),
+                    "signal_tokens": _signal_tokens(name),
+                    "in_window_by_k": {str(k): _g_hit[p].get(k)
+                                       for p in _g_names for k in _GATE_KS
+                                       if k in _g_hit[p]},
+                    "wide_rows": len(wide),
+                })
+        arms["gate"] = gate
+        #: `gated` and the `gate_gated_names` entries describe the SAME names now
+        #: that the record is one-per-name; this cross-check makes a future
+        #: double-count fail loudly instead of inflating a quoted share.
+        for p in gate:
+            _recorded = sum(1 for g in gate_gated if p in g["predicates"])
+            assert _recorded == gate[p]["gated"], (p, _recorded, gate[p]["gated"])
+        arms["gate_by_class"] = {c: dict(v) for c, v in sorted(gate_by_class.items())}
+        arms["gate_gated_names"] = gate_gated
         arms["exact"] = exact
         arms["exact_misses"] = exact_misses
         arms["exact_misses_recorded"] = len(exact_misses)
@@ -920,13 +1282,46 @@ def run(args: argparse.Namespace) -> int:
         by_class: dict[str, dict[str, dict[str, int]]] = collections.defaultdict(
             lambda: {str(k): {"pairs": 0, "in_window": 0, "attached": 0,
                               "attached_folded": 0} for k in KS})
+        #: #12294, variant arm: what the gate removes from the pair population.
+        #: ``gated_pairs`` counts the gated MENTIONS in this arm, at
+        #: ``_GATE_KS[0]`` only (the denominator is ``pairs`` at the SAME window,
+        #: so the share is readable); ``would_attach_before`` is the number that
+        #: decides the issue — a gated pair that phase 1 CAN bind today becomes a
+        #: guaranteed duplicate once its query is not issued.
+        #: ``pairs``, ``gated_pairs``, ``in_window_before`` and
+        #: ``would_attach_before`` are all counted at ONE window (``_GATE_KS[0]``)
+        #: so the share is readable — the first cut counted the denominator once
+        #: per surface and the numerator per (surface × k), a 184 % ratio.
+        #: ``would_attach_before_any_k`` is the falsifier's number and is counted
+        #: once per PAIR over every k (a pair phase 1 binds at ANY width is a
+        #: duplicate the gate creates) — per pair, not per (pair × k), which is
+        #: how it was first accumulated and would over-report up to 4×.
+        vgate: dict[str, dict[str, int]] = {
+            p: {"pairs": 0, "gated_pairs": 0, "in_window_before": 0,
+                "would_attach_before": 0, "would_attach_before_any_k": 0}
+            for p in ("shipped", "zep_full_name")}
         for row in sample:
             name = row["name"]
             for vclass, surface in variants(name, row["cls"]):
                 folded_surface = _fold_punct(surface)
+                # #12294: the gate evaluates the MENTION — a capture derives its
+                # query from the surface form it extracted, never from the stored
+                # name, which it does not know yet.
+                _v_gated = {"shipped": not _name_carries_signal(surface),
+                            "zep_full_name": not _has_high_entropy(
+                                _zep_normalize_for_fuzzy(surface))}
+                #: per predicate, did phase 1 bind THIS pair at ANY width — the
+                #: accumulator that makes `would_attach_before_any_k` a PAIR
+                #: count rather than a (pair × k) event count.
+                _v_attach: dict[str, bool] = {p: False for p in _v_gated}
                 for k in KS:
                     var[k]["pairs"] += 1
                     by_class[vclass][str(k)]["pairs"] += 1
+                    if k == _GATE_KS[0]:
+                        for _p, _g in _v_gated.items():
+                            vgate[_p]["pairs"] += 1
+                            if _g:
+                                vgate[_p]["gated_pairs"] += 1
                     rows = window(surface, k)
                     in_win = any(r["id"] == row["id"] for r in rows)
                     if in_win:
@@ -936,6 +1331,18 @@ def run(args: argparse.Namespace) -> int:
                     # derived query would carry it — never the stored name
                     cand, _m = _find_existing_entity(rows, surface, "core:other")
                     hit_ok = cand is not None and cand.get("id") == row["id"]
+                    # #12294 false-suppression: a gated mention's query is never
+                    # issued, so a pair that WAS in-window loses its canonical
+                    # from phase 1's window AND from phase 2's candidate table.
+                    for _p, _g in _v_gated.items():
+                        if not _g:
+                            continue
+                        if hit_ok:
+                            _v_attach[_p] = True
+                        if in_win and k == _GATE_KS[0]:
+                            vgate[_p]["in_window_before"] += 1
+                            if hit_ok:
+                                vgate[_p]["would_attach_before"] += 1
                     if hit_ok:
                         var[k]["attached"] += 1
                         by_class[vclass][str(k)]["attached"] += 1
@@ -947,8 +1354,13 @@ def run(args: argparse.Namespace) -> int:
                     if cand2 is not None and cand2.get("id") == row["id"]:
                         var[k]["attached_folded"] += 1
                         by_class[vclass][str(k)]["attached_folded"] += 1
+                # once per PAIR, after every window is known
+                for _p, _ok in _v_attach.items():
+                    if _ok:
+                        vgate[_p]["would_attach_before_any_k"] += 1
         arms["variant"] = var
         arms["variant_by_class"] = {c: dict(v) for c, v in sorted(by_class.items())}
+        arms["gate_variant"] = vgate
 
         # ── ARM 3: what a capture actually hands ``resolve_entities``.
         # ``search_graph`` accumulates every query's rows into ONE id-keyed dict,
@@ -957,25 +1369,102 @@ def run(args: argparse.Namespace) -> int:
         # capture, which is the production budget (``max_queries=15``).
         pooled = {k: {"captures": 0, "set_sum": 0, "set_min": 10**9, "set_max": 0}
                   for k in KS}
+        #: #12294: the PRODUCTION-TRUTH cost of the gate, which the isolated arms
+        #: cannot answer. `search_graph` unions every derived query into ONE
+        #: id-keyed candidate set, so a gated name's canonical can still arrive
+        #: through ANOTHER name's query in the same capture. This measures exactly
+        #: that: build the union from the NON-gated names only (what the gate
+        #: would leave in place), then ask whether each gated name's canonical is
+        #: still in it.
+        #: ⛔ ``lost`` is NOT "every gated name that is not rescued" — it is a
+        #: recall cost, so it must be one the gate CAUSES: the canonical was in
+        #: the UNGATED union (``merged``) and is not in the gated one. A gated
+        #: name whose canonical neither union holds is
+        #: ``unreachable_regardless`` — the gate costs nothing there, so counting
+        #: it as loss would inflate the decline's own evidence (a defect that ran
+        #: the flattering-for-the-conclusion way: the first cut booked all 12 k=3
+        #: misses as ``lost``).
+        #: ⛔ IT IS PER-WINDOW, AND THAT IS NOT #12294's TARGET CLASS. This branch
+        #: books a name no query in THIS window can reach — at k=3 on the measured
+        #: corpus that is ~12 names window 15 finds fine. The target class (a name
+        #: unreachable at ANY measured window) is `gate[p]["gated_and_missed"]`,
+        #: which is 0 here. Reading this field as "the class Zep's gate protects"
+        #: inverts the finding; the label below says so because a lane quoting it
+        #: under the arm's authority would be quoting the inversion.
+        #: ⚠️ THE COMMITTED ARTIFACT PREDATES THE SPLIT: its `shipped` k=3 cell
+        #: (`lost` 85) is therefore an UPPER bound — the honest value is
+        #: ``86 - rescued - unreachable_regardless``, bounded below by
+        #: ``86 - 1 - 12 = 73`` since every name whose own query found it is in
+        #: ``merged``. Its k=15 cell is EXACT (all 86 gated names are in-window at
+        #: k=15, so ``unreachable_regardless`` is 0 there), which is why the PR
+        #: body quotes k=15's 80 lost and never k=3's.
+        #: ⛔ Per WINDOW, and the key says which: the first cut measured k=3 only
+        #: and recorded no `k`, so "1 of 85 rescued" was silently the NARROWEST
+        #: union — the choice that maximises apparent loss. k=15 is recorded
+        #: beside it, and the artifact now names both.
+        pooled_gate: dict[str, dict[str, dict[str, int]]] = {
+            p: {str(k): {"gated": 0, "rescued_by_union": 0, "lost": 0,
+                        "unreachable_regardless": 0}
+                for k in _GATE_KS if k in KS}
+            for p in ("shipped", "zep_full_name")}
         budget = 15   # production ``max_queries``
-        for start in range(0, min(len(sample), args.captures * budget), budget):
+        #: The pooled arms' own denominator, recorded beside their numbers — see
+        #: `_pooled_coverage` for why a silent cap is the defect here.
+        _pooled = _pooled_coverage(len(sample), args.captures, budget)
+        arms["pooled_coverage"] = _pooled
+        for start in range(0, _pooled["names_reached"], budget):
             group = sample[start:start + budget]
             if len(group) < 2:
                 continue
             for k in KS:
                 merged: dict[str, dict] = {}
+                #: per PREDICATE, the ids the gate would leave in place — built
+                #: from exactly the names that predicate keeps, so neither
+                #: column is measured against the other's set.
+                kept: dict[str, dict[str, dict]] = {
+                    p: {} for p in ("shipped", "zep_full_name")}
                 for row in group:
-                    for r in window(row["name"], k):
+                    rows_here = window(row["name"], k)
+                    for r in rows_here:
                         if r["id"] and r["id"] not in merged:
                             merged[r["id"]] = r
+                    for p, _keeps in (
+                            ("shipped", _name_carries_signal(row["name"])),
+                            ("zep_full_name", _has_high_entropy(
+                                _zep_normalize_for_fuzzy(row["name"])))):
+                        if not _keeps:
+                            continue
+                        for r in rows_here:
+                            if r["id"]:
+                                kept[p][r["id"]] = r
                 size = len(merged)
                 pooled[k]["captures"] += 1
                 pooled[k]["set_sum"] += size
                 pooled[k]["set_min"] = min(pooled[k]["set_min"], size)
                 pooled[k]["set_max"] = max(pooled[k]["set_max"], size)
+                if k not in _GATE_KS:
+                    continue
+                for row in group:
+                    for p, is_gated in (
+                            ("shipped", not _name_carries_signal(row["name"])),
+                            ("zep_full_name", not _has_high_entropy(
+                                _zep_normalize_for_fuzzy(row["name"])))):
+                        if not is_gated:
+                            continue
+                        cell = pooled_gate[p][str(k)]
+                        cell["gated"] += 1
+                        if row["id"] in kept[p]:
+                            cell["rescued_by_union"] += 1
+                        elif row["id"] in merged:
+                            # reachable BEFORE the gate, gone after it: a real loss
+                            cell["lost"] += 1
+                        else:
+                            # neither union holds it — the gate costs nothing here
+                            cell["unreachable_regardless"] += 1
+        arms["pooled_gate"] = pooled_gate
         arms["pooled"] = pooled
 
-        # ── ARM 4 (#12297): the cross-encoder rerank over the SAME candidates.
+        # ── ARM 5 (#12297): the cross-encoder rerank over the SAME candidates.
         #
         # ⛔ A reranker REORDERS what retrieval returned; it cannot surface a row
         # the leg never produced. So this arm's ceiling is `in_window(P)` — the
@@ -1125,7 +1614,7 @@ def main(argv: list[str] | None = None) -> int:
     # ── #12297: the cross-encoder rerank arm. DEFAULT OFF, so every existing
     # invocation — and every committed artifact — is byte-identical.
     p.add_argument("--rerank", action="store_true",
-                   help="also measure arm 4: the cross-encoder rerank over the "
+                   help="also measure arm 5: the cross-encoder rerank over the "
                         "same fused candidates at each --rerank-pool width. "
                         "Off by default so the committed artifacts' shape is "
                         "unchanged.")

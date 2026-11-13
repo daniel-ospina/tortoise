@@ -31,7 +31,9 @@
 #      nudge — a paging outage must never cost the record)
 #  13. the ledger leg is what fails the step when it cannot file
 #  14. `--job` is required and an unknown argument is a usage error (exit 2)
-#  15. the body file is written under RUNNER_TEMP and is the issue's body
+#  15. the body file is written under RUNNER_TEMP, and every body assertion here reads THAT
+#      file. ⚠️ NOT pinned: that the body the substrate FILES is the one that was built — a
+#      decoy payload still passes (measured, review round 10); filed as #12320.
 #  16. a NON-Actions author is refused by the shared substrate on this path too
 #      (the PAT trap: it would file a duplicate on every failing run)
 #  17. the pasted report cannot break the body it is pasted into (a fence longer than
@@ -53,6 +55,32 @@
 #  17h. a FAILING ASCII fallback must not DEAFEN the notifier: the `|| true` guard on
 #      the `tr` squeeze is a guard, not decoration — under `set -euo pipefail` its
 #      absence aborts the body build before anything is filed (#2240's silence)
+#  17i. the fallback's OWN empty state claims no excerpt (#12200): neither path produced
+#      one, so the body must say exactly that and point at the run link — never "it is
+#      pasted …" (pinned by SHAPE, not one phrasing), never the intro's "follows
+#      verbatim" (the louder member of the same class), and never a GUESSED CAUSE (a
+#      failing `tr` and an all-non-ASCII tail are indistinguishable here)
+#  17j. a converter's own stderr diagnostic is suppressed, so the job log carries the
+#      alert rather than a second, phantom failure (#12200)
+#  17k. a BIG report whose TAIL is blank says the TAIL held nothing, not the FILE, and names
+#      the report's real size — so a 15,400-byte report is never described as empty and the
+#      6000-byte cut the intro promises is declared in that state too (#12283 F7)
+#  17l. a HEALTHY converter that emits nothing is not a MISSING one: a tail that is entirely
+#      undecodable makes `iconv -c` emit zero bytes with a status glibc uses to say it dropped
+#      everything, and the state sentence names that cause instead of blaming the host
+#  17m. the ASCII fallback's own stderr diagnostic is suppressed too — `tr` shares the
+#      notifier's job, so its complaint must not read as a second failure
+#  17n. a tail whose only ASCII is LINE BREAKS is a FOURTH cause of an empty excerpt — the
+#      converter is present and succeeds and the shell strips its trailing newlines, so the
+#      body must name that cause instead of blaming the converter (#12200, round 8)
+#  17o. a NON-REGULAR report path (a character device) must not HANG the alert — `wc -c` reads
+#      to EOF and a device never reaches one — and a size it could not measure must not be
+#      asserted: the carrying arm declares the 6000-byte WINDOW instead (#12272, round 8)
+#  17p. a `wc` that yields NO NUMBER must not silence the LOSS disclosure: the squeeze-length
+#      comparison is the second measurement site, and an unguarded `[ -lt ]` there both logs
+#      `integer expression expected` and CLEARS the "excerpt is NOT byte-identical" sentence on
+#      a report whose cut really did split a character. Unmeasurable ⇒ declared unmeasured
+#      (#12200, review round 9)
 #  18. a LATE `deploy-api` failure must not read as "nothing shipped"
 #  19-21. `--resolve` (#8841) retires EXACTLY the keys whose steps reported
 #      `success` in this run (plus the job-level key only when `job.status` is
@@ -286,6 +314,11 @@ else
   bad "case 1's fixture holds an invalid UTF-8 sequence or exceeds the cap — the no-drop pin below would be vacuous"
 fi
 assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "NOT byte-identical" "and the body does NOT claim a drop it did not measure (a measure, not a constant)"
+# ⛔ AND THE SAME FOR THE UNMEASURED-LOSS SENTENCE (case 17p review round 2, P2): 17p's fixtures all
+# DROP a character, so the measured `if` shadows the `elif` and an `elif true` mutant — a body that
+# publishes "could NOT be measured" on every alert — stayed green on all 247 rows. This state is
+# under the cap and decodes, so both counts resolve and the sentence must be ABSENT.
+assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "could NOT be measured" "and it does NOT claim an UNMEASURED comparison in a state it measured (an unconditional disclosure reds here)"
 
 echo "── case 1b: a >6000-byte report keeps its ACTIONABLE TAIL ─────────────"
 # The gate prints its context (remote-ahead, non-conforming files, the
@@ -602,6 +635,18 @@ assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "co
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "non-ASCII" "and DECLARES the non-ASCII loss, so a mangled report never reads as the gate's own text"
 assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "NOT byte-identical" "and it does NOT claim a squeeze it did not perform"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the ASCII report is still carried, so the operator sees what is blocking"
+# ⛔ R4's CARRYING half (review round 2, P2). 17i pins the empty state hard; nothing pinned the
+# direction that matters just as much: in the state where the fallback DOES produce text, the body
+# must say it is pasted AND actually paste it — and must never also claim nothing was. Without these
+# three rows an edit that emits the empty-state sentence from the carrying arm passes every other
+# assertion in this file (183/183, measured), shipping "it is pasted with its non-ASCII bytes
+# dropped … NOTHING is pasted below" directly above a fenced report: the on-call reader concludes
+# the report is absent and leaves for the run, which is the exact consumer-side failure #12200 is
+# about, mirrored.
+FALLBACK_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$FALLBACK_BODY" "it is pasted with its non-ASCII bytes dropped" "and the CARRYING arm claims the paste it really performs"
+assert_not_contains "$FALLBACK_BODY" "NOTHING is pasted below" "and it never ALSO claims nothing was pasted — the two states' sentences are exclusive"
+assert_contains "$FALLBACK_BODY" '```' "and the excerpt is FENCED, so the claim is accompanied by the artifact it describes"
 # This arm is reached only when NO converter ran, so the split character is still in
 # the raw bytes: the fallback must drop it (not paste it), or the issue body is
 # undecodable. Pinned here as well as in case 17g, because a "fix" that swaps this
@@ -614,10 +659,17 @@ fi
 export PATH="$PATH_BEFORE_ICONV_SHIM"
 
 # ── case 17h: a failing ASCII FALLBACK must not deafen the notifier ──────────────────
-# `tr` is coreutils, but the guard around it is what a merge already dropped once
-# (review P2, PR #12110): without `|| true`, `set -e` aborts `build_body` AT the
-# assignment and NOTHING is filed — the exact silence #2240 exists to remove. The
-# guard is pinned here rather than assumed away as "tr never fails".
+# `tr` is coreutils, but the `|| true` guard around it is LOAD-BEARING, not
+# decoration: without it, `set -e` aborts `build_body` AT the assignment and NOTHING
+# is filed — the exact silence #2240 exists to remove. The guard is pinned here
+# rather than assumed away as "tr never fails".
+# ⚠️ HISTORY, CORRECTED (review round 14): this comment used to say the guard "is
+# what a merge already dropped once". Measured over every commit that has ever
+# carried the `tr` line on main — two of them — both carry `|| true`, and
+# `origin/main:368` has it today; no merge dropped it. The sentence was inherited
+# from main and is the same class this PR removes, so it is corrected here rather
+# than left standing one function away from the script comment that declares it
+# false.
 REAL_TR="$(command -v tr)"
 if [ -n "$REAL_TR" ]; then
   ok "case 17h: a real tr exists, so the failing-squeeze shim can wrap it"
@@ -642,6 +694,151 @@ export PATH="$PATH_BEFORE_ICONV_SHIM"
 assert_eq "$RC" "0" "case 17h: a failing ASCII fallback does NOT fail the alert (the ledger is the alert, the notifier is the safety net)"
 assert_eq "$(count_creates)" "1" "case 17h: and an issue IS still filed — a degraded body, never a deaf channel"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "case 17h: and the degradation is STATED rather than silent"
+# ⛔ The SAME empty state is reachable from here (a broken `tr` produces no excerpt too), and
+# this arm is why the sentence may not name a CAUSE: an earlier wording asserted "every byte
+# of the excerpt-able tail is non-ASCII", which is false for THIS state — an ASCII report
+# whose fallback command failed (measured, VGATE round 1). The state is named, the cause is
+# not guessed; a cause-specific sentence reds this row.
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "ASCII fallback produced no excerpt either" "case 17h: and a FAILING fallback is described as itself, not as a non-ASCII report"
+assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "is non-ASCII" "case 17h: and it does NOT diagnose the report's bytes — a failing tr and an all-non-ASCII tail are indistinguishable from here"
+# …and this report is 11,923 bytes, so THIS arm must declare the 6000-byte cut as well
+# (review round 6, P3): the intro promises it beside the excerpt in every state.
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "only its last 6000 were read" "case 17h: and the 6000-byte cut is DECLARED in this arm too, not only in the empty-capture arm"
+
+# ── case 17i: the ASCII fallback's OWN empty state claims no excerpt (#12200) ─────────
+# The fallback branch has TWO outcomes and the sentence that described them was
+# unconditional: a report whose excerpt-able text is entirely non-ASCII (`→→→`)
+# squeezes to NOTHING under `tr -d '\200-\377'`, so the fenced block is skipped — while
+# the body still said "it is pasted with its non-ASCII bytes dropped". That is a claim
+# about evidence made on a report the issue does not carry: with a degraded excerpt the
+# reader reads the body; with no excerpt at all they must follow the run link. Same class
+# as case 17c, on the path where the promise is prose instead of a heading — which is the
+# class this whole file is about ("write the sentence about the ARTIFACT, not about the
+# code path that produced it").
+#
+# The same class had a LOUDER member: the section intro said the report "follows
+# verbatim" for every drift body, before the report is even read. It is pinned absent here
+# too, so fixing one sentence and not the other cannot pass.
+#
+# The no-converter shim is what makes this state reachable at all: with a working iconv
+# the tail is squeezed (or its status is caught) and this branch is never entered.
+python3 -c 'import sys,pathlib; pathlib.Path(sys.argv[1]).write_text("\u2192\u2192\u2192\n", encoding="utf-8")' "$FIX/drift-report-nonascii.txt"
+# The pre-check below reproduces the SCRIPT's own assignment shape on purpose: a command
+# substitution strips trailing newlines, so `→→→\n` captures as EMPTY even though one LF
+# survives the byte delete. Testing the delete alone (`| wc -c` = 1) would describe a
+# different state than the branch actually reaches. ⚠️ This check is a DIAGNOSTIC, not the
+# non-vacuity anchor: it copies the expression, so if the script's capture shape changes it
+# can keep passing while describing a state the code no longer reaches. The POSITIVE body
+# rows below are the anchor — `produced no excerpt either` is emitted ONLY in the
+# empty-fallback arm (the script's own wording, quoted exactly: an earlier draft of this
+# comment quoted a phrase — `yielded NOTHING either` — that no commit of this branch ever
+# emitted, which is this PR's own class one layer down), so a fixture that stopped reaching
+# that arm reds those rows regardless of this check.
+EX17I="$(LC_ALL=C tr -d '\200-\377' < "$FIX/drift-report-nonascii.txt")"
+if [ -z "$EX17I" ]; then
+  ok "case 17i: the fixture captures as EMPTY under the ASCII fallback (so the case is not vacuous)"
+else
+  bad "case 17i: the fixture does NOT capture as empty — this case cannot reach the state it pins (got '$EX17I')"
+fi
+export PATH="$ICONV_BROKEN_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-nonascii.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$RC" "0" "case 17i: a report with no ASCII left still files the alert"
+assert_eq "$(count_creates)" "1" "case 17i: and an issue IS filed — the ledger leg never goes deaf"
+BODY_17I="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$BODY_17I" "could not be byte-squeezed" "case 17i: and the squeeze failure is still STATED"
+assert_contains "$BODY_17I" "produced no excerpt either" "case 17i: and it names the state it is actually in"
+assert_contains "$BODY_17I" "run link above" "case 17i: and sends the reader to where the report actually is"
+assert_not_contains "$BODY_17I" "it is pasted with its non-ASCII bytes dropped" "case 17i: and it does NOT claim a pasted excerpt it does not carry (#12200 — this row reds if the sentence's condition is removed)"
+assert_not_contains "$BODY_17I" "only its last 6000 were read" "case 17i: and it does NOT declare a cut for a report under the cap — the clause is CONDITIONAL (this report is a few bytes)"
+# The claim is pinned by SHAPE, not only by one phrasing, and the shape row alone is NOT the
+# net: round-1 review measured a mutant that keeps every other row green — the correct state
+# sentence SURVIVES and a second clause is added ("… yet the report **was** pasted with its
+# non-ASCII bytes dropped"). A past-tense verb walked past the original alternation, so the
+# row now spans the tenses AND the PRESENCE verbs this paragraph can carry (pasted / reproduced
+# / quoted / shown …: "the report was reproduced below" is the same false claim with a
+# different verb), and a verb-agnostic row pins the claim's distinctive clause (the loss
+# declaration), which no synonym for "is pasted" can avoid — the two nets catch different
+# regressions and BOTH are kept.
+# ⚠️ BOTH nets match against a NEWLINE-FLATTENED body (review round 2, P3): this script writes each
+# sentence as ~90-char `echo` lines, and `assert_no_match` greps line by line — so a claim whose
+# subject and verb land on DIFFERENT lines (`echo "the report is"` / `echo "reproduced below."`)
+# escaped both nets while the rendered markdown joins them into the claim. Flattening makes the nets
+# match what the READER sees, not what the source happens to wrap on.
+# ⚠️ The subject list is why neither row false-reds on the CORRECT wording: the fixed empty-state
+# sentence says "NOTHING is pasted below", whose subject is `NOTHING` — never one of the claim
+# subjects above. A rewrite that gives the negation a listed subject WOULD false-red, and that is
+# the correct trade: the state sentence is ours to word.
+BODY_17I_FLAT="$(printf '%s' "$BODY_17I" | tr '\n' ' ')"
+# ⛔ Case-INSENSITIVE for the shape row, because a claim can start a sentence ("The report is
+# reproduced below.") — measured: the capitalised split-line variant walked past a lowercase-only
+# ERE. The correct wording is safe under lowercasing: its subject is `nothing`.
+BODY_17I_LC="$(printf '%s' "$BODY_17I_FLAT" | tr '[:upper:]' '[:lower:]')"
+assert_no_match "$BODY_17I_LC" '(it|they|this|the excerpt|the report|the degraded report) (is|are|was|were|has been|have been) +(pasted|reproduced|quoted|included|shown|carried|printed)' "case 17i: no phrasing of a PASTE/PRESENCE claim survives (#12200), across line breaks and case"
+assert_not_contains "$BODY_17I_FLAT" "with its non-ASCII bytes dropped" "case 17i: and no LOSS CLAUSE survives either — verb-agnostic, so a synonym for 'pasted' cannot carry it in"
+assert_no_match "$BODY_17I" 'follows verbatim' "case 17i: and the section intro claims no verbatim report either — the louder sibling of the same class"
+# ⛔ THE INTRO'S CONDITION IS THE FIX, SO THE CONDITION IS WHAT GETS PINNED (review round 3, P2).
+# The rows above pin the PHRASE that had to go; nothing pinned the clause that makes the
+# replacement true. Measured: delete `when it can be carried` and this file stays green,
+# 186/186 — while the body then reads "… is reproduced below;" in a state whose next
+# paragraph says "NOTHING is pasted below", i.e. the exact claim #12200 exists to remove,
+# restored by a four-word edit. The net below is the shape that catches that deletion and
+# NOT the correct wording: it needs the presence verb to be followed by END-OF-CLAIM
+# punctuation, so "reproduced below when it can be carried;" (the shipped sentence, and
+# any rewording that keeps a condition) does not match, while "reproduced below;" does.
+# ⚠️ Why it is NOT the SHAPE net reused from :739: that row requires SUBJECT-VERB ADJACENCY,
+# and the intro separates them with an appositive ("the one that names … — is reproduced
+# below"), so the intro's own sentence shape walks past it. `pasted` is deliberately NOT in
+# this verb list: the CORRECT empty-state sentence ends "NOTHING is pasted below;", which
+# this net would otherwise false-red.
+BODY_17I_PRESENCE='(reproduced|quoted|shown|included|printed|carried) below([[:space:]]*[;.,:]|$)'
+assert_no_match "$BODY_17I_LC" "$BODY_17I_PRESENCE" "case 17i: and the intro's presence claim is CONDITIONED — an unconditional '<verb> below;' would claim a report this state does not carry (#12200)"
+# …and the SAME claim with a word between `below` and its punctuation walks past the row above
+# (measured in review round 4: `reproduced below in full;` left 190/190 green while the body
+# claimed a report in a state that carries none). So the condition is pinned POSITIVELY as
+# well — the presence claim must be followed by a conditional keyword, whatever its wording.
+# Residual, stated rather than implied: a restructure that moves the condition BEFORE the verb
+# ('when it can be carried, the report is reproduced below') reds this row although the
+# sentence is true. That is the right failure mode (a red asks for the alternation to be
+# extended) as against a green that certifies a claim the body does not carry.
+BODY_17I_CONDITION='(reproduced|quoted|shown|included|printed|carried) below[[:space:]]+(when|whenever|if|provided|unless)'
+assert_match "$BODY_17I_LC" "$BODY_17I_CONDITION" "case 17i: and the condition is PRESENT in the claim — 'below in full;' is unconditional, so it would read as a carried report (review round 4)"
+assert_not_contains "$BODY_17I" '```' "case 17i: and it pastes NO fenced block, in any form"
+if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
+  ok "case 17i: and the body is still valid UTF-8"
+else
+  bad "case 17i: the body is NOT valid UTF-8"
+fi
+
+# ── case 17j: a converter's own diagnostic must not reach the job log (#12200) ────────
+# The fallback also fires when `iconv` is ABSENT, and a missing or refusing converter
+# prints its own diagnostic. This branch ADDS the suppression relative to main (#12200,
+# "Also in the same block"). The history, checked against the commits rather than assumed:
+# the pre-#12110 form of this statement DID suppress it (`… -c 2>/dev/null || true`,
+# 49cf519354), and #12110's rewrite of the squeeze (6e5ff01625) did not carry it over — no
+# merge dropped it, and `git log 6e5ff01625..origin/main -- …deploy-api-alert.sh` is empty,
+# so the branch does not inherit it from anywhere. (An earlier draft of this comment said a
+# merge dropped it, which is the same class this PR removes: a sentence stating a mechanism
+# the artifact does not show.) One spurious stderr line is not a correctness bug — but it is
+# noise on the one channel an operator reads during an incident, and an unsuppressed
+# diagnostic reads like a second failure. Pinned, or a later edit drops it and nothing says so.
+ICONV_NOISY_DIR="$FIX/bin-iconv-noisy"
+mkdir -p "$ICONV_NOISY_DIR"
+cat > "$ICONV_NOISY_DIR/iconv" <<'ICONV_NOISY_EOF'
+#!/usr/bin/env bash
+# Refuses AND says so on stderr — the shape a missing/failing converter has on a runner.
+echo "iconv: I refuse this conversion" >&2
+exit 1
+ICONV_NOISY_EOF
+chmod +x "$ICONV_NOISY_DIR/iconv"
+export PATH="$ICONV_NOISY_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$RC" "0" "case 17j: a converter that FAILS noisily still files the alert"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "case 17j: and the body still declares the fallback"
+assert_not_contains "$OUT" "I refuse this conversion" "case 17j: and its diagnostic is SUPPRESSED — the job log carries the alert, not the converter's complaint"
 
 # ── case 17b (arm c): the disclosure is a BYTE MEASURE, not the status ─────────────────
 # glibc 2.39 drops the split sequence and exits 0, so a status-based disclosure says
@@ -670,6 +867,113 @@ BLANK_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
 assert_contains "$BLANK_BODY" "held no excerpt-able text" "and says the report held no excerpt-able text"
 assert_not_contains "$BLANK_BODY" "could not be byte-squeezed" "and does NOT claim a squeeze it never attempted"
 assert_not_contains "$BLANK_BODY" '```' "and pastes NO fenced block when there is nothing to paste"
+# The section intro is emitted BEFORE the report is read, so an unconditional claim about
+# what follows it is false in every report-less state — the blank, 0-byte, unreadable and
+# fallback-empty bodies alike (#12200). Pinned in this state as well as 17i so the claim
+# cannot survive in one arm while being fixed in another.
+assert_no_match "$BLANK_BODY" 'follows verbatim' "and the intro claims no VERBATIM report either (#12200)"
+# …and the intro's CONDITION is pinned in this state too, not only in 17i (review round 3,
+# P2): the same four-word deletion must not be able to survive in one report-less arm while
+# reddening in the other. Same net, flattened+lowercased for the same reasons as 17i's.
+BLANK_BODY_LC="$(printf '%s' "$BLANK_BODY" | tr '\n' ' ' | tr '[:upper:]' '[:lower:]')"
+assert_no_match "$BLANK_BODY_LC" "$BODY_17I_PRESENCE" "and the intro's presence claim is CONDITIONED here too — 'reproduced below;' would claim a report a blank state does not carry (#12200)"
+assert_match "$BLANK_BODY_LC" "$BODY_17I_CONDITION" "and that claim CARRIES its condition here too — the positive half, so an adverb after 'below' cannot smuggle the unconditional claim back in"
+
+# ── case 17k: a BIG report whose TAIL is blank — declare the cut and say which bytes
+#    were read (review round 5, P3) ────────────────────────────────────────────────
+# Only the report's LAST 6000 bytes are read, so a 15,400-byte report whose final bytes are
+# blank captures as EMPTY while the FILE holds plenty of text. Calling that "the report file
+# held no excerpt-able text" is false about the file — and it left the cut undeclared, which
+# made the section intro's "any of the 6000-byte cut … is declared beside it" false in this
+# single state. Both halves are pinned: the sentence must attribute the emptiness to the TAIL
+# it actually read, name the size, and the unqualified sentence must be absent.
+python3 -c 'import sys,pathlib; pathlib.Path(sys.argv[1]).write_bytes((b"check-migration-drift: BLOCKING 20260926000002\n" * 200) + (b"\n" * 6000))' "$FIX/drift-report-bigtail.txt"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-bigtail.txt"
+assert_eq "$RC" "0" "case 17k: a >6000-byte report with a blank tail still files the alert"
+BIGTAIL_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$BIGTAIL_BODY" "last 6000 bytes held no excerpt-able text" "case 17k: and it says the TAIL held nothing, not that the FILE did"
+assert_not_contains "$BIGTAIL_BODY" "**The report file held no excerpt-able text**" "case 17k: and the unqualified sentence — false about a 15,400-byte file — is ABSENT"
+assert_contains "$BIGTAIL_BODY" "15400 bytes" "case 17k: and it names the report's real size, so a reader sees text above the cut"
+assert_contains "$BIGTAIL_BODY" "only that tail is read" "case 17k: and the 6000-byte cut is DECLARED here too — the intro promises it beside the excerpt"
+assert_not_contains "$BIGTAIL_BODY" '```' "case 17k: and it pastes no fenced block it does not have"
+
+# ── case 17l: a HEALTHY converter that emits nothing is NOT a missing converter
+#    (review round 5, note 1) ───────────────────────────────────────────────────
+# The empty-fallback sentence used to name two causes — no `iconv`, or one that refused — while
+# a THIRD is reachable and needs no broken converter at all: the tail's last 6000 bytes are
+# entirely undecodable, so `iconv -c` emits ZERO bytes and the ASCII fallback finds nothing to
+# keep either. ⚠️ Its STATUS there is 1, not 0 (measured on glibc 2.39: `printf '\x92' | iconv -c`
+# → rc 1, 0 bytes; `printf 'A\xffB' | iconv -c` → rc 0, 2 bytes — glibc reports a drop it emitted
+# nothing for with status 1, and the ONE input that returns 0 with no output is an EMPTY one,
+# which the `raw_tail`-empty arm handles before this branch is reached, so it cannot smear this
+# claim) — an earlier draft of this comment said it "succeeds", which
+# is false on every host the suite runs on, and the alert does not read that status (`if !
+# excerpt=…; then :`). On such a host the old sentence told the on-call reader the converter
+# was missing while it had just run. The row pins the STATE ("emitted nothing it could convert")
+# and the absence of the two-cause form; it is a phrase-level pin, which is the residual #12283
+# records for this whole harness.
+
+# ── case 17n: a tail whose only ASCII is LINE BREAKS — the converter worked (round 8)
+# The fourth cause of an empty excerpt, and the one NO EMIT-NOTHING STUB can reach: `iconv` is
+# present and succeeds, emitting the tail's line breaks; the shell's command substitution strips
+# TRAILING newlines, so the capture is empty, and `tr` keeps the same `0a 0a` and is stripped the
+# same way. Measured on the real converter: `printf '\n\n\xff'` → `iconv -c` rc 0 emitting
+# `0a 0a`, capture `[]`. Before round 8 every named cause blamed the converter here — a host
+# whose converter had just worked.
+python3 -c 'import sys,pathlib; pathlib.Path(sys.argv[1]).write_bytes(b"\n\n\xff")' "$FIX/drift-report-blank-lines.txt"
+EX17N="$(iconv -f UTF-8 -t UTF-8 -c < "$FIX/drift-report-blank-lines.txt")"
+if [ -z "$EX17N" ]; then
+  ok "case 17n: the fixture captures as EMPTY under the REAL converter (the case is not vacuous)"
+else
+  bad "case 17n: the fixture does NOT capture as empty — this case cannot reach the state it pins"
+fi
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-blank-lines.txt"
+assert_eq "$RC" "0" "case 17n: a tail of nothing but line breaks still files the alert"
+assert_eq "$(count_creates)" "1" "case 17n: and an issue IS filed"
+BLANKLINE_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$BLANKLINE_BODY" "produced no excerpt either" "case 17n: and it names the state it is in"
+assert_contains "$BLANKLINE_BODY" "emitted only blank lines" "case 17n: and the FOURTH cause is named — the converter worked, so blaming it would be false"
+assert_not_contains "$BLANKLINE_BODY" '```' "case 17n: and it pastes no fenced block"
+python3 -c 'import sys,pathlib; pathlib.Path(sys.argv[1]).write_bytes((b"check-migration-drift: BLOCKING 20260926000002\n" * 200) + (b"\x92" * 6000))' "$FIX/drift-report-undecodable-tail.txt"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-undecodable-tail.txt"
+assert_eq "$RC" "0" "case 17l: an all-undecodable tail still files the alert"
+UNDEC_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$UNDEC_BODY" "produced no excerpt either" "case 17l: and it names the state it is in"
+assert_not_contains "$UNDEC_BODY" "is unavailable or refused to emit" "case 17l: and does NOT blame the converter — a healthy converter that emits nothing is not a missing one"
+assert_contains "$UNDEC_BODY" "emitted nothing it could convert" "case 17l: and the third cause is named, so the enumeration matches what the host can do"
+assert_not_contains "$UNDEC_BODY" '```' "case 17l: and it pastes no fenced block"
+assert_contains "$UNDEC_BODY" "only its last 6000 were read" "case 17l: and the 6000-byte cut is DECLARED in this arm too (review round 6 — the intro promises it beside the excerpt)"
+assert_contains "$UNDEC_BODY" "15400 bytes" "case 17l: and it names the report's real size"
+
+# ── case 17m: the ASCII FALLBACK's own diagnostic must not reach the job log (round 7) ─
+# The same rationale that put `2>/dev/null` on the `iconv` squeeze applies one line down: an
+# absent or failing `tr` prints its own diagnostic, which lands in the job log beside an alert
+# that went out perfectly well. R3 named "the converter", so this is the same class just
+# outside its letter — measured: `tr: command not found` reached the run's stderr.
+TR_NOISY_DIR="$FIX/bin-tr-noisy"
+mkdir -p "$TR_NOISY_DIR"
+cat > "$TR_NOISY_DIR/tr" <<TR_NOISY_EOF
+#!/usr/bin/env bash
+# Fails ONLY the ASCII-fallback squeeze (its own \`-d\` flag) and does so noisily.
+for a in "\$@"; do
+  if [ "\$a" = "-d" ]; then
+    echo "tr: cannot delete" >&2
+    exit 1
+  fi
+done
+exec "$REAL_TR" "\$@"
+TR_NOISY_EOF
+chmod +x "$TR_NOISY_DIR/tr"
+reset_case
+export PATH="$TR_NOISY_DIR:$PATH_BEFORE_ICONV_SHIM"
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-undecodable-tail.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$RC" "0" "case 17m: a FAILING, NOISY ASCII fallback still files the alert"
+assert_not_contains "$OUT" "tr: cannot delete" "case 17m: and its diagnostic is SUPPRESSED — the job log carries the alert, not the fallback's complaint"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "produced no excerpt either" "case 17m: and the body still names the state it is in"
 
 # ── case 17d: the READ GUARD — an existing but unreadable report must not abort ─────
 # NOTE THE MECHANISM (corrected, pass-5 review): a DIRECTORY is `-s`-TRUE on this fs, so
@@ -713,7 +1017,9 @@ reset_case
 if command -v timeout >/dev/null 2>&1; then
   timeout 20 "$HELPER" --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/report-fifo" >/dev/null 2>&1
   assert_eq "$?" "0" "case 17f: a FIFO report does not hang the alert (a hang returns 124 here)"
-  assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was not readable" "case 17f: and a FIFO is refused as not readable, which is true of it"
+  assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was NOT READ" "case 17f: and a FIFO is described as NOT READ — it IS readable, reading it is what would block (review round 7)"
+  assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was not readable" "case 17f: and NOT as 'not readable', which is false of a pipe a reader can drain"
+  assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "is a named pipe" "case 17f: and it names the real property — a pipe, which could block"
 else
   ok "case 17f: SKIPPED on this host — no \`timeout\` binary (macOS); the FIFO guard is pinned by CI (ubuntu-latest)"
 fi
@@ -738,10 +1044,17 @@ fi
 # not depend on the host's iconv build.
 cat > "$BIN/iconv" <<'ICONV_EOF'
 #!/usr/bin/env bash
-# STUB_ICONV_MODE=status → pass the bytes through, then report GNU libiconv's
-# "some sequence was dropped" status.  =silent → report it and emit nothing.
+# STUB_ICONV_MODE=status → what `iconv -c` REALLY does: emit the CONVERTIBLE bytes
+# (valid UTF-8), then report "a sequence was dropped" in the STATUS.  =silent →
+# report it and emit nothing.
 [ "${STUB_ICONV_MODE:-status}" = "silent" ] && exit 1
-cat
+# ⛔ `cat` here modelled the WRONG converter (review round 3, P2): it passed the
+# ORPHANED continuation byte through, so the pasted excerpt was invalid UTF-8 —
+# the artifact case 17 forbids and 17b arm (a) forbids explicitly — while the
+# row went green, because nothing in this case measured the body's validity. The
+# comment above claimed "status 1 WITH valid output" about a stub that emits
+# invalid output. Decoding with errors ignored IS `-c`'s contract.
+python3 -c 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read().decode("utf-8","ignore").encode())'
 exit 1
 ICONV_EOF
 chmod +x "$BIN/iconv"
@@ -750,6 +1063,15 @@ export STUB_ICONV_MODE=status
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
 assert_eq "$RC" "0" "an iconv status of 1 with valid output does not abort the alert (the notifier is the safety net)"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "gh workflow run supabase-deploy.yml --ref main" "and the excerpt still reaches the body"
+# …and the two properties 17b arm (a) pins ONLY where a real `iconv` exists are pinned here,
+# converter-independently — which is this case's whole reason to exist (review round 3, P2:
+# before these rows the label said "with valid output" and nothing measured it).
+assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "could not be byte-squeezed" "case 17g: and it is the SQUEEZED excerpt, not the raw fallback"
+if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
+  ok "case 17g: and the status-1 body is VALID UTF-8 — the split character was dropped, never pasted"
+else
+  bad "case 17g: the status-1 body is NOT valid UTF-8 — the raw tail's orphaned byte reached the issue"
+fi
 reset_case
 export STUB_ICONV_MODE=silent
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
@@ -793,6 +1115,180 @@ reset_case
 run_alert --help
 assert_eq "$RC" "0" "--help exits 0, as it claims"
 assert_eq "$(count_calls 'GH')" "0" "--help contacts nothing"
+
+# ── case 17o: a NON-REGULAR report path must neither HANG the alert nor claim a size ──
+# `-e` admits anything that exists and `[ ! -p ]` refuses only a FIFO, so a CHARACTER DEVICE
+# (`/dev/zero`) passes both. `tail -c 6000` is BOUNDED and returns; the size probe this PR added
+# was `wc -c`, which reads to EOF — and a device never reaches one, so `build_body` never
+# returned and NOTHING was filed: no ledger entry, no exit status, the #2240 silence this script
+# exists to remove, one primitive past the FIFO guard. Measured on the unguarded form:
+# `--drift-report /dev/zero` rc 124 at 8 s, where `origin/main` reaches its ledger leg — so the
+# regression was this line, not the report. The fix measures a size only from a REGULAR file
+# (`-f`), and both arms below pin the consequence:
+#   * `/dev/zero` (NULs only → the EMPTY arm) must file, name the empty state, and paste nothing;
+#   * `/dev/urandom` with a converter shim emitting fixed text (→ the CARRYING arm) must carry the
+#     excerpt AND declare the 6000-byte WINDOW, because the total size is exactly what cannot be
+#     measured here — while never claiming the measured-size truncation note.
+# `timeout`-gated for case 17f's reason: macOS dev hosts have none, and a hang is the property
+# under test — an unbounded pin would BE the defect it pins.
+if command -v timeout >/dev/null 2>&1; then
+  export PATH="$PATH_BEFORE_ICONV_SHIM"
+  reset_case
+  timeout 20 "$HELPER" --job deploy-api --steps "$DRIFT_STEPS" --drift-report /dev/zero >/dev/null 2>&1
+  assert_eq "$?" "0" "case 17o: a character-device report does not hang the alert (a hang returns 124 here)"
+  assert_eq "$(count_creates)" "1" "case 17o: and the ledger issue IS filed — a hang files nothing at all"
+  DEVZERO_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+  assert_contains "$DEVZERO_BODY" "held no excerpt-able text" "case 17o: and the empty state is named rather than a report claimed"
+  assert_not_contains "$DEVZERO_BODY" '```' "case 17o: and it pastes no fenced block it does not have"
+  assert_not_contains "$DEVZERO_BODY" "follows verbatim" "case 17o: and no verbatim claim survives in it"
+
+  DEV_ICONV_DIR="$FIX/bin-iconv-dev"
+  mkdir -p "$DEV_ICONV_DIR"
+  cat > "$DEV_ICONV_DIR/iconv" <<'DEV_ICONV_EOF'
+#!/usr/bin/env bash
+# Emits FIXED long ASCII whatever it is fed, so the CARRYING arm is reached DETERMINISTICALLY
+# on a path whose size cannot be measured (a device yields random bytes; the excerpt must not).
+seq 1 400 | sed 's/^/BLOCKING 20260926000002 non-conforming file row /'
+DEV_ICONV_EOF
+  chmod +x "$DEV_ICONV_DIR/iconv"
+  reset_case
+  export PATH="$DEV_ICONV_DIR:$PATH_BEFORE_ICONV_SHIM"
+  timeout 20 "$HELPER" --job deploy-api --steps "$DRIFT_STEPS" --drift-report /dev/urandom >/dev/null 2>&1
+  assert_eq "$?" "0" "case 17o: a device that DOES yield a report does not hang the alert either"
+  export PATH="$PATH_BEFORE_ICONV_SHIM"
+  assert_eq "$(count_creates)" "1" "case 17o: and that alert's ledger issue IS filed too"
+  DEVRAND_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+  assert_contains "$DEVRAND_BODY" '```' "case 17o: and the excerpt is CARRIED (the shim emits text, so this arm is not vacuous)"
+  assert_contains "$DEVRAND_BODY" "only the report's LAST 6000 bytes are shown" "case 17o: and the 6000-byte WINDOW is declared although the file's size could not be measured — the intro promises a cut beside the excerpt"
+  assert_not_contains "$DEVRAND_BODY" "report truncated to its LAST 6000 bytes" "case 17o: and it does NOT claim a measured truncation — no size was measured, so asserting one is the class this PR removes"
+else
+  ok "case 17o: SKIPPED on this host — no \`timeout\` binary (macOS); the device guard is pinned by CI (ubuntu-latest)"
+fi
+
+# ── case 17p: a `wc` that yields NO NUMBER must not silence the LOSS disclosure (#12200) ──
+# `-f` guards the SIZE PROBE. The squeeze-length comparison is a SECOND `wc` call site, and it is
+# reached on every carrying arm. Unguarded, a `wc` that prints text (or exits non-zero) makes
+# `[ … -lt … ]` emit `integer expression expected` into the job log AND clears the disclosure: on
+# `drift-report-utf8.txt` the cut really does split a character (case 17b arm c measures that), so
+# the body then carries a shorter-than-report excerpt while saying nothing about the loss — the
+# exact class #12200 exists to remove, at the one site the size probe's guard does not reach.
+# Two shim shapes, because they fail differently: a non-numeric PRINT leaves the command status 0,
+# an exiting shim leaves the capture EMPTY. Both must land on the same sentence.
+WC_NAN_DIR="$FIX/bin-wc-nan"
+mkdir -p "$WC_NAN_DIR"
+cat > "$WC_NAN_DIR/wc" <<'WC_NAN_EOF'
+#!/usr/bin/env bash
+# Bounded by construction: it never reads stdin, so a case that reaches it cannot hang the suite.
+echo not-a-number
+exit 0
+WC_NAN_EOF
+chmod +x "$WC_NAN_DIR/wc"
+export PATH="$WC_NAN_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$RC" "0" "case 17p: a non-numeric \`wc\` still files the alert"
+assert_eq "$(count_creates)" "1" "case 17p: and the ledger leg is untouched by it"
+assert_not_contains "$OUT" "integer expression expected" "case 17p: and NO arithmetic diagnostic reaches the job log"
+WC_NAN_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$WC_NAN_BODY" "could NOT be measured" "case 17p: and the loss it could not measure is DECLARED, not cleared"
+assert_not_contains "$WC_NAN_BODY" "the excerpt is NOT byte-identical" "case 17p: and it does NOT assert a comparison it never made"
+assert_contains "$WC_NAN_BODY" "only the report's LAST 6000 bytes are shown" "case 17p: (the WINDOW is still declared — the size probe's own guard is unaffected)"
+assert_contains "$WC_NAN_BODY" '```' "case 17p: and the excerpt itself is still carried, so this case is not vacuous"
+
+WC_FAIL_DIR="$FIX/bin-wc-fail"
+mkdir -p "$WC_FAIL_DIR"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$WC_FAIL_DIR/wc"
+chmod +x "$WC_FAIL_DIR/wc"
+export PATH="$WC_FAIL_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$RC" "0" "case 17p: a \`wc\` that exits non-zero (an empty capture) still files the alert"
+assert_not_contains "$OUT" "integer expression expected" "case 17p: and that shape emits no arithmetic diagnostic either"
+WC_FAIL_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$WC_FAIL_BODY" "could NOT be measured" "case 17p: and it lands on the SAME unmeasured sentence, not a third wording"
+assert_not_contains "$WC_FAIL_BODY" "the excerpt is NOT byte-identical" "case 17p: and it still does not assert a comparison it never made"
+
+# A LC-COLLATION SHAPE: `[!0-9]` is a RANGE, and under a UTF-8 collation locale it also matches
+# non-ASCII decimal digits — so a shim `wc` printing `١٢٣` passes a range guard as "all digits" and
+# then fails the numeric test with the same diagnostic and the same cleared disclosure. The guard
+# therefore spells the class as a literal list `[!0123456789]`, which no locale can widen. The pin
+# needs a collation locale; without one the shape is indistinguishable, so it is SKIPPED by name
+# rather than silently passing (case 17o's pattern for a missing `timeout`).
+if locale -a 2>/dev/null | grep -qiE '^en_US\.utf-?8$'; then
+  WC_LOCALE_DIR="$FIX/bin-wc-locale"
+  mkdir -p "$WC_LOCALE_DIR"
+  cat > "$WC_LOCALE_DIR/wc" <<'WC_LOCALE_EOF'
+#!/usr/bin/env bash
+# Arabic-Indic digits: all "digits" to a collation-aware range guard, and not a number to `[`.
+printf '\331\241\331\242\331\243\n'
+exit 0
+WC_LOCALE_EOF
+  chmod +x "$WC_LOCALE_DIR/wc"
+  export PATH="$WC_LOCALE_DIR:$PATH_BEFORE_ICONV_SHIM"
+  reset_case
+  LC_ALL=en_US.UTF-8 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+  export PATH="$PATH_BEFORE_ICONV_SHIM"
+  assert_eq "$(count_creates)" "1" "case 17p: a locale-digit count still files the alert"
+  assert_not_contains "$OUT" "integer expression expected" "case 17p: and a collation-widened digit does NOT reach the numeric test"
+  WC_LOCALE_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+  assert_contains "$WC_LOCALE_BODY" "could NOT be measured" "case 17p: and it is declared UNMEASURED (the range spelling would have hidden the loss here)"
+else
+  ok "case 17p: SKIPPED — no en_US.UTF-8 collation locale on this host, so the range/list spellings are indistinguishable"
+fi
+
+# A DIGIT-ONLY count can still be uncomparable: bash's `test` rejects anything past int64 and
+# leaves BOTH flags 0, so this shape needs its own bound (verification round 2, measured).
+WC_OVERFLOW_DIR="$FIX/bin-wc-overflow"
+mkdir -p "$WC_OVERFLOW_DIR"
+cat > "$WC_OVERFLOW_DIR/wc" <<'WC_OVERFLOW_EOF'
+#!/usr/bin/env bash
+# 20 digits: pure `0-9`, and past int64, so `[` refuses it with status 2.
+echo 99999999999999999999
+exit 0
+WC_OVERFLOW_EOF
+chmod +x "$WC_OVERFLOW_DIR/wc"
+export PATH="$WC_OVERFLOW_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$(count_creates)" "1" "case 17p: an out-of-range count still files the alert"
+assert_not_contains "$OUT" "integer expression expected" "case 17p: and an int64-overflowing count emits no arithmetic diagnostic"
+WC_OVERFLOW_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$WC_OVERFLOW_BODY" "could NOT be measured" "case 17p: and it is declared UNMEASURED rather than treated as a comparable length"
+
+# A 19-DIGIT count that is INSIDE int64 (`1e18`) is a number the guard still declines (its bound is
+# a LENGTH bound, deliberately conservative). That is over-disclosure, never a hidden loss — but the
+# sentences must describe it: "could not be measured, or longer than the 18-digit bound". A prose-only fact, so
+# this row pins BOTH the STATE handling (no diagnostic, one issue filed, same sentence) AND the window's
+# wording (the length-bound clause). The SQUEEZE sentence's wording is still unpinned — residual 0b on the PR.
+WC_INRANGE_DIR="$FIX/bin-wc-inrange"
+mkdir -p "$WC_INRANGE_DIR"
+cat > "$WC_INRANGE_DIR/wc" <<'WC_INRANGE_EOF'
+#!/usr/bin/env bash
+echo 1000000000000000000
+exit 0
+WC_INRANGE_EOF
+chmod +x "$WC_INRANGE_DIR/wc"
+export PATH="$WC_INRANGE_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$(count_creates)" "1" "case 17p: a 19-digit in-range count still files the alert"
+# ⛔ No `assert_not_contains "$OUT" "integer expression expected"` row here: no revert of this guard
+# can make `[ 1000000000000000000 -lt … ]` error (it is a legal comparison), so such a row could
+# never go red — dead weight that reads as coverage (agent-infra#3442 rule 3). The 20-digit row above
+# is the discriminating half.
+WC_INRANGE_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$WC_INRANGE_BODY" "could NOT be measured" "case 17p: and the guard's conservative answer is DECLARED, not silent"
+assert_contains "$WC_INRANGE_BODY" "longer than the 18 digits this guard will compare" "case 17p: and the window names the guard's LENGTH BOUND, not a comparability it did not test"
+
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+WC_REAL_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$WC_REAL_BODY" "the excerpt is NOT byte-identical" "case 17p: the REAL \`wc\` still declares the measured loss on the same fixture (so the two answers are distinguishable)"
+assert_not_contains "$WC_REAL_BODY" "could NOT be measured" "case 17p: and it does not claim an unmeasured comparison"
 
 # ── #8841: the RESOLVE leg — retiring a recovered finding's ledger key ──────
 # Filing without closing is a ledger that can only grow. Measured on this
