@@ -2051,3 +2051,35 @@ def test_the_EDGE_label_spelling_follows_its_ONE_owner(tmp_path, monkeypatch) ->
     assert counts["dropped_vector_labels"] == ["<rel:SUPPORTS>"], (
         "the DR report composes the edge key by hand instead of from "
         f"`cache_projection.relationship_target`: {counts}")
+
+
+def test_the_remedy_does_not_promise_a_relabel_to_a_node_with_NO_label(tmp_path, caplog) -> None:
+    """`#12015` review round 4 — the node arm has a NO-LABEL shape too.
+
+    The remedy clause was made target-aware for EDGES (a relationship has no label, so no
+    relabel can repair its vector), but a node entry is not automatically relabel-repairable
+    either: `dropped_vector_labels` mints `<unlabelled>` for a dump node whose `labels` bag is
+    EMPTY (`hosted_backup`'s own mint), and `is_relationship_target` answers False for it — so
+    it fell to the node arm and was promised a relabel migration that cannot reach a node with
+    no label (`relabel_legacy_documents()` is `MATCH (n:Document)`-scoped).
+
+    Measured on the un-fixed clause: `dropped_vector_labels == ['<unlabelled>']` and the
+    warning read *"nodes kept so a relabel migration can repair them"* over exactly that node —
+    a named repair that is a no-op, the same defect one sentinel over from the edge case.
+    """
+    proj = _proj(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
+        out = restore_graph(
+            proj.g,
+            _dump([{"dump_id": 1, "labels": [],
+                    "props": {"id": "x", "embedding": VEC}}]),
+            allow_unserved_vectors=True)
+    assert out["dropped_vector_labels"] == ["<unlabelled>"], out
+    msg = "\n".join(r.getMessage() for r in caplog.records
+                    if "dropped" in r.getMessage())
+    assert msg, "an authorised UNLABELLED-NODE drop logged nothing"
+    assert "NO relabel" in msg, (
+        "a node the dump gave NO label is not repairable by a relabel migration, so the "
+        "warning must not promise one: " + msg)
+    assert "nodes kept so a relabel migration can repair them" not in msg, (
+        "the relabel promise is still made over a node that has no label at all: " + msg)

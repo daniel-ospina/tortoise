@@ -127,6 +127,14 @@ _EMBED_BATCH = 400  # rows per UNWIND vecf32 re-encode query (falkordb inlines p
 #: directions (`tests/test_11641_runtime_vector_label.py`): a label added to
 #: `tortoise.security.VALID_ENTITY_TYPES` reds here instead of silently widening what the restore
 #: writes, and a label dropped from it reds instead of leaving a declaration over a dead label.
+#: The report entry minted for a dump node whose `labels` bag is EMPTY — the second
+#: shape `dropped_vector_labels` can carry besides a record label and `<relationship:TYPE>`.
+#: ⛔ It is NOT a relabel-repairable target (`#12015` review round 4): a node with no label
+#: cannot be matched by `relabel_legacy_documents()`, whose only route is `MATCH (n:Document)`,
+#: so the operator warning must not promise a relabel for it. The mint and the remedy clause
+#: read THIS constant, so the two cannot drift apart.
+_UNLABELLED_DUMP_ENTRY = "<unlabelled>"
+
 #: `(label, id-prop)` shaped so the register's constant pin can read it
 #: (`tests/test_embed_writer_register.py::test_every_declared_label_re_derives_at_this_head`) —
 #: ⚠️ only the LABEL element is re-derived there; the id-prop is the label's PRIMARY identity key
@@ -1284,7 +1292,7 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         label
         for dump_id, labels, _props in node_rows
         if dump_id in strip_vector_ids
-        for label in (labels or ("<unlabelled>",))
+        for label in (labels or (_UNLABELLED_DUMP_ENTRY,))
     } | {
         relationship_target(edge_rows[index][2])
         for index in strip_edge_vector_indexes
@@ -1392,14 +1400,24 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
                         if not is_relationship_target(t)]
         edge_targets = [t for t in dropped_vector_labels
                         if is_relationship_target(t)]
-        if edge_targets and not node_targets:
-            remedy = ("edges kept — a relationship has no label, so NO relabel "
-                      "migration can repair that vector; only an explicit property "
-                      "clear removes it")
-        elif edge_targets:
+        # ⛔ A NODE entry is NOT automatically relabel-repairable either (`#12015` review
+        # round 4). The mint above writes `<unlabelled>` for a dump node whose `labels` bag
+        # is EMPTY, and such a node carries no label for a relabel walk to match: the only
+        # route, `relabel_legacy_documents()`, is `MATCH (n:Document)`-scoped, so it cannot
+        # reach it. Classifying it as a plain node target sent the operator to a no-op —
+        # the same defect this clause was being fixed for, one sentinel over.
+        unlabelled_targets = [t for t in node_targets if t == _UNLABELLED_DUMP_ENTRY]
+        relabelable = [t for t in node_targets if t != _UNLABELLED_DUMP_ENTRY]
+        no_label = bool(edge_targets or unlabelled_targets)
+        if no_label and relabelable:
             remedy = ("nodes kept so a relabel migration can repair them, and the "
-                      "edges kept beside them, whose vectors no relabel can repair "
-                      "(a relationship has no label)")
+                      "edges kept beside them, or the nodes the dump gave no label, "
+                      "which carry NO label at all and whose vectors no relabel can "
+                      "repair; only an explicit property clear removes those")
+        elif no_label:
+            remedy = ("the kept targets carry NO label at all (a relationship, or a "
+                      "node the dump gave none), so NO relabel migration can repair "
+                      "those vectors; only an explicit property clear removes them")
         else:
             remedy = "nodes kept so a relabel migration can repair them"
         logger.warning(
