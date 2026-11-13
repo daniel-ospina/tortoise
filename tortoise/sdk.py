@@ -47154,9 +47154,13 @@ class TortoiseSDK:
                 "OR (n:Event AND n.eventId = $id) "
                 "RETURN count(n) AS hits, "
                 "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
-                "collect(DISTINCT n.id) AS ids",
+                "collect(DISTINCT n.id) AS ids, "
+                "sum(CASE WHEN n.status IS NULL THEN 1 ELSE 0 END) AS null_statuses, "
+                "collect(DISTINCT n.status) AS statuses",
                 params={"id": id_val}).result_set
-            _hits, _idless, _addressed_ids = _addressed[0] if _addressed else (0, 0, [])
+            (_hits, _idless, _addressed_ids,
+             _null_statuses, _addressed_statuses) = (
+                _addressed[0] if _addressed else (0, 0, [], 0, []))
             if not _hits:
                 # The `:Source` arm consults `url` only when nothing matched by
                 # `id`, so the url arm of this read asks the same question.
@@ -47168,10 +47172,14 @@ class TortoiseSDK:
                         "MATCH (n:Point:Source) WHERE n.url = $id "
                         "RETURN count(n) AS hits, "
                         "sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
-                        "collect(DISTINCT n.id) AS ids",
+                        "collect(DISTINCT n.id) AS ids, "
+                        "sum(CASE WHEN n.status IS NULL THEN 1 ELSE 0 END) "
+                        "AS null_statuses, "
+                        "collect(DISTINCT n.status) AS statuses",
                         params={"id": id_val}).result_set
-                    _hits, _idless, _addressed_ids = (
-                        _by_url[0] if _by_url else (0, 0, []))
+                    (_hits, _idless, _addressed_ids,
+                     _null_statuses, _addressed_statuses) = (
+                        _by_url[0] if _by_url else (0, 0, [], 0, []))
             _lifecycle_ids = [i for i in (_addressed_ids or ()) if i]
             if _hits and _idless:
                 # An id-less Point (url/eventId only) cannot be handed to the
@@ -47187,7 +47195,23 @@ class TortoiseSDK:
                     f"key every other door uses) or write the window through "
                     f"`update_point(id, ...)`."
                 )
-            for _lifecycle_id in _lifecycle_ids:
+            # ⛔ Review F4-2: an ENTAILED status is not a lifecycle write. A
+            # generic tenant PUT is a read-modify-write — it fetches the row and
+            # sends it back with the fields it changed — so refusing
+            # `update_entity(terminal, status=<the status it already has>,
+            # content=…)` contradicted this refusal's OWN last sentence ("content
+            # and metadata revisions are still accepted on it") and turned a
+            # declared-preserved capability (#3305) into a hard error. An
+            # unchanged status cannot resurrect anything. The exemption is narrow:
+            # status is the ONLY lifecycle field supplied, EVERY bound row holds
+            # exactly that status, and none holds NULL (a NULL-status row is not
+            # "equal", it is the legacy shape the backfill route exists for).
+            _status_entailed = (
+                "status" in props
+                and not (_TEMPORAL_RESTAMP_PROPS & set(props))
+                and not _null_statuses
+                and tuple(_addressed_statuses or ()) == (props["status"],))
+            for _lifecycle_id in (() if _status_entailed else _lifecycle_ids):
                 try:
                     self._assert_lifecycle_guard(
                         _lifecycle_id, method="update_entity", missing_ok=True,
@@ -47219,7 +47243,17 @@ class TortoiseSDK:
                     "RETURN collect(DISTINCT n.status)",
                     params={"ids": _lifecycle_ids},
                 ).result_set[0][0])
-            if _pt_statuses:
+            # ⛔ Review F4-1: gate on the ADDRESS, never on the collected statuses.
+            # `collect` drops NULLs, so a Point whose stored status is NULL yields
+            # `()` — indistinguishable from "no Point addressed" — and gating on it
+            # skipped the vocabulary check, the transition check AND the
+            # `status`-drop: `status='garbage'` was STORED (the #3311 defect this
+            # door exists to close), a lifecycle write landed unjournalled (so
+            # `rebuild_all` reverted it), and on a multi-label node the key rode
+            # into the sibling arm and journalled `restatus` against the wrong
+            # label (which makes `rebuild_all` raise). Measured. `_lifecycle_ids`
+            # is non-empty exactly when a Point is bound.
+            if _lifecycle_ids:
                 _status = props["status"]
                 if (not isinstance(_status, str)
                         or _status not in POINT_STATUS_VALUES):

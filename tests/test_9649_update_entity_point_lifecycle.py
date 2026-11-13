@@ -585,3 +585,54 @@ def test_a_source_keyed_by_id_is_not_blocked_by_a_hybrid_point_url(env):
         "MATCH (n:Point:Source) WHERE n.url=$u RETURN n.status",
         params={"u": "X-9649"}).result_set == hybrid, (
         "the hybrid Point the write could not reach must be untouched")
+
+
+def test_a_null_status_point_still_validates_and_journals_its_status(env):
+    """Review round 4, P1: the status arm must gate on the ADDRESS, not on a
+    collected status list.
+
+    `collect(DISTINCT n.status)` drops NULLs, so a Point whose stored status is
+    NULL (the legacy shape the backfill route exists for) yielded `()` — read as
+    "no Point addressed". Measured with that gate: `status='garbage'` was STORED
+    (the #3311 defect this door closes) and `status='live'` landed UNJOURNALLED,
+    so `rebuild_all` reverted it. Both must behave as on a status-bearing point.
+    """
+    sdk, events = env
+    pid = _live(sdk)
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status=NULL", params={"id": pid})
+
+    with pytest.raises(ValueError, match="Invalid status"):
+        sdk.update_entity(pid, status="garbage")
+    assert _row(sdk, pid)["status"] is None, (
+        "a refused vocabulary must not store anything")
+
+    sdk.update_entity(pid, status="live")
+    assert _row(sdk, pid)["status"] == "live"
+    recs = _mutations(events, pid)
+    assert [r.get("label") for r in recs] == ["Point"], (
+        f"the backfill write must be journaled against Point: {recs}")
+
+
+def test_a_read_modify_write_of_the_unchanged_status_still_lands(env):
+    """Review round 4, P2: an ENTAILED status is not a lifecycle write.
+
+    A generic tenant PUT reads the row and sends it back with the fields it
+    changed. Refusing `update_entity(terminal, status=<stored>, content=…)`
+    contradicted this refusal's own last sentence ("content and metadata
+    revisions are still accepted on it") and made the declared-preserved #3305
+    revision a hard error. A CHANGED status on the same claim is still refused.
+    """
+    sdk, _ = env
+    pid = _live(sdk, "rmw")
+    sdk.retract_point(pid)
+    stored = sdk.get_point(pid)["status"]
+    assert stored == "retracted"
+
+    sdk.update_entity(pid, status=stored, content="read-modify-write revision")
+    assert sdk.get_point(pid)["content"] == "read-modify-write revision"
+    assert _row(sdk, pid)["status"] == "retracted", (
+        "the revision must not disturb the terminal status")
+
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.update_entity(pid, status="live", content="a resurrection attempt")
