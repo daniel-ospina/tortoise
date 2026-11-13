@@ -458,6 +458,44 @@ def _scoped(brief: str, heading: str) -> str:
     return " ".join(_scope_slice(brief, heading).split())
 
 
+def _shape(text: str) -> str:
+    """`text` as a SHAPE: every number becomes a wildcard, everything else literal.
+
+    ⛔ THE NEXT SCOPE INWARD (#12349 round 24, closing the class ten rounds
+    converged on). A §-scoped pin of the form `assert <true text> in <section>`
+    is a PRESENCE check, so a claim falsified IN PLACE stays green whenever the
+    same section also still carries the true text — which it does whenever a
+    falsifier plants one. The file already had the remedy in one place (the
+    census pin matches the claim's SHAPE and requires exactly one match); this
+    generalises it, so the numbers are falsifiable while the wording must be
+    present exactly once.
+    """
+    out = []
+    for part in re.split(r"(\d+(?:\.\d+)?)", text):
+        if re.fullmatch(r"\d+(?:\.\d+)?", part):
+            out.append(r"\d+\.\d+" if "." in part else r"\d+")
+        else:
+            out.append(re.escape(part))
+    return "".join(out)
+
+
+def _only_claim(scope: str, true: str, where: str) -> None:
+    """`scope` must state this claim EXACTLY ONCE, and to `true`'s numbers.
+
+    Any of the three falsifications a presence pin cannot see reds here: the
+    claim rewritten in place (its numbers no longer match), the claim DELETED
+    (`[]`), and the truth restated beside the falsified copy (`[false, true]`
+    or `[true, true]` — more than one match of the shape).
+    """
+    found = re.findall(_shape(true), scope)
+    assert found == [true], (
+        f"{where} must state this claim EXACTLY ONCE and to the artifact's "
+        f"numbers ({true!r}) — it carries {found!r}. A §-scoped PRESENCE pin is "
+        "satisfied by a restatement anywhere in the same section, so a claim "
+        "falsified in place survives while the true text sits beside it "
+        "(#12349 round 24)")
+
+
 # ── 1. the defect claim, asserted against the shipped tokenizer ─────────────
 
 @pytest.mark.parametrize("name,run", [
@@ -720,11 +758,18 @@ def test_artifact_carries_the_rule_as_the_harness_constant(
     assert artifact["decision_rule"].startswith("PASS iff")
     assert artifact["primary_k"] == 3
     assert artifact["verdict"]["rule"] == artifact["decision_rule"]
-    for clause in ("strictly greater", "exact two-sided McNemar", "p < 0.05"):
+    # ⛔ The threshold is DERIVED from the rule, not restated: a hard-coded
+    # `p < 0.05` asserted here could agree with §4.1 forever after the rule
+    # moved. Each clause is then shape-unique in §4.1 (#12349 round 24): a
+    # presence check let a clause be falsified in place with the truth restated
+    # beside it.
+    threshold = re.search(r"p\s*<\s*\d+(?:\.\d+)?",
+                          artifact["decision_rule"]).group(0)
+    for clause in ("strictly greater", "exact two-sided McNemar", threshold):
         assert clause in artifact["decision_rule"], clause
         # §4.1 is where the brief states the rule's clauses (#12349 round 19).
-        assert clause in _scoped(brief_text, "4.1"), (
-            f"§4.1 no longer quotes the rule's own clause {clause!r}")
+        _only_claim(_scoped(brief_text, "4.1"), clause,
+                    f"§4.1's rule clause {clause!r}")
 
 
 def test_artifact_population_is_the_committed_pin(artifact, population) -> None:
@@ -1294,11 +1339,10 @@ def test_brief_fixture_table_is_the_artifact(artifact, brief: str) -> None:
                 f"`pg/native`: {nv['reachable']} of {n}.")
     # ⛔ §3.5-SCOPED (#12349 round 16, finding 4): a whole-document `in " ".join(...)`
     # was satisfied by a copy of this sentence planted in §4 while §3.5's own
-    # summary was falsified — measured M-C1, green.
-    assert sentence in _scoped(brief, "3.5"), (
-        f"§3.5's summary sentence must read {sentence!r} — the artifact says the "
-        f"shipped leg reaches {sh['reachable']} of {n} and the in-place fix "
-        f"{fx['reachable']} of {n}")
+    # summary was falsified — measured M-C1, green. And SHAPE-UNIQUE (#12349 round
+    # 24): even §-scoped, a restatement inside §3.5 kept the falsified summary
+    # green, so the numbers must appear exactly once.
+    _only_claim(_scoped(brief, "3.5"), sentence, "§3.5's fixture summary")
 
 
 # The forms `_scope_slice` reads. Anything else that opens a section is a leak.
@@ -1563,12 +1607,16 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     # `population.json` and §3.3's pinned cells with all 73 green (#12349 round
     # 18, P2). Pinned here, from the population itself.
     strat = Counter(n["cls"] for n in population["names"])
-    assert f"{strat['definite']} `definite`" in section2 and \
-        f"{strat['ident']} `ident`" in section2 and \
-        f"{strat['path']} `path`" in section2, (
-        "§2 must publish the 300-name sample's stratification — the population "
-        f"records {strat['definite']} `definite` / {strat['ident']} `ident` / "
-        f"{strat['path']} `path`, and that pair is NOT the degenerate split")
+    # ⛔ SHAPE-UNIQUE, not a presence check (#12349 round 24): §2 legitimately
+    # carries TWO `definite`/`ident` pairs (this stratification and the
+    # degenerate split), so the claim is matched as ONE shape and required
+    # exactly once — a falsified stratification with the true one restated
+    # beside it now reds instead of passing on presence.
+    _only_claim(
+        section2,
+        f"{strat['definite']} `definite` / {strat['ident']} `ident` / "
+        f"{strat['path']} `path`",
+        "§2's 300-name stratification")
     assert sum(deg.values()) == census["degenerate"], (
         f"the degenerate ids cover {sum(deg.values())} of the census's "
         f"{census['degenerate']} — the split below would then describe a "
@@ -1591,10 +1639,8 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
         "§2's `none of them a path` clause must agree with the classes: "
         f"{deg['path']} degenerate queries are `path`")
     subset = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
-    assert re.search(rf"(?<!\d){subset['n']} tokens-controlled queries",
-                     section2), (
-        f"§2 must name the {subset['n']}-query tokens-controlled population "
-        f"in §2 itself")
+    _only_claim(section2, f"{subset['n']} tokens-controlled queries",
+                "§2's tokens-controlled population")
     # §2's OWN published triple, and the control-break disclosure that gives it
     # meaning (#12349 round 16, finding 6): both were unpinned, so §2 could state
     # `0.6172 → 0.6287, +2.15 pts, p = 0.827` — contradicting the artifact — with
@@ -1602,9 +1648,7 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     triple = (f"{subset['recall_at_3_base']:.4f} → {subset['recall_at_3']:.4f}, "
               f"+{subset['delta_pts']:.2f} pts, "
               f"p = {subset['mcnemar_p_two_sided']:.3f}")
-    assert f"**{triple}**" in section2, (
-        f"§2 must publish the tokens-controlled triple as {triple!r} — "
-        f"recomputed from `primary_arm_tokens_controlled_subset`")
+    _only_claim(section2, triple, "§2's tokens-controlled triple")
     def _hit3(ranks: dict, i: str) -> bool:
         return ranks.get(i) is not None and ranks[i] <= 3
 
@@ -1617,16 +1661,26 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     net_rows = len(_gains) - len(_losses)
     _deg_ids = set(artifact["arms"]["postgres_bm25/tokens"]["degenerate_ids"])
     on_collapsed = sum(1 for i in _gains if i in _deg_ids)
-    assert re.search(rf"net \+{net_rows} rows at k=3", section2), (
-        f"§2 must state the full arm's net +{net_rows} rows at k=3 — "
-        "recomputed from the two arms' ranks")
-    assert re.search(rf"\*\*{on_collapsed}\*\* sit on collapsed rows", section2), (
-        f"§2 must state that {on_collapsed} of those gains sit on collapsed "
-        "(degenerate) rows — recomputed from the ranks and `degenerate_ids`")
-    assert "the two Postgres arms' ranks are identical" in section2, (
-        "§2 must DISCLOSE the control break — the degenerate rows are where "
-        "the two Postgres arms cannot differ, and deleting that sentence leaves "
-        "the split stated without the reason it matters")
+    _only_claim(section2, f"net +{net_rows} rows at k=3",
+                "§2's net row count")
+    _only_claim(section2, f"**{on_collapsed}** sit on collapsed rows",
+                "§2's collapsed-row share")
+    # ⛔ The disclosure is DERIVED, not restated: the artifact's own ranks must
+    # show the two Postgres arms agreeing on EVERY degenerate id, which is what
+    # makes the sentence true. Then the sentence itself is shape-unique, so
+    # deleting it (or rewriting it to "differ") reds instead of passing.
+    _tok_ranks = artifact["arms"]["postgres_bm25/tokens"]["ranks"]
+    _nat_ranks = artifact["arms"]["postgres_bm25/native"]["ranks"]
+    _differ = [i for i in _deg_ids if _tok_ranks[i] != _nat_ranks[i]]
+    assert not _differ, (
+        "§2 discloses that the two Postgres arms' ranks are identical on every "
+        f"degenerate query; the artifact now differs on {len(_differ)} of "
+        f"{len(_deg_ids)} ({_differ[:3]}) — the control break changed shape and "
+        "the disclosure, §2's split and §0's k=5 reading all need re-deriving")
+    _only_claim(
+        section2,
+        "for every one of them the two Postgres arms' ranks are identical.",
+        "§2's control-break disclosure")
     # §0's subset row states BOTH recalls, and §0 is where a reader quotes from —
     # read from §0's SLICE, like every other pin here (round 17, P2: the previous
     # form read the whole document, so the comment above was wider than the code).
@@ -1680,7 +1734,8 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
         f"expected {want!r}")
 
 
-def test_changelog_does_not_restate_superseded_numbers(artifact, changelog: str) -> None:
+def test_changelog_does_not_restate_superseded_numbers(artifact, population,
+                                                      changelog: str) -> None:
     """`SEARCH-ARCHITECTURE-CHANGELOG.md` duplicates §0 and the fixture counts.
 
     It is the record `SEARCH-ARCHITECTURE.md` §6.2's reader opens to learn why the
@@ -1736,6 +1791,21 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, changelog: str)
     assert sentence in text, (
         "the changelog's `#8933` fixture counts must be the artifact's; expected "
         f"{sentence!r}")
+    # ⛔ The `snake_case` finding had NO pin in either document (a single edit was
+    # green, #12349 round 24), so it is re-derived from the committed ranks and
+    # required to appear exactly once in the `#12298` entry.
+    snakes = [n["id"] for n in population["names"]
+              if n["cls"] == "ident" and "#" not in n["name"]]
+    sh_ranks = arms["falkordb_tfidf"]["ranks"]
+    fx_ranks = arms["falkordb_tfidf__tokens_fixed"]["ranks"]
+    a = sum(1 for i in snakes
+            if sh_ranks.get(i) is not None and sh_ranks[i] <= 3)
+    b = sum(1 for i in snakes
+            if fx_ranks.get(i) is not None and fx_ranks[i] <= 3)
+    _only_claim(
+        text,
+        f"{a} was found at k=3 by the shipped leg and {b} by the in-place query",
+        "the changelog's `snake_case` finding")
 
 
 # ── 6. the two things a re-run would otherwise decide wrongly ───────────────
@@ -1965,6 +2035,15 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     assert _num(table[1][2]) == 0.0, (
         f"§4.3 `#n` row claims a non-zero effect: {table[1][2]!r} — the "
         "measured effect on that sub-class is zero")
+    # ⛔ The second-positive-term claim had NO pin (#12349 round 24): it is the
+    # sentence that stops the 9.0 % row being read as an upper bound on the
+    # composite, and it is only true while the path delta is POSITIVE.
+    assert path_delta > 0, (
+        "§4.3 says a non-zero path share ADDS to the composite; the path delta "
+        f"is now {path_delta:.1f} pts")
+    _only_claim(_scoped(brief_text, "4.3"),
+                "any non-zero path share adds on top of it.",
+                "§4.3's second-positive-term claim")
 
 
 def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> None:
@@ -2002,15 +2081,28 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
     assert k5["only_b"] == 0 and k5["only_a"] > 0, (
         "the k=5 comparison no longer favours the shipped leg \u2014 the bullet's "
         "'the shipped leg ahead N\u20130' sentence needs re-deriving")
-    assert (
+    # ⛔ SHAPE-UNIQUE (#12349 round 24): a presence pin let the k=5 reading be
+    # falsified in place while a restatement kept it green — and this is the one
+    # width where the shipped leg leads, i.e. the sentence that turns a sign
+    # change into a floor.
+    _only_claim(
+        plain,
         f"while at k=5 it is {'\u2212' if k5['delta_pts'] < 0 else '+'}"
-        f"{abs(k5['delta_pts']):.2f} pts"
-    ) in plain, (
-        "\u00a70's scorer bullet does not state the k=5 direction. That is the ONE "
-        "width where the shipped leg leads, so dropping it turns a sign change "
-        "into a floor \u2014 the defect review cycle 6 fixed")
-    assert f"the shipped leg ahead {k5['only_a']}\u20130" in plain, (
-        "\u00a70 must state the k=5 discordant split, not just the delta")
+        f"{abs(k5['delta_pts']):.2f} pts",
+        "§0's k=5 direction")
+    _only_claim(plain, f"the shipped leg ahead {k5['only_a']}\u20130",
+                "§0's k=5 discordant split")
+
+    # §0's Reading-1 figure — the falsifier's own numbers, quoted verbatim by
+    # every downstream reader, and unpinned until round 24 (ONE edit was green).
+    assert dep["mcnemar_p_two_sided"] < 1e-6, (
+        "§0 quotes the deployable comparison as p < 1e-6; the artifact now "
+        f"records p = {dep['mcnemar_p_two_sided']}")
+    _only_claim(
+        plain,
+        f"{dep['recall_at_3']:.4f} vs {dep['recall_at_3_base']:.4f}, "
+        f"+{dep['delta_pts']:.2f} pts, p < 1e-6",
+        "§0's Reading-1 falsifier figure")
 
     shipped = artifact["arms"]["falkordb_tfidf"]["ranks"]
     tokens = artifact["arms"]["postgres_bm25/tokens"]["ranks"]
@@ -2035,12 +2127,14 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
 
     # §4's verdict line restates the same two deltas; it is the sentence a reader
     # quotes as the RESULT, so it is pinned with them rather than left as prose.
-    assert (
+    # ⛔ SHAPE-UNIQUE (#12349 round 24): presence left it falsifiable in place.
+    _only_claim(
+        plain4,
         "Result: FAIL — on the full arm "
         f"(+{k3['delta_pts']:.2f} pts, p = {k3['mcnemar_p_two_sided']:.3f}) and on "
         f"the tokens-controlled subset (+{subset['delta_pts']:.2f} pts, "
-        f"p = {subset['mcnemar_p_two_sided']:.3f})"
-    ) in plain4, "§4's Result line no longer matches the artifact"
+        f"p = {subset['mcnemar_p_two_sided']:.3f})",
+        "§4's Result line")
 
 
 def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arch: str) -> None:
@@ -2503,20 +2597,17 @@ def test_brief_states_what_the_reuse_guards_actually_do(brief_text) -> None:
     accepted. Over-claiming and under-claiming are the same failure.
     """
     flat = _scoped(brief_text, "2").replace("**", "")
-    assert "refuses a graph whose population differs, or that population plus leftover rows" in flat, (
-        "§2 must state exactly what the reuse guards refuse — the harness refuses "
-        "a DIFFERENT population (`==` index wait + total `:Object` count), not "
-        "any reuse")
-    assert "count is asserted against the population" in flat, (
-        "§2 must name the count guard, which is what catches a previous arm's "
-        "`m3fx-*` fixture rows (`STARTS WITH 'm3-'` does not match them)")
-    assert "`==`, not `>=`" in flat, (
-        "§2 must name the equality, which is what stops an over-full index "
-        "from being accepted silently")
-    assert "is still accepted" in flat, (
-        "§2 must disclose the one reuse case neither guard refuses (a graph with "
-        "exactly the same 300 names) and why it is harmless — an undisclosed "
-        "gap is how the previous over-claim got written")
+    # ⛔ SHAPE-UNIQUE (#12349 round 24): these four phrases were §-scoped PRESENCE
+    # checks, so each could be falsified in place with the true phrasing restated
+    # beside it in §2 and every gate stayed green.
+    _only_claim(flat, "refuses a graph whose population differs, or that "
+                "population plus leftover rows",
+                "§2's reuse-guard scope")
+    _only_claim(flat, "count is asserted against the population",
+                "§2's count guard")
+    _only_claim(flat, "`==`, not `>=`", "§2's index-wait equality")
+    _only_claim(flat, "is still accepted",
+                "§2's accepted-reuse disclosure")
     assert "with the SAME population is ACCEPTED" not in flat
     assert "numDocuments >= n" not in flat, (
         "§2 still says the wait accepts an at-least-full index — it requires "
