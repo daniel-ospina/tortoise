@@ -62,6 +62,17 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 # `_update_entity`. Imported so neither surface re-literals the vocabulary.
 from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
+# #12297: the fused-candidate rerank, imported at module scope because the read
+# path evaluates its gate on EVERY search. `rerank` is a light module (stdlib +
+# `env_truthy` + `heavy_imports`; torch is reached lazily inside the scorer), so
+# this adds no import cost to `sdk` and cannot cycle (it imports nothing from
+# here). The alternative — a function-local import — would sit in the hot path
+# for no benefit.
+from .rerank import (
+    DEFAULT_FUSED_RERANK_POOL,
+    rerank_pool,
+    rerank_pool_enabled,
+)
 from .ids import ulid
 # #2782: the money value's WRITE gate. `money` imports only `numeric_domain`
 # (no cycle), and it is already loaded via `value_normalizer` below — importing
@@ -4670,6 +4681,79 @@ def _rec_point_id(rec: dict):
         if isinstance(point, dict):
             pid = point.get('id')
     return pid
+
+
+#: #12297 — the ONE property a fused-candidate rerank may score, keyed by the
+#: RESOLVED GRAPH LABEL (``read_ledger.label_for_entity_type``), with the two
+#: entity types that share a label and carry a different text split out below.
+#: ⛔ Keyed by label, not by the caller-facing ``entity_type``: ``document`` and
+#: ``source`` are both ``:Source`` (D10, ONTOLOGY v3.15 §4.4) and an ``operator``
+#: is a ``:Point``, so a map on ``entity_type`` would have to restate the very
+#: alias table ``read_ledger`` owns.
+_RERANK_TEXT_FIELD_BY_LABEL: dict[str, str] = {
+    "Point": "content",
+    "Event": "subject",
+    "Subject": "name",
+    "Object": "name",
+    "Source": "title",
+}
+
+
+def _rerank_text_field(entity_type: str, graph_label: str) -> str | None:
+    """#12297: the property the rerank scores for this read, or ``None``.
+
+    An operator's text is its ``label`` (a ``:Point`` whose ``content`` is not
+    the searchable string); a document's is its ``title``. Any label absent
+    from the map has no declared text field, and the rerank then degrades to the
+    retrieval order rather than scoring a property that is not that node's text
+    — a wrong field would produce a confident, meaningless order.
+    """
+    if entity_type == "operator":
+        return "label"
+    return _RERANK_TEXT_FIELD_BY_LABEL.get(graph_label)
+
+
+def _fetch_rerank_pool_texts(graph, entity_type: str, graph_label: str,
+                             id_field: str, ids: list[str]) -> dict[str, str]:
+    """#12297: ONE batch read of the fused pool's own text, for the rerank.
+
+    The real content fetch (``tortoise_fts_query`` step 7) runs AFTER the
+    ``[:limit]`` cut, so a rerank placed BEFORE it needs the pool's text and
+    nothing else. This reads exactly that, at the pool's own width.
+
+    ⛔ Two predicates are restated from step 7 and are the ONLY duplication:
+    ``is_operator: true`` for the operator leg and ``documentKind IS NOT NULL``
+    for the document leg. They are restated because the rerank must score the
+    SAME row set step 7 will materialise — scoring rows that step 7 then drops
+    would order a list on evidence the caller never sees — and
+    ``tests/test_rerank_pool.py`` pins both against the real fetch so the pair
+    cannot drift silently.
+
+    Best-effort by construction: any failure returns ``{}``, which makes the
+    caller degrade to the retrieval order (never a failed search).
+    """
+    field = _rerank_text_field(entity_type, graph_label)
+    if not field or not ids:
+        return {}
+    if entity_type == "operator":
+        match = "MATCH (n:Point {is_operator: true}) WHERE n.id IN $ids "
+    elif entity_type == "document":
+        match = ("MATCH (n:Source) WHERE n.url IN $ids "
+                 "AND n.documentKind IS NOT NULL ")
+    else:
+        match = f"MATCH (n:{graph_label}) WHERE n.{id_field} IN $ids "
+    try:
+        rows = graph.query(
+            match + f"RETURN n.{id_field}, n.{field}",
+            params={"ids": ids},
+        ).result_set
+    except Exception:  # noqa: BLE001, RUF100 — best-effort, degrade below
+        return {}
+    out: dict[str, str] = {}
+    for row in rows or []:
+        if row and row[0] and len(row) > 1:
+            out[str(row[0])] = str(row[1] or "")
+    return out
 
 
 _NON_POINT_ENTITY_LABELS_CACHE: frozenset[str] | None = None
@@ -41677,6 +41761,41 @@ class TortoiseSDK:
         #     saturated window into COMPLETE;
         #   * an asked leg never answered (``_lost_legs``, folded above).
         _trunc["incomplete"] = bool(_leg_peak >= str_limit or _lost_legs)
+        # ── #12297: the FUSED-CANDIDATE-LIST rerank, placed AHEAD of the cut.
+        #
+        # This is the ONE wiring point for both surfaces the issue names:
+        #   * user search — a caller's own ``limit`` (MCP ``tortoise_search`` /
+        #     the SDK read);
+        #   * the capture-time noun-matching prior — ``extractor_v2._fts_rows``
+        #     calls THIS function at ``limit=3`` for every derived entity query,
+        #     so the prior leg is reranked here without a second call site and
+        #     without touching its window (``#11901`` measured the window lever
+        #     and declined it standalone; this is the PAIRED shape).
+        #
+        # ⛔ Placed BEFORE ``result_ids[:limit]`` on purpose: a reranker that
+        # ran after the cut could only reorder rows that already survived, and
+        # its entire value is choosing WHICH rows survive a fixed ``limit``.
+        # ⛔ ``rerank_pool`` is a PERMUTATION, never a filter — see its contract.
+        # ⛔ Default OFF (``TORTOISE_FUSED_RERANK``): the shipped order is
+        # byte-identical when the flag is unset, which is also why this costs
+        # one env lookup rather than a batch read on every search.
+        if result_ids and rerank_pool_enabled() and (query or "").strip():
+            _pool_ids = result_ids[:DEFAULT_FUSED_RERANK_POOL]
+            _pool_texts = _fetch_rerank_pool_texts(
+                graph, entity_type, graph_label, id_field, _pool_ids)
+            if _pool_texts:
+                _rows = [{"id": pid, "content": _pool_texts.get(pid, "")}
+                         for pid in _pool_ids]
+                _reranked, _rr_stats = rerank_pool(query, _rows)
+                _trunc["rerank"] = _rr_stats
+                if _rr_stats.get("applied"):
+                    # ``rerank_pool`` is a permutation of what it was handed, so
+                    # the scored head keeps its length and the ids past the pool
+                    # width follow in their own retrieval order, untouched.
+                    _head = [r["id"] for r in _reranked]
+                    _head_set = set(_head)
+                    result_ids = _head + [i for i in result_ids
+                                          if i not in _head_set]
         result_ids = result_ids[:limit]
 
         # 6. EP annotation (Point only)

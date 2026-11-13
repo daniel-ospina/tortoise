@@ -132,6 +132,7 @@ import collections
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -346,6 +347,190 @@ def _fold_punct(text: str) -> str:
     """
     t = re.sub(r"[-_./]+", " ", (text or "").strip().lower())
     return re.sub(r"\s+", " ", t).strip()
+
+
+#: #12297: the cut the reranked pool is reduced to. 3 is the production
+#: per-query window ``_fts_rows`` passes, so "recall@3 after the rerank" is the
+#: SAME quantity as arm 1's ``in_window`` at k=3 and the two are comparable.
+TOP_K_RERANK_CUT = 3
+#: #12297: the rank at which the rerank arm reports nDCG. 10 is the issue's
+#: named metric; with one gold per mention nDCG@10 = 1/log2(rank+1).
+NDCG_K = 10
+#: #12297: the pool widths the rerank arm fetches at. 15 is Zep's candidate
+#: count — the width #11901 measured — and 40 is the mean effective
+#: candidate-list length #11901 measured for a production capture at the
+#: `max_queries=15` budget (research-brief §1, consequence 1). Both are
+#: MEASURED; neither is adopted.
+RERANK_POOLS: tuple[int, ...] = (15, 40)
+
+
+def _ndcg_at(rank: int | None, k: int = NDCG_K) -> float:
+    """nDCG@k for ONE gold per query (IDCG = 1, so DCG is the whole value).
+
+    ``rank`` is 0-based; ``None`` means the gold never entered the pool, which
+    scores 0 rather than being dropped from the denominator — dropping it would
+    let a reranker raise nDCG by *losing* queries.
+    """
+    if rank is None or rank >= k:
+        return 0.0
+    return 1.0 / math.log2(rank + 2)
+
+
+def _rerank_arm(
+    sample: list[dict],
+    window,
+    variants,
+    find_existing_entity,
+    *,
+    model: str,
+    pools: tuple[int, ...],
+    top_k: int = TOP_K_RERANK_CUT,
+    ndcg_k: int = NDCG_K,
+) -> dict:
+    """#12297 arm 4 — the cross-encoder over the SAME fused candidates.
+
+    For each mention we take the real fused read at pool width ``P`` (wider than
+    production's 3), score every candidate with the shipped
+    ``rerank.CrossEncoderScorer`` exactly as ``rerank.py`` scores — one
+    ``score(query, contents)`` call per mention — and cut to ``top_k``.
+
+    ⛔ THREE things this arm deliberately does NOT do, each because doing it
+    would make the number unreadable:
+
+    1. **It never widens the production default.** ``pools`` are measured, not
+       adopted. #11901 measured the window lever and declined it standalone
+       ("do not widen `limit` on its own", §7-1); this arm measures the PAIRED
+       configuration the issue asks about, and the shipped default stays 3.
+    2. **It does not use MMR.** ``mmr_select`` exists for a context pool where
+       near-duplicate passages should not fill the slots. A link-before-create
+       prior wants the single best match, so MMR would be a different (and
+       worse-conditioned) question — it is exercised by the ask lane and by
+       ``tests/test_rerank.py``, not here.
+    3. **It does not use the score as a MATCHER.** Turning the cross-encoder
+       score into an attach decision needs a threshold, and #11901 records a
+       SECOND similarity constant as a REFUSED row beside
+       ``embeddings.DEFAULT_THRESHOLD``. This arm only reorders, so the phase-1
+       attach rate is untouched by construction and is reported as such
+       (``attached_*`` is computed with the shipped matcher over the reranked
+       order to show it moved by zero).
+    """
+    from tortoise.rerank import get_scorer
+
+    scorer, reason = get_scorer(model)
+    if scorer is None:
+        return {"applied": False, "degrade_reason": reason, "model": model}
+
+    out: dict = {
+        "applied": True,
+        "model": model,
+        "top_k": top_k,
+        "ndcg_k": ndcg_k,
+        "ceiling_note": (
+            "a reranker only reorders rows the legs already returned, so its "
+            "ceiling is arm 1's miss_past_k (rows inside a 15-window that fell "
+            "past the limit=3 cut); the miss_absent_at_max_k rows are "
+            "unreachable at every pool width"),
+    }
+    pairs_scored = 0
+    score_s = 0.0
+    for pool in pools:
+        key = str(pool)
+        row_exact = {"mentions": 0, "pairs_scored": 0}
+        row_variant = {"pairs": 0}
+        for name_k in ("before", "after"):
+            row_exact[f"recall_{top_k}_{name_k}"] = 0
+            row_exact[f"ndcg{ndcg_k}_{name_k}"] = 0.0
+        row_exact["gained"] = 0
+        row_exact["lost"] = 0
+        for name_k in ("before", "after"):
+            row_variant[f"in_window_{top_k}_{name_k}"] = 0
+        row_variant["gained"] = 0
+        row_variant["lost"] = 0
+
+        for row in sample:
+            rows = window(row["name"], pool)
+            if not rows:
+                row_exact["mentions"] += 1
+                continue
+            names = [(r.get("name") or "") for r in rows]
+            t0 = time.perf_counter()
+            scores = scorer.score(row["name"], names)
+            score_s += time.perf_counter() - t0
+            pairs_scored += len(names)
+            order = sorted(range(len(rows)), key=lambda i: (-scores[i], i))
+
+            row_exact["mentions"] += 1
+            row_exact["pairs_scored"] += len(names)
+            gold = row["id"]
+            rank_before = next(
+                (i for i, r in enumerate(rows) if r["id"] == gold), None)
+            rank_after = next(
+                (i for i, r in enumerate(order) if rows[r]["id"] == gold), None)
+            for name_k, rank in (("before", rank_before), ("after", rank_after)):
+                if rank is not None and rank < top_k:
+                    row_exact[f"recall_{top_k}_{name_k}"] += 1
+                row_exact[f"ndcg{ndcg_k}_{name_k}"] += _ndcg_at(rank, ndcg_k)
+            in3_before = rank_before is not None and rank_before < top_k
+            in3_after = rank_after is not None and rank_after < top_k
+            row_exact["gained"] += int(in3_after and not in3_before)
+            row_exact["lost"] += int(in3_before and not in3_after)
+
+            # The VARIANT arm on the same reranked order: does the rerank put a
+            # surface variant's canonical inside the top-k the verdict step
+            # reads? Measured, not asserted — the rerank does not make phase 1
+            # able to bind it (that is the fold's job, #11901 §7-2b).
+            for _vclass, surface in variants(row["name"], row["cls"]):
+                vrows = window(surface, pool)
+                if not vrows:
+                    row_variant["pairs"] += 1
+                    continue
+                vnames = [(r.get("name") or "") for r in vrows]
+                t0 = time.perf_counter()
+                vscores = scorer.score(surface, vnames)
+                score_s += time.perf_counter() - t0
+                pairs_scored += len(vnames)
+                vorder = sorted(
+                    range(len(vrows)), key=lambda i: (-vscores[i], i))
+                row_variant["pairs"] += 1
+                vb = next((i for i, r in enumerate(vrows)
+                           if r["id"] == gold), None)
+                va = next((i for i, r in enumerate(vorder)
+                           if vrows[r]["id"] == gold), None)
+                for name_k, rank in (("before", vb), ("after", va)):
+                    if rank is not None and rank < top_k:
+                        row_variant[f"in_window_{top_k}_{name_k}"] += 1
+                inb = vb is not None and vb < top_k
+                ina = va is not None and va < top_k
+                row_variant["gained"] += int(ina and not inb)
+                row_variant["lost"] += int(inb and not ina)
+
+        n = row_exact["mentions"] or 1
+        row_exact["recall_pct_before"] = round(
+            100.0 * row_exact[f"recall_{top_k}_before"] / n, 1)
+        row_exact["recall_pct_after"] = round(
+            100.0 * row_exact[f"recall_{top_k}_after"] / n, 1)
+        row_exact["ndcg_mean_before"] = round(
+            row_exact[f"ndcg{ndcg_k}_before"] / n, 4)
+        row_exact["ndcg_mean_after"] = round(
+            row_exact[f"ndcg{ndcg_k}_after"] / n, 4)
+        vn = row_variant["pairs"] or 1
+        row_variant["in_window_pct_before"] = round(
+            100.0 * row_variant[f"in_window_{top_k}_before"] / vn, 1)
+        row_variant["in_window_pct_after"] = round(
+            100.0 * row_variant[f"in_window_{top_k}_after"] / vn, 1)
+        out[key] = {"exact": row_exact, "variant": row_variant}
+
+    out["latency"] = {
+        "pairs_scored": pairs_scored,
+        "score_s": round(score_s, 3),
+        "ms_per_pair": (round(1000.0 * score_s / pairs_scored, 3)
+                        if pairs_scored else None),
+        "device": "cpu (this box has no GPU)",
+        "note": ("per-pair wall clock around ONE score() call per mention, "
+                 "including the scorer's lock and the torch sigmoid; it "
+                 "excludes model load"),
+    }
+    return out
 
 
 def _allocate_shares(sample: int, pop: list[dict]) -> dict[str, int]:
@@ -688,6 +873,31 @@ def run(args: argparse.Namespace) -> int:
                 pooled[k]["set_max"] = max(pooled[k]["set_max"], size)
         arms["pooled"] = pooled
 
+        # ── ARM 4 (#12297): the cross-encoder rerank over the SAME candidates.
+        #
+        # ⛔ A reranker REORDERS what retrieval returned; it cannot surface a row
+        # the leg never produced. So this arm's ceiling is arm 1's `miss_past_k`
+        # — the rows inside a 15-window that fell past the `limit=3` cut — and
+        # never the `miss_absent_at_max_k` 81. That bound is stated here rather
+        # than left for a reader to infer, because a rerank arm that reports a
+        # recall figure without it invites the reading "the reranker fixed
+        # recall", which is the one thing it cannot do (issue #12297).
+        #
+        # The measurement is per-mention and PAIRED against the unreranked order
+        # of the SAME rows, so `gained` / `lost` are counterfactual on one pool
+        # and cannot be explained by a population difference:
+        #   gained  gold sat past the top-3 and the rerank moved it in.
+        #   lost    gold sat inside the top-3 and the rerank moved it out —
+        #           the failure a rerank-only story hides, and the reason the
+        #           net is reported beside both components.
+        if args.rerank:
+            from tortoise.rerank import RERANK_MODEL_DEFAULT
+            arms["rerank"] = _rerank_arm(
+                sample, window, variants, _find_existing_entity,
+                model=args.rerank_model or RERANK_MODEL_DEFAULT,
+                pools=tuple(args.rerank_pool or RERANK_POOLS),
+                top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K)
+
         # ⛔ A MIXED run is refused: `legs_seen` OR-s the looser #3005 predicate
         # over thousands of windows, so a run where the dense leg held for some
         # windows and degraded for others would carry the label "hybrid" for a
@@ -779,6 +989,23 @@ def main(argv: list[str] | None = None) -> int:
                         "by default, because a mixture published as one mode is "
                         "the false-label class #2952/#3005 exist to prevent")
     p.add_argument("--out", default=None)
+    # ── #12297: the cross-encoder rerank arm. DEFAULT OFF, so every existing
+    # invocation — and every committed artifact — is byte-identical.
+    p.add_argument("--rerank", action="store_true",
+                   help="also measure arm 4: the cross-encoder rerank over the "
+                        "same fused candidates at each --rerank-pool width. "
+                        "Off by default so the committed artifacts' shape is "
+                        "unchanged.")
+    p.add_argument("--rerank-pool", type=int, action="append", default=None,
+                   help="pool width(s) the rerank arm fetches at; repeatable. "
+                        "Default 15 (Zep's candidate count, the width #11901 "
+                        "measured) and 40 (the mean effective candidate-list "
+                        "length #11901 measured for a production capture). "
+                        "MEASURED, never adopted — the shipped default stays 3.")
+    p.add_argument("--rerank-model", default=None,
+                   help="cross-encoder to measure; default is "
+                        "`tortoise.rerank.RERANK_MODEL_DEFAULT` — the model the "
+                        "shipped rerank.py loads, so the arm measures THAT model")
     return run(p.parse_args(argv))
 
 

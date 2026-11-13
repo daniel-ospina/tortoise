@@ -74,6 +74,125 @@ DEFAULT_ASK_RERANK_PER_SESSION_CAP = 2
 DEFAULT_ASK_RERANK_LAMBDA = 0.7
 
 
+# ── #12297 — the FUSED-CANDIDATE-LIST rerank (search + noun path) ─────────
+#
+# A SECOND gate, deliberately not the ask lane's. The two differ in every knob
+# that matters: the ask lane reranks a deduped CONTEXT pool and then applies MMR
+# diversity with a per-session cap, while a fused candidate list is a RETRIEVAL
+# pool whose only consumer is a truncation (`[:limit]`) — MMR there would be
+# diversity for its own sake, and a per-session cap would reorder on a grouping
+# the caller never asked for. Sharing one gate would mean shipping the ask
+# lane's MMR semantics onto the search path by accident.
+FUSED_RERANK_ENV = "TORTOISE_FUSED_RERANK"
+FUSED_RERANK_POOL_ENV = "TORTOISE_FUSED_RERANK_POOL"
+FUSED_RERANK_MODEL_ENV = "TORTOISE_FUSED_RERANK_MODEL"
+#: How many of the fused pool's leading candidates get SCORED. The retrieval
+#: pool is ~120 per leg (`retrieval.DEFAULT_POOL_SIZE`), so scoring all of it is
+#: 2x the cost for candidates the caller's `limit` will never show. 40 is
+#: #11901's measured mean effective candidate-list length for a production
+#: capture at the `max_queries=15` budget — i.e. the real pool size on the noun
+#: path, which is the surface this lever is calibrated on. Candidates past it
+#: keep their retrieval order and stay in the list.
+DEFAULT_FUSED_RERANK_POOL = 40
+
+
+def rerank_pool_enabled(flag: bool | None = None) -> bool:
+    """#12297 gate. Explicit kwarg wins; else ``TORTOISE_FUSED_RERANK`` —
+    fail-safe OFF (only 1/true/yes/on enables, the #4097 truthy contract).
+
+    ⛔ OFF is the shipped state, and the reason is measured rather than
+    stylistic (the ``#1745`` fail-safe convention): see
+    ``docs/research/2026-11-12-12297-rerank-calibration/`` for the calibration
+    this gate waits on."""
+    if flag is not None:
+        return bool(flag)
+    return is_truthy(os.environ.get(FUSED_RERANK_ENV))
+
+
+def fused_rerank_model() -> str:
+    """#12297's model name — its own env namespace, the same default model.
+
+    ``load_scorer`` caches by NAME, so when both gates are on they share ONE
+    loaded cross-encoder rather than paying a second 20 s load."""
+    return (os.environ.get(FUSED_RERANK_MODEL_ENV, RERANK_MODEL_DEFAULT)
+            .strip() or RERANK_MODEL_DEFAULT)
+
+
+def rerank_pool(
+    query: str,
+    candidates: list[dict],
+    *,
+    text_key: str = "content",
+    pool: int | None = None,
+    enabled: bool | None = None,
+    model: str | None = None,
+) -> tuple[list[dict], dict]:
+    """#12297 — reorder a FUSED candidate list by cross-encoder relevance.
+
+    ⛔ **A PERMUTATION, NEVER A FILTER.** The returned list has the same rows as
+    the input — same length, same identities, same objects reordered. That is
+    the property that makes this safe to insert ahead of an existing truncation
+    (`tortoise_fts_query`'s ``result_ids[:limit]``): a reranker that DROPPED
+    rows would be a silent recall loss on a surface whose every measurement is
+    taken at a fixed ``limit``, and it would be indistinguishable from the
+    reranker ranking well. The caller's own ``[:limit]`` is the only cut.
+
+    ``pool`` bounds how many leading candidates are SCORED; the rest keep their
+    retrieval order and stay in the list. The scored head is reordered by
+    descending score with the original index as a stable tie-break, then the
+    unscored tail follows unchanged.
+
+    Degrade (``applied: False`` + ``degrade_reason``) on: the gate off, an empty
+    query or pool, a scorer that will not load, a score exception, and a
+    length-mismatched score vector. Every one of them returns the input order
+    untouched — this function never raises and never changes a caller's
+    behaviour on failure.
+    """
+    untouched = list(candidates)
+    if not rerank_pool_enabled(enabled):
+        return untouched, {"applied": False, "degrade_reason": "disabled"}
+    if not untouched:
+        return untouched, {"applied": False, "degrade_reason": "empty_pool"}
+    if not (query or "").strip():
+        return untouched, {"applied": False, "degrade_reason": "empty_query"}
+
+    pool_n = _clamp_int(
+        pool if pool is not None else os.environ.get(FUSED_RERANK_POOL_ENV),
+        DEFAULT_FUSED_RERANK_POOL)
+    n_scored = min(len(untouched), pool_n)
+    head = untouched[:n_scored]
+
+    scorer, reason = load_scorer(model or fused_rerank_model())
+    if scorer is None:
+        return untouched, {"applied": False, "degrade_reason": reason}
+
+    texts = [str(h.get(text_key) or "")[:RERANK_TRUNCATE_CHARS] for h in head]
+    try:
+        scores = scorer.score(query, texts)
+    except Exception as e:  # noqa: BLE001, RUF100 — degrade, never raise
+        return untouched, {"applied": False, "degrade_reason": f"{e!r}"}
+    if not isinstance(scores, (list, tuple)) or len(scores) != len(texts):
+        return untouched, {
+            "applied": False,
+            "degrade_reason": "scorer returned length-mismatched scores "
+                              f"({len(scores) if isinstance(scores, (list, tuple)) else '?'} "
+                              f"vs {len(texts)})",
+        }
+
+    order = sorted(range(n_scored), key=lambda i: (-float(scores[i]), i))
+    reordered = [head[i] for i in order] + untouched[n_scored:]
+    moved = sum(1 for rank, i in enumerate(order) if rank != i)
+    return reordered, {
+        "applied": True,
+        "pool": pool_n,
+        "scored": n_scored,
+        "unscored": len(untouched) - n_scored,
+        "moved": moved,
+        "top_score": round(float(scores[order[0]]), 4),
+        "min_scored": round(min(float(s) for s in scores), 4),
+    }
+
+
 def rerank_enabled(flag: bool | None = None) -> bool:
     """A7 gate. Explicit kwarg wins; else env TORTOISE_ASK_RERANK (fail-safe
     OFF — only 1/true/yes/on enables, the declared contract since #4097)."""
