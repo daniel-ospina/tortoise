@@ -3949,8 +3949,8 @@ def tortoise_query(kind: str | None = None,
       confidence is Phase 2 in the hybrid-search plan, not a shipped feature.
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
-      ignores kind/min_confidence/order_by, and REFUSES `filters=` (see the
-      tag= bullet below — it used to ignore it silently, #12455); a non-Point
+      REFUSES kind/min_confidence/order_by and `filters=` (see the tag= bullet
+      below — all of them used to be ignored silently, #12455/#12500); a non-Point
       `entity_type` is REFUSED there (and on the structural arms) rather than
       dropped — those arms read the Point label only, and the refusal names the
       per-type enumerator to use instead (#12372).
@@ -4099,14 +4099,22 @@ def tortoise_query(kind: str | None = None,
     # refusal costs no read and cannot serve rows on an error path, and below the
     # `tag=` precedence split, so a caller passing both keeps a message about the
     # arm that actually answered.
+    # TRUTHINESS, not `is not None` (round-1 P1, measured): this arm's own
+    # semantics define the falsy values as ABSENT — the `text=` call below
+    # normalises with `min_confidence or 0.0` and `order_by or "relevance"`, and
+    # the sibling `#12455` guard two blocks down keys on `if filters and …` for
+    # the same reason. A client that serialises its own defaults
+    # (`min_confidence=0.0`, `order_by=""`, `kind=""`) was getting a refusal on
+    # every structural read where the answer had always been CORRECT — a floor of
+    # 0.0 excludes nothing and an empty order string asks for none.
     _unapplied: list[str] = []
     if tag is not None or not text:
         # Both structural arms share `paginated_query`.
-        if min_confidence is not None:
+        if min_confidence:
             _unapplied.append("min_confidence")
-        if order_by is not None:
+        if order_by:
             _unapplied.append("order_by")
-    if tag is not None and kind is not None:
+    if tag is not None and kind:
         # Tag mode reads EVERY kind of tagged Point, so a named kind narrows
         # nothing while looking like it did.
         _unapplied.append("kind")
@@ -4117,14 +4125,19 @@ def tortoise_query(kind: str | None = None,
             " Tag mode also reads every kind of tagged Point, so a named `kind` "
             "narrows nothing." if "kind" in _unapplied and tag is not None else ""
         )
+        # The tag arm answer over `text=`, so "pass text=" alone is a dead end
+        # there: `tag=` takes precedence and the caller loops on the same message
+        # (round-1 P2, measured). Name what has to be dropped as well.
+        _route = ("drop tag= and pass text= to use them"
+                  if tag is not None else "pass text= to use them")
         return _SafeError({"error": (
             f"{_named} is not applied on the {_arm} arm (#12500): the structural "
             f"arms read through sdk.paginated_query, which takes no confidence floor "
             f"and no ordering, and tag mode reads a tag and nothing else — so these "
             f"arguments used to be dropped silently and the caller got rows they "
             f"excluded, or an order they did not ask for.{_extra} They ARE applied "
-            f"on the text= arm (the fts leg). Pass text= to use them, or drop "
-            f"{_named} for this read."
+            f"on the text= arm (the fts leg), which tag= takes precedence over — so "
+            f"{_route}, or drop {_named} for this read."
         )})
     # ── #12455: `filters=` was ACCEPTED on the `text=` and `tag=` arms and DROPPED
     # `filters` is a STRUCTURAL-path argument. `text=` forwards

@@ -127,10 +127,13 @@ _STRUCTURAL_SHAPES = [
 def test_the_structural_arms_refuse_a_floor_or_an_order(stub, base, argument) -> None:
     """RED before the fix: the accessor never saw the argument, rows came back.
 
-    Fails on ``_is_refusal(result) is False`` — and on the confidence assertion,
-    which proves the returned rows are exactly what the floor was meant to
-    exclude. The fixture reaches it because the stub serves 0.01 rows and its
-    accessors take no floor.
+    Fails on ``_is_refusal(result) is False``. The second assertion is the one
+    that shows WHY that matters, and it has to be written against the shape this
+    arm really returns: un-paginated the arm answers a bare ``list``, so a
+    ``"results" not in result`` check would be inert (round-1 finding 4 made this
+    real). With the guard removed the call returns 3 rows at confidence 0.01 —
+    exactly the rows the floor of 0.9 excludes — so this reds on the rows, not
+    just on the refusal.
     """
     from tortoise.mcp_server import tortoise_query
 
@@ -139,10 +142,8 @@ def test_the_structural_arms_refuse_a_floor_or_an_order(stub, base, argument) ->
 
     assert _is_refusal(result), (
         f"{argument}={value!r} on {sorted(base)} was accepted and DROPPED — the "
-        f"accessor takes no such parameter, so the caller got rows they excluded"
-    )
-    assert not isinstance(result, (list, dict)) or "results" not in result, (
-        "a refusal must not also carry a page"
+        f"accessor takes no such parameter, so the caller got rows they excluded: "
+        f"{result if not isinstance(result, list) else len(result)}"
     )
 
 
@@ -255,3 +256,48 @@ def test_defaults_are_not_refusals(stub) -> None:
     result = tortoise_query(kind="statement", min_confidence=None, order_by=None)
 
     assert not _is_refusal(result), f"refused the defaults: {result}"
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"kind": "statement", "min_confidence": 0.0},
+    {"kind": "statement", "offset": 0, "min_confidence": 0.0},
+    {"kind": "statement", "order_by": ""},
+    {"tag": "pricing", "kind": ""},
+    {"tag": "pricing", "min_confidence": 0.0},
+    {"tag": "pricing", "order_by": ""},
+])
+def test_falsy_values_are_no_ops_and_never_refused(stub, kwargs) -> None:
+    """A client that serialises its own DEFAULTS must not be refused (#12500 r1).
+
+    The arm itself defines these values as absent — the `text=` call normalises
+    with `min_confidence or 0.0` and `order_by or "relevance"`, and the sibling
+    `filters=` guard keys on truthiness for the same reason. Keying this guard on
+    `is not None` refused `min_confidence=0.0` / `order_by=""` / `kind=""` on
+    every structural and tag read, where the answer had always been CORRECT (a
+    floor of 0.0 excludes nothing; an empty order names none). Measured before
+    the fix: all six shapes REFUSED.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(**kwargs)
+
+    assert not _is_refusal(result), (
+        f"refused a call whose {sorted(kwargs)} are semantic NO-OPS on this arm"
+    )
+    assert stub.calls, f"{sorted(kwargs)} never read anything"
+
+
+def test_the_tag_arm_message_names_the_precedence_that_blocks_pass_text(stub) -> None:
+    """`tag=` wins over `text=`, so "pass text=" alone loops the caller (#12500 r1).
+
+    Fails if the tag-arm message omits `tag=` — the caller drops nothing, re-reads
+    the same sentence, and is back where they started. The `filters=` guard had
+    exactly this defect in #12455 and was fixed for it.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    result = tortoise_query(tag="pricing", min_confidence=_CONFIDENCE_FLOOR)
+
+    assert _is_refusal(result), "no refusal to read a message off"
+    assert "tag=" in result["error"], result["error"]
+    assert "drop tag=" in result["error"], result["error"]
