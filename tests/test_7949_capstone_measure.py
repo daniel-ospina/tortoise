@@ -4679,9 +4679,14 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
     return failures
 
 
-#: A LINE CITE bound to the tool-maintained manifest. The supported spellings, and
-#: they are exhaustive on purpose (the docstring of a guard should not promise more
-#: than the guard does): ``ci-surfaces.yml:9973``, `` `ci-surfaces.yml`, `:9987` ``,
+#: A LINE CITE bound to the tool-maintained manifest. ⛔ THE SPELLING SET IS `_SEP`
+#: ABOVE; THIS LIST IS A READING AID, NOT THE CONTRACT. It used to say it was
+#: "exhaustive on purpose", and two shapes its own must-catch fixtures require
+#: (`` → 9987 `` and `` line no. 9987 ``) were absent from it — the guard promised
+#: less than it did, which reads as a false claim the moment a reader trusts the
+#: word. `_SEP` also carries the plural forms (`` lines ``/`` rows ``/`` entries ``),
+#: `` of ``, and the optional `` number ``/`` no. `` tail. Every spelling below is
+#: a real one:
 #: `` at :9987 ``, `` — `:9987` ``, `` at 9987 `` / `` — 9987 `` (no colon),
 #: `` line `9987` `` / `` row 9987 `` / `` (entry 9987) ``, `` :9,987 ``,
 #: `` ci-surfaces.yml#L9987 `` / `` L9987 `` / `` L. 9987 `` (the GitHub-anchor and
@@ -5300,7 +5305,28 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
             f"config/ci-surfaces.yml `{section}:` is a {type(entries).__name__}, not a "
             f"list — this pin compares entries and cannot read a mapping")
     # a YAML `# comment` is already gone; keep the value verbatim otherwise.
-    return [str(e).strip() for e in entries]
+    #
+    # ⛔ A NON-STRING ENTRY IS A SHAPE ERROR, NOT SOMETHING TO `str()` (measured
+    # fail-open). This used to be `str(e).strip()`, and `str()` of a mapping or a
+    # list yields a REPR whose basename is the repr itself — so with
+    # `- {test_pack_logic_writeprobe_11083.py: 3.0}` or
+    # `- [test_pack_logic_writeprobe_11083.py]` spliced under `slow_files:`, the
+    # entry classified as "not a capstone file" (`_is_capstone` compares the
+    # BASENAME, and `PurePosixPath("{'…': 3.0}").name` is the whole string) and
+    # the document's "hold none" half stayed GREEN over a block that does hold
+    # the entry. `merge=union` is exactly the mechanism that can splice a
+    # foreign shape into a hand-curated block, which is why this is refused
+    # rather than guessed at: the grammar is `- <filename>` strings and a value
+    # outside it has no filename to compare.
+    for e in entries:
+        if not isinstance(e, str):
+            raise _ManifestShapeError(
+                f"config/ci-surfaces.yml `{section}:` holds a {type(e).__name__} "
+                f"entry ({e!r}) where the grammar is `- <filename>` strings — "
+                f"this pin compares entries by basename, and an entry wrapped in "
+                f"a mapping or a list has no basename to compare, so the file "
+                f"inside it would read as 'not a capstone file'")
+    return [e.strip() for e in entries]
 
 
 def test_the_bare_continuation_cites_name_what_they_say():
@@ -5970,7 +5996,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         """The document's four `durations:` globs, plus the entry ITSELF by basename.
 
         The basename, not the raw string: a PATH-PREFIXED entry is this file's own
-        convention (70 rows spell theirs that way, e.g. `- bench/test_smoke_embedded.py`
+        convention (6 rows across the three blocks spell theirs that way, e.g. `- bench/test_smoke_embedded.py`
         in `carve_out:`), and comparing `name == ENTRY` let
         `- tests/test_pack_logic_writeprobe_11083.py` sit in `slow_files:` with the
         document's "hold none" FALSE and the pin GREEN — and the same form in
@@ -6042,7 +6068,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"states it. If the manifest is reordered, the paragraph that "
                 f"explains the rot is now false; re-derive it, do not delete this")
         # …compared by BASENAME, so a path-spelled row (`- tests/<entry>`, this file's
-        # own convention in 70 rows) is the same entry and not a false "different"
+        # own convention in 6 rows across the three blocks) is the same entry and not a false "different"
         # capstone file.
         carve = [PurePosixPath(e).name for e in carve_all if _is_capstone(e)]
         if not carve:
@@ -6109,12 +6135,29 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The pattern mirrors the row's own grammar: the phrase, an optional noun, a
         # colon, its ONE filename — and nothing quantifier-shaped in between.
         _ONE_ENTRY = (
-            r"`carve_out:`\s*holds\s*\*\*one\*\*\s*(?:entry|file)?\s*:\s*`"
-            + ENTRY + r"`"
-            # …and NOTHING may follow it that adds another: by the
-            # comma/'and one more'/plus/besides/among/except the same row can
-            # contradict itself in a handful of characters.
-            r"(?![^|]{0,12}\b(?:and|plus|besides|among|other than|except)\b)")
+            r"`carve_out:`\s*holds\s*\*\*one\*\*\s*(?:entry|file)?\s*"
+            r"(?::|—|–)\s*`"
+            # ⛔ `re.escape`, because `ENTRY` is a FILENAME and its `.` is a regex
+            # wildcard. Un-escaped, the sentence named
+            # `test_pack_logic_writeprobe_11083_py` (or `…Xpy`) and this arm still
+            # matched — measured — while `_stray_entry_finding` is silent by
+            # construction in that state (`if entry not in sentence: return None`,
+            # and the exact name IS absent). So a one-character typo in the one
+            # filename the sentence exists to state left the pin GREEN
+            # (a fresh-context review's #1 finding, reproduced before it was fixed).
+            + re.escape(ENTRY) + r"`"
+            # ⛔ THE DEFAULT IS "NOTHING MAY FOLLOW", so this is a POSITIVE lookahead
+            # for a clause break, not a deny-list of connectives. The deny-list
+            # shipped one round and four same-meaning tails walked straight past it —
+            # "as well as", "along with", "in addition to", "for the E6 lane today,
+            # and two more entries besides" — each making the claim FALSE with the
+            # pin GREEN (measured). A break is what the row actually writes after the
+            # name, and anything else is a qualifier this arm has not been taught to
+            # understand, so it refuses.
+            r"(?=\s*(?:—|–|\||\.|;|,|$))"
+            # …and `, one of two` / `, among several` turn "holds ONE" into a count
+            # of a larger set while keeping the clause-break shape.
+            r"(?!\s*,?\s*(?:one\s+of|two|three|among|several|many)\b)")
         if not re.search(_ONE_ENTRY, doc_hits[0]):
             block_failures.append(
                 f"03-test-design.md's `carve_out:` sentence does not say, in the row's "
@@ -6142,10 +6185,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # with a message that named a cause that was not there. The pattern now
         # accepts either order and the two fillers the sentence may carry; anything
         # else between the names is where a negation would live.
+        # ⛔ THE TAIL GUARD APPLIES TO **BOTH** ALTERNATIVES, so the whole pattern is
+        # one group and the lookahead sits OUTSIDE it. Appended to a bare
+        # alternation the lookahead binds to the LAST alternative only, which is how
+        # the first cut of this guard let "… hold none — except one capstone entry in
+        # `slow_files:`" through (measured GREEN).
         _HOLD_NONE = (
-            r"(?:`uri_requiring:`\s*(?:and|,|/)\s*`slow_files:`"
+            r"(?:(?:`uri_requiring:`\s*(?:and|,|/)\s*`slow_files:`"
             r"|`slow_files:`\s*(?:and|,|/)\s*`uri_requiring:`)"
-            r"\s*(?:both\s+)?(?:,?\s*which\s+)?hold none")
+            r"\s*(?:both\s+)?(?:,?\s*which\s+)?hold none"
+            # …and the same claim the other way round, which is correct prose:
+            # "`uri_requiring:` holds none, as does `slow_files:`".
+            r"|`uri_requiring:`\s*holds? none\s*,?\s*as does\s*`slow_files:`)"
+            # AND THE CLAUSE MUST NOT BE EXTENDED BY AN EXCEPTION. A clause break is
+            # not a licence: an `except`/`but`/`though`/`second`/`two` inside the same
+            # clause turns the claim inside out while the positive form still matches.
+            r"(?![^.;|]*\b(?:except|but|though|although|save|other\s+than|"
+            r"second|third|two|three|also)\b)")
         if not re.search(_HOLD_NONE, doc_hits[0]):
             block_failures.append(
                 "03-test-design.md's `carve_out:` sentence does not state, POSITIVELY, "
@@ -6525,7 +6581,11 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     # measured RED before `_neighbour_number_strays` existed. They are the natural
     # prose of a maintainer explaining the block's mechanism — and `03-test-design.md`
     # is the bundle's cite-heavy document (`sdk.py:9938`/`:9991`, `capstone_run.py`),
-    # so its neighbours WILL name other modules with line numbers.
+    # so its neighbours WILL name other modules with line numbers. Both numbers are
+    # re-derived at this head (`grep -n subject_binding_available tortoise/sdk.py`) —
+    # an earlier revision carried `9867`/`9920`, which is that pair minus 71: a
+    # carried OFFSET, the exact rot this PR exists to remove, caught by the same
+    # review that re-derived the document's copy of the pair.
     ("`surfaces:` blocks are spliced by `tools/ci_selection.py::register_tests` (its "
      "`entry_lines` loop, `:4906`) and the entry line moves under them.", []),
     ("The `corpus` block in `capstone_run.py` is frozen; its literal sits at `:1186`.",
@@ -6699,6 +6759,86 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
         assert _neighbour_number_strays(position), (
             f"a `lines`/`rows` POSITION on a neighbouring line must be scanned: "
             f"{position!r} — there is no tail allow-list to slip past any more")
+
+
+@pytest.mark.parametrize("mutation, arm", [
+    # ⛔ NON-VACUITY FOR THE BLOCK ARM'S OWN ARMS. A review deleted twelve of them one
+    # at a time and found the pin GREEN every time — over the real document AND over
+    # the mutation each arm exists to catch — so nothing in the 240-case file could
+    # tell an arm that works from one that had been deleted. This is the same standard
+    # the PR applies to the arity-5 `section` element it removes ("an enforcement path
+    # with no caller is an inert guard"), turned on the arms it adds.
+    #
+    # Each case is the text its arm is for, applied to a /tmp copy with the pin
+    # re-run; delete the arm and the case goes green. Every one was verified that way
+    # by hand before it was written here.
+    (lambda doc, man: (doc.replace(
+        "`uri_requiring:` and `slow_files:` hold none",
+        "`uri_requiring:` and `slow_files:` do NOT hold none", 1), man),
+     "`_HOLD_NONE` (the clause is negated)"),
+    (lambda doc, man: (doc.replace(
+        "`carve_out:` holds **one**: ",
+        "`carve_out:` holds **one** file besides ", 1), man),
+     "`_ONE_ENTRY` (a quantifier replaces the colon)"),
+    (lambda doc, man: (doc + "\nThe `carve_out:` block and the row "
+                             "`test_pack_logic_writeprobe_11083.py` sits at `:9987` "
+                             "on this head.\n", man),
+     "neighbour loop (a number on a line naming the ENTRY)"),
+    # ⛔ IT MUST BE A CITE THE NEIGHBOUR ARM EXEMPTS, or the case is satisfied by a
+    # sibling arm and the doc-wide arm can be deleted unnoticed (measured: appending
+    # a bare "line 9987" was caught by the neighbour loop instead). `_OTHER_FILE`
+    # exempts a line that cites another module, so this one is the doc-wide arm's
+    # alone.
+    (lambda doc, man: (doc + "\nSee `tools/ci_selection.py` and "
+                             "`config/ci-surfaces.yml:9987`.\n", man),
+     "doc-wide `_MANIFEST_CITE` (a cite the neighbour arm exempts)"),
+    (lambda doc, man: (doc, man.replace(
+        "\nslow_files:\n", "\nslow_files:\n- test_capstone_leak_7949.py\n", 1)),
+     "the `slow_files:` leak arm"),
+    (lambda doc, man: (doc, man.replace(
+        "\ncarve_out:\n", "\ncarve_out:\n- test_capstone_second_7949.py\n", 1)),
+     "the holds-one arm on the manifest side"),
+    (lambda doc, man: (doc, man.replace(
+        "\ncarve_out:\n", "\ncarve_out:\ncarve_out:\n", 1)),
+     "the duplicate-key refusal"),
+    # ⛔ THE TWO THE SAME REVIEW FOUND AS FAIL-OPENS, so they get a case like the
+    # rest: each is RED here and GREEN if the arm it names is deleted.
+    (lambda doc, man: (doc.replace(
+        "`carve_out:` holds **one**: `test_pack_logic_writeprobe_11083.py`",
+        "`carve_out:` holds **one**: `test_pack_logic_writeprobe_11083_py`", 1), man),
+     "`_ONE_ENTRY` (`re.escape` — the filename's `.` is a wildcard unescaped)"),
+    (lambda doc, man: (doc, man.replace(
+        "\nslow_files:\n",
+        "\nslow_files:\n- {test_pack_logic_writeprobe_11083.py: 3.0}\n", 1)),
+     "the non-string entry refusal in `_section_entries`"),
+])
+def test_each_block_arm_reds_on_the_mutation_it_guards(mutation, arm, monkeypatch,
+                                                      tmp_path):
+    """The named arm REFUSES this mutation — each case is that arm's own shape.
+
+    ⚠️ TWO CONTRACTS, STATED SEPARATELY, because an earlier docstring claimed the
+    strong one for every row and a review measured it false for seven arms:
+
+      * for the arms below that are a shape's ONLY guard (the hold-none clause, the
+        one-entry grammar, the neighbour loop, the doc-wide cite, the leak arm), the
+        case fails if the arm is deleted — verified by deleting each one;
+      * `ceil(len(carve) > 1)` is a MESSAGE refinement: `elif carve != [ENTRY]`
+        refuses the same state, so its case stays RED with the arm deleted. It is
+        listed for the message it produces, not for coverage.
+    """
+    doc_text = _EPIC_CITE_DOCS["03-test-design.md"].read_text(encoding="utf-8")
+    man_text = _EPIC_CITE_SOURCES["ci_surfaces"].read_text(encoding="utf-8")
+    doc_new, man_new = mutation(doc_text, man_text)
+    assert (doc_new, man_new) != (doc_text, man_text), (
+        f"the {arm} fixture changed nothing")
+    dcopy = tmp_path / "03-test-design.md"
+    dcopy.write_text(doc_new, encoding="utf-8")
+    mcopy = tmp_path / "ci-surfaces.yml"
+    mcopy.write_text(man_new, encoding="utf-8")
+    monkeypatch.setitem(_EPIC_CITE_DOCS, "03-test-design.md", dcopy)
+    monkeypatch.setitem(_EPIC_CITE_SOURCES, "ci_surfaces", mcopy)
+    with pytest.raises(AssertionError):
+        test_the_epic_bundle_cites_the_branch_rederived_resolve()
 
 
 def test_the_two_cite_arms_are_complementary_not_duplicate():
