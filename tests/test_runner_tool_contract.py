@@ -1342,8 +1342,10 @@ def _workflow_paths(root: Path | None = None) -> list[Path]:
     Why centralised: the narrow glob looked CORRECT at each site, which is why it was
     written three times in this file. Repairing each site leaves the fourth to be written
     next week, so every scan derives from `_WORKFLOW_SUFFIXES` through this function, and
-    `test_no_site_spells_the_workflow_glob_one_sidedly` reds if a one-extension glob
-    reappears — it grades what the PATTERN matches, not how it is spelled.
+    `test_no_site_spells_the_workflow_glob_one_sidedly` reds if a one-extension glob reappears.
+    That pin grades TWO ways (see `_opens`) — what the PATTERN matches, and, for a wildcarded
+    pattern, what it literally SPELLS — because the match arm alone is population-dependent;
+    the pin's SCOPE states what neither arm reaches.
 
     `root` exists so a pin can drive the REAL scan on a synthetic tree; it defaults to the
     repo's own directory at CALL time, so it follows `WORKFLOWS`.
@@ -3473,8 +3475,8 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         `"*"` fragment matches BOTH witness names. It is that fragments are graded
         INDEPENDENTLY and never joined, so a symmetric fragment (`"*"`, `"yml"` alone) masks a
         one-sided whole. Joining them would mean reconstructing the pattern the interpreter
-        builds, i.e. executing the code under test — and a naive join would false-red this
-        module's own `f"*{suffix}"`.
+        builds, i.e. executing the code under test — so the fragments stay ungraded rather than
+        guessed at.
       * a reader that never calls `glob`/`rglob` — `WORKFLOWS.iterdir()` filtered by suffix, or
         `os.listdir`. Measured clean, and not pinnable from source text without a dataflow
         analysis. (`rglob` IS graded: it is in the same NAME set as `glob`, and a recursive
@@ -3494,7 +3496,17 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         `WORKFLOWS.glob(pattern)`). The constant arm reads module globals only, so a bare NAME
         there has no literal in its span and no constant to resolve. Declared rather than
         closed: the copyable idiom in this file IS module-level (`_SCRIPT_GLOBS`,
-        `_WORKFLOW_SUFFIXES`), which the arm does grade.
+        `_WORKFLOW_SUFFIXES`), which the arm does grade. The same reach applies to a pattern
+        handed to a HELPER that forwards it to `glob` (`_enumerate(WORKFLOWS, "<star>.yml")`):
+        the call site's argument is a literal, but the `glob` call's is a bare NAME, so neither
+        arm pairs them. Declared, not closed — pairing them is a dataflow analysis, not a
+        source scan.
+      * an extension spelled with a CHARACTER CLASS (`"release*.[y]ml"`). The spelling arm
+        compares the segment against the two literal extensions, so this falls back to the
+        match arm and grades CLEAN against a tree with no `release*` workflow — the same hole
+        one level down (measured, review round 9). Declared rather than closed: normalising
+        every equivalent spelling (`[y]ml`, `?ml`, `*ml`) would need the pattern GRAMMAR, and a
+        half-normaliser invents false reds.
       * a `.yml`-only glob in this module that does NOT target workflows (a future config or
         fixture loader). It reds, and that is an OVER-BLOCK by choice: a receiver-based filter
         would have to guess which directories hold workflows, and every guess it got wrong in
@@ -3509,23 +3521,21 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
     source = Path(__file__).read_text()
     #: NON-VACUITY ON THE ANALYZER, not just on the population. A pin whose READER has gone blind
     #: is indistinguishable from a clean tree — with `_glob_calls` short-circuited to `[]` and a
-    #: real one-sided glob added, this test still passed (measured, review round 6). The two
-    #: assertions below pin the reader's own shape, so a mutilated analyzer reds HERE instead of
+    #: real one-sided glob added, this test still passed (measured, review round 6). The
+    #: assertion below pins the reader's own shape, so a mutilated analyzer reds HERE instead of
     #: certifying the module, which is the same failure `#12238` names one layer up.
+    #:
+    #: ⛔ THERE IS DELIBERATELY NO SECOND CANARY HERE (`any(literals … over the module's own
+    #: calls`). Holding every pattern in a module constant and calling `base.glob(pattern)` is a
+    #: behaviour-preserving refactor that leaves this module with no literal-carrying call at all,
+    #: and it still has something to grade — the constants arm reads the module globals. Reding it
+    #: would block the very idiom that arm grades (measured, review round 9: the enumerator
+    #: rewritten as `base.glob(_WF_PREFIX + suffix)` with `_WF_PREFIX = "*"` left this module with
+    #: `literals=[]` on BOTH calls and red-ed an otherwise identical tree). Blindness is what the
+    #: shape assertion below pins.
     assert _glob_calls('WORKFLOWS.glob("*.yml")') == [(1, "WORKFLOWS", "glob", ["*.yml"])], (
         "`_glob_calls` no longer reports (line, receiver, method, literals) for a plain one-sided "
         "glob — the structural scan below would grade nothing and pass"
-    )
-    #: NOT `any(literals …)` unconditionally: holding every pattern in a module constant and
-    #: calling `base.glob(pattern)` is a behaviour-preserving refactor that leaves this module with
-    #: no literal-carrying call at all, and the scan then has nothing to grade — which is not the
-    #: same as being BLIND, and reding it would block the very idiom the constant arm grades
-    #: (measured, review round 8). Blindness is what the shape assertion above pins.
-    _module_calls = _glob_calls(source)
-    assert not _module_calls or any(literals for *_head, literals in _module_calls), (
-        "this module calls glob/rglob but no call carries a literal or an f-string fragment — the "
-        "structural scan graded nothing. If the patterns are held in a constant on purpose, say "
-        "so in SCOPE rather than letting a silent pass stand in for it"
     )
     yml_names, yaml_names = _workflow_probe_names()
     assert yml_names, "the probe population is empty — this pin would grade nothing"
