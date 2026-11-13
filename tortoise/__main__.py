@@ -12985,7 +12985,17 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
         chunk = chunk[: cap - total]
         chunks.append(chunk)
         total += len(chunk)
-    return b"".join(chunks), False
+    # ⛔ The CAP is a truncation trigger too (fresh review round 20): exiting here
+    # means `total == cap`, and if the response still OWES bytes the body is as
+    # cut as a deadline stop — a 2xx fragment then parsed to `identity is None`
+    # and read `❌ … captive portal … Check your TORTOISE_API_URL` on a HEALTHY
+    # setup (and a cut 403 lost its `error_code`). The cap needs no slow network,
+    # so it was the easiest trigger to hit.
+    outstanding = getattr(resp, "length", None)
+    if outstanding is None:
+        inner = getattr(resp, "fp", None)
+        outstanding = getattr(inner, "length", None)
+    return b"".join(chunks), outstanding not in (None, 0)
 
 
 def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> None:

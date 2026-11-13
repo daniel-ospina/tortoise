@@ -1846,7 +1846,9 @@ class TestDoctorHostedCredential:
         # without this a cap of 10 MB reads as green.
         assert error_stream.served == 65536, error_stream.served
         hosted = _row(out, "Hosted")
-        # → API error 400 (the error-body read is the third capped read)
+        # This 400 body is SMALL and COMPLETE, so it is evidence: the refusal is
+        # reported with its own text. (A body cut by the CAP is the different
+        # case, pinned by test_a_v1_team_body_over_the_cap_*.)
         assert hosted is not None and "❌" in hosted, out[-1200:]
         assert "API error 400" in hosted, hosted
 
@@ -2671,6 +2673,37 @@ class TestDoctorHostedCredential:
         assert "❌" not in hosted, hosted
         assert "CUT" in hosted, hosted
         assert "no team identity" not in hosted, hosted
+
+    def test_a_v1_team_body_over_the_cap_is_unproven_not_a_broken_setup(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A >64 KiB 2xx body is a TRUNCATION, not a captive portal.
+
+        The cap needs no slow network, so it was the easiest way to make a healthy
+        setup read `❌ … no team identity … Check your TORTOISE_API_URL`: the
+        fragment was parsed, found to carry no identity, and blamed on the user
+        (fresh review round 20).
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        big = b'{"org_id":"org-9","pad":"' + b"x" * 70000 + b'"}'
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            return _FakeResponse(200, big)
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "over-cap.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor over cap seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1200:]
+        assert "❌" not in hosted, hosted
+        assert "TORTOISE_API_URL" not in hosted, hosted
+        assert "CUT" in hosted, hosted
 
 
 class TestDoctorPath:
