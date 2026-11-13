@@ -841,7 +841,7 @@ def invalidate(
         # goalId on the retired claim"` over a claim that DOES name one, so the
         # dependent state went unreconciled AND the summary read clean: neither
         # `counts.failed` nor `counts.gone` moves for a skipped check. The absent
-        # arm has no claim, so it keeps `invalidation.goal_id` alone..
+        # arm has no claim, so it keeps `invalidation.goal_id` alone.
         return {"invalidated": False, "judgementId": judgement_id,
                 "alreadyRetired": True, "status": None, "found": False,
                 "reason": invalidation.reason,
@@ -882,8 +882,7 @@ def invalidate(
                     "reason": invalidation.reason,
                     "cache": _reconcile_or_report(
                         sdk, invalidation.goal_id
-                        or (after.get("goalId") if isinstance(after, dict)
-                            else None)),
+                        or after.get("goalId")),
                     "detail": f"already terminal ({after_status or 'outdated'})"}
         raise exc
 
@@ -891,7 +890,16 @@ def invalidate(
     # INTO silence nor allowed to mask the retirement: `_reconcile_or_report`
     # reports it, and the caller's repair route is to call the public, idempotent
     # `reconcile_goal_state_cache` again with the goal's id.
-    cache_report = _reconcile_or_report(sdk, invalidation.goal_id)
+    #
+    # ⛔ AND THIS ARM — the ONLY one that actually retires — owes the reconcile the
+    # same claim-sourced goal id as the terminal arms (#12315 review cycle 12). It
+    # was the last arm still reading `invalidation.goal_id` alone, and here the
+    # skip is PERMANENT: the claim is terminal by the time a caller could notice,
+    # so `invalidate_stale` never scans it again, and the skipped check moves
+    # neither `counts.failed` nor `counts.gone` — a sweep reads clean over a goal
+    # still displaying a word for the claim this very call retracted.
+    resolved_goal_id = invalidation.goal_id or claim.get("goalId")
+    cache_report = _reconcile_or_report(sdk, resolved_goal_id)
 
     result: dict[str, Any] = {
         "invalidated": True,
@@ -901,7 +909,7 @@ def invalidate(
         "detail": invalidation.detail,
         "validTo": stamp,
         "state": invalidation.state,
-        "goalId": invalidation.goal_id,
+        "goalId": resolved_goal_id,
         "indicatorId": invalidation.indicator_id,
         "targetId": invalidation.target_id,
         "cache": cache_report,

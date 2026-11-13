@@ -512,10 +512,15 @@ def test_an_already_terminal_claim_reconciles_the_goal_the_CLAIM_names(sdk):
     check moves neither `counts.failed` nor `counts.gone`, so the sweep read
     clean over a goal whose word names a claim that no longer counts.
 
-    The mutation this excludes: swapping `invalidation.goal_id or
-    claim["goalId"]` back to `invalidation.goal_id` (and the same in the
-    post-exception arm) leaves every OTHER test green — they all build the
-    `Invalidation` with the goal the claim carries.
+    The mutation this excludes, stated per arm because the claim was previously
+    broader than the evidence: reverting the ALREADY-TERMINAL arm to
+    `invalidation.goal_id` alone fails this test and the legacy-flag pin above;
+    reverting the POST-EXCEPTION arm fails
+    `test_the_POST_EXCEPTION_terminal_arm_reconciles_too`
+    (which now names no goal, on purpose); and reverting the SUCCESS arm fails
+    `test_the_success_arm_reconciles_the_goal_the_CLAIM_names`. Every other test
+    builds the `Invalidation` with the goal the claim carries, which is why each
+    of the three was green before.
     """
     i, t, g = _world(sdk, tag="terminal-goal-from-claim")
     made = _judge(sdk, i, t, g)
@@ -532,6 +537,35 @@ def test_an_already_terminal_claim_reconciles_the_goal_the_CLAIM_names(sdk):
     assert result["found"] is True, result
     assert result["cache"]["checked"] is True, result["cache"]
     assert sdk.get_entity(g["id"]).get("goalState") is None
+
+
+def test_the_success_arm_reconciles_the_goal_the_CLAIM_names(sdk):
+    """The arm that ACTUALLY retires is the one where a skipped reconcile is fatal.
+
+    #12315 review cycle 12. Every other success-path test goes through
+    `invalidate_stale`, where `invalidation_for` copies `goalId` from the claim —
+    so a DIRECT `invalidate()` call with a goal-less `Invalidation` was the one
+    shape nobody built, and it passed `invalidation.goal_id` (None) to the
+    reconcile. The claim is terminal after this call, so `invalidate_stale` never
+    scans it again: the goal keeps the derived word FOREVER, and neither
+    `counts.failed` nor `counts.gone` moves for the skip. The result must also
+    report the resolved id, not the caller's `None`.
+    """
+    i, t, g = _world(sdk, tag="success-goal-from-claim")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+    # the claim is LIVE and stale: the bar moved above the recorded reading
+    sdk.update_entity(t["id"], threshold=8.0)
+    finding = Invalidation(judgement_id=made["point_id"], reason="target-revised",
+                           detail="threshold moved")
+    result = invalidate(sdk, finding)
+    assert result["invalidated"] is True, result
+    assert not result.get("alreadyRetired"), result
+    assert result["cache"]["checked"] is True, result["cache"]
+    assert result["goalId"] == g["id"], result
+    assert sdk.get_entity(g["id"]).get("goalState") is None, (
+        "the goal still displays a word nothing backs: "
+        f"{sdk.get_entity(g['id']).get('goalState')!r}")
 
 
 # ── 4b. an UNNAMED scope is undecidable, never a retirement ──────────────
@@ -1329,8 +1363,11 @@ def test_the_POST_EXCEPTION_terminal_arm_reconciles_too(sdk, monkeypatch):
         raise ValueError("already terminal")
 
     monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
+    # ⛔ NO `goal_id` HERE, ON PURPOSE (#12315 review cycle 12): passing it makes
+    # `invalidation.goal_id or after["goalId"]` short-circuit, so the claim-sourced
+    # fallback this arm exists to provide was evaluated by NO test — reverting it
+    # to `invalidation.goal_id` alone left all 364 green.
     report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
-                                          goal_id=g["id"],
                                           reason="target-revised", detail="…"))
     assert report["alreadyRetired"] is True, report
     assert report["found"] is True, report
