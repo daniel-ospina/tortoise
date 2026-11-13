@@ -1442,7 +1442,7 @@ def test_section_1_locators_still_point_at_the_code_they_name(brief: str) -> Non
     exactly what this test enforces: these locators point at their symbols.
     """
     scope = _scope_slice(brief, "1")
-    marker = "**The pinned read of the code**"
+    marker = "The pinned read of the code"
     assert marker in scope, (
         "§1 lost the 'pinned read of the code' table — the locators it carries "
         "are the only record of which lines the mechanism claims rest on")
@@ -1608,7 +1608,7 @@ def test_the_scorers_do_not_rank_identically(artifact, brief_text) -> None:
     # POSITIVE claims are §0-scoped (#12349 round 19); the NEGATIVE one stays
     # document-wide on purpose — a false reading must not appear ANYWHERE.
     assert "rank these documents identically" not in brief_text
-    _s0 = _scoped(brief_text, "0")
+    _s0 = _scoped(brief_text, "0").replace("*", "")
     assert "45 rank differently" in _s0
     assert "1.452 vs 1.285" in _s0
 
@@ -2297,8 +2297,8 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     # The section was ALSO mislabelled §3.4 in this block, in its messages and in
     # the CI row: §3.4 is "The mechanism — a tokenizer contract mismatch", and
     # this paragraph is §3.3 "Per class (recall@3 / recall@15)".
-    section33 = _scoped(brief, "3.3")
-    plain33 = section33.replace("*", "")
+    section33 = _scoped(brief, "3.3").replace("*", "")
+    plain33 = section33
     # ⛔ SHAPE-UNIQUE (#12349 round 24 reviewer, P2: these were the remaining
     # §-scoped PRESENCE pins, each measured GREEN when falsified in place with the
     # truth restated beside it in §3.3).
@@ -2308,7 +2308,7 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     # second, TRUE bolded ratio in §3.3 false-reds it (round-24 reviewer, cycle 8).
     # The claim carries the sentence's own words.
     _only_claim(section33,
-                f"found by the **shipped** leg **{sh} of {len(hashed)}**",
+                f"found by the shipped leg {sh} of {len(hashed)}",
                 "§3.3's `#n` recall cell",
                 values=(str(sh), str(len(hashed))),
                 free=("shipped", "found"))
@@ -2659,9 +2659,9 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
                 # ⛔ The ARITHMETIC is the claim's content (round-24 reviewer,
                 # cycle 9): `+` → `−` and `sum` → `average` both planted green.
                 free=("above|below", "+", "sum"))
-    _only_claim(_s43, f"i.e. {100 - total:.1f} %",
+    _only_claim(_s43, f"i.e. {100 - total:.1f} %, before any overlap",
                 "§4.3's published remainder",
-                values=(f"{100 - total:.1f}",))
+                values=(f"{100 - total:.1f}",), free=("any",))
     # ⛔ The PRODUCT is its own claim (#12349 review, P2): both factors were
     # pinned and the arithmetic joining them was not — `0.09 × 91.8 ≈ +8.3 pts`
     # → `+8.4 pts` left all 118 tests GREEN. 0.09 × 91.8 = 8.262, which the brief
@@ -2896,7 +2896,7 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
     # A blockquote in the decision doc puts a `>` between the words a sentence
     # spans on two lines; drop the marker before comparing prose. §6.2-SCOPED
     # (#12349 round 19): the doc is 560 lines and the note is one section of it.
-    text = _scoped(re.sub(r"(?m)^\s*>\s?", "", search_arch), "6.2")
+    text = _scoped(re.sub(r"(?m)^\s*>\s?", "", search_arch), "6.2").replace("*", "")
     cmp = artifact["comparisons"]
     k3 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
     k15 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k15"]
@@ -2929,7 +2929,7 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
         f"artifact records p = {k3['mcnemar_p_two_sided']} (> 0.05) and §0/§4.1 "
         "say FAIL — the inverted reading is the one this decision document must "
         "not carry")
-    _only_claim(text, f"by **zero** at k={15}",
+    _only_claim(text, f"by zero at k={15}",
                 "the status note's 'zero at k=15'", free=("zero",))
     assert k15["delta_pts"] == 0.0
     k5 = cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k5"]
@@ -2938,8 +2938,8 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
         "note's k=5 sentence needs re-deriving")
     _only_claim(
         text,
-        f"**{'\u2212' if k5['delta_pts'] < 0 else '+'}"
-        f"{abs(k5['delta_pts']):.2f} pts at k=5**",
+        f"{'\u2212' if k5['delta_pts'] < 0 else '+'}"
+        f"{abs(k5['delta_pts']):.2f} pts at k=5",
         "the status note's k=5 direction",
         values=(f"{abs(k5['delta_pts']):.2f}",))
     _only_claim(text, f"the whole {dep['delta_pts']:g}-point swing",
@@ -3526,8 +3526,8 @@ def test_the_falsifier_predicate_is_stated_the_same_way_in_every_document(
              ("SEARCH-ARCHITECTURE-CHANGELOG.md", changelog, "#12298"),
              ("SEARCH-ARCHITECTURE.md", search_arch, "6.2"))
     for name, doc, section in where:
-        plain = " ".join(doc.replace("*", "").replace("*", "").split())
-        ruled = _scoped(doc, section).replace("*", "").replace("*", "")
+        plain = " ".join(doc.replace("*", "").split())
+        ruled = _scoped(doc, section).replace("*", "")
         assert re.search(r"not\s+met|not\s+triggered", ruled, re.I), (
             f"{name}: §{section} no longer states that the closure condition is "
             f"not met/triggered — that is the section a reader takes the C3 "
