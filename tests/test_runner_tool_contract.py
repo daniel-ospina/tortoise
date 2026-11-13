@@ -3335,9 +3335,10 @@ def _glob_matches(pattern: str, names: tuple[str, ...]) -> bool:
     string-concatenated arguments and character classes are graded by what they MATCH rather than
     by how they are spelled — the distinction three review rounds were spent on. A pattern with NO
     wildcard (`python-ci.yml`, a deliberate single-workflow reference, or a tuple of REQUIRED
-    filenames) enumerates nothing, so it matches nothing here by construction: `"*.yml"` still
-    reds, while `glob("python-ci.yml")` and a filename tuple stay clean instead of reding as
-    "one-sided enumerations" (measured, review round 7).
+    filenames) can open exactly one file, so it is not an EXTENSION-CLASS enumeration and it
+    matches nothing here by construction: `"*.yml"` still reds, while `glob("python-ci.yml")` and
+    a filename tuple stay clean instead of reding as "one-sided enumerations" (measured, review
+    round 7).
     """
     segment = pattern.rsplit("/", 1)[-1]
     if not any(ch in segment for ch in "*?["):
@@ -3404,10 +3405,17 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
       * cut 3 used `tokenize` but asked ONE witness name, `x.yml` — so `glob("ci*.yml")` (four
         real workflows) and `glob("[!x]*.yml")` (all 41) graded clean, and the MIRROR direction,
         `glob("<star>.yaml")` skipping all 41 `.yml` workflows, was never asked at all;
-      * cut 4 (this one) asks the same stem twice — `.yml` and `.yaml` — and treats EXACTLY ONE
-        as the defect; keys pairing on the RECEIVER rather than the line, so two unrelated
-        receivers on one line cannot silence each other and a both-extension pair split across
-        lines is clean; and grades module-level pattern CONSTANTS, this file's own idiom.
+      * cut 4 asked the same stem twice — `.yml` and `.yaml` — so EXACTLY ONE reads as the
+        defect, and graded module-level pattern CONSTANTS (this file's own idiom);
+      * cut 5 (this one) REMOVES cut 4's receiver-pairing exemption, which excused any one-sided
+        call sharing a receiver with a complementary call anywhere in the file. It had zero
+        beneficiaries on this module (both exemption sets were empty) and its only observable
+        effect was to licence the next narrow site: with a legitimate
+        `[*WORKFLOWS.glob("<star>.yml"), *WORKFLOWS.glob("<star>.yaml")]` pair present, one of
+        this PR's OWN three sites could be reverted to `WORKFLOWS.glob("<star>.yml")` and all 53
+        tests passed — a partial reversion of this fix, certified green (measured, review round
+        7). A both-extension pair is now RED like any other hand-written enumeration, because the
+        module's one enumeration is `_workflow_paths()`: the red names it.
 
     SCOPE, so a green run is not read as more than it is — what stays out of reach, declared
     rather than implied:
@@ -3429,15 +3437,11 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         `os.listdir`. Measured clean, and not pinnable from source text without a dataflow
         analysis. (`rglob` IS graded: it is in the same NAME set as `glob`, and a recursive
         enumeration of the workflows directory reds like any other one-sided glob.)
-      * a both-extension pair spread across two DIFFERENT receivers. Pairing is per receiver, so
-        that reads as one-sided. It is also the shape that would be a genuine bug — the two
-        receivers need not name the same directory — so the red there is the safe direction.
-      * the MIRROR of that: a receiver that pairs both extensions over one DIRECTORY also excuses
-        a one-sided glob into a DIFFERENT directory (`REPO.glob("config/<star>.yml")` beside
-        `REPO.glob("config/<star>.yaml")` and a narrow `REPO.glob(".github/workflows/ci-<star>.yml")`).
-        Measured, review round 5. Keying on the directory segment would close it and would red the
-        legitimate pair whenever the two halves spell the directory differently, so it is declared
-        instead.
+      * a both-extension pair written by hand — `[*WORKFLOWS.glob("<star>.yml"),
+        *WORKFLOWS.glob("<star>.yaml")]`, or the same pair as module constants. This is an
+        OVER-BLOCK by choice: the pair is CORRECT, but it is also the shape whose `.yaml` half
+        can be dropped silently later, and `_workflow_paths()` already expresses it once. The red
+        says so rather than licensing a receiver, which is what measured worse (cut 5 above).
       * a one-sided pattern held in a LOCAL binding or a `__`-prefixed global rather than a
         module-level constant (`globs = ("<star>.yml",)` inside a function, consumed by
         `WORKFLOWS.glob(pattern)`). The constant arm reads module globals only, so a bare NAME
@@ -3472,25 +3476,12 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
     yml_names, yaml_names = _workflow_probe_names()
     assert yml_names, "the probe population is empty — this pin would grade nothing"
     calls = _glob_calls(source)
-    #: A receiver whose OTHER half globs the complementary extension is a PAIR, not a one-sided
-    #: site. Built SYMMETRICALLY: the `.yml` half is excused by a `.yaml` call on the same
-    #: receiver and the `.yaml` half by a `.yml` one. Excusing only the `.yml` half was measured —
-    #: it red the `.yaml` half of a legitimate pair; excusing by LINE was measured too — it let an
-    #: unrelated `CONFIG.glob("<star>.yaml")` silence a narrow `WORKFLOWS.glob("<star>.yml")`.
-    receivers_with_yml = {
-        receiver
-        for _line, receiver, _method, literals in calls
-        if receiver
-        and any(_glob_matches(lit, yml_names) for lit in literals)
-        and not any(_glob_matches(lit, yaml_names) for lit in literals)
-    }
-    receivers_with_yaml = {
-        receiver
-        for _line, receiver, _method, literals in calls
-        if receiver
-        and any(_glob_matches(lit, yaml_names) for lit in literals)
-        and not any(_glob_matches(lit, yml_names) for lit in literals)
-    }
+    #: ⛔ NO PAIRING EXEMPTION (cut 5 above). An earlier cut excused a one-sided call when a
+    #: complementary call existed on the same RECEIVER, which is a scalar fact about the whole
+    #: file rather than about the site: once any legitimate pair existed, EVERY later one-sided
+    #: site on that receiver went green — including a reverted one of this PR's own sites, with
+    #: all 53 tests passing (measured, review round 7). The exemption had no beneficiary on this
+    #: module; its only effect was to license the next hole.
     one_sided: list[str] = []
     for line, receiver, method, literals in calls:
         if not literals:
@@ -3498,10 +3489,6 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         opens_yml = any(_glob_matches(lit, yml_names) for lit in literals)
         opens_yaml = any(_glob_matches(lit, yaml_names) for lit in literals)
         if opens_yml == opens_yaml:
-            continue
-        if opens_yml and receiver in receivers_with_yaml:
-            continue
-        if opens_yaml and receiver in receivers_with_yml:
             continue
         one_sided.append(f"line {line}: {(receiver or '<expression>')}.{method}({literals!r})")
     one_sided += [
