@@ -1138,6 +1138,7 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
             # `is None`, not `or` — `pack_registry._validate` refuses a falsy
             # rule id, but this function is also reachable from the Python API
             # with a dict that never went through a manifest (round-17 review).
+            where = f"{namespace} guards[{i}].onConfusion[{j}]"
             rule = c.get("rule")
             if rule is None:
                 rule = f"{namespace}:{entry.get('kind')}:{j}"
@@ -1210,8 +1211,14 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 # core name has no section (`entity_route("WorkItem") is None`).
                 # The guard then validated at install but could never degrade,
                 # so R4's ladder step 1 was silently dead for that spelling.
-                fallback=(_qualify(str(c.get("fallback")).strip(), namespace)
-                          if c.get("fallback") else ""),
+                # ⛔ FALSY IS NOT ABSENT here either (round-22 review P3,
+                # measured): `fallback: ""` compiled `fallback=''` with no log,
+                # so the guard silently lost its R4 degrade ladder; `kind: ""` /
+                # `layer: 0` compiled `guarded_kind/layer=None` with no log, so
+                # the table's declared-layer disagreement check was silently
+                # suppressed. Not fail-open (#1934 holds), but each one is a
+                # declaration the runtime quietly discards.
+                fallback=_optional_str_field(c, "fallback", namespace, where),
                 reason=str(c.get("reason") or c.get("message") or rule),
                 # ⛔ QUALIFIED, exactly like `redirect`/`fallback` — the SAME
                 # defect, on the third field. A manifest spells its OWN kinds
@@ -1230,15 +1237,80 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 # overrule an explicit declaration with a guess.
                 from_kinds=_kept_kinds(namespace, from_kinds),
                 from_layers=_kept_layers(from_layers),
-                link_predicate=(str(c["linkPredicate"])
-                                if c.get("linkPredicate") else None),
-                guarded_kind=(_qualify(str(entry["kind"]).strip(), namespace)
-                              if entry.get("kind") else None),
-                guarded_layer=(str(entry["layer"]).strip().lower()
-                               if entry.get("layer") else None),
+                link_predicate=_declared_link_predicate(c, "linkPredicate", where),
+                guarded_kind=_declared_kind(entry, "kind", namespace, where),
+                guarded_layer=_declared_layer(entry, "layer", where),
                 declaring_pack=namespace,
             ))
     return tuple(out)
+
+
+def _declared_kind(entry: dict, key: str, namespace: str, where: str):
+    """The entry's own kind, or None — reporting a value that cannot be one.
+
+    `if entry.get(key)` read `""`/`0` as ABSENT, so a declared-but-unusable `kind`
+    compiled to `None` and vanished without a word, silently suppressing the
+    table's declared-layer disagreement check (round-22 review P3, measured).
+    """
+    value = entry.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        _logger.warning(
+            "kind_guards: %s.%s is not a usable kind — ignored, so the guard is "
+            "not held to any kind", where, key)
+        return None
+    return _qualify(value.strip(), namespace)
+
+
+def _declared_layer(entry: dict, key: str, where: str):
+    """The entry's own layer, or None — same reasoning as `_declared_kind`."""
+    value = entry.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        _logger.warning(
+            "kind_guards: %s.%s is not a usable entity layer — ignored",
+            where, key)
+        return None
+    return value.strip().lower()
+
+
+def _declared_link_predicate(entry: dict, key: str, where: str):
+    """The linking predicate, or None — reporting a value that cannot be one.
+
+    ⛔ A BLANK MUST STAY None (round-23 review P2, measured): compiling `""` (or
+    `str(0)` -> `'0'`) made `confusion.link_predicate` TRUTHY, so the guard
+    ABSTAINED where it used to fire — an unannounced behaviour change on the
+    Python-API route, from a field the author never validly declared. `None` keeps
+    the pre-existing meaning (no linking predicate), and the drop is reported.
+    """
+    value = entry.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        _logger.warning(
+            "kind_guards: %s.%s is not a usable linking predicate — the guard "
+            "runs without one", where, key)
+        return None
+    return value
+
+
+def _optional_str_field(entry: dict, key: str, namespace: str, where: str) -> str:
+    """A qualified kind field, reporting a value that cannot be one.
+
+    A blank is DECLARED and unusable, and the guard silently loses its R4
+    degrade without it (round-22 review P3, measured). Absent stays silent.
+    """
+    value = entry.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str) or not value.strip():
+        _logger.warning(
+            "kind_guards: %s.%s is not a usable kind — the guard loses its "
+            "degrade", where, key)
+        return ""
+    return _qualify(value.strip(), namespace)
 
 
 def _kept_kinds(namespace: str, kinds) -> tuple[str, ...]:
@@ -1274,15 +1346,22 @@ def _kept_layers(layers) -> tuple[str, ...]:
     # `('',)` silently — a scope no real layer can match, since `resolve` only
     # ever asks for "subject"/"object". `_kept_kinds` already dropped blanks, so
     # the two scopes did not share one filter despite the round's framing.
-    kept = tuple(str(layer).lower() for layer in layers
+    # ⛔ STRIP WHAT IS KEPT (round-22 review P3, measured): blanks were dropped
+    # last round but the KEPT members were not stripped, so `fromLayers:
+    # [" subject "]` compiled `(' subject ',)` — `resolve` only ever asks for
+    # `"subject"`/`"object"`, so the layer gate could never match and the guard
+    # was dead on BOTH layers, silently (nothing was "dropped", so no warning).
+    # `_kept_kinds` already strips, so the two scopes were still not one filter.
+    kept = tuple(str(layer).strip().lower() for layer in layers
                  if isinstance(layer, str) and str(layer).strip())
     if len(kept) != len(tuple(layers)):
         # ⛔ LOG THE WIDENED SCOPE (round-20 review P3, measured): logging
         # `kept` before the widening below told an all-non-string scope it was
         # held to `()` while the guard actually covered both layers.
         _logger.warning(
-            "kind_guards: dropped a non-string from fromLayers %r — the guard "
-            "is held to %r", tuple(layers), kept or ("subject", "object"))
+            "kind_guards: dropped a non-string or blank from fromLayers %r — "
+            "the guard is held to %r", tuple(layers),
+            kept or ("subject", "object"))
     return kept or ("subject", "object")
 
 
@@ -1337,7 +1416,12 @@ def _catalog_pack_guards() -> tuple[Confusion, ...]:
     for ns in sorted(getattr(reg, "packs", {}) or {}):
         pack = reg.packs[ns]
         declared = getattr(pack, "guards", None)
-        if declared:
+        # ⛔ `is not None`, not truthiness (round-22 review P3, measured): a
+        # FALSY non-sequence block (`{}` / `""` / `0` / `false`) never reached
+        # `pack_guards` at all, so the "whole block is skipped" warning added for
+        # exactly those shapes was unreachable from the only caller. An empty
+        # list stays silent, as before.
+        if declared is not None:
             out.extend(pack_guards(ns, declared))
     compiled = tuple(out)
     # A cache miss is not a failure (a registry implementation without a

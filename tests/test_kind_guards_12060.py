@@ -456,7 +456,8 @@ class TestNeverRefuses:
         # step stores it — not the manifest's spelling, and not `()`
         assert any("held to ('acme:widget',)" in m for m in kinds_records), \
             kinds_records
-        assert any("dropped a non-string from fromLayers" in m for m in records), records
+        assert any("dropped a non-string or blank from fromLayers" in m
+                   for m in records), records
         # the message must state the scope the guard IS held to, not the
         # pre-widened one (an all-non-string list widens to both layers)
         assert all_bad == ("subject", "object")
@@ -482,6 +483,45 @@ class TestNeverRefuses:
         # a tuple IS a legal sequence of entries, and stays accepted
         assert len(kg.pack_guards(
             "acme", (entry(),))) == 1
+
+        # ⛔ THE REST OF THE CONSTRUCTION, same class (round-22 review P3): a
+        # declared-but-unusable field used to vanish without a word —
+        # `fallback: ""` silently deprived the guard of its R4 degrade, and
+        # `kind: ""` / `layer: 0` silently suppressed the table's declared-layer
+        # disagreement check. Each is now reported.
+        blank_fb, fb_logs = capture(
+            lambda: kg.pack_guards("acme", [entry(fallback="")]))
+        assert blank_fb[0].fallback == ""
+        assert any("fallback is not a usable kind" in m for m in fb_logs), fb_logs
+        for key in ("kind", "layer"):
+            bad_entry = {"kind": "widget", "layer": "object",
+                         "onConfusion": entry()["onConfusion"]}
+            bad_entry[key] = "" if key == "kind" else 0
+            out, logs = capture(lambda b=bad_entry: kg.pack_guards("acme", [b]))
+            assert len(out) == 1, (key, out)
+            assert getattr(out[0], f"guarded_{key}") is None, (key, out[0])
+            assert any(f"{key} is not a usable" in m for m in logs), (key, logs)
+
+        # ⛔ and a member that is KEPT must be stripped: `fromLayers: [" subject "]`
+        # compiled `(' subject ',)`, matching no layer — the guard was dead on
+        # BOTH layers with no warning, because nothing was dropped (round-22 P3)
+        spaced = capture(
+            lambda: kg.pack_guards("acme", [entry(fromLayers=[" subject "])]))
+        assert spaced[0][0].from_layers == ("subject",), spaced[0][0].from_layers
+
+        # ⛔ A BLANK/UNUSABLE `linkPredicate` STAYS None — it must not become the
+        # truthy string that makes the guard ABSTAIN where it used to fire
+        # (round-23 review P2, measured: `""` compiled `''`, `0` compiled `'0'`)
+        for bad_link in ("", 0, False, []):
+            out, logs = capture(
+                lambda v=bad_link: kg.pack_guards(
+                    "acme", [entry(linkPredicate=v)]))
+            assert out[0].link_predicate is None, (bad_link, out[0])
+            assert any("not a usable linking predicate" in m for m in logs), logs
+        # …and a real one is kept verbatim
+        assert kg.pack_guards(
+            "acme", [entry(linkPredicate="supports")])[0].link_predicate == \
+            "supports"
 
         # a falsy predicate is no longer rewritten into the default
         assert kg.pack_guards("acme", [entry(when="")]) == ()
@@ -811,6 +851,28 @@ class TestAcceptance5Counters:
 
 # ══ 6. the pack extension point ═══════════════════════════════════════════
 
+def _capture_logs(call):
+    """Run `call`, returning (result, the `tortoise.kind_guards` log messages)."""
+    import logging
+
+    records = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    log = logging.getLogger("tortoise.kind_guards")
+    handler = _Grab()
+    log.addHandler(handler)
+    prev = log.level
+    log.setLevel(logging.WARNING)
+    try:
+        return call(), records
+    finally:
+        log.removeHandler(handler)
+        log.setLevel(prev)
+
+
 def _catalog_pack(tmp_path, monkeypatch, namespace="acme", *, guards=None,
                   depends_on="[]", object_kinds="concept"):
     """Write a pack into a private catalog and point BOTH readers at it.
@@ -894,6 +956,43 @@ class TestAcceptance6PackExtensionPoint:
         assert kg._catalog_pack_guards() == ()
         r = sdk.create_subject("acme widget")
         assert "kind_redirect" not in r and "kind_redirect_skipped" not in r
+
+    def test_a_catalog_block_that_is_not_a_sequence_is_READ_not_skipped(
+            self, tmp_path, sdk, monkeypatch):
+        """The ONE caller must hand even a malformed block to the reader.
+
+        Round-22 review P3, measured: `_catalog_pack_guards` gated on
+        `if declared:`, so a FALSY non-sequence block (`{}` / `""` / `0` /
+        `false`) never reached `pack_guards` at all — which made the "the whole
+        block is skipped … (got dict)" warning added for exactly those shapes
+        unreachable from the one route a real pack takes. An empty list stays
+        silent, as today.
+        """
+        import types
+
+        import tortoise.domain_loader as dl
+
+        def registry_with(declared):
+            reg = types.SimpleNamespace(
+                packs={"acme": types.SimpleNamespace(guards=declared)})
+            monkeypatch.setattr(dl, "_get_registry", lambda: reg)
+            return reg
+
+        # ⛔ A MANIFEST cannot carry these (`_validate_guards` refuses
+        # `guards: {}` outright, measured), so the route is a programmatically
+        # built `PackManifest` — which is exactly why the reader must not be
+        # gated on truthiness by its only caller.
+        for body, token in (({}, "dict"), ("", "str"), (0, "int"), (False, "bool")):
+            registry_with(body)
+            out, logs = _capture_logs(kg._catalog_pack_guards)
+            assert out == (), (body, out)
+            assert any("whole block is skipped" in m and token in m
+                       for m in logs), (body, logs)
+        # …and an ABSENT or EMPTY block stays silent
+        for declared in (None, []):
+            registry_with(declared)
+            out, logs = _capture_logs(kg._catalog_pack_guards)
+            assert out == () and logs == [], (declared, logs)
 
     def test_a_pack_guard_is_read_from_the_catalog_and_fires(self, tmp_path, sdk,
                                                              monkeypatch):
