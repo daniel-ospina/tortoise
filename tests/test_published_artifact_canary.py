@@ -1035,6 +1035,59 @@ def test_the_gate_steps_cannot_be_DEFUSED_into_a_green_job():
     assert len(canary_step) == 1, "the `id: canary` step is missing"
     undefused(canary_step[0], "release-artifact-canary / the `id: canary` step")
 
+    # ── THE ENFORCEMENT LINK, not just the gate step (#12422 review cycle 5, P1).
+    # `undefused()` on the GATE says the gate can fail its job; it says nothing about the
+    # two things that must then STOP the upload. Both were free, MEASURED green:
+    #   * `if: always()` on the `dist` upload-artifact → a rejected wheel is still uploaded;
+    #   * `if: always()` on `publish`, or deleting `publish`'s `needs: build` → it publishes
+    #     whatever it finds in `dist/`, gate or no gate.
+    # Together those turn a red pre-upload gate into an IRREVERSIBLE upload with the whole
+    # suite green (`444 passed`, exit 0 measured) — the exact outcome this pin's docstring
+    # says the gate exists to prevent, reached past the gate instead of through it.
+    publish_job = yaml.safe_load((workflows / "publish-pypi.yml").read_text())["jobs"]["publish"]
+    assert publish_job.get("needs") == "build", (
+        "`publish` no longer declares `needs: build`, so it can run without the pre-upload "
+        "gate ever having executed"
+    )
+    assert "if" not in publish_job, (
+        f"`publish` carries `if: {publish_job['if']!r}` — a condition on the publishing job "
+        f"can let it run when the gate's job failed"
+    )
+
+    dist_upload = [
+        step
+        for step in build_steps
+        if str(step.get("uses", "")).startswith("actions/upload-artifact")
+        and str((step.get("with") or {}).get("name")) == "dist"
+    ]
+    assert len(dist_upload) == 1, "the `dist` artifact upload is missing from the build job"
+    undefused(dist_upload[0], "publish-pypi build / the `dist` upload (the wheel `publish` reads)")
+
+    # ── THE ALERT'S OWN TWO LEGS (#12422 review cycle 5, P2). The filing and the close are
+    # the workflow's durable record; `continue-on-error: true` on either makes a failed
+    # filing read as a green run while the issue this workflow exists to file is never
+    # filed. MEASURED green before this clause (`125 passed` / `71 passed`).
+    # ⛔ `continue-on-error` ONLY, not `undefused()`: these legs legitimately carry an `if:`
+    # — that is WHEN the alert fires, it is load-bearing, and it is already pinned by its
+    # exact expression elsewhere in this file. Forbidding `if` here would red a correct
+    # workflow (measured on the first cut of this clause). The transcript fetch's
+    # `continue-on-error: true` is DELIBERATE and is not asserted here.
+    report_steps = yaml.safe_load((workflows / "release-artifact-canary.yml").read_text())["jobs"][
+        "report"
+    ]["steps"]
+    for label, needle in (
+        ("the FILING leg", "File or refresh the alert issue"),
+        ("the CLOSE leg", "Close the alert issue on a green run"),
+    ):
+        matched = [step for step in report_steps if needle in str(step.get("name") or "")]
+        assert len(matched) == 1, f"{label} ({needle!r}) is missing from the report job"
+        assert "continue-on-error" not in matched[0], (
+            f"{label} carries `continue-on-error: {matched[0]['continue-on-error']!r}` — a "
+            f"filing failure (no GH_TOKEN, no `gh`, a substrate refusal) is then swallowed, "
+            f"`report` reads SUCCESS, and the issue this workflow exists to file is never "
+            f"filed while the run looks green"
+        )
+
 
 def test_the_publish_time_smoke_resolves_EXACTLY_ONE_wheel_before_it_runs():
     """`--wheel "$(ls dist/*.whl)"` tests the PREVIOUSLY PUBLISHED release (#12363 review E3).
@@ -2561,13 +2614,19 @@ def test_the_canary_cannot_be_SILENCED_without_reding_this_file():
     )
 
 
-def test_an_UNWRITABLE_or_UNREADABLE_report_is_an_exit_2_not_a_traceback(monkeypatch, tmp_path):
+def test_an_UNWRITABLE_or_UNREADABLE_report_is_an_exit_2_not_a_traceback(monkeypatch, tmp_path, capsys):
     """Every I/O fault in `main` must say "detector", never borrow the release verdict.
 
     A traceback is exit 1, and exit 1 is what BOTH consumers render as "the published
     artifact is broken — a release is owed". Round 3 fixed that for the fetch path; the
     `pyproject.toml` read and the `--summary-file` append were still uncaught (#12363
     round 5).
+
+    ⛔ THE EXIT CODE ALONE IS AN INERT ASSERTION (#12422 review cycle 5, P1, MEASURED).
+    `main()`'s own unexpected-failure backstop also returns 2, so `== 2` holds with BOTH
+    guards deleted — measured: `71 passed`, exit 0, while the two guards and the round-5
+    claim this docstring makes were gone. The only observable difference is the guard's
+    OWN message, so that is what is asserted.
     """
     offline = lambda package, timeout: (None, "offline", canary.INDEX_UNREADABLE)  # noqa: E731
 
@@ -2575,11 +2634,21 @@ def test_an_UNWRITABLE_or_UNREADABLE_report_is_an_exit_2_not_a_traceback(monkeyp
     monkeypatch.setattr(canary, "fetch_index", offline)
     monkeypatch.setattr(canary, "REPO_ROOT", tmp_path / "not-a-checkout")
     assert canary.main(["--json"]) == 2
+    err = capsys.readouterr().err
+    assert "could not read" in err and "pyproject.toml" in err, (
+        "the pyproject read is not guarded by its own handler — the backstop produced this "
+        f"exit 2, so the round-5 guard is unobserved: {err!r}"
+    )
     monkeypatch.undo()
 
     # (b) the summary file cannot be appended to
     monkeypatch.setattr(canary, "fetch_index", offline)
     assert canary.main(["--json", "--summary-file", str(tmp_path / "nope" / "s.md")]) == 2
+    err = capsys.readouterr().err
+    assert "could not append to --summary-file" in err, (
+        "the --summary-file append is not guarded by its own handler — the backstop produced "
+        f"this exit 2, so the round-5 guard is unobserved: {err!r}"
+    )
 
 
 def test_the_unexpected_failure_boundary_is_pinned(monkeypatch, capsys):
