@@ -430,6 +430,53 @@ def test_the_workflow_files_the_drift_ON_A_FAILING_READING() -> None:
         f"a skipped check step must NOT file a fabricated reading, got {condition!r}"
     )
 
+    # ⛔ AND THE CHECK STEP MUST STILL FAIL THE RUN. `if: always()` files the alert; `exit "$rc"` is
+    # what makes a MEASURED disagreement a RED check rather than a green run with a note — the PR's
+    # whole headline ("a red check, not a silent 401"). Both halves are pinned because either alone
+    # leaves the instrument able to look green while the halves disagree: MEASURED at this head, the
+    # mutation `exit "$rc"` -> `exit 0` left this file's 22 tests AND 444 workflow-wide tests GREEN.
+    failing = [s for s in _steps() if (s.get("run") or "").rstrip().endswith('exit "$rc"')]
+    assert len(failing) == 1, (
+        "exactly one step must propagate the reading's rc, or a MISMATCH/SPLIT exits 0 and the \"red "
+        f"check\" is green: {[s.get('name') for s in _steps()]}"
+    )
+    assert not failing[0].get("continue-on-error"), (
+        "the check step must never `continue-on-error` — that turns a measured split into a green run"
+    )
+
+
+def test_the_workflow_grants_the_alert_scope_and_runs_on_its_stated_cadence() -> None:
+    """The two settings the monitor needs and NOTHING else asserted — both measured undefended.
+
+    MEASURED at this head: dropping `issues: write` from `permissions:` left `test_consent_key_check.py`
+    and the wider workflow suites GREEN (112 tests in the narrower run), while
+    `.github/scripts/auto-file-issue.sh` would 403 and the monitor would file NOTHING on a red reading —
+    the deaf-detector-while-looking-green class the file's own `#2140` comment exists for. And changing
+    the cron to `'0 3 * * *'` was green everywhere, while the workflow header, §2.5, §4.4 and the alert
+    body all state "every 30 minutes".
+
+    The scope is asserted as an EQUALITY, not a presence check: an added `contents: write` is a real
+    widening of what a scheduled job can do to the repo, and a presence test would not see it.
+    """
+    workflow = _workflow()
+    assert workflow.get("permissions") == {"contents": "read", "issues": "write"}, (
+        "the monitor's scopes moved — `contents: read` is all checkout needs, `issues: write` is the "
+        "alert; without the latter the detector is deaf and still green: "
+        f"{workflow.get('permissions')!r}"
+    )
+    # `on:` parses as the BOOLEAN True under YAML 1.1 (see `_workflow`), so it is reached that way.
+    triggers = workflow[True]
+    assert triggers["schedule"] == [{"cron": "11,41 * * * *"}], (
+        "the stated cadence (every 30 min, offset off the hour boundary) is what the docs and the "
+        f"alert body promise; got {triggers.get('schedule')!r}"
+    )
+    assert "workflow_dispatch" in triggers, (
+        "§2.5 and §4.4 both tell the operator to trigger this run by hand for an ad-hoc rotation check"
+    )
+    assert "concurrency" not in workflow or workflow["concurrency"].get("cancel-in-progress") is False, (
+        "a cancelled tick measures nothing — `cancel-in-progress` must stay false"
+    )
+
 
 def test_the_two_dedupe_TITLES_are_stable_constants() -> None:
     """The title IS the dedupe key (`auto-file-issue.sh` searches `in:title` and comments a recurrence

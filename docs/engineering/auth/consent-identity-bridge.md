@@ -403,7 +403,7 @@ verdicts — `AGREE` (0), `MISMATCH` (1), `SPLIT` (1, exactly one half configure
 configured: consistent but **not** agreement), `UNVERIFIABLE` (2, a half could not be read or published a
 malformed field). Both 1 and 2 are RED for a monitor; they differ in what they claim — a measured
 disagreement vs no measurement. The tool **never accepts, reads or prints a key** (it has no such flag and
-reads no env), and it validates even the fingerprints it receives against `^[0-9a-f]{12}$` before
+reads no env), and it validates even the fingerprints it receives against `[0-9a-f]{12}\Z` before
 comparing — a half that answered with the key, a prefix, or a full digest is `UNVERIFIABLE` and the value is
 **not echoed** into a CI log or an issue body.
 

@@ -178,6 +178,18 @@ def test_the_fingerprint_hashes_the_BYTES_the_HMAC_uses(clean_env) -> None:
     clean_env.setenv("CONSENT_TOKEN_SECRET", _KEY_A)
     assert consent_token.consent_token_key_health()["key_fingerprint"] == hashlib.sha256(
         _KEY_A.encode()).hexdigest()[:12]
+    # ⛔ THE INVARIANT AT THE FUNCTION ITSELF, not only through `consent_token_key_health()`. MEASURED
+    # at this head, the mutation `raw = (… or "").strip() or None` inside `consent_key_fingerprint`
+    # left every test in this file GREEN: the only byte-exactness arm went through the health block,
+    # which SHORT-CIRCUITS on `_secret_state`'s `padded` refusal and never reaches the digest. So a
+    # normalisation introduced into the one function §2.5 names as the contract's statement would
+    # publish a fingerprint of bytes nothing signs — the silent split, with a green light in front.
+    for verbatim in (" " + _KEY_A, _KEY_A + " ", _KEY_A + "\n"):
+        assert consent_token.consent_key_fingerprint(verbatim) == hashlib.sha256(
+            verbatim.encode()).hexdigest()[:12], (
+            "the fingerprint normalised the key before hashing it — it MUST be the same `key.encode()` "
+            "the HMAC is computed over, byte for byte (§2.5)"
+        )
     # Mint with the key the deployment holds, then verify the same token: the MAC is reproducible
     # only from the bytes the fingerprint describes, so the two cannot be derived from different
     # values without one of them failing.
@@ -362,6 +374,14 @@ def test_the_SPEC_section_2_5_still_states_the_contract_the_code_implements() ->
     # it states is the code's constant.
     assert f"`sha256(key)[:{consent_token.CONSENT_KEY_FINGERPRINT_HEX_CHARS}]`" in section, (
         "§2.5 no longer states `sha256(key)[:N]` with N == CONSENT_KEY_FINGERPRINT_HEX_CHARS"
+    )
+    # ⛔ THE ANCHOR, because `$` and `\Z` are NOT the same assertion and both suites carry comments
+    # existing specifically because `$` accepts a trailing newline. §2.5 states the validation the
+    # checker performs; while it said `^[0-9a-f]{12}$` a future implementer following the SPEC could
+    # restore `$` and red nothing (MEASURED: the checker's own `FINGERPRINT_RE` is `\Z`).
+    assert "[0-9a-f]{12}\\Z" in section, (
+        "§2.5 no longer states the ANCHOR the implementations use — it must read `[0-9a-f]{12}\\Z`, "
+        "not `^[0-9a-f]{12}$`: `$` accepts a trailing newline, which is the drift this pin prevents"
     )
     # The `configured` THIRD state and the closed `reason` vocabulary — both are published facts a
     # CONSUMER acts on, and both were documented only in a private constant before the review.
