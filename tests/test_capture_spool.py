@@ -2362,10 +2362,44 @@ def test_a_repeatedly_unreadable_meta_records_ONCE_not_once_per_turn(tmp_path):
             (entries / f"live{turn}.meta.json").write_text(
                 json.dumps({"version": 1, "session_id": f"live{turn}"}), encoding="utf-8")
             list_spool_metas(tmp_path)
-        lines = [l for l in read_discards(tmp_path) if l.get("reason") == "meta_unreadable"]
+        lines = [line for line in read_discards(tmp_path) if line.get("reason") == "meta_unreadable"]
         assert len(lines) == 1, f"one event, not one per scan — got {len(lines)}"
         assert lines[0]["retained"] is True
         assert "cannot read 1 spool meta" in lines[0]["detail"]
+    finally:
+        if meta_path.exists():
+            meta_path.chmod(0o600)
+
+
+def test_repair_false_records_and_touches_nothing_for_an_unreadable_meta(tmp_path):
+    """`list_spool_metas(root, repair=False)` is the READ-ONLY reader the health
+    line uses. It must not write a ledger line, a refusal stamp, or touch the
+    entry for the unreadable arm either — a health check must not mutate what it
+    describes, and `unreadable counts as pending` is how that path already reads
+    it.
+
+    The TS leg has the twin (`repair:false neither records nor touches an
+    unreadable meta`). This row exists because without it, dropping the
+    `if repair:` guard on the unreadable collection passes the WHOLE Python suite
+    on the leg that carries most of the new code — and would make the health line
+    start writing ledger lines (review cycle 4).
+
+    MUTATION THAT REDS THIS: collect/record the unreadable arm without the
+    `if repair:` guard.
+    """
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    meta_path = entries / "locked.meta.json"
+    meta_path.write_text(json.dumps({"version": 1, "session_id": "s"}), encoding="utf-8")
+    meta_path.chmod(0o000)
+    try:
+        from tortoise.capture_spool import list_spool_metas
+        metas, discards = list_spool_metas(tmp_path, repair=False)
+        assert metas == []
+        assert discards == [], "a read-only reader writes no ledger line"
+        assert meta_path.exists()
+        assert not (tmp_path / "discarded.jsonl").exists()
+        assert not (tmp_path / ".refusal-stamp.json").exists()
     finally:
         if meta_path.exists():
             meta_path.chmod(0o600)
@@ -2402,7 +2436,7 @@ def test_an_ALTERNATING_unreadable_set_does_not_re_record_forever(tmp_path):
                 if (tmp_path / "parked.b").exists():
                     (tmp_path / "parked.b").rename(hidden)
             list_spool_metas(tmp_path)
-        lines = [l for l in read_discards(tmp_path) if l.get("reason") == "meta_unreadable"]
+        lines = [line for line in read_discards(tmp_path) if line.get("reason") == "meta_unreadable"]
         assert len(lines) == 2, (
             f"one line per DISTINCT set (2), not one per alternation — got {len(lines)}")
     finally:

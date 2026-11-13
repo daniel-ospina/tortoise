@@ -1573,9 +1573,15 @@ export function listSpoolEntries(
   //    on every turn — so a dir-stamp key suppresses nothing on exactly the path
   //    this exists for. The stem set is unchanged by a new session, so a steady
   //    state is ONE line no matter how many turns pass.
-  //  - ONE aggregate consumes ONE slot of the (32-wide) refusal window, not N,
-  //    so unreadable entries cannot crowd the admission refusals out of it and
-  //    defeat `refusedAtCurrentState`'s fast path.
+  //  - ONE aggregate per distinct SET consumes ONE slot of the (32-wide)
+  //    refusal window, so N unreadable entries in a STABLE set cost one slot, not
+  //    N. That is not the same as "cannot crowd the window": the digest is in the
+  //    pair key, so K distinct sets occupy up to K slots and can evict an
+  //    admission refusal once K approaches 32 (measured, review cycle 4). That
+  //    outcome is FAIL-SAFE — `refusedAtCurrentState` misses and pays a full scan
+  //    instead of short-circuiting, and the evicted refusal simply re-records
+  //    once — so it costs work, never correctness. Stated exactly because the
+  //    invariant a reader trusts here is what decides whether the window is safe.
   //
   //  ⚠️ The trade, stated: the record names a COUNT and one example path, not one
   //  record per entry, so an operator holding only `discarded.jsonl` cannot

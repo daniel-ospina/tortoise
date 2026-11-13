@@ -1146,12 +1146,15 @@ def _record_refusal(
         "replaces_session_id": replaces_session_id,
     }
     history = _read_refusal_stamps(root)
-    for stamp in history:
-        if (stamp.get("session_id"), stamp.get("reason")) != key:
+    # NB: the loop variable is `observed`, NOT `stamp` — `stamp` is this
+    # function's parameter and shadowing it would make any future use after this
+    # loop silently read the last history entry (review cycle 4).
+    for observed in history:
+        if (observed.get("session_id"), observed.get("reason")) != key:
             continue
-        if stamp.get("entries_stamp") != fingerprint["entries_stamp"]:
+        if observed.get("entries_stamp") != fingerprint["entries_stamp"]:
             continue
-        prior = stamp.get("record")
+        prior = observed.get("record")
         if isinstance(prior, dict):
             return prior
     full = record_discard(root, record)
@@ -1494,9 +1497,16 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
     #    on every turn — so a dir-stamp key suppresses nothing on exactly the path
     #    this exists for. The stem set is unchanged by a new session, so a steady
     #    state is ONE line no matter how many turns pass.
-    #  - ONE aggregate consumes ONE slot of the (32-wide) refusal window, not N,
-    #    so unreadable entries cannot crowd the admission refusals out of it and
-    #    defeat `_refused_at_current_state`'s fast path.
+    #  - ONE aggregate per distinct SET consumes ONE slot of the (32-wide)
+    #    refusal window, so N unreadable entries in a STABLE set cost one slot,
+    #    not N. That is not the same as "cannot crowd the window": the digest is
+    #    in the pair key, so K distinct sets occupy up to K slots and can evict an
+    #    admission refusal once K approaches 32 (measured, review cycle 4). That
+    #    outcome is FAIL-SAFE — `_refused_at_current_state` misses and pays a full
+    #    scan instead of short-circuiting, and the evicted refusal simply
+    #    re-records once — so it costs work, never correctness. Stated exactly
+    #    because the invariant a reader trusts here is what decides whether the
+    #    window is safe.
     #
     # ⚠️ The trade, stated: the record names a COUNT and one example path, not one
     # record per entry, so an operator holding only `discarded.jsonl` cannot

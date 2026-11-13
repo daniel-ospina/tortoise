@@ -4855,8 +4855,21 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: `extraction_outcome: "unknown"` marker across its own re-snapshot, so the
 #: trace survives past the session's next `turn_end` (BEHAVIOUR moved, so the
 #: generation moved with it).
+#: Generation 21 (#11802): the drain stops DESTROYING a spool entry it could not
+#: read. Reading and parsing were ONE `catch`, so a `PermissionError` at `open`
+#: was recorded as "meta is not valid JSON" — a claim about bytes the process
+#: never opened — and the transcript was quarantined while the meta (the only
+#: copy of the session id, the capture instant and the retry state) was unlinked.
+#: 1,356 of 3,384 lost sessions were this class. A read refusal is now
+#: `meta_unreadable`, RETAINED and retryable with both files left in place; only a
+#: real parse failure keeps the quarantine path. Behaviour moved, so the
+#: generation moves with it — a generation-20 install must read as STALE
+#: ("reinstall"), never as `modified-artifact` ("local edit"). Both halves of the
+#: Pi seam move together: `contract_version_for("pi")` grades them as ONE
+#: contract, so `tortoise-volunteer.ts` carries 21 too (its own digest lives in
+#: `_READ_SEAM_GENERATION_DIGESTS`).
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    21, "e974052ab651bc859501285a5208deff1da5fd34c4875e8a2a06a7a5f39df25b")
+    21, "79de3acc5576499d35d7ed4024e710e15813874b17a5ed8dbbc3594c2912650a")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4868,7 +4881,7 @@ _GENERATION_DIGESTS = {
     # #11802: the drain stops destroying an unreadable spool entry. Both Pi
     # halves move together (one contract), so the READ seam gains its own 21
     # entry below.
-    21: "e974052ab651bc859501285a5208deff1da5fd34c4875e8a2a06a7a5f39df25b",
+    21: "79de3acc5576499d35d7ed4024e710e15813874b17a5ed8dbbc3594c2912650a",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
@@ -4996,6 +5009,12 @@ _GENERATION_DIGESTS = {
 #: rule as its sibling: a byte set needs a NEW generation and a NEW entry, and an
 #: existing entry is never rewritten.
 _READ_SEAM_GENERATION_DIGESTS = {
+    # Generation 21 (#11802): the READ half moves with the capture half because
+    # they are ONE contract — see the generation-21 note on
+    # `_PINNED_PI_SEAM_INSTALL_CONTRACT`. Only the marker changed here (the read
+    # seam's behaviour is untouched); an unmoved marker would have made
+    # `contract_version_for("pi")` return None, turning every installed pair into
+    # an ungradable one.
     21: "c168bb64a7ae7ba837f9c1627b869d356bb88ba573d11412fc243d11ed3066a7",
     # Generation 18: the read seam ships in the wheel at the generation that
     # grades the pair as one seam.  Nothing has shipped, so this entry is CREATED

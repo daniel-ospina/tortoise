@@ -127,7 +127,7 @@ failure — on the transcript. The meta is the one sibling that never got the sa
 
 - **A `retained` flag on the record**, with defined precedence over the reason:
   `tortoise/pi-hooks/tortoise-capture.ts:1148-1161` (`DiscardRecord.retained`),
-  `tortoise/capture_spool.py:228-260` (`RETAINED_DISCARD_REASONS`, `is_lost_discard` — "an explicit
+  `tortoise/capture_spool.py:251-288` (`RETAINED_DISCARD_REASONS`, `is_lost_discard` — "an explicit
   `retained` flag on the record WINS over the reason").
 - **`recordDiscard` already accepts `retained`** (`tortoise/pi-hooks/tortoise-capture.ts:1583-1602`)
   and writes it to the append-only `discarded.jsonl` ledger (`:1293`).
@@ -148,10 +148,14 @@ legs, because the two legs drain one shared directory
 
 ### 2.5 Both legs carry the defect
 
+> ⚠️ **Line numbers in the table below are against `origin/main` (PRE-fix), on purpose:** the
+> exact lines they cite are the ones this change removes, so they cannot be cited at HEAD. Every
+> other citation in this document is against the branch that ships alongside it.
+
 | Leg | Site | `catch` |
 |---|---|---|
-| TypeScript (the deployed harness seam) | `tortoise/pi-hooks/tortoise-capture.ts:1439-1443` | `catch { meta = undefined }` — collapses *read failure* and *parse failure* into one outcome, then renders it as `meta is not valid JSON` (`:1456`). |
-| Python (the CLI drain) | `tortoise/capture_spool.py:1304-1309` | `except (OSError, json.JSONDecodeError, UnicodeDecodeError): meta = None` — `OSError` **includes `PermissionError`**. Same collapse, same `corrupt_entry`, same quarantine + unlink (`:1315-1326`). |
+| TypeScript (the deployed harness seam) | `tortoise-capture.ts` `listSpoolEntries` (main: `:1454`) | `catch { meta = undefined }` — collapses *read failure* and *parse failure* into one outcome, then renders it as `meta is not valid JSON` (`:1456`). |
+| Python (the CLI drain) | `capture_spool.py` `list_spool_metas` (main: `:1372`-`1382`) | `except (OSError, json.JSONDecodeError, UnicodeDecodeError): meta = None` — `OSError` **includes `PermissionError`**. Same collapse, same `corrupt_entry`, same quarantine + unlink (`:1315-1326`). |
 
 The TS comment at `tortoise/pi-hooks/tortoise-capture.ts:1415` claims the function "Mirrors
 `capture_spool.list_spool_metas`" — it does, which is why fixing one leg alone would leave the other
@@ -165,7 +169,7 @@ leg destroying the same files on the next tick.
 
 | Copy | Path | Size / lines | Marker |
 |---|---|---|---|
-| Repo (canonical source) | `tortoise/pi-hooks/tortoise-capture.ts` | 194,418 B / 4,014 | `// tortoise-hook-version: 19` |
+| Repo (canonical source) | `tortoise/pi-hooks/tortoise-capture.ts` | 206,167 B / 4,210 | `// tortoise-hook-version: 21` |
 | Fleet deployed | `~/.pi/agent/extensions/tortoise-capture.ts` | 190,157 B / 3,935 | `// tortoise-hook-version: 18` |
 | Other repo | `agent-infra/extensions/tortoise-capture/index.ts` | 33,983 B / 827 | not the same artifact |
 
@@ -178,7 +182,8 @@ from `tortoise/pi-hooks/tortoise-capture.ts`** by `tortoise install pi`, and the
 contract number the installer and its drift detector both read.
 
 **Disposition.** The repo copy is patched — it is the source of truth and the only copy the installer
-reads. The deployed copy is **generation 18, one behind** (the repo carries generation 19, whose
+reads. The deployed copy is **generation 18, three behind at this head** (18 when this was measured;
+main then carried 20 and this branch ships 21, whose
 header comment at `tortoise/pi-hooks/tortoise-capture.ts:44-53` exists only to move the marker so
 stale installs reinstall — the bytes themselves are generation-18 behaviour plus the `captureOutcome`
 parity block). Consequence stated plainly: **patching the repo does not fix the running fleet until
@@ -314,7 +319,7 @@ Checked against every recorded decision that reaches this work:
 
 | Decision | Reached by this fix? | Verdict |
 |---|---|---|
-| **#10175** — owner ruling 2026-10-27: the hosted capture cap is **HELD deliberately**; refusal is correct until the new extractor/storage architecture lands; carries an `OVERRIDES:` line. Must not touch the cap, prune the graph, or file the refusal as a defect. | **No.** The fix changes no ceiling (`SPOOL_MAX_ENTRIES`/`SPOOL_MAX_TOTAL_BYTES`/`MAX_ENTRY_BYTES` untouched), adds no eviction, prunes nothing. | **Not contradicted — and it is the same ruling.** A cap that REFUSES writes and KEEPS the backlog is exactly what #10175 holds; keeping an unreadable entry is *more* consistent with it than destroying one. **⚠️ CORRECTION (review cycle 1): the first version of this row claimed a retained unreadable entry "continues to occupy a count/byte slot". That is FALSE and was measured false.** Both legs compute count and bytes from PARSED metas (`capture_spool.py:2247`, `tortoise-capture.ts` `pruneSpool`/`spoolSaturated`), so an unparsed meta and its live `.turns.jsonl` are counted by NEITHER the meta sum NOR `_orphan_paths` — a spool holding one unreadable entry measured 5,422 bytes on disk while `spool_saturated(…, max_total_bytes=1000)` returned `False`. This is a REAL residual of the retained path and is declared in §7; it is not fixed here because grading those bytes against the ceiling would change effective cap semantics, which #10175 holds. Filed separately. |
+| **#10175** — owner ruling 2026-10-27: the hosted capture cap is **HELD deliberately**; refusal is correct until the new extractor/storage architecture lands; carries an `OVERRIDES:` line. Must not touch the cap, prune the graph, or file the refusal as a defect. | **No.** The fix changes no ceiling (`SPOOL_MAX_ENTRIES`/`SPOOL_MAX_TOTAL_BYTES`/`MAX_ENTRY_BYTES` untouched), adds no eviction, prunes nothing. | **Not contradicted — and it is the same ruling.** A cap that REFUSES writes and KEEPS the backlog is exactly what #10175 holds; keeping an unreadable entry is *more* consistent with it than destroying one. **⚠️ CORRECTION (review cycle 1): the first version of this row claimed a retained unreadable entry "continues to occupy a count/byte slot". That is FALSE and was measured false.** Both legs compute count and bytes from PARSED metas (`capture_spool.py:2247`, `tortoise-capture.ts` `pruneSpool`/`spoolSaturated`), so an unparsed meta and its live `.turns.jsonl` are counted by NEITHER the meta sum NOR `_orphan_paths` — a spool holding one unreadable entry measured 5,422 bytes on disk while `spool_saturated(…, max_total_bytes=1000)` returned `False`. This is a REAL residual of the retained path and is declared in §7; it is not fixed here — but NOT because #10175 holds against it (see §7: it does not); the reason is risk/scope. Filed as **tortoise#12483**. |
 | **#10977 comment `6781757043`** (2026-11-10) — one-belief-kind: a claim is a `:Point` with `pointKind: statement`; Object/Event/Subject/Source are different nodes on different layers, never a kind of claim; `decision` is an Event. | **No.** This fix writes no graph node and adds no kind. It reads the ontology only to locate what the spool entry *is*. §1 above obeys the ruling (a session is an `:Event` + `:Source`, not a claim). | **Not contradicted.** |
 
 No `OVERRIDES:` line is added by this lane, because nothing here departs from a default
@@ -395,7 +400,7 @@ is `None`, so `write_spool_entry` treats it as a fresh snapshot and `_atomic_wri
 meta and the log — dropping any stored turns outside the current `MAX_TURNS` window and discarding
 `filed_key`/`attempts`. Pre-existing (the drain fix does not reach it), lower frequency (it needs the same
 session to be the writer), but it is the same defect shape and it is **not** fixed here — the lane's scope
-is the drain. Filed as its own issue with this analysis.
+is the drain. Filed as **tortoise#12487** with this analysis.
 
 **(4) The two legs disagree destructively on non-UTF-8 metas — pre-existing, not introduced here.**
 Python's decoder raises `UnicodeDecodeError` (→ `corrupt_entry`, entry destroyed); Node's
@@ -412,7 +417,7 @@ separately rather than widened here.
   version recorded the read refusal with an unconditional `recordDiscard`/`record_discard`; because the
   repairing scan also runs on the **per-turn** write path and the entry never becomes readable, that
   appends one line **per turn** into an uncapped `discarded.jsonl` in the spool root — the exact
-  amplification class `_record_refusal`/`recordRefusal` exists to prevent (`capture_spool.py:1025-1041`).
+  amplification class `_record_refusal`/`recordRefusal` exists to prevent (`capture_spool.py:1066-1082`).
   Cycle 1 switched both legs to the refusal recorder and claimed "5 scans → 1 line" — **but the refusal
   key is `(session_id, reason, entries/ stamp)` and that stamp includes `entries/` mtime, which every
   turn moves** by writing a new meta. So the claim held only on a STATIC directory and was false on the
