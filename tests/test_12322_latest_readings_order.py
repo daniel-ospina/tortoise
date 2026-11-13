@@ -380,9 +380,12 @@ def test_a_truncated_page_set_raises_instead_of_answering_from_survivors(
     sdk, monkeypatch
 ):
     """A server-side cap below the page size truncates EVERY page, and the rows it
-    costs are the most recently CREATED (pages ascend by id, not by instant) — so
-    continuing would report a stale reading as the current state, which is the
-    defect #12322 removes arriving through the read's own transport (#4233).
+    costs are ARBITRARY BY INSTANT — pages ascend by ``id(e)``, which is creation
+    order only while nothing has been deleted (the engine REUSES a freed node id;
+    measured on a lane: ids 2,3,4 for A,B,C, delete B, create D ⇒ D holds id 3),
+    and a backfilled row can be instant-OLD while landing last. So continuing
+    would compute the state from an incomplete set — the defect #12322 removes
+    arriving through the read's own transport (#4233).
 
     Reproduced without a server cap (a lane reports ``RESULTSET_SIZE = -1``) by
     truncating the PAGE query's rows in the client; the ``count(e)`` aggregate is
@@ -471,7 +474,7 @@ def test_since_excludes_by_instant_on_the_correctly_ordered_list(sdk):
 
     The two boundary EDGES are pinned in ``tests/test_11926_derived_invalidation.py``
     (not in this file): equality still admits
-    (``tests/test_11926_derived_invalidation.py:804``) and an
+    (``tests/test_11926_derived_invalidation.py:821``, the assertion) and an
     incomparable boundary excludes everything (``since="not-an-instant"`` → ``[]``).
     """
     indicator = _indicator(sdk, "since")
