@@ -10250,9 +10250,9 @@ class UnapprovedKindNamespace(ValueError):
 #: ``outdated`` is absent because ``_sanitize_props`` already refuses it as a
 #: server-managed lifecycle flag.
 #:
-#: #9649 covers the separate door ``update_entity`` opens onto the same window
-#: (its Point arms write caller props and ``status`` with a vocabulary check and
-#: no lifecycle guard, so they can also flip a ``retracted`` Point to ``live``).
+#: Since **#9649** the separate door ``update_entity`` consults the SAME guard for
+#: ``status`` and every member of this set, so a DEAD claim's window is refused on
+#: BOTH Point doors; a healthy claim's undated end is still stored here.
 #:
 #: The two precision names are the CANONICAL constants from ``validity``, never
 #: re-spelled here: a hand-written copy of a canonical declaration is how
@@ -10283,8 +10283,8 @@ def _shape_or_refuse_caller_end(props: dict) -> dict | None:
 
     ⚠️ **This binds the GUARDED caller doors only** (``create_point``,
     ``update_point``), so the refusal is not airtight and §4.7 does not claim it
-    is: ``update_entity``'s Point arms remain an unguarded route to a junk end
-    (#9649), and ``supersede_point``'s numeric-``valid_from`` kwarg is
+    is: ``update_entity``'s arms guard the lifecycle, never the SHAPER (#9202;
+    #9649 closed the dead-claim half), and ``supersede_point``'s numeric-``valid_from`` kwarg is
     deliberately exempt (it is not a caller ``validTo`` write). The shape/refuse
     rule, its vocabulary, its receipt and its count are stated HERE and in
     ``validity.read_caller_end`` rather than in the canonical ontology: they are
@@ -47127,18 +47127,36 @@ class TortoiseSDK:
             # write touches", so it resolves the address instead of trusting one
             # key of it. Terminality still comes from ONE instrument: this read
             # only turns the address into the id that instrument takes.
+            #
+            # ⛔ Review F1-b: the secondary arms are qualified by the CO-LABEL the
+            # write needs, not by the property alone. `eventId` is a documented,
+            # WRITABLE provenance property on a plain `:Point` (#1417), and the
+            # write reaches a Point by `eventId` only through the `:Event` arm —
+            # so matching `eventId` unconditionally refused an ordinary
+            # `update_entity(<eventId of an :Event>, status=…)` because some
+            # unrelated Point carried that value as provenance (measured), and the
+            # refusal named a Point the caller never addressed (AX rule 2).
+            # ⛔ Review F1-a: `sum(CASE WHEN n.id IS NULL …)` — NOT `len(ids)` —
+            # detects the id-less Point, because Cypher's `collect` DROPS nulls:
+            # an id-less `:Point:Source`/`:Point:Event` came back as `[]`, which
+            # read as "no Point addressed" and let `status='live'` through
+            # (measured: a superseded id-less Point resurrected).
             _addressed = proj.g.query(
-                "MATCH (n:Point) WHERE n.id = $id OR n.eventId = $id "
-                "OR n.url = $id RETURN collect(DISTINCT n.id)",
+                "MATCH (n:Point) WHERE n.id = $id "
+                "OR (n:Event AND n.eventId = $id) "
+                "OR (n:Source AND n.url = $id) "
+                "RETURN sum(CASE WHEN n.id IS NULL THEN 1 ELSE 0 END) AS idless, "
+                "collect(DISTINCT n.id) AS ids",
                 params={"id": id_val}).result_set
-            _addressed_ids = _addressed[0][0] if _addressed else []
+            _idless, _addressed_ids = _addressed[0] if _addressed else (0, [])
             _lifecycle_ids = [i for i in (_addressed_ids or ()) if i]
-            if _addressed_ids and not _lifecycle_ids:
+            if _idless:
                 # An id-less Point (url/eventId only) cannot be handed to the
                 # id-keyed instrument, so terminality cannot be checked. Fail
                 # CLOSED: a resurrection is the harm #9649 exists to stop, and no
                 # production writer mints such a node — `create_point` always
-                # stamps an `id`.
+                # stamps an `id`. (`sum` rather than `count(n)`: a duplicate-id
+                # fan-out must not read as id-less just because it has rows.)
                 raise ValueError(
                     f"update_entity refused {_lifecycle_fields}: the Point bound "
                     f"by {id_val!r} carries no `id`, so its lifecycle state "

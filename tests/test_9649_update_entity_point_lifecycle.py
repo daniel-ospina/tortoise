@@ -480,3 +480,47 @@ def _fan(sdk, pid: str) -> list[tuple]:
     return sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN n.status, n.validTo",
         params={"id": pid}).result_set
+
+
+def test_an_id_less_terminal_point_is_refused_not_skipped(env):
+    """Review round 2, P1: the fail-closed arm could not fire.
+
+    `collect(DISTINCT n.id)` DROPS nulls, so an id-less `:Point:Source` came back
+    as `[]` — read as "no Point addressed" — and `status='live'` resurrected it
+    (measured: a superseded row went live). `sum(CASE WHEN n.id IS NULL …)` is what
+    detects the shape; this test reds if it is reverted to a length test.
+    """
+    sdk, _ = env
+    sdk._get_proj().g.query(
+        "CREATE (n:Point:Source {url:'src://idless-9649', status:'superseded', "
+        "validTo:'2020-01-01T00:00:00Z'})")
+    before = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.url=$u RETURN n.status, n.validTo",
+        params={"u": "src://idless-9649"}).result_set
+
+    with pytest.raises(ValueError, match="carries no `id`"):
+        sdk.update_entity("src://idless-9649", status="live")
+    after = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.url=$u RETURN n.status, n.validTo",
+        params={"u": "src://idless-9649"}).result_set
+    assert after == before == [["superseded", "2020-01-01T00:00:00Z"]], (
+        f"the id-less dead claim must not move: {before} -> {after}")
+
+
+def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
+    """Review round 2, P2: the address resolution must not be WIDER than the write.
+
+    `eventId` is a writable provenance property on a plain `:Point` (#1417), and
+    this door reaches a Point by `eventId` only through the `:Event` arm. An
+    unqualified `n.eventId = $id` therefore refused an ordinary `:Event` update
+    because an unrelated Point carried that value — naming a Point the caller
+    never addressed (AX rule 2) and blocking a healthy write.
+    """
+    sdk, _ = env
+    sdk.create_point("statement", "carries provenance", dedup=False,
+                     status="retracted", eventId="ev-9649-prov")["id"]
+    sdk._get_proj().g.query(
+        "CREATE (e:Event {eventId:'ev-9649-prov', name:'session'})")
+
+    sdk.update_entity("ev-9649-prov", status="archived")
+    assert sdk.get_entity("ev-9649-prov")["status"] == "archived"
