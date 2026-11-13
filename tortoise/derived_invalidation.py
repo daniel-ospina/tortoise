@@ -728,10 +728,13 @@ def _reconcile_or_report(sdk: Any, goal_id: str | None) -> dict:
     Every ``alreadyRetired`` answer owes the goal's ``goalState`` cache a
     reconcile (#12336): the retirement is a no-op there, but the WORD a goal
     displays can still name a claim that vanished (#12315's arm) or was retired by
-    another route — and nothing else repairs it, because
+    another route — and no AUTOMATIC path repairs it, because
     :func:`invalidate_stale` scans LIVE claims, so a goal whose last claim is gone
-    is never a finding again. Measured before this existed: ``goalState`` stayed
-    ``met`` after the claim was deleted, through both the sweep and this door.
+    is never a finding again. ⚠️ "No automatic path" is not "no repair":
+    :func:`reconcile_goal_state_cache` is public and idempotent, and that IS the
+    repair route the success arm's failure message names. Measured before this
+    existed: ``goalState`` stayed ``met`` after the claim was deleted, through both
+    the sweep and this door.
 
     Reported, never raised, for the same reason the success arm reports its
     reconcile failure: the retirement outcome is already the idempotent one, and a
