@@ -1083,7 +1083,7 @@ def _effective_shell(job: dict | None, step: dict) -> str:
     return "\n".join([default_shell, str(step.get("shell") or "")])
 
 
-def _ambiguous_comment_cut(line: str) -> str:
+def _ambiguous_comment_cuts(line: str) -> list[str]:
     """`line` cut at its first `#` in a word position, ignoring quotes/scopes.
 
     ⛔ A `#` WHOSE DATA-NESS THIS SCANNER CANNOT DECIDE MUST BE READ BOTH WAYS
@@ -1096,13 +1096,19 @@ def _ambiguous_comment_cut(line: str) -> str:
 
     The opposite reading (cut at the `#`, what `main` did) loses a replacement that
     follows genuinely-data `#`. Neither reading is right, so the rule is
-    **refuse if EITHER reading refuses** — `_executed_lines` emits both.
+    **refuse if EITHER reading refuses** — `_executed_lines` emits every reading.
+    ⛔ EVERY WORD-POSITION `#`, NOT JUST THE FIRST (#12279 FINAL REVIEW 3, P0,
+    measured 40 RED→GREEN spellings): with only the first cut, a DATA `#` earlier
+    on the line (`echo "old $(pg_dump --version) # was"; cp -a … # pin`) made the
+    only extra reading stop BEFORE the replacement, so neither reading refused and
+    the copy landed.
     """
 
+    cuts: list[str] = []
     for index, char in enumerate(line):
         if char == "#" and (index == 0 or line[index - 1] in " \t;&|("):
-            return line[:index]
-    return line
+            cuts.append(line[:index])
+    return cuts
 
 
 def _executed_lines(job: dict | None, step: dict) -> list[str]:
@@ -1119,9 +1125,7 @@ def _executed_lines(job: dict | None, step: dict) -> list[str]:
     lines = (_effective_shell(job, step) + "\n" + _run_commands(step)).splitlines()
     out = list(lines)
     for line in lines:
-        cut = _ambiguous_comment_cut(line)
-        if cut != line:
-            out.append(cut)
+        out.extend(_ambiguous_comment_cuts(line))
     return out
 
 
@@ -6400,6 +6404,15 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         ('cp -a "${b}/17/bin/." "${b}/16/bin/" # restore the client', "a braced destination"),
         ('sudo rsync -a "${b}/17/bin/" "${b}/16/bin/" # keep in sync', "the rsync carriage"),
         ('echo "b=${b}"; cp -a "$b/17/bin/." "$b/16/bin/" # x', "an `echo` before the copy"),
+        # ⛔ AND A DATA `#` EARLIER ON THE LINE MUST NOT BE THE ONLY CUT (#12279
+        # FINAL REVIEW 3, P0, measured 40 RED→GREEN spellings): with only the FIRST
+        # word-position `#` cut, `echo "old $(pg_dump --version) # was"; cp … # pin`
+        # had one reading that stopped before the replacement and one that kept
+        # everything as data — so NEITHER refused and the copy landed.
+        (
+            'echo "old $(pg_dump --version) # was"; cp -a "$b/17/bin/." "$b/16/bin/" # pin',
+            "a data `#` before the replacement",
+        ),
     ):
         step = {"run": f"b=/usr/lib/postgresql; {live}"}
         assert any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
