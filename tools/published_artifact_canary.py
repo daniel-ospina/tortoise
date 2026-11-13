@@ -84,6 +84,32 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ENGINE_PACKAGE = "tortoise-graph"
 CLIENT_PACKAGE = "tortoise-client"
 INDEX_JSON = "https://pypi.org/pypi/{package}/json"
+PYPI_SIMPLE = "https://pypi.org/simple"
+
+#: pip's "this distribution does not exist on the index" vocabulary. Used to tell a
+#: genuinely absent artifact (FAIL) from a pip run that could not be evaluated at all
+#: (network/proxy/config trouble → UNKNOWN). Matching is on pip's own wording because
+#: that is the only signal a subprocess gives us; the cost of being wrong in the
+#: UNKNOWN direction is a non-zero exit with a clear detail, not a silent pass.
+_INSTALL_ABSENCE_MARKERS = (
+    "no matching distribution found",
+    "could not find a version that satisfies",
+    "from versions: none",
+)
+
+
+def _install_failure_is_absence(stderr: str, spec: str, wheel: Path | None = None) -> bool:
+    """True when the failure is about the ARTIFACT, not about pip's environment.
+
+    Index mode: pip's own "this distribution does not exist" vocabulary. Wheel mode:
+    pip naming the wheel it could not install — that IS the artifact failing, and it is
+    the pre-publish gate's whole job to red on it.
+    """
+    text = (stderr or "").lower()
+    if wheel is not None and Path(wheel).name.lower() in text:
+        return True
+    return any(marker in text for marker in _INSTALL_ABSENCE_MARKERS)
+
 
 OK = "OK"
 FAIL = "FAIL"
@@ -94,7 +120,22 @@ UNKNOWN = "UNKNOWN"
 #: gets — an ambient ``TORTOISE_DB_URI``/``TORTOISE_DB_PATH`` inherited from the
 #: runner would point the command at some other target and turn a broken
 #: artifact green (the "measures something other than what it claims" class).
-_STRIPPED_ENV_PREFIXES = ("TORTOISE_", "FALKORDB_", "REDIS_")
+#: ``PIP_`` is stripped by PREFIX on purpose. A member denylist of the pip variables
+#: measured at one moment (``PIP_INDEX_URL``, ``PIP_CONFIG_FILE``, …) is a gate that
+#: reports OK over a violated property: it cannot close the class, only today's members,
+#: and a mirror/proxy/constraint that arrives by another name silently makes the canary
+#: grade something other than what PyPI serves (#12363 review round 3). The tool's own
+#: ``PIP_DISABLE_PIP_VERSION_CHECK`` is assigned AFTER the filter, so it survives.
+_STRIPPED_ENV_PREFIXES = (
+    "TORTOISE_",
+    "FALKORDB_",
+    "REDIS_",
+    "PIP_",
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+)
 
 #: Named explicitly, not by prefix: these decide WHICH BYTES the child imports,
 #: so a ``PYTHONPATH`` entry pointing at a checkout puts that tree's ``tortoise/``
@@ -491,12 +532,18 @@ def install_and_run(
     timeout: float,
     runner=subprocess.run,
     wheel: Path | None = None,
+    transcript_path: Path | None = None,
 ) -> tuple[Arm, str]:
     """Install the PUBLISHED wheel and run the documented first command.
 
     Returns (arm, transcript). The transcript is the evidence — a bare
     "exit 1" without the command's own output cannot distinguish the #2204
     signature from an unrelated failure.
+
+    ``transcript_path`` is written INCREMENTALLY, as each command finishes. A job
+    cancelled at its ``timeout-minutes`` boundary never reaches the final write, so a
+    transcript produced only at the end is absent in exactly the terminal state where
+    the diagnosis is worth most (#12363 review round 3).
     """
     venv = workdir / "venv"
     home = workdir / "home"
@@ -511,8 +558,19 @@ def install_and_run(
         spec = f"{package}=={version}" if version else package
     transcript: list[str] = []
 
+    def flush() -> None:
+        if transcript_path is None:
+            return
+        try:
+            transcript_path.parent.mkdir(parents=True, exist_ok=True)
+            transcript_path.write_text("\n".join(transcript) + "\n")
+        except OSError:
+            # Evidence is best-effort; never let an unwritable log change the verdict.
+            pass
+
     def run(cmd: list[str], label: str) -> subprocess.CompletedProcess:
         transcript.append(f"$ {' '.join(cmd)}   # {label}")
+        flush()
         completed = runner(
             cmd,
             cwd=str(workdir),
@@ -525,6 +583,7 @@ def install_and_run(
             if stream:
                 transcript.append(stream.rstrip())
         transcript.append(f"[exit {completed.returncode}]")
+        flush()
         return completed
 
     try:
@@ -540,10 +599,33 @@ def install_and_run(
                 "install",
                 "--quiet",
                 "--no-cache-dir",
+                # ⛔ Explicit, because pip ALSO reads /etc/pip.conf and
+                # /etc/xdg/pip/pip.conf unconditionally — an env strip cannot reach
+                # them, and a CLI flag outranks both. Without this, a runner with a
+                # global index configured grades the MIRROR's copy of the artifact
+                # (#12363 review round 3).
+                "--index-url",
+                PYPI_SIMPLE,
                 spec,
             ],
             f"install {spec}" if wheel is not None else f"install the PUBLISHED artifact {spec}",
         )
+        if installed.returncode != 0 and not _install_failure_is_absence(
+            installed.stderr or "", spec, wheel
+        ):
+            # A pip failure is not evidence that the ARTIFACT is broken: a DNS blip,
+            # an index outage or a proxy 502 all land here, and reporting those as
+            # "users cannot even install it — a release is owed" is the B1 mis-routing
+            # one layer down (#12363 review round 3).
+            return (
+                Arm(
+                    "engine-init",
+                    UNKNOWN,
+                    f"`pip install` could not be evaluated (exit {installed.returncode}): "
+                    f"{(installed.stderr or '').strip().splitlines()[-1:] or ['no output']}",
+                ),
+                "\n".join(transcript),
+            )
         if installed.returncode != 0:
             return (
                 Arm(
@@ -670,6 +752,9 @@ def main(argv: list[str] | None = None) -> int:
 
     init_arm: Arm | None = None
     transcript = ""
+    log_path = (
+        Path(args.transcript_dir) / "published-artifact-canary.log" if args.transcript_dir else None
+    )
     published = latest_version(engine_doc or {})
     if wheel is not None or (engine_doc is not None and published):
         with tempfile.TemporaryDirectory(prefix="artifact-canary-") as tmp:
@@ -679,6 +764,7 @@ def main(argv: list[str] | None = None) -> int:
                 workdir=Path(tmp),
                 timeout=args.timeout,
                 wheel=wheel,
+                transcript_path=log_path,
             )
 
     report = build_report(
@@ -694,10 +780,14 @@ def main(argv: list[str] | None = None) -> int:
         client_state=client_state,
     )
 
-    if args.transcript_dir:
-        target = Path(args.transcript_dir)
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "published-artifact-canary.log").write_text(transcript or "(no run)\n")
+    if log_path is not None and not transcript:
+        # The install never ran (unreadable index): say so in the log rather than leaving
+        # an empty file the reader has to interpret.
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            f"(no install/run: engine index state={engine_state} "
+            f"{'— ' + engine_error if engine_error else ''})\n"
+        )
 
     summary = render_summary(report)
     if args.summary_file:
