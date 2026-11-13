@@ -3865,6 +3865,11 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
         assert payload["operators_read"] is None, payload
         assert payload["operators_total_reported"] is None, payload
         assert payload["operators_reconciled"] is None, payload
+        # The converse must NOT be read into these fields: `census` is `null` here too,
+        # but the pair below (`after_read_*`) reaches the SAME `census: null` with a
+        # COMPLETED read. Pinning both halves keeps a later "census is null, so pass
+        # `operators=None`" tidy-up from reinstating the round-3 defect (round-5 review).
+        assert payload["census"] is None, payload
         assert f"read {len(OPERATOR_ROWS)} rows" in (payload["read_failure"] or ""), (
             payload["read_failure"])
     elif failure.startswith("after_read"):

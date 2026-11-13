@@ -822,13 +822,18 @@ def _disarmed_artifact(
     # Resolved ONCE: the artifact and the operator-facing line must not disagree.
     measured = (census is not None) if census_measured is None else census_measured
     # ⛔ The reasoning layer's three fields travel HERE too, and they are TRI-STATE for a
-    # reason: `None` means NO COMPLETED LAYER READ, i.e. this run produced no census at
-    # all (it is `null` on exactly those arms, and `read_failure` names the cause — the
-    # refusing read that never returned, whatever rows it had already seen). It does NOT
-    # mean "this graph has no operator layer"; `(n, m)` means a completed read, and
-    # `(n, None)` a completed read with no count to reconcile it. The distinction is the
-    # whole point: "not read" and "read but unreconciled" must not collapse into one
-    # value (round-2/3 review). The ledger-stopped arm DID complete the read and passes
+    # reason: `None` means NO COMPLETED LAYER READ — the run stopped at or before that
+    # read, so no census was produced and `read_failure` names the refusing read
+    # (whatever rows it had already seen before it refused). It does NOT mean "this graph
+    # has no operator layer"; `(n, m)` means a completed read, and `(n, None)` a
+    # completed read with no count to reconcile it. The distinction is the whole point:
+    # "not read" and "read but unreconciled" must not collapse into one value
+    # (round-2/3 review).
+    # ⚠️ The CONVERSE does not hold, and reading it into this field re-creates the very
+    # defect it closes: `graphs()` is read AFTER the layer, so `census: null` also occurs
+    # WITH a completed read (`(n, m)` on the two `after_read_*` arms). These fields report
+    # the layer's state at the point the run stopped and are NEVER derived from `census`
+    # (round-5 review). The ledger-stopped arm DID complete the read and passes
     # the real pair. Without this, a driver doing the round-7-mandated switch on a ledger
     # stop found `census_measured: true` — the strongest completeness claim the artifact
     # makes — with the only contrary fact in `read_note` prose, which is the defect the
