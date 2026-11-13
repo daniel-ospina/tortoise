@@ -4735,9 +4735,16 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     # that explicitly mark the sizing as history — so recorded history stays writable and a
     # present-tense prescription reds in any emphasis or word order.
     plan_norm = _re.sub(r"\*+", "", _re.sub(r"\s+", " ", plan))
+    # ⛔ THE MARKER MUST BE TIED TO THE SIZING, NOT TO THE SENTENCE'S SUBJECT (review
+    # cycle 10, measured). Leaving the loose markers in (`cycle N`, `original`, `first
+    # draft`, `earlier`) exempted a clause that PRESCRIBES as soon as it mentioned one:
+    # "Cycle 3 confirmed the read is sized to `counts.Event + 1` today." stayed GREEN,
+    # because the clause itself carried `Cycle 3` — no comma to split on, so the
+    # per-clause rule could not separate them. Only a marker attached to the SIZING makes
+    # a statement historical rather than prescriptive; a bare `cycle N` or `original`
+    # says where the number came from, not that it was withdrawn.
     _HISTORY = _re.compile(
-        r"\b(was|were|had been)\b|withdrawn|original|superseded|first draft|earlier|"
-        r"\bcycle \d|used to|no longer", _re.I)
+        r"\b(?:was|were|had been)\s+sized\b|withdrawn|superseded|no longer|used to", _re.I)
 
     def _prescribes(text: str) -> list[str]:
         """Clauses that state the withdrawn sizing as if it were current.
@@ -4773,6 +4780,15 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     assert not _prescribes(
         "The superseded row sized the request to `counts.Event + 1`."), (
         "recorded history must stay writable")
+    # ⛔ ...and the other direction of the same trap: a history WORD is not a history
+    # STATEMENT. `Cycle 3` says where the number came from; it does not withdraw it.
+    # Measured GREEN before this case was added (review cycle 10).
+    assert _prescribes(
+        "Cycle 3 confirmed the read is sized to `counts.Event + 1` today."), (
+        "a bare history word in the same clause still exempts a live prescription")
+    assert _prescribes(
+        "As earlier, the read is sized to `counts.Event + 1`."), (
+        "a bare history word in the same clause still exempts a live prescription")
     prescribing = _prescribes(plan_norm)
     assert not prescribing, (
         "the plan prescribes sizing the request to the count (one row of headroom), which "

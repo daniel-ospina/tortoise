@@ -640,7 +640,7 @@ class MCPReader:
         # BELOW the bound — where a read would have returned `len(raw) < limit_sent`, which
         # the arms below ACCEPT. Narrow (a graph sitting exactly AT the bound with a delete
         # inside the count->read window) and it clears on a re-run, so it is fail-CLOSED
-        # and filed rather than fixed here.
+        # and filed as issue #12445 rather than fixed here.
         #
         # ⛔ Why it is not a one-line fix: moving the refusal after the read is only safe if
         # the fill check ALSO moves onto the EQUALITY path. The fill arm below lives INSIDE
