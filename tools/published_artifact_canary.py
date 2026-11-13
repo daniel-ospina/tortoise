@@ -808,7 +808,11 @@ def install_and_run(
         # whose TMPDIR sits under one — so a foreign telemetry `.db` would be accepted and
         # the "created no database" arm could never fire (#12363 round 9).
         created = sorted(
-            p for p in home.rglob("*.db") if "tortoise" in str(p.relative_to(home)).lower()
+            p
+            for p in home.rglob("*.db")
+            if "tortoise" in p.name.lower()
+            or "tortoise" in p.parent.name.lower()
+            or "tortoise" in str(p.relative_to(home)).lower()
         )
         if created:
             db_path = created[0]

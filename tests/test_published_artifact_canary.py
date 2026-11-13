@@ -1187,6 +1187,38 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
         assert "published-artifact-alert.sh" in str(step.get("run")), (
             f"{name} must go through the shared script — inlined shell here is what drifts"
         )
+    # ── the three gates and the transcript pair ──────────────────────────────────────
+    # A post-reading runner failure (`result: failure`, `exit_code: 0`) is NOT a finding:
+    # filing an outage for it asserts "could not evaluate" about a run that evaluated fine.
+    for name in ("What a red here means", "File or refresh the alert issue"):
+        gate = str(steps[name].get("if"))
+        if name == "File or refresh the alert issue":
+            assert "needs.canary.outputs.exit_code != '0'" in gate, (
+                f"{name} must skip a run that REACHED a verdict: {gate}"
+            )
+    close_if = str(steps["Close the alert issue on a green run"].get("if"))
+    assert "needs.canary.outputs.exit_code == '0'" in close_if, (
+        "close must follow the READING, not the job result: a failed transcript upload on a "
+        "green artifact would otherwise leave a stale release-owed issue open forever"
+    )
+    # the upload ↔ download pair: `continue-on-error: true` means a rename here can never
+    # red anything, it just silently reverts every issue body to "no transcript".
+    upload = next(
+        s for s in jobs["canary"]["steps"] if str(s.get("uses", "")).startswith("actions/upload")
+    )
+    fetch = next(
+        s for s in report["steps"] if str(s.get("uses", "")).startswith("actions/download")
+    )
+    assert fetch["with"]["name"] == upload["with"]["name"], (
+        f"download {fetch['with']['name']!r} does not match upload "
+        f"{upload['with']['name']!r} — the report job would always find no transcript"
+    )
+    assert fetch.get("continue-on-error") is True, (
+        "a job killed before its upload genuinely has no artifact; that must not fail the report"
+    )
+    assert "published-artifact-alert.sh" in str(
+        steps["File or refresh the alert issue"].get("run", "")
+    )
     assert "needs.canary.outputs.exit_code" in str(
         steps["File or refresh the alert issue"].get("env", {})
     ), (
@@ -1304,10 +1336,15 @@ def test_the_unexpected_failure_boundary_is_pinned(monkeypatch, capsys):
     assert "a bug nobody anticipated" in capsys.readouterr().err
 
 
-def test_a_database_created_ANYWHERE_under_the_fresh_HOME_is_accepted(tmp_path):
+def test_a_RELOCATED_tortoise_store_under_the_fresh_HOME_is_accepted(tmp_path):
     """The default path is a second copy of `tortoise/config.py`'s decision. If a release
-    relocates it, a hardcoded expectation reds the canary forever and the summary says
-    "a release is owed" when the fix belongs in this tool (#12363 round 7)."""
+    relocates the store, a hardcoded expectation reds the canary forever and the summary
+    says "a release is owed" when the fix belongs in this tool (#12363 round 7).
+
+    The tolerance is bounded: the store must still be TORTOISE's (its file or directory
+    names it). A relocation to a store with no tortoise identity in the path is
+    indistinguishable from a foreign database, and the sibling case below pins that
+    boundary rather than leaving it to chance (#12363 rounds 8–10)."""
 
     class _Relocated(_Runner):
         def __call__(self, cmd, **kwargs):
@@ -1345,10 +1382,14 @@ def test_a_FOREIGN_database_under_HOME_does_not_count_as_initialised(tmp_path):
                 (cache / "events.db").write_text("")
             return result
 
+    # ⛔ The workdir is deliberately named `tortoise-checkout`: the pre-fix filter matched
+    # the ABSOLUTE path, so on a plain `tmp_path` (no "tortoise" anywhere) the regression
+    # was invisible and this test passed under it (#12363 round 10). With a tortoise-named
+    # ANCESTOR, the absolute-path filter accepts the foreign file and this case reds.
     arm, _ = canary.install_and_run(
         package="tortoise-graph",
         version="0.2.0",
-        workdir=tmp_path,
+        workdir=tmp_path / "tortoise-checkout",
         timeout=10,
         runner=_Telemetry({}, creates_db_for=None),
     )

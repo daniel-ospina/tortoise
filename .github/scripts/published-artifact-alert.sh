@@ -70,7 +70,7 @@ open_issue() {
   # the `tortoise init` output plus its `[exit N]` last, so a head would show the setup
   # and hide the diagnosis (#12363 round 6).
   local log="${RUNNER_TEMP:-/tmp}/canary/published-artifact-canary.log"
-  local tail_text="(no transcript reached this job — the canary was killed before its upload, or the artifact was not available)"
+  local tail_text="(no transcript reached this job — the canary was killed before its upload, or the artifact could not be downloaded here)"
   if [ -s "$log" ]; then
     tail_text="$(tail -n 40 "$log")"
   fi
@@ -85,7 +85,9 @@ open_issue() {
     printf '```\n%s\n```\n\n' "$tail_text"
     printf 'Run: %s/%s/actions/runs/%s\n' \
       "${GITHUB_SERVER_URL:-https://github.com}" "$GITHUB_REPOSITORY" "${GITHUB_RUN_ID:-unknown}"
-    printf 'Transcript: the `published-artifact-canary-log` artifact on that run.\n\n'
+    if [ -s "$log" ]; then
+      printf 'Transcript: the `published-artifact-canary-log` artifact on that run.\n\n'
+    fi
     printf 'Refs #12363\n'
   } >"$body_file"
 
