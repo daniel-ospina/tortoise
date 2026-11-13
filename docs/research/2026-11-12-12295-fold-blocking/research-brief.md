@@ -167,8 +167,8 @@ folding to `b`), so `the-plan-doc` folds to `the plan doc` while the stored `the
 outside (`test_the_article_anchor_decision_is_not_reversed`) and reports its measured cost instead.
 The artifact's own per-`k` rows say something sharper than "a ceiling". At the **k=3 production
 window** 179 of 180 are IN the window, so exactly one is out of reach at that setting; at
-**k=5, k=10 and k=15 all 180 are in the window** (`variant_by_class["space-to-hyphen"]["in_window"]`
-= 180) and **still 0 attach**. Width therefore cannot recover them — which makes the diagnosis
+**k=5, k=10 and k=15 all 180 are in the window** (`arms.variant_by_class["space-to-hyphen"][k]["in_window"]`
+= 180 at each of those `k`) and **still 0 attach**. Width therefore cannot recover them — which makes the diagnosis
 *stronger*, not weaker: the article anchor alone is the cause, and no `k` budget fixes it. Recovering
 them would take the
 lane from **207/422 = 49.1 %** to **386/422 = 91.5 %**, which is exactly the artifact's
