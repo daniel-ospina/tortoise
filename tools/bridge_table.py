@@ -1943,6 +1943,15 @@ def render(
         1 for d in merged
         if (d.split(":", 1)[1] if d.startswith(NAMESPACES) else d) in sdk_defs
     )
+    # The `maintenance` tier is DERIVED from the live registry, never spelled here: this
+    # sentence named the tier by hand and kept naming `packs_list` after #11609 batch 1
+    # archived it, which is the drift `bridge_table --check` cannot catch (the generator
+    # and the generated doc go stale TOGETHER). Sorted for a stable diff.
+    maint_names = sorted(
+        e.name.removeprefix("tortoise_")
+        for e in TOOL_REGISTRY
+        if getattr(e, "risk", "") == "maintenance"
+    )
     out += [
         "",
         f"**{n_merged} merged targets. {n_ok} of them have a method behind them today.** The other"
@@ -1953,7 +1962,7 @@ def render(
         "**Read-only** is the entry's MCP `readOnlyHint` — what a client uses to auto-approve,",
         "NOT what a key needs. A `no` here does not mean `graphs:write`: since #4122 the tier is",
         "`risk` on the registry entry and `readOnlyHint` is derived from it, so a",
-        "`risk=\"maintenance\"` tool (`get_confidence`, `compute_confidence`, `packs_list`) reads",
+        f"`risk=\"maintenance\"` entry ({', '.join(maint_names)}) reads",
         "`no` while a `graphs:read` key may still call it. Key permission is the derived `writes`",
         "flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for the ruling.",
         "",

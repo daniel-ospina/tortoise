@@ -53,7 +53,7 @@ something derivable from today's code.
 **Read-only** is the entry's MCP `readOnlyHint` — what a client uses to auto-approve,
 NOT what a key needs. A `no` here does not mean `graphs:write`: since #4122 the tier is
 `risk` on the registry entry and `readOnlyHint` is derived from it, so a
-`risk="maintenance"` tool (`get_confidence`, `compute_confidence`, `packs_list`) reads
+`risk="maintenance"` entry (compute_confidence, get_confidence) reads
 `no` while a `graphs:read` key may still call it. Key permission is the derived `writes`
 flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for the ruling.
 
