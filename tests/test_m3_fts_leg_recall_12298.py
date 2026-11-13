@@ -997,11 +997,31 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     """
     text = " ".join(brief.split())
     census = artifact["terms_census"]
-    assert (f"{census['degenerate']} of the {census['queries']} queries are "
-            "degenerate") in text, (
+    # ⛔ §2-SCOPED, DIGIT-ANCHORED, and it costs nothing to be exact (#12349
+    # rounds 14-15). Three successive cuts of this block were each caught by a
+    # fresh reviewer asserting more than the code enforced:
+    #   * round 13: whole-document `in text` for the class split -> a §4
+    #     restatement plus edited §2 cells stayed green (M5b);
+    #   * round 15 finding 1: the CENSUS COUNT was still whole-document -> §2's
+    #     own `126 of the 300` rewritten to `226` stayed green when a
+    #     restatement carried the true count (M7);
+    #   * round 15 finding 2: `next(...)` picked the FIRST sentence in the whole
+    #     document containing the phrase, not §2's -> an EARLIER (e.g. §0)
+    #     sentence carrying the true split plus edited §2 cells stayed green
+    #     (M10d).
+    # So everything below reads from §2's own text, and the counts are
+    # digit-anchored so a `126` cannot be satisfied by a `226`.
+    section2 = text.split("## 2. ")[1].split("## 3. ")[0]
+    census_sentence = next(
+        s for s in re.split(r"(?<=\.)\s+", section2)
+        if "queries are degenerate" in s)
+    assert re.search(
+        rf"(?<!\d){census['degenerate']} of the {census['queries']} queries "
+        r"are degenerate", census_sentence), (
         "§2's degenerate-query census no longer matches `terms_census` — the "
-        "control break is stated as 126 of 300 and recorded as "
-        f"{census['degenerate']} of {census['queries']}")
+        "control break is recorded as "
+        f"{census['degenerate']} of {census['queries']} and §2's own census "
+        f"sentence says: {census_sentence}")
     # ⛔ §2's DEGENERATE CLASS SPLIT is published ("108 `definite` … and 18
     # ident — none of them a path") and was unpinned while §2's census is
     # described as compared CELL BY CELL (#12349 review, P2-2): rewriting those
@@ -1015,17 +1035,6 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
         f"the degenerate ids cover {sum(deg.values())} of the census's "
         f"{census['degenerate']} — the split below would then describe a "
         "different population")
-    # ⛔ SENTENCE-scoped and DIGIT-anchored, not a whole-document substring
-    # (#12349 round-14 finding 1). The first cut asserted these counts against
-    # the flattened WHOLE brief while its comment claimed §3.4's cell treatment;
-    # measured: adding a plausible §4 restatement ("Of the corpus, 108
-    # `definite` names plus 18 ident names drove that.") AND rewriting §2's own
-    # cells to 118/28 kept all 72 tests green — the §2 cells falsified with every
-    # gate green, which is P2-2 surviving in a weaker form. `(?<!\d)` stops a
-    # `108` from being satisfied by a `1108`.
-    census_sentence = next(
-        s for s in re.split(r"(?<=\.)\s+", text)
-        if "queries are degenerate" in s)
     assert re.search(rf"(?<!\d){deg['definite']} `definite`", census_sentence), (
         f"§2's own census sentence must state {deg['definite']} `definite` "
         f"degenerate queries — recomputed from `degenerate_ids` and the pinned "
@@ -1039,9 +1048,13 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
         "§2's `none of them a path` clause must agree with the classes: "
         f"{deg['path']} degenerate queries are `path`")
     subset = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
-    assert f"**{subset['n']} tokens-controlled queries**" in text or \
-        f"the **{subset['n']} tokens-controlled queries**" in text, (
-            f"§2 must name the {subset['n']}-query tokens-controlled population")
+    # §2-SCOPED for the same reason as the census above: a whole-document `in
+    # text` is satisfied by a restatement in ANY section, so §2's own number
+    # could be falsified while every gate stayed green.
+    assert re.search(rf"(?<!\d){subset['n']} tokens-controlled queries",
+                     section2), (
+        f"§2 must name the {subset['n']}-query tokens-controlled population "
+        f"in §2 itself")
     # §0's subset row states BOTH recalls, and §0 is where a reader quotes from.
     subset_row = next(
         (r for r in _table(brief, "recall@3", "Δ vs shipped")
