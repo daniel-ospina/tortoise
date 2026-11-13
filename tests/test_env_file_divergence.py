@@ -1009,12 +1009,15 @@ def test_doctor_error_arm_does_not_deny_an_applied_read(capsys, _isolated, monke
 
     assert "❌ Config: .env" in row, row
     assert "do not show that error" not in row, row
-    # ⛔ And not the opposite over-claim either: the graded store resolved fine
-    # here (`TORTOISE_DB_PATH` outranks the file's broken URI on the CLI's
-    # ladder), so "the rows below fail the same way" was false — an earlier
-    # round's own pin asserted it (#12428 review).
-    assert "graded the store above" in row, row
+    # ⛔ The row now makes NO claim about the rows below at all. Every version of
+    # that tail was false in some reachable state — the graded store resolved fine
+    # here (`TORTOISE_DB_PATH` outranks the file's broken URI on the CLI's ladder),
+    # so "the rows below fail the same way" was false, and "graded the store
+    # above" was false in the arm where it resolved normally (#12428 review).
     assert "fail the same way" not in row, row
+    assert "graded the store above" not in row, row
+    assert "resolved from the same values" not in row, row
+    assert "the value it rejects is the one this `.env` supplied" in row, row
 
 
 def test_doctor_unresolved_arm_does_not_deny_an_applied_read(capsys, _isolated,
@@ -1387,13 +1390,16 @@ def test_a_broken_target_from_the_FILE_is_not_called_an_environment_error(
     from tortoise.__main__ import _dotenv_divergence, _dotenv_rows
 
     path = _write_env(_isolated, "TORTOISE_DB_URI=relative/x.db\n")
-    # The applied state: the key IS in this process, recorded as loaded.
+    # The applied state: the key IS in this process, recorded as loaded — and the
+    # RECORD says this process took that value from the FILE (#12428 review).
     monkeypatch.setenv("TORTOISE_DB_URI", "relative/x.db")
     monkeypatch.setattr(dotenv_file, "LOADED_PATHS", {str(path)}, raising=False)
+    monkeypatch.setattr(dotenv_file, "APPLIED", {"TORTOISE_DB_URI": "relative/x.db"},
+                        raising=False)
 
     payload = _dotenv_divergence(graded_target="/tmp/graded-by-the-rows.db")
     assert payload["read_by_this_command"] is True, payload
-    assert not payload.get("daemon_error_from_env"), payload
+    assert payload.get("daemon_error_source") == "file", payload
     assert "supplied" in str(payload.get("daemon_error")), payload
 
     row = " ".join(str(detail) for _c, _s, detail in _dotenv_rows(payload))
@@ -1460,8 +1466,10 @@ def test_a_file_that_was_never_applied_does_not_claim_it_was():
                       "cli_target": "/tmp/graded-by-the-rows.db",
                       "daemon_target": None,
                       "daemon_error": "ValueError: Relative DB path 'relative/x.db' rejected."})
+    # Neither claim about the rows below survives: the row states WHO supplied the
+    # rejected value and nothing it cannot verify (#12428 review).
     assert "applied that file at import as well" not in row, row
-    assert "this command does not read it, so the rows below do not show that error" in row, row
+    assert "rows below" not in row, row
 
 
 def test_a_file_applied_after_grading_does_not_blame_the_rows():
@@ -1475,8 +1483,9 @@ def test_a_file_applied_after_grading_does_not_blame_the_rows():
                       "applied_when_graded": False,
                       "daemon_target": None,
                       "daemon_error": "ValueError: Relative DB path 'relative/x.db' rejected."})
-    assert "AFTER resolving the store above" in row, row
+    assert "AFTER resolving the store above" not in row, row
     assert "resolved from the same values" not in row, row
+    assert "rows below" not in row, row
 
 
 def test_a_shadowed_shell_value_is_still_the_environment_s(_isolated, monkeypatch):
@@ -1492,11 +1501,53 @@ def test_a_shadowed_shell_value_is_still_the_environment_s(_isolated, monkeypatc
     _write_env(_isolated, "TORTOISE_DB_URI=/tmp/ok.db\n")
     monkeypatch.setenv("TORTOISE_DB_URI", "relative/broken.db")   # the shell's own
     monkeypatch.setattr(dotenv_file, "LOADED_PATHS", set(), raising=False)
+    monkeypatch.setattr(dotenv_file, "APPLIED", {}, raising=False)
 
     payload = _dotenv_divergence(graded_target="/tmp/graded.db")
 
     # The shell value is broken and the file's is not: the ENVIRONMENT owns it.
-    assert payload.get("daemon_error_from_env") is True, payload
+    assert payload.get("daemon_error_source") == "env", payload
+
+
+def test_a_shell_value_identical_to_the_files_is_not_credited_to_it(
+        capsys, _isolated, monkeypatch):
+    """The shell exporting the file's OWN broken value does not make it the file's.
+
+    Measured (#12428 review): env `TORTOISE_DB_URI=relative/x.db` and a `.env`
+    declaring the same value printed "the value is the one this `.env` supplied"
+    — the file supplied nothing (`pending_assignments` was empty, the key was
+    already present) — and then "the target above does not show that error"
+    three lines under a `Graph store` row showing that exact error.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "relative/x.db")
+    _write_env(_isolated, "TORTOISE_DB_URI=relative/x.db\n")
+
+    out = _show_text(capsys)
+
+    assert "this `.env` supplied" not in out, out
+    assert "does not RESOLVE with this file" not in out, out
+    assert "file did not supply it" in out, out
+    # The target above DID fail, so the row must say so rather than deny it.
+    assert "does not show that error" not in out, out
+    assert "see `Graph store` above" in out, out
+
+
+def test_two_broken_values_are_reported_as_both(capsys, _isolated, monkeypatch):
+    """The probe popps the FILE's values, so its failure is a DIFFERENT key.
+
+    Measured (#12428 review): env `TORTOISE_DB_PATH=relative/y.db` with `.env`
+    `TORTOISE_DB_URI=relative/x.db` printed the FILE's error and then claimed
+    "the ENVIRONMENT's own value does not resolve — this file did not cause it":
+    both are broken, and the file is one of the causes.
+    """
+    monkeypatch.setenv("TORTOISE_DB_PATH", "relative/y.db")
+    _write_env(_isolated, "TORTOISE_DB_URI=relative/x.db\n")
+
+    out = _show_text(capsys)
+
+    assert "ENVIRONMENT's own value does not resolve either" in out, out
+    assert "this file did not cause it" not in out, out
+    assert "does not RESOLVE with this file" in out, out
 
 
 def test_a_described_value_does_not_keep_a_delimited_credential():

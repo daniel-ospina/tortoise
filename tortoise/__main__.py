@@ -4349,23 +4349,33 @@ def _cmd_config(args) -> int:
                 print("     ladders now read the SAME ENVIRONMENT — a difference")
                 print("     between them would come from the ladders, not the file")
             if env_file.get("daemon_error"):
-                print("  ⛔ the daemon's target does not RESOLVE with this file:")
+                # ⛔ THREE sources, not two (#12428 review): the file supplied the
+                # rejected value / the environment did / BOTH are broken (the
+                # probe pops the file's values, so a pre-existing failure is on a
+                # DIFFERENT key and both are causes). And the tail may not claim
+                # the target above fails — that is this run's own outcome, and it
+                # used to be asserted over a target that resolved fine.
+                _src = env_file.get("daemon_error_source") or "unknown"
+                print("  ⛔ the daemon's target does not RESOLVE"
+                      + (" with this file:" if _src in ("file", "both") else ":"))
                 print(f"     {_printable(env_file['daemon_error'])}")
-                if env_file.get("daemon_error_from_env"):
-                    # The ENVIRONMENT's own value does not resolve, so the file
-                    # neither caused it nor can this command avoid it — both
-                    # entry points see the same refusal (#12428 review).
-                    print("     the ENVIRONMENT's own value does not resolve — this")
-                    print("     file did not cause it, and the target above fails the")
-                    print("     same way")
-                elif env_file.get("read_by_this_command"):
-                    # The process applied the file, so ITS OWN resolution ran on
-                    # the same values — the target above fails the same way.
-                    print("     this process applied that file at import as well, so")
-                    print("     the target above fails the same way")
+                if _src == "file":
+                    print("     the value it rejects is the one this `.env` supplied")
+                elif _src == "both":
+                    print("     this file's value does not resolve — and the")
+                    print("     ENVIRONMENT's own value does not resolve either")
+                elif _src == "env":
+                    print("     the ENVIRONMENT's own value does not resolve; this")
+                    print("     file did not supply it")
                 else:
-                    print("     this command does not read it, so the target above does")
-                    print("     not show that error")
+                    print("     which entry point supplied the value is not")
+                    print("     attributable from here")
+                if env_file.get("cli_error") or env_file.get("graded_unresolved"):
+                    print("     this command's own target does not resolve either —")
+                    print("     see `Graph store` above")
+                elif _src == "file" and not env_file.get("read_by_this_command"):
+                    print("     this command does not read the file, so it does not")
+                    print("     fail here")
             else:
                 if env_file.get("daemon_rung") == "refuses":
                     # ⛔ "neither … is set" is false when the file sets one and an
@@ -11312,6 +11322,29 @@ def _dotenv_unread_candidates(daemon_path: str) -> list[str]:
     return [str(cwd_env)] if cwd_env.is_file() else []
 
 
+def _db_value_source(key: str | None) -> str:
+    """WHO supplied the value this process now holds for a ladder key.
+
+    ``file`` — the value is one :func:`dotenv_file.load_dotenv` wrote from a
+    ``.env``; ``env`` — the user's own environment (it was either present before
+    the file was read, or set differently); ``unknown`` — no such key is set.
+
+    This is a RECORDED fact, not an inference: the applied state has nothing left
+    to fill, so "no key was pending" says nothing about who supplied the value
+    that failed (#12428 review).
+    """
+    import os
+
+    from tortoise import dotenv_file as _dotenv_file
+
+    if not key:
+        return "unknown"
+    value = os.environ.get(key)
+    if value is None:
+        return "unknown"
+    return "file" if _dotenv_file.applied_value(key) == value else "env"
+
+
 def _dotenv_already_applied() -> bool:
     """Has THIS process applied the daemon's `.env` yet? (Recorded in `LOADED_PATHS`)
 
@@ -11547,9 +11580,18 @@ def _dotenv_divergence(graded_target: str | None = None, *,
                         os.environ.get("TORTOISE_DB_PATH"),
                     )
                     if _env_error_preexists:
-                        # Attribute the refusal to the ENVIRONMENT, so the
-                        # printing arms stop claiming the file caused it.
-                        payload["daemon_error_from_env"] = True
+                        # ⛔ `both` only when the FILE's own value is the one the
+                        # ladder read: a broken environment on a DIFFERENT key
+                        # (the file sets a healthy `TORTOISE_DB_PATH`, the shell
+                        # exports a broken `TORTOISE_DB_URI`) makes the file a
+                        # bystander, not a second cause (#12428 review).
+                        _overlay_key = next(
+                            (key for key in _DB_LADDER_KEYS
+                             if (os.environ.get(key) or "").strip()), None)
+                        payload["daemon_error_source"] = (
+                            "both" if _overlay_key in effective else "env")
+                    else:
+                        payload["daemon_error_source"] = "file"
         except ValueError as exc:
             # `os.environ` REFUSES a value carrying a NUL byte, and
             # `parse_dotenv` decodes a binary file with errors="replace" — so a
@@ -11580,18 +11622,26 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         except ValueError as exc:
             # ⛔ This arm is reached in the APPLIED state too: `effective` is empty
             # because there is nothing LEFT to fill, not because the file did not
-            # act — so `os.environ` may hold the file's own value here. Blame the
-            # ENVIRONMENT only when it fails WITHOUT the file's keys.
+            # act — so `os.environ` may hold the file's own value here. Who
+            # supplied it is a RECORDED fact (`dotenv_file.APPLIED`), not value
+            # coincidence: the shell may hold the file's exact value because the
+            # FILE put it there, or because the user exported it themselves —
+            # and only the record can tell (#12428 review).
             daemon_target = None
+            _key = None
+            for _candidate in _DB_LADDER_KEYS:
+                if (os.environ.get(_candidate) or "").strip():
+                    _key = _candidate
+                    break
+            _source = _db_value_source(_key)
             daemon_error = _redact_db_value(
                 f"{type(exc).__name__}: {exc}"
-                + ("" if _env_error_preexists else
-                   " — the value is the one this `.env` supplied"),
+                + (" — the value is the one this `.env` supplied"
+                   if _source == "file" else ""),
                 os.environ.get("TORTOISE_DB_URI"),
                 os.environ.get("TORTOISE_DB_PATH"),
             )
-            if _env_error_preexists:
-                payload["daemon_error_from_env"] = True
+            payload["daemon_error_source"] = _source
     if cli_error:
         payload["cli_error"] = cli_error
     if daemon_error:
@@ -11774,53 +11824,31 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
                      + _applied_note))
         return rows
     if env_file.get("daemon_error"):
-        # ⛔ The clause is conditional here too: when this process applied the
-        # file, the rows below resolved from the SAME values and DO show the
-        # error, so the round-4 sentence was false in that state (#12428 review).
-        _rows_failed = bool(env_file.get("cli_error")
-                            or env_file.get("graded_unresolved"))
-
-        def _rows_below_fail() -> str:
-            return ("this file did not cause it" +
-                    (", and the rows below fail the same way"
-                     if _rows_failed else
-                     " — the rows below graded a target of their own"))
-
-        if not env_file.get("applied_when_graded", True):
-            # Applied DURING this run, after the store above was resolved — so the
-            # rows did not resolve from the file's values at all (#12428 review).
-            _applied_tail = ("this run applied that file at import AFTER resolving "
-                             "the store above, so the rows below do not show that "
-                             "error")
+        # ⛔ THREE sources (file / environment / BOTH), and no claim about what
+        # the rows below did — every previous version of that tail was false in
+        # some reachable state, and the arm is only reachable when this run's own
+        # target RESOLVED (#12428 review).
+        _src = env_file.get("daemon_error_source") or "unknown"
+        if _src in ("file", "both"):
+            _lead = f"{path} makes the DAEMON's target unresolvable: "
+        elif _src == "env":
+            _lead = ("the DAEMON's target is unresolvable from the environment "
+                     "itself: ")
         else:
-            _applied_tail = ("this process applied that file at import as well, so "
-                             "the rows below resolved from the same values" +
-                             (" and fail the same way" if _rows_failed else
-                              " and graded the store above"))
+            _lead = f"{path} is disclosed, but the DAEMON's target does not resolve: "
+        if _src == "file":
+            _why = "the value it rejects is the one this `.env` supplied"
+        elif _src == "both":
+            _why = ("this file's value does not resolve, and neither does the "
+                    "environment's own")
+        elif _src == "env":
+            _why = ("the ENVIRONMENT's own value does not resolve; this file did "
+                    "not supply it")
+        else:
+            _why = "the message above names the value that failed"
         rows.append(("Config: .env", "❌",
-                     (f"{path} is disclosed, but the DAEMON's target is unresolvable "
-                      f"from the environment itself: "
-                      if env_file.get("daemon_error_from_env") else
-                      f"{path} makes the DAEMON's target unresolvable: ")
-                     + f"{_printable(str(env_file['daemon_error'])[:90])} — "
-                     # ⛔ "the rows below fail the same way" is a claim about
-                     # THIS run's own resolution, so it needs that run's own
-                     # outcome — not the file's applied state. Measured: an
-                     # applied `.env` with a broken URI and a healthy graded
-                     # target printed "so the rows below fail the same way" while
-                     # they graded normally (#12428 review).
-                     # ⛔ THREE states, not two: the environment caused it / this
-                     # process had already applied the file / neither (the file
-                     # was only ever applied INSIDE the overlay, so this command
-                     # does not read it). The middle one was lost in an earlier
-                     # round and the NOT-applied arm then claimed "this process
-                     # applied that file at import as well" — measured on the
-                     # documented setup with a file-broken URI (#12428 review).
-                     + (_rows_below_fail()
-                        if env_file.get("daemon_error_from_env") else
-                        _applied_tail if _applied else
-                        "this command does not read it, so the rows below do not "
-                        "show that error")))
+                     _lead + f"{_printable(str(env_file['daemon_error'])[:90])} — "
+                     + _why))
         return rows
     # The store the rows BELOW grade. It is the payload's `cli_target` because
     # `_cmd_doctor` hands `_dotenv_divergence` the target it already resolved —

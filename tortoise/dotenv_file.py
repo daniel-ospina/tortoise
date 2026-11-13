@@ -59,6 +59,24 @@ DOTENV_NAME = ".env"
 #: inferred one, and it survives a module reload.
 LOADED_PATHS: set[str] = set()
 
+#: The key/value pairs THIS PROCESS actually wrote from a `.env`, recorded by
+#: :func:`load_dotenv`. ``LOADED_PATHS`` answers WHICH file was applied; this
+#: answers WHAT it put in the environment, which is the only way a report can say
+#: "the value it rejects came from the file" without inferring it from "no key
+#: was pending" — the applied state has nothing pending precisely because its
+#: values are already in `os.environ` (#12428 review).
+APPLIED: dict[str, str] = {}
+
+
+def applied_value(key: str) -> str | None:
+    """The value THIS process wrote for ``key`` from a ``.env``, else ``None``.
+
+    Compare it with ``os.environ.get(key)``: equal means the process is holding
+    the FILE's value (so the file is a cause of whatever that value does),
+    unequal-or-None means the user's own environment supplied it.
+    """
+    return APPLIED.get(key)
+
 
 def dotenv_path() -> str:
     """The ONE path the daemon's ``.env`` read uses: the repo root.
@@ -164,6 +182,9 @@ def load_dotenv(path: str | None = None) -> list[str]:
     written: list[str] = []
     for key, value in pending_assignments(path).items():
         os.environ[key] = value
+        # Recorded even though the environment now carries it: after the fill,
+        # "present" no longer says where the value came from (#12428 review).
+        APPLIED[key] = value
         written.append(key)
     LOADED_PATHS.add(os.path.abspath(path if path is not None else dotenv_path()))
     return written
