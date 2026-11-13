@@ -41732,7 +41732,7 @@ class TortoiseSDK:
                 #    multiplier is an identity. Measured: five points created on one
                 #    date — a bulk import or one capture burst — the read with
                 #    recency byte-identical to the read without it, the rerank
-                #    skipped, and the trace naming ``recency_order_requested`` over a
+                #    skipped, and the trace naming recency over a
                 #    pool in plain fused order.
                 #
                 # The mechanical question is whether the EFFECTIVE WEIGHTS can
@@ -41945,19 +41945,43 @@ class TortoiseSDK:
         # ⛔ KEYED ON WHAT STEP 4b DID, NOT ON WHAT THE CALLER ASKED FOR. 4b
         # fails OPEN — its ``except`` arm leaves plain RRF order — so a recency
         # REQUEST whose read broke reordered nothing; skipping the rerank then,
-        # while reporting ``recency_order_requested``, names a cause that never
+        # while reporting a reason naming recency, names a cause that never
         # applied and suppresses a lever that was free to run. ``_recency_applied``
-        # is set inside 4b's ``try`` only.
+        # is set inside 4b's ``try`` only. The emitted reason therefore says what
+        # BITT (``recency_order_applied``), not what was ASKED FOR — the request
+        # wording described the cause that did not fire.
+        # ⛔ ORDER_BY IS A PRECONDITION, and it is the same defect as the recency
+        # inversion in a different costume. The rerank runs BEFORE the ``limit``
+        # cut, so it changes which rows SURVIVE the page — that is the whole
+        # point on a relevance read, and it is a bug on every other ordering:
+        # ``order_by="confidence"`` sorts the SURVIVORS by EP belief and
+        # ``order_by="graph"`` by the graph ranker, both AFTER the cut, so a
+        # rerank that re-picked the page would silently drop high-confidence
+        # rows the un-reranked read returns. Step 5e's valid-time lever in this
+        # same method scopes itself the same way (``order_by == "relevance"``);
+        # this is that rule applied to the second pre-cut reorder. Not a silent
+        # choice either: a read that opted in and was left alone DISCLOSES it.
+        _rr_order_by_ok = order_by == "relevance"
         _rr_recency_conflict = bool(_recency_applied)
         if (result_ids and rerank_pool_enabled() and (query or "").strip()
-                and _rr_recency_conflict and status_trace is not None):
+                and not _rr_order_by_ok and status_trace is not None):
             status_trace.append(dict(
                 _trace_entry("rerank", ran=False, degraded=False,
-                             reason="recency_order_requested", count=0),
+                             reason="order_by_not_relevance", count=0),
                 **{RERANK_POOL_KEY: fused_rerank_pool_width(),
                    RERANK_SCORED_KEY: 0,
                    RERANK_UNSCORED_KEY: len(result_ids)}))
         if (result_ids and rerank_pool_enabled() and (query or "").strip()
+                and _rr_order_by_ok
+                and _rr_recency_conflict and status_trace is not None):
+            status_trace.append(dict(
+                _trace_entry("rerank", ran=False, degraded=False,
+                             reason="recency_order_applied", count=0),
+                **{RERANK_POOL_KEY: fused_rerank_pool_width(),
+                   RERANK_SCORED_KEY: 0,
+                   RERANK_UNSCORED_KEY: len(result_ids)}))
+        if (result_ids and rerank_pool_enabled() and (query or "").strip()
+                and _rr_order_by_ok
                 and not _rr_recency_conflict):
             # ONE width for the batch read AND the scorer (#12297 review): the
             # knob used to be resolved only inside ``rerank_pool``, so a

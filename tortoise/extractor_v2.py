@@ -2933,10 +2933,17 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
                                   # effect here was UNMEASURED reordering of the
                                   # persisted prior; #12297 measured exactly this
                                   # leg's recall@3 on the #11901 noun-path corpus
-                                  # (exact arm 244→277 / 300; variant arm 406→425
-                                  # of 426, i.e. **−1**: a candidate fusion had
-                                  # inside the cut is dropped, which is the risk
-                                  # this record exists to state. Artifact
+                                  # at the SHIPPED width (40): exact arm
+                                  # 244→300 / 300 (+56, every mention inside the
+                                  # window); variant arm 406→424 of 426, i.e.
+                                  # **−1**: a candidate fusion ALREADY HAD inside
+                                  # the cut is dropped, which is the risk this
+                                  # record exists to state. (At the narrower width
+                                  # 15 the same arms read 244→277 and 406→425.) The
+                                  # width is named because the pool-15 arm is not
+                                  # the shippable configuration and quoting it
+                                  # alone would credit the lever with a gain it
+                                  # does not earn where it runs. Artifact
                                   # `docs/research/2026-11-12-12297-rerank-
                                   # calibration/measurement-noun-path.json`, whose
                                   # brief calls that row the honest counter-case),

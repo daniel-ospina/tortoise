@@ -718,6 +718,45 @@ def test_the_rerank_runs_before_the_valid_time_demotion():
     assert src.index("rerank_pool(") < src.index("prefer_latest_ids(")
 
 
+def test_a_non_relevance_order_by_is_never_re_picked_by_the_rerank(sdk, monkeypatch):
+    """The second pre-cut reorder must not touch a page another ordering owns.
+
+    The rerank runs BEFORE ``result_ids[:limit]``, so on ``order_by="confidence"``
+    — sorted by EP belief AFTER the cut — it would change which rows the belief
+    sort ever sees, silently dropping high-confidence rows the un-reranked read
+    returns. This pins the precondition on the CONDITION rather than on a
+    comment: a positional scorer (which reverses a fused page) is injected, and
+    the confidence-ordered read must be byte-identical with the gate OFF and ON,
+    with the refusal disclosed. Step 5e pins the same scope for its own lever.
+
+    Mutation check: delete ``_rr_order_by_ok`` from the two conditions and the
+    ON read stops matching the OFF read (the injected scorer re-picks the page) —
+    the measurement is the assertion, not the wording.
+    """
+    nonce = uuid.uuid4().hex[:8]
+    q = f"zebra {nonce}"
+    for i in range(6):
+        sdk.create_point(kind="statement", content=f"{q} order probe {i}")
+
+    off = [r["id"] for r in sdk.tortoise_fts_query(
+        q, entity_type="point", limit=3, order_by="confidence")]
+    assert len(off) == 3, f"premise: a full page must come back (off={off})"
+
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    _inject(_Positional(), monkeypatch)
+    trace: list[dict] = []
+    on = [r["id"] for r in sdk.tortoise_fts_query(
+        q, entity_type="point", limit=3, order_by="confidence",
+        leg_trace=trace)]
+    assert on == off, (
+        "a confidence-ordered page was re-picked before the cut: the rerank "
+        f"changed membership under an ordering that only sorts survivors "
+        f"(off={off} on={on})")
+    entry = _rerank_entries(trace)[0]
+    assert entry["ran"] is False, f"the skip must be disclosed ({entry})"
+    assert entry["reason"] == "order_by_not_relevance", entry
+
+
 def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
     """#12297 — **THE wiring point**: a candidate fusion pushed past the cut.
 
@@ -893,7 +932,7 @@ def test_an_all_tied_page_is_NOT_a_recency_order_in_force(sdk, monkeypatch):
     whose dates all fall in ONE group weighs every row the same and the multiplier
     reorders nothing. A sign test ("did any row carry a date") treated that as "the
     caller's order is in force", suppressed the rerank and had the trace name
-    ``recency_order_requested`` — true of a page written in one day (a bulk import,
+    ``recency_order_applied`` — true of a page written in one day (a bulk import,
     a single capture burst) with no row reordered. The predicate is the SPREAD of
     the effective weights.
     """
@@ -993,7 +1032,7 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
     entries = _rerank_entries(trace)
     assert entries and entries[0]["ran"] is False, (
         f"the skip must be disclosed in the leg trace, not silent ({entries})")
-    assert entries[0]["reason"] == "recency_order_requested", entries[0]
+    assert entries[0]["reason"] == "recency_order_applied", entries[0]
 
     # ⛔ AND THE OTHER HALF — the one that makes the guard a GUARD. Step 4b fails
     # OPEN (its ``except`` arm leaves plain RRF order), so a recency request whose
@@ -1003,7 +1042,7 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
     # through the public API rather than by patching an internal flag:
     # ``recency_field="bad prop"`` → ``Invalid input 'p'`` → plain RRF → the
     # rerank RUNS. Without the ``_recency_applied`` fix this asserts
-    # ``recency_order_requested`` and fails.
+    # ``recency_order_applied`` and fails.
     monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
     _inject(_Positional(), monkeypatch)
     trace2: list[dict] = []

@@ -264,8 +264,11 @@ A re-run records the field. The same is true of `config.model`: it read `null` (
 
 So the user-search rerank **improves ranking and is not affordable**: 3.4 s per
 query on CPU, per query, in the interactive search path. **The lever earns its gate
-on the noun path only.** This is a scoped recommendation, not a general one, and
-the gate's default-off posture is what makes that scope enforceable.
+on the noun path only.** This is a scoped recommendation, not a general one — and
+the gate CANNOT enforce that scope: there is one process-wide variable at one wiring
+point shared by both surfaces, so enabling it for the noun path also adds it to
+interactive user search. Default-off does not bound the blast radius of turning it
+on; it only means nothing changes until someone turns it on for everything.
 
 
 ---

@@ -89,11 +89,16 @@ FUSED_RERANK_POOL_ENV = "TORTOISE_FUSED_RERANK_POOL"
 FUSED_RERANK_MODEL_ENV = "TORTOISE_FUSED_RERANK_MODEL"
 #: How many of the fused pool's leading candidates get SCORED. The retrieval
 #: pool is ~120 per leg (`retrieval.DEFAULT_POOL_SIZE`), so scoring all of it is
-#: 2x the cost for candidates the caller's `limit` will never show. 40 is
-#: #11901's measured mean effective candidate-list length for a production
-#: capture at the `max_queries=15` budget — i.e. the real pool size on the noun
-#: path, which is the surface this lever is calibrated on. Candidates past it
-#: keep their retrieval order and stay in the list.
+#: 2x the cost for candidates the caller's `limit` will never show. 40 is the
+#: SIZE of #11901's measured mean effective candidate set for a production capture
+#: at the `max_queries=15` budget (mean 42.7 over 20 captures: `set_sum` 854 /
+#: 20), which is the surface this lever is calibrated on. ⛔ That set is the
+#: per-CAPTURE UNION of 15 per-query reads; this width bounds the SCORED HEAD of
+#: ONE derived query, which the wiring applies up to 15 times per capture. The two
+#: quantities are the same order and not the same thing — a capture at the default
+#: therefore prices at ~15 x 40 = 600 pairs, which is the arithmetic §6 of the
+#: brief uses. Candidates past the width keep their retrieval order and stay in
+#: the list.
 DEFAULT_FUSED_RERANK_POOL = 40
 
 #: #12297 — the trace-entry keys carrying the rerank's OWN decision, written on
