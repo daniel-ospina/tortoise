@@ -3334,8 +3334,11 @@ def _glob_matches(pattern: str, names: tuple[str, ...]) -> bool:
     """Would this glob PATTERN match a workflow filename in `names`?
 
     Asked with `fnmatch` on the pattern's LAST PATH SEGMENT, so `**/`, directory prefixes,
-    string-concatenated arguments and character classes are graded by what they MATCH rather than
-    by how they are spelled — the distinction three review rounds were spent on. A pattern with NO
+    character classes, and a concatenation whose literal part alone carries the whole pattern
+    (this repo's own `glob.glob(str(WORKFLOWS) + "/*.yml")`) are graded by what they MATCH rather
+    than by how they are spelled — the distinction three review rounds were spent on. ⛔ NOT every
+    concatenation: `glob("*" + ".yml")` arrives as two fragments that are graded SEPARATELY and
+    never joined, so it stays clean (declared in the pin's SCOPE). A pattern with NO
     wildcard (`python-ci.yml`, a deliberate single-workflow reference, or a tuple of REQUIRED
     filenames) can open at most one file per pattern, so it is not an EXTENSION-CLASS enumeration
     and it matches nothing here by construction: `"*.yml"` still reds, while `glob("python-ci.yml")`
@@ -3470,13 +3473,17 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         `['*.yml']` and reds (a literally-spelled extension is one-sided however it is
         tokenized), while `glob(f"*{suffix}")` — this module's correct form — yields `['*']`,
         which matches both extensions and stays clean. What that CANNOT catch, declared: an
-        extension assembled from placeholders (`f"*{dot}yml"`, `glob("*" + ext)`). ⛔ The reason
-        is NOT that the fragments match nothing — `fnmatch("ci.yml", "*")` is true, so a lone
+        extension assembled from placeholders (`f"*{dot}yml"`, `glob("*" + ext)`), or a LITERAL
+        concatenation that splits the pattern itself (`glob("*" + ".yml")`, `glob("*." + "yaml")`)
+        — its fragments come back as `['*', '.yml']`, which grade True/True and True/False, so the
+        whole is one-sided while both halves look innocent. ⛔ The reason is
+        NOT that the fragments match nothing — `fnmatch("ci.yml", "*")` is true, so a lone
         `"*"` fragment matches BOTH witness names. It is that fragments are graded
-        INDEPENDENTLY and never joined, so a symmetric fragment (`"*"`, `"yml"` alone) masks a
+        INDEPENDENTLY and never joined, so a fragment that opens BOTH extensions (`"*"`) masks a
         one-sided whole. Joining them would mean reconstructing the pattern the interpreter
-        builds, i.e. executing the code under test — so the fragments stay ungraded rather than
-        guessed at.
+        builds, i.e. executing the code under test — so the join is never attempted: the
+        fragments are graded exactly as they stand, and only the pattern they WOULD form stays
+        ungraded.
       * a reader that never calls `glob`/`rglob` — `WORKFLOWS.iterdir()` filtered by suffix, or
         `os.listdir`. Measured clean, and not pinnable from source text without a dataflow
         analysis. (`rglob` IS graded: it is in the same NAME set as `glob`, and a recursive
