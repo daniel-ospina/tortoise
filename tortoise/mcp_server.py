@@ -3795,7 +3795,10 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "limit-less call returns a SILENTLY TRUNCATED window: pass the "
         "limit you need. Or tortoise_search(entity_type='event', "
         "kind=<eventKind>, limit=10000) — one kind per call, which also "
-        "slices at `limit` (default 10, no total)."),
+        "slices at `limit` (default 10, no total) — and that arm carries the "
+        "structural leg's SILENT causes too: a 500 ms driver budget and a "
+        "circuit breaker, either of which answers [] with no field reporting "
+        "it."),
     "source": (
         "Enumerate it with tortoise_graph_overview(section='sources') — it "
         "lists every provenance Source with its point count, in one call."),
@@ -3807,7 +3810,10 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "tortoise_graph_overview(section='status') MINUS the provenance "
         "Sources that section 'sources' lists: those are the "
         "`documentKind IS NULL` complement (`sdk.list_sources`), and "
-        "counts.Source is the union of both."),
+        "counts.Source is the union of both. A gap against that partition has "
+        "NAMED causes (the kinds you did not name) and a SILENT one: the leg "
+        "has a 500 ms driver budget and a circuit breaker, and on either it "
+        "answers [] with no field reporting it."),
     "object": (
         "No bulk listing — and none is planned (#12378 keeps these as counts): "
         "tortoise_search(entity_type='object', kind=<objectKind>, "

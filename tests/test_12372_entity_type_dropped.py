@@ -928,3 +928,43 @@ def test_the_document_remedy_states_the_partition_not_the_union() -> None:
     assert "documentKind IS NULL" in message, (
         f"the complementary partition must be named: {message!r}"
     )
+
+
+def test_every_remedy_that_names_a_search_names_the_silent_cause() -> None:
+    """The silent-cause disclosure is a property of the READ, not of one entry.
+
+    Round 9 fixed the `document` partition but left that entry — and `event`'s
+    alternative branch — without the clause `operator`, `object` and `subject`
+    carry, although both name the same read:
+    `tortoise_search(entity_type=…, kind=…)`, i.e. `run_structural_query`. That
+    leg answers `[]` with no field reporting it from two causes that are not
+    population differences at all: `_breaker_allow("structural")` returning
+    False (`tortoise/search_engine.py:4252`), and `graph.query(...,
+    timeout=timeout_ms)` raising into the `except Exception` arm (`:4308`,
+    500 ms default from the signature at `:4168`). A per-entry assertion cannot
+    stop the NEXT entry from repeating the omission — this PR has already
+    re-derived the same class three times — so this sweeps the remedy table
+    itself. `source` is exempt BY CONSTRUCTION: it names
+    `tortoise_graph_overview(section='sources')`, a direct Cypher read with no
+    breaker (`sdk.py:26630-26640`), so it names no search at all.
+    """
+    from tortoise.mcp_server import _ENTITY_TYPE_REMEDY
+
+    searching = {
+        entity_type: message
+        for entity_type, message in _ENTITY_TYPE_REMEDY.items()
+        if "tortoise_search(" in message
+    }
+    assert searching, (
+        "no remedy names a tortoise_search read — this sweep would be vacuous"
+    )
+    missing = {
+        entity_type
+        for entity_type, message in searching.items()
+        if "500 ms" not in message or "breaker" not in message
+    }
+    assert missing == set(), (
+        "these remedies name a structural-leg search but not the causes that "
+        "make it answer [] with nothing reporting it: "
+        f"{sorted(missing)}"
+    )
