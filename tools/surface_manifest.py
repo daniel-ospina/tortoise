@@ -2166,7 +2166,12 @@ def surface_symbols(doc: dict) -> set[tuple[str, str]]:
     for key in ("rows", "retired"):
         half = doc.get(key)
         if half is None and key == "retired":
-            continue  # an older manifest may predate the retired half; `rows` is required
+            # NOT "an older manifest may predate the half" — no such manifest can be committed
+            # green: `check` reds a baseline with no `retired:` list from both directions. The
+            # only tree that reaches this is one `cut` is REPAIRING, so refusing would block
+            # the repair; but an absence must be SAID, because a retired name dropped in the
+            # same PR is otherwise invisible. `cmd_cut` prints the warning.
+            continue
         if not isinstance(half, list):
             raise SurfaceEvidenceUnreadable(
                 f"a manifest document carries no `{key}:` list, so its removed symbols "
@@ -2255,15 +2260,24 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
         archived.add((kind, symbol))
     try:
         from tortoise.sdk_retired import REMOVED_SDK_METHODS, RETIRED_SDK_METHODS
-        from tortoise.tool_registry import RETIRED_USE_INSTEAD
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, RETIRED_USE_INSTEAD
     except Exception as exc:
         raise SurfaceEvidenceUnreadable(
             f"could not import the retirement records (RETIRED_USE_INSTEAD / "
             f"RETIRED_SDK_METHODS / REMOVED_SDK_METHODS): {type(exc).__name__}: {exc}"
         ) from exc
+    # ⛔ The forward record is the SERVED set, not the map's keys. `_RETIRED_SHIMS` is built
+    # from `RETIRED_TOOL_REGISTRY` (`RETIRED_TOOL_REGISTRY = [t for t in _ENTRY_DECLARATIONS
+    # if t.name in RETIRED_USE_INSTEAD]`), so a KEY whose `ToolDefinition` was deleted serves
+    # nothing at all — neither advertised nor answered. Counting that key as a record would let
+    # one "cleanup" (retire the name AND delete the tool) report the removal as *"keeps
+    # SERVING the name"*, the opposite of the truth (review of PR #12313). This gate must not
+    # rest on an invariant it does not check, even though `tests/test_retired_tools.py` reds
+    # the dangling-key state on a committed tree.
+    served_forward = set(RETIRED_USE_INSTEAD) & {t.name for t in RETIRED_TOOL_REGISTRY}
     return {
         "archived": archived,
-        "forward": set(RETIRED_USE_INSTEAD),
+        "forward": served_forward,
         "sdk_retired": set(RETIRED_SDK_METHODS) | set(REMOVED_SDK_METHODS),
     }
 
@@ -2536,6 +2550,11 @@ def cmd_cut(args: argparse.Namespace) -> int:
                   "`--allow-removal <symbol> --allow-removal-reason <why>`; it is logged "
                   "below and belongs in the PR body.")
             return 1
+
+    if prior_doc is not None and prior_doc.get("retired") is None:
+        print("  WARNING the committed baseline carries no `retired:` list, so the retired "
+              "half could not be compared — a retired name that also left the declaration is "
+              "NOT graded by this cut (and `check` reds the shape; reconcile, then re-cut)")
 
     MANIFEST_FILE.write_text(
         MANIFEST_HEADER

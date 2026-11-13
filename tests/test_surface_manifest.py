@@ -5657,3 +5657,42 @@ def test_ONE_waiver_grammar_is_shared_by_both_callers():
     # The class axis: a waiver naming the OTHER surface is not an explanation.
     assert sm.waiver_matches("sdk:x", "x", "tool") is False
     assert sm.waiver_matches("tool:x", "x", "sdk") is False
+def test_the_forward_record_is_the_SERVED_set_not_the_maps_keys(monkeypatch):
+    """A `RETIRED_USE_INSTEAD` key with no `ToolDefinition` serves NOTHING.
+
+    `_RETIRED_SHIMS` is built from `RETIRED_TOOL_REGISTRY`, which is the entries whose name is
+    in the map — so a dangling key (retire the name, then delete the tool: one "cleanup") would
+    otherwise be counted as a record asserting the removal "keeps SERVING the name", which is
+    the opposite of the truth. `tests/test_retired_tools.py` reds that state on a committed
+    tree; this gate must not rest on an invariant it does not check. (Review of PR #12313.)
+    """
+    import tortoise.tool_registry as registry
+
+    sm = _load_manifest_tool()
+    real = list(registry.RETIRED_TOOL_REGISTRY)
+    assert real, "the retired registry is empty — this arm would prove nothing"
+    monkeypatch.setattr(registry, "RETIRED_TOOL_REGISTRY", [real[0]])
+    records = sm.removal_records()
+    assert records["forward"] == {real[0].name}, records["forward"]
+
+
+def test_a_baseline_with_NO_retired_half_is_SAID_not_silent(monkeypatch, tmp_path, derived_baseline, capsys):
+    """`cut` is the repair path for that shape, so it proceeds — but it must SAY so.
+
+    `check` reds a baseline with no `retired:` list from both directions, so this shape is only
+    reachable on a tree `cut` is repairing; refusing would block the repair. The absence is
+    still printed, because a retired name dropped in the same PR is then not graded.
+    """
+    sm = _load_manifest_tool()
+    prior = copy.deepcopy(derived_baseline)
+    prior.pop("retired", None)
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "WARNING the committed baseline carries no `retired:` list" in out, out
