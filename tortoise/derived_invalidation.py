@@ -1021,7 +1021,7 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
       remain, its own stale finding reconciles the word — so the shape that could
       recur here is the last-claim one); that shape is what
       :func:`reconcile_goal_states` sweeps for, and this function is the per-goal
-      door it routes through);
+      door it routes through.
     * a ``blocked`` goal lost the word when a ``target-revised`` retirement
       cleared the cache under it.
 
