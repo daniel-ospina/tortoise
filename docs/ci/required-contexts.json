@@ -42,12 +42,6 @@
         "build-client"
       ]
     ],
-    "canary": [
-      [
-        "release-artifact-canary.yml",
-        "canary"
-      ]
-    ],
     "canary-streak": [
       [
         "python-ci.yml",
@@ -73,6 +67,10 @@
     "check": [
       [
         "availability-liveness.yml",
+        "check"
+      ],
+      [
+        "consent-key-drift.yml",
         "check"
       ],
       [
@@ -416,12 +414,6 @@
         "repo-harnesses"
       ]
     ],
-    "report": [
-      [
-        "release-artifact-canary.yml",
-        "report"
-      ]
-    ],
     "schema-drill": [
       [
         "ci.yml",
@@ -547,7 +539,7 @@
       ]
     ]
   },
-  "gate_digest": "9a9e27bbb62407180dfdb74ba705577ae2f209d50e5de16f273de87f531e4d75",
+  "gate_digest": "918dc98e141ed1bbfe176d3f261d08fa189694fe622e01ee3a41c1b311ed1334",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -571,5 +563,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-11-13T18:07:41Z"
+  "verified_at": "2026-11-13T22:32:18Z"
 }
