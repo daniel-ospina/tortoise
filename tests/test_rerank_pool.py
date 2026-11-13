@@ -958,16 +958,32 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                         or any(node is k.value for k in c.keywords)):
                     call = c
                     break
+            # ⛔ THE VALUE, NOT THE NAME. A presence test accepted
+            # ``_rerank_candidates=True`` as an opt-out at every site here
+            # (measured: the one-word flip at the volunteer seam left all 58
+            # tests green while the armed gate re-picked that pool), which is
+            # exactly the edit this census exists to catch.
             opted_out = bool(call) and any(
-                k.arg == "_rerank_candidates" for k in call.keywords)
+                k.arg == "_rerank_candidates"
+                and isinstance(k.value, _ast.Constant)
+                and k.value.value is False
+                for k in call.keywords)
             if call is not None and not opted_out:
                 # a read BOUND as a seam (``_search_fn=sdk.tortoise_fts_query``):
                 # the flag rides in the adjacent ``_search_kwargs`` dict, so the
-                # call itself carries no keyword for it
-                opted_out = any(
-                    k.arg == "_search_kwargs"
-                    and "_rerank_candidates" in _ast.unparse(k.value)
-                    for k in call.keywords)
+                # call itself carries no keyword for it — and the DICT is
+                # evaluated, not grepped, for the reason above
+                for k in call.keywords:
+                    if k.arg != "_search_kwargs":
+                        continue
+                    try:
+                        opts = _ast.literal_eval(k.value)
+                    except (ValueError, SyntaxError):
+                        continue        # not a literal: cannot be proven, so not
+                    if isinstance(opts, dict) and opts.get(
+                            "_rerank_candidates") is False:
+                        opted_out = True
+                        break
             owner = ""
             for fn in _ast.walk(tree):
                 if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and any(
@@ -1026,9 +1042,20 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         f"{len(kw_seams)} ``_search_kwargs`` — a seam without kwargs inherits "
         "``_rerank_candidates=True`` and re-picks its pool")
     for kw in kw_seams:
-        assert "_rerank_candidates" in _ast.unparse(kw.value), (
+        # ⛔ THE VALUE, NOT THE NAME — ``{'_rerank_candidates': True}`` satisfied
+        # the substring form this replaces (measured), and a seam whose kwargs
+        # say True re-picks its pool while reading as an opt-out here.
+        try:
+            opts = _ast.literal_eval(kw.value)
+        except (ValueError, SyntaxError) as exc:
+            raise AssertionError(
+                f"_search_kwargs at line {kw.lineno} is not a literal dict, so "
+                "this census cannot prove it opts out — write it as a literal"
+            ) from exc
+        assert isinstance(opts, dict) and opts.get(
+            "_rerank_candidates") is False, (
             "_search_kwargs at line "
-            f"{kw.lineno} does not opt out of the rerank")
+            f"{kw.lineno} does not opt out of the rerank: {opts!r}")
 
 
 def test_a_non_relevance_order_by_is_never_re_picked_by_the_rerank(sdk, monkeypatch):
@@ -1118,6 +1145,10 @@ def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
 
     off = [r["id"] for r in sdk.tortoise_fts_query(
         q, entity_type="point", limit=2, pool_size=25)]
+    # the UNCUT gate-off order, read before the gate is armed — the reference the
+    # ``count`` assertion below contrasts against
+    uncut = [r["id"] for r in sdk.tortoise_fts_query(
+        q, entity_type="point", limit=25, pool_size=25)]
     assert marker_id not in off, (
         "premise: the marker passage must fall OUTSIDE a limit=2 cut without "
         f"the rerank, or this test proves nothing (off={off})")
@@ -1130,12 +1161,28 @@ def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
 
     monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
     _inject(_MarkerOnly(), monkeypatch)
+    trace: list[dict] = []
     on = [r["id"] for r in sdk.tortoise_fts_query(
-        q, entity_type="point", limit=2, pool_size=25)]
+        q, entity_type="point", limit=2, pool_size=25, leg_trace=trace)]
     assert marker_id in on, (
         "the rerank did not promote the marker into the cut — either it ran "
         "AFTER `result_ids[:limit]` (where it can only reorder what already "
         f"survived) or it did not run at all (on={on})")
+
+    # ⛔ AND ``count`` MUST BE THE MOVES THE LEVER MADE. This is the ONE read in
+    # this file where rows demonstrably move (the marker jumps from outside the
+    # cut to inside it), and the only other assertion on ``count`` anywhere
+    # asserted ZERO (the flat-scorer page, where "nothing moved" is the right
+    # answer) — so ``count=int(_rr_stats.get("moved") or 0)`` could be replaced
+    # by a literal ``0`` with the whole suite green (measured), leaving every
+    # caller reading the trace told "the reranker ran and moved nothing" on a
+    # page it fully reordered. Derived from the gate-OFF order, not a magic
+    # number: the marker's slot before and after.
+    entry = _rerank_entries(trace)[0]
+    assert entry["ran"] is True and entry["reason"] == "ok", entry
+    assert entry["count"] > 0, (
+        f"the trace says the reranker moved nothing on a page it reordered "
+        f"({entry}) [gate-off order: {uncut[:3]}… → gated page: {on}]")
 
 
 def test_a_pool_with_no_usable_text_makes_no_scorer_call(sdk, monkeypatch):

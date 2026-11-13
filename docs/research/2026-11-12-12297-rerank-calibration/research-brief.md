@@ -261,13 +261,17 @@ paragraph called the table "an AD-HOC observation … at loadavg 2.7" — true o
 7.5 / 62.9 ms micro-benchmark the table REPLACED, false of the table itself, and it
 contradicted the provenance paragraph seven lines above.)
 
-**And three recorded gaps in the artifact:** `measurement-user-search.json` was
-produced before the report's `config` carried `fused_rerank_gate_armed`,
-`wired_pool_width` and the resolved `model`, so it has none of the three keys (its
-`config.model` was filled in afterwards, as `model_provenance` states). Each
-absence is expected rather than a lost record — and the numbers are themselves
-evidence the baseline was not already reranked (`gained 165 / lost 0` is not
-producible by a rerank-vs-rerank comparison). A re-run records all three fields.
+**And recorded gaps in the artifact:** `measurement-user-search.json` was produced
+before the report's `config` carried `fused_rerank_gate_armed`,
+`wired_pool_width` and the resolved `model`, and before the per-arm accounting
+fields added since (`rerank_applied_on_every_query`, `rerank_skipped_read`,
+`degraded_queries`, `model_was_explicit`, `model_resolver`) — it has NONE of them
+(its `config.model` was filled in afterwards, as `model_provenance` states). ⛔ THE
+LIST IS ILLUSTRATIVE, NOT A COUNT: the harness's `config` block keeps growing, and
+a number here re-stales on the next field. Each absence is expected rather than a
+lost record — and the numbers are themselves evidence the baseline was not
+already reranked (`gained 165 / lost 0` is not producible by a rerank-vs-rerank
+comparison). A re-run records whatever the harness carries at that point.
 `config.model` there reads `cross-encoder/ms-marco-MiniLM-L6-v2`, the id the run
 resolved, and `model_provenance` states that it was filled in after the run and
 that no measured value changed; the harness writes the resolved id natively from
