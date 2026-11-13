@@ -2891,6 +2891,41 @@ def test_a_neutral_row_with_a_TERMINAL_successor_keeps_DROP(sdk):
         "a neutral edge transfers nothing, so the carry disposition is false: " + fix)
 
 
+def test_a_neutral_row_with_a_SHAPED_successor_keeps_the_NEUTRAL_drop(sdk):
+    """A neutral edge is DROP because of the EDGE, not because of the successor.
+
+    The refused-carrier arm's rationale is the successor's — "a carry needs a
+    successor EP actually reads" — and it scopes the DROP "for the edge AS NAMED",
+    which invites a carry to a differently-named successor. On a NEUTRAL edge that
+    carry is inert: measured `effective_n 2.0` (the bare prior), exactly as deleting
+    the edge is, while the same row's `fix` orders DELETE and says "§3.1's
+    disposition is DROP". So the neutral arm must take the row whichever shape the
+    successor has (#12210 review, P3).
+
+    The successor here is operator-SHAPED on purpose: that is the carrier shape that
+    made the refused arm pre-empt the neutral one.
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2", is_operator=True)
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    # The instruction this triage is appended to: DELETE.
+    assert "Delete this IMPL edge" in fix, fix
+    assert "the disposition here is DROP" in fix, (
+        "a neutral edge's DROP is the edge's own, not the successor's: " + fix)
+    assert "AS NAMED" not in fix, (
+        "'AS NAMED' invites a carry to a differently-named successor, which a "
+        "neutral edge cannot perform (measured effective_n 2.0): " + fix)
+    assert "a carry needs a successor EP actually reads" not in fix, (
+        "that is the successor's rationale, and it is not why this row is DROP: "
+        + fix)
+
+
 def test_the_neutral_shaped_prefix_clause_is_operator_lane_accurate(sdk):
     """An ambiguous OPERATOR row must not be told an ``op_type`` carrier is unread.
 
@@ -3192,8 +3227,19 @@ def test_a_neither_arm_draft_row_is_told_to_clear_the_shape_too(sdk):
                  if i.node_id == v1["id"])
     fix = issue.fix
     assert "ONCE PROMOTED" in fix, fix
-    assert "clear the shape on the endpoint EP refuses" in fix, (
+    assert "Clear the shape on the endpoint EP refuses too" in fix, (
         "the promotion alone builds no factor while the endpoint is shaped: " + fix)
+    # ⛔ The clause must be its OWN sentence, and must count its own steps:
+    # ``_draft_mech``'s neither-arm text ends with a declarative, so splicing
+    # " AND clear the shape …" welded an imperative onto it, and "only both steps"
+    # named two while the instruction lists three (promote, clear the shape, move)
+    # (#12210 review, P3).
+    assert "re-scored. Clear the shape on the endpoint EP refuses too" in fix, (
+        "the shape step must start a new sentence: " + fix)
+    assert "re-scored AND clear the shape" not in fix, (
+        "an imperative welded onto a declarative: " + fix)
+    assert "ALL THREE steps are needed" in fix, (
+        "the instruction lists three steps, so the count must say three: " + fix)
 
 
 def test_a_dead_input_on_a_three_input_operator_is_not_told_it_builds_no_factor(sdk):
