@@ -1015,7 +1015,13 @@ OPERATOR_READ_CEILING = 10_000
 #: LIST return (`sdk.py`). A response that FILLS the request is therefore
 #: indistinguishable from a truncated layer, while a response STRICTLY BELOW it is the
 #: exact layer — which is what `read_events` rests completeness on. Same hazard as the
-#: operator read, and the same refusals apply.
+#: operator read, but the Event read refuses STRICTLY MORE, and the difference is the
+#: engine cap: a count AT the bound refuses before the read, and a FILLED response refuses
+#: even when a fresh count agrees. The operator read (#12380) refuses only a count ABOVE
+#: `OPERATOR_READ_CEILING` and a fill whose count disagrees, so a 10,000-row operator layer
+#: capped at 10,000 is accepted — the same fail-open, latent there (3,727 of 10,000 used)
+#: and tracked separately (#12440); do not read this constant as evidence that arm needs no
+#: audit.
 #:
 #: ⛔ 10,000 is TWO bounds that happen to coincide, and the coincidence is the whole
 #: hazard. Ours: the SDK refuses `tortoise_search(limit > 10000)` outright, which makes
@@ -1030,10 +1036,12 @@ OPERATOR_READ_CEILING = 10_000
 #: never fire, and a layer that grew by one row past the cap is filed as complete. Sizing
 #: to the bound makes a capped response equal it and refuse.
 #:
-#: The residual is on the UNREPORTED arm only: a server tuned BELOW this bound caps
-#: invisibly, and nothing here can see that tuning. A reported count catches it (a capped
-#: response never equals a larger count), and a deployment that lowers the cap must lower
-#: this constant with it.
+#: The residual is a server tuned BELOW this bound, which caps the read invisibly. On the
+#: UNREPORTED arm nothing can see it. On the reported arm only a count DIFFERING from the
+#: cap sees it — a count that EQUALS the cap cannot, because it agrees with the capped
+#: response (`len(raw) == reported` short-circuits the whole re-count path). Nothing fires
+#: at the shipped default, where the cap is the bound; a deployment that lowers the cap
+#: must lower this constant with it.
 #:
 #: The bound exists because this layer can only be read in ONE response (a `limit` and no
 #: `offset`), so "the whole layer" needs a stated size a refusal can name — and it is a

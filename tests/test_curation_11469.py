@@ -4634,8 +4634,8 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     assert f"127 carry · 5 not-carried · {total - 132:,} undecidable" in flat, (
         "the dispositions line does not add up to the population")
     # ⛔ The PLAN's wiring row must not prescribe the clamp the code was fixed to remove:
-    # it said `limit=EVENT_READ_CEILING` while the code sends `reported + 1`, i.e. the plan
-    # documented the fail-open (PR-review cycle 2), and nothing pinned it.
+    # it said `limit=EVENT_READ_CEILING` while the code then sent `reported + 1`, i.e. the
+    # plan documented the fail-open (PR-review cycle 2), and nothing pinned it.
     plan = (_pathlib.Path(__file__).resolve().parent.parent / "docs" / "plans"
             / "2026-11-13-issue-12378-event-layer-read.md").read_text(encoding="utf-8")
     assert "limit=EVENT_READ_CEILING + 1" not in plan, (
@@ -4669,8 +4669,9 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     # ⛔ ...and the CODE's own text, which nothing pinned (PR-review cycle 5). The plan pin
     # above guards the plan, but `tools/curate_graph.py` carried the SAME superseded
     # prescription in TWO places — the `read_events` docstring bullet and the
-    # `EVENT_READ_CEILING` constant's comment — while the code sends
-    # `EVENT_READ_CEILING + 1` (`curate_graph.py:limit_sent`). It survived four review
+    # `EVENT_READ_CEILING` constant's comment — while the code then sent
+    # `EVENT_READ_CEILING + 1` (`curate_graph.py:limit_sent`, cycle 3; it sends the bound
+    # itself since cycle 5). It survived four review
     # cycles and one peer fix for exactly that reason: the phrase was pinned in the plan
     # only. A maintainer reconciling code to that text deletes the bound-sized request and
     # restores the one-row-headroom truncation window, so the wrong direction is the
@@ -4706,7 +4707,7 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
     # code line.
     assert "is sized to `counts.Event + 1`" not in source_flat, (
         "curate_graph.py still prescribes sizing the Event request to the count; the code "
-        "sends EVENT_READ_CEILING + 1")
+        "sizes it to exactly EVENT_READ_CEILING")
     assert "sizes each request to `counts.Event + 1`" not in source_flat, (
         "the EVENT_READ_CEILING comment still prescribes sizing the request to the count")
     # ⛔ CYCLE 5 CHANGED WHAT THE PRESENCE SIDE MUST PIN, and the scoping discipline above
@@ -4911,9 +4912,12 @@ def test_a_layer_that_shrank_with_an_agreeing_recount_is_accepted_not_refused():
     The re-count was applied only when `read > reported`, so a `:Event` deleted by the
     hosted entity-delete path in the two-request window made a COMPLETE read refuse —
     the same false block in the other direction (PR-review cycle 2). The request is
-    `EVENT_READ_CEILING + 1`, so a response that stays BELOW it is the exact layer at any
-    size in either direction, and a fresh count that equals the rows confirms the
-    disagreement was a stale count.
+    exactly `EVENT_READ_CEILING`, so a response STRICTLY BELOW it was not capped and is the
+    exact layer in either direction, and a fresh count that equals the rows confirms the
+    disagreement was a stale count — while a response that FILLS the request refuses even
+    when the fresh count agrees (see the reported-arm fill arm), because `bound + 1` did
+    not survive cycle 5: a request one above the bound can never be filled at the engine's
+    cap, which made that refusal inert.
     """
     mod = _tool_module()
     rows = [{"id": "ev-1", "eventKind": "meeting", "name": "a"},
