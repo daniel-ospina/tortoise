@@ -4740,16 +4740,28 @@ _UNIT_WORDS = (r"s|sec|secs|seconds|ms|us|µs|min|mins|h|hr|hrs|hour|hours|days?
 #: FALSE-PASS surface, not only the false-red one this list is usually discussed as.
 #: They are kept OUT of `_UNIT_WORDS` and added only to the plain `_UNIT`, so an arm
 #: that must refuse a POSITION (`9987 lines into the manifest`, `at 9987 lines`,
-#: `9987 rows down`) can use the positional variant and still leave a genuine COUNT
-#: (`— 155 lines`, `on 1450 files`) green. Measured: with `lines|rows` in the shared
-#: list, EVERY spelling of a line position written with a unit noun was GREEN while
-#: `:9987` was RED — one arm, two spellings, opposite verdicts (#12369 review, P2).
+#: `9987 rows down`) can use the strict positional variant — and it PAYS for that in
+#: the benign direction, which is stated here rather than implied: a genuine COUNT
+#: whose noun is `lines`/`rows` on such a line is refused too (`— 155 lines` yields
+#: `['155']` under `_BARE_NUM`, measured), because nothing mechanical separates the
+#: two there. `on 1450 files` stays green, `files` being in the shared list (#12369
+#: review, P3: an earlier cut of this comment claimed BOTH stayed green, and the
+#: residual twenty lines below said the opposite about the same example). Measured:
+#: with `lines|rows` in the shared list, EVERY spelling of a line position written
+#: with a unit noun was GREEN while `:9987` was RED — one arm, two spellings,
+#: opposite verdicts (#12369 review, P2).
 _UNIT_POSITION_WORDS = r"lines|rows"
 #: The words that make a `lines`/`rows` phrase a POSITION rather than a count.
 #: ⛔ `in` IS A TAIL ONLY AT THE END OF A CLAUSE (#12369 review, P2). A bare `rows in.`
 #: is a position (`the entry reads 9987 rows in.` — measured GREEN before this), while
 #: `155 lines in the summary` is a COUNT and must stay green. The lookahead is what
 #: separates them, so the alternative is punctuation/end-anchored rather than a word.
+#: ⚠️ `of the manifest|file` IS A DELIBERATE OVER-CATCH, not a positional tell (#12369
+#: review, P3): `` — 155 lines of the file `` reads as a COUNT and is matched anyway
+#: (`_MANIFEST_CITE` → True, measured). Over-catching is the tolerated direction on
+#: the doc-wide arm — the cost is a false red a maintainer rewrites, against a miss
+#: that ships the rot — and a count and a position are not separable there, so the
+#: alternative is kept and NAMED rather than presented as a discriminator.
 _POSITION_TAIL = (r"(?:into|down|deep|below|above|from\s+the\s+top|"
                   r"in(?=[.,;:!?)\]]|$)|"
                   r"of\s+the\s+(?:manifest|file))")
@@ -4892,17 +4904,20 @@ _MANIFEST_CITE = re.compile(
 #: that is the direction this pin prefers (the sentence is not where a line count
 #: belongs), and it is the only sentence this arm reads.
 _BARE_NUM = re.compile(_LEADING_NUM_NO_POSITION)
-#: ⛔ TWO PATTERNS, TWO QUESTIONS, AND SWAPPING THEM IS A BUG IN EITHER DIRECTION.
-#: The CLAIM sentence asks "is any number here?" and its contract is that the answer
-#: is no — so it uses the POSITIONAL-strict pattern above and refuses the whole
-#: unit-noun class. A NEIGHBOUR line asks "does this line re-state the claim's
-#: position?" and the same document legitimately counts things beside the manifest's
-#: name — `— 155 lines of rows`, `lists 60 entries`, `row: 166 s` — so it must stay
-#: UNIT-AWARE. Measured: giving the neighbour arm the strict pattern refused all three
-#: of those (false reds), while giving the claim sentence the unit-aware one let
-#: `— its 9987th line` through (the false pass). An ORDINAL is caught by BOTH (the
-#: digit run is all `_NUM` needs), which is why the strictness can differ here without
-#: losing the class that matters.
+#: ⛔ ONE MATCHER NOW, AND IT IS THE STRICT ONE — on BOTH surfaces. The CLAIM
+#: sentence asks "is any number here?" and its contract is that the answer is no; a
+#: NEIGHBOUR line asks the same question of the same claim, so `_bare_number_hits_
+#: neighbour` calls `_bare_number_hits` and there is no unit-aware variant left to
+#: swap in. Measured at this head: `— 155 lines of rows` beside the manifest's name is
+#: refused (`['155']`) — an accepted FALSE RED, pinned where it is paid for — while
+#: `lists 60 entries` and `row: 166 s` stay GREEN, because `entries`, `s` and the rest
+#: of the unambiguous units are in `_UNIT_WORDS` and `lines`/`rows` are the only nouns
+#: this pattern treats as positions. (An earlier cut of this comment claimed the arm
+#: was "UNIT-AWARE" and that the strict pattern refused "all three" of those — stale
+#: text from the round that deleted the tail allow-list, refuted 1-of-3 here and by
+#: `_bare_number_hits_neighbour`'s own docstring.) An ORDINAL (`— its 9987th line`) is
+#: caught by the strict pattern too, which is why one matcher loses none of the class
+#: that matters.
 
 #: ⛔ A LONE FOUR-DIGIT 19xx/20xx RUN IS A YEAR AS OFTEN AS A LINE NUMBER, and the bare
 #: arm cannot tell them apart — so it refuses the year rather than punishing prose that
@@ -4948,6 +4963,28 @@ _BLOCK_WORDS_WITH_MANIFEST = re.compile(
 #: them carries `carve_out`/`entry`/`block`/`manifest`. The stems are the entry's own
 #: name in the three spellings the document and the bundle use for it.
 _ENTRY_STEMS = re.compile(r"writeprobe|write[-_ ]?probe|pack[-_ ]?logic|11083")
+
+
+def _in_neighbour_population(line: str, claim_line: str) -> bool:
+    """Is `line` a line the neighbour arm must SCAN? One place, called by the loop.
+
+    ⛔ WHY THIS IS A FUNCTION AND NOT AN INLINE CONDITION (#12369 review, P2,
+    measured). Both vocabularies were asserted by tests — the block's, the entry's,
+    and the manifest's FILENAME — but nothing drove the LOOP, so putting the gate
+    back to `_BLOCK_WORDS` alone left every case green while re-opening the false
+    pass the widening exists to close:
+
+        Re-derived again: `config/ci-surfaces.yml` — its 9987th line at this head.
+        (widened gate: admitted, stray `['9987']`; pre-delta gate: SKIPPED, GREEN)
+
+    The decision now lives here, the block arm's loop calls it, and the population
+    test pins the call site by AST — so a revert of the CALL, not only of the
+    constants, reds.
+    """
+    if line == claim_line:
+        return False
+    return bool(_BLOCK_WORDS_WITH_MANIFEST.search(line)
+                or _ENTRY_STEMS.search(line))
 #: …and a line that names ANOTHER source file is that file's, not this claim's: see
 #: `_neighbour_number_strays` for the measurement that made this necessary.
 _OTHER_FILE = re.compile(r"[\w/]+\.(?:py|ya?ml|json|md)\b")
@@ -6154,10 +6191,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # that exists only inside a test body cannot be tested.
         neighbour_findings: list[str] = []
         for other_line in doc_lines:
-            if other_line == doc_hits[0]:
-                continue
-            if not (_BLOCK_WORDS_WITH_MANIFEST.search(other_line)
-                    or _ENTRY_STEMS.search(other_line)):
+            if not _in_neighbour_population(other_line, doc_hits[0]):
                 continue
             stray = _neighbour_number_strays(other_line.replace(ENTRY, ""))
             if stray:
@@ -6556,8 +6590,38 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
             f"{line!r} is not in the neighbour population — a line naming the "
             f"manifest's FILENAME is a line about this claim, or the rot returns "
             f"uncaught in the document's own words")
+        assert _in_neighbour_population(line, "the claim line"), (
+            f"{line!r} is refused by `_in_neighbour_population`, which is the "
+            f"function the block arm's loop now CALLS — the constants are not the "
+            f"gate on their own")
         assert _neighbour_number_strays(line), (
             f"{line!r} is in the population but yields no stray — the arm is inert")
+    # …and the CLAIM line itself is never a neighbour, or the block arm would report
+    # the claim sentence's own text as a stray beside itself.
+    assert not _in_neighbour_population("`carve_out:` holds one", "`carve_out:` holds one")
+    assert not _in_neighbour_population("an unrelated sentence about the loader",
+                                        "`carve_out:` holds one")
+    # ⛔ THE WIRING PIN (#12369 review, P2). Reverting the loop to the pre-delta gate
+    # (`_BLOCK_WORDS` alone, or the two constants inlined) leaves every constant
+    # assertion above GREEN while the false pass returns; only the CALL SITE is the
+    # gate. Parsed, not grepped: the assertion is that the loop over `doc_lines`
+    # contains a call to `_in_neighbour_population`.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    loops = [node for node in ast.walk(tree)
+             if isinstance(node, ast.For)
+             and isinstance(node.target, ast.Name)
+             and node.target.id == "other_line"]
+    assert loops, ("the block arm's neighbour loop no longer iterates `other_line` "
+                   "— re-point this wiring pin rather than deleting it")
+    for loop in loops:
+        assert any(isinstance(call, ast.Call)
+                   and isinstance(call.func, ast.Name)
+                   and call.func.id == "_in_neighbour_population"
+                   for call in ast.walk(loop)), (
+            "the neighbour loop does not consult `_in_neighbour_population` — the "
+            "population gate was reverted to a narrower spelling, and the false pass "
+            "#12369 closed (a line naming the manifest by FILENAME, or the entry by "
+            "name, going UNSCANNED) comes back with every constant test green")
     # …and the unambiguous UNITS stay counts on a neighbouring line: `entries`, `s`,
     # `bytes` are never positional nouns, so they are not what the strict arm refuses.
     for count in ("`config/ci-surfaces.yml` lists 60 entries in `carve_out:`",
