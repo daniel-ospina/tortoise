@@ -89,6 +89,17 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
     #: SQUASH-merges (`admin-merge.sh` defaults to `--squash`), so after merge the
     #: branch commit is not an ancestor of main while its object survives in every
     #: object DB that fetched the PR — an ancestry assert would red healthy main.
+    #: ⛔ THESE TWO READ THE ARTIFACT ONLY, so they run ABOVE the git gate: a
+    #: `pytest.skip` inside that gate aborts THIS test, and putting them below
+    #: it meant every fresh clone (where neither sha is an object — the normal
+    #: post-squash shape) skipped the retrieval-mode check entirely. MEASURED:
+    #: an artifact declaring `legs_seen.vector=False` and
+    #: `window_modes.keyword_only=5` — the keyword-only false-label class this
+    #: file exists to refuse — reported `1 skipped … UNVERIFIED` instead of red.
+    assert r["legs_seen"].get("vector") is True, (
+        "the artifact is not the fused read — re-run with the embeddings extra "
+        "(a keyword-only figure is never a figure about the production read)")
+    assert r["window_modes"]["keyword_only"] == 0
     repo = Path(__file__).resolve().parent.parent
     if (repo / ".git").exists() and shutil.which("git"):
         #: ⛔ EVERY git subprocess here needs a timeout: on a promisor/partial
@@ -151,10 +162,6 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
                 "on the files this measurement exercises — the substitution is "
                 "not code-equivalent, so the numbers no longer describe this "
                 "tree")
-    assert r["legs_seen"].get("vector") is True, (
-        "the artifact is not the fused read — re-run with the embeddings extra "
-        "(a keyword-only figure is never a figure about the production read)")
-    assert r["window_modes"]["keyword_only"] == 0
 
 
 def test_the_pre_12295_control_is_the_zero_it_claims(report):
