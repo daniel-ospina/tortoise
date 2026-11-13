@@ -376,16 +376,21 @@ class TestDoctorReadCappedIsAWallClock:
             f"the interrupted body was reported COMPLETE ({outcome})")
 
     def test_a_body_the_watchdog_ended_is_never_reported_complete(self):
-        """The DETERMINISTIC form of the same defect: EOF after OUR interrupt.
+        """A DETERMINISTIC reproduction of "EOF after OUR interrupt", unraced.
 
-        The close-delimited test below exercises the shape, but on the shipped
-        code the loop's deadline check usually wins the race and reports `cut`
-        anyway, so it cannot isolate the flag. This one does: the deadline is 20 ms
-        out, the watchdog fires while `read1` is still blocked (100 ms), and
-        `read1` answers the shutdown the way a close-delimited body does — with
-        `b""`, no exception, and `length is None`. Grading that as "the stream
-        declared its end" is the false red: it reported `cut=False` for a body
-        THIS reader truncated (measured at `fb2926ef9e`).
+        The close-delimited drip test below exercises the real shape, but there the
+        loop's own deadline check usually wins the race and reports `cut` anyway,
+        so it cannot isolate the decision. This one always reaches the EOF branch
+        with nothing declared: the deadline is 20 ms out, the watchdog fires while
+        `read1` is still blocked (100 ms), and `read1` answers the shutdown the way
+        a close-delimited body does — `b""`, no exception, `length is None`.
+
+        It pins the OUTCOME (`cut=True`), not one implementation of it: the flag
+        and the clock heuristic each satisfy it here. The flag is the stronger
+        form — the clock cannot see the window between the timer firing and the
+        next `monotonic()` read, which is the window the false red was measured in
+        (`fb2926ef9e`: 360 bytes, `cut=False`, 0.50 s) — and that window is not
+        reproducible without faking the clock, so it is stated rather than pinned.
         """
         import time
 
@@ -2815,6 +2820,44 @@ class TestDoctorHostedCredential:
         over = _Chunked(200, b"y" * (4096 + 10))
         _data_b, cut_b = _doctor_read_capped(over, 4096, _time.monotonic() + 5)
         assert cut_b is True, "a chunked body over the cap must be a cut"
+
+        # (b2) EOF arriving AFTER the deadline with NOTHING declared is
+        # ambiguous: our own watchdog closes the socket and `read1` reports that
+        # as EOF, so a body THIS READER cut must not read as complete (round 24).
+        # The deadline must still be ahead at entry (a past deadline exits at the
+        # loop head and never reaches the EOF branch — round 25), so the sleep
+        # happens INSIDE the second read.
+        class _EofLate(_Chunked):
+            def __init__(self, status, body, declared=None, delay=0.05):
+                super().__init__(status, body)
+                self._declared = declared
+                self._delay = delay
+                self._calls = 0
+
+            @property
+            def length(self):
+                if self._declared is not None:
+                    return self._declared
+                return super().length
+
+            def read(self, n=None):
+                self._calls += 1
+                if self._calls == 1:
+                    return self._buf.read(n)
+                _time.sleep(self._delay)
+                return b""
+
+        eof_late = _EofLate(200, b"hi")
+        _d_late, cut_late = _doctor_read_capped(eof_late, 4096,
+                                                _time.monotonic() + 0.01)
+        assert cut_late is True, "EOF after our own interrupt is not completeness"
+
+        # ...but a DECLARED length fully satisfied still proves completeness, even
+        # when the deadline has passed by the time the EOF lands (round 17).
+        done = _EofLate(200, b"hi", declared=0)
+        _d_done, cut_done = _doctor_read_capped(done, 4096,
+                                                _time.monotonic() + 0.01)
+        assert cut_done is False, "a satisfied declared length is complete"
 
         # (c) the probe is ONE byte — its wait and allocation must not scale with
         # the cap (fresh review round 23).

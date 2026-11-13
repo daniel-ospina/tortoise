@@ -13074,7 +13074,18 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
                 if outstanding is None:
                     inner = getattr(resp, "fp", None)
                     outstanding = getattr(inner, "length", None)
-                return b"".join(chunks), outstanding not in (None, 0)
+                if outstanding not in (None, 0):
+                    return b"".join(chunks), True      # bytes still owed
+                if outstanding == 0:
+                    return b"".join(chunks), False     # declared length satisfied
+                # ⛔ NO declared length: EOF is AMBIGUOUS at/after the deadline,
+                # because OUR OWN watchdog closes the socket and `read1` reports
+                # that as EOF. Reading it as "the stream ended" reported a body
+                # THIS READER cut as complete — a close-delimited reply then
+                # reached the no-identity arm and a healthy setup read
+                # `❌ … captive portal` (fresh review round 24). Before the
+                # deadline, an EOF with nothing declared is the stream's own end.
+                return b"".join(chunks), time.monotonic() >= deadline
             # A reader that IGNORES `n` (a test double, a custom transport, a
             # proxy shim) would otherwise append the same bytes on every pass
             # until the cap — duplicating the body instead of bounding it.
@@ -13110,8 +13121,11 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
         # review round 23).
         probe = reader(1)
         # An interrupted probe returns `b""` for the same reason a completed body
-        # does, so the flag decides — a "cut" claim is the safe one, and
-        # "complete" is the one that puts a fragment in front of the verdict.
+        # does, so the FLAG decides (round 19/24): the clock is a proxy for it and
+        # leaves the window between the timer firing and the next `monotonic()`
+        # read — which is exactly the window the round-24 defect was measured in.
+        # A "cut" claim is the safe one; "complete" is the one that puts a
+        # fragment in front of the verdict.
         return b"".join(chunks), bool(probe) or interrupted
     finally:
         if watchdog is not None:
