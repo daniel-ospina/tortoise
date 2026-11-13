@@ -1464,7 +1464,7 @@ _TERMINATOR_TRAILING_OPERATORS = ")]`"
 
 
 def _bare_terminator(text: str) -> str:
-    """The `find`/`xargs` terminator WORD in `text`, or `text` when it is not one.
+    """The `find` terminator WORD in `text`, or `text` when it is not one.
 
     ONE RULE, NOT TWO (the principle this change applies to the comment strippers):
     a terminator glued to a closing operator is the same terminator, and both
@@ -1829,19 +1829,42 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
 
 
 def _in_find_segment(line: str, pos: int) -> bool:
-    """Is `pos` inside a `find`/`xargs` command segment?
+    """Is `pos` inside a `find` command segment?
 
     The `';'` / `\\;` token is a find TERMINATOR there, and an ordinary OPERAND
     everywhere else — `echo ';' chmod …` prints text, while
     `cp -a src ';' "$b/16/bin/"` really copies. Reading it as a separator in both
     made one a false RED and the other a false GREEN (#12279 review P1).
+
+    ⛔ `find` ONLY, and `xargs` is deliberately NOT in the set (#12279 review P3,
+    then a MEASURED FAIL-OPEN fixed here). `xargs` has no `;` terminator, so
+    reading `';'` as a list separator inside an `xargs` command is exactly the
+    false GREEN this gate exists to stop. It USED to answer True for a
+    PATH-QUALIFIED `xargs`: the wrapper skip below compares the RAW token
+    (`word in _WRAPPER_WORDS`) while the return basename-normalises, so a bare
+    `xargs` was skipped as a wrapper but `/usr/bin/xargs` was not, fell through to
+    the return, and matched the `"xargs"` member — measured, one spelling away:
+    `/usr/bin/xargs -0 cp -a /tmp/src/. ';' "$b/16/bin/"` was spared while the
+    bare-`xargs` spelling was refused, and bash copies in both. A `find` behind a
+    BARE wrapper is still recognised (`xargs find …` skips the wrapper and reads
+    `find`), and so is a path-qualified `find` (`/usr/bin/find …`, basenamed
+    here). ⛔ A PATH-QUALIFIED WRAPPER is NOT skipped — the comparison above is on
+    the RAW token, the same asymmetry that caused the bug — so
+    `/usr/bin/xargs find …` answers False here, as `/usr/bin/sudo find …` already
+    did. MEASURED HARMLESS, which is why it is stated rather than fixed: both of
+    those spellings are still REFUSED by the operand model
+    (`_replaces_a_client_binary` is True for
+    `/usr/bin/xargs find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" ';'` and the
+    `/usr/bin/sudo find` sibling), so the missed reading spares nothing. The unit
+    test pins this direction too, so the sentence cannot later be re-read as
+    "no spelling is ever missed".
     """
 
     seg_start, _ = _segment_bounds(line, pos)
     for word in line[seg_start:pos].split():
         if word in _WRAPPER_WORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word):
             continue  # `sudo find …`, `env FOO=1 find …`
-        return word.rsplit("/", 1)[-1] in {"find", "xargs"}
+        return word.rsplit("/", 1)[-1] in {"find"}
     return False
 
 
@@ -5948,6 +5971,68 @@ BINARY_MUTATION_POLARITY = [
         True,
         "#12279 P3: an operand whose content is a quoted `;` is not a terminator",
     ),
+    # ⛔ THE VERB'S OWN PRIMARY DECIDES — AND THAT DECISION NEEDED ITS OWN ROW
+    # (#12279 review P2, measured: DELETING the per-primary decision leaves the
+    # module fully green — 383 passed — while the replacement below goes
+    # RED→GREEN). Every row above puts the destination in the segment's LAST
+    # primary, where `last_by_primary` and the whole-segment `last` fallback
+    # agree, so none of them exercises the decision at all: the model was
+    # carried by inspection, which is the R10 defect this PR fixed elsewhere.
+    (
+        'find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \\; -exec echo /tmp/x \\;',
+        True,
+        "#12279 review P2: the destination sits in an EARLIER -exec primary than "
+        "the segment's tail operand, so only the per-primary read refuses it",
+    ),
+    (
+        'find "$b/16/bin" -type f -exec cp {} "$RUNNER_TEMP/snap" \\; -exec echo /tmp/x \\;',
+        False,
+        "#12279 review P2 CONTROL: the same EARLIER-primary shape copying OUT of "
+        "the client dir stays GREEN — the row above must not be satisfied by "
+        "blanket-refusing a segment with two primaries",
+    ),
+    # ⛔ EVERY `_EXEC_PRIMARY_WORDS` MEMBER IS PINNED (#12279 review P2, measured:
+    # DROPPING `-execdir` from the set leaves the module fully green — 383 passed
+    # — while its replacement goes RED→GREEN). Only `-exec` had a row, so three of
+    # the four members were carried by inspection alone.
+    (
+        "find \"$b/17/bin\" -type f -execdir cp {} \"$b/16/bin/\" ';'",
+        True,
+        "#12279 review P2: `-execdir` opens an operand list exactly as `-exec` does",
+    ),
+    (
+        "find \"$b/17/bin\" -type f -ok cp {} \"$b/16/bin/\" ';'",
+        True,
+        "#12279 review P2: `-ok` opens an operand list exactly as `-exec` does",
+    ),
+    (
+        "find \"$b/17/bin\" -type f -okdir cp {} \"$b/16/bin/\" ';'",
+        True,
+        "#12279 review P2: `-okdir` opens an operand list exactly as `-exec` does",
+    ),
+    (
+        "find \"$b/16/bin\" -type f -execdir ls -l {} ';'",
+        False,
+        "#12279 review P2 CONTROL: `-execdir` on a READ stays GREEN",
+    ),
+    # ⛔ A PATH-QUALIFIED `xargs` IS NOT A find SEGMENT (#12279 review P3, measured
+    # FAIL-OPEN). `_in_find_segment` skipped a BARE `xargs` as a wrapper word but
+    # not `/usr/bin/xargs`, so the basename fell through to the `"xargs"` member
+    # and answered True — the `';'` then read as a list SEPARATOR, not an operand,
+    # and the replacement was spared. `xargs` has no `;` terminator, so it must
+    # never be a find segment: the bare spelling was refused and this one was not.
+    (
+        "/usr/bin/xargs -0 cp -a /tmp/src/. ';' \"$b/16/bin/\"",
+        True,
+        "#12279 P3: a path-qualified `xargs` is not a find segment — its `;` is an "
+        "OPERAND, so the destination is still read",
+    ),
+    (
+        "find \"$b/16/bin\" -type f -exec ls -l {} ';'",
+        False,
+        "#12279 P3 CONTROL: a BARE-find READ stays GREEN — narrowing the find "
+        "segment to `find` must not lose the ordinary spelling",
+    ),
 ]
 
 
@@ -8761,3 +8846,62 @@ def test_the_redirect_rule_reads_every_redirect_on_the_line() -> None:
         "only the FIRST redirect on the line was graded, so a second one could "
         "rewrite the pinned binary with every row green (#12069 review P1)"
     )
+
+
+def test_a_path_qualified_wrapper_word_is_not_a_find_segment() -> None:
+    """`_in_find_segment` basenames its ANSWER, so a `/usr/bin/xargs` must not answer True.
+
+    MEASURED FAIL-OPEN (#12279 review P3, found by VERIFYING the review finding
+    rather than applying it). The walk skips a wrapper word by comparing the RAW
+    token (`word in _WRAPPER_WORDS`), but the return basenames
+    (`word.rsplit("/", 1)[-1]`), so a bare `xargs` was skipped while
+    `/usr/bin/xargs` was not: it fell through and matched the `"xargs"` member,
+    the `';'` read as a list SEPARATOR instead of an operand, and the complete
+    replacement was spared while bash performs it —
+
+        xargs -0 cp -a /tmp/src/. ';' "$b/16/bin/"             refused
+        /usr/bin/xargs -0 cp -a /tmp/src/. ';' "$b/16/bin/"   SPARED
+
+    `xargs` has no `;` terminator, so an `xargs` command is not a find segment at
+    all and the member is gone. This asserts the decision points DIRECTLY,
+    because no polarity row can see the difference in the READ direction: a
+    path-qualified `find` READ is refused neither way, so a row would stay green
+    under both readings and pin nothing.
+    """
+
+    xargs_replacement = "/usr/bin/xargs -0 cp -a /tmp/src/. ';' \"$b/16/bin/\""
+    assert _replaces_a_client_binary(xargs_replacement), (
+        "a path-qualified `/usr/bin/xargs` is not a find segment, so its `';'` is "
+        "an OPERAND and the destination is still the last one — this spelling was "
+        "SPARED while the bare-`xargs` spelling was refused (#12279 P3, measured)"
+    )
+    assert not _in_find_segment(xargs_replacement, xargs_replacement.index("';'")), (
+        "the answer is basename-normalised but the wrapper skip is not, so a "
+        "path-qualified `xargs` reaches the `xargs` member again and its `';'` "
+        "becomes a list separator — the R7 false GREEN by one spelling"
+    )
+
+    path_qualified_wrapper = "/usr/bin/xargs find \"$b/17/bin\" -type f -exec cp {} \"$b/16/bin/\" ';'"
+    assert not _in_find_segment(path_qualified_wrapper, path_qualified_wrapper.index("';'")), (
+        "a PATH-QUALIFIED wrapper is not skipped (the comparison is on the raw "
+        "token), so this answers False — the same asymmetry as `/usr/bin/sudo "
+        "find …`. Pinned so the docstring cannot be re-read as \"no spelling is "
+        "ever missed\", AND so nobody \"fixes\" it by restoring the `xargs` member, "
+        "which is the fail-open `mut-133` refuses (#12279 P3)"
+    )
+    assert _replaces_a_client_binary(path_qualified_wrapper), (
+        "…and the missed reading must still cost NOTHING: the operand model "
+        "refuses this spelling anyway (measured). If that stops being true this "
+        "assertion is the alarm, because the `_in_find_segment` answer alone "
+        "would then spare a real replacement"
+    )
+
+    for spelling in (
+        "/usr/bin/find \"$b/16/bin\" -type f -exec ls -l {} ';'",
+        "sudo /usr/bin/find \"$b/16/bin\" -type f -exec ls -l {} ';'",
+        "xargs find \"$b/16/bin\" -type f -exec ls -l {} ';'",
+    ):
+        assert _in_find_segment(spelling, spelling.index("';'")), (
+            f"a `find` behind a wrapper, or spelled by an absolute path, is still a "
+            f"find segment — narrowing the set to `find` must not lose it: {spelling!r}"
+        )
