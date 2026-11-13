@@ -1559,9 +1559,8 @@ def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(
     §7 points at this JSON as its citation, so a note left over from an earlier
     draft hands an auditing reader an inference the PR says it removed: the
     committed file still called the ceiling "arm 1's miss_past_k" — which is 0 BY
-    CONSTRUCTION only at arm 1's widest measured window (this run reads 33 / 27 /
-    13 below it, and 0 is reachable at any narrower k), and therefore no bound at
-    any width — two revisions after the
+    CONSTRUCTION only at arm 1's widest measured window (0 is reachable at any
+    narrower k), and therefore no bound at any width — two revisions after the
     brief and the body were corrected. The note is a GENERATED string, so the pin
     is against the generator, not against a copy of its text: change either side
     and this reds.
