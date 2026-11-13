@@ -384,6 +384,7 @@
         "TORTOISE_S4_DELTA": "1",
         "TORTOISE_JSON_MODE": "1",
         "TORTOISE_IDENTIFIER_TOKENS": "1",
+        "TORTOISE_UNDERSCORE_TERMS": "1",
         "TORTOISE_STATE_VALUE_VERBATIM": "1"
       },
       "why_value_gate_off": "its default flipped ON in #10996; an arm that declares itself OFF must pin the explicit 0 or it measures the predicate's population",

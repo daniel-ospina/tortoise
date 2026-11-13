@@ -511,7 +511,7 @@ DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
                   # aliases either way (0 of 27 points, 0 turns across the 7
                   # fixtures — measured), so the pin makes the population
                   # insensitive to the shell without moving a number.
-                  ("TORTOISE_IDENTIFIER_TOKENS", "1"),
+                  ("TORTOISE_IDENTIFIER_TOKENS", "1"), ("TORTOISE_UNDERSCORE_TERMS", "1"),
                   # `#10360`, and the union that absorbed `#11449` (`91dbc9a88`):
                   # `extractor_v2` is the ONLY module that reads this switch
                   # (`_state_value_verbatim_enforced`, its one `env_flag` read — the
