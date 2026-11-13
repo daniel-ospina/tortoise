@@ -1973,9 +1973,9 @@ def test_the_drop_warning_names_a_remedy_that_EXISTS_for_the_target(tmp_path, ca
     assert mixed_msg, "an authorised MIXED drop logged nothing"
     assert "nodes kept so a relabel migration can repair them" in mixed_msg, (
         "the node half of a mixed drop keeps its relabel remedy: " + mixed_msg)
-    assert "edges kept beside them" in mixed_msg, (
+    assert "edges kept" in mixed_msg, (
         "the mixed wording must say the EDGE half has no relabel: " + mixed_msg)
-    assert "no relabel can repair" in mixed_msg, mixed_msg
+    assert "NO relabel can reach" in mixed_msg, mixed_msg
 
 
 def test_restore_graph_still_restores_a_served_label(tmp_path) -> None:
@@ -2083,6 +2083,39 @@ def test_the_remedy_does_not_promise_a_relabel_to_a_node_with_NO_label(tmp_path,
         "warning must not promise one: " + msg)
     assert "nodes kept so a relabel migration can repair them" not in msg, (
         "the relabel promise is still made over a node that has no label at all: " + msg)
+    # ⛔ AND THE NON-DESTRUCTIVE ROUTE IS NAMED (`#12015` review round 7). "Only an
+    # explicit property clear removes it" sends an operator to the destructive move while
+    # the label ADD (`SET n:Source`, the `#11641`/D10 walk) makes the vector reachable.
+    assert "SET n:Source" in msg, (
+        "a label-less node's vector IS repairable without deleting it — the warning must "
+        "name the label ADD, not only a property clear: " + msg)
+
+
+def test_a_NON_Document_unserved_label_gets_no_relabel_promise(tmp_path, caplog) -> None:
+    """`#12015` review round 7 — only a `:Document` is inside the relabel walk's scope.
+
+    `relabel_legacy_documents()` is `MATCH (n:Document)`-scoped, so a dropped vector on any
+    OTHER unserved label (`:Session` here) cannot be repaired by it either. The clause used
+    to treat every non-sentinel node label as relabel-repairable, which named a repair that
+    does not reach these — while the label ADD (`SET n:Source`) does, so the warning names
+    that instead. Same class as the edge and no-label arms, one label class over.
+    """
+    proj = _proj(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
+        out = restore_graph(
+            proj.g,
+            _dump([{"dump_id": 1, "labels": ["Session"],
+                    "props": {"id": "s1", "embedding": VEC}}]),
+            allow_unserved_vectors=True)
+    assert out["dropped_vector_labels"] == ["Session"], out
+    msg = "\n".join(r.getMessage() for r in caplog.records
+                    if "dropped" in r.getMessage())
+    assert msg, "an authorised drop on an unserved label logged nothing"
+    assert "no relabel walk matches" in msg, (
+        "`:Session` is outside `relabel_legacy_documents()`'s `MATCH (n:Document)` scope, "
+        "so the warning must not promise that relabel: " + msg)
+    assert "SET n:Source" in msg, (
+        "the non-destructive label ADD is the route that DOES reach it: " + msg)
 
 
 def test_the_mixed_remedy_does_not_name_edges_that_are_not_there(tmp_path, caplog) -> None:

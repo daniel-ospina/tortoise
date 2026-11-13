@@ -127,13 +127,6 @@ _EMBED_BATCH = 400  # rows per UNWIND vecf32 re-encode query (falkordb inlines p
 #: directions (`tests/test_11641_runtime_vector_label.py`): a label added to
 #: `tortoise.security.VALID_ENTITY_TYPES` reds here instead of silently widening what the restore
 #: writes, and a label dropped from it reds instead of leaving a declaration over a dead label.
-#: The report entry minted for a dump node whose `labels` bag is EMPTY — the second
-#: shape `dropped_vector_labels` can carry besides a record label and `<relationship:TYPE>`.
-#: ⛔ It is NOT a relabel-repairable target (`#12015` review round 4): a node with no label
-#: cannot be matched by `relabel_legacy_documents()`, whose only route is `MATCH (n:Document)`,
-#: so the operator warning must not promise a relabel for it. The mint and the remedy clause
-#: read THIS constant, so the two cannot drift apart.
-_UNLABELLED_DUMP_ENTRY = "<unlabelled>"
 
 #: `(label, id-prop)` shaped so the register's constant pin can read it
 #: (`tests/test_embed_writer_register.py::test_every_declared_label_re_derives_at_this_head`) —
@@ -150,6 +143,18 @@ _VECTOR_RESTORE_LABELS: tuple[tuple[str, str], ...] = (
 
 #: The label set the vector restore is bound to, derived once from the declaration above.
 _VECTOR_RESTORE_LABEL_SET = frozenset(label for label, _prop in _VECTOR_RESTORE_LABELS)
+
+#: The report entry minted for a dump node whose `labels` bag is EMPTY — the second
+#: shape `dropped_vector_labels` can carry besides a record label and `<relationship:TYPE>`.
+#: ⛔ It is NOT a relabel-repairable target (`#12015` review round 4): a node with no label
+#: cannot be matched by `relabel_legacy_documents()`, whose only route is `MATCH (n:Document)`,
+#: so the operator warning must not promise a relabel for it — while the label ADD
+#: (`SET n:Source`) does reach it, which is why the warning names that route as well
+#: (`#12015` review round 7). Declared BELOW both constants above so it cannot inherit their
+#: `#:` docstring (round 7 measured it inserted mid-chain, which silently made the
+#: served-label bound the documentation of a `str`). The mint and the remedy clause read
+#: THIS constant, so the two cannot drift apart.
+_UNLABELLED_DUMP_ENTRY = "<unlabelled>"
 
 
 class RestoreVerificationError(RuntimeError):
@@ -1407,30 +1412,38 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         # reach it. Classifying it as a plain node target sent the operator to a no-op —
         # the same defect this clause was being fixed for, one sentinel over.
         unlabelled_targets = [t for t in node_targets if t == _UNLABELLED_DUMP_ENTRY]
-        relabelable = [t for t in node_targets if t != _UNLABELLED_DUMP_ENTRY]
-        no_label = bool(edge_targets or unlabelled_targets)
-        if no_label and relabelable:
-            # ⛔ Built from the parts ACTUALLY PRESENT (`#12015` review round 5). The mixed
-            # sentence used to name "the edges kept beside them" unconditionally, which was
-            # true while this arm required `edge_targets` — but the arm is ALSO reached by a
-            # relabelable NODE plus an UNLABELLED one with no edges at all, and a sentence
-            # that names surviving edges over an edge-free drop is the very class of defect
-            # the last three rounds removed (a claim outrunning the labels).
-            present = []
-            if edge_targets:
-                present.append("the edges kept beside them")
-            if unlabelled_targets:
-                present.append("the nodes the dump gave no label")
-            remedy = ("nodes kept so a relabel migration can repair them, and "
-                      + " or ".join(present)
-                      + ", which carry NO label at all and whose vectors no relabel can "
-                        "repair; only an explicit property clear removes those")
-        elif no_label:
-            remedy = ("the kept targets carry NO label at all (a relationship, or a "
-                      "node the dump gave none), so NO relabel migration can repair "
-                      "those vectors; only an explicit property clear removes them")
-        else:
-            remedy = "nodes kept so a relabel migration can repair them"
+        # ⛔ EACH CLASS MAY BE PRESENT INDEPENDENTLY, so the sentence is COMPOSED from what
+        # was actually dropped (`#12015` reviews rounds 5 and 7). Two defects lived in the
+        # collapsed form: an arm named "the edges kept beside them" over an edge-free drop
+        # (a claim outrunning the labels), and the concluding clause offered an explicit
+        # property clear as the ONLY route for a label-less NODE — while the label ADD
+        # (`SET n:Source`, exactly what the relabel walk performs) makes such a vector
+        # reachable WITHOUT deleting it. And the walk is `MATCH (n:Document)`-scoped, so
+        # only a `Document` entry can honestly be promised a relabel at all; any other
+        # unserved label needs the same label ADD. Its label is imported rather than
+        # restated: one owner for the walk's scope (`tortoise/migrate_kinds.py`).
+        from tortoise.migrate_kinds import _LEGACY_DOCUMENT_LABEL
+
+        relabel_repairable = [t for t in node_targets if t == _LEGACY_DOCUMENT_LABEL]
+        other_labelled = [t for t in node_targets
+                          if t not in (_LEGACY_DOCUMENT_LABEL, _UNLABELLED_DUMP_ENTRY)]
+        parts: list[str] = []
+        if relabel_repairable:
+            parts.append("nodes kept so a relabel migration can repair them")
+        if other_labelled:
+            parts.append(
+                "nodes kept whose label no relabel walk matches — give the node a "
+                "SERVED label (a label ADD, `SET n:Source`) and the vector becomes "
+                "reachable")
+        if unlabelled_targets:
+            parts.append(
+                "the nodes the dump gave no label, so NO relabel migration can repair "
+                "them — the same label ADD (`SET n:Source`) does")
+        if edge_targets:
+            parts.append(
+                "edges kept, where only an explicit property clear removes the vector "
+                "(a relationship carries NO label at all, so NO relabel can reach it)")
+        remedy = "; ".join(parts)
         logger.warning(
             "restore_graph: dropped %d vector(s) on unserved target(s) %s — "
             "allow_unserved_vectors=True (%s)",

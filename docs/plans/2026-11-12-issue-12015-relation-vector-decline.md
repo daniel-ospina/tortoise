@@ -158,11 +158,11 @@ uv run python tools/test_lane.py run -- tests/test_cache_projection_live.py \
     tests/test_record_serve.py tests/test_reconciliation.py \
     tests/test_record_reconcile_trigger.py tests/test_11641_runtime_vector_label.py \
     tests/test_embed_writer_register.py -q
-→ 339 passed, 3 skipped
+→ 342 passed, 3 skipped
 ```
 
 ⛔ Both figures are readings of a TREE, so they are true only of the head they were taken at: THIS
-branch's head, which INCLUDES the 13 tests this change adds — 10 in block 1 (`6 + 3 + 1` across its
-three files) and 3 in block 2. Compare them with your own run of the same two commands at the same
+branch's head, which INCLUDES the 16 tests this change adds — 10 in block 1 (`6 + 3 + 1` across its
+three files) and 6 in block 2. Compare them with your own run of the same two commands at the same
 head, never with `main`, and re-derive rather than carrying any number forward: `main` also gains
 tests under these files over time. `uv run ruff check` is green at the same head.
