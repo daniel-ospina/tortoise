@@ -623,8 +623,9 @@ def _rerank_arm(
             "is the ceiling MINUS the in-pool golds the arm still leaves outside "
             "the top 3, i.e. `recall_3_before` minus `lost` plus `gained`, so read "
             "those three fields in the same cell rather than treating the achieved "
-            "count as the ceiling — `lost` 0 is necessary but not sufficient (it can "
-            "be 0 with the achieved figure still below the ceiling). WIDTH "
+            "count as the ceiling — at a pool wider than the top-3 cut `lost` 0 is "
+            "necessary but not sufficient (it can be 0 with the achieved figure still "
+            "below the ceiling). WIDTH "
             "DEPENDENT throughout, and not quoted here. "
             "⛔ `arms.exact` is a DIFFERENT table: arm 1's in-window count at arm 1's "
             "widths, beside arm 1's own miss counters, sliced by class under "
@@ -634,12 +635,16 @@ def _rerank_arm(
             "its `arms.{label}.<P>.exact` cell instead, which stores no in_window "
             "of its own — arm 1 is the only arm whose MENTION-level in-pool count is "
             "recorded, and only at arm 1's own four widths — so at a pool width "
-            "outside that set the ceiling is a denominator you must know from the "
-            "width, not one you can read here. The VARIANT pairs carry at-pool TOP-3 "
+            "outside that set the ceiling is NOT recorded here: it is a measurement "
+            "of what the legs returned at that width, not a function of the width, so "
+            "it has to be re-measured rather than read off. The VARIANT pairs carry "
+            "at-pool TOP-3 "
             "counts of their own (`variant.in_window_3_before` / `in_window_3_after`); "
             "neither is a ceiling — the variant pairs' in-pool count is arm 2's, in "
             "`arms.variant.<k>.in_window` and `arms.variant_by_class.<cls>.<k>.in_window` "
-            "at arm 2's widths — so never read either as in_window(P). miss_past_k is "
+            "at arm 2's widths. At a pool wider than the top-3 cut, neither TOP-3 count "
+            "is in_window(P) — but at a pool no wider than that cut the window IS the "
+            "top 3, so `in_window_3_before` is the same number. miss_past_k is "
             "0 BY CONSTRUCTION only "
             "at arm 1's WIDEST window (a response has at most that many rows, so "
             "'the rank is past it' cannot occur) and can be non-zero at a narrower "
@@ -1643,8 +1648,9 @@ def run(args: argparse.Namespace) -> int:
         # was: it is 0 BY CONSTRUCTION only at arm 1's WIDEST window (a response
         # has at most that many rows, so "the rank is past it" cannot occur) and
         # only possibly non-zero at a narrower k, where a gold the legs returned
-        # further down is genuinely past the cut — so it measures the counter, not
-        # the legs, at any width. ⛔ "non-zero at every narrower k" was the previous
+        # further down is genuinely past the cut — so at the widest window it
+        # measures the counter, not the legs; at a narrower k it is a real
+        # measurement that is still not a bound. ⛔ "non-zero at every narrower k" was the previous
         # wording and it bakes a corpus fact into a generated string: 0 is reachable
         # whenever every in-window gold sits inside the top k. `miss_absent_at_max_k` is not a width-independent bound either —
         # it is "absent within arm 1's maximum window (15)", and a wider window
