@@ -239,7 +239,11 @@ def _record_when_running(name: str, pid: int, env: dict[str, str],
 
     ⚠️ WHAT THE POLL CAN AND CANNOT REPAIR — stated because the honest answer
     determines whether a red here blames the code or the box. The poll re-asks `record`
-    until it answers or the deadline expires; it never turns a refusal into a success.
+    until it answers or the deadline expires. ⛔ IT DOES MASK A FIRST REFUSAL — that is
+    its whole point, and `test_the_record_poll_retries_a_refusal_until_the_sut_answers`
+    pins exactly that (a refusal on call 1, `returncode == 0` on call 2). What it never
+    does is MANUFACTURE a success: every success returned from here is an answer the SUT
+    gave, and a refusal the SUT repeats survives the deadline as a FAILURE.
     Of the two arms: the LIVENESS arm (`kill -0` says ESRCH/EPERM, or the state letter
     is `Z`) is a POSITIVE observation that the process is gone or a zombie, and no number
     of retries brings it back. The START-TIME arm (`pid_starttime` returned nothing) is
