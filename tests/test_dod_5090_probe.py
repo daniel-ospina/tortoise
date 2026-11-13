@@ -3411,7 +3411,7 @@ def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
     assert shipped["disarming_assignments"], shipped
     assert shipped["deployment"]["disarming_assignments"], shipped["deployment"]
     caveat = probe.per_file_scope_note(shipped["deployment"])
-    assert "OVERRIDE it with a non-truthy one" in caveat, caveat
+    assert "value(s) leave it OFF" in caveat, caveat
     # …and a compose BUILD ARG is not a runtime arm (the fourth reader now agrees with
     # the other three about what build-time means) — in BOTH the map and the list
     # spelling, since the flush-left sequence is the same document.
@@ -3463,6 +3463,54 @@ def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
             encoding="utf-8")
         assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
             "unset_declarations"], spelling
+
+
+def test_the_LAST_assignment_in_a_file_decides_its_arming(tmp_path, monkeypatch):
+    """`ENV FLAG=1` then `ENV FLAG=0` leaves the container with 0 — the file is OFF.
+
+    ⛔ Measured (fresh review of PR #12474, P2, pre-existing): the walk read the file
+    `ON` because SOME line assigned a truthy value, so `gate enabled by default` could
+    publish `True` over an image whose effective environment has the gate off — the
+    fail-open direction, and the one concept on which the compose reader (which does
+    report an explicit override) disagreed with the Dockerfile and shell readers.
+    LAST WINS per file now, and the shadowed assignment is reported.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
+        "ENV TORTOISE_EMBED_GATE=0\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert any("OVERRIDES an earlier truthy value" in hit
+               for hit in shipped["disarming_assignments"]), shipped
+    # …the reverse order is ON, and the shadowed OFF line is reported.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=0\n'
+        "ENV TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    assert any("shadowed by a later truthy value" in hit
+               for hit in shipped["disarming_assignments"]), shipped
+    # …and the same in the shell reader.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nexport TORTOISE_EMBED_GATE=0\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "OFF", shipped["per_surface"]
+    # …and an EMPTY value with a TAB comment is still an OFF assignment, not silence.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    environment:\n"
+        "    - TORTOISE_EMBED_GATE=\t# empty\n", encoding="utf-8")
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "disarming_assignments"]
+    # …and a TAB comment on the LEGACY space form keeps the hit.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE 1\t# on\n", encoding="utf-8")
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "per_surface"]["Dockerfile"]["state"] == "ON"
 
 
 def test_the_LEGACY_ENV_space_form_is_a_deployment_hit(tmp_path, monkeypatch):
@@ -8728,7 +8776,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `206 + 1` and `205 + 2` at THIS tree, both equal to the `207` the pin re-derives
+    count: `207 + 1` and `206 + 2` at THIS tree, both equal to the `208` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.

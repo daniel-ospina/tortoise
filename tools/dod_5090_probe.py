@@ -2736,9 +2736,9 @@ def _assigned_value(line: str, flag: str) -> str | None:
         # ENV: no other surface has this form, and `ARG` never reaches the process.
         if not (legacy_value_form and rest_raw[:1] in (" ", "\t")):
             return None
-        legacy = rest.split(" #", 1)[0].strip().strip("'\"")
+        legacy = _strip_inline_comment(rest).strip().strip("'\"")
         return legacy or None
-    value = rest[1:].strip()
+    value = _strip_inline_comment(rest[1:]).strip()
     # A genuine assignment's value is ONE token, optionally followed by a
     # comment (`FLAG=1  # enable`). Words after it mean the line is prose
     # about the flag, not a setting of it — ⛔ EXCEPT the Dockerfile
@@ -2873,6 +2873,14 @@ def flag_in_shipped_configs(flag: str) -> dict:
         surface_unreadable: list[str] = []
         surface_indeterminate: list[str] = []
         surface_file_hits: dict[str, list[str]] = {}
+        # ⛔ LAST WINS, per file: `ENV FLAG=1` then `ENV FLAG=0` (or two `export`s) leaves
+        # the container with 0, and counting ANY truthy line read the file ARMED —
+        # a false PASS on the deployment population this lane widened, and the one concept
+        # on which the compose reader (which reported the override) disagreed with the
+        # Dockerfile and shell readers (fresh review of PR #12474, P2). The decisions are
+        # DEFERRED so the file's state is the LAST one, and a shadowing assignment is
+        # reported instead of vanishing.
+        decisions: list[tuple[bool, str, str]] = []
         for path in candidates:
             if not path.is_file():
                 continue
@@ -2992,19 +3000,27 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     indeterminate.append(f"{posix}:{number}: {line.strip()[:90]}")
                     surface_indeterminate.append(posix)
                     continue
-                if is_truthy(literal):
-                    hit = f"{posix}: {line.strip()[:90]}"
-                    hits.append(hit)
-                    surface_hits.append(hit)
-                    surface_file_hits.setdefault(posix, []).append(hit)
-                elif where == "environment" or where.endswith(".environment"):
-                    # ⛔ An explicit FALSE value in `environment:` OVERRIDES the image's
-                    # `ENV` — the deployment is disarmed, and calling the file "silent"
-                    # while the caveat says a build "INHERITS" an arm steered a reader to
-                    # `True` on a self-disarming deployment (fresh review of PR #12474,
-                    # P2). Reported, so the direction has a bucket a reader can consult.
+                # ⛔ Deferred, never applied here: the FILE's state is its LAST
+                # runtime-relevant assignment (`is_truthy` is decided per line).
+                decisions.append((is_truthy(literal),
+                                  f"{posix}: {line.strip()[:90]}",
+                                  f"{posix}:{number}: {line.strip()[:90]}"))
+            # ── the file's effective value, once its lines are read (LAST WINS) ──
+            if decisions:
+                effective_truthy, hit_text, plain_text = decisions[-1]
+                if effective_truthy:
+                    hits.append(hit_text)
+                    surface_hits.append(hit_text)
+                    surface_file_hits.setdefault(posix, []).append(hit_text)
+                    for truthy, _hit, earlier in decisions[:-1]:
+                        if not truthy:
+                            disarming_assignments.append(
+                                earlier + " (shadowed by a later truthy value)")
+                else:
                     disarming_assignments.append(
-                        f"{posix}:{number}: {line.strip()[:90]}")
+                        plain_text + (" (OVERRIDES an earlier truthy value)"
+                                      if any(truthy for truthy, _h, _l in decisions[:-1])
+                                      else ""))
         if not present:
             state = "ABSENT"
         elif surface_hits:
@@ -3180,11 +3196,13 @@ def per_file_scope_note(deployment: dict) -> str:
     if unsets or overrides:
         parts = []
         if unsets:
-            parts.append(f"{unsets} declaration(s) with no value UNSET it")
+            parts.append(f"{unsets} compose declaration(s) with no value UNSET it")
         if overrides:
-            parts.append(f"{overrides} value(s) OVERRIDE it with a non-truthy one")
-        disarm = ("; ⛔ and this tree's compose file DISARMS it in "
-                  + " and ".join(parts) + " — that direction is NOT modelled here")
+            parts.append(f"{overrides} value(s) leave it OFF — the LAST of them by compose "
+                         "override or by FILE order (an earlier truthy assignment does not "
+                         "survive a later non-truthy one)")
+        disarm = ("; ⛔ and this tree DISARMS it in " + " and ".join(parts)
+                  + " — neither direction is modelled by the per-file arming rule")
     return (
         "this reading is PER FILE and does not model the MERGE: a compose file's "
         "`environment:` mapping ADDS TO or OVERRIDES the image's `ENV`, so a silent "
@@ -3312,7 +3330,7 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
         # UNSETS the variable, which this per-file reading does not model.
         f"compose declarations that UNSET it: "
         f"{shipped.get('unset_declarations') or 'none'}; "
-        f"compose values that OVERRIDE it OFF: "
+        f"values that OVERRIDE it OFF: "
         f"{shipped.get('disarming_assignments') or 'none'}; "
         f"mentioning it: {shipped['mentions'] or 'none'}"
         f"; set ON in: {shipped['files'] or 'none'})"
