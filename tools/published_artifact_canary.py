@@ -618,6 +618,27 @@ def render_summary(report: Report) -> str:
 _INDEX_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def _proxy_hint() -> str:
+    """Name the cause when the ambient proxy environment is present and the read failed.
+
+    `_INDEX_OPENER` deliberately ignores `http_proxy`/`https_proxy` — the child's policy is
+    "no proxy" (see `_clean_env`), and the two must not disagree. The cost is that a
+    PROXY-ONLY egress path reads INDEX_UNREADABLE every day forever, and without this the
+    reason string sends the operator to their network with no pointer to the one fact that
+    explains it. Measured: on such a box the bare reason is
+    `URLError fetching https://pypi.org/…: <urlopen error [Errno 111] Connection refused>`.
+    """
+    spellings = ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+    present = [name for name in spellings if os.environ.get(name)]
+    if not present:
+        return ""
+    return (
+        " — ambient proxy environment is DELIBERATELY ignored (parity with the child's "
+        f"`_clean_env`; set: {', '.join(present)}), so a proxy-only egress path cannot be "
+        "graded and this box needs a direct route to the index"
+    )
+
+
 def fetch_index(package: str, timeout: float) -> tuple[dict[str, Any] | None, str, str]:
     """GET the index JSON. Returns (doc, reason, state).
 
@@ -654,7 +675,7 @@ def fetch_index(package: str, timeout: float) -> tuple[dict[str, Any] | None, st
         # "a release is owed" (#12363 review B2-1).
         return None, f"{type(exc).__name__} reading {url}: {exc}", INDEX_UNREADABLE
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return None, f"{type(exc).__name__} fetching {url}: {exc}", INDEX_UNREADABLE
+        return None, f"{type(exc).__name__} fetching {url}: {exc}{_proxy_hint()}", INDEX_UNREADABLE
     try:
         doc = json.loads(payload)
     except ValueError as exc:
