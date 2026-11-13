@@ -492,6 +492,46 @@ def test_a_claim_carrying_the_LEGACY_outdated_flag_is_already_retired(sdk):
     assert result["invalidated"] is False
     assert result["alreadyRetired"] is True, result
     assert sdk.get_entity(made["point_id"])["status"] != "retracted"
+    # ⛔ AND THE RECONCILE STILL RAN, sourced from the CLAIM (#12336 review
+    # cycle 11): this `Invalidation` names no goal, so passing
+    # `invalidation.goal_id` alone left `checked: False` over a claim that DOES
+    # carry `goalId` — the dependent state unreconciled on the exact shape the
+    # module block above says must be repaired.
+    assert result["cache"]["checked"] is True, result["cache"]
+
+
+def test_an_already_terminal_claim_reconciles_the_goal_the_CLAIM_names(sdk):
+    """A caller that names no goal must still reconcile: the claim is the source.
+
+    The shape is real and supported (the legacy-flag pin above builds it): an
+    `Invalidation(judgement_id=…)` with no `goal_id`, over a claim retired out of
+    band, so `verdicts`/`invalidate_stale` never sees it again and NOTHING else
+    repairs the goal's displayed word (#12336). MEASURED by review: reading the
+    id from `invalidation.goal_id` alone made this case report
+    `cache.checked: False` while `goalState` still read `met` — and a skipped
+    check moves neither `counts.failed` nor `counts.gone`, so the sweep read
+    clean over a goal whose word names a claim that no longer counts.
+
+    The mutation this excludes: swapping `invalidation.goal_id or
+    claim["goalId"]` back to `invalidation.goal_id` (and the same in the
+    post-exception arm) leaves every OTHER test green — they all build the
+    `Invalidation` with the goal the claim carries.
+    """
+    i, t, g = _world(sdk, tag="terminal-goal-from-claim")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+    # out of band: no door call, so the word above is left naming this claim
+    sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$id}) SET p.outdated = 'true'",
+        params={"id": made["point_id"]},
+    )
+    finding = Invalidation(judgement_id=made["point_id"], reason="target-revised",
+                           detail="…")
+    result = invalidate(sdk, finding)
+    assert result["alreadyRetired"] is True, result
+    assert result["found"] is True, result
+    assert result["cache"]["checked"] is True, result["cache"]
+    assert sdk.get_entity(g["id"]).get("goalState") is None
 
 
 # ── 4b. an UNNAMED scope is undecidable, never a retirement ──────────────

@@ -737,6 +737,13 @@ def _reconcile_or_report(sdk: Any, goal_id: str | None) -> dict:
     ``counts.gone``), not a reason to discard the sweep's other results. A falsy
     ``goal_id`` is not a failure — ``reconcile_goal_state_cache`` says so itself.
 
+    ⛔ THE CALLER MUST NAME THE GOAL, and the two read arms name it from the
+    claim when the ``Invalidation`` does not (``invalidation.goal_id or
+    claim["goalId"]``). A skipped check is invisible in the counters — it is
+    neither ``failed`` nor ``gone`` — so passing a goal id that is falsy for a
+    reason the claim could have supplied is a reconcile that silently does not
+    happen over the exact shape this helper exists for (#12336).
+
     ⚠️ It is deliberately the SAME reconcile the retirement path uses (step 4),
     wrapped once, so there is one set of predicates behind
     ``counts.failed``/``gone`` however the finding reached the door.
@@ -826,6 +833,15 @@ def invalidate(
         # purge) also leaves the goal's word naming it (#12336). All three
         # already-retired arms go through `_reconcile_or_report`, so an absent
         # `cache` key can never be read as "clean".
+        #
+        # ⛔ THE GOAL ID COMES FROM THE CLAIM WHEN THE CALLER DID NOT NAME ONE.
+        # The two read arms hold `claim`, whose own `goalId` is the authoritative
+        # fact; passing only `invalidation.goal_id` made a caller that omits it
+        # (a supported shape — `tests:489`) report `checked: False, reason: "no
+        # goalId on the retired claim"` over a claim that DOES name one, so the
+        # dependent state went unreconciled AND the summary read clean: neither
+        # `counts.failed` nor `counts.gone` moves for a skipped check. The absent
+        # arm has no claim, so it keeps `invalidation.goal_id` alone..
         return {"invalidated": False, "judgementId": judgement_id,
                 "alreadyRetired": True, "status": None, "found": False,
                 "reason": invalidation.reason,
@@ -842,7 +858,8 @@ def invalidate(
         return {"invalidated": False, "judgementId": judgement_id,
                 "alreadyRetired": True, "status": status, "found": True,
                 "reason": invalidation.reason,
-                "cache": _reconcile_or_report(sdk, invalidation.goal_id),
+                "cache": _reconcile_or_report(
+                    sdk, invalidation.goal_id or claim.get("goalId")),
                 "detail": f"already terminal ({status or 'outdated'})"}
 
     stamp = at or invalidation.effective_at or _now()
@@ -863,7 +880,10 @@ def invalidate(
                     "alreadyRetired": True, "status": after_status,
                     "found": True,
                     "reason": invalidation.reason,
-                    "cache": _reconcile_or_report(sdk, invalidation.goal_id),
+                    "cache": _reconcile_or_report(
+                        sdk, invalidation.goal_id
+                        or (after.get("goalId") if isinstance(after, dict)
+                            else None)),
                     "detail": f"already terminal ({after_status or 'outdated'})"}
         raise exc
 
@@ -937,7 +957,13 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     ``counts.gone`` — a sweep may not read clean while a reconcile did not happen.
     """
     if not goal_id:
-        return {"checked": False, "reason": "no goalId on the retired claim"}
+        # ⛔ NOT "the claim names no goal" — this function cannot know that: it
+        # was handed nothing. The two ALREADY-TERMINAL arms source the id from the
+        # claim (`invalidation.goal_id or claim["goalId"]`), so a call that lands
+        # here means no caller supplied one, and the message says exactly that
+        # rather than asserting a fact about the claim it never read.
+        return {"checked": False,
+                "reason": "no goalId was supplied to the reconcile"}
     try:
         goal = sdk.get_entity(goal_id)
     except Exception as exc:
