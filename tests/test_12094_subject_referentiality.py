@@ -950,9 +950,9 @@ def test_a_raising_tokeniser_leaves_a_held_surface_with_no_offset(monkeypatch):
     ``referentiality.phrase_tokens`` itself RAISES — which is the arm
     ``_referentiality_tokens`` catches (a provenance field must never abort a
     capture), and it is also the ONLY way ``if _phrase else None`` is taken:
-    without that guard, ``re.search`` over an empty pattern matches at position 0,
-    and the record would carry ``0`` — a real coordinate pointing at the start of
-    the section, which is not where the surface is. ``None`` (absent) and ``0``
+    without that guard, ``re.search`` over an empty pattern matches the first
+    position whose neighbours are both non-word (94 on this fixture) — a real
+    coordinate pointing into the section, which is not where the surface is. ``None`` (absent) and ``0``
     (the first character) are different claims, and only one of them is true.
 
     Measured at the #12102 mutation pass (agent-infra#3442): deleting EITHER guard
@@ -1004,7 +1004,7 @@ def test_a_raising_cue_emits_a_warning_naming_the_surface(monkeypatch, caplog):
     warnings = [r.getMessage() for r in caplog.records
                 if r.name == "tortoise.extractor"
                 and r.levelno == logging.WARNING]
-    assert any("#12094" in m and "it" in m and "Product Strategy" in m
+    assert any("#12094" in m and "'it'" in m and "'Product Strategy'" in m
                for m in warnings), (
         "the operator-facing warning must name the surface and its section; "
         f"warning records were {warnings!r}")
