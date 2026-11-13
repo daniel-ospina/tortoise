@@ -325,7 +325,9 @@ retrieval-miss class `#11901` owns; the folded rung cannot reach what the window
    pairs, and with the fold those are now 202 at `k=3` instead of 409; whether the *production*
    duplicate rate falls by as much is **not** established by this artifact.
 4. **A blocker is not a production wiring.** `BlockIndex` is wired into `entity_candidates` (the
-   dedupe scan, a live MCP surface) and into the comparison; it is **not** wired into the capture
+   dedupe scan, a live MCP surface) and **nothing else** — it is not on the comparison path, whose
+   consumer is `extractor_v2._find_by_folded_key` and the KEY-only `attach_matches` (`E`/`B` keys,
+   no index), and it is **not** wired into the capture
    path's candidate generation, because that would widen the set handed to the adjudicator, which
    `#11901` measured as the X7 regression. That wiring is `#12186`'s B1, gated on the verdict step.
 5. **No LongMemEval number.** `docs/benchmarks/longmemeval-500q/run-report.md` stays `PENDING`.

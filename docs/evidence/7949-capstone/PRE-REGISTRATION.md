@@ -2699,8 +2699,10 @@ to answer.
   `# #9906: an INTRA-BATCH duplicate (the same normalized content` — a comment, not a read.
 - **New value — measured at this head, by opening the line:** `tortoise/extractor_v2.py:10619` is
   `_value_fidelity_judged = _state_value_verbatim_enforced()`. Re-derived by SYMBOL, not by adding
-  the file's `+83`: the other two occurrences of that symbol are unmoved, because they sit below
-  the first hunk — the `def` at `:5431` and the `armed =` site at `:5521`. A cite re-staled onto
+  the file's `+83`: the other two occurrences of that symbol are unmoved, because they sit above
+  the first hunk (`@@ -5772 +5772,41 @@`, so a line above it takes no shift; a line BELOW it would
+  move by `+40`, and below all four by `+83`) — the `def` at `:5431` and the `armed =` site at
+  `:5521`. A cite re-staled onto
   either would satisfy a bare symbol match while naming something this sentence does not claim,
   which is why the pin asserts the receiving variable and not the symbol alone.
 - **Scope: the pin's cite, and the two gate lines this entry names — nothing else.** A successor

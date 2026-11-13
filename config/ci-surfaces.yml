@@ -3751,7 +3751,10 @@ surfaces:
   - test_12295_entity_blocking.py
   # The measurement pins. Hermetic: they read the COMMITTED artifact and the
   # brief from disk and assert the numbers agree — no DB, no network, no model —
-  # so they cost milliseconds and belong wherever the mechanism's tests are.
+  # so they belong wherever the mechanism's tests are. ⚠️ NOT "milliseconds":
+  # this PR's own weights block below records 3.5 s for the measurement pins (and
+  # 4.4 s for the entity-blocking file) — they are CHEAP, not free, which is why
+  # they are dual-registered rather than left out.
   # ⛔ `core` alone is NOT enough, and "wherever the mechanism's tests are" was
   # the wrong reason: their subject is the `docs/` artifact and brief, and a
   # docs-only diff selects no surface at all, so this row ran them ZERO times on

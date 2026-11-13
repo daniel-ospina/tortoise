@@ -76,8 +76,13 @@ Zep/Graphiti (`graphiti_core/utils/maintenance/dedup_helpers.py`, read at
    carries it AND the population is known complete** — the same "bare-form
    fallback ONLY when unambiguous" discipline ``_find_existing_entity`` already
    applies to kinds. ⛔ **The ``E`` fold is non-injective too, and it DOES attach
-   alone**, which is a ``#12047`` property this module inherits rather than
-   creates: :func:`key_of` collapses punctuation, so ``C++``, ``C#`` and ``C``
+   alone.** The NON-INJECTIVITY is ``#12047``'s and is inherited (``key_of`` IS
+   the stored ``canonical_name`` key); the ATTACH is CREATED here, by the folded
+   rung this PR adds to ``extractor_v2._find_by_folded_key`` — on ``origin/main``
+   ``_find_existing_entity`` has only the ``exact`` and ``bare`` arms, both
+   ``_norm``-keyed, so ``_find_existing_entity([{id:o1, name:"C#"}], "C++")``
+   returns ``(None, "none")`` there. :func:`key_of` collapses punctuation, so
+   ``C++``, ``C#`` and ``C``
    all fold to ``c`` (likewise ``.NET``/``NET``, ``50%``/``50``), and a capture
    window holding exactly one of them binds the other —
    ``_find_existing_entity([{id:o1, name:"C#"}], "C++")`` returns ``o1`` by the
