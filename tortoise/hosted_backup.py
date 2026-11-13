@@ -1410,10 +1410,21 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         relabelable = [t for t in node_targets if t != _UNLABELLED_DUMP_ENTRY]
         no_label = bool(edge_targets or unlabelled_targets)
         if no_label and relabelable:
-            remedy = ("nodes kept so a relabel migration can repair them, and the "
-                      "edges kept beside them, or the nodes the dump gave no label, "
-                      "which carry NO label at all and whose vectors no relabel can "
-                      "repair; only an explicit property clear removes those")
+            # ⛔ Built from the parts ACTUALLY PRESENT (`#12015` review round 5). The mixed
+            # sentence used to name "the edges kept beside them" unconditionally, which was
+            # true while this arm required `edge_targets` — but the arm is ALSO reached by a
+            # relabelable NODE plus an UNLABELLED one with no edges at all, and a sentence
+            # that names surviving edges over an edge-free drop is the very class of defect
+            # the last three rounds removed (a claim outrunning the labels).
+            present = []
+            if edge_targets:
+                present.append("the edges kept beside them")
+            if unlabelled_targets:
+                present.append("the nodes the dump gave no label")
+            remedy = ("nodes kept so a relabel migration can repair them, and "
+                      + " or ".join(present)
+                      + ", which carry NO label at all and whose vectors no relabel can "
+                        "repair; only an explicit property clear removes those")
         elif no_label:
             remedy = ("the kept targets carry NO label at all (a relationship, or a "
                       "node the dump gave none), so NO relabel migration can repair "

@@ -2083,3 +2083,36 @@ def test_the_remedy_does_not_promise_a_relabel_to_a_node_with_NO_label(tmp_path,
         "warning must not promise one: " + msg)
     assert "nodes kept so a relabel migration can repair them" not in msg, (
         "the relabel promise is still made over a node that has no label at all: " + msg)
+
+
+def test_the_mixed_remedy_does_not_name_edges_that_are_not_there(tmp_path, caplog) -> None:
+    """`#12015` review round 5 — the mixed arm has an EDGE-FREE shape.
+
+    Making the remedy target-aware left one arm over-claiming: the mixed sentence said
+    "nodes kept so a relabel migration can repair them, and **the edges kept beside them**",
+    but the arm is also reached by a relabelable node PLUS an unlabelled one with **no edges
+    in the dump at all** — so it named surviving edges over an edge-free drop. Same rule as
+    the operator line: the claim must not outrun the labels.
+
+    Measured on the over-claiming arm: `dropped_vector_labels == ['<unlabelled>', 'Document']`
+    with `edges == []`, and the warning still said "the edges kept beside them".
+    """
+    proj = _proj(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
+        out = restore_graph(
+            proj.g,
+            _dump([
+                {"dump_id": 1, "labels": ["Document"],
+                 "props": {"id": "d1", "documentKind": "article",
+                           "embedding": VEC}},
+                {"dump_id": 2, "labels": [], "props": {"id": "x", "embedding": VEC}},
+            ]),
+            allow_unserved_vectors=True)
+    assert out["dropped_vector_labels"] == ["<unlabelled>", "Document"], out
+    assert out["dropped_vectors"] == 2, out
+    msg = "\n".join(r.getMessage() for r in caplog.records
+                    if "dropped" in r.getMessage())
+    assert "nodes kept so a relabel migration can repair them" in msg, msg
+    assert "the nodes the dump gave no label" in msg, msg
+    assert "edges kept beside them" not in msg, (
+        "the dump carried NO edges, yet the warning named kept edges as survivors: " + msg)
