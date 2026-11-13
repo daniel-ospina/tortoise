@@ -1,0 +1,369 @@
+---
+title: "Scoping #11802 — the capture drain destroys what it could not read (research: internal + external)"
+type: engineering
+domain: platform
+doc_status: live
+subjects.team: epistemic-team
+aboutSubjects: tortoise-hosted
+aboutObjects: capture, spool, durability, discard-ledger
+created: 2026-11-13
+---
+
+# Scoping — #11802: the drain destroys what it could not read
+
+**Lane:** `fix/11802-capture-discard` · **Worktree:** `.worktrees/fix-11802` · **Tier:**
+standard+complex · **Domain:** Complicated (an established pattern applied one level up, not a new
+mechanism) · **Scope:** the tortoise-repo half only; the renderer/ownership half is
+agent-infra#3921.
+
+> **Why this doc exists.** The brief for this lane mandated research before code. This is that
+> research: what the repo already measured and holds, what the ontology says about what a spool
+> entry *is*, which deployed copy is being patched, and what the field converges on outside. Every
+> internal claim carries a `file:line`. Nothing here re-derives the causal chain the issue already
+> measured — it points at it.
+
+---
+
+## 1 · The problem, restated in the ontology's own terms
+
+The issue measured the mechanism (root-owned writer, user-owned drain, `EACCES` before any parse,
+1,356 of 3,384 lost sessions never readable by the process that discarded them). This section
+answers the question the brief asked: **which layer does a captured session live on, and which node
+is the durable record of "this session happened"?**
+
+Per `docs/ONTOLOGY.md`:
+
+| Layer (§2, `docs/ONTOLOGY.md:59-71`) | What a captured session is there |
+|---|---|
+| **Semantic** | a **`:Source`** with `sourceKind: agentSession` — the provenance bridge (`docs/ONTOLOGY.md:180`, `:1130`). Its **bytes live outside the graph**, reached through the source (§4.4, `docs/ONTOLOGY.md:461-463`). |
+| **Episodic** | an **`:Event`** with `eventKind: AgentSession` (exact spelling; `sessionCaptured` is an alias of the same concept — `docs/ONTOLOGY.md:531`). |
+| **Epistemic** | whatever `:Point`s are **extracted** from it, each tied back by `extractedFrom` → the `:Source` (`docs/ONTOLOGY.md:180`). |
+
+**So: a captured session is an `:Event` (Episodic layer) plus a `:Source` (Semantic layer) whose
+bytes are outside the graph — and the durable record that "this session happened" is that
+`:Event`.** The `:Source` is the address; the bytes are the transcript; the Points are what the
+extractor eventually believes.
+
+### The part that makes this a durability bug and not a tidiness bug
+
+The `AgentSession` Event's `eventId` is **content-addressed from `session_id` + `captured_at`**
+(`docs/ONTOLOGY.md:520`, citing #909 §4.3 #3). Those are the two inputs to the Event anchor.
+
+Now read what the spool meta actually holds (`tortoise/pi-hooks/tortoise-capture.ts:1093-1133`):
+`session_id`, `client_captured_at`, `created_at`, `content_digest`, `capture_key`, `attempts`,
+`next_attempt_at_ms`, `filed_key`, `filed_lane`. That is **the Event anchor's inputs plus the entire
+retry/idempotency state**.
+
+The repo already states this consequence about the same file, in its own words
+(`tortoise/capture_spool.py:789-794`):
+
+> `NOT re-fileable` — … the entry's key is `sha256(session_id)[:32]` and **the corrupt meta (the only
+> copy of the session id) is REMOVED, so no verb can reconstruct the session id the server needs.**
+
+And `docs/architecture/PI-CAPTURE-ARCHITECTURE.md:160` says the same from the reaper's side: a
+quarantined `.turns.jsonl.orphan` is **"unreachable to every surface"** and is therefore **reaped
+ahead of both delivery classes**. Confirmed in code — `tortoise/capture_spool.py:26-33` allows an
+`.orphan` to be reclaimed because it is "unreachable to every surface", and
+`tortoise/capture_spool.py:2177-2188` spends an orphan's bytes **first**, before any undelivered
+entry, because "an orphan's delivered-ness is unknowable".
+
+**Therefore the current behaviour is not "preserve the transcript for forensics". It is a delayed
+delete**: quarantine strips the transcript of the only key that can re-address it, and the cap then
+reclaims orphan bytes before anything else. An entry whose meta was merely *unreadable at that
+instant* is destroyed on a path that can never retry, and the transcript that "survived" is on a
+path that is reaped first. That is why "never destroy what you could not read" is a durability
+requirement and not politeness.
+
+---
+
+## 2 · What the repo already holds — the fix is an existing pattern, applied one level up
+
+This is the most important internal finding: **the codebase already has the correct semantics and
+applies them everywhere except here.** The fix introduces no new doctrine.
+
+### 2.1 The read path already says unreadable ≠ corrupt
+
+`tortoise/pi-hooks/tortoise-capture.ts:3317-3320` (`healthScan`), on the same files:
+
+> A meta we cannot read **still counts as PENDING (it may be waiting)** and is EXCLUDED from the
+> saturation metas.
+
+The health line and the drain therefore currently disagree about the same bytes: the reader says
+"pending, may be waiting", the repair pass says "corrupt, destroy". The fix resolves that
+contradiction in favour of the position the read path already records.
+
+### 2.2 The doctrine is already written down, verbatim, for a neighbouring case
+
+`tortoise/pi-hooks/tortoise-capture.ts:2107-2112`:
+
+> **A refusal is a delay the operator can reverse (`--retry-terminal`), an unlink is a loss nobody
+> can.**
+
+and `tortoise/capture_spool.py:185-190` on `DISCARD_TRANSCRIPT_TORN`:
+
+> The entry is RECORDED and KEPT (marked terminal), NEVER unlinked: … a read/decode failure must
+> never delete user data (#7708 follow-up).
+
+`DISCARD_TRANSCRIPT_UNREADABLE` (`tortoise/capture_spool.py:183-184`) exists for exactly a read
+failure — on the transcript. The meta is the one sibling that never got the same treatment.
+
+### 2.3 The mechanisms the fix needs already exist
+
+- **A `retained` flag on the record**, with defined precedence over the reason:
+  `tortoise/pi-hooks/tortoise-capture.ts:1148-1161` (`DiscardRecord.retained`),
+  `tortoise/capture_spool.py:228-260` (`RETAINED_DISCARD_REASONS`, `is_lost_discard` — "an explicit
+  `retained` flag on the record WINS over the reason").
+- **`recordDiscard` already accepts `retained`** (`tortoise/pi-hooks/tortoise-capture.ts:1583-1602`)
+  and writes it to the append-only `discarded.jsonl` ledger (`:1293`).
+- **Precedent arms that keep + record**: `DISCARD_ENTRY_GROWTH_REFUSED` and `DISCARD_SPOOL_SATURATED`
+  both write `retained: true` (`tortoise/pi-hooks/tortoise-capture.ts:2136`, `:2191`), with the
+  comment "a refused growth is a delay, not a loss".
+- **A `repair: false` reader** already skips corrupt entries without mutating
+  (`tortoise/pi-hooks/tortoise-capture.ts:1418-1421`).
+
+### 2.4 Discard reasons are not a closed set at the server
+
+Only `tortoise/capture_spool.py`, `tests/test_capture_spool.py` and
+`tests/test_3516_client_captured_at.py` name the `DISCARD_*` values. (By contrast the *closed* sets
+are `CAPTURE_LANES` and `CLIENT_CAPTURED_AT_SOURCES`, `tortoise/capture_spool.py:1332-1341`, which
+the server does validate.) So a new reason needs no server change — but it must be added to **both**
+legs, because the two legs drain one shared directory
+(`tortoise/pi-hooks/tortoise-capture.ts:2554-2556`).
+
+### 2.5 Both legs carry the defect
+
+| Leg | Site | `catch` |
+|---|---|---|
+| TypeScript (the deployed harness seam) | `tortoise/pi-hooks/tortoise-capture.ts:1439-1443` | `catch { meta = undefined }` — collapses *read failure* and *parse failure* into one outcome, then renders it as `meta is not valid JSON` (`:1456`). |
+| Python (the CLI drain) | `tortoise/capture_spool.py:1304-1309` | `except (OSError, json.JSONDecodeError, UnicodeDecodeError): meta = None` — `OSError` **includes `PermissionError`**. Same collapse, same `corrupt_entry`, same quarantine + unlink (`:1315-1326`). |
+
+The TS comment at `tortoise/pi-hooks/tortoise-capture.ts:1415` claims the function "Mirrors
+`capture_spool.list_spool_metas`" — it does, which is why fixing one leg alone would leave the other
+leg destroying the same files on the next tick.
+
+---
+
+## 3 · Which deployed copy is being patched, and how that was proved
+
+**The brief warned not to guess. Measured:**
+
+| Copy | Path | Size / lines | Marker |
+|---|---|---|---|
+| Repo (canonical source) | `tortoise/pi-hooks/tortoise-capture.ts` | 194,418 B / 4,014 | `// tortoise-hook-version: 19` |
+| Fleet deployed | `~/.pi/agent/extensions/tortoise-capture.ts` | 190,157 B / 3,935 | `// tortoise-hook-version: 18` |
+| Other repo | `agent-infra/extensions/tortoise-capture/index.ts` | 33,983 B / 827 | not the same artifact |
+
+**Proof of which one the fleet runs, from the installer's own declaration**, not from the paths:
+`tortoise/hook_install.py:834` (`PI_EXTENSION_NAME = "tortoise-capture.ts"`) and
+`tortoise/hook_install.py:904-908` — `_pi_artifact_contract()` returns
+`source = tortoise/pi-hooks/<PI_EXTENSION_NAME>`, `install_name = <PI_EXTENSION_NAME>`,
+`root_relpath = .pi/agent/extensions`. So `~/.pi/agent/extensions/tortoise-capture.ts` **is written
+from `tortoise/pi-hooks/tortoise-capture.ts`** by `tortoise install pi`, and the marker is the
+contract number the installer and its drift detector both read.
+
+**Disposition.** The repo copy is patched — it is the source of truth and the only copy the installer
+reads. The deployed copy is **generation 18, one behind** (the repo carries generation 19, whose
+header comment at `tortoise/pi-hooks/tortoise-capture.ts:44-53` exists only to move the marker so
+stale installs reinstall — the bytes themselves are generation-18 behaviour plus the `captureOutcome`
+parity block). Consequence stated plainly: **patching the repo does not fix the running fleet until
+`tortoise install pi` is re-run.** That is the installer's contract, not a gap this lane may paper
+over by hand-editing `~/.pi/agent/extensions/`; the lane reports it and the fix ships in the
+artifact the installer distributes.
+
+---
+
+## 4 · External research
+
+**PREFLIGHT — search tool.** `Search tool: Perplexity API (model 'sonar'), called directly with curl
+because the `web_search` tool could not see the credential — rung 1 unavailable: `mcp_load
+seo-intelligence` → "Unknown MCP server 'seo-intelligence'"; rung 2's harness route → `PERPLEXITY_API_KEY
+not set` in the process env, while the key IS present in `~/keys.env` (mode 600, as the skill
+documents) — queries: 4 attempted / 4 returned` (query 2 answered HTTP 429 and was retried serially
+after backoff, per the skill's rule; it then returned). `exa` was not used and is not on the ladder.
+
+**PREFLIGHT — graph.** `Graph: 0 hit(s) over 2 queries ("capture spool unreadable permission discard
+quarantine", "unreadable meta quarantine data loss") — unread — no query ran — failed: q1 504×1, q2
+504×1 (server wait-budget exceeded on both; retried once each per the skill) | wrote: not written —
+no query ran, so no evidence to file |`. The BRIEF's script route was tried first and reported
+`GRAPH-UNREACHABLE(NO-KEY)` (no key in this process's env); sourcing `~/keys.env` reached the server,
+which then answered `504` with a 237-byte wait-budget body on both queries. Recorded, not silently
+skipped.
+
+### 4.1 A consumer must never destroy what it could not read
+
+The field converges **strongly** here. The recommended policy is to classify the failure *before*
+deciding anything, and to keep three classes apart:
+
+- **transient operational** (timeout, dependency outage, throttling) → retry with bounded backoff;
+- **malformed/semantically invalid** — the consumer *successfully read the bytes* and cannot parse
+  them → stop retrying, dead-letter/quarantine;
+- **unreadable** (`EACCES`, missing file, I/O error, decryption failure) → **never classified as
+  malformed.**
+
+The stated reason `EACCES` must not cause deletion is exactly our case: *"`EACCES` proves that the
+consumer failed to access the message; it does not prove that the message is malformed. Deleting it
+would convert an infrastructure or authorization defect into silent data loss"* — and the file may
+be owned by another user, the condition may be temporary (an ACL or mount change), and *"another
+consumer or operator may be able to read and repair it."*
+
+That is a precise description of #11802: a root-owned entry in a user-owned spool, whose bytes are
+valid JSON and whose readability is a property of *who is asking*.
+
+**Convergent invariant** (query 4, and it is the cleanest statement of the whole fix):
+
+> **No successful read, no destructive decision; no durable completion, no cursor advancement.**
+
+Corollaries the field states explicitly, all of which bear on our code:
+
+- **Quarantine requires a successful read of the metadata first.** *"A cleaner should not blindly move
+  or delete an entry it cannot `stat`, open, or read. It should first successfully read the metadata
+  needed to identify the item … If metadata cannot be read, the safe result is retryable skip, not
+  quarantine."* — This is the direct verdict on `listSpoolEntries`: it quarantines a transcript whose
+  meta it never opened. It also explains why quarantine is worse than useless here: a quarantine
+  record that cannot name the item is not an audit trail.
+- **Do not advance a cursor/watermark past an unread entry.** Our "cursor" is the repair pass itself;
+  leaving the entry in place and rescanning is the idempotent shape the field prescribes.
+- **Atomic rename within one filesystem** is the right quarantine primitive *when quarantine is
+  warranted* — which it is not, for an unread entry.
+- Analogy sources: `rsync --partial/--partial-dir` keeps incomplete data so a later run resumes
+  rather than presenting an incomplete destination as finished; `logrotate`'s `delaycomp*` postpones
+  acting on a file a writer may still hold; `systemd-tmpfiles` cleans by explicit age policy, never
+  by "one scan could not read it".
+
+**Where the field does NOT converge:** the *name* and the *retention policy* for the middle state.
+Dead-letter queue, quarantine directory, and "recorded skip" are all in use, and which is right
+depends on whether replay is possible. For #11802 the answer is dictated by the repo, not the field:
+the entry can simply **stay in the spool and be retried**, because the spool *is* the retry queue —
+no DLQ needed.
+
+### 4.2 How a spool shared by more than one uid is owned in production
+
+The field converges on one negative and is explicit that there is no clever single flag:
+
+> A sound design is usually **not** "one writable directory with several UIDs." Use a root-owned,
+> non-writable container, create **one subdirectory per producer UID**, and **run the consumer under
+> the same UID as the producer** whenever possible.
+
+- **`StateDirectory=` / `DynamicUser=`** are built around **one unit → one state directory → one
+  effective owner**, and systemd may *recursively re-own* a managed directory whose ownership does
+  not match the configured identity — so a directory shared by several services can be actively
+  damaged by being treated as a normal `StateDirectory=`.
+- **`/var/spool/mail`** is **single-owner-per-mailbox** (per-recipient files), not several arbitrary
+  UIDs mutating one file; it also needs locks, because directory permissions alone do not make a
+  shared append safe.
+- **Setgid** makes new entries inherit the directory's group — it *"does not make files mutually
+  writable or solve ownership conflicts."* The **sticky bit** stops one user deleting another's
+  entries; it does **not** stop reading them, nor opening/truncating them, nor name-replacement,
+  symlink, hardlink or TOCTOU attacks.
+
+**Consequence for this lane, stated plainly:** the *ownership* defect (two identities rendered from
+two different sources) is **agent-infra#3921** and is correctly out of scope here. But the field
+confirms the tortoise half is not a workaround for it — it is the *other required half*. As long as
+two uids can write one spool, **the consumer will meet entries it cannot read**, and the only correct
+consumer behaviour is the retryable skip. Fixing only the ownership would leave the destroy-on-read
+path armed for every future mismatch (a mount change, an ACL, a `sudo` run, a migration).
+
+### 4.3 The observability obligation — explicit and metered, not silent
+
+The field converges on "counted event with an explicit disposition", and its disposition vocabulary
+maps **one-to-one onto a field the repo already has** (`retained`):
+
+| Field's term | Meaning | Repo equivalent |
+|---|---|---|
+| `retained` | not progressing, but recovery remains possible | `retained: true` |
+| `retryable` | failed temporarily, may succeed later | entry kept, `next_attempt_at_ms` backoff |
+| `dead-lettered` | isolated for investigation/replay | (n/a here — the spool is the retry queue) |
+| `permanent` | will not be recoverable | current `corrupt_entry` + unlink |
+
+The decisive argument for splitting the metric: **"A retryable item is an operational failure but not
+necessarily data loss. A permanently lost item is a correctness or durability failure. Combining them
+makes dashboards, SLOs, and alerts answer the wrong question."** Today an `EACCES` and a genuinely
+corrupt meta land in the *same* `corrupt_entry` bucket, so the ledger reports an authorization defect
+as data corruption — which is precisely the complaint in the issue (§13's conflation).
+
+Both halves are prescribed together: a **counter** (how often, is it rising) *and* a **structured
+ledger record** (which item, when, why) — *"Do not use a log line as the sole signal … Do not use a
+counter as the sole record: it cannot identify or reconstruct an individual lost item."* The repo
+already has the ledger (`discarded.jsonl`, append-only) and a per-run `spool DISCARD` warning line
+(`tortoise/pi-hooks/tortoise-capture.ts:3564-3565`), so the metering requirement reduces to: **the
+new reason must be distinguishable in both**, and marked `retained` so `is_lost_discard` does not
+count it as a loss.
+
+---
+
+## 5 · Contradiction test (run before adopting anything above)
+
+Checked against every recorded decision that reaches this work:
+
+| Decision | Reached by this fix? | Verdict |
+|---|---|---|
+| **#10175** — owner ruling 2026-10-27: the hosted capture cap is **HELD deliberately**; refusal is correct until the new extractor/storage architecture lands; carries an `OVERRIDES:` line. Must not touch the cap, prune the graph, or file the refusal as a defect. | **No.** The fix changes no ceiling (`SPOOL_MAX_ENTRIES`/`SPOOL_MAX_TOTAL_BYTES`/`MAX_ENTRY_BYTES` untouched), adds no eviction, prunes nothing. | **Not contradicted — and it is the same ruling.** A cap that REFUSES writes and KEEPS the backlog is exactly what #10175 holds; keeping an unreadable entry is *more* consistent with it than destroying one. One consequence is stated rather than hidden: an unreadable entry now continues to occupy a count/byte slot, so a spool full of them can reach saturation and refuse new writes. That is the held-cap behaviour working as ruled (refuse, don't destroy), and the health line already counts unreadable metas as pending (`:3317-3320`), so nothing new becomes invisible. |
+| **#10977 comment `6781757043`** (2026-11-10) — one-belief-kind: a claim is a `:Point` with `pointKind: statement`; Object/Event/Subject/Source are different nodes on different layers, never a kind of claim; `decision` is an Event. | **No.** This fix writes no graph node and adds no kind. It reads the ontology only to locate what the spool entry *is*. §1 above obeys the ruling (a session is an `:Event` + `:Source`, not a claim). | **Not contradicted.** |
+
+No `OVERRIDES:` line is added by this lane, because nothing here departs from a default
+against a decision — the fix adopts the repo's own written doctrine.
+
+---
+
+## 6 · Design decided, and the reasoning that rejected the alternatives
+
+**Decided:** split the single `catch` into a *read* outcome and a *parse* outcome. A read refusal
+(`EACCES`/`EIO`/`ENOENT`-between-readdir-and-open/any I/O error) records a **retained** discard with
+its own reason and leaves **both** the meta and the transcript exactly where they are, so the next
+drain retries. Only a genuine `JSON.parse` failure (or valid JSON with no usable `session_id`) keeps
+today's quarantine + unlink path. Both legs implement it; both reasons are distinguishable in the
+ledger and in the warning line.
+
+Alternatives considered and **rejected**, with the reason:
+
+1. **Leave it to agent-infra#3921 (fix the ownership only).** Rejected: §4.2 — the consumer will still
+   meet unreadable entries on any future mismatch (mount, ACL, sudo, migration). The field's invariant
+   is unconditional: *no successful read, no destructive decision.*
+2. **Quarantine the meta as well as the transcript, and record it.** Rejected: §4.1 — quarantine
+   requires a successful metadata read to identify the item; and per §1 the meta is the *only* copy of
+   the session id, so removing it from the scan path guarantees the entry can never be filed. A
+   quarantined copy of the meta would also be reaped ahead of everything (`capture_spool.py:26-33`).
+3. **Add a dead-letter queue.** Rejected: the spool already **is** the retry queue with backoff
+   (`next_attempt_at_ms`, `attempts`). A DLQ adds machinery and another unreachable surface, which is
+   the very failure mode being fixed.
+4. **Only shut down the destroy path (skip silently).** Rejected: §4.3 and the issue's own §13 — the
+   conflation must stop being *reported* as corruption. Silence would be a new defect: the read path
+   and the operator both need to know an entry is waiting unread.
+5. **Treat unreadable as terminal (record, mark terminal, keep).** Rejected: an unreadable entry has
+   not been *inspected*, so there is nothing to declare terminal about it; marking it terminal would
+   permanently stop retrying an entry that becomes readable the moment the permission mismatch
+   resolves. `attempts`/backoff already bound the retry rate.
+
+**Stated residual:** the fix makes the *consumer* honest. It does not make the two uids able to read
+each other's files — until agent-infra#3921 lands, a foreign-uid entry will now **accumulate** rather
+than be destroyed, and the spool can saturate. Saturation refuses writes and records the refusal
+(held cap, #10175); it does not delete. That is the trade this fix deliberately makes: **a visible,
+reversible backlog instead of silent, irreversible loss.**
+
+---
+
+## Sources
+
+**Internal (this repo):** `docs/ONTOLOGY.md:59-71` (§2 layers), `:180` (extractedFrom / sourceKind),
+`:461-463` (§4.4 bytes live outside the graph), `:520` (content-addressed `eventId` from session_id +
+captured_at), `:531` (`AgentSession` eventKind), `:1130` (`agentSession` is the provenance bridge) ·
+`tortoise/pi-hooks/tortoise-capture.ts:1093-1133` (SpoolMeta), `:1404-1462` (`listSpoolEntries`),
+`:1439-1456` (the conflated catch and the lie), `:1583-1602` (`recordDiscard` accepts `retained`),
+`:2107-2112` (the doctrine), `:2136`, `:2191` (retained precedent arms), `:2554-2556` (one shared
+directory), `:3317-3320` (read path: unread meta is PENDING), `:3564-3565` (the warning line) ·
+`tortoise/capture_spool.py:26-33` (orphans reclaimable), `:183-190` (`transcript_unreadable`/`_torn`),
+`:228-260` (`RETAINED_DISCARD_REASONS`, `is_lost_discard`), `:789-794` ("no verb can reconstruct the
+session id"), `:1258-1327` (`list_spool_metas`, the `OSError` catch), `:2177-2188` (orphans spent
+first) · `docs/architecture/PI-CAPTURE-ARCHITECTURE.md:160` (orphan unreachable, reaped) ·
+`tortoise/hook_install.py:834`, `:904-908` (the install contract) · issue #11802 §1–§7 (the measured
+root cause and scale — cited, not re-derived).
+
+**External (Perplexity, model `sonar`, 4 queries — see the PREFLIGHT line):** poison-message /
+unreadable-vs-malformed policy and the invariant *no successful read, no destructive decision*;
+quarantine requires a successful metadata read; `rsync --partial`, `logrotate delaycompress`,
+`systemd-tmpfiles` as the tolerance analogues; multi-uid spool ownership (systemd `StateDirectory=`,
+`/var/spool/mail`, setgid and sticky-bit limits); observability (`retained`/`retryable`/`permanent`
+dispositions, counters vs structured ledger, why a combined counter answers the wrong question).
+⚠️ **single-category:** all four are Perplexity (rung 1 and rung 2 are one engine, so this is ONE
+source category, not two) — the convergence claims are consistent across all four queries, but no
+independent second engine corroborated them; Brave is not loadable and `exa` is prohibited.
