@@ -2621,6 +2621,8 @@ def test_every_shipped_surface_is_named_with_a_state(tmp_path, monkeypatch):
         "docker-compose.yml": "OFF",
         "docker-compose.yaml": "ABSENT",
         "Dockerfile": "ABSENT",
+        "fly.toml": "ABSENT",
+        "entrypoint": "ABSENT",
         "config": "OFF",
         ".github/workflows": "ABSENT",
     }, states
@@ -2791,14 +2793,17 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     # with the rule off" was false for exactly the shape below — the same
     # per-file-vs-merged-view conflation the note builder above had already been
     # corrected for. Both notes now qualify it.
-    assert "Read from that file ALONE the deployment is unarmed" in hold, hold
+    assert "read from that file ALONE the deployment is unarmed" in hold, hold
     assert "INHERITS that image's `ENV`" in hold, hold
 
     # The latent shape, executed: the compose file is silent while a DEPLOYMENT file
     # (`Dockerfile.selfhost`) arms the flag — the two facts the qualification exists
-    # for. ⛔ This walk globs `Dockerfile*` only; it does NOT parse the compose file's
-    # `build:` stanza, so what this fixture pins is the PER-FILE reading and the note's
-    # scoping of it, not a measured compose→image inheritance (that merge is `#12022`).
+    # for. ⛔ The `build:` edge itself is MEASURED now (`deployment["builds_from"]`,
+    # `#12022`/`#12070` item 3): the synthetic compose file here declares no
+    # `build.dockerfile`, so the caveat says `measured build edge(s): none` instead
+    # of asserting an inheritance this tree's fixture cannot express. A fixture that
+    # DOES declare the edge is pinned in
+    # `test_the_per_file_caveat_names_the_MEASURED_build_edge`.
     (tmp_path / "Dockerfile.selfhost").write_text(
         'FROM python:3.12-slim\nENV TORTOISE_EMBED_GATE="1"\n', encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
@@ -2807,7 +2812,7 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     row = probe.score_rule_bullet()
     assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
     hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
-    assert "Read from that file ALONE the deployment is unarmed" in hold, hold
+    assert "read from that file ALONE the deployment is unarmed" in hold, hold
     # ⛔ And the SIBLING note carries the same defect class (round-13 review, P3): the
     # gate note led with "a deployment built from that file ALONE runs with the gate
     # OFF" and retracted it a sentence later — and this shape makes it reachable, not
@@ -2819,7 +2824,7 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
         probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE"),
         "TORTOISE_EMBED_GATE", False)
     assert "read from that file ALONE the gate is off" in gate_note, gate_note
-    assert "does not model a compose file that BUILDS from an armed" in gate_note, gate_note
+    assert "INHERITS that image's `ENV`" in gate_note, gate_note
     assert "a Tortoise deployment built from that file" not in gate_note, gate_note
     # ⛔ And the OTHER half of the same conflation (round-11 review, P2): with an armed
     # surface that IS a deployment file, the note must NOT claim that surface "does
@@ -2852,6 +2857,248 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     assert "UNARMED deployment file(s) ['docker-compose.yml']" in shipped_default, shipped_default
     assert "Dockerfile.selfhost=ON" in shipped_default, shipped_default
     assert "SCOPED to the surface(s) that arm it" not in shipped_default, shipped_default
+
+
+#: ── `#12022`: the deployment channels are DISCOVERED, not a path list ─────────
+def test_fly_toml_ENV_table_arms_the_deployment_and_build_args_do_not(
+        tmp_path, monkeypatch):
+    """`fly.toml`'s `[env]` is a deployed process's environment; `[build.args]` is not.
+
+    `#12022`: the walk did not read `fly.toml` at all, so a `[env]` entry that the Fly
+    machine's process really gets was outside the population the row note called
+    "every existing deployment file". ⛔ The table SCOPING is the load-bearing half:
+    a line scan reads `[build.args]` exactly like `[env]` (both are `KEY = "value"`),
+    and a build argument never reaches the process — so the wrong reader here would
+    be a false PASS of the same class, one format over.
+    """
+    (tmp_path / "fly.toml").write_text(
+        '[build.args]\n  TORTOISE_EMBED_GATE = "1"\n\n'
+        '[env]\n  TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["fly.toml"]["state"] == "OFF", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    # …and the ignored assignment is NAMED, never silently dropped: a reader has to
+    # be able to see that the walk found the line and decided it is not runtime env.
+    assert shipped["outside_runtime"], shipped
+    assert shipped["outside_runtime"][0].startswith("fly.toml:2:"), shipped["outside_runtime"]
+
+    # The SAME line inside `[env]` does arm it — so the OFF above is the table, not
+    # an inability to read TOML.
+    (tmp_path / "fly.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "1"\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["fly.toml"]["state"] == "ON", shipped["per_surface"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "fly.toml=ON(toml:[env])" in note, note
+
+
+def test_the_fly_manifest_is_DISCOVERED_by_platform_name_not_a_fixed_path(
+        tmp_path, monkeypatch):
+    """A second Fly manifest is walked without editing a list (`#12022`).
+
+    A fixed `("fly.toml",)` entry is how the channel was missed in the first place;
+    Fly's own convention is `fly.toml` / `fly.<app>.toml`, so the glob is the
+    discovery and a `fly.staging.toml` that arms the flag must move the reading.
+    """
+    (tmp_path / "fly.toml").write_text("[env]\n  FOO = \"1\"\n", encoding="utf-8")
+    (tmp_path / "fly.staging.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "1"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["fly.toml"]["searched"] == [
+        "fly.staging.toml", "fly.toml"], shipped["per_surface"]["fly.toml"]
+    assert shipped["deployment"]["files"] == {
+        "fly.staging.toml": "ON", "fly.toml": "OFF"}, shipped["deployment"]
+
+
+def test_the_entrypoint_is_DISCOVERED_from_the_image_and_its_exports_are_read(
+        tmp_path, monkeypatch):
+    """`entrypoint.sh` is found through `ENTRYPOINT`, and its `export` is a setting.
+
+    `#12022`: the image RUNS this script, so an `export FLAG=1` in it arms every
+    deployment the image runs — and the walk never read it. Two facts are pinned:
+    the script is discovered from the manifest (no `entrypoint.sh` literal here), and
+    `export VAR="${VAR:-default}"` is read as the DEFAULT it is, not as an
+    unresolvable token that silently reads OFF.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nCOPY entrypoint.sh /entrypoint.sh\n'
+        'ENTRYPOINT ["/entrypoint.sh"]\nCMD ["uvicorn", "app:app"]\n',
+        encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        'export HF_HOME="${HF_HOME:-/app/model}"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert [p.name for p in probe._entrypoint_scripts()] == ["entrypoint.sh"]
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["searched"] == ["entrypoint.sh"], shipped
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\n"
+        'export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-1}"\n',
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+    # ⛔ The row still holds, and the reason is NAMED: the IMAGE BUILD file this tree
+    # ships declares no gate of its own, so `deployment["on"]` is `False` even though
+    # the entrypoint arms it — one channel arming is not every channel arming.
+    assert shipped["deployment"]["armed"] == ["entrypoint.sh"], shipped["deployment"]
+    assert shipped["deployment"]["silent"] == ["Dockerfile.hosted"], shipped["deployment"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "entrypoint.sh=ON(shell:export)" in note, note
+
+
+def test_an_unexported_shell_assignment_is_not_a_shipped_environment_entry(
+        tmp_path, monkeypatch):
+    """A shell VARIABLE is not the process environment; only `export` reaches Python.
+
+    The entrypoint's own idiom elsewhere is `export NAME` as a separate statement, so
+    both spellings have to be understood: `export FLAG=1` and `FLAG=1` + `export FLAG`
+    arm it, while a bare `FLAG=1` that is never exported does NOT — reading it as a
+    shipped default would be a false PASS, and reading an EXPORTED one as silence
+    would be the false HOLD this walk exists to avoid.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nTORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "OFF", shipped["per_surface"]
+    assert any(hit.startswith("entrypoint.sh:2:") for hit in shipped["outside_runtime"]), \
+        shipped["outside_runtime"]
+
+    # …exported by a LATER statement, which is `entrypoint.sh`'s own house style.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nTORTOISE_EMBED_GATE=1\nexport TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+
+
+def test_a_shell_indirection_is_UNMEASURED_never_silent(tmp_path, monkeypatch):
+    """A value the walk cannot resolve is UNMEASURED — the unreadable-file doctrine.
+
+    `export FLAG="${OTHER}"` may arm the flag; reading it as OFF would publish "this
+    file declares nothing" over a line that may declare it (the fail-open direction).
+    Reading it as ON would be a measurement never made. UNMEASURED is the only
+    honest state, and it holds the row rather than passing it.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        '#!/bin/bash\nexport TORTOISE_EMBED_GATE="${SOME_OTHER_FLAG}"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", shipped
+    assert shipped["deployment"]["files"] == {
+        "Dockerfile.hosted": "OFF", "entrypoint.sh": "UNMEASURED"}, shipped
+    assert shipped["deployment"]["measured"] is False, shipped["deployment"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert shipped["indeterminate"], shipped
+    note = _gate_note(shipped)
+    assert "gate enabled by default: UNMEASURED" in note, note
+    assert "indeterminate assignments: [" in note, note
+
+
+def test_a_deployment_channel_that_arms_NOTHING_holds_row_one_and_is_NAMED(
+        tmp_path, monkeypatch):
+    """`#12022`'s falsifier: an armed compose file must not cover a silent channel.
+
+    The shape `#12022` names as the false PASS: `docker-compose.yml` is armed (so the
+    old population reads `True`) while `fly.toml`'s `[env]` and the entrypoint say
+    nothing — and `fly.toml` is what the hosted deployment actually respects. The row
+    must HOLD, and the output must name every channel it walked, so a reader can see
+    the population rather than trusting a phrase.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)          # docker-compose.yml armed
+    (tmp_path / "fly.toml").write_text(
+        '[env]\n  TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"\n', encoding="utf-8")
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport HF_HOME=\"/app/model\"\n", encoding="utf-8")
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    assert "UNARMED deployment file(s)" in row.observed, row.observed
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "fly.toml" in hold, hold
+    assert "entrypoint.sh" in hold, hold
+    note = next(n for n in row.notes if n.startswith("gate enabled by default:"))
+    # The CHANNELS are named, not just the filenames: a reader can tell that a TOML
+    # `[env]` table and a shell `export` were actually read (#12022).
+    assert "fly.toml=OFF(toml:[env])" in note, note
+    assert "entrypoint.sh=OFF(shell:export)" in note, note
+    assert "docker-compose.yml=ON(compose)" in note, note
+
+
+def test_the_per_file_caveat_is_ONE_string_BOTH_notes_call(tmp_path, monkeypatch):
+    """`#12054`: one inference, one string — the hold note and the gate note agree.
+
+    The measured cost: the gate note was corrected to a per-file reading while the
+    hold note 500 lines below still said a deployment built from the silent files
+    "runs with the rule off" — two opposite standards for one inference in one report.
+    The pin is structural, not a phrase list: BOTH notes must carry the SAME helper's
+    output, so reverting either one to its own wording reds here.
+    """
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "fly.toml").write_text("[env]\n  FOO = \"1\"\n", encoding="utf-8")
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    # The caveat itself states the per-file fact and the inheritance, and asserts NO
+    # deployment consequence it then has to take back (`#12070` item 4).
+    assert "this reading is PER FILE" in caveat, caveat
+    assert "INHERITS that image's `ENV`" in caveat, caveat
+    assert "runs with the rule off" not in caveat, caveat
+    gate_note = _gate_note(shipped)
+    assert caveat in gate_note, gate_note
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert caveat in hold, hold
+    assert "runs with the rule off" not in hold, hold
+
+
+def test_the_per_file_caveat_names_the_MEASURED_build_edge(tmp_path, monkeypatch):
+    """`#12070` item 3: the compose→image edge is READ, so the caveat can name it.
+
+    The caveat's whole point is that a silent compose file can still yield an armed
+    deployment by INHERITING an armed image. Nothing read the `build:` stanza, so the
+    qualification named an edge the walk had never checked on the tree it described —
+    and a fixture writing `services: {}` could not express it at all. Both are fixed
+    by reading `build:`/`dockerfile:` and reporting the edge.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    build:\n      context: .\n"
+        "      dockerfile: Dockerfile.selfhost\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE="1"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["builds_from"] == {
+        "docker-compose.yml": "Dockerfile.selfhost"}, shipped["deployment"]
+    # The per-FILE reading still holds the row: the compose file itself declares
+    # nothing, and the walk does not model the merge (`#12022` keeps that boundary).
+    assert shipped["deployment"]["files"] == {
+        "docker-compose.yml": "OFF", "Dockerfile.selfhost": "ON"}, shipped
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "docker-compose.yml BUILDS from Dockerfile.selfhost" in caveat, caveat
+
 
 
 @pytest.mark.parametrize("text", [
@@ -4352,7 +4599,7 @@ def test_row_one_is_PARTIAL_because_ONE_writer_embeds_outside_the_gate(
     outside-gate writer holds the row **while the product does not name it**.
     The injected writer here is UNDECLARED on purpose (the register is empty),
     so this falsifier keeps its teeth; the DECLARED direction — the same writer,
-    named — is `test_a_named_UNGATED_writer_is_the_accepted_exception_reading_b`
+    named — is `test_naming_a_LIVE_undeclared_writer_is_the_acceptance_reading_b_describes`
     below. Dropping `undeclared` from the verdict reds this test.
     """
     _fake_rule_tree(tmp_path)
@@ -9178,3 +9425,149 @@ def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
     # duplicate in it is the one the prose has to hold for.
     parse_only = _duplicate_key_report([v for v in violations if "broken.py" in v])
     assert "could not READ or PARSE" in parse_only.split("\n  ")[0], parse_only
+
+
+#: ── `#12312`: the citations this family makes are CHECKED, not trusted ───────
+#: The defect: a docstring cited `test_a_named_ungated_writer_is_the_accepted_
+#: exception_reading_b`, which no `def` under `tests/` declares — the test it meant
+#: is `test_naming_a_LIVE_undeclared_writer_is_the_acceptance_reading_b_describes`,
+#: named correctly nineteen lines away. Nothing red, and the stale stem had already
+#: survived one rename on `main`.
+#:
+#: ⛔ The checker asserts RESOLVABILITY, never truth — the same thing every citation
+#: checker in the field asserts (rustdoc's `broken_intra_doc_links`, Sphinx
+#: `-n/--nitpicky` + `intersphinx`, mkdocs `strict`): a reference, once recognised,
+#: must resolve to a symbol that exists. It is deliberately lexical and cheap.
+#:
+#: ⚠️ THE BOUND, declared rather than implied, because the honest measurement is
+#: that repo-WIDE is NOT cheap today: over `tools/`, `tortoise/`, `tests/` and
+#: `docs/` there are **157** node-id citations that name an existing test file and
+#: a test that file does not define — almost all of them a line-WRAPPED citation
+#: whose stem is truncated (`…test_the_INDENT_pops_DECLARED_`), so the fix is a
+#: continuation-aware extractor plus a triage of 157 rows, not a rename. This check
+#: therefore covers the FAMILY that produced the defect — `tools/dod_5090_probe.py`,
+#: this file, and this epic's two artifacts — and reports 0 violations there. The
+#: repo-wide item stays open in `#12312` with that cost stated.
+CITATION_SURFACES = (
+    "tools/dod_5090_probe.py",
+    "tests/test_dod_5090_probe.py",
+    "docs/epics/2026-11-04-5090-vector-layer/S3-VECTOR-CENSUS.md",
+    "docs/epics/2026-11-04-5090-vector-layer/TEST-DESIGN-surface-map.md",
+)
+
+_NODE_ID_CITATION = re.compile(r"([\w./-]+\.py)::(test_[A-Za-z0-9_]+)")
+_BARE_CITATION = re.compile(r"`(test_[A-Za-z0-9_]+)`")
+
+
+def _test_symbols(root: Path) -> tuple[set[str], set[str], dict[str, set[str]]]:
+    """``(every test def name, every test MODULE stem, {path: names})``.
+
+    The module stems are part of the universe on purpose: a backticked
+    ``test_lane`` is a citation of `tools/test_lane.py`, not a test that has gone
+    missing, and a checker that could not tell those apart would report hundreds of
+    false REDs. Both trees this repo keeps test tooling in are scanned — `tests/`
+    for the defs, `tests/` and `tools/` for the module stems.
+    """
+    defined: set[str] = set()
+    modules: set[str] = set()
+    by_file: dict[str, set[str]] = {}
+    for tree in ("tests", "tools"):
+        for path in sorted((root / tree).glob("**/test_*.py")):
+            modules.add(path.stem)
+    for path in sorted((root / "tests").glob("**/*.py")):
+        rel = path.relative_to(root).as_posix()
+        try:
+            tree_ast = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+        except (OSError, SyntaxError):
+            continue
+        names = {
+            node.name for node in ast.walk(tree_ast)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+        }
+        defined |= names
+        modules.add(path.stem)
+        by_file[rel] = names
+    return defined, modules, by_file
+
+
+def _unresolved_citations(text: str, defined: set[str], modules: set[str],
+                          by_file: dict[str, set[str]]) -> list[str]:
+    """Every citation in ``text`` that names no test this tree declares.
+
+    Two citation shapes are checked, and the skip rules are what keep it honest:
+
+    * `path/to/test_x.py::test_name` — checked ONLY when that file resolves in this
+      tree. A documentation EXAMPLE naming a file that does not exist here
+      (`tests/test_x.py::test_y`) is not a broken citation of this repo, and
+      flagging it would make the check unusable.
+    * a backticked BARE test name — resolves if some test declares it OR a test
+      MODULE carries the stem.
+    """
+    unresolved: list[str] = []
+    for path, name in _NODE_ID_CITATION.findall(text):
+        candidates = [k for k in by_file if k == path or k.endswith("/" + path)]
+        if not candidates:
+            continue
+        if not any(name in by_file[k] for k in candidates):
+            unresolved.append(f"{path}::{name}")
+    for name in _BARE_CITATION.findall(text):
+        if name in defined or name in modules:
+            continue
+        unresolved.append(name)
+    return sorted(set(unresolved))
+
+
+def test_every_citation_this_family_makes_resolves_to_a_real_test():
+    """`#12312`: a docstring that names a test must name one that EXISTS.
+
+    The pin is the check, and the check is self-tested below on the exact stale stem
+    this issue was filed for — so the guard cannot silently degrade into a
+    tautology that passes on any text (the class this file reds elsewhere).
+    """
+    root = Path(probe.__file__).resolve().parent.parent
+    defined, modules, by_file = _test_symbols(root)
+    assert defined, "the symbol universe came back empty — the check asserts nothing"
+    unresolved: dict[str, list[str]] = {}
+    for rel in CITATION_SURFACES:
+        text = (root / rel).read_text(encoding="utf-8")
+        found = _unresolved_citations(text, defined, modules, by_file)
+        if found:
+            unresolved[rel] = found
+    assert not unresolved, (
+        "a citation names a test this tree does not declare — fix the stem (and, "
+        f"if a test was renamed, the citations with it): {unresolved}")
+    # …and the CITATION FOR THE GUARD ITSELF resolves, so a later rename of this
+    # test cannot leave `#12312`'s own reference pointing nowhere.
+    assert "test_every_citation_this_family_makes_resolves_to_a_real_test" in defined
+
+
+def test_the_citation_check_REDS_on_a_deliberately_broken_citation():
+    """The falsifier: red on a broken citation, green once it is fixed.
+
+    ⛔ Against the REAL universe, not a toy one: the broken name is the one `#12312`
+    was filed for, so this also pins the rename that fixed it. Without this arm the
+    check above could compare two sets that never intersect and stay green forever.
+    """
+    root = Path(probe.__file__).resolve().parent.parent
+    defined, modules, by_file = _test_symbols(root)
+    # ⛔ The broken citations are ASSEMBLED from parts, not written as literals: this
+    # checker scans RAW TEXT, so a broken citation written in one piece would red the
+    # very check the falsifier is testing — a self-reference, not a defect.
+    stale_stem = "test_a_named_ungated_writer_is" + "_the_accepted_exception_reading_b"
+    real_stem = "test_naming_a_LIVE_undeclared_writer_is" + "_the_acceptance_reading_b_describes"
+    broken = f"…the declared direction is `{stale_stem}` below."
+    assert _unresolved_citations(broken, defined, modules, by_file) == [stale_stem], broken
+    fixed = f"…the declared direction is `{real_stem}` below."
+    assert _unresolved_citations(fixed, defined, modules, by_file) == [], fixed
+    # A NODE-ID citation is checked against the FILE's defs, not the whole universe:
+    # `<this file>::<a name this file does not declare>` is wrong even when the name
+    # exists elsewhere, and that is the shape a rename produces.
+    misplaced_name = "test_the_working_tree_report_records" + "_every_suite"
+    misplaced = f"`tests/test_dod_5090_probe.py::{misplaced_name}`"
+    assert _unresolved_citations(misplaced, defined, modules, by_file) == [
+        f"tests/test_dod_5090_probe.py::{misplaced_name}"], misplaced
+    # …and a citation of a file this tree does not ship is SKIPPED, not flagged: a
+    # documentation EXAMPLE is not a claim about this repo.
+    example = f"`tests/test_x.py::{'test' + '_y'}`"
+    assert _unresolved_citations(example, defined, modules, by_file) == []
