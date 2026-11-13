@@ -317,7 +317,7 @@ retrieval-miss class `#11901` owns; the folded rung cannot reach what the window
 
 1. **Not a production census, and not a production duplicate *rate*.** Same declared limit as
    `#11901`: a lane cannot reach a live `:Object` graph, so this is the mechanism on a real name
-   distribution, never a frequency estimate. The 419/422 variant pairs are **GENERATED** from real
+   distribution, never a frequency estimate. The 422 variant pairs are **GENERATED** from real
    names, not observed.
 2. **The in-window difference against `#11901` (96.9 % vs 62.1 % at `k=3`) is measured but not
    diagnosed** (§2). The likely driver is the changed harvest input; nothing here proves it.
