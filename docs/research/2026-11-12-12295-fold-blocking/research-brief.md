@@ -308,7 +308,7 @@ retrieval-miss class `#11901` owns; the folded rung cannot reach what the window
 | `§2.0` (Postgres record / FalkorDB cache) | **not reached** |
 | hosted FalkorDB **no-eviction** finding | **not reached** — nothing is tiered or evicted |
 | `#3584`/`#3590` — identity is the minted id, `name` is a natural key | **upheld** — `name` is never rewritten; every key here is derived and comparison-side |
-| **`#12047` round-4 finding 5** — `a-b` must not fold to `b` | **upheld and pinned on the UNSHIPPED comparison path this PR leaves alone**, and its measured cost is the 180-pair residual above; §7(a)'s separation lever would reintroduce that binding on the MENTION side, which is why it is not free |
+| **`#12047` round-4 finding 5** — `a-b` must not fold to `b` | **upheld, and pinned on the SHIPPED comparison path this PR itself modifies** — `test_the_article_anchor_decision_is_not_reversed` drives the shipped `_find_existing_entity` (which gains `_find_by_folded_key` at `extractor_v2.py:5828`) and returns `(None, 'none')` for `a-b` against a stored `b`; its measured cost is the 180-pair residual above; §7(a)'s separation lever would reintroduce that binding on the MENTION side, which is why it is not free |
 | `§7` + `§17.4.6` — the read ledger is not an admission-control signal | **not read** — the instrument passes `_record_reads=False` throughout |
 
 ---
