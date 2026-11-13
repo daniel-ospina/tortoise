@@ -281,7 +281,7 @@ class BlockIndex:
     ``Subject`` that share a key can never be paired by this index alone.
     """
 
-    __slots__ = ("_blocks", "_members", "_oversized", "_keys")
+    __slots__ = ("_blocks", "_keys", "_members", "_oversized")
 
     def __init__(self) -> None:
         self._blocks: dict[tuple[str, str], list[str]] = {}
@@ -311,7 +311,7 @@ class BlockIndex:
             self._keys += 1
 
     @classmethod
-    def from_rows(cls, rows, *, label_of=None) -> "BlockIndex":
+    def from_rows(cls, rows, *, label_of=None) -> BlockIndex:
         """Build from ``{id, name}`` rows (an optional ``label`` field is used)."""
         index = cls()
         for row in rows or ():

@@ -25,7 +25,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.entity_blocking import (  # noqa: E402
+from tortoise.entity_blocking import (
     AMBIGUOUS_KEYS,
     BASENAME,
     EXACT,
@@ -43,8 +43,7 @@ from tortoise.entity_blocking import (  # noqa: E402
     reduction_ratio,
     shingles,
 )
-from tortoise.entity_resolver import normalize_entity_name  # noqa: E402
-
+from tortoise.entity_resolver import normalize_entity_name
 
 # ── the key: derived, never the stored name ───────────────────────────────
 
@@ -120,7 +119,7 @@ def test_one_basename_carrier_attaches_on_a_COMPLETE_population():
     assert [m["id"] for m in got] == ["o1"]
     assert got[0]["basename_only"] is True
 
-    two = cands + [{"id": "o2", "name": "server/config.py", "kind": "core:other"}]
+    two = [*cands, {"id": "o2", "name": "server/config.py", "kind": "core:other"}]
     assert attach_matches("api/config.py", two, complete=True) == [], (
         "two basename carriers must BOTH be refused, never one silently picked")
 

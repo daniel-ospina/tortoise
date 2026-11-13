@@ -397,7 +397,10 @@ def run(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 3
 
-    from tortoise.extractor_v2 import _find_existing_entity, _sanitise_query_text
+    from tortoise.entity_blocking import (
+        BlockIndex,
+    )
+    from tortoise.extractor_v2 import _find_existing_entity, _norm, _norm_kind, _sanitise_query_text
     from tortoise.sdk import TortoiseSDK
 
     sessions = Path(os.path.expanduser(args.sessions_dir))
@@ -456,6 +459,15 @@ def run(args: argparse.Namespace) -> int:
         sdk.tortoise_fts_query("warm", entity_type="object", limit=1,
                                include_terminal=True, _record_reads=False,
                                _valid_time_rerank=False)
+
+        # ── THE MULTI-KEY BLOCKER (#12295). Built once over the SAME population the
+        # window searches, so "did the true duplicate land in at least one block"
+        # is asked of one corpus under two candidate generators. Graph-free: the
+        # blocker is a pure function of the names, so every k shares its answer —
+        # which is itself the finding (a blocker is not a window).
+        index = BlockIndex.from_rows(
+            [{"id": row["id"], "name": row["name"], "label": "Object"}
+             for row in pop])
 
         #: Which legs the fused read actually submitted. An FTS-only run is a
         #: DIFFERENT measurement from a hybrid one — the capture prior is the
@@ -627,24 +639,82 @@ def run(args: argparse.Namespace) -> int:
         # The stored node exists; the capture says it a different (real) way, so
         # the question is whether the shipped matcher can bind it — which is the
         # question "does this capture mint a duplicate".
+        #
+        # ⛔ FOUR FIELDS PER CLASS, because #12295 added a rung and the BEFORE has
+        # to stay measurable after the code moves:
+        #   ``attached``          the SHIPPED matcher, whatever it is at this head
+        #                         (it now includes the comparison-side fold)
+        #   ``attached_norm_only`` a FROZEN COPY of pre-#12295 phase 1 (`_norm`
+        #                         equality + kind, nothing else). Recomputed here,
+        #                         never read back from the old artifact, so the
+        #                         before/after is one run on one corpus.
+        #   ``attached_folded``   the candidate fold #11901 measured (`_fold_punct`,
+        #                         separators only) — kept so the two folds can be
+        #                         told apart rather than conflated.
+        #   ``in_multikey_block`` the pair completeness of the multi-key blocker:
+        #                         is the canonical id in the union of the keys the
+        #                         mention blocks on? (the metric `#12295` names)
+        def _norm_only_match(rows: list[dict], surface: str, kind: str):
+            """Pre-#12295 phase 1, frozen — the control the AFTER is measured against.
+
+            Verbatim the body `_find_existing_entity` had before the folded rung
+            (`extractor_v2.py`, pre-#12295): ``_norm`` equality, exact kind then
+            bare kind, ambiguous when the bare form collides. Frozen ON PURPOSE:
+            importing the live function would move the "before" every time the
+            "after" changes, and a before/after measured against a moving before
+            is not a measurement.
+            """
+            n = _norm(surface)
+            kind_folded = str(kind).strip().lower()
+            exact = [r for r in rows
+                     if _norm(r.get("name", "")) == n
+                     and str(r.get("kind", "")).strip().lower() == kind_folded]
+            if exact:
+                return exact[0]
+            bare = _norm_kind(kind)
+            m = [r for r in rows
+                 if _norm(r.get("name", "")) == n
+                 and _norm_kind(r.get("kind", "")) == bare]
+            return m[0] if len(m) == 1 else None
+
         var = {k: {"pairs": 0, "in_window": 0, "attached": 0,
-                   "attached_folded": 0, "in_window_not_attached": 0}
+                   "attached_folded": 0, "in_window_not_attached": 0,
+                   "attached_norm_only": 0, "in_multikey_block": 0}
                for k in KS}
         by_class: dict[str, dict[str, dict[str, int]]] = collections.defaultdict(
             lambda: {str(k): {"pairs": 0, "in_window": 0, "attached": 0,
-                              "attached_folded": 0} for k in KS})
+                              "attached_folded": 0, "attached_norm_only": 0,
+                              "in_multikey_block": 0} for k in KS})
+        #: How many candidates the multi-key blocker proposes per mention — the
+        #: COST side of pair completeness (a blocker can reach 1.0 by proposing
+        #: everything, which is the number a lone recall figure hides).
+        blocked_sizes: dict[int, list[int]] = {k: [] for k in KS}
         for row in sample:
             name = row["name"]
             for vclass, surface in variants(name, row["cls"]):
                 folded_surface = _fold_punct(surface)
+                # The multi-key blockers are graph-free, so they are computed ONCE
+                # per (row, surface) and reported at every k — the window does not
+                # change what the blocker proposes.
+                blocked_ids = set(index.candidates(surface, label="Object"))
+                in_mk_block = row["id"] in blocked_ids
+                mk_len = len(blocked_ids)
                 for k in KS:
                     var[k]["pairs"] += 1
                     by_class[vclass][str(k)]["pairs"] += 1
+                    blocked_sizes[k].append(mk_len)
+                    if in_mk_block:
+                        var[k]["in_multikey_block"] += 1
+                        by_class[vclass][str(k)]["in_multikey_block"] += 1
                     rows = window(surface, k)
                     in_win = any(r["id"] == row["id"] for r in rows)
                     if in_win:
                         var[k]["in_window"] += 1
                         by_class[vclass][str(k)]["in_window"] += 1
+                    legacy = _norm_only_match(rows, surface, "core:other")
+                    if legacy is not None and legacy.get("id") == row["id"]:
+                        var[k]["attached_norm_only"] += 1
+                        by_class[vclass][str(k)]["attached_norm_only"] += 1
                     # the MENTION is the surface form, exactly as a capture's
                     # derived query would carry it — never the stored name
                     cand, _m = _find_existing_entity(rows, surface, "core:other")
@@ -662,6 +732,67 @@ def run(args: argparse.Namespace) -> int:
                         by_class[vclass][str(k)]["attached_folded"] += 1
         arms["variant"] = var
         arms["variant_by_class"] = {c: dict(v) for c, v in sorted(by_class.items())}
+
+        # ── ARM 4: PAIR COMPLETENESS — the metric `#12295` names, before vs after.
+        #
+        # Pair completeness = the fraction of true duplicate pairs that land in at
+        # least one block (`arXiv:1905.06167`; the ER field's own floor for "the
+        # scoring step is not capped before it starts" is 0.95). Here the true
+        # pairs are `#11901`'s variant pairs and the block is the CANDIDATE SET.
+        # Two generators are measured on the same corpus, in one run:
+        #   fts_only   the shipped window   (block = the k rows a capture sees)
+        #   multikey   the #12295 blocker   (block = the union over the key set)
+        # ⛔ The multikey figure is k-INDEPENDENT and that is not a rounding
+        # artifact: a blocker is a function of the names, so a window width cannot
+        # move it. Reporting it per k would imply a width can buy blocking recall.
+        _pairs = var[KS[0]]["pairs"]
+        _mk = var[KS[0]]["in_multikey_block"]
+        _sizes = blocked_sizes[KS[0]] or [0]
+        _all_pairs_per_mention = max(1, len(pop) - 1)
+        arms["blocking"] = {
+            "pairs": _pairs,
+            "population": len(pop),
+            "multikey": {
+                "in_block": _mk,
+                "pair_completeness": (round(_mk / _pairs, 4) if _pairs else None),
+                "candidates_mean": round(sum(_sizes) / len(_sizes), 2),
+                "candidates_max": max(_sizes),
+                # The cost side, always beside the completeness: proposing every
+                # node scores PC = 1.0 and is not a blocker.
+                "reduction_ratio": round(
+                    (sum(_sizes) / len(_sizes)) / _all_pairs_per_mention, 4),
+                "k_independent": True,
+            },
+            "fts_only": {
+                "in_window": {str(k): var[k]["in_window"] for k in KS},
+                "pair_completeness": {
+                    str(k): (round(var[k]["in_window"] / _pairs, 4) if _pairs else None)
+                    for k in KS},
+            },
+            "index_stats": index.stats(),
+        }
+
+        # ── ARM 5: THE DUPLICATE RATE, per configuration, on the same pairs.
+        # "Mints a duplicate" = the mention does not attach onto its own canonical.
+        # At the PRODUCTION WINDOW (k=3, `_derive_queries` -> `_fts_rows`), because
+        # a rate quoted at another width is not a rate the product pays.
+        _k = KS[0]
+        _v = var[_k]
+        arms["duplicate_rate"] = {
+            "window_k": _k,
+            "pairs": _pairs,
+            "prior_off": {"attached": 0, "minted": _pairs, "rate": 1.0},
+            "prior_on_norm_only": {
+                "attached": _v["attached_norm_only"],
+                "minted": _pairs - _v["attached_norm_only"],
+                "rate": round((_pairs - _v["attached_norm_only"]) / _pairs, 4),
+            },
+            "prior_on_shipped_folded": {
+                "attached": _v["attached"],
+                "minted": _pairs - _v["attached"],
+                "rate": round((_pairs - _v["attached"]) / _pairs, 4),
+            },
+        }
 
         # ── ARM 3: what a capture actually hands ``resolve_entities``.
         # ``search_graph`` accumulates every query's rows into ONE id-keyed dict,
@@ -687,6 +818,21 @@ def run(args: argparse.Namespace) -> int:
                 pooled[k]["set_min"] = min(pooled[k]["set_min"], size)
                 pooled[k]["set_max"] = max(pooled[k]["set_max"], size)
         arms["pooled"] = pooled
+
+        # The COST of the FTS candidate set, on the same denominators as the
+        # multi-key blocker's, so "better completeness at lower cost" is a
+        # comparison of two numbers in the artifact and not a sentence in a brief.
+        # The FTS candidate set a capture sees is the POOLED union over its
+        # derived queries (`search_graph`, `extractor_v2.py:3074`), not `limit`.
+        _pool3 = arms["pooled"][KS[0]]
+        _pool_mean = (_pool3["set_sum"] / _pool3["captures"]
+                      if _pool3["captures"] else 0.0)
+        arms["blocking"]["fts_only"]["candidates_mean"] = round(_pool_mean, 2)
+        arms["blocking"]["fts_only"]["reduction_ratio"] = (
+            round(_pool_mean / (len(pop) - 1), 4) if len(pop) > 1 else None)
+        arms["blocking"]["fts_only"]["candidate_set"] = (
+            "pooled union over a capture's derived queries (max_queries=15); "
+            "the per-query window is `k`")
 
         # ⛔ A MIXED run is refused: `legs_seen` OR-s the looser #3005 predicate
         # over thousands of windows, so a run where the dense leg held for some
