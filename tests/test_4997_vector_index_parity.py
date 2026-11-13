@@ -483,16 +483,25 @@ def test_none_result_set_means_not_measured():
     `None`, so `is None` afterwards is ALSO satisfied by a read that never
     entered — the false-PASS shape `test_unmeasured_pair_is_none_in_both_halves`
     guards its own arm against.
+
+    ⛔ The pair's COHERENCE (both halves `None`, never half-populated) is
+    deliberately NOT asserted here: on a virgin projection `_bare()` leaves the
+    served half `None` too, so that assertion could not fail on the mutation it
+    would look like it guards — the same unable-to-fail shape as above. Its real
+    guards are `test_unmeasured_pair_is_none_in_both_halves` and
+    `test_a_re_read_that_cannot_measure_clears_an_already_populated_pair`, which
+    populate the pair BEFORE the failing read.
     """
     proj = _bare()
     proj.g = _NoneCatalogueGraph()
     proj._record_vector_index_inventory()
-    assert any("db.indexes()" in c for c in proj.g.calls), (
+    # Lower-cased for the same reason the fake is: a case change in the emitted
+    # Cypher is not a missing read, and this message would then blame the wrong
+    # thing (the file's `_is_vector_drop` lowercases for the same reason).
+    assert any("db.indexes()" in c.lower() for c in proj.g.calls), (
         "the catalogue read must have been ATTEMPTED, or `is None` proves nothing"
     )
     assert proj._vector_indexed_labels is None
-    # The pair stays coherent: `None` means NOT MEASURED, so neither half is a set.
-    assert proj._vector_index_served_labels is None
 
 
 # (d) fail-open: a raising read never breaks store setup
@@ -690,11 +699,13 @@ def test_a_store_with_no_gap_does_not_warn(caplog):
 # ── #11087 (S4): the contract is reported POSITIVELY ──────────────────────
 #
 # The pin above is unchanged in SUBSTANCE (plan §6.1) — "no gap ⇒ no gap
-# report" still holds — but its CAPTURE LEVEL is INFO, not WARNING (#11660
-# review F1 moved the unarmed gap report to INFO and the armed one to the
-# retirement INFO). A comment claiming a WARNING capture over a pin that no
-# longer takes one is the same defect class this file's fixtures were fixed
-# for: it sends the next reader to check the wrong half.
+# report" still holds — but its CAPTURE LEVEL is INFO, not WARNING. #11660
+# review F1 moved the ARMED (retired) gap report to a retirement INFO; the
+# UNARMED report keeps its WARNING, which is the split `_gap_level()` above
+# reads from `vector_index_retired()`. The header said "captures at WARNING"
+# over a pin that no longer takes one, which is the same defect class this
+# file's fixtures were fixed for: it sends the next reader to check the wrong
+# half.
 #
 # What #11087 ends is the SILENCE — the same store must now report the
 # serves/indexes pair at INFO, and so must a store that HAS a gap (which also
