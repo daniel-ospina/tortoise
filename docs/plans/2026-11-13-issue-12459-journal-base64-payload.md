@@ -48,41 +48,65 @@ the append path)
 | `tools/journal_growth.py` | read **critically** — see §1.1. It cannot report the vector payload's **on-disk** span (it re-serialises with spaced separators). |
 | #11886 | the ruler defect: the tool attributes bytes by re-serialising with **spaced** separators, so its vector figure and the journal's on-disk figure are on different rulers |
 
-### External — ⛔ **UNAVAILABLE on this box. Declared, with the errors.**
+### External — a routing failure I first mis-diagnosed, then repaired
 
-The brief's rung 1 is `mcp__seo-intelligence__perplexity_search`. Four rungs were attempted; each failed on
-a different missing piece:
+**Recorded because the first version of this note declared the survey impossible and that was wrong.**
 
-| rung | attempt | error |
+| rung | attempt | outcome |
 |---|---|---|
-| 1 | `mcp_load seo-intelligence` | `Unknown MCP server 'seo-intelligence'` |
-| 2 | `web_search` (`sonar`, the cheapest model) | `PERPLEXITY_API_KEY not set` |
-| 3 | `mcp_load brave-search` | `MCP error -32000: Connection closed` |
-| 4 | `mcp_load exa` → `web_search_exa` | loads, then `(401) API key must be provided … EXA_API_KEY` |
+| 1 | `mcp_load seo-intelligence` | ⛔ `Unknown MCP server 'seo-intelligence'` — the server is not in this box's `mcp_catalog` |
+| 2 | `web_search` (`sonar`, the cheapest) | ⛔ `PERPLEXITY_API_KEY not set` — **but the credential exists**, at `$HOME/.env`, which this shell does not source (`~/.profile` sources `/tmp/cell-home/keys.env`, which does not exist) |
+| 3 | `mcp_load brave-search` | ⛔ `MCP error -32000: Connection closed` |
+| 4 | `mcp_load exa` → `web_search_exa` | ⛔ `(401) EXA_API_KEY` |
 
-There is no `.env` on this box (`AGENT_INFRA_PATH` is unset too), so no rung could be repaired without a
-credential only the owner can supply. **That is a gap in this note, not a silent substitution.** What it
-means in practice: the external questions are answered from (a) sources **already recorded in this repo**
-and (b) **measurements run here**, which is a stronger footing for the numeric claims and a weaker one for
-the comparables survey. Concretely:
+I first wrote that "no rung could be repaired without a credential only the owner can supply". **That was a
+false inference from a true observation**: a fresh-context reviewer found `$HOME/.env` holds a live
+`PERPLEXITY_API_KEY`, and `set -a; . ~/.env` made rung 2 work. So the survey below **was run** — four
+queries on `sonar`, ~$0.024 total, at the `research` skill's cost gate. The lesson is recorded rather than
+smoothed over, because the failure mode ("the cheapest rung did not load" → "the owner must unblock it") is
+how a repairable gap becomes a permanent one.
 
-- **(a) binary float encodings in a text log.** The trade-off is already recorded in-repo
-  (`STORAGE-ARCHITECTURE.md` §5.2, #5612's citations): base64 of packed float32 is **+33 % over raw**, and
-  **4.1× smaller than the float64 decimal text** (8,414 → 2,048) — the `~5×` in that source is against the
-  **raw 4 B/float** (8,414 → 1,536), a different comparison. Measured here, on the record that matters (§1).
-- **(b) shortest-round-trip printing.** Answered by **measurement instead of citation** — §2.3. The claim
-  "9 significant digits is exactly float32's precision" is checkable, so it was checked: on 2,000,000
-  random float32 values, `%.9g` round-trips **2,000,000/2,000,000**; `%.8g` misses **10,758**; `%.7g`
-  misses **1,336,573**.
-- **(c) versioned formats on a replay path.** Answered from this repo's own contracts — the append-only
-  rule (#5917: *"Nothing is truncated or rewritten — the seal is another append"*) and R1's
-  presence-is-ownership. These **forbid** the obvious external pattern (a file-level header), which is a
-  constraint no comparable's practice can override; see §2.1.
-- **(d) what the memory comparables store.** ⛔ **NOT ANSWERED.** Zep/Graphiti episode payloads, Mem0,
-  Letta and pgvector's on-disk array format were not surveyed, and no claim about them is made in this
-  note. This is the one question the note leaves open, and it does not block the decision: the binding
-  constraints here are #5004 and R1, both internal, and a comparable's practice could not reverse either.
-
+- **(a) binary float encodings in a text log.** A packed `float32` array is `4N` bytes raw; base64 spends
+  `4⌈N/3⌉` **characters** (≈ `5.33N`, i.e. **+33 %**) and keeps the JSON envelope and the surrounding
+  record greppable, while the *values* become opaque. The binary alternatives are cheaper and worse here:
+  protobuf `packed repeated float` is `4N + h + ℓ` (≈ `4N+3`), MessagePack and CBOR are ≈ `5N` for an
+  array of float32, and Arrow/Parquet add buffers, offsets and schema framing that dominate a single small
+  record. **Only base64 keeps the log line a JSON object**, which is the property §2.5 needs. On
+  **corruption detection all six are the same**: none carries an intrinsic checksum, so a *validly
+  altered* payload decodes silently under every one of them — which is why §2.2's refusals are structural
+  (count, version, alphabet) and why this note does **not** claim integrity from the encoding. Recorded
+  in-repo too: `STORAGE-ARCHITECTURE.md` §5.2 — base64 is **~4× smaller than the float64 decimal text**
+  (8,414 → 2,048) and **~5× smaller than the raw 4 B/float** (8,414 → 1,536); those are two different
+  comparisons and the note keeps them apart (§1.4).
+- **(b) shortest-round-trip printing.** The formal bound is `⌈1 + p·log₁₀2⌉` with `p = 24` significand
+  bits ⇒ `⌈8.22⌉ = **9**`: for every finite binary32 value there is a ≤9-digit decimal that correctly
+  rounds back to **exactly** it, and "round-trips" means `R₃₂(P(x)) = x` — equality of sign, exponent and
+  significand, not closeness. It is a **sufficient worst case, not a per-value cost**, which is exactly
+  why P0's text measures **12.2 chars/float** and not 9. Ryu/Grisu exist to find the *shortest* such
+  numeral rather than a fixed 9. Checked here as well as cited — §2.3's 2,000,000-value sweep
+  (`%.9g` exact 2,000,000/2,000,000; `%.8g` misses 10,758; `%.7g` misses 1,336,573).
+- **(c) versioned formats on a replay path.** The convergent pattern is **both layers**: a stable
+  container header for framing, and a **per-record/per-batch version discriminator read *before* the
+  payload is interpreted**, plus length-delimited records so an old reader can skip what it cannot decode,
+  stable integrity metadata, and — the rule that matters here — ***"unknown version" must be a controlled
+  error, never an attempt to guess the layout***. A **file-level** version is safe *"only when every
+  record in that file is guaranteed to use the same format"*, and is explicitly called out as unsafe
+  across *"rolling upgrades or records from multiple producers"*. That is §2.1's argument, reached
+  independently: this journal is append-only (#5917), concatenable and restorable, so a file header cannot
+  describe it — and §3.1's `unknown version → refuse` is the cited rule, not a local preference.
+- **(d) what the memory comparables store — answered, and the answer is "not this".** **Zep/Graphiti**
+  episodes are graph nodes whose *content* may be `text`/`message`/`json`, and embeddings are computed for
+  graph entities and handed to the configured graph store; the episode payload is not documented as
+  carrying a serialized embedding array. **Mem0** computes the embedding per memory and passes it to a
+  vector-store adapter (pgvector or Qdrant), so the durable form is the store's native column, not JSON.
+  **Letta/MemGPT** passages carry `Optional[List[float]]` at the API layer with an `embedding_config`, and
+  in PostgreSQL land as a native pgvector value (padded to 4096 dims). **pgvector** itself stores a native
+  variable-length vector of 32-bit floats. And **none of the four documents a versioned on-disk embedding
+  serialization format at all.** So there is **no comparable practice to copy**, and — read against the
+  contradiction test — nothing here contradicts #5004 or R1: they delegate the vector to a store, while
+  this journal is required to **carry** it (R1's *presence is ownership*). The inline-in-a-text-log vector
+  is therefore *ours alone*, which is precisely why this format has to be designed and tested rather than
+  borrowed.
 **CONTRADICTION TEST (asked first, before cost, quality or fit).** Three recorded positions bind this
 design, and none may be reversed by adoption:
 
@@ -188,7 +212,8 @@ P2 journal   1,000,000 × 2,798 B = 2.798 GB  ≈ $0.35/mo      (saves 2.625 GB 
 pre-P0       1,000,000 × 9,176 B = 9.176 GB  ≈ $1.15/mo
 ```
 
-#11821's closing line said **"~4.7 GB ≈ $0.59 (P0) → ~2.1 GB ≈ $0.26 (P2)"**. Measured, it is
+#11821's *"Effect on the unbounded line"* cost line said **"~4.7 GB ≈ $0.59 (P0) → ~2.1 GB ≈ $0.26
+(P2)"**. Measured, it is
 **5.42 GB ≈ $0.68 → 2.80 GB ≈ $0.35**, and the difference is **arithmetic that can be reproduced**, not a
 different basis:
 
@@ -393,7 +418,8 @@ Under the new frame every one of those steps is identical, because the frame is 
 always dropped, never half-applied), but a human salvaging the fragment can no longer *read* the surviving
 tail — a base64 body truncated on a 4-character boundary still decodes to a **prefix** of the vector
 (measured: −4 chars → 1,533 B, i.e. 383.25 floats with the first 383 whole; −8 → 1,530 B, 382.50), but only
-after the human trims it to that boundary and decodes it. So hand-recovery changes **shape**, not
+after the human trims the **body** to a 4-char boundary (a 3-byte multiple) **and the decoded bytes to a
+4-byte multiple** — the two moduli differ, so two trims are needed. So hand-recovery changes **shape**, not
 existence. Cost, not correctness; recorded under Rollback (§6) as a permanent loss.
 
 ---
@@ -427,7 +453,7 @@ Dispatch is on the **value**, per record:
 | `embedding` value in the line | meaning | reader |
 |---|---|---|
 | a JSON **list** | P0 (float32 shortest text) or pre-P0 (float64 text) | unchanged — the existing path |
-| a **string** starting `b64:` | P2 frame | decode per §2; refuse on any of the four corruptions |
+| a **string** starting `b64:` | P2 frame | decode per §2; refuse on any of the **five** corruptions |
 | **absent** | pre-#5004 / foreign record | unchanged — recompute is the only behaviour available (R1) |
 | `null` | owned "no vector" | unchanged — the replay must **not** invent one (R1) |
 | a string **not** starting `b64:` | impossible; the seam drops every string | refuse with a message naming the value |
@@ -507,8 +533,29 @@ fixture (the P0 test's rule, so the check cannot pass vacuously):
 
 Two fixtures, because the **magnitude is a property of the text, not of the encoding**: this fixture
 (`0.1 + i·1e-9`, ~15.0 chars/float) gives **1.40×**, a realistic full-precision float64 vector (~19.7
-chars/float) gives **1.84×**. The direction is general; the magnitude is not, and the fixture is chosen to
-be off the float32 grid rather than to be typical. And it is narrowed **not at all**: the frame's width
+chars/float) gives **1.84×**.
+
+⛔ **And the *sign* is a property of the text too — which is why §1's figures use a real vector.** The
+frame costs a flat **5.33 chars/float (`f32`) / 10.71 (`f64`)**, so it is a **floor the text can fall
+below**. Measured on a 384-d vector of degenerate shapes (the probe prints these):
+
+```
+   shape                            f32: text    frame    ratio    f64: text    frame    ratio
+   all zeros                            1,537    2,064    0.74x       1,537    4,112    0.37x
+   small ints 0..383                    2,195    2,064    1.06x       2,195    4,112    0.53x
+   the probe's real vector (f32)        8,031    2,064    3.89x       8,031    4,112    1.95x
+```
+
+A ratio **below 1 means the frame is LARGER than the text**. So on zeros, base64 loses for **both** widths
+(the `f64` frame is 2.68× the text; even `f32` is 1.34×), and on small integers it loses for `f64` (1.87×)
+while only marginally winning for `f32` (1.06×). Sparse and zero-heavy **caller** vectors are real, so this
+is not a corner case to wave away: base64 is a **size trade whose sign depends on the vector**. It is taken
+here for the *bit exactness*, the single reader and the removal of the shortest-decimal invariant — not
+because it always shrinks. A degenerate vector that loses bytes is still a correct vector.
+
+(These f64 numbers are **full-precision** text — `0.10000000149011612`, what a widened float32 prints —
+so they exceed §1's `f32` figures, which are P0's *shortest* text. The two are not comparable and §1's are
+the ones the journal actually writes.) And it is narrowed **not at all**: the frame's width
 field is what carries the promise — `f64` in, `f64` out.
 
 ### 4.3 What happens to a caller-owned vector under the new format

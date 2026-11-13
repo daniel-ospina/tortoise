@@ -368,6 +368,31 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
     f64_spans("a realistic full-precision float64 vector",
               [float(x) for x in np.random.default_rng(12459).standard_normal(EMBEDDING_DIM)])
 
+    # ── the sign of the trade is a property of the VECTOR ───────────────
+    # The frame costs a flat 5.33 chars/float (f32) / 10.71 (f64), so it is a
+    # FLOOR the JSON text can fall below. Measured on degenerate shapes:
+    print("\n== degenerate vectors: the trade's SIGN depends on the vector "
+          "(ratio = text/frame; <1 means the frame is LARGER)")
+    print("   shape                 f32: text     frame    ratio    "
+          "f64: text     frame    ratio")
+    def _len(values, width):
+        n = len(values)
+        text = json.dumps(values, separators=(",", ":"))
+        fr = json.dumps(frame(width, 4 if width == "f32" else 8, values))
+        return len(text), len(fr)
+    shapes = {
+        "all zeros": [0.0] * EMBEDDING_DIM,
+        "small ints 0..383": [float(i) for i in range(EMBEDDING_DIM)],
+        "the probe's real vector (f32)": vec,
+    }
+    for label, values in shapes.items():
+        t32, f32 = _len(values, "f32")
+        t64, f64 = _len(values, "f64")
+        print(f"   {label:<28} {t32:>9,} {f32:>9,}  {t32 / f32:>6.2f}x "
+              f"{t64:>10,} {f64:>9,}  {t64 / f64:>6.2f}x")
+    print("   ⛔ a ratio BELOW 1x means base64 is LARGER than the decimal text —")
+    print("      the frame is chosen for bit-exactness and one reader, not for bytes.")
+
     # ── what the reader REFUSES (the fail-closed half) ──────────────────
     print("\n== the reader refuses (each raises, none decodes silently short)")
     body = frame("f32", 4, vec).rsplit(":", 1)[1]

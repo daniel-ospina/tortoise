@@ -96,8 +96,11 @@ env -u TORTOISE_DB_URI uv run python \
 `measurement.txt` is one run's verbatim output. Exit 0 = measured; the probe asserts every equivalence
 it prints and returns non-zero if one fails.
 
-## What this evidence does NOT cover
+## External research
 
-External research was unavailable on the box this was measured on (four rungs, each a different missing
-key/server — see the note's §0). The comparables survey (Zep/Graphiti episode payloads, Mem0, Letta,
-pgvector's on-disk array format) was **not performed**, and the note makes no claim about them.
+It was run, and the note's §0 carries it with citations — four `sonar` queries (~$0.024): encodings for a
+float array in a text log, the 9-digit float32 round-trip bound, per-record versioning on a replay path, and
+the comparables (Zep/Graphiti, Mem0, Letta, pgvector). The routing history is recorded because the first
+draft got it wrong: rung 1's `seo-intelligence` MCP server is absent, and `PERPLEXITY_API_KEY` is **not
+exported** in a fresh session's shell — but it **is** present in `$HOME/.env`, so `set -a; . ~/.env` makes
+rung 2 work. Declaring the survey impossible was a false inference from a true observation.

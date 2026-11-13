@@ -39,6 +39,14 @@
   f64 spans (the off-grid fixture): today 5,770 B (15.0 chars/float) → frame 4,112 B (10.71) = 1.40x
   f64 spans (a realistic full-precision float64 vector): today 7,552 B (19.7 chars/float) → frame 4,112 B (10.71) = 1.84x
 
+== degenerate vectors: the trade's SIGN depends on the vector (ratio = text/frame; <1 means the frame is LARGER)
+   shape                 f32: text     frame    ratio    f64: text     frame    ratio
+   all zeros                        1,537     2,064    0.74x      1,537     4,112    0.37x
+   small ints 0..383                2,195     2,064    1.06x      2,195     4,112    0.53x
+   the probe's real vector (f32)     8,031     2,064    3.89x      8,031     4,112    1.95x
+   ⛔ a ratio BELOW 1x means base64 is LARGER than the decimal text —
+      the frame is chosen for bit-exactness and one reader, not for bytes.
+
 == the reader refuses (each raises, none decodes silently short)
   truncated body, padding intact             REFUSED (ValueError, decoded 1,533 B)
   one element short, count unchanged         REFUSED (ValueError, decoded 1,532 B)
