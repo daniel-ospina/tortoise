@@ -511,7 +511,10 @@ def test_a_row_the_read_did_NOT_RETURN_is_never_scored(sdk, monkeypatch):
             texts_seen.append(list(texts))
             return [0.0 for _ in texts]
 
+    pool_sizes: list[int] = []
+
     def _drops_the_last(graph, entity_type, graph_label, id_field, ids):
+        pool_sizes.append(len(ids))
         out = real_fetch(graph, entity_type, graph_label, id_field, ids)
         if len(out) > 1:
             out.pop(sorted(out)[-1])
@@ -526,9 +529,24 @@ def test_a_row_the_read_did_NOT_RETURN_is_never_scored(sdk, monkeypatch):
 
     entry = _rerank_entries(trace)[0]
     assert texts_seen, "the scorer never ran, so this test proves nothing"
-    assert "" not in texts_seen[0], texts_seen[0]
-    assert entry[rerank.RERANK_SCORED_KEY] == len(texts_seen[0])
-    assert entry[rerank.RERANK_UNSCORED_KEY] >= 1
+    # ⛔ NO ``"" not in texts_seen[0]`` AND NO ``scored == len(texts_seen[0])``.
+    # Both are unfalsifiable HERE (measured, and then removed): ``rerank_pool``
+    # filters ``scorable`` by ``.strip()`` before it calls the scorer, so no
+    # sdk-side change can put ``""`` in front of the model; and ``scored`` is
+    # derived from that same list, so the second compares a number to itself.
+    # What CAN fail is the accounting: the excluded id is a candidate that came
+    # back with no text, so it must be counted UNSCORED and not silently dropped
+    # from the disclosure. Handing ``rerank_pool`` only the SCORED head (the
+    # historical shape) reports ``unscored: 0`` here and reds. Exact, from the
+    # recorded pool size — not a bound. (The sdk's own truthiness filter is NOT
+    # what these two pin: ``rerank_pool`` strips an empty text itself, so
+    # replacing that filter with a membership test leaves both green — measured.
+    # The load it avoids is pinned by
+    # ``test_a_pool_with_no_usable_text_makes_no_scorer_call``.)
+    assert entry[rerank.RERANK_UNSCORED_KEY] == pool_sizes[0] - entry[
+        rerank.RERANK_SCORED_KEY], entry
+    assert entry[rerank.RERANK_SCORED_KEY] == pool_sizes[0] - 1, (
+        f"scored={entry[rerank.RERANK_SCORED_KEY]} pool={pool_sizes[0]}")
 
 
 def test_an_UNSCORED_row_keeps_its_SLOT_and_is_not_pushed_off_the_page(
@@ -856,10 +874,18 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
 
     # ⛔ AND THE OPT-OUT IS "NOT PASSED" AT THE SITES THAT NEED IT. A behaviour
     # test cannot reach `battery/runner/setup.py` or `tools/why_layer_rate.py`,
-    # whose false diagnosis is the harm: pin the CALL SITES in the source so a
-    # new caller cannot quietly inherit a re-picked page. This is a presence
-    # check, so it is deliberately the weakest form — the behaviour above is the
+    # whose false diagnosis is the harm: pin the CALL SITES so a new caller
+    # cannot quietly inherit a re-picked page. The behaviour above is the
     # assertion; this stops the sweep from being silently shrunk.
+    #
+    # ⛔ TWO HALVES, because a substring scan of a FILE is not a check on a
+    # CALL SITE. The first version only scanned five external files, and it was
+    # measured that deleting ``_rerank_candidates=False`` from any of the EIGHT
+    # call sites inside ``tortoise/sdk.py`` — including ``recall_state``'s page,
+    # which a driven ``limit=3`` read shows literally moving — left the whole
+    # suite green. The in-sdk sites are enumerated from the AST, so a NINTH
+    # caller added without the kwarg reds here rather than shipping.
+    import ast as _ast
     import pathlib as _pl
     root = _pl.Path(__file__).resolve().parent.parent
     for rel in ("battery/runner/setup.py", "tools/why_layer_rate.py",
@@ -870,6 +896,21 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
             f"{rel} reads the rerankable page without opting out — with the "
             "gate armed its page composition moves and a membership probe "
             "returns a false diagnosis")
+
+    tree = _ast.parse((root / "tortoise" / "sdk.py").read_text())
+    sites = [n for n in _ast.walk(tree)
+             if isinstance(n, _ast.Call)
+             and getattr(n.func, "attr", None) == "tortoise_fts_query"]
+    assert len(sites) >= 8, (
+        f"the AST found {len(sites)} in-sdk call sites; the sweep enumerated 8, "
+        "so either a caller is missing from this check or the read was renamed")
+    offenders = [
+        n.lineno for n in sites
+        if not any(k.arg == "_rerank_candidates" for k in n.keywords)
+    ]
+    assert not offenders, (
+        "these in-sdk call sites read the rerankable page WITHOUT opting out, "
+        f"so the armed gate re-picks their page: lines {offenders}")
 
 
 def test_a_non_relevance_order_by_is_never_re_picked_by_the_rerank(sdk, monkeypatch):
