@@ -361,7 +361,12 @@ def classify_point(
     # one. Never the disposition — that is what the reason already says.
     who = keeper_id if keeper_id is not None else "a row this pass did not name"
 
-    if duplicate_of is not None and content_mismatch:
+    if duplicate_of is not None and row.node_type != "operator" and content_mismatch:
+        # An operator is never folded on content: its key is id-scoped (its text is a
+        # label, routinely empty), so a `duplicate_of` on ONE operator row can only come
+        # from a shared node id — and a "content hash" reason would then assert a
+        # relation that was never computed (round-5 review). The operator branch below
+        # decides every operator row unconditionally.
         # A content hash that TWO rows share while their CONTENT differs is not a
         # duplicate relation — it is a hash that cannot be trusted for this pair. Rows
         # are folded by hash alone, so the second text used to be reported as an "exact
@@ -375,18 +380,18 @@ def classify_point(
                         "text has no row of record and needs a per-row decision",
                         pack, key, row.content)
 
-    if duplicate_of == CARRY:
+    if duplicate_of == CARRY and row.node_type != "operator":
         return Decision(row.node_id, row.node_type, row.kind, NOT_CARRIED,
                         "exact content duplicate of a carried row (same content hash); "
                         f"the keeper {who} carries it. MERGE of near-duplicates is #5006's scope, "
                         "not this pass's", pack, key, row.content)
-    if duplicate_of == UNDECIDABLE:
+    if duplicate_of == UNDECIDABLE and row.node_type != "operator":
         return Decision(row.node_id, row.node_type, row.kind, UNDECIDABLE,
                         "exact content duplicate of a row that is itself undecidable — the "
                         f"content has no carry candidate yet (the keeper {who} is undecidable "
                         "too), so this row is not carried either",
                         pack, key, row.content)
-    if duplicate_of is not None:
+    if duplicate_of is not None and row.node_type != "operator":
         # The keeper was not carried: neither is its duplicate, and the reason names
         # the keeper rather than claiming a carry that did not happen.
         body = (

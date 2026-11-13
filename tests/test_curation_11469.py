@@ -3607,3 +3607,30 @@ def test_an_error_payload_on_the_audit_section_is_a_designed_refusal_too(
                    "--out", str(tmp_path / "i.json")])
     assert rc == 3, (rc, capsys.readouterr())
     assert "REFUSED" in capsys.readouterr().err
+
+
+def test_two_operator_rows_sharing_an_id_do_not_get_a_content_duplicate_reason():
+    """An operator is never folded on content, so its reason must not claim a hash fold.
+
+    Round-5 review measured both duplicate limbs asserting a content-hash relation for
+    operator rows whose only shared thing was a node ID — `read_operators` refuses the
+    id-LESS row but not the id-DUPLICATED one, and `create_point` ids are already
+    documented as non-unique here, so the shape is reachable. The plan's row artifact is
+    the review surface (`plan --rows`), and a false relation in it is the defect class
+    four rounds have been removing.
+    """
+    row = C.Row(node_id="o9", node_type="operator", kind="IMPL", content="",
+                content_hash=None, props={"id": "o9"})
+    other = C.Row(node_id="o9", node_type="operator", kind="IMPL", content="b",
+                  content_hash="h", props={"id": "o9"})
+
+    mismatch = C.classify_point(row, {}, duplicate_of="o9", keeper_id="o9",
+                                content_mismatch=True)
+    assert mismatch.disposition == C.UNDECIDABLE
+    assert "content hash" not in mismatch.reason, mismatch.reason
+    assert "endpoint" in mismatch.reason, mismatch.reason
+
+    same = C.classify_point(other, {}, duplicate_of=C.CARRY, keeper_id="o9")
+    assert same.disposition == C.UNDECIDABLE, same
+    assert "duplicate" not in same.reason.lower(), same.reason
+    assert "content hash" not in same.reason, same.reason
