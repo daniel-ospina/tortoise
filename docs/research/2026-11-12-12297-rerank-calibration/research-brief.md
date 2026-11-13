@@ -494,7 +494,7 @@ for the recall and nDCG cells, `arms.*.latency` for the per-pair cost.
 lexical-control run prices it at **5.463** over the same 39,930-pair **count** on
 one thread — a 5.5 % spread on the same box that spans the CORPUS difference as
 well as run-to-run noise: this run's population is a regenerated one
-(`c9f290a2866ec996`; §6's is `0aa80dff278c4e58`), as Residual 4 below records, so
+(`c9f290a2866ec996`; §6's is `0aa80dff278c4e58`), as Residual 4 (§7, above) records, so
 the two are **not pooled** and the pairs are not literally the same 39,930. The
 finding here is the **ratio to the lexical baselines measured in this same
 process** (≈ 176× `difflib`, ~1,090× `overlap` — the same ratio as below), which
@@ -559,7 +559,7 @@ already returned.
    made here**.
 3. **On user search neither is affordable as wired** (§5): ranking improves, but
    the cross-encoder costs ≈ 3.4 s/query. The lexical control was **not** run on
-   that surface — stated as a residual below rather than inferred from §5.
+   that surface — stated as a residual (Residual 1, §7) rather than inferred from §5.
 
 ## Sources
 
