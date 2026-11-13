@@ -47,18 +47,18 @@ from pathlib import Path
 
 import pytest
 
-from tortoise.pricing import (
-    TIER_DISPLAY_NAMES,
-    all_tiers,
-    tier_display_name,
-    tier_display_names,
-)
 from tests.test_website_static import (
     DASHBOARD_PRICING_JS,
     PRICING_JSON,
     PRODUCT_HTML,
     PUBLIC_TIERS,
     _render_pricing_fn,
+)
+from tortoise.pricing import (
+    TIER_DISPLAY_NAMES,
+    all_tiers,
+    tier_display_name,
+    tier_display_names,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
