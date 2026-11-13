@@ -697,9 +697,19 @@ def verdicts(
     target_id: str | None = None,
     limit: int = 10000,
 ) -> list[Verdict]:
-    """One :class:`Verdict` for every LIVE judgement in scope.
+    """One :class:`Verdict` for each LIVE judgement this scan REACHED.
 
-    ⛔ An UNSCOPED call means every live judgement in the graph. That is a real
+    ⛔ UP TO ``limit`` (default 10,000), NEWEST FIRST — and this call CANNOT tell
+    you whether it reached them all. The graph read is capped
+    (:func:`~tortoise.goal_judgement.live_judgements` carries the same bound), so
+    a scope holding more live claims than ``limit`` comes back with a list that
+    looks complete and is not: pass a ``limit`` you know exceeds the scope, or use
+    :func:`invalidate_stale`, whose ``truncated`` key reports exactly that. A
+    silent cap is the #11823 defect class this module exists to close, and an
+    audit path that hid it would be the same bug one layer up.
+
+    ⛔ An UNSCOPED call narrows no dimension, so it sweeps the whole graph rather
+    than one chain. That is a real
     repair sweep rather than a mistake — a graph can hold judgements its goals no
     longer reach — but it is also the call that can retire the most, so
     :func:`invalidate_stale` offers ``dry_run`` for exactly this case.

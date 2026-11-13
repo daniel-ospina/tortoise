@@ -936,7 +936,15 @@ def live_judgements(
     target_id: str | None = None,
     limit: int | None = None,
 ) -> list[dict]:
-    """EVERY live judgement Point matching the given scope, newest first.
+    """Up to ``limit`` (default 10,000) live judgement Points in scope, newest first.
+
+    ⛔ ``limit`` IS A CAP, NOT A COURTESY. The read is a single ``LIMIT $lim``
+    query, so a scope holding more live claims than the bound comes back with a
+    list that looks complete and is not — and this function cannot report whether
+    the bound was hit, because a list carries no room for that answer. A caller
+    that needs the disclosure must ask for one
+    (:func:`derived_invalidation.invalidate_stale` returns ``truncated``) or pass a
+    bound it knows exceeds the scope.
 
     :func:`latest_judgement` is this read with ``limit=1`` — one predicate, two
     windows — because the invalidation sweep (#11926) has to answer "which
