@@ -353,10 +353,20 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
     print(f"  …and it is genuinely off the float32 grid: "
           f"{off_grid}  (so a narrowing WOULD be visible)")
     assert off_grid, "the fixture must not be on the float32 grid"
-    print(f"  f64 spans: today (JSON text) "
-          f"{len(json.dumps(verbatim, separators=(',', ':')).encode()):,} B → "
-          f"frame {len(json.dumps(f64_text).encode()):,} B  "
-          f"({len(json.dumps(verbatim, separators=(',', ':')).encode()) / len(json.dumps(f64_text).encode()):.2f}x)")
+    def f64_spans(label: str, values: list[float]) -> None:
+        text = json.dumps(values, separators=(",", ":")).encode()
+        frame_text = json.dumps(frame("f64", 8, values)).encode()
+        assert as_f64_bits(unframe(frame("f64", 8, values))) == as_f64_bits(values)
+        print(f"  f64 spans ({label}): today {len(text):,} B "
+              f"({len(text) / len(values):.1f} chars/float) → frame "
+              f"{len(frame_text):,} B ({len(frame_text) / len(values):.2f}) "
+              f"= {len(text) / len(frame_text):.2f}x")
+
+    f64_spans("the off-grid fixture", verbatim)
+    # The magnitude is a property of the TEXT, not of the encoding: a realistic
+    # full-precision float64 vector prints ~19.7 chars/float, not ~15.
+    f64_spans("a realistic full-precision float64 vector",
+              [float(x) for x in np.random.default_rng(12459).standard_normal(EMBEDDING_DIM)])
 
     # ── what the reader REFUSES (the fail-closed half) ──────────────────
     print("\n== the reader refuses (each raises, none decodes silently short)")

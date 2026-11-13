@@ -49,7 +49,8 @@ figure in the note names its ruler.
 | `PointPromoted` record | 4,936 B | 2,311 B | 2.14× |
 | `OperatorPromoted` record | 4,924 B | 2,299 B | 2.14× |
 | whole corpus (39 records) | 32,130 B | 19,005 B | 1.69× |
-| verbatim (`f64`) vector, JSON text → frame | 5,770 B | 4,112 B | 1.40× |
+| verbatim (`f64`) vector, JSON text → frame — **off-grid fixture** | 5,770 B | 4,112 B | 1.40× |
+| …same, a **realistic** full-precision float64 vector | 7,552 B | 4,112 B | 1.84× |
 
 Frame arithmetic for one 384-d vector: `384 × 4 = 1,536 B` raw → base64 `2,048 B` (+33.3 %) → `+16 B`
 of framing (14 B prefix + 2 B of JSON quotes) = **2,064 B**.
@@ -72,8 +73,9 @@ of framing (14 B prefix + 2 B of JSON quotes) = **2,064 B**.
 
 | corruption | verdict |
 |---|---|
-| truncated body, padding intact | refused |
-| one element short, count unchanged | refused |
+| truncated body, padding intact | refused (1,533 B decoded) |
+| one element short, count unchanged | refused (1,532 B) |
+| **packed `f64` under a declared `f32`** | refused (3,072 B decoded against a declared 1,536 B) |
 | unknown frame version | refused |
 | non-base64 character in body | refused (`validate=True`) |
 

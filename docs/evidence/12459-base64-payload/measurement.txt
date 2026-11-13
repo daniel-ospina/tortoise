@@ -36,7 +36,8 @@
 == the caller-owned / preserved population (#5004 round-7)
   float64 frame round-trip bit-identical: True
   …and it is genuinely off the float32 grid: True  (so a narrowing WOULD be visible)
-  f64 spans: today (JSON text) 5,770 B → frame 4,112 B  (1.40x)
+  f64 spans (the off-grid fixture): today 5,770 B (15.0 chars/float) → frame 4,112 B (10.71) = 1.40x
+  f64 spans (a realistic full-precision float64 vector): today 7,552 B (19.7 chars/float) → frame 4,112 B (10.71) = 1.84x
 
 == the reader refuses (each raises, none decodes silently short)
   truncated body, padding intact             REFUSED (ValueError, decoded 1,533 B)

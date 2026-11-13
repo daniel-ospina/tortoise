@@ -67,8 +67,9 @@ and (b) **measurements run here**, which is a stronger footing for the numeric c
 the comparables survey. Concretely:
 
 - **(a) binary float encodings in a text log.** The trade-off is already recorded in-repo
-  (`STORAGE-ARCHITECTURE.md` §5.2, #5612's citations): base64 of packed float32 is **+33 % over raw** and
-  ~5× smaller than float64 decimal text. Measured here, on the record that matters (§1).
+  (`STORAGE-ARCHITECTURE.md` §5.2, #5612's citations): base64 of packed float32 is **+33 % over raw**, and
+  **4.1× smaller than the float64 decimal text** (8,414 → 2,048) — the `~5×` in that source is against the
+  **raw 4 B/float** (8,414 → 1,536), a different comparison. Measured here, on the record that matters (§1).
 - **(b) shortest-round-trip printing.** Answered by **measurement instead of citation** — §2.3. The claim
   "9 significant digits is exactly float32's precision" is checkable, so it was checked: on 2,000,000
   random float32 values, `%.9g` round-trips **2,000,000/2,000,000**; `%.8g` misses **10,758**; `%.7g`
@@ -199,7 +200,8 @@ different basis:
 
 So both rows are **reproducible arithmetic on a blended basis, plus a vector-ratio assumption the P2 row
 then breaks**: they scale the whole record by the VECTOR's ratio. That is nearly right pre-P0, where the
-vector is 92 % of the record — and wrong once the non-vector bytes are a third of it. The P2 row assumes
+vector is 92 % of the record — and wrong once the non-vector bytes are a **quarter** of it (734 of 2,798 B
+= 26 %). The P2 row assumes
 the record shrinks *with* its vector, when in fact **734 B** of the record (`2,798 − 2,064`) does not
 shrink at all. Corrected on the creating record: **2.80 GB, saving ≈ $0.33/mo** — where the vector-ratio
 row implies `(5.423 − 2.069) × $0.125 = $0.42`, i.e. the correction is **~22 %** of that quote. Stated
@@ -280,7 +282,7 @@ is still mandatory — the default `False` discards characters outside the alpha
 probe asserts both halves: every multiple-of-4 cut decodes silently, and `−16` is the only one of them whose
 decoded length passes a `%4` check.
 
-The reader's four refusals, all measured in the probe:
+The reader's **five** refusals, all measured in the probe:
 
 ```
 == the reader refuses (each raises, none decodes silently short)
@@ -390,9 +392,9 @@ Under the new frame every one of those steps is identical, because the frame is 
 **The one new interaction, stated:** a torn record now loses the same number of *replayed* records (it was
 always dropped, never half-applied), but a human salvaging the fragment can no longer *read* the surviving
 tail — a base64 body truncated on a 4-character boundary still decodes to a **prefix** of the vector
-(measured: −4 chars → 383 floats, −8 → 382, …), but only after the human trims it to that boundary and
-decodes it. So hand-recovery changes **shape**, not existence. Cost, not correctness; recorded under
-Rollback (§6) as a permanent loss.
+(measured: −4 chars → 1,533 B, i.e. 383.25 floats with the first 383 whole; −8 → 1,530 B, 382.50), but only
+after the human trims it to that boundary and decodes it. So hand-recovery changes **shape**, not
+existence. Cost, not correctness; recorded under Rollback (§6) as a permanent loss.
 
 ---
 
@@ -454,9 +456,10 @@ Named here so the implementation cannot choose a weaker one:
      i.e. #3316's behaviour, unchanged, with the frame in the record.
   5. **a sealed fragment before a P2 record still costs nothing**: the #5917 shape (torn fragment, then the
      next append) with P2-framed records — the record after the seal is present, once.
-  6. **the four refusals of §2.2 each red**: truncated body (−16 chars, the measured silent case), short
-     array with the count unchanged, unknown version, non-base64 character — each must raise, not
-     silently-short.
+  6. **the five refusals of §2.2 each red**: truncated body (−16 chars, the measured silent case), short
+     array with the count unchanged, **packed `f64` under a declared `f32`** (3,072 B decoded against a
+     declared 1,536 B — §6's rollback row depends on this one), unknown version, non-base64 character —
+     each must raise, not silently-short.
   7. **`append` decodes nothing**: a decoded record re-appended writes a **frame** (the encoder is at the
      write boundary, not on the in-memory record), so re-stamping a read record cannot flip its width —
      the #11835 F2 class of defect, one layer out.
@@ -480,7 +483,9 @@ keep its RAW form. `vecf32()` is the ONE form it must not take."* P0 named that 
 
 - **`embedding_verbatim`** — a vector the **caller** supplied (set by `TortoiseSDK.create_point`'s
   `_create_map`), which the store writes un-narrowed
-  (`CASE WHEN $embedding_verbatim THEN $embedding ELSE vecf32($embedding)`);
+  (`CASE WHEN $embedding_clear THEN NULL WHEN $embedding IS NULL THEN n.embedding WHEN
+  $embedding_verbatim THEN $embedding ELSE vecf32($embedding) END` — abridged to its last two arms here;
+  the full four-arm form is at `projection/entities.py:2976`);
 - **`embedding_preserved`** — a vector copied from a **previous** capture (possibly anyone's), which the
   turn carrier does not mark verbatim, so it is the only signal there.
 
@@ -496,12 +501,15 @@ fixture (the P0 test's rule, so the check cannot pass vacuously):
 ```
   float64 frame round-trip bit-identical: True
   …and it is genuinely off the float32 grid: True   (so a narrowing WOULD be visible)
-  f64 spans: today (JSON text) 5,770 B → frame 4,112 B  (1.40×)
+  f64 spans (the off-grid fixture): today 5,770 B (15.0 chars/float) → frame 4,112 B (10.71) = 1.40x
+  f64 spans (a realistic full-precision float64 vector): today 7,552 B (19.7 chars/float) → frame 4,112 B (10.71) = 1.84x
 ```
 
-So the verbatim population **shrinks too** (1.40×, since 15.0 chars/float of float64 text → 10.7 base64
-chars/float) while being narrowed **not at all**. The frame's width field is what carries the promise:
-`f64` in, `f64` out.
+Two fixtures, because the **magnitude is a property of the text, not of the encoding**: this fixture
+(`0.1 + i·1e-9`, ~15.0 chars/float) gives **1.40×**, a realistic full-precision float64 vector (~19.7
+chars/float) gives **1.84×**. The direction is general; the magnitude is not, and the fixture is chosen to
+be off the float32 grid rather than to be typical. And it is narrowed **not at all**: the frame's width
+field is what carries the promise — `f64` in, `f64` out.
 
 ### 4.3 What happens to a caller-owned vector under the new format
 
@@ -552,7 +560,7 @@ The frame was chosen so that this question has a cheap answer, which is the stro
 | the format is wrong (base64 turns out to be the wrong choice) | **dual reader**: both shapes stay readable indefinitely, because dispatch is per record and needs no state. The writer reverts to JSON text; journals that already carry frames keep replaying. | **nothing** — no record is rewritten, so no migration is needed in either direction |
 | the frame is withdrawn entirely | a reader that stops decoding still has to keep understanding frames for as long as any frame-bearing journal exists. That reader is a **permanent** obligation of the format. | a second reader path, forever |
 | base64 makes the log un-inspectable in an incident | a decode helper (`tools/journal_decode.py`-shaped) restores human readability on demand; it is a **tool**, not a format change | **human greppability of the vector** — you can no longer read, diff or hand-edit a vector in the log by eye. This is a real, permanent loss and the main non-byte cost of P2. |
-| a tear loses more of a record than before | nothing to recover: the record was never half-applied | **hand-recoverability of a torn vector**: a base64 body truncated on a 4-char boundary still decodes to a **prefix** of the vector, but only after a human trims it to that boundary and decodes — so hand-recovery changes **shape**, not existence (§2.6) |
+| a tear's surviving vector is no longer directly readable | nothing to recover: the record was never half-applied | **hand-recoverability of the vector's bytes as-is**: the values survive as a decodable **prefix**, but only after a human trims the body to a 4-char boundary — the shape of hand-recovery changes, not its existence (§2.6) |
 
 **What is permanently lost if the format ships and then is withdrawn:** the simplicity of a single-shape
 journal — every frame-bearing journal is thereafter a second code path that must keep a reader. That cost is
