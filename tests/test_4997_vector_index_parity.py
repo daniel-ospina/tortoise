@@ -689,11 +689,28 @@ def test_a_store_with_no_gap_does_not_warn(caplog):
 
 # ── #11087 (S4): the contract is reported POSITIVELY ──────────────────────
 #
-# The pin above is deliberately UNCHANGED (plan §6.1): it captures at
-# WARNING, so "no gap ⇒ no warning" stays true and the warning semantics a
-# caller may match on are preserved. What #11087 ends is the SILENCE — the
-# same store must now report the serves/indexes pair at INFO, and so must a
-# store that HAS a gap (which also still warns).
+# The pin above is unchanged in SUBSTANCE (plan §6.1) — "no gap ⇒ no gap
+# report" still holds — but its CAPTURE LEVEL is INFO, not WARNING (#11660
+# review F1 moved the unarmed gap report to INFO and the armed one to the
+# retirement INFO). A comment claiming a WARNING capture over a pin that no
+# longer takes one is the same defect class this file's fixtures were fixed
+# for: it sends the next reader to check the wrong half.
+#
+# What #11087 ends is the SILENCE — the same store must now report the
+# serves/indexes pair at INFO, and so must a store that HAS a gap (which also
+# still reports the gap).
+#
+# ⛔ THE PAIR REPORT IS VALUE-LATCHED, AND THAT IS THE CONTRACT (#11311).
+# #11295's item 3 asked for a pin that two setups on one `(endpoint, graph)`
+# yield TWO INFO records — i.e. it asked to pin an UNLATCHED report. That
+# premise was superseded before this landed: an unlatched line puts two label
+# lists on the INFO stream at the hosted per-request rate. The pins that
+# replaced it are BOTH halves, and they are the ones to extend, never an
+# unlatched one: `test_an_unchanged_pair_is_not_reported_twice` (unchanged pair
+# ⇒ one record) and
+# `test_a_changed_pair_is_reported_and_a_repaired_store_announces_it` (changed
+# pair ⇒ two). A key-only latch reds the second; dropping the latch reds the
+# first — measured for #11295, so neither direction is unpinned.
 
 def _pair_records(caplog):
     return [r for r in caplog.records if "#11087" in r.getMessage()]
