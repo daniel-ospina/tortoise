@@ -12859,18 +12859,23 @@ def _session_index_rows_without_graph(
 #: retry rather than reporting a waking service as a broken credential.
 #: ⛔ Worst case for the SOCKET timeouts is 5 + 30 + 10 + 30 = 75 s, and only when
 #: the network is timing out on both legs. An outer watchdog must size itself at
-#: **105 s**, not 45 and not 75: the deadline is checked BETWEEN reads, so one
-#: `read1` already blocked runs to its own socket bound (up to 30 s) past the
-#: budget, and DNS/connect are not covered at all. A 45 s cap pre-empts the
-#: `/health` retry and reproduces the "cold box reported as a broken endpoint"
-#: failure this whole retry exists to prevent. The budget below is what stops the
-#: CUMULATIVE drift; it is not a hard interrupt (fresh review round 16).
+#: **105 s**, not 45 and not 75, because DNS resolution (`getaddrinfo`) runs
+#: before any socket timeout is applied, while `connect()` consumes — rather than
+#: adds to — a leg's own bound (`socket.create_connection` sets the timeout before
+#: connecting). 105 s is therefore a conservative margin over the 75 s of bounds,
+#: not a derivation. A 45 s cap pre-empts the `/health` retry and reproduces the
+#: "cold box reported as a broken endpoint" failure this whole retry exists to
+#: prevent. The budget below is what stops the CUMULATIVE drift.
+#: ✅ A BODY read is no longer part of that residue: the deadline arms a socket
+#: watchdog (`_doctor_read_capped`), so a `read1` already blocked when it passes is
+#: interrupted rather than left to run to its own socket bound (fresh review
+#: round 19 — that was true of an earlier head, not of this one).
 #: ⚠️ Those are per-`recv` bounds, NOT a wall-clock cap on their own: a server
 #: that drips bytes just slowly enough keeps one `read()` alive past them. That is
-#: why the body is read in CHUNKS against a deadline (`_read_capped`) under the
-#: `_DOCTOR_TOTAL_BUDGET_S` wall clock below — measured with a real dripping
-#: server: `doctor` returns in ~18 s instead of the ~200 s a single
-#: `read(cap)` was held for.
+#: why the body is read in CHUNKS against a deadline under the
+#: `_DOCTOR_TOTAL_BUDGET_S` wall clock below AND the read is interrupted at that
+#: deadline — measured with a real dripping server: `doctor` returns in ~18 s
+#: instead of the ~200 s a single `read(cap)` was held for.
 _DOCTOR_HEALTH_TIMEOUT_S = 5
 _DOCTOR_TEAM_TIMEOUT_S = 10
 _DOCTOR_TEAM_RETRY_TIMEOUT_S = 30
@@ -12881,18 +12886,22 @@ _DOCTOR_BODY_CAP = 65536
 
 #: The hosted probe's wall-clock budget (#11912). It bounds leg STARTS, caps each
 #: leg at `min(its own bound, what is left)`, AND is passed into every body read
-#: as a deadline (`_read_capped`), so a leg already inside `resp.read(...)` stops
+#: as a deadline (`_doctor_read_capped`), so a leg already inside a body read stops
 #: at it too: a dripping server that held one leg for ~200 s now returns in
-#: ~18 s total, because the deadline is checked BETWEEN chunks rather than only
-#: between legs. ⛔ What it is NOT: a hard interrupt. A `read1` already blocked
-#: when the deadline passes still runs to its own socket bound, so the honest
-#: worst case is ~budget + ONE leg bound per leg — the 105 s an outer watchdog
-#: must use, per the constant block above (measured: 84.8 s with the budget at
-#: 75, fresh review at `e19d160c27`). tortoise#12398 stays OPEN for that residue;
-#: the drip-hang it was filed for is what `_read_capped` closes. Why the budget
-#: exists at all: without it a spent socket bound was invisible and `min()` had
-#: nothing to subtract from, so `doctor` (and `onboard`'s last step) could chain
-#: four slow legs on exactly the network `--offline` exists for.
+#: ~18 s total. ✅ That body read IS a hard interrupt: the deadline arms a watchdog
+#: that shuts the socket down, because checking the deadline between `read1` calls
+#: says nothing about a SINGLE call — on a chunked body `read1` loops inside
+#: `fp.readline` for the chunk-size line, so a byte-drip under the socket bound
+#: held one call for 12.0 s against a 0.5 s bound (x24, measured) and never
+#: returned at all if the drip did not end (fresh review round 19). Between-calls
+#: checking is what bounds a Content-Length body; the watchdog is what bounds
+#: both, on both reply types (`HTTPResponse` and the `HTTPError` whose `fp` is
+#: one). ⛔ What the budget is still NOT: an interrupt for DNS resolution, which
+#: runs before any socket timeout is applied — that is the 105 s margin the
+#: constant block above sizes an outer watchdog at. Why the budget exists at all:
+#: without it a spent socket bound was invisible and `min()` had nothing to
+#: subtract from, so `doctor` (and `onboard`'s last step) could chain four slow
+#: legs on exactly the network `--offline` exists for.
 _DOCTOR_TOTAL_BUDGET_S = 75
 
 #: The key prefixes a HOSTED mint produces (`signup`, `key create`). #11912 uses
@@ -13206,6 +13215,18 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
 
     source = ("env:TORTOISE_API_KEY" if env_key
               else (str(winner_path) if winner_path is not None else "none"))
+    # ⛔ WHICH knob actually moves this endpoint (fresh review round 19).
+    # `TORTOISE_API_URL` applies to an ENV-sourced key only: `_resolve_config_path`
+    # takes a file-sourced key's URL from the SAME file or the built-in default
+    # (#2369 D1.1), so naming the env override to a store-credential user sends
+    # them at a knob that cannot change the result — the "remedy names an inert
+    # knob" class this file has already paid for twice.
+    _endpoint_remedy = (
+        "check https://api.premiselabs.co/health or your TORTOISE_API_URL, then "
+        "`tortoise config show`"
+        if source == "env:TORTOISE_API_KEY" else
+        "check the endpoint is reachable, then `tortoise config show` to see the "
+        "`api_url` this store supplies")
     api_url = api_url if isinstance(api_url, str) else str(api_url or "")
     # A store/proxy-supplied endpoint ending in `/` would ask for `//health` and
     # `//v1/team` — the 404-that-reads-as-a-broken-key every other hosted caller
@@ -13532,8 +13553,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                             f"cannot reach {base} — "
                             f"{_reason_text(reason)}"
                             ". The credential is UNGRADED (nothing was asked of "
-                            "it) — check https://api.premiselabs.co/health or your "
-                            "TORTOISE_API_URL, then `tortoise config show`"
+                            f"it) — {_endpoint_remedy}"
                             f"{_provenance_note}"))
             return
         # ⛔ A HEALTHY endpoint is allowed to time out here. The hosted app
@@ -13560,8 +13580,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                             f"cannot reach {base} — "
                             f"{_retry_wait_claim(retry_reason, silent=(f'no answer in {_fmt_bound(health_first_bound)}s, and none in {_fmt_bound(health_retry_bound)}s on retry'), refused=(f'refused on retry after the first attempt timed out at {_fmt_bound(health_first_bound)}s'), failed=(f'the retry failed after the first attempt timed out at {_fmt_bound(health_first_bound)}s'))}"
                             ". The credential is UNGRADED (nothing was asked of "
-                            "it) — check https://api.premiselabs.co/health or your "
-                            f"TORTOISE_API_URL, then `tortoise config show`"
+                            f"it) — {_endpoint_remedy}"
                             f"{_provenance_note}"))
             return
 
