@@ -1898,15 +1898,20 @@ def test_the_drop_COUNT_and_the_drop_LABELS_describe_the_SAME_set(tmp_path) -> N
 
 
 def test_the_drop_warning_names_a_remedy_that_EXISTS_for_the_target(tmp_path, caplog) -> None:
-    """`#12015` review round 3 — a relabel repairs a NODE's vector, never an EDGE's.
+    """`#12015` reviews rounds 3, 8 and 9 — the line must name only repairs that WORK.
 
     The `allow_unserved_vectors=True` warning is the ONLY operator-visible line on the
     recovery route, and it ended by promising that "a relabel migration can repair them".
-    That is true of a `:Document` label (the `:Document` → `:Source` walk `relabel_legacy_documents()`
-    does) and FALSE of a `<relationship:TYPE>` entry: a relationship has no label at all, so
-    nothing relabel-shaped can reach it and only an explicit property clear removes the vector.
-    A line that names a repair which cannot exist sends the operator to a no-op, which is the
-    same class as calling the wrong object the survivor.
+    ⛔ It cannot repair the VECTOR: the restore DELETES the vector on every flagged target
+    (`props.pop("embedding", None)` before this line is emitted) and nothing writes it
+    back. What a relabel DOES do for a `:Document` label is make the NODE served (the
+    `:Document` → `:Source` walk `relabel_legacy_documents()` performs), so that a RE-EMBED
+    lands where `run_vector_query` serves it. For a `<relationship:TYPE>` entry even that
+    is unavailable — a relationship has no label at all, and no product read path queries a
+    relationship vector — so this line says the drop is FINAL rather than offering a clear
+    or an index that would remove nothing and serve nothing. A line that names a repair
+    which cannot exist sends the operator to a no-op, which is the same class as calling
+    the wrong object the survivor.
     """
     proj = _proj(tmp_path)
     with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
@@ -1921,6 +1926,9 @@ def test_the_drop_warning_names_a_remedy_that_EXISTS_for_the_target(tmp_path, ca
                          if "dropped" in r.getMessage())
     assert edge_msg, "an authorised EDGE drop logged nothing"
     assert "NO relabel" in edge_msg, edge_msg
+    assert "drop is FINAL" in edge_msg, (
+        "a relationship vector has no serving read path, so the line must say the drop "
+        "is final rather than offer a clear/index: " + edge_msg)
     assert "nodes kept so a relabel migration makes them SERVED" not in edge_msg, (
         "the EDGE is what survives here and no relabel repairs a relationship: "
         + edge_msg)
@@ -2087,10 +2095,12 @@ def test_the_remedy_does_not_promise_a_relabel_to_a_node_with_NO_label(tmp_path,
     # explicit property clear removes it" sends an operator to the destructive move while
     # the label ADD (`SET n:Source`) makes the NODE served, so a re-embed lands where the
     # read path serves it — the walk itself only matches `:Document`, and the dropped
-    # vector is not recoverable by any step.
+    # VECTOR is not recoverable by any step (only a re-embed replaces it).
     assert "SET n:Source" in msg, (
-        "a label-less node's vector IS repairable without deleting it — the warning must "
-        "name the label ADD, not only a property clear: " + msg)
+        "the warning must name the label ADD that makes a re-embed land: " + msg)
+    assert "GONE" in msg and "re-embed" in msg, (
+        "the line must say the dropped vector is gone and that a re-embed replaces it — "
+        "otherwise it promises to bring that vector back: " + msg)
 
 
 def test_a_NON_Document_unserved_label_gets_no_relabel_promise(tmp_path, caplog) -> None:
@@ -2099,8 +2109,8 @@ def test_a_NON_Document_unserved_label_gets_no_relabel_promise(tmp_path, caplog)
     `relabel_legacy_documents()` is `MATCH (n:Document)`-scoped, so a dropped vector on any
     OTHER unserved label (`:Session` here) cannot be repaired by it either. The clause used
     to treat every non-sentinel node label as relabel-repairable, which named a repair that
-    does not reach these — while the label ADD (`SET n:Source`) does, so the warning names
-    that instead. Same class as the edge and no-label arms, one label class over.
+    does not reach these, so the warning names the label ADD (`SET n:Source`) that lets a
+    RE-EMBED land instead. Same class as the edge and no-label arms, one label class over.
     """
     proj = _proj(tmp_path)
     with caplog.at_level(logging.WARNING, logger="tortoise.hosted_backup"):
@@ -2118,6 +2128,9 @@ def test_a_NON_Document_unserved_label_gets_no_relabel_promise(tmp_path, caplog)
         "so the warning must not promise that relabel: " + msg)
     assert "nodes kept so a relabel migration makes them SERVED" not in msg, (
         "the relabel promise is still made over a label the walk cannot match: " + msg)
+    assert "GONE" in msg and "re-embed" in msg, (
+        "the arm must say the dropped vector is gone and that a re-embed replaces it: "
+        + msg)
     assert "SET n:Source" in msg, (
         "the non-destructive label ADD is the route that DOES reach it: " + msg)
 

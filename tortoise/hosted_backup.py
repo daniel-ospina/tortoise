@@ -1438,17 +1438,25 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         if other_labelled:
             parts.append(
                 "nodes kept whose label no relabel walk matches — the dropped vector "
-                "is GONE; add a SERVED label (`SET n:Source`) and re-embed")
+                "is GONE; add a SERVED label (`SET n:Source`, with the `url` a Source "
+                "resolves by) and re-embed")
         if unlabelled_targets:
             parts.append(
                 "the nodes the dump gave no label, so NO relabel migration can repair "
                 "them — the dropped vector is GONE; add a SERVED label "
-                "(`SET n:Source`) and re-embed")
+                "(`SET n:Source`, with the `url` a Source resolves by) and re-embed")
         if edge_targets:
+            # ⛔ AND THE EDGE DROP IS FINAL (`#12015` review round 9). The vector is already
+            # gone, so there is nothing left for a property clear to remove, and a
+            # relationship vector INDEX serves nothing: every `idx.vector.queryNodes` call
+            # site interpolates a NODE label from `ENTITY_TYPE_LABELS`, so no `entity_type`
+            # reaches a relationship — which is this module's own definition of unserved,
+            # 400 lines up. Do not offer a served-edge route the product does not implement.
             parts.append(
-                "edges kept — a relationship carries NO label at all, so NO relabel "
-                "can reach the dropped vector; only an explicit property clear or a "
-                "new index can serve one there")
+                "edges kept — a relationship carries NO label at all, so NO relabel can "
+                "reach the dropped vector, and nothing in the product queries a "
+                "relationship vector: that drop is FINAL (re-ingest the source if the "
+                "vector is needed)")
         remedy = "; ".join(parts)
         logger.warning(
             "restore_graph: dropped %d vector(s) on unserved target(s) %s — "
