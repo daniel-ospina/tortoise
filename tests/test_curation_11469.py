@@ -3788,7 +3788,8 @@ def test_an_operator_payload_that_is_not_a_row_listing_is_refused(monkeypatch, c
                   "--out", str(tmp_path / "i.json")])
 
 
-@pytest.mark.parametrize("failure", ["refused", "raised"])
+@pytest.mark.parametrize("failure", ["refused", "raised", "after_read_refused",
+                                      "after_read_raised"])
 def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
         monkeypatch, capsys, tmp_path, failure):
     """BOTH disarmed census-failure arms carry `read_note` — one state, one spelling.
@@ -3803,6 +3804,15 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
     `refused` drives the DESIGNED arm (`CurationRefused`, from an `is_error` payload on
     the source listing); `raised` drives the generic one (`RuntimeError` from an
     unmeasurable points read). Both must answer the same way on this field.
+
+    ⛔ The two `after_read_*` arms are the state that makes `None` mean what it says:
+    `graphs()` is the LAST census read, so a failure there leaves the OPERATOR LAYER
+    already read and reconciled — and an arm reporting `operators_read: null` on it
+    would assert the opposite of what happened. Round-3 review measured exactly that
+    (a plain `{"error": …}` on `graphs` reached the generic arm with the layer read, and
+    both disarmed arms said "never read"). Both arms are driven separately: the
+    `is_error` payload takes the DESIGNED arm and a plain dict the GENERIC one, and they
+    are distinct code paths — pinning one left the other green (measured).
     """
     mod = _tool_module()
 
@@ -3821,6 +3831,10 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
                 return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
             return {"result": [], "total": 0}
         if section == "graphs":
+            if failure == "after_read_refused":
+                return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
+            if failure == "after_read_raised":
+                return {"error": "500 Internal Server Error"}
             return {"result": [{"namespace": "org_x_g_old"},
                                {"namespace": "org_x_g_new"}]}
         if name == "tortoise_query":
@@ -3839,8 +3853,15 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
     payload = json.loads((tmp_path / "p.json").read_text())
     assert payload["census"] is None, payload
     assert "credential's own graph" in (payload["read_note"] or ""), payload["read_note"]
-    # The census was never read on either arm, so the layer's three fields say so —
-    # `None`, never `False`: "not read" and "read but unreconciled" are different facts.
-    assert payload["operators_read"] is None, payload
-    assert payload["operators_total_reported"] is None, payload
-    assert payload["operators_reconciled"] is None, payload
+    if failure.startswith("after_read"):
+        # The layer WAS read (and reconciled) before the failing read: the artifact must
+        # report the real pair, not `null`.
+        assert payload["operators_read"] == len(OPERATOR_ROWS), payload
+        assert payload["operators_total_reported"] == len(OPERATOR_ROWS), payload
+        assert payload["operators_reconciled"] is True, payload
+    else:
+        # The census was never read on these arms, so the layer's three fields say so —
+        # `None`, never `False`: "not read" and "read but unreconciled" are different.
+        assert payload["operators_read"] is None, payload
+        assert payload["operators_total_reported"] is None, payload
+        assert payload["operators_reconciled"] is None, payload

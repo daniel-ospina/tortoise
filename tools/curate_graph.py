@@ -881,6 +881,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
         return 2
     reader = MCPReader(_live_call_tool, args.graph)
     disarmed = C.off_switch_active(args.off)
+    #: The reasoning layer as READ so far — `None` until the operator read completes, then
+    #: `(rows, reported)`. Declared before the `try` so every disarmed arm reports the
+    #: truth for its own point in the sequence (see the assignment below).
+    layer: tuple[int, int | None] | None = None
     try:
         counts = reader.counts()
         structure = reader.structure()
@@ -888,6 +892,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
         sources, source_total = reader.read_sources()
         # ⛔ The reasoning layer, read and reconciled — see `read_operators`.
         operators, operators_reported = reader.read_operators(structure)
+        # ⛔ Bound the moment the read COMPLETES, and bound before the `try` so every
+        # disarmed arm can report it truthfully: `graphs()` below is a LATER read, so a
+        # failure there leaves the layer read and reconciled, and an arm that reported
+        # `None` ("never read") would state the opposite of what happened (round-3
+        # review). `None` now means only what it says.
+        layer = (len(operators), operators_reported)
         # INSIDE the guard too: `graphs()` feeds the identity guard and the ledger
         # scope, so a failure there is the same census class.
         graphs = reader.graphs()
@@ -906,7 +916,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # end — dropping it would lose the only record that part of this census came from
         # a different graph than `--graph` names.
         return _disarmed_artifact(args, str(exc), refused=str(exc), read_failure=str(exc),
-                                  read_note=reader.note)
+                                  read_note=reader.note, operators=layer)
     except Exception as exc:
         # ⛔ THE SWITCH IS RESOLVED BEFORE THE CENSUS, for EVERY read — not only the
         # source section. An armed run still raises (a failed read must be loud); a
@@ -926,7 +936,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # commit's own `run.refused` defect, one field over (round-2 review).
         return _disarmed_artifact(args, f"{type(exc).__name__}: {exc}",
                                   refused=f"{type(exc).__name__}: {exc}",
-                                  read_note=reader.note,
+                                  read_note=reader.note, operators=layer,
                                   read_failure=f"{type(exc).__name__}: {exc}")
     gap = _source_gap(counts, len(sources))
     unreconciled = _unreconciled_sources(len(sources), gap)
@@ -985,7 +995,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             return _disarmed_artifact(args, str(exc), census=plan.census(),
                                       pending=len(plan.carry_rows()), refused=str(exc),
                                       census_measured=unreconciled is None,
-                                      operators=(len(operators), operators_reported),
+                                      operators=layer,
                                       read_note=reader.note)
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 3
