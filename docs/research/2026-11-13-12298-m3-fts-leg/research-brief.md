@@ -108,18 +108,18 @@ which is recorded here because it constrains where the option could ever run. Ti
 and VectorChord-BM25 were named as candidates; neither had a verifiable PG-16 artifact in the sources
 read, and one working option is what M3 requires.
 
-**The pinned read of the code** (head `c17e3c5f78`, locators named because §6.2's own have drifted twice):
+**The pinned read of the code** (head `00a74c9cd2`, locators named because §6.2's own have drifted twice):
 
 | what | where | what it decides |
 |---|---|---|
 | the query builder | `tortoise/sparse.py:505` `build_or_query` | OR-union of `tokenize_sparse_query` terms, then the #8933 alias/phrase tail, deduped against the originals |
 | the tokenizer | `tortoise/sparse.py:381` `tokenize_sparse_query` | splits on **every** `[^a-z0-9]` (`_SPLIT_RE` at `:58`) — **including `_`** |
 | the query term cap | `tortoise/sparse.py:63` `DEFAULT_MAX_OR_TERMS = 12` | 12 terms, longest-first |
-| the degenerate branch | `sparse.py:505` — `return escape_redisearch_literal(query)` | when ≤1 token survives, the whole query is the **escaped raw string** |
+| the degenerate branch | `sparse.py:590` — `return escape_redisearch_literal(query)` | when ≤1 token survives, the whole query is the **escaped raw string** |
 | the leg | `tortoise/search_engine.py:2800` `run_fts_query`, Cypher at `:2986-2998` | `CALL db.idx.fulltext.queryNodes('Object', $query) … ORDER BY score DESC, <recency tie> LIMIT` |
 | the tie key | `search_engine.py:2642` `recency_tie_clause` | `coalesce(<recency>,'') DESC, coalesce(<id>,'') DESC` — the **id key is DESC on every label** |
 | the score discard | `tortoise/search_engine.py:4492` `for rank, (pid, _score) in enumerate(ranked)` | **why this is a recall question** |
-| the index | `tortoise/projection/__init__.py:20333` `("Object", "name", "FULLTEXT")`, created by `_create_fulltext_index` (def at `:20761`, called from `:20747`) | **no `OPTIONS`** → RediSearch defaults (language `english`, default stopwords, default tokenizer) |
+| the index | `tortoise/projection/__init__.py:20346` `("Object", "name", "FULLTEXT")` (declared in `_REQUIRED_FULLTEXT_INDEXES`), created by `_create_fulltext_index` (def at `:20774`) from the `_FULLTEXT_INDEX_LABEL_FIELDS` loop at `:21224` | **no `OPTIONS`** → RediSearch defaults (language `english`, default stopwords, default tokenizer) |
 
 ---
 
@@ -186,7 +186,12 @@ fairer one — so the break is disclosed instead.
 straight after the writes can see a **partially built** index and book a present name as a miss — an
 artefact in the direction that flatters the wrong arm. The harness **waits** until `numDocuments`
 reaches the population size **exactly** (`==`, not `>=` — an over-count means the graph is not the one
-this run wrote) and **refuses** on timeout; it also **refuses a graph whose population differs, or that population
+this run wrote) and **refuses** on timeout, and it **refuses a catalogue row that does not index
+`name`**: a count cannot tell `Object.name` from an `Object.id` index, and a wrong-field index reaches
+the same `numDocuments` and answers every query with zero rows — so it would publish a clean-looking
+0.0 baseline, and the leg's own trace cannot see it (measured on docker FalkorDB v4.20.6: an unindexed
+`CALL db.idx.fulltext.queryNodes` returns `[]` **without raising**, so the trace records
+`reason: empty_results`, not a degradation). It also **refuses a graph whose population differs, or that population
 plus leftover rows**, twice over: `o.name` is an ON CREATE write (`#8919`), so a second run against the
 same graph would measure the previous population, and the graph's total `:Object` count is asserted
 against the population so a graph carrying a previous arm's `m3fx-*` fixture rows (which

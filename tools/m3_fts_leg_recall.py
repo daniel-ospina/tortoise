@@ -535,7 +535,7 @@ def _fts_cypher(graph, or_string: str, limit: int) -> list[tuple[str, float]]:
 
 
 def _refuse_degraded_legs(trace: list[dict], query: str) -> None:
-    """Refuse the run if the shipped leg did not actually RUN for a query.
+    """Refuse the run if the shipped leg RECORDED a degraded read for a query.
 
     ``run_fts_query`` returns ``[]`` from every degraded exit as well as from a
     genuine empty result, so the sweep cannot tell them apart by looking at the
@@ -550,6 +550,21 @@ def _refuse_degraded_legs(trace: list[dict], query: str) -> None:
     that only ever looked for BAD entries. Every ``return []`` in
     ``run_fts_query`` records first today; this keeps that a requirement rather
     than an accident.
+
+    ⛔ WHAT THIS GUARD CANNOT SEE, stated because it used to claim it could
+    (#12349 review, P2). It reads the TRACE, so it sees only what the leg
+    REPORTED. An ABSENT INDEX is not one of those things on the engine this
+    measurement ran on: measured on docker FalkorDB **v4.20.6**, with
+    ``CALL db.indexes()`` returning ``[]``, ``CALL db.idx.fulltext.queryNodes``
+    returns ``[]`` **without raising**, so ``run_fts_query`` records
+    ``{'ran': True, 'degraded': False, 'reason': 'empty_results'}`` and this
+    function does not refuse — correctly, because nothing degraded. The
+    ``index_missing`` degradation in ``search_engine`` is reachable only through
+    a driver ERROR whose message names an index, which this engine does not
+    produce per query. The index's PRESENCE and its FIELD SET are therefore
+    ``_wait_indexed``'s job (it reads ``CALL db.indexes()`` before any query is
+    issued and refuses an index that does not cover ``name``); do not read a
+    clean trace as proof that an index exists.
     """
     entries = [e for e in trace
                if isinstance(e, dict) and e.get("leg") == "fts"]
@@ -562,9 +577,10 @@ def _refuse_degraded_legs(trace: list[dict], query: str) -> None:
     if bad:
         raise SystemExit(
             f"REFUSED: the shipped FTS leg did not run cleanly for {query!r} "
-            f"— {bad}. A degraded read (breaker open / index missing / query "
-            "failed) returns [] exactly like a genuine miss, so continuing "
-            "would publish an understated baseline.")
+            f"— {bad}. A degraded read (breaker open / query failed) returns [] "
+            "exactly like a genuine miss, so continuing would publish an "
+            "understated baseline. (An ABSENT INDEX is not reported this way — "
+            "see this function's docstring; _wait_indexed is that guard.)")
 
 
 def verify_cypher_parity(graph, queries: list[str]) -> None:
@@ -753,7 +769,19 @@ def _wait_indexed(proj, expected: int, timeout_s: float = 60.0) -> tuple[int, fl
     Returns ``(numDocuments, waited_seconds)``. A timeout is a REFUSAL, never a
     proceed: measuring against a partially built index understates the leg, and
     an understated leg is indistinguishable from a real one in the artifact.
+
+    ⛔ The COUNT is not the whole question (#12349 review, P2). An ``Object``
+    index over some OTHER field (``id``) also reaches ``expected`` documents and
+    also answers every query with zero rows — a legitimate-looking 0.0 baseline
+    that no trace reading can catch, because on v4.20.6 an unindexed or
+    wrong-field query returns ``[]`` without raising. So the catalogue row's
+    FIELD SET is checked through the repo's one shared definition
+    (``tortoise.index_catalogue.index_row_has_field``), not a positional read:
+    the same helper ``projection._schema_is_current`` uses, so "does this row
+    index this field" cannot drift between the two sites.
     """
+    from tortoise.index_catalogue import index_row_has_field
+
     t0 = time.time()
     last = -1
     # ⛔ EQUALITY, not `>=` (#12349 review, P2). `>=` returns immediately on an
@@ -775,6 +803,16 @@ def _wait_indexed(proj, expected: int, timeout_s: float = 60.0) -> tuple[int, fl
             # (measured); an earlier comment said LAST and contradicted the code.
             if not row or row[0] != "Object":
                 continue
+            # ⛔ A row that does not cover `name` cannot answer these queries at
+            # all — see the docstring. Refuse on FIRST sight rather than waiting
+            # for a count that will never be the measurement's.
+            if not index_row_has_field(row, "name"):
+                raise SystemExit(
+                    "REFUSED: the Object fulltext index does not cover `name` "
+                    f"(catalogue row {row!r}). Every query would return zero "
+                    "rows and the shipped baseline would publish as 0.0 — a "
+                    "wrong-field index is indistinguishable from a real one by "
+                    "document count and by the leg's trace.")
             stats = next((c for c in row
                           if isinstance(c, dict) and "numDocuments" in c), None)
             last = int(stats["numDocuments"]) if stats else -1

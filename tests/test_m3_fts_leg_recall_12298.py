@@ -575,9 +575,16 @@ def _unnamed_values(true: str, values: tuple[str, ...],
         word_start = residual.rfind(" ", 0, match.start()) + 1
         word_end = residual.find(" ", match.end())
         word = residual[word_start:len(residual) if word_end < 0 else word_end]
+        # ⛔ The IDENTIFIER test reads the word with its punctuation STRIPPED
+        # (#12349 review, P2). The docs write every identifier in backticks, so
+        # `m3-000014` arrived as `` `m3-000014` `` and the hyphenated-id test
+        # below could never match it — the exemption existed and was unusable
+        # on exactly the form these documents use, which left `3` and `000014`
+        # reported as unnamed values in a claim that names no value at all.
+        bare = word.strip("`'\"()[]{}.,;:!?")
         prefix = re.search(r"[A-Za-z_]+$", residual[:match.start()])
         if (prefix and len(prefix.group(0)) >= 2) or re.fullmatch(
-                r"[A-Za-z][A-Za-z0-9]*(?:-\d+)+", word):
+                r"[A-Za-z][A-Za-z0-9]*(?:-\d+)+", bare):
             continue  # part of an IDENTIFIER (`BM25`, `m3-000014`)
         # ⛔ NO bare `=` here (#12349 round-24 reviewer, cycle 4): `p = 0.34` is
         # the form every p-value pin uses, so exempting `=` exempted the exact
@@ -1195,6 +1202,41 @@ _HEADLINE_ROWS: tuple[tuple[str, tuple[str, str] | None], ...] = (
 )
 
 
+#: §1's "pinned read of the code": `(file, the line the brief cites, the text that line
+#: must hold, the citation form the brief must still carry)`. The line numbers are
+#: duplicated here ON PURPOSE — the brief's number and the code's real number are the
+#: two halves this pin compares, so sharing one source would make the comparison
+#: vacuous.
+_S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
+    ("tortoise/sparse.py", 505, "def build_or_query(",
+     "`tortoise/sparse.py:505`"),
+    ("tortoise/sparse.py", 58, "_SPLIT_RE", "`:58`"),
+    ("tortoise/sparse.py", 381, "def tokenize_sparse_query(",
+     "`tortoise/sparse.py:381`"),
+    ("tortoise/sparse.py", 63, "DEFAULT_MAX_OR_TERMS = 12",
+     "`tortoise/sparse.py:63`"),
+    # ⛔ The degenerate branch is the `return`, NOT the enclosing `def`: the row
+    # cited 505 (the function header) for a statement 85 lines below it.
+    ("tortoise/sparse.py", 590, "return escape_redisearch_literal(query)",
+     "`sparse.py:590`"),
+    ("tortoise/search_engine.py", 2800, "def run_fts_query(",
+     "`tortoise/search_engine.py:2800`"),
+    ("tortoise/search_engine.py", 2986, "CALL db.idx.fulltext.queryNodes",
+     "`:2986-2998`"),
+    ("tortoise/search_engine.py", 2642, "def recency_tie_clause(",
+     "`search_engine.py:2642`"),
+    ("tortoise/search_engine.py", 4492,
+     "for rank, (pid, _score) in enumerate(ranked):",
+     "`tortoise/search_engine.py:4492`"),
+    ("tortoise/projection/__init__.py", 20346, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:20346`"),
+    ("tortoise/projection/__init__.py", 20774, "def _create_fulltext_index(",
+     "`:20774`"),
+    ("tortoise/projection/__init__.py", 21224,
+     "self._create_fulltext_index(label, fields)", "`:21224`"),
+)
+
+
 def _signed(cell: str) -> float:
     """The first SIGNED number in a cell, U+2212 included (`−0.67` -> -0.67).
 
@@ -1262,6 +1304,71 @@ def test_brief_headline_table_pins_every_column_and_the_subset_row(
             assert abs(_num(cells[3]) - row["mcnemar_p_two_sided"]) < 1e-3, (
                 f"§0's p cell for {arm!r} states {cells[3]!r}; the artifact says "
                 f"{row['mcnemar_p_two_sided']}")
+
+        # ⛔ The p cell's TRAILING CLAUSE is a claim of its own, and nothing read
+        # it (#12349 review, P2). `only_a` is that count: queries the SHIPPED leg
+        # finds and the arm does not, i.e. regressions. Measured before this pin:
+        # rewriting the brief's `0 regressions` to `1 regression` left all 118
+        # tests GREEN, so §0's table could contradict §0's own Reading-2 bullet
+        # (which IS pinned, 15 lines below) with the pin reporting OK — the same
+        # class as the Δ and p cells this test was written for.
+        tail = cells[3].split(",", 1)[1].strip() if "," in cells[3] else ""
+        if arm == "falkordb_tfidf__tokens_fixed":
+            assert tail, (
+                "§0's in-place row must state its regression count beside the "
+                f"p bound; the cell is {cells[3]!r}. Zero is the reason this arm "
+                "is preferred — dropping the clause drops the claim")
+        if tail:
+            stated = re.search(r"\bzero\b|-?\d+", tail.lower())
+            assert stated, (
+                f"§0's trailing clause for {arm!r} states no count: {tail!r}")
+            said = 0 if stated.group() == "zero" else int(stated.group())
+            assert said == row["only_a"], (
+                f"§0's row for {arm!r} states {tail!r}; the artifact records "
+                f"only_a = {row['only_a']} (names the shipped leg finds and this "
+                "arm does not) — rewrite the brief, do not relax the pin")
+
+
+def test_section_1_locators_still_point_at_the_code_they_name(brief: str) -> None:
+    """§1's "pinned read of the code" must POINT AT the code it names.
+
+    ⛔ The table exists BECAUSE "§6.2's own have drifted twice", and it had
+    already drifted itself (#12349 review, P2): at the head this PR merges, the
+    three `projection/__init__.py` locators were uniformly +13 (main's #12348
+    inserted lines above them), the declared head `c17e3c5f78` was not the head
+    the numbers came from (at `c17e3c5f78` they are a further 6 lower), and the
+    degenerate-branch row cited `` `sparse.py:505` `` for a `return` that is at
+    line 590. Nothing read the numbers, so all of it was prose.
+
+    The pin is (file, line the brief cites, text that line must hold). `line`
+    is here only so a DELETED citation is caught; the code side is resolved
+    from the file at test time, so a `main` that moves the code reds this and
+    the brief gets updated rather than silently dating. `cited` is the form the
+    brief must still carry — a bare `:N` for a row that continues the previous
+    row's path (`:58`, `:20774`), the full `path:N` otherwise.
+    """
+    scope = _scope_slice(brief, "1")
+    marker = "**The pinned read of the code**"
+    assert marker in scope, (
+        "§1 lost the 'pinned read of the code' table — the locators it carries "
+        "are the only record of which lines the mechanism claims rest on")
+    table = scope[scope.index(marker):]
+
+    for rel, line, symbol, cited in _S1_LOCATORS:
+        assert cited in table, (
+            f"§1 no longer cites {cited!r} for {symbol!r} in {rel} — the table "
+            "must name the line each claim rests on, and this test reads that "
+            "citation")
+        src = (REPO_ROOT / rel).read_text(encoding="utf-8").splitlines()
+        actual = next((i + 1 for i, text in enumerate(src) if symbol in text),
+                      None)
+        assert actual is not None, (
+            f"{rel} no longer contains {symbol!r}; §1's table names it — the "
+            "mechanism the brief describes has moved or gone")
+        assert line == actual, (
+            f"§1 cites {rel}:{line} for {symbol!r}, but that text is at line "
+            f"{actual} — update the brief's locator (and its declared head), do "
+            "not relax this pin")
 
 
 def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact, brief_text) -> None:
@@ -2145,6 +2252,19 @@ def test_changelog_does_not_restate_superseded_numbers(artifact, population,
             f"the committed artifact says {want:.4f}")
     subset = [r for r in rows if "subset" in r[0]]
     assert len(subset) == 1, "the changelog table lost its tokens-controlled subset row"
+    # ⛔ The row's LABEL is a claim too (#12349 review, P2): the cell pair below
+    # was pinned and the `174 of 300` label was not — measured, `174` → `173`
+    # left all 118 tests GREEN while the brief's own `174` (which IS pinned) then
+    # contradicted it in the same release. `n` is the subset's own denominator,
+    # not the population's, because the comparison is computed over 174 rows.
+    n_sub = artifact["comparisons"]["tokens_controlled_subset"]["n"]
+    n_pop = len(population["names"])
+    assert n_pop == artifact["sample"], (
+        f"the committed population holds {n_pop} names; the artifact measured "
+        f"a sample of {artifact['sample']} — the two must be the same run")
+    assert f"({n_sub} of {n_pop} queries)" in subset[0][0], (
+        f"the changelog's subset row states {subset[0][0]!r}; the artifact "
+        f"records n = {n_sub} over a {n_pop}-name population")
     pair = artifact["verdict"]["primary_arm_tokens_controlled_subset"]
     # Arm-vs-baseline, the same order the brief's §0 cell uses.
     arm, base = (round(_num(p), 4) for p in _plain(subset[0][1]).split("vs"))
@@ -2423,6 +2543,23 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     _only_claim(_s43, f"i.e. **{100 - total:.1f} %**",
                 "§4.3's published remainder",
                 values=(f"{100 - total:.1f}",))
+    # ⛔ The PRODUCT is its own claim (#12349 review, P2): both factors were
+    # pinned and the arithmetic joining them was not — `0.09 × 91.8 ≈ +8.3 pts`
+    # → `+8.4 pts` left all 118 tests GREEN. 0.09 × 91.8 = 8.262, which the brief
+    # rounds to 8.3, so the pin compares the ROUNDED product and reds a digit the
+    # factors alone cannot see.
+    bound_pts = token_share / 100 * snake_delta
+    _only_claim(_s43,
+                f"{token_share / 100:.2f} \u00d7 {snake_delta:.1f} \u2248 "
+                f"+{bound_pts:.1f} pts",
+                "§4.3's single-term bound",
+                values=(f"{token_share / 100:.2f}", f"{snake_delta:.1f}",
+                        f"{bound_pts:.1f}"),
+                # ⛔ `×` and `≈` are DIRECTIONAL operators: left literal, a
+                # rewrite from a product to a sum stops matching and a planted
+                # true copy satisfies the pin. Wildcarding them is the declared
+                # residual; the three numbers are the claim.
+                free=("\u00d7", "\u2248"))
 
     # ⛔ The Δ COLUMN, in its own cells — a whole-document `"91.8" in brief` is a
     # substring that §3.3's sentence and `share × 91.8` both satisfy, so the two
@@ -2543,6 +2680,16 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
     tokens = artifact["arms"]["postgres_bm25/tokens"]["ranks"]
     both = [q for q in shipped if shipped[q] is not None and tokens[q] is not None]
     moved = {q: abs(shipped[q] - tokens[q]) for q in both if shipped[q] != tokens[q]}
+    # ⛔ The bullet NAMES its largest mover, and the name was unpinned (#12349
+    # review, P2): `m3-000014` goes 1 → 6 was free text beside a pinned
+    # `largest move 5 places`, so rewriting the example to `1 → 5` left 118 tests
+    # GREEN. The example must be the artifact's actual largest mover, and its two
+    # ranks must be the recorded ones.
+    worst = max(moved, key=lambda q: (moved[q], q))
+    assert worst == "m3-000014", (
+        "§0 names `m3-000014` as the largest mover; the artifact's largest mover "
+        f"is now {worst!r} — re-derive the example, do not just rename it")
+    example = (shipped[worst], tokens[worst])
     mean_sh = artifact["arms"]["falkordb_tfidf"]["recall_by_k"]["15"]["mean_rank_when_found"]
     mean_tk = artifact["arms"]["postgres_bm25/tokens"]["recall_by_k"]["15"]["mean_rank_when_found"]
     assert mean_sh > mean_tk, (
@@ -2554,15 +2701,17 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         plain,
         f"of the {len(both)} names both arms find inside k=15, {len(moved)} rank "
         f"differently (mean rank when found {mean_sh:.3f} vs {mean_tk:.3f}, "
-        f"largest move {max(moved.values())} places",
+        f"largest move {max(moved.values())} places \u2014 `{worst}` goes "
+        f"{example[0]} \u2192 {example[1]})",
         "§0's window-vs-order bullet",
         values=(str(len(both)), str(len(moved)), f"{mean_sh:.3f}",
-                f"{mean_tk:.3f}", str(max(moved.values()))),
+                f"{mean_tk:.3f}", str(max(moved.values())),
+                str(example[0]), str(example[1])),
         # ⛔ `inside` is the claim's direction (`inside` → `outside`) and
         # `differently` is its point (`rank differently` → `identically`) —
         # both planted green when left literal (round-24 reviewer, cycles 4-5).
         free=("inside", "differently", "both", "largest|smallest",
-              "find|miss"))
+              "find|miss", "\u2192"))
 
     _only_claim(
         plain,
@@ -2657,6 +2806,16 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
     _only_claim(text, f"the whole {dep['delta_pts']:g}-point swing",
                 "the status note's swing",
                 values=(f"{dep['delta_pts']:g}",))
+    # ⛔ The note's CLOSING figure pair was unpinned (#12349 review, P2): four
+    # neighbouring figures were shape-pinned while `(0.9633 vs 0.7133)` — the
+    # pair a reader quotes as the size of the swing — was free text, and
+    # `0.9634` left all 118 tests GREEN.
+    _only_claim(
+        text,
+        f"does beat it ({dep['recall_at_3']:.4f} vs "
+        f"{dep['recall_at_3_base']:.4f})",
+        "the status note's closing figure pair",
+        values=(f"{dep['recall_at_3']:.4f}", f"{dep['recall_at_3_base']:.4f}"))
     assert recovery["delta_pts"] == dep["delta_pts"], (
         "the recovery arm no longer reproduces the deployable arm's swing, so the "
         "status note's 'reproduces inside the current index' is now false")
@@ -2685,6 +2844,60 @@ def test_the_index_wait_requires_exactly_the_expected_count(tool_mod) -> None:
     assert "last >= expected" not in src, (
         "the wait accepts an at-least-full index again — re-read §3.5 and the "
         "artifacts' `measurement_notes` before changing this")
+
+
+def test_the_index_wait_refuses_an_object_index_that_does_not_cover_name(
+        tool_mod) -> None:
+    """The wait must refuse a WRONG-FIELD index, not just count it.
+
+    ⛔ A document COUNT is not the identity of the index (#12349 review, P2).
+    Measured on docker FalkorDB **v4.20.6**: `CALL db.idx.fulltext.queryNodes`
+    against a graph with NO fulltext index returns `[]` WITHOUT raising, so
+    `run_fts_query` records `{'ran': True, 'degraded': False, 'reason':
+    'empty_results'}` and `_refuse_degraded_legs` — which reads the TRACE —
+    cannot refuse it. An `Object` index over `id` is worse than absent: it
+    reaches the same document count and answers every query with zero rows, so
+    the shipped baseline would publish as 0.0 with every guard green.
+
+    This is a BEHAVIOURAL pin (a fake catalogue, not a source grep): the row
+    shape is the one `projection._schema_is_current` documents,
+    `[label, properties, {prop: [kind, …]}, …]`, and membership goes through the
+    repo's shared `index_catalogue.index_row_has_field`.
+    """
+    import pytest as _pytest
+
+    class _Res:
+        def __init__(self, rows):
+            self.result_set = rows
+
+    class _Graph:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def query(self, _cypher):
+            return _Res(self._rows)
+
+    class _Proj:
+        def __init__(self, rows):
+            self.g = _Graph(rows)
+
+    stats = {"numDocuments": 3}
+    control = _Proj([["Object", ["name"], {"name": ["FULLTEXT"]}, stats]])
+    assert tool_mod._wait_indexed(control, 3, timeout_s=1.0) == (3, 0.0)
+
+    wrong_field = _Proj([["Object", ["id"], {"id": ["FULLTEXT"]}, stats]])
+    with _pytest.raises(SystemExit) as exc:
+        tool_mod._wait_indexed(wrong_field, 3, timeout_s=1.0)
+    assert "does not cover `name`" in str(exc.value), (
+        "the index wait accepted a full-text index over `id` — it reaches the "
+        "expected document count and returns zero rows for every query, which "
+        "is a 0.0 baseline with every other guard green")
+
+    # …and the row whose FIELD LIST names `name` but whose KINDS map does not
+    # is accepted, because `indexed_field_names` reads BOTH catalogue columns on
+    # purpose (a property in only one of them still answers the question).
+    props_only = _Proj([["Object", ["name"], {"id": ["RANGE"]}, stats]])
+    assert tool_mod._wait_indexed(props_only, 3, timeout_s=1.0) == (3, 0.0)
 
 
 def test_the_reuse_count_guard_is_wired(tool_mod) -> None:
@@ -2922,7 +3135,12 @@ def test_the_index_wait_REFUSES_on_timeout_and_on_overshoot(tool_mod) -> None:
         def query(self, _cypher, params=None):
             n = self.counts[min(self.i, len(self.counts) - 1)]
             self.i += 1
-            row = ["Object", {"numDocuments": n}]
+            # ⛔ The MEASURED row shape, not `[label, stats]` (#12349 review,
+            # P2): `_wait_indexed` now also requires the row to COVER `name`,
+            # so a two-cell stub is refused for the wrong reason and this test
+            # would pass while the count logic it exists for went unmeasured.
+            row = ["Object", ["name"], {"name": ["FULLTEXT"]},
+                   {"numDocuments": n}]
 
             class _R:
                 # ClassVar, not a plain mutable class attribute (RUF012): the
