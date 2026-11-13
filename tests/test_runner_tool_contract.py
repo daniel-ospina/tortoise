@@ -111,7 +111,7 @@ GH_JOBS = {
     # below; `drift-guard.yml` therefore has no entry here any more — the step,
     # its `Ensure gh` and the `pull-requests: read` grant it needed all moved.
     "closes-coherence.yml": ["closes-coherence"],
-    "release-artifact-canary.yml": ["canary", "report"],
+    "release-artifact-canary.yml": ["report"],
     # The alert legs (`published-artifact-alert.sh` → `auto-file-issue.sh`) are the only
     # `gh` users here, and they sit behind a script the scanner does not follow — so this
     # row, plus the workflow's `ensure gh` step, is what keeps that requirement visible
