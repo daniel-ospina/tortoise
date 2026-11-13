@@ -183,12 +183,9 @@ fairer one — so the break is disclosed instead.
 (a) **The index builds on a background cycle.** `db.indexes()` reports `numDocuments`; a query issued
 straight after the writes can see a **partially built** index and book a present name as a miss — an
 artefact in the direction that flatters the wrong arm. The harness **waits** until `numDocuments`
-reaches the population size and **refuses** on timeout; it also **refuses a graph whose stored names do
-not match the pinned population**, because `o.name` is an ON CREATE write (`#8919`) — a second run
-against the same graph would measure the previous population, and the count guard alone cannot see that.
-⚠️ Both guards are narrower than "refuses any reused graph": the wait accepts `numDocuments >= n` (so
-an over-full index passes it), and the name check compares the pinned names, so reusing a graph with the
-SAME population is accepted.
+reaches the population size and **refuses** on timeout; it also **refuses a reused graph** outright,
+because `o.name` is an ON CREATE write (`#8919`) — a second run against the same graph would measure
+the previous population, and the count guard alone cannot see that.
 (b) **Re-upserting into a live graph is not free** — before the wait and run-scoped graphs existed, two
 runs differed by 2 names (0.7133 vs 0.7067, an uncommitted pre-run observation). With both, two
 independent runs return **identical** numbers, and the second one is committed as
@@ -296,10 +293,11 @@ confirmation, and it is what `#12350` should be measured with. See `artifact.jso
 
 Two of those are decisive and none of them is about the scorer:
 
-* **`abc_def` is unretrievable at ANY k on the shipped leg** — it does not appear in its own name's
-  top 15 at all (`abc|def`, and the index holds `abc_def`; what the artifact records is the RANK, absent
-  at both windows — it does not record how many rows the query returned, so "zero rows" was more than
-  the evidence). The `#8933` machinery does not help: its alias tail
+* **`abc_def` is unretrievable at ANY k on the shipped leg** — it returns **no row at the production
+  window and none at k=15** for its own name. ⛔ Stated as what the artifact records (`rank` and
+  `rank_wide`, both `None`), not as a row COUNT: the harness does not record the size of an empty
+  result set, so "zero rows" was a stronger claim than the committed evidence carries.
+  (`abc|def`, and the index holds `abc_def`). The `#8933` machinery does not help: its alias tail
   (`err4032`) and adjacency phrase (`"err 4032"`) are *whitespace/punctuation* composites, and the index
   does not hold `abc_def` as `abc def` either.
 * **The 4-segment run needs the widened criterion** — the in-place fix reaches it at k=15 (rank 4) among
@@ -379,7 +377,7 @@ remainder without a derivation; it is removed rather than re-guessed.
 | recorded decision | does this contradict it? |
 |---|---|
 | **V1 / §6.2** — the text index and its payload stay in the graph; the move is deferred behind M3 | **No — this *is* M3**, and its answer is "do not move". The deferral is upheld, not reversed |
-| owner's pre-authorised SPLADE reopening (`#12186`, 2026-11-12) | **No adoption is made, so no override is needed.** The authorization was conditional on M3; the measurement falsifies its premise. §0 makes the **recommendation** and names the ruling as the owner's; the reopen is argued on `#12298`, not here |
+| owner's pre-authorised SPLADE reopening (`#12186`, 2026-11-12) | **No adoption is made, so no override is needed.** The authorization was conditional on M3; the measurement falsifies its premise. §0 states the judgement and how to overrule it |
 | **KEEP ruling** (`#11395` comment `6781921075`) — `:Object`/`:Subject` keep their stored embeddings | **No.** Nothing here touches an embedding; the measurement is the lexical leg only |
 | **§12.2c** — the entity vector is the entry + resolution key, budget-capped | **No.** Not touched |
 | **`#11901` conclusion** — do not widen the window before a verdict exists | **No.** `limit` is held at the production 3 (5/10/15 only report the curve); the finding is that **width is not the constraint** either — 21 queries return nothing at any k |

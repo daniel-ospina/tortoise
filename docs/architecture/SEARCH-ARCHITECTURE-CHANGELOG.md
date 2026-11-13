@@ -105,9 +105,9 @@ decision.
 
 **The `#8933` identifier fixture is part of the DoD, and the shipped leg fails it.** Five fixture records
 queried at the production window: shipped **3 of 5 reachable**, the in-place query **5 of 5**, BM25 fed
-our terms **3 of 5**, BM25 with its own analyser **5 of 5**. `abc_def` is unreachable at the production
-window and at k=15 on the shipped leg (the artifact records the RANK, absent at both — not a row count).
-The identifier capability the product believes it has is defeated on exactly
+our terms **3 of 5**, BM25 with its own analyser **5 of 5**. `abc_def` returns **no row at the
+production window and none at k=15** for its own
+name on the shipped leg. The identifier capability the product believes it has is defeated on exactly
 the shapes `#8933` was built for.
 
 **The defect it found, stated as a design fact rather than as tracker state.** RediSearch treats `_` as a
