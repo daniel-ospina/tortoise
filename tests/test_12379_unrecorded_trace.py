@@ -37,6 +37,7 @@ from tortoise import capture_backlog
 from tortoise.capture_spool import (
     PostOutcome,
     Snapshot,
+    capture_health_line,
     flush_spool,
     read_spool_meta,
     unrecorded_captures,
@@ -156,6 +157,61 @@ def test_the_unrecorded_marker_is_STICKY_across_a_replay_filing(tmp_path):
         "say the extraction outcome was recorded, and a NULL-outcome session can "
         "never be re-extracted by a re-POST")
     assert capture_backlog.sessions() == []
+
+
+def test_a_later_recorded_verdict_CLEARS_the_marker(tmp_path):
+    """A resolved session must stop being reported — else the trace is a
+    permanent false alarm (#12379 review).
+
+    `confirmed: filed` means the server imported the turns, so extraction RAN:
+    the state "we do not know how it ended" is over. A marker left standing
+    over that verdict makes `session health` cry wolf for every session the
+    server later resolved, until the entry is evicted — the alert-fatigue shape
+    the health line's own states are ordered to avoid. (The case NOTHING on the
+    client can resolve — no later filing at all — is why the health line states
+    this historically: "were filed with NO recorded extraction outcome at the
+    time".)
+
+    MUTATIONS THAT RED THIS: make the stamp unconditional (`if unrecorded:` /
+    `elif outcome_recorded(...)` → a single-or-no branch that never pops).
+    """
+    write_spool_entry(tmp_path, _snapshot())
+    flush_spool(tmp_path, _post(UNRECORDED_BODY), now=1000.0)
+    assert unrecorded_captures(tmp_path) == [SESSION]
+
+    # A later pass files new content and the server reports the outcome.
+    write_spool_entry(tmp_path, _snapshot(
+        turns=[*TURNS, {"role": "user", "content": "one more turn"}]))
+    resolved = flush_spool(
+        tmp_path, _post({"confirmed": "filed", "extracted": 5}), now=2000.0)
+
+    assert resolved.filed == 1, "the turns are durable — the entry still files"
+    assert resolved.unrecorded == 0
+    assert unrecorded_captures(tmp_path) == [], (
+        "the server recorded the outcome, so the trace is stale — it must not "
+        "outlive the evidence that resolved it")
+    assert capture_health_line(tmp_path, api_key="tt_k").unrecorded == ()
+    assert (read_spool_meta(tmp_path, SESSION) or {}).get("filed_key") is not None
+
+
+def test_a_recorded_STORE_ONLY_verdict_also_clears_the_marker(tmp_path):
+    """The other resolved shape: `confirmed: unextracted` says extraction did
+    NOT run, and the server KNOWS it (#4188 / #4258) — not the same state as
+    "unknown".
+
+    MUTATIONS THAT RED THIS: narrow `outcome_recorded` to `filed` alone.
+    """
+    write_spool_entry(tmp_path, _snapshot())
+    flush_spool(tmp_path, _post(UNRECORDED_BODY), now=1000.0)
+    assert unrecorded_captures(tmp_path) == [SESSION]
+
+    write_spool_entry(tmp_path, _snapshot(
+        turns=[*TURNS, {"role": "user", "content": "one more turn"}]))
+    resolved = flush_spool(tmp_path, _post(STORE_ONLY_BODY), now=2000.0)
+
+    assert resolved.filed == 1
+    assert resolved.unrecorded == 0
+    assert unrecorded_captures(tmp_path) == []
 
 
 def test_a_known_store_only_outcome_is_not_counted_as_unrecorded(tmp_path):
@@ -296,7 +352,7 @@ def test_session_health_reports_the_unrecorded_count(tmp_path, capsys):
     # Case-insensitive on purpose: the spelling a Python-only term would take
     # is lower-case, and an upper-case-only check would pass it (#12427).
     assert "unrecorded" not in out.out.lower(), out.out
-    assert "UNRECORDED" in out.err, out.err
+    assert "NO recorded" in out.err, out.err
     assert SESSION in out.err, out.err
 
 

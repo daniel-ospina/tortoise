@@ -8778,10 +8778,11 @@ def _print_unrecorded_captures(health=None) -> None:
     named = ", ".join(found[:3]) + (f" +{len(found) - 3} more"
                                    if len(found) > 3 else "")
     print(
-        f"capture: {len(found)} session(s) with an UNRECORDED extraction "
-        f"outcome ({named}) — the turns are stored and the server has not "
-        f"recorded whether extraction ran; no re-extraction is offered for "
-        f"them (`tortoise session view <id>` reports the server's state)",
+        f"capture: {len(found)} session(s) were filed with NO recorded "
+        f"extraction outcome at the time ({named}) — the turns are stored, it "
+        f"is not known whether extraction ran, and no re-extraction is offered "
+        f"for them (`tortoise session view <id>` reports the server's state; a "
+        f"later capture verdict that records how it ended clears this)",
         file=_sys.stderr,
     )
 

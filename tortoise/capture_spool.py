@@ -342,6 +342,31 @@ def outcome_unrecorded(body) -> bool:
             and body.get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE)
 
 
+#: The ``confirmed`` verdicts that mean the server KNOWS how the capture ended, so
+#: a marker standing over one of them is stale. ``filed`` is ``extracted >= 1``
+#: (#12374's ``FILED`` verdict); ``unextracted`` is the store-only outcome the
+#: server recorded (``outcome_known: true``, #4188 / #4258). Everything else —
+#: ``pending`` (still unknown), ``replayed`` (already captured, says nothing about
+#: extraction), an absent verdict, a malformed body — leaves the marker alone.
+RECORDED_OUTCOME_VERDICTS = ("filed", "unextracted")
+
+
+def outcome_recorded(body) -> bool:
+    """True when a 2xx body PROVES the server recorded how the capture ended.
+
+    The inverse question to :func:`outcome_unrecorded`, and the ONLY evidence
+    allowed to clear the spool marker. It is deliberately narrow: an
+    uninformative body (``replayed``, a bare 2xx, a malformed one) must not be
+    read as a resolved outcome — that reading is what deleted the only trace on
+    the routine resume/clear/compact replay path (see ``_flush_one``'s comment).
+    """
+    if not isinstance(body, dict):
+        return False
+    verdict = body.get("confirmed")
+    return (isinstance(verdict, str)
+            and verdict.strip().lower() in RECORDED_OUTCOME_VERDICTS)
+
+
 @dataclass
 class FlushSummary:
     attempted: int = 0
@@ -3165,28 +3190,40 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
             fresh["next_attempt_at_ms"] = 0
             # #12379: the DURABLE half of the trace, written in the same CAS as
             # `filed_key` so it describes the content that was actually filed.
-            # STICKY, deliberately, and set-only-when-present (the same
-            # omit-rather-than-write-null rule `filed_lane`/`filed_stamp` follow
-            # for the TS leg's strict comparison).
+            # Set-only-when-present (the same omit-rather-than-write-null rule
+            # `filed_lane`/`filed_stamp` follow for the TS leg's strict
+            # comparison).
             #
-            # ⛔ It is NOT cleared by a later filing. A re-capture of this session
-            # cannot resolve the state: the server's re-capture gate requires a
-            # RECORDED failure (`prior_capture_ok is False`), so a session whose
-            # outcome is NULL replays and answers `replayed` — a body that says
-            # "already captured", not "recorded how extraction ended". Treating
-            # that as evidence of a recorded outcome deleted the only trace, on
-            # the routine resume/clear/compact path, while the condition provably
-            # persisted (measured in review: marker set → replay filing → marker
-            # gone, `filed_key` set). Only `session view` can answer currency, so
-            # a stale marker is corrected by reading the server, not by a client
-            # guess. `write_spool_entry` carries the key across snapshots and the
-            # Pi leg mirrors that carry (see its comment there).
+            # ⛔ An UNINFORMATIVE body never clears it. A re-capture of this
+            # session cannot resolve the state: the server's re-capture gate
+            # requires a RECORDED failure (`prior_capture_ok is False`), so a
+            # session whose outcome is NULL replays and answers `replayed` — a
+            # body that says "already captured", not "recorded how extraction
+            # ended". Treating that as evidence of a recorded outcome deleted the
+            # only trace, on the routine resume/clear/compact path, while the
+            # condition provably persisted (measured in review: marker set →
+            # replay filing → marker gone, `filed_key` set).
+            #
+            # ⛔ But a body that DOES report the outcome is evidence, and keeping
+            # the marker over it is the alert-fatigue failure the health line
+            # exists to avoid: `confirmed: filed` means the server imported the
+            # turns (so extraction ran) and `confirmed: unextracted` means it
+            # knows it did not — either way the session is no longer "unknown",
+            # and a marker left standing would make `session health` report a
+            # permanent false alarm until the entry is evicted. So the marker is
+            # CLEARED by a recorded verdict and only by one
+            # (:func:`outcome_recorded`). What remains after that is the case
+            # nothing on the client can resolve — no later filing at all — which
+            # is why the health line states it HISTORICALLY ("filed with no
+            # recorded outcome at the time") rather than as a live claim.
             #
             # A CAS miss leaves the entry unfiled and unstamped: its content was
             # not what this POST carried, so the next pass re-posts it and that
             # attempt's own outcome stamps it.
             if unrecorded:
                 fresh[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
+            elif outcome_recorded(outcome.body):
+                fresh.pop(UNRECORDED_OUTCOME_KEY, None)
             _write_meta(root, fresh)
         # else: the posted content WAS filed; the entry keeps the newer turns
         # and stays unfiled, so they are re-posted next time.
