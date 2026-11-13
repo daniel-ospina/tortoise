@@ -4894,6 +4894,47 @@ def _neighbour_number_strays(line: str) -> list[str]:
     return stray
 
 
+def _stray_entry_finding(sentence: str, entry: str) -> str | None:
+    """The finding for a filename on the `carve_out:` sentence that is not `entry`.
+
+    ⛔ GATED ON THE ENTRY BEING NAMED, and the gate is the whole point (#12369
+    review, P3, measured). Ungated, this arm fired on the D2 state — the sentence
+    rewritten to name a DIFFERENT file, so it named the entry nowhere — and
+    reported that it named `['test_graph_census_7949.py']` *"besides
+    `test_pack_logic_writeprobe_11083.py`"*, asserting a clause the sentence did
+    not carry. The test was RED either way (the arm above catches that state with
+    a TRUE message), so this was never a fail-open: it is the *diagnostic* that
+    was wrong, which matters because the message is what a reader acts on — two
+    findings for one defect, one of them false, sends them to fix a filename that
+    is not there. That is the same "the MESSAGE was the defect" class this pin
+    already closed once for the bare-number arm, so the rule lives HERE, in a
+    function with its own test, instead of in a comment a later edit can drop.
+
+    The gate cannot weaken the arm: with `entry` absent the caller's preceding
+    arm is RED regardless, and with it present this one enumerates every stray
+    name on the sentence.
+
+    ⛔ THE PATH PREFIX IS NOT AN EXEMPTION. The first cut used `(?<![\w/])`,
+    which let a SECOND capstone filament through merely by writing it with a
+    path — "unlike `tests/test_graph_census_7949.py`, which lives elsewhere"
+    was GREEN while the same name BARE was RED. The match is on the name
+    anywhere, and it exempts exactly one thing: THIS module, whose basename the
+    sentence cites beside the clause.
+    """
+    if entry not in sentence:
+        return None
+    extra = sorted({f for f in re.findall(r"test_\w+\.py", sentence)
+                    if f not in (entry, Path(__file__).name)})
+    if not extra:
+        return None
+    return (
+        f"03-test-design.md's `carve_out:` sentence names {extra!r} "
+        f"besides {entry!r} — the sentence is the document's claim that the "
+        f"block holds ONE capstone entry, so a second filename on it either "
+        f"contradicts the tree or re-opens the claim to a file the pin "
+        f"does not pick up. Name one entry.")
+
+
 class _ManifestShapeError(RuntimeError):
     """`config/ci-surfaces.yml` is not readable in the shape this pin needs.
 
@@ -5880,22 +5921,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                     f"that drops one of them is a claim the pin can no longer "
                     f"check. Restore the clause; do not narrow the sentence.")
         # Only the ONE named entry may appear: a second `test_*.py` token is the
-        # addition case above in another spelling. ⛔ THE PATH PREFIX IS NOT AN
-        # EXEMPTION. The first cut used `(?<![\w/])`, which let a SECOND capstone
-        # filament through merely by writing it with a path —
-        # "unlike `tests/test_graph_census_7949.py`, which lives elsewhere" was GREEN
-        # while the same name BARE was RED. The fix matches the name anywhere and
-        # exempts exactly one thing: THIS module, whose basename the sentence cites
-        # beside the clause.
-        extra_files = sorted({f for f in re.findall(r"test_\w+\.py", doc_hits[0])
-                              if f not in (ENTRY, Path(__file__).name)})
-        if extra_files:
-            block_failures.append(
-                f"03-test-design.md's `carve_out:` sentence names {extra_files!r} "
-                f"besides {ENTRY!r} — the sentence is the document's claim that the "
-                f"block holds ONE capstone entry, so a second filename on it either "
-                f"contradicts the tree or re-opens the claim to a file the pin "
-                f"does not pick up. Name one entry.")
+        # addition case above in another spelling. The arm's rule, its gate and the
+        # reason for both are in `_stray_entry_finding` — pinned by its own test
+        # rather than by this comment.
+        stray = _stray_entry_finding(doc_hits[0], ENTRY)
+        if stray:
+            block_failures.append(stray)
         # ⛔ scan the sentence with the ENTRY NAME removed: `test_pack_logic_
         # writeprobe_11083.py` carries a 5-digit run that is not a line cite.
         sentence_numbers = _bare_number_hits(doc_hits[0].replace(ENTRY, ""))
@@ -6235,6 +6266,62 @@ def test_the_two_cite_arms_are_complementary_not_duplicate():
         "_MANIFEST_CITE must NOT red a bare `:NNNN` — elsewhere in the document "
         "that is a legitimate cite of some OTHER module, and refusing it is the "
         "false-red class this PR exists to remove")
+
+
+def test_the_stray_entry_arm_never_claims_a_clause_the_sentence_does_not_carry():
+    """The P3 a fresh-context review found: a TRUE red with a FALSE message.
+
+    ⛔ WHY (measured on the D2 state — the sentence rewritten to name
+    `test_graph_census_7949.py` and NOT the entry). Ungated, the arm fired beside
+    the "does not name the entry" arm and said the sentence named
+    `['test_graph_census_7949.py']` *besides* `test_pack_logic_writeprobe_11083.py`
+    — a clause that sentence did not contain. Two findings for ONE defect, one of
+    them false, and the false one names the fix: a reader correcting "besides"
+    would go looking for a second filename that is not on the line while the real
+    defect is that the ONLY filename is the wrong one.
+
+    Nothing was ever accepted that should have been refused — the red stands
+    either way — so this is not a fail-open. It is the *diagnostic* that is
+    pinned here, which is the same "the MESSAGE was the defect" class this pin
+    already closed once for the bare-number arm (`_BARE_NUM`'s table above: an
+    earlier message prescribed the very form the arm refuses).
+
+    Both directions, because a gate that silenced the arm outright would turn the
+    addition case GREEN — the false-PASS direction is the worse one.
+    """
+    entry = "test_pack_logic_writeprobe_11083.py"
+
+    # (a) THE MEASURED D2 STATE: a different filename, entry named nowhere. The
+    #     OTHER arm owns this diagnosis; this one must say nothing rather than
+    #     invent a "besides" clause.
+    replaced = "`carve_out:` holds **one**: `test_graph_census_7949.py` — the E6 lane"
+    assert _stray_entry_finding(replaced, entry) is None, (
+        "the stray-entry arm must stay SILENT when the sentence does not name the "
+        "entry — its wording says 'besides <entry>', which is false there, and the "
+        "'does not name' arm already reports that state with a true message "
+        "(#12369 review P3, measured: both fired and the second one was false)")
+
+    # (b) THE ADDITION CASE — the arm's actual job, and it must still fire. The
+    #     path prefix is not an exemption: this spelling was GREEN under the first
+    #     cut's `(?<![\w/])` lookbehind while the bare name was RED.
+    added = (f"`carve_out:` holds **one**: `{entry}` — unlike "
+             "`tests/test_graph_census_7949.py`, which lives elsewhere")
+    finding = _stray_entry_finding(added, entry)
+    assert finding is not None, (
+        "a SECOND capstone filename on the claim sentence must be refused, "
+        "including when it is written with a path prefix")
+    assert "test_graph_census_7949.py" in finding, (
+        f"the finding must name the offending file so it is actionable: {finding!r}")
+
+    # (c) THE CONTROL: the sentence as this document actually carries it must not
+    #     fire — the arm is not red-on-red. `Path(__file__).name` is exempt because
+    #     the sentence cites this module beside the clause.
+    clean = (f"`carve_out:` holds **one**: `{entry}` — the pin reads the block "
+             f"(`{Path(__file__).name}::_section_entries`); `uri_requiring:` and "
+             f"`slow_files:` hold none")
+    assert _stray_entry_finding(clean, entry) is None, (
+        "the arm must not fire on the document's own sentence — this module's "
+        "basename is exempt because the sentence cites it beside the clause")
 
 
 def test_a_cite_that_names_a_directory_names_a_file_that_exists():
