@@ -1061,12 +1061,140 @@ class TestCliOnboardDbTarget:
                                side_effect=lambda a: seen.update(idx=a) or 0):
             fake_run.return_value.returncode = 0
             fake_run.return_value.stdout = str(repo_root)
-            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard", offline=True))
 
         assert rc == 0
         doctor = seen["doctor"]
         assert doctor.db == uri
         assert doctor.path is None
+        # #11912 review: `offline` must be forwarded on THIS branch too — the
+        # docker lane every `docker://` user takes. Without this assertion the
+        # forwarding at the `is_db_uri(...)` arm could be deleted with the suite
+        # green (the path-only test below never reaches it).
+        assert doctor.offline is True
+
+    def test_onboard_forwards_offline_to_doctor(self, tmp_path, monkeypatch):
+        """#11912: `onboard --offline` must reach the doctor it calls.
+
+        `docs/quickstart-cloud.md` advertises `--offline` as the answer for a
+        proxy or an air-gapped runner, and step 5 of the wizard is `doctor` —
+        the one step that now dials. Without this forwarding the promise is
+        false for the wizard, which is the FIRST command a new user runs: a
+        credential-bearing box behind a blackholing proxy would pay the hosted
+        block's whole timeout budget at its last onboarding step.
+        """
+        _delenv_falkordb(monkeypatch)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        from tortoise import __main__ as m
+
+        seen: dict = {}
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor",
+                               side_effect=lambda a: seen.update(doctor=a) or 0), \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(m, "_cmd_index_github",
+                               side_effect=lambda a: seen.update(idx=a) or 0):
+            fake_run.return_value.returncode = 0
+            fake_run.return_value.stdout = str(repo_root)
+            m._cmd_onboard(mock.Mock(path=None, cmd="onboard", offline=True))
+
+        # A real bool, not the Mock: `_cmd_doctor` reads it with getattr and a
+        # truthy non-bool would silently enable the flag for every caller.
+        assert seen["doctor"].offline is True
+
+    def _onboard_doctor_args(self, m, tmp_path, monkeypatch, args):
+        """Run `_cmd_onboard` with step 5 stubbed; return the doctor Namespace."""
+        _delenv_falkordb(monkeypatch)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        repo_root = tmp_path / "repo-default"
+        repo_root.mkdir(exist_ok=True)
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        seen: dict = {}
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor",
+                               side_effect=lambda a: seen.update(doctor=a) or 0), \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(m, "_cmd_index_github",
+                               side_effect=lambda a: seen.update(idx=a) or 0):
+            fake_run.return_value.returncode = 0
+            fake_run.return_value.stdout = str(repo_root)
+            m._cmd_onboard(args)
+        return seen["doctor"]
+
+    def test_onboard_forwards_offline_as_a_real_bool(self, tmp_path, monkeypatch):
+        """`onboard` must hand `doctor` a BOOL, not whatever `args` carried.
+
+        #11912's whole point is that the onboarding completion gate must not
+        certify a dead credential, so the DEFAULT has to be the probe — and
+        `bool(...)` is what makes "absent" mean dial rather than "off" (a bare
+        `getattr` hands on a truthy `Mock`/`1`, and the mutated value is what
+        these assertions catch: `is` compares identity, not truthiness).
+        """
+        from tortoise import __main__ as m
+
+        truthy = self._onboard_doctor_args(
+            m, tmp_path, monkeypatch,
+            mock.Mock(path=None, cmd="onboard", offline=1))
+        assert truthy.offline is True
+
+        falsy = self._onboard_doctor_args(
+            m, tmp_path, monkeypatch,
+            mock.Mock(path=None, cmd="onboard", offline=0))
+        assert falsy.offline is False
+
+    def test_onboard_tolerates_an_args_object_without_offline(self, tmp_path, monkeypatch):
+        """An args object with NO `offline` attribute means DIAL, not skip.
+
+        `_cmd_doctor` tolerates a bare `Namespace(cmd="doctor")` (#703), and a
+        caller of that shape must keep the hosted probe ON — silently turning it
+        off is the completion-gate regression #11912 exists to prevent.
+        """
+        from tortoise import __main__ as m
+
+        args = mock.Mock(spec=["path", "cmd"], path=None, cmd="onboard")
+        assert self._onboard_doctor_args(m, tmp_path, monkeypatch, args).offline is False
+
+    def test_the_onboard_parser_itself_accepts_offline(self, tmp_path, monkeypatch):
+        """`tortoise onboard --offline` must PARSE — the docs tell users to run it.
+
+        Every assertion above builds the args object by hand, so nothing pinned
+        the parser: deleting the `onboard.add_argument("--offline", …)` block
+        left the suite green while `tortoise onboard --offline` — the exact
+        command `docs/quickstart-selfhosted.md` now recommends — dies with
+        "unrecognized arguments". This drives the real entry point instead.
+        """
+        _delenv_falkordb(monkeypatch)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "onboard-parse.db"))
+        repo_root = tmp_path / "repo-parse"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# readme", encoding="utf-8")
+
+        from tortoise import __main__ as m
+
+        seen: dict = {}
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor",
+                               side_effect=lambda a: seen.update(doctor=a) or 0), \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(m, "_cmd_index_github",
+                               side_effect=lambda a: seen.update(idx=a) or 0):
+            fake_run.return_value.returncode = 0
+            fake_run.return_value.stdout = str(repo_root)
+            rc = m.main(["onboard", "--offline"])
+
+        assert rc == 0
+        assert seen["doctor"].offline is True
 
     def test_onboard_relative_path_clean_error(self, capsys):
         """onboard --path rel.db must fail cleanly at init (rc 1, no

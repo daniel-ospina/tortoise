@@ -584,7 +584,14 @@ PROCESS_GLOBALS: tuple[ProcessGlobal, ...] = (
 #: `TORTOISE_API_URL` makes the suite non-hermetic on a fleet shell: the ask lane
 #: fails loud on it (`ask_lane.py:438,848`) and the commit client routes to it
 #: (`sdk.py` `_post_commit`). Clearing it makes a local run match CI.
-AMBIENT_ENV_GLOBALS: tuple[str, ...] = ("TORTOISE_API_URL",)
+#: Ambient variables cleared before EVERY test. `TORTOISE_API_KEY` is here
+#: because `tortoise doctor` probes the hosted identity when one is configured
+#: (#11912): an operator-exported key would make the suite dial the live API,
+#: and a stale one would red a run on the credential instead of the code.
+#: The FILE store (`~/.tortoise/credentials.json`, `<cwd>/.tortoise`) is the
+#: other half and is isolated by the module that needs it (test_doctor.py),
+#: because redirecting `$HOME` for all 41k tests is not a per-test scrub.
+AMBIENT_ENV_GLOBALS: tuple[str, ...] = ("TORTOISE_API_URL", "TORTOISE_API_KEY")
 
 
 def reset_process_globals(

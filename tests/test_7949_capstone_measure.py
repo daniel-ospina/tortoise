@@ -4351,7 +4351,15 @@ _BUNDLE_RULES = (
      ("identifier_tokens_enabled()",), "line", None),
     ("the Object writer's objectKind default", "projection_entities",
      ("the writer stamps",),
-     ("o.objectKind=coalesce($ok",), "line", None),
+     # ⛔ The anchor is the FULL ON CREATE default, not the `coalesce($ok` prefix
+     # (#12342 review). `entities.py` carries the prefix TWICE — `:5086` is the
+     # `ON CREATE SET` that writes `'other'`, `:5102` is the `ON MATCH SET` that
+     # keeps `o.objectKind` — so `coalesce($ok` alone passes on EITHER, and a
+     # re-derivation of this cite onto `:5102` would stay GREEN while the
+     # sentence's claim (the writer stamps the `'other'` DEFAULT) goes false.
+     # That is a false PASS in the one guard whose job is to catch a cite that
+     # moved, so the anchor names what the sentence actually claims.
+     ("o.objectKind=coalesce($ok, 'other')",), "line", None),
     # A THIRD `entities.py` cite the pattern surfaced, and its rule must be its
     # own: `:2740` is the `is_episodic` write, not the `pointKind` one `:2602`
     # carries, so a shared "the live write" phrase would bind it to the wrong
@@ -5152,13 +5160,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("18728", "relation_write = apply_relation_edges("),
+            ("18799", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("18727", "from tortoise.relation_write import apply_relation_edges"),
+            ("18798", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18715", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18786", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5168,8 +5176,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("9867", "subject_binding_available,"),
-            ("9920", "and not subject_binding_available(graph):"),
+            ("9938", "subject_binding_available,"),
+            ("9991", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6607", "def subject_binding_available(graph) -> bool:"),
@@ -5178,13 +5186,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("9867", "subject_binding_available,"),
-            ("9920", "and not subject_binding_available(graph):"),
+            ("9938", "subject_binding_available,"),
+            ("9991", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18375", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18446", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
@@ -5223,11 +5231,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("16251", "The v2 path reports"),
-            ("16252", '"extraction_mode": "llm:<route>"'),
+            ("16322", "The v2 path reports"),
+            ("16323", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         ("04-plan.md", "operator / label path", (
-            ("25041", "declared = declared_relation_predicates()"),
+            ("25147", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
@@ -5261,14 +5269,52 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
         # insertion that moved every number below it. That is the class here — a
         # line-number pin over a number another tool owns, not a citation anyone
-        # mis-copied. At THIS merge (`main` `9828250732` plus #12060's own 8-line
-        # registration block, which lands above the entry): entry 9951,
-        # `carve_out:` opens 9825, `uri_requiring:` 10156 — so 9951 is inside the
-        # section, and the identical text also sits at 6090 and 8467 (+8 on `main`'s
-        # 6082 / 8459 for the same cause), which is what the 5th element exists to
-        # refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8233 — the latter also +8, same cause) of `surfaces:`,
-        # so the resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8467 refuses
+        # mis-copied. ⛔ The `9951` this comment used to defend was never a value
+        # on `main`: it was 9943 + the 8 lines #12060 was predicted to add, and
+        # two other registrations landed first, so the prediction described no
+        # checkable commit — which is why this one number has now been
+        # "re-derived" three times. That is the row's real defect and not a
+        # transcription slip: the number is owned by another tool, so every
+        # landing PR above it is a re-derivation this pin cannot do for itself.
+        #
+        # So it is re-derived from THIS merged tree, and every value below is
+        # stated with the tree it was read from, never carried across a merge:
+        #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
+        #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
+        # 9943 at `9828250732`; 9949 at `ba84fbfabf`, 9965 at `e200623286` and
+        # 9973 at `cd22562c24e4` — +30 across three landing PRs that each
+        # registered test files above it; 9987 at the `main` tip `abf186f1109a`
+        # (+14: a 13-line `surfaces:` block inserted at 2237 and a 1-line
+        # `tier1:` one at 9150); 10005 at this branch alone (`d036b9859960`,
+        # +32 from its one 32-line block at 7522-7553, the +1 it also adds at
+        # 10291 sitting below the entry). At THIS merge — `main` tip
+        # `abf186f1109a`, which already contains #12060's own registrations,
+        # plus this branch's entry, both landing above it — the entry reads
+        # 10019 (+46 = `main`'s +14 and this branch's +32), `carve_out:` opens
+        # 9893 and `uri_requiring:` 10224, so 10019 is inside the section. The
+        # identical text also sits at 6103 and 8534, which is what the 5th
+        # element exists to refuse; the pair shows the two cases over
+        # `9828250732`'s 6082 / 8459. Each insertion below is attributed to the
+        # LANDING COMMIT that made it (measured with `git diff -U0 <a> <b> --
+        # config/ci-surfaces.yml`), and its position is where that commit put it:
+        #   +8  @2725  `cd22562c24` (#12060)   → above BOTH twins
+        #   +6  @6721  `ba84fbfabf` (#11609)   → above the sdk twin only
+        #  +16  @7514  `e200623286` (#11926)   → above the sdk twin only
+        #  +13  @2237  `f1f74135a15b` (#12302, #12294's name-entropy gate) → above BOTH
+        #   +1  @9150  `f1f74135a15b`           → BELOW both twins; it moves neither
+        #  +32  @7522  this branch's own block → above the entry and the sdk twin
+        # ⚠️ Both `f1f74135a15b` rows are read at the main tip `abf186f1109a`, which
+        # carries them but made NEITHER: `git show --stat abf186f1109a --
+        # config/ci-surfaces.yml` is empty, and `f1f74135a15b` is the only commit in
+        # `cd22562c24e4..abf186f1109a` that touches this file. A row naming the span
+        # END rather than the commit would be the same defect one level down: the
+        # number is true and the reader who checks `git show` learns nothing.
+        # ⛔ So the FIRST twin reads 6103 = 6082 + 8 + 13 (only two of the six
+        # insertions are above it, which is why the two twins do not move
+        # together), and the sdk twin reads 8534 = 8459 + 8 + 6 + 16 + 13 + 32.
+        # ⚠️ Both of those are INDENTED sub-keys
+        # (`core:` 2235, `sdk:` 8300) of `surfaces:`, so the resolver's
+        # nearest-column-zero-key rule reports the PARENT: a cite onto 8534 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
@@ -5306,13 +5352,25 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("705", "`plan_hierarchy_edges` returns one"),
         ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            # 9714 -> 9951: re-derived from THIS merged tree (`awk
+            # re-derived from THIS merged tree (`awk
             # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
             # config/ci-surfaces.yml`), never carried forward from either side of
-            # the merge — `main` read 9943 and the branch read 9941, and neither
-            # number describes a tree that adds BOTH. The 8-line delta over `main`
-            # is #12060's own registration block above the entry.
-            ("9951", "- test_pack_logic_writeprobe_11083.py"),
+            # the merge: 9714 -> 9951 -> 9973 -> 10019 is the number's own trail,
+            # and only the last of those describes a tree that adds BOTH parents.
+            # Measured values, not a delta: 9943 at `9828250732`, 9949 at
+            # `ba84fbfabf`, 9965 at `e200623286`, 9973 at `cd22562c24e4`, 9987 at
+            # the `main` tip `abf186f1109a`, 10005 at this branch alone
+            # (`d036b9859960`), and 10019 merged. ⛔ `9951` is in that list only
+            # because this row printed it — it was a predicted merge-tree value
+            # (9943 + 8), never a line any commit on `main` carried. The deltas
+            # are just where the registrations landed: `main` adds +14 above the
+            # entry (a 13-line `surfaces:` block at 2237 plus a 1-line `tier1:`
+            # one at 9150) and this branch adds +32 (one 32-line block at
+            # 7522-7553; its 1-line `durations:` addition at 10291 falls below
+            # the entry), so a row sitting BELOW every insertion moves by the
+            # whole +46. The `core:` sub-key reads 2235 on every tree (no
+            # insertion above it); `sdk:` moves +30 then +13 then +32 to 8300.
+            ("10019", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
@@ -11442,7 +11500,7 @@ _CITE_QUALIFIER_PATTERN = (
     # optional `(?:-\d+)?` tail the helper reported BOTH of them as UNQUALIFIED — a
     # false BLOCK of a conformant edit whose own message told the author to add the base
     # they had already added (measured by a fresh-context review at `f885a51663`).
-    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:17987-18001`
+    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:18058-18072`
     # (`A2`'s mint seam) is printed UNQUALIFIED in the record, and that is not a false
     # block — the range arm below reads the range OUT OF THE RECORD and asserts both of its
     # endpoints against `tortoise/sdk.py`, so this cite is pinned by derivation instead of
@@ -12270,7 +12328,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — §2 carries NINE FILE-QUALIFIED
         # cites and only THREE are held (main's enumeration, re-measured on this tree at this
         # merge: 9 found, matching this list exactly). Held: `identity_hold.py:125` and
-        # `tortoise/value_gate.py:81` (`_cite` loop below) and `sdk.py:17987-18001` (the count-3
+        # `tortoise/value_gate.py:81` (`_cite` loop below) and `sdk.py:18058-18072` (the count-3
         # range arm) — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
         # `:9617`, `:11731-11732`, and the `research-brief.md` / `02-research-brief.md` cites.
         # ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's SCOPE paragraph

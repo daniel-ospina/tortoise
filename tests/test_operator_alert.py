@@ -746,6 +746,62 @@ def test_reset_clears_the_light_leg_dedup_store(monkeypatch):
         "the reset must drop the singleton, or dedup state leaks across tests")
 
 
+def test_alert_store_from_wires_the_recurrence_record(monkeypatch):
+    """#12243: drop the wiring and the store silently records NOTHING.
+
+    Every store-level test injects its OWN ``comment_issue``, so this is the only
+    pin on the PRODUCTION channel: ``_record_occurrence`` early-returns when the
+    callable is ``None``, which is exactly the pre-#12243 silence the change
+    exists to remove. Deleting the ``comment_issue=`` argument in
+    ``alert_channel.alert_store_from`` must redden something.
+    """
+    import json
+    import types
+
+    from tortoise import alert_channel
+    from tortoise import github_issue as gi
+    from tortoise import telegram_push as tp
+    from tortoise.alert_store import DEDUP_PREFIX
+
+    posted: list[tuple[int, str]] = []
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        gi, "create_issue",
+        lambda repo, pat, title, body, assignee=None: 1)
+    monkeypatch.setattr(
+        gi, "issue_is_open_checked", lambda repo, pat, number: True)
+
+    def _comment(repo, pat, number, body):
+        seen.append((repo, pat))
+        posted.append((number, body))
+
+    monkeypatch.setattr(gi, "comment_issue", _comment)
+    monkeypatch.setattr(tp, "send_message", lambda *a, **k: None)
+
+    storage = MemoryStorage()
+    storage.upload(
+        f"{DEDUP_PREFIX}STALE/team_x.json",
+        json.dumps({
+            "kind": "STALE", "issue_number": 4242,
+            "filed_at": "2026-09-10T00:00:00Z",
+        }).encode(),
+        content_type="application/json",
+    )
+    cfg = types.SimpleNamespace(
+        gh_repo="daniel-ospina/tortoise", github_issues_pat="p",
+        alert_assignee=None, telegram_bot_token="t", telegram_chat_id="c")
+    store = alert_channel.alert_store_from(
+        cfg, storage_factory=lambda: storage)
+
+    assert store.open_incident_state("STALE", "team_x") is OpenOutcome.DEDUP
+    assert [n for n, _ in posted] == [4242], (
+        "the DEDUP must reach the real channel: gi.comment_issue")
+    assert "Observed again" in posted[0][1]
+    assert seen == [("daniel-ospina/tortoise", "p")], (
+        "the record must post with the SAME repo/credential pair the close path "
+        "uses — a wrong token 404s into the swallow and the feature goes silent")
+
+
 def test_alert_store_from_forwards_the_writer(monkeypatch):
     """Pin main's #3127/#2844 authority contract across the delegate.
 
