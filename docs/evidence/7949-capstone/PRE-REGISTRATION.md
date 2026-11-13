@@ -2628,30 +2628,31 @@ to answer.
 >
 > ⚠️ **The handling is still §10.26→§10.27's**: a new dated entry, never a re-point in place.
 
-- **What moved, and why an offset cannot describe it.** The branch's delta against `origin/main` is
-  now **`+99 / -12` in fifteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
-  read-back (`:10508` on `main`, `:10536` here), and `+54` from `_collect_classify_items`
-  (`:11803` → `:11857`) all the way through the S2.2 VET gate (`:16779` → `:16833`). A single
-  offset applied to the block would be wrong at two of those three regions, which is exactly why
-  every line below was opened instead.
+- **What moved, and why an offset cannot describe it.** The branch's delta against `origin/main` WAS
+  **`+99 / -12` in fifteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
+  read-back (`:10508` on `main`, `:10536` on the branch), and `+54` from `_collect_classify_items`
+  (`:11803` → `:11857`) through the S2.2 VET gate (`:16779` → `:16833`). ⛔ **THE FORWARD MERGE OF
+  `main` (`6408da01ce`) MOVED THE FILE AGAIN — by `+48` — so every number below was opened on the
+  MERGED tree instead of carrying either parent's value or an offset from it.**
 - **New value — measured at this head, by opening each line:** `_collect_classify_items` at
-  `:11857`, extent `:11857-11879` (`def` to `return items`, unchanged in size); the two `if items:`
-  gates at `:14276`/`:14429`; the two fail-open `except` arms at `:14289`/`:14440`; the two result
-  blocks at `:14640` (closing `:14646`) and `:14650` (closing `:14654`); `_run_vet_pass`'s S2.2
-  call at `:16834` and its post-S4 union call at `:14405`; and the `#10360` read-back
-  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:10536`.
-- **Verified by content, not by arithmetic.** `:11857` is
-  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:11879` is `return items`;
-  `:14276`/`:14429` are the two `if items:` gates; `:14289`/`:14440` are the two fail-open
-  `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:14640`
-  opens `result["classify_later"]` and `:14646` closes it (`}`), `:14650` opens `result["vet"]`
-  and `:14654` closes it; `:16834` is
-  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14405` is
-  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:10536` is the read-back assignment.
-  The selection flags this block sits under are at `:13820` (`vet_enabled`), `:13789`
-  (`classify_later`) and `:13814` (its construction-failure arm), and the early return that emits
-  both OFF surfaces is `if not edus:` at `:13824`, with `edus = _edus_from_conversation(...)` at
-  `:13823` above it.
+  `:12730`, extent `:12730-12752` (`def` to `return items`, unchanged in size); the two `if items:`
+  gates at `:15149`/`:15302`; the two fail-open `except` arms at `:15162`/`:15313`; the two result
+  blocks at `:15611` (closing `:15617`) and `:15621` (closing `:15625`); `_run_vet_pass`'s S2.2
+  call at `:17805` and its post-S4 union call at `:15278`; and the `#10360` read-back
+  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:11409` — the record's live
+  `read_back` now carries this value, superseding §10.28's `:10536` sentence.
+- **Verified by content, not by arithmetic.** `:12730` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12752` is `return items`;
+  `:15149`/`:15302` are the two `if items:` gates; `:15162`/`:15313` are the two fail-open
+  `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:15611`
+  opens `result["classify_later"]` and `:15617` closes it (`}`), `:15621` opens `result["vet"]`
+  and `:15625` closes it; `:17805` is
+  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:15278` is
+  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:11409` is the read-back assignment.
+  The selection flags this block sits under are at `:14693` (`vet_enabled`), `:14662`
+  (`classify_later`) and `:14687` (its construction-failure arm), and the early return that emits
+  both OFF surfaces is `if not edus:` at `:14697`, with `edus = _edus_from_conversation(...)` at
+  `:14696` above it.
 - **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
