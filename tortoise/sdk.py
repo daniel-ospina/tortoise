@@ -33726,7 +33726,18 @@ class TortoiseSDK:
         # `affected` by `graph_ep_reachable` is WRONG: on a pass with
         # affected=3, window_reachable=4, graph_ep_reachable=8 the record
         # carries `coverage=0.75` while that division reads 0.375 for a pass
-        # that consumed its whole window.
+        # that consumed its whole window (an ILLUSTRATION of the misreading, not
+        # a pinned fixture — the measured case is the test cited below).
+        #
+        # ⛔ And it is not a CONSERVATIVE denominator either: the graph
+        # population can be SMALLER than the window's, because operator-less
+        # claims are in the window (`_trivial_stamp`) but not in
+        # `ep_reachable_claims`. Measured on
+        # `test_an_operator_less_pass_does_not_report_full_coverage`:
+        # `affected=5, window_reachable=5, graph_ep_reachable=3`, so that
+        # division would read `5/3 = 1.67` — over 100% coverage for a pass that
+        # consumed its whole window. Published here so a reader can compare the
+        # pass's radius with the graph's — never divided into `affected`.
         reachable = out.get("ep_reachable_claims")
         if reachable is not None:
             last["graph_ep_reachable"] = int(reachable)
@@ -33833,9 +33844,26 @@ class TortoiseSDK:
           ``IMPL|NAND`` edge to a live epistemic endpoint. Its OWN
           ``count(DISTINCT n)``, never ``_edged_claim_ids()``: that query is
           label-blind (``epistemic_disjunction`` admits Point|Subject|Object|
-          Event), so reusing it here would put a ``:Point`` numerator over a
-          wider denominator and yield ``belief_coverage_pct > 1`` and a
-          NEGATIVE ``no_belief`` (measured: 5.0 / -8.0).
+          Event), so a belief count taken over that wider epistemic population
+          — once the ``IMPL|NAND`` requirement is dropped too, which is what the
+          cited measurement does (its 10 baselined claims are operator-less) —
+          put over this ``:Point``-scoped denominator mixes a WIDER numerator
+          into a NARROWER denominator: the direction that yields
+          ``belief_coverage_pct > 1`` and a NEGATIVE ``no_belief`` (measured:
+          5.0 / -8.0). ⛔ #12138 §2: this bullet used to call the label-blind set
+          a "wider denominator", which is the OTHER mistake and the one the
+          ranges cannot see (a wider denominator lowers the ratio and raises
+          ``no_belief``, both in range — see the no-clamp note below), and it
+          then still credited that number to ``_edged_claim_ids``' own
+          population, where the ratio is ``0/2 = 0.0`` — in range. (That
+          measurement's 2-chain carries NO baseline, which is what leaves the
+          wider numerator at 10; baseline its head the way the suite helper
+          ``_chain`` does and the same arithmetic reads 11 over 2 — ``5.5`` /
+          ``-9.0`` — with ``1/2 = 0.5`` here instead. Both variants' *ratios* are
+          in range (the scope-mix pairs themselves are not, which is the point);
+          #12138 §2.) The two directions
+          and the two populations are distinct; only the scope mix produces the
+          5.0 / -8.0 pair.
         - ``belief_present`` — the SAME population, counted through the shared
           presence predicate (`ep_has_belief_cypher`, #11702) rather than a
           private ``IS NOT NULL``: a stored (0,0) pair is not a belief and a
@@ -33940,14 +33968,20 @@ class TortoiseSDK:
         # silently corrected into a plausible "fully covered" (#12116 review
         # C-P3: a clamp is the opposite of the asserted invariant the comment
         # claimed). ⛔ #12138 §2 — only ONE direction is visible that way: a
-        # NARROWER (or label-blind) denominator lets the numerator exceed it,
-        # so `no_belief` goes negative or `belief_coverage_pct` exceeds 1. A
+        # NARROWER denominator, or a label-blind NUMERATOR over one, lets the
+        # numerator exceed it, so `no_belief` goes negative or
+        # `belief_coverage_pct` exceeds 1. A
         # WIDER denominator keeps BOTH in range (`belief_present` fixed over a
-        # larger denominator ⇒ the ratio falls and `no_belief` rises; measured:
-        # denominator +4 ⇒ pct 0.2, no_belief +4), so the ranges cannot see it.
+        # larger denominator ⇒ the ratio falls and `no_belief` rises; measured on
+        # the pinned fixture, `belief_present=1`: a denominator 4→5 moves `pct`
+        # 0.25→0.2 and `no_belief` 3→4 — absolute values, not a delta), so the
+        # ranges cannot see it.
         # What reddens on an inflated denominator is the counts pinned against
         # independent queries in `tests/test_11823_propagation_cap_signal.py`
-        # (`test_counts_match_an_independent_query`).
+        # (`test_counts_match_an_independent_query`), and, from a different
+        # angle, `test_an_edged_but_unreachable_claim_is_not_invisible`
+        # (measured: a reach query missing the far-endpoint live filter reddens
+        # BOTH, so naming one alone overstated the coverage).
         no_belief = reachable - belief_present
         unclassified = points_edged - reachable
         return {
@@ -35431,7 +35465,8 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         # The anchors are dream_all's own scan (drafts included; the closure
-        # seed applies the live predicate).
+        # SEED applies the draft-only filter, not the full liveness one — see
+        # `_window_closure`'s deliberate-asymmetry note, #12138 §7).
         rows = proj.g.query(
             "MATCH (n:Point) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
@@ -35453,10 +35488,17 @@ class TortoiseSDK:
 
         ⚠️ #11823: this query is **label-blind** — ``epistemic_disjunction``
         admits ``Point|Subject|Object|Event`` — so it is NOT the denominator for
-        a ``:Point``-scoped belief count. Mixing the two populations yields
-        ``belief_coverage_pct > 1`` and a negative ``no_belief``; the health
-        block's own denominator is a separate, ``:Point``-scoped
-        ``count(DISTINCT n)`` in :meth:`_propagation_counts`.
+        a ``:Point``-scoped belief count. ⛔ #12138 §2: the reason is the
+        POPULATION, not a visible range violation — this set is a SUPERSET of
+        the ``:Point``-scoped reach, so as a denominator it is WIDER, which
+        lowers the ratio and raises ``no_belief``, both still in range and
+        therefore invisible to the ranges the health block asserts (see R10 in
+        the #11823 plan). The ``belief_coverage_pct > 1`` / NEGATIVE ``no_belief``
+        pair belongs to the opposite scope mix — a label-blind NUMERATOR over a
+        ``:Point``-scoped denominator (measured: 5.0 / -8.0 at 10 beliefs over 2
+        point claims) — and this docstring previously attributed it to this,
+        wider, direction. The health block's own denominator is a separate,
+        ``:Point``-scoped ``count(DISTINCT n)`` in :meth:`_propagation_counts`.
         """
         proj = self._get_proj()
         edged_rows = proj.g.query(
