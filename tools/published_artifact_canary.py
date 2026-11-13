@@ -737,21 +737,61 @@ def install_and_run(
             )
         if installed.returncode != 0 and wheel is None:
             # pip's absence vocabulary matched — but pip prints it for an UNREACHABLE
-            # index too (measured), so confirm independently before telling a human
-            # that users cannot install the release.
+            # index too (measured), so probe before telling a human that users cannot
+            # install the release. THREE answers, not two (#12363 round 11):
+            #   INDEX_UNREADABLE → UNKNOWN. The probe got no answer, so the pip failure
+            #     is unexplained: a detector outage, never a release call.
+            #   INDEX_ABSENT     → FAIL. The project is gone from the index.
+            #   INDEX_OK         → FAIL. ⛔ THIS BRANCH USED TO RETURN UNKNOWN, WHICH MADE
+            #     THE FAIL ARM BELOW UNREACHABLE. `_main` only calls this function after a
+            #     SUCCESSFUL fetch of this very URL, so the probe — a second read of the
+            #     same endpoint — answers `ok`; `confirmed != INDEX_ABSENT` then reported
+            #     "the index could not confirm the release is absent", i.e. exit 2, which
+            #     BOTH consumers render as "detector outage — do NOT cut a release"
+            #     (`release-artifact-canary.yml`'s summary and
+            #     `published-artifact-alert.sh`'s TITLE_OUTAGE branch). A release that is
+            #     advertised but uninstallable (no files uploaded for `info.version`, every
+            #     file yanked, a wheel pip rejects) therefore reached the human as the
+            #     OPPOSITE of the finding, and only a race (the project 404ing between two
+            #     consecutive reads of one URL) could ever reach the FAIL. `ok` means the
+            #     index IS reachable and DOES serve the project while pip cannot resolve the
+            #     exact version — a finding about the ARTIFACT, not about the detector.
             probe = absent_probe or (lambda name: index_absence_probe(name))
             confirmed = probe(package)
-            if confirmed != INDEX_ABSENT:
+            if confirmed == INDEX_UNREADABLE:
                 return (
                     Arm(
                         "engine-init",
                         UNKNOWN,
-                        f"`pip install {spec}` failed and the index could not confirm the "
-                        f"release is absent ({confirmed}) — not the artifact's fault",
+                        f"`pip install {spec}` failed and the index could not be re-read "
+                        f"to establish whether the release exists ({confirmed}) — a "
+                        f"detector outage, not a reading about the artifact",
                     ),
                     "\n".join(transcript),
                 )
+            index_says = (
+                "the project is ABSENT from the index"
+                if confirmed == INDEX_ABSENT
+                else f"the index still serves the project ({confirmed})"
+            )
+            return (
+                Arm(
+                    "engine-init",
+                    FAIL,
+                    f"`pip install {spec}` failed (exit {installed.returncode}) and "
+                    f"{index_says} — users cannot even install it; a release is owed",
+                ),
+                "\n".join(transcript),
+            )
         if installed.returncode != 0:
+            # WHEEL mode only: an index-mode failure returned above (its probe always
+            # answers, and every answer routes to a verdict), so a branch on `wheel`
+            # here would be dead. Assert the invariant rather than carrying a
+            # conditional that no run can reach.
+            assert wheel is not None, (
+                "an index-mode install failure reached the built-wheel arm without a probe "
+                "verdict — the probe block above must return for every state"
+            )
             return (
                 Arm(
                     "engine-init",
@@ -760,9 +800,6 @@ def install_and_run(
                         f"the BUILT wheel {wheel.name} failed to install (exit "
                         f"{installed.returncode}) — the artifact about to be "
                         f"uploaded is not installable"
-                        if wheel is not None
-                        else f"`pip install {spec}` from the index failed (exit "
-                        f"{installed.returncode}) — users cannot even install it"
                     ),
                 ),
                 "\n".join(transcript),

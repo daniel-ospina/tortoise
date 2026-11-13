@@ -56,12 +56,20 @@ concurrency:
   cancel-in-progress: false
 
 # contents: read for actions/checkout (the tool reads pyproject.toml for the tree
-# version). No write scope: this workflow alerts by FAILING; it does not comment.
-# contents: read for checkout; issues: write for the alert issue — the sibling detectors
-# this workflow is modelled on (deploy-staleness #10109, availability-watchdog) FILE an
-# issue and close it on recovery. A step summary alone lives inside ONE run: a 97-day
-# broken artifact can go on being broken while every summary says so, which is the
-# "invisible because nobody opened it" class this workflow exists to end (#12363 round 5).
+# version); issues: write for the alert issue — the sibling detectors this workflow is
+# modelled on (deploy-staleness #10109, availability-watchdog) FILE an issue and close it
+# on recovery. A step summary alone lives inside ONE run: a 97-day broken artifact can go
+# on being broken while every summary says so, which is the "invisible because nobody
+# opened it" class this workflow exists to end (#12363 round 5).
+#
+# ⛔ A line that used to sit here read "No write scope: this workflow alerts by FAILING; it
+# does not comment" — the pre-round-5 design, and the OPPOSITE of the declaration below.
+# It is removed rather than kept beside the correction because it is the sentence a
+# permissions audit would act on, and acting on it (dropping `issues: write`) is exactly
+# what de-fangs the detector: `open_issue` would die in
+# `.github/scripts/published-artifact-alert.sh` while the run still reads green.
+# `test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code` is what keeps the
+# two in step.
 permissions:
   contents: read
   issues: write

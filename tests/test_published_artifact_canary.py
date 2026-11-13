@@ -457,8 +457,10 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
     """pip's absence vocabulary is not proof of absence — MEASURED: against an
     unreachable index pip prints the same "Could not find a version that satisfies …
     (from versions: none)" it prints for a genuinely missing release. So the FAIL needs
-    an INDEPENDENT re-read of the index; anything else is UNKNOWN, which exits non-zero
-    without sending a human to cut an irreversible release (#12363 round 3 → round 4)."""
+    an INDEPENDENT re-read of the index, and only its answer routes the arm:
+    ABSENT and OK are both FAIL (the project is gone / the project is served but the
+    version will not install), and UNREADABLE alone is UNKNOWN — a non-zero exit that
+    never sends a human to cut an irreversible release (#12363 rounds 3 → 4 → 11)."""
     marks = (
         "ERROR: Could not find a version that satisfies the requirement "
         "tortoise-graph==0.2.0 (from versions: none)\n"
@@ -478,6 +480,21 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
     assert _run(canary.INDEX_ABSENT).status == canary.FAIL
     # the real unreachable-index shape: pip's wording, but the index answers nothing
     assert _run(canary.INDEX_UNREADABLE).status == canary.UNKNOWN
+    # ⛔ INDEX_OK IS A FAIL, AND THIS ARM IS WHY THE PIN EXISTS (#12363 round 11). It used
+    # to be UNKNOWN — and because `_main` only reaches `install_and_run` after a SUCCESSFUL
+    # fetch of this same URL, `ok` is what the REAL probe answers, so the FAIL arm was
+    # unreachable in production: an advertised-but-uninstallable release (no files for
+    # `info.version`, all files yanked, a wheel pip rejects) was reported as exit 2 and
+    # read by both consumers as "detector outage — do NOT cut a release", the exact
+    # opposite of the finding. Tested THROUGH the injected probe, so the state is reachable
+    # in the pin even though the un-injected path was measured dead.
+    ok_arm = _run(canary.INDEX_OK)
+    assert ok_arm.status == canary.FAIL, (
+        f"a reachable index that serves the project while pip refuses the version is a "
+        f"RELEASE finding, not a detector outage (got {ok_arm.status}: {ok_arm.detail})"
+    )
+    assert "users cannot even install" in ok_arm.detail, ok_arm.detail
+    assert "detector outage" not in ok_arm.detail, ok_arm.detail
     # and a failure pip does not attribute to a missing distribution is never a FAIL
     arm = canary.install_and_run(
         package="tortoise-graph",
@@ -595,6 +612,115 @@ def test_both_workflows_keep_the_transcript_and_budget_the_fetches():
         "3 x the per-command budget exceeds the build job's own timeout"
     )
     upload_without_condition(build_job["steps"], "build")
+
+
+def test_the_transcript_DIRECTORY_is_paired_at_every_site_that_names_it():
+    """The transcript's PATH — not just the artifact's name — is a paired constant (#12363 round 11).
+
+    Five places must agree, and four of them are silent when they stop agreeing:
+
+      1. the tool invocation's `--transcript-dir` (where the log is WRITTEN),
+      2. that job's `upload-artifact` `path:` (what is COLLECTED — `if-no-files-found: warn`,
+         so a rename here keeps the job GREEN while uploading nothing),
+      3. the report job's `download-artifact` `path:` (`continue-on-error: true`, same),
+      4. `published-artifact-alert.sh`'s `local log=` (what the issue body TAILS), and
+      5. the tool's own log BASENAME (`Path(args.transcript_dir) / …`).
+
+    Measured, not argued: renaming only site 1 to `$RUNNER_TEMP/canary-logs` left every
+    existing pin green (`test_both_workflows_keep_the_transcript_and_budget_the_fetches`
+    asserts only that the substring `--transcript-dir` is PRESENT), the upload matched no
+    file, and every filed issue body silently degraded to "(no transcript reached this
+    job …)" — the exact evidence loss round 6 fixed by making the log incremental, one
+    level out. This is the same class the authors already recognised for the artifact
+    NAME and left unpinned for the PATH.
+    """
+    import re
+
+    import yaml
+
+    workflows = REPO_ROOT / ".github" / "workflows"
+
+    def normalised(value: str) -> str:
+        """Both runner-temp spellings collapsed to one token, quotes stripped."""
+        text = str(value).strip().strip('"')
+        for spelling in ("${{ runner.temp }}", "${RUNNER_TEMP:-/tmp}", "$RUNNER_TEMP"):
+            text = text.replace(spelling, "TEMP")
+        return text
+
+    def last_segment(value: str) -> str:
+        """The final path component, with either runner-temp spelling normalised away."""
+        return normalised(value).rstrip("/").rsplit("/", 1)[-1]
+
+    def paired(wf_file: str, job_name: str, artifact_name: str) -> str:
+        job = yaml.safe_load((workflows / wf_file).read_text())["jobs"][job_name]
+        steps = job["steps"]
+        runs = [str(step.get("run") or "") for step in steps]
+        invocations = [text for text in runs if "published_artifact_canary.py" in text]
+        assert len(invocations) == 1, (wf_file, job_name, "expected exactly one canary call")
+        found = re.search(r'--transcript-dir\s+"?([^\s"]+)"?', invocations[0])
+        assert found, (wf_file, job_name, "the canary call passes no --transcript-dir")
+        written = last_segment(found.group(1))
+
+        uploads = [
+            s
+            for s in steps
+            if str(s.get("uses", "")).startswith("actions/upload-artifact")
+            and s.get("with", {}).get("name") == artifact_name
+        ]
+        assert len(uploads) == 1, (
+            wf_file,
+            job_name,
+            f"expected exactly one transcript upload named {artifact_name!r} (found "
+            f"{[s.get('with', {}).get('name') for s in steps if s.get('uses', '').startswith('actions/upload-artifact')]})",
+        )
+        collected = last_segment(uploads[0]["with"]["path"])
+        assert written == collected, (
+            f"{wf_file}/{job_name}: the tool writes the transcript to `{written}` but the "
+            f"upload collects `{collected}` — `if-no-files-found: warn` keeps this job GREEN "
+            f"while it uploads NOTHING, so every issue body silently loses its TAIL"
+        )
+        return written
+
+    canary_dir = paired(
+        "release-artifact-canary.yml", "canary", "published-artifact-canary-log"
+    )
+    paired("publish-pypi.yml", "build", "publish-canary-log")
+
+    # 3 + 4: the report job DOWNLOADS into the directory the alert script then reads.
+    report = yaml.safe_load((workflows / "release-artifact-canary.yml").read_text())["jobs"][
+        "report"
+    ]
+    downloads = [
+        step
+        for step in report["steps"]
+        if str(step.get("uses", "")).startswith("actions/download-artifact")
+    ]
+    assert len(downloads) == 1, "the report job must fetch the canary transcript exactly once"
+    assert downloads[0]["with"]["name"] == "published-artifact-canary-log", (
+        "the report job asks for an artifact name no upload declares"
+    )
+    assert last_segment(downloads[0]["with"]["path"]) == canary_dir, (
+        "the report job unpacks the transcript into a different directory than the canary's "
+        "upload path, so `download-artifact` succeeds and the alert still finds nothing"
+    )
+
+    alert = (REPO_ROOT / ".github" / "scripts" / "published-artifact-alert.sh").read_text()
+    log_ref = re.search(r'^\s*local log="([^"]+)"', alert, re.MULTILINE)
+    assert log_ref, "the alert script no longer names a transcript path to TAIL"
+    alert_path = normalised(log_ref.group(1)).rstrip("/")
+    assert "/" in alert_path, ("the alert's log path carries no directory", log_ref.group(1))
+    alert_dir = alert_path.rsplit("/", 1)[0].rsplit("/", 1)[-1]
+    alert_base = alert_path.rsplit("/", 1)[-1]
+    assert alert_dir == canary_dir, (
+        f"the alert reads `{alert_dir}` but the canary uploads `{canary_dir}` — the body's "
+        f"TAIL would be unreachable and every issue would degrade to \"(no transcript …)\""
+    )
+
+    # 5: the BASENAME, in the tool itself.
+    tool = (REPO_ROOT / "tools" / "published_artifact_canary.py").read_text()
+    assert f'"{alert_base}"' in tool, (
+        f"the alert TAILs `{alert_base}` but the tool writes a different filename"
+    )
 
 
 def test_the_transcript_is_written_incrementally_not_only_at_the_end(tmp_path):
@@ -1246,9 +1372,36 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
     )
     harness = REPO_ROOT / ".github" / "scripts" / "published-artifact-alert.test.sh"
     assert harness.is_file(), "an alert script with no executable harness is unpinned"
-    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    assert "published-artifact-alert" in ci, (
-        "the harness must be wired into ci.yml's ops-harnesses filter + job, or nothing runs it"
+    # ⛔ THE STEP, NOT A SUBSTRING (#12363 round 11). This assertion used to be
+    # `'published-artifact-alert' in ci`, which the ops-harnesses PATHS FILTER alone
+    # satisfies (ci.yml's `startswith(".github/scripts/published-artifact-alert")` row) —
+    # so deleting the step that actually RUNS the harness left this pin green and all six
+    # properties inside the harness (delegation, the exit-code branch, the transcript
+    # TAIL, the no-token fail-closed, the no-op close, the usage error) silently unrun
+    # forever. Measured by mutation: with the `run:` step removed and the filter entry
+    # kept, the substring form stayed green. Both halves are asserted, so removing either
+    # reds: the filter (or the job is never selected on a harness change) and the step (or
+    # nothing executes the harness even when selected).
+    import yaml as _yaml
+
+    ci_jobs = _yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    )["jobs"]
+    harness_runs = [
+        (job, step.get("name"))
+        for job, body in ci_jobs.items()
+        for step in (body.get("steps") or [])
+        if ".github/scripts/published-artifact-alert.test.sh" in str(step.get("run") or "")
+    ]
+    assert harness_runs, (
+        "no job in ci.yml RUNS .github/scripts/published-artifact-alert.test.sh — the "
+        "harness would never execute, and every property it pins stops being checked "
+        "while this suite stays green (a filter/paths entry is not a step)"
+    )
+    ci_text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "startswith(\".github/scripts/published-artifact-alert\")" in ci_text, (
+        "the ops-harnesses paths filter must also list this harness, or the job that runs "
+        "it is not selected when the harness changes"
     )
 
 
