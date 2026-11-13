@@ -528,3 +528,34 @@ def test_this_modules_own_header_did_not_restore_the_stale_boundary() -> None:
     assert present == [], (
         f"this file's header re-states the pre-fix boundary: {present}"
     )
+
+
+def test_the_stub_declares_no_var_keyword_and_only_real_knobs() -> None:
+    """The fixture's fidelity is TESTED, not just claimed (#12455 round 10).
+
+    Round 9's P1 was a stub that swallowed `**kwargs`, so an injected
+    `filters=` on the fts call — fatal against the real SDK, which declares no
+    `VAR_KEYWORD` — passed silently: 22 passed. Removing `**kwargs` fixed the
+    INSTANCE; this test protects the PROPERTY, which is what made the suite
+    discriminating in the first place. Measured: re-adding `**kwargs` to the stub
+    reds this test and nothing else.
+
+    Only the fts leg is checked, deliberately: the stub's `query` and
+    `paginated_query` legitimately carry `**kwargs`, because their real
+    counterparts do (`VAR_KEYWORD filters`), and narrowing those would make the
+    stub LESS faithful than the product.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    real = set(inspect.signature(TortoiseSDK.tortoise_fts_query).parameters)
+    stub = inspect.signature(_StubSDK.tortoise_fts_query).parameters
+    wildcard = [p.name for p in stub.values()
+                if p.kind is inspect.Parameter.VAR_KEYWORD]
+    assert wildcard == [], (
+        "the stub's fts leg swallowed **kwargs — an injected filter path would "
+        "pass silently against a real SDK that has no VAR_KEYWORD"
+    )
+    invented = sorted(set(stub) - real)
+    assert invented == [], (
+        f"the stub declares knobs the real fts leg does not have: {invented}"
+    )
