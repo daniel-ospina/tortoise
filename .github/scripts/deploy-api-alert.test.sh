@@ -81,6 +81,10 @@
 #      `integer expression expected` and CLEARS the "excerpt is NOT byte-identical" sentence on
 #      a report whose cut really did split a character. Unmeasurable ⇒ declared unmeasured
 #      (#12200, review round 9)
+#  17q. an INTERNAL separator in a `wc` count is not a comparable number: normalising the count
+#      must trim the ENDS only, or `1 2` becomes `12` and the loss disclosure is cleared at BOTH
+#      measurement sites (the size probe and the squeeze comparison). With a positive control that
+#      the same fixture DOES declare the loss under the real `wc` (#12340)
 #  18. a LATE `deploy-api` failure must not read as "nothing shipped"
 #  19-21. `--resolve` (#8841) retires EXACTLY the keys whose steps reported
 #      `success` in this run (plus the job-level key only when `job.status` is
@@ -1289,6 +1293,57 @@ run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-rep
 WC_REAL_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
 assert_contains "$WC_REAL_BODY" "the excerpt is NOT byte-identical" "case 17p: the REAL \`wc\` still declares the measured loss on the same fixture (so the two answers are distinguishable)"
 assert_not_contains "$WC_REAL_BODY" "could NOT be measured" "case 17p: and it does not claim an unmeasured comparison"
+
+# ── case 17q: an INTERNAL separator in the count is not a comparable number (#12340) ──────────
+# The counts are normalised before they are compared, because some `wc` implementations PAD the
+# field. The earlier form stripped whitespace EVERYWHERE, so a `wc` printing `1 2` normalised to
+# the number `12` on BOTH sides of the comparison: the comparison then ran on a number nobody
+# measured, and on this fixture (whose cut really does split a character — the control below
+# proves the disclosure is reachable here) the body carried a shorter-than-report excerpt while
+# saying NOTHING about it. That is the silent-loss state #12200 exists to remove, one `wc` shape
+# past the shapes case 17p covers. The fix trims the ENDS only, so a separator stays non-numeric
+# and lands on the existing "could NOT be measured" arm.
+#
+# POSITIVE CONTROL FIRST: the same fixture under the REAL `wc` must declare the measured loss.
+# Without it, a body that says nothing for some unrelated reason would pass the negative half.
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+WC_SEP_CONTROL="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$WC_SEP_CONTROL" "the excerpt is NOT byte-identical" "case 17q: CONTROL — the real \`wc\` declares the loss on this fixture, so the disclosure is reachable here"
+assert_eq "$(count_creates)" "1" "case 17q: CONTROL — and the alert fires in that state"
+
+WC_SEP_DIR="$FIX/bin-wc-sep"
+mkdir -p "$WC_SEP_DIR"
+cat > "$WC_SEP_DIR/wc" <<'WC_SEP_EOF'
+#!/usr/bin/env bash
+# Bounded by construction: it never reads stdin, so a case that reaches it cannot hang the suite.
+# TWO counts on one line — stock `wc -c` never prints this, and it is exactly the shape a
+# whole-string whitespace strip resolves into a single number (`1 2` -> `12`).
+echo '1 2'
+exit 0
+WC_SEP_EOF
+chmod +x "$WC_SEP_DIR/wc"
+export PATH="$WC_SEP_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+WC_SEP_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_eq "$RC" "0" "case 17q: a \`wc\` with an internal separator still files the alert"
+assert_eq "$(count_creates)" "1" "case 17q: and the ledger leg is untouched by it"
+assert_not_contains "$OUT" "integer expression expected" "case 17q: and NO arithmetic diagnostic reaches the job log"
+assert_contains "$WC_SEP_BODY" "could NOT be measured" "case 17q: and the loss it could not measure is DECLARED, not cleared (the whole-string strip resolved \`1 2\` to 12 and said nothing)"
+# ⛔ THE SENTENCE MUST ALSO NAME THE STATE IT IS ACTUALLY IN (review cycle 1, P3). Its parenthetical
+# used to enumerate two causes ("no count, or longer than 18 digits") while the guard's predicate has
+# three, so in THIS state it named neither — a reader checking the parenthetical found it false. The
+# three named causes are the exact complement of the predicate (non-empty, all digits, ≤18), so this
+# row is a closed set by construction rather than by hope.
+assert_contains "$WC_SEP_BODY" "carried a non-digit" "case 17q: and that sentence names THIS state's cause (a non-digit), not only the empty/long ones"
+assert_not_contains "$WC_SEP_BODY" "the excerpt is NOT byte-identical" "case 17q: and it does NOT assert a comparison it never made"
+# ⛔ THE SIZE PROBE IS THE OTHER NORMALISATION SITE, and it has its own discriminator: an
+# unmeasurable size takes the WINDOW arm. A whole-string strip made `1 2` a KNOWN 12-byte report,
+# so this sentence was absent too — the same mutation reddens this row.
+assert_contains "$WC_SEP_BODY" "only the report's LAST 6000 bytes are shown" "case 17q: and the SIZE probe treats the separator as unmeasurable too, so the window is declared"
+assert_contains "$WC_SEP_BODY" '```' "case 17q: and the excerpt itself is still carried, so this case is not vacuous"
 
 # ── #8841: the RESOLVE leg — retiring a recovered finding's ledger key ──────
 # Filing without closing is a ledger that can only grow. Measured on this

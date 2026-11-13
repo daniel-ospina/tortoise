@@ -42,7 +42,7 @@ import sys
 import tempfile
 import tokenize
 import types
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
@@ -4357,7 +4357,15 @@ _BUNDLE_RULES = (
      ("identifier_tokens_enabled()",), "line", None),
     ("the Object writer's objectKind default", "projection_entities",
      ("the writer stamps",),
-     ("o.objectKind=coalesce($ok",), "line", None),
+     # ⛔ The anchor is the FULL ON CREATE default, not the `coalesce($ok` prefix
+     # (#12342 review). `entities.py` carries the prefix TWICE — `:5086` is the
+     # `ON CREATE SET` that writes `'other'`, `:5102` is the `ON MATCH SET` that
+     # keeps `o.objectKind` — so `coalesce($ok` alone passes on EITHER, and a
+     # re-derivation of this cite onto `:5102` would stay GREEN while the
+     # sentence's claim (the writer stamps the `'other'` DEFAULT) goes false.
+     # That is a false PASS in the one guard whose job is to catch a cite that
+     # moved, so the anchor names what the sentence actually claims.
+     ("o.objectKind=coalesce($ok, 'other')",), "line", None),
     # A THIRD `entities.py` cite the pattern surfaced, and its rule must be its
     # own: `:2740` is the `is_episodic` write, not the `pointKind` one `:2602`
     # carries, so a shared "the live write" phrase would bind it to the wrong
@@ -4705,17 +4713,95 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
 #: prose — but never a table pipe, and never another `something.ext` token, so
 #: `` … `config/ci-surfaces.yml` and `tools/ci_selection.py:4140` `` is a cite of a
 #: DIFFERENT file, not of this one. Every shape above is pinned by the two matcher
-#: tests below.
-_UNIT = (r"(?!\s*(?:s|sec|secs|seconds|ms|min|mins|tests?|files|lines|rows|cases|"
-         r"bytes|shards|entries|points|(?i:kb|mb)|%)\b)")
-_NUM = rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT}(?![\d])(?!\.\d)(?!-\d)(?!:\d)"
+#: tests below — INCLUDING the long form: the GAP is bounded at 400 characters
+#: (`_GAP`), and the bound is stated here rather than left to be discovered, because
+#: a bound nobody states is a scope the reader trusts past the guard's reach.
+#: Rule 3 — a number followed by a UNIT is a COUNT, not a cite — is only as good as
+#: the unit list, and two shapes walked straight through earlier cuts:
+#:   * `%` was inside the `\b` group, and `%` is a NON-WORD character, so `%\b` can
+#:     never hold at end-of-input: `— 145 %` was read as a line cite. It is matched
+#:     OUTSIDE the boundary group now.
+#:   * the list had no time units, so `— 166 hours` was a cite.
+#: Both measured with `_MANIFEST_CITE` against `config/ci-surfaces.yml — <n> <unit>`.
+#:
+#: ⛔ THE LIST IS CLOSED, AND THAT IS THE FALSE-RED SIDE OF THIS GUARD — a MISSED unit
+#: does not weaken the pin, it REFUSES CORRECT PROSE. Measured on the shipped list:
+#: `— 166 pp above the floor`, `— 961 pins`, `— 131 GB`, `the entry moved 103 times`
+#: and `the block is 145 characters wide` were all RED. Every one of those spellings
+#: is written in THIS repo (`pp` in the `durations:` prose, `pins` for tests,
+#: `times`/`characters` in this very module's comments), so the list is not a nice-to-
+#: have: add the unit when you add a count, and put the count in
+#: `…_does_not_fire_on_correct_prose` where the next widening has to keep it green.
+_UNIT_WORDS = (r"s|sec|secs|seconds|ms|us|µs|min|mins|h|hr|hrs|hour|hours|days?|"
+               r"weeks?|months?|years?|times?|tests?|pins?|defs?|files|cases|"
+               r"characters?|chars?|bytes|shards|entries|points|modules?|arms?|keys?|nodes?|"
+               r"commits?|sessions?|issues?|prs?|pp|percentage points|(?i:kb|mb|gb|tb)")
+#: ⛔ `lines` / `rows` ARE POSITION NOUNS AS WELL AS UNITS, and that ambiguity is a
+#: FALSE-PASS surface, not only the false-red one this list is usually discussed as.
+#: They are kept OUT of `_UNIT_WORDS` and added only to the plain `_UNIT`, so an arm
+#: that must refuse a POSITION (`9987 lines into the manifest`, `at 9987 lines`,
+#: `9987 rows down`) can use the strict positional variant — and it PAYS for that in
+#: the benign direction, which is stated here rather than implied: a genuine COUNT
+#: whose noun is `lines`/`rows` on such a line is refused too (`— 155 lines` yields
+#: `['155']` under `_BARE_NUM`, measured), because nothing mechanical separates the
+#: two there. `on 1450 files` stays green, `files` being in the shared list (#12369
+#: review, P3: an earlier cut of this comment claimed BOTH stayed green, and the
+#: residual twenty lines below said the opposite about the same example). Measured:
+#: with `lines|rows` in the shared list, EVERY spelling of a line position written
+#: with a unit noun was GREEN while `:9987` was RED — one arm, two spellings,
+#: opposite verdicts (#12369 review, P2).
+_UNIT_POSITION_WORDS = r"lines|rows"
+#: The words that make a `lines`/`rows` phrase a POSITION rather than a count.
+#: ⛔ `in` IS A TAIL ONLY AT THE END OF A CLAUSE (#12369 review, P2). A bare `rows in.`
+#: is a position (`the entry reads 9987 rows in.` — measured GREEN before this), while
+#: `155 lines in the summary` is a COUNT and must stay green. The lookahead is what
+#: separates them, so the alternative is punctuation/end-anchored rather than a word.
+#: ⚠️ `of the manifest|file` IS A DELIBERATE OVER-CATCH, not a positional tell (#12369
+#: review, P3): `` — 155 lines of the file `` reads as a COUNT and is matched anyway
+#: (`_MANIFEST_CITE` → True, measured). Over-catching is the tolerated direction on
+#: the doc-wide arm — the cost is a false red a maintainer rewrites, against a miss
+#: that ships the rot — and a count and a position are not separable there, so the
+#: alternative is kept and NAMED rather than presented as a discriminator.
+_POSITION_TAIL = (r"(?:into|down|deep|below|above|from\s+the\s+top|"
+                  r"in(?=[.,;:!?)\]]|$)|"
+                  r"of\s+the\s+(?:manifest|file))")
+#: Used where a POSITION must be refused: everything is a unit except `lines`/`rows`.
+_UNIT_NO_POSITION = rf"(?!\s*(?:(?:{_UNIT_WORDS})\b|%))"
+_UNIT = rf"(?!\s*(?:(?:{_UNIT_WORDS}|{_UNIT_POSITION_WORDS})\b|%))"
+#: ⛔ NO THIRD VARIANT AND NO POSITIONAL-TAIL ALLOW-LIST — see
+#: `_bare_number_hits_neighbour`. An allow-list of tails fails in the DANGEROUS
+#: direction (a tail it omits ACCEPTS a false position), which is why it is gone
+#: rather than widened.
+#: ⛔ `(?!,\d)` IS LOAD-BEARING: without it the thousands-separated alternative
+#: BACKTRACKS to a prefix, so `1,320,023 bytes` matched as the integer `1,320` and was
+#: reported as a line cite. The existing pass-fixture never showed it because its
+#: number had no separator beside it; `config/ci-surfaces.yml — 1,320,023 bytes` did.
+_NUM = rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT}(?![\d])(?!,\d)(?!\.\d)(?!-\d)(?!:\d)"
+#: …and the STRICT variant, which is what a NEIGHBOUR line uses.
+_NUM_NO_POSITION = (
+    rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT_NO_POSITION}(?![\d])(?!,\d)(?!\.\d)(?!-\d)(?!:\d)")
 #: ⛔ THE `.` IN THIS LOOKBEHIND IS LOAD-BEARING: without it a DECIMAL FRAGMENT is
 #: read as an integer (`1.093 %` matched `093`), contradicting the rule stated three
 #: paragraphs up. Reproduced, then closed.
 _LEADING_NUM = rf"(?<![\w#.]){_NUM}"
-_WRAP = r"[`*]*"
-_SEP = r"(?::|#L|—|–|\bL\.?|\b(?:at|on|line|lines|row|rows|entry|entries)\b)"
-_GAP = r"(?:(?!\.\w)[^|]){0,160}?"
+_LEADING_NUM_NO_POSITION = rf"(?<![\w#.]){_NUM_NO_POSITION}"
+_WRAP = r"[`*#]*"
+_SEP = (r"(?:(?::|#L|—|–|→|\bL\.?|\b(?:at|on|line|lines|row|rows|entry|entries|of)\b)(?:\s+(?:number|no\.?))?)")
+#: ⛔ THE GAP IS BOUNDED, AND THE BOUND USED TO TRUNCATE SILENTLY — the module's own
+#: contract is that a guard may be incomplete but may not be quiet about it. At
+#: `{0,160}` a cite written with more prose than that between the manifest's name and
+#: the number was INVISIBLE. The reproduction is the witness in
+#: `…_catches_every_spelling`, and it is the same string: 240 characters of padding
+#: (`"prose " * 40`) put 242 between the filename and the `line` separator and 247
+#: between the filename and the digits — a cite a reader follows, and the matcher did
+#: not see it. 400 covers a heavily qualified or wrapped sentence, and the bound is
+#: kept at all (rather than removed) because an unbounded gap reads a number out of a
+#: LATER paragraph or table row and reports it as this sentence's cite — measured 0
+#: hits on the current document at both bounds, so the widening changes no verdict
+#: today. Whatever this comment says, the witness's own arithmetic is the figure to
+#: trust: it is one string, written once, and the pad length is a number nobody should
+#: have to re-derive from prose.
+_GAP = r"(?:(?!\.\w)[^|]){0,400}?"
 #: A RANGE is the cite a maintainer writes when re-adding one, and `_NUM`'s `(?!-\d)`
 #: guard — which exists to stop a FRAGMENT of a longer run being read as the number —
 #: also stopped the two-endpoint form entirely, so `(:9987-9995)` and
@@ -4729,8 +4815,8 @@ _GAP = r"(?:(?!\.\w)[^|]){0,160}?"
 #: a digit, a decimal or another `-<digit>`, which is exactly what a date fragment
 #: is. Caught by the false-red fixture that already existed, which is what those
 #: fixtures are for.
-_RANGE_NUMS = (r"(?<![\d,])\d{1,5}(?:,\d{3})*\s*[-–—]\s*\d{1,5}(?:,\d{3})*"
-               r"(?![\d.])(?!-\d)")
+_RANGE_NUMS = (r"(?<![\d,-])\d{1,5}(?:,\d{3})*\s*[-–—]\s*\d{1,5}(?:,\d{3})*"
+               rf"{_UNIT}(?![\d.])(?!-\d)")
 
 #: A bare line cite with NO filename binding — the form this module documents as
 #: invisible to every sweep. Applied to the ONE sentence the claim lives on, where
@@ -4744,36 +4830,290 @@ _RANGE_NUMS = (r"(?<![\d,])\d{1,5}(?:,\d{3})*\s*[-–—]\s*\d{1,5}(?:,\d{3})*"
 _LINE_CITE = re.compile(rf"{_SEP}\s*{_WRAP}{_NUM}{_WRAP}")
 
 #: ⛔ THE BINDING MUST INCLUDE THE NAME THE DOCUMENT ACTUALLY USES. The document
-#: names the manifest BOTH ways: ``config/ci-surfaces.yml`` in the row's first
-#: column and *"`surfaces:` sits ABOVE `carve_out:` in the manifest"* on the claim's
-#: own sentence. Binding only the literal FILENAME left the doc-wide arm blind to
+#: names the manifest BOTH ways: ``config/ci-surfaces.yml`` in the intro prose and in
+#: another row's second cell, and *"the manifest"* on the claim's own sentence (whose
+#: row carries the filename NOWHERE — measured). Binding only the literal FILENAME left the doc-wide arm blind to
 #: the sentence's own vocabulary: appending *"the `carve_out:` entry the table above
 #: names sits on line 9987 of the manifest at this head"* was GREEN, while the same
 #: sentence with the literal filename was RED. That is the exact rot this arm
 #: removes, re-armable in the document's own words — measured, then closed here.
-_MANIFEST = r"(?:ci-surfaces\.yml|the\s+manifest)"
+_MANIFEST = r"(?:ci-surfaces\.ya?ml|the\s+manifest)"
+#: ⛔ THE SECOND ARM NEEDS `(?<![\w.])` IN FRONT OF ITS SEPARATOR. Without it
+#: ``sdk.py:9612`` — a legit cite of ANOTHER file that merely happens to sit before
+#: the manifest's name — matched as a manifest cite, and the pin accused the author of
+#: a line-number cite they never wrote:
+#:
+#:     the loader (`sdk.py:9612`) reads `config/ci-surfaces.yml` on every run
+#:
+#: Measured True before this guard, False after; a cite of THIS file in this order is
+#: written ``… `:9987`, see `config/ci-surfaces.yml```, so its separator follows
+#: whitespace or a wrapper character, while `sdk.py`'s colon follows a letter.
+#: ⛔ THE POSITIONAL SHAPE, ADDED BECAUSE THE SUBSET ABOVE CANNOT SEE IT (#12369
+#: review, P2). A line POSITION written with a unit noun — `the entry sits 9987 lines
+#: into the manifest`, `on 9987 lines`, `9987 rows down` — reads as `number + unit`
+#: to `_NUM`, i.e. a COUNT, so every one of those was GREEN while `:9987` was RED.
+#: ⛔ AND THE BLANKET FIX IS NOT AVAILABLE: making `lines`/`rows` non-units
+#: doc-wide refused `— 155 lines of rows`, which this file pins as CORRECT PROSE
+#: (a count is not a cite). So the discriminator is the POSITIONAL TAIL — `into`,
+#: `down`, `deep`, `below`, `above`, `from the top` — which a count does not carry.
+#: Residual, stated: a bare `9987 lines` with no tail is genuinely ambiguous with a
+#: count and is NOT caught here; on the CLAIM sentence it is, because that arm has no
+#: count exemption at all (`_BARE_NUM`).
 _MANIFEST_CITE = re.compile(
     rf"{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_NUM}{_WRAP}"
-    rf"|{_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}{_MANIFEST}"
+    rf"|(?<![\w.]){_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}{_MANIFEST}"
     rf"|{_WRAP}{_LEADING_NUM}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
     rf"|{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_RANGE_NUMS}{_WRAP}"
     rf"|{_WRAP}{_RANGE_NUMS}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
+    rf"|{_MANIFEST}{_GAP}{_WRAP}{_LEADING_NUM_NO_POSITION}{_WRAP}"
+    rf"\s*(?:lines?|rows?)\s*{_POSITION_TAIL}\b"
+    rf"|{_WRAP}{_LEADING_NUM_NO_POSITION}{_WRAP}\s*(?:lines?|rows?)\s*{_POSITION_TAIL}\b"
+    rf"{_GAP}{_MANIFEST}"
 )
+
 
 #: A bare NUMBER in cite position with no separator and no filename binding — the
 #: form a maintainer produces when trimming the recorded history down to its number
 #: ("the entry read 9943 before the last re-derivation"). `_LINE_CITE` above needs a
 #: separator beside the number, so this passed it AND the doc-wide arm.
 #:
-#: ⛔ IT REFUSES A COMMIT HEAD TOO, AND THAT IS THE INTENDED CONTRACT, not a
-#: false red: the bundle's own D5 keeps the head-qualified history AT THE PIN
-#: ("the head-qualified history of the entry's line is kept at the pin"), so the
-#: document carries neither a line number nor a head. An earlier cut of the failure
-#: message told a maintainer to "describe the history by head", i.e. it prescribed
-#: the form this arm refuses — the MESSAGE was wrong, and it now says what the
-#: policy says. The `.` in the lookbehind is load-bearing in its own right: without
-#: it a DECIMAL FRAGMENT is read as an integer (`1.093 %` matched `093`).
-_BARE_NUM = re.compile(_LEADING_NUM)
+#: ⛔ IT REFUSES A DIGIT-HEAVY HEAD — EXACTLY, NOT "A HEAD". A hex head whose
+#: first three characters happen to be digits is refused (`9828250732`,
+#: `12345678`); a head that opens with a letter is NOT (`1a0ace24`, `e59e6076`),
+#: because `_NUM` needs `\d{3,}` behind a non-word character. Measured, and pinned
+#: below, rather than claimed wider than the regex is: the contract this arm
+#: actually enforces is "a bare run of 3+ digits", and a hex head that begins with
+#: two or fewer digits slips it. The sentence on the claim line is still guarded
+#: against the HISTORY form this matters for (`read 9943`, `was 9943`).
+#:
+#: ⛔ AND THE POLICY BEHIND THAT IS UNCHANGED (the bundle's own D5 keeps the
+#: head-qualified history AT THE PIN), so the document carries neither a line number
+#: nor a head. An earlier cut of the failure message told a maintainer to "describe
+#: the history by head", i.e. it prescribed the form this arm refuses — the MESSAGE
+#: was wrong, and it now says what the policy says. The `.` in the lookbehind is
+#: load-bearing in its own right: without it a DECIMAL FRAGMENT is read as an integer
+#: (`1.093 %` matched `093`).
+#: ⛔ THIS ARM READS A POSITION, SO `lines`/`rows` ARE NOT UNITS TO IT. With the
+#: shared `_UNIT` they were, and every spelling of a line position written with a unit
+#: noun passed: `the entry sits 9987 lines into the manifest`, `9987 rows`, `at 9987
+#: lines`, `9987 rows down` were ALL GREEN while `:9987` was RED — the same guard
+#: giving opposite verdicts for the same claim, on the one sentence whose contract says
+#: it carries no number at all. `_LEADING_NUM_NO_POSITION` closes that whole class
+#: rather than adding the four spellings to a list. Residual, stated: a genuine COUNT
+#: whose noun is `lines`/`rows` on THIS sentence (`— 155 lines`) is now refused too;
+#: that is the direction this pin prefers (the sentence is not where a line count
+#: belongs), and it is the only sentence this arm reads.
+_BARE_NUM = re.compile(_LEADING_NUM_NO_POSITION)
+#: ⛔ ONE MATCHER NOW, AND IT IS THE STRICT ONE — on BOTH surfaces. The CLAIM
+#: sentence asks "is any number here?" and its contract is that the answer is no; a
+#: NEIGHBOUR line asks the same question of the same claim, so `_bare_number_hits_
+#: neighbour` calls `_bare_number_hits` and there is no unit-aware variant left to
+#: swap in. Measured at this head: `— 155 lines of rows` beside the manifest's name is
+#: refused (`['155']`) — an accepted FALSE RED, pinned where it is paid for — while
+#: `lists 60 entries` and `row: 166 s` stay GREEN, because `entries`, `s` and the rest
+#: of the unambiguous units are in `_UNIT_WORDS` and `lines`/`rows` are the only nouns
+#: this pattern treats as positions. (An earlier cut of this comment claimed the arm
+#: was "UNIT-AWARE" and that the strict pattern refused "all three" of those — stale
+#: text from the round that deleted the tail allow-list, refuted 1-of-3 here and by
+#: `_bare_number_hits_neighbour`'s own docstring.) An ORDINAL (`— its 9987th line`) is
+#: caught by the strict pattern too, which is why one matcher loses none of the class
+#: that matters.
+
+#: ⛔ A LONE FOUR-DIGIT 19xx/20xx RUN IS A YEAR AS OFTEN AS A LINE NUMBER, and the bare
+#: arm cannot tell them apart — so it refuses the year rather than punishing prose that
+#: dates itself ("the block was reviewed in 2026"). Discriminating power is not lost: the SEPARATOR
+#: arms still catch `:2026`, `at 2026` and `line 2026`, because a cite is written with a
+#: separator and a year is not. Residual, stated: a line number of exactly 2026 written
+#: with no separator is indistinguishable from a year and is not caught here.
+_BARE_YEAR = re.compile(r"^(?:19|20)\d{2}$")
+
+
+def _bare_number_hits(text: str) -> list[str]:
+    """Bare-number hits with a lone four-digit year removed — the tested contract."""
+    return [m.group(0) for m in _BARE_NUM.finditer(text)
+            if not _BARE_YEAR.match(m.group(0))]
+
+#: The block's own names. A line carrying one of these is a line that TALKS ABOUT the
+#: block, and it is the population the neighbour arm scans.
+_BLOCK_WORDS = re.compile(r"carve[_-]?out|carve out|\b(?:entry|block|manifest)\b")
+#: ⛔ …AND THE MANIFEST'S OWN FILENAME BELONGS IN THE POPULATION, because this arm's
+#: failure message promises a line number "must not reappear ANYWHERE in the
+#: document" and `_MANIFEST` already treats `ci-surfaces.yml` as the manifest — while
+#: this gate did not, so the loop below `continue`d before `_neighbour_number_strays`
+#: ever ran on the most natural such line (#12369 review, P2, measured GREEN):
+#:
+#:     Re-derived again: `config/ci-surfaces.yml` — its 9987th line at this head.
+#:
+#: The identical sentence with the WORD "manifest" instead of the filename was
+#: scanned and red, which is the inconsistency: one vocabulary admitted, the other
+#: not, for the same file. An ORDINAL (`9987th line`) is unambiguously a POSITION —
+#: not the count-ambiguous `number + lines` residual the regex states — so a line
+#: naming this file must be scanned whatever spelling follows.
+_BLOCK_WORDS_WITH_MANIFEST = re.compile(
+    rf"(?:{_BLOCK_WORDS.pattern})|{_MANIFEST}")
+#: ⛔ …AND SO DOES A LINE THAT NAMES THE ENTRY. The block's own vocabulary is only
+#: half the population: the most natural way to put the number back names the FILE,
+#: not the block —
+#:
+#:     The row `test_pack_logic_writeprobe_11083.py` sits at `:9987` on this head.
+#:     The write-probe row sits at `:9987` on this head.
+#:     The row `test_pack_logic_writeprobe_11083.py` sits at 9987 on this head.
+#:
+#: — all three measured GREEN while gating on `_BLOCK_WORDS` alone, because none of
+#: them carries `carve_out`/`entry`/`block`/`manifest`. The stems are the entry's own
+#: name in the three spellings the document and the bundle use for it.
+_ENTRY_STEMS = re.compile(r"writeprobe|write[-_ ]?probe|pack[-_ ]?logic|11083")
+
+
+def _in_neighbour_population(line: str, claim_line: str) -> bool:
+    """Is `line` a line the neighbour arm must SCAN? One place, called by the loop.
+
+    ⛔ WHY THIS IS A FUNCTION AND NOT AN INLINE CONDITION (#12369 review, P2,
+    measured). Both vocabularies were asserted by tests — the block's, the entry's,
+    and the manifest's FILENAME — but nothing drove the LOOP, so putting the gate
+    back to `_BLOCK_WORDS` alone left every case green while re-opening the false
+    pass the widening exists to close:
+
+        Re-derived again: `config/ci-surfaces.yml` — its 9987th line at this head.
+        (widened gate: admitted, stray `['9987']`; pre-delta gate: SKIPPED, GREEN)
+
+    The decision now lives here, the block arm's loop calls it, and the population
+    test pins the call site by AST — so a revert of the CALL, not only of the
+    constants, reds.
+    """
+    if line == claim_line:
+        return False
+    return bool(_BLOCK_WORDS_WITH_MANIFEST.search(line)
+                or _ENTRY_STEMS.search(line))
+#: …and a line that names ANOTHER source file is that file's, not this claim's: see
+#: `_neighbour_number_strays` for the measurement that made this necessary.
+_OTHER_FILE = re.compile(r"[\w/]+\.(?:py|ya?ml|json|md)\b")
+#: ⛔ BUT `config/ci-surfaces.yml` IS THE FILE THIS CLAIM IS ABOUT — it is never
+#: "another file". Without this subtraction the exemption was one file too WIDE and
+#: re-opened the hole the arm exists for (measured): a neighbour line that re-typed
+#: the number AND named the manifest was scanned by NEITHER arm —
+#: ``The `carve_out:` entry sits in `config/ci-surfaces.yml` and read 9943 before the
+#: last re-derivation.`` returned NO strays, and the strict arm did not see it either
+#: because the bare form has no separator. So the manifest's own name is removed
+#: before the other-file test, which is what makes "another file" mean another file.
+_MANIFEST_FILE = re.compile(r"[\w/]*ci-surfaces\.ya?ml")
+
+
+def _neighbour_number_strays(line: str) -> list[str]:
+    """Numbers a NEIGHBOUR line attaches in cite position — [] for another file's cite.
+
+    `_LINE_CITE` carries no file binding on purpose: on the CLAIM sentence any number
+    in cite position is a finding. On a neighbouring line that same looseness refuses
+    the document's ordinary prose, because this document is cite-heavy and a
+    maintainer explaining this block's mechanism naturally writes
+
+        ``… spliced by `tools/ci_selection.py::register_tests` (its `entry_lines`
+        loop, `:4906`)``
+
+    — measured RED before this guard, and again for ``The `corpus` block in
+    `capstone_run.py` … its literal sits at `:1186` ``. Both are cites of ANOTHER
+    module, which this module's own contract says must stay green ("elsewhere in the
+    document that is a legitimate cite of some OTHER module").
+
+    ⚠️ RESIDUAL, stated, and it is WIDER THAN IT USED TO SAY (#12369 review, P3,
+    measured): the exemption is an EARLY RETURN, so when the line names another source
+    file it exempts EVERY number shape, not the `:NNNN` continuation alone. The earlier
+    wording said "a bare `:NNNN` on a line that also names another file is therefore not
+    seen", which a reader would reasonably take to mean that `9987 lines` on such a line
+    IS seen. Measured, it is not:
+
+        The `carve_out:` entry sits 9987 lines down after `tools/ci_selection.py`
+        spliced a block above it.                                        -> []
+
+    And that spelling is not contrived — naming the tool that causes the shift is the
+    natural sentence, more natural than the separator form the old text named. It is
+    ACCEPTED for the reason the exemption exists (nothing mechanical can tell a
+    continuation of another file's cite from a re-typed manifest line) and the doc-wide
+    STRICT arm (`_MANIFEST_CITE`) still catches a manifest-BOUND cite on any line — but
+    a line that names the tool and NOT the manifest is caught by neither, and the
+    disclosure now says so instead of being quiet about the wider class. ⛔ THAT CONCLUSION DOES NOT EXTEND TO THE MANIFEST ITSELF: the
+    strict arm sees only a cite with a SEPARATOR, so exempting `ci-surfaces.yml`
+    would hide the separator-less form (`read 9943`) from BOTH arms — which is why
+    `_MANIFEST_FILE` is subtracted before this test.
+
+    The caller passes the line with the claim ENTRY's own filename already removed.
+    """
+    if _OTHER_FILE.search(_MANIFEST_FILE.sub("", line)):
+        return []
+    stray = [m.group(0) for m in _LINE_CITE.finditer(line)]
+    stray += [n for n in _bare_number_hits_neighbour(line) if n not in stray]
+    return stray
+
+
+def _bare_number_hits_neighbour(text: str) -> list[str]:
+    """The NEIGHBOUR hits — the SAME strict matcher the claim sentence uses.
+
+    One implementation, two callers, no second pattern: an earlier cut kept a
+    unit-aware variant and a comment claiming the neighbour arm was "deliberately
+    UNIT-AWARE", while this file asserted `9987 lines` RED twenty lines later. The
+    tail allow-list was deleted for that reason; the helper is now an alias so the
+    two arms cannot drift apart again.
+    """
+    return _bare_number_hits(text)
+    return _bare_number_hits(text)
+
+
+def _stray_entry_finding(sentence: str, entry: str) -> str | None:
+    r"""The finding for a filename on the `carve_out:` sentence that is not `entry`.
+
+    ⚠️ RAW STRING ON PURPOSE: the paragraph below quotes `(?<![\w/])`, and in a
+    non-raw docstring Python escape-processes `\w` into a `SyntaxWarning` on every
+    run of this file — a warning nothing refuses (`ruff` does not enable W605), so
+    it would sit in the suite output forever. Measured: the same text was an `#`
+    COMMENT before this function existed, where it was free; moving it into a
+    docstring without the `r` prefix is what made it a live warning.
+
+    ⛔ GATED ON THE ENTRY BEING NAMED, and the gate is the whole point (#12369
+    review, P3, measured). Ungated, this arm fired on the D2 state — the sentence
+    rewritten to name a DIFFERENT file, so it named the entry nowhere — and
+    reported that it named `['test_graph_census_7949.py']` *"besides
+    `test_pack_logic_writeprobe_11083.py`"*, asserting a clause the sentence did
+    not carry. The test was RED either way (the arm above catches that state with
+    a TRUE message), so this was never a fail-open: it is the *diagnostic* that
+    was wrong, which matters because the message is what a reader acts on — two
+    findings for one defect, one of them false, sends them to fix a filename that
+    is not there. That is the same "the MESSAGE was the defect" class this pin
+    already closed once for the bare-number arm, so the rule lives HERE, in a
+    function with its own test, instead of in a comment a later edit can drop.
+
+    The gate cannot weaken the arm: with `entry` absent the caller's preceding
+    arm is RED regardless, and with it present this one enumerates every stray
+    name on the sentence.
+
+    ⛔ THE PATH PREFIX IS NOT AN EXEMPTION. The first cut used `(?<![\w/])`,
+    which let a SECOND capstone filament through merely by writing it with a
+    path — "unlike `tests/test_graph_census_7949.py`, which lives elsewhere"
+    was GREEN while the same name BARE was RED. The match is on the name
+    anywhere, and it exempts exactly one thing: THIS module, whose basename the
+    sentence cites beside the clause.
+
+    ⚠️ RESIDUAL, stated rather than discovered later: this arm refuses a TRUE
+    mention too. Appending *"Unlike `bench/test_smoke_embedded.py`, which is also
+    embedded-only."* to the claim row is RED, and that file IS a genuine
+    `carve_out:` entry (it is one of the block's own rows) — so the sentence is
+    refused for explaining itself accurately. Scoping the arm to names absent from
+    the block would fix it and would also let a second entry through whenever the
+    block and the sentence agreed, which is the state the claim exists to forbid:
+    the pin cannot read a sentence's intent. One filename on that sentence is the
+    rule; a sibling belongs in prose, not on the claim.
+    """
+    if entry not in sentence:
+        return None
+    extra = sorted({f for f in re.findall(r"test_\w+\.py", sentence)
+                    if f not in (entry, Path(__file__).name)})
+    if not extra:
+        return None
+    return (
+        f"03-test-design.md's `carve_out:` sentence names {extra!r} "
+        f"besides {entry!r} — the sentence is the document's claim that the "
+        f"block holds ONE capstone entry, so a second filename on it either "
+        f"contradicts the tree or re-opens the claim to a file the pin "
+        f"does not pick up. Name one entry.")
 
 
 class _ManifestShapeError(RuntimeError):
@@ -4797,16 +5137,30 @@ def _parse_manifest(lines: list[str], failures: list[str]) -> dict | None:
     "holds none". `parse_manifest_text` refuses it (its `DuplicateManifestKeyError`
     docstring records 24 duplicate keys measured on one merge).
 
-    ⛔ Parsed ONCE and passed on: the manifest is ~1.3 MB and one strict parse is
-    ~0.8 s on a shared cell, so asking `_section_entries` per section re-parsed it
-    three times — ~1.6 s of a ~18 s junit sum for the file. The refusal is
-    unchanged; only the repetition goes. (Readings, not constants: three
-    consecutive runs at the reviewed head measured 0.755 / 0.776 / 0.832 s per
+    ⛔ Parsed ONCE and passed on: one strict parse is ~0.8 s on a shared cell, so
+    asking `_section_entries` per section parsed it once per section (three parses)
+    — keeping ONE removes the other two, ~1.6 s of a ~18 s junit sum for the file.
+    The refusal is unchanged; only the repetition goes. (Readings, not constants:
+    three consecutive runs at the reviewed head measured 0.755 / 0.776 / 0.832 s per
     parse. No byte figure is quoted here — a size is a tree state, and this PR is
     about not typing one into a document.)
+
+    ⛔ A NON-MAPPING PARSE IS A FAILURE, NOT A `None` (measured fail-open).
+    `parse_manifest_text` legitimately returns `None` for an EMPTY document —
+    verified: `''`, `'# only comments\n'`, `'   \n'` and `'---\n'` all parse to
+    `None` — and the caller's `manifest is None` is documented as "the refusal is
+    already in `block_failures`". With an empty manifest there IS no refusal, so
+    every `_entries_or_failure` short-circuited and every "holds one" / "hold none"
+    guard was suppressed: the whole block arm reported GREEN over a file it never
+    read. A top-level list or scalar was a DIFFERENT outcome and is not the same
+    finding: those parse to a non-`None` `list`/`str` (verified), so the pin went
+    RED — only its diagnostic then said "the key is ABSENT entirely", which is true
+    of every section and names the wrong cause. The parsed TYPE is checked here, at
+    the ONE place that can see both: a non-mapping parse is a collected finding, and
+    so is an empty document, because `None` is not a mapping either.
     """
     try:
-        return parse_manifest_text("\n".join(lines))
+        parsed = parse_manifest_text("\n".join(lines))
     except DuplicateManifestKeyError as exc:
         failures.append(
             f"config/ci-surfaces.yml has a DUPLICATE mapping key ({exc}) — the file "
@@ -4826,6 +5180,20 @@ def _parse_manifest(lines: list[str], failures: list[str]) -> dict | None:
             f"{exc}) — this pin cannot read a block it cannot parse, and an "
             f"unparseable manifest is a real defect in a file a tool rewrites")
         return None
+    if not isinstance(parsed, dict):
+        # ⛔ AN EMPTY (or non-mapping) MANIFEST IS A FAILURE, NOT A `None` — see the
+        # docstring: `parse_manifest_text` returns `None` for `''`, for a
+        # comments-only file, for `'---\n'`, and for a bare whitespace document, and
+        # the caller reads `None` as "the refusal is already collected". With an
+        # empty manifest nothing was collected, so every "holds one" / "hold none"
+        # guard was skipped and this pin reported GREEN over a file it never read.
+        failures.append(
+            f"config/ci-surfaces.yml parses to {type(parsed).__name__}, not a "
+            f"mapping — an empty or non-mapping manifest cannot hold the "
+            f"`carve_out:` block 03-test-design.md makes a positive claim about, and "
+            f"reading it as 'no findings' is the fail-open this pin exists to be")
+        return None
+    return parsed
 
 
 def _section_entries(manifest: dict, section: str) -> list[str] | None:
@@ -4898,8 +5266,10 @@ def _section_entries(manifest: dict, section: str) -> list[str] | None:
     not "unify" these three readers.
 
     The hand scan it replaces also could not see an INDENTED entry: this very
-    test file is registered that way under the `core:` and `sdk:` mirrors of
-    `surfaces:` — the same filename indented, which a scan that only looks at
+    test file is registered that way under the `core:` mirror of `surfaces:`
+    (measured with `parse_manifest_text`: `core` holds it, `sdk` does not — that
+    mirror holds 128 entries and none of them is this file) — the
+    same filename indented, which a scan that only looks at
     column 0 cannot see — and a scan that misses those cannot honestly claim a
     section "holds none". (Those mirrors are inside a block `register_tests` DOES
     write, so their line numbers move on the next registration; naming them by
@@ -5561,10 +5931,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # over it would be my error, not the document's.
     #
     # ⚠️ THE CLASSIFIER IS A SUBSTRING RULE, and that residual is stated rather than
-    # hidden: a capstone file whose NAME carries none of these markers and which
-    # lands in `uri_requiring:`/`slow_files:` would not be seen. It is tied to the
-    # DOCUMENT's definition (`03-test-design.md`'s four `durations:` globs) and must
-    # be moved with it; the block membership itself is exact (YAML, not a hand scan).
+    # hidden: a capstone file whose NAME carries none of the DOCUMENT's four
+    # `durations:` globs and which lands in `uri_requiring:`/`slow_files:` would not be
+    # seen. It must be moved with the document's definition; the block membership
+    # itself is exact (YAML, not a hand scan). Widening past those globs is a FALSE
+    # BLOCK rather than coverage — that is how `pack_logic`/`writeprobe` were removed.
     block_failures: list[str] = []
     ci_lines = sources["ci_surfaces"]
     # ⚠️ THE CLASSIFIER MUST MATCH THE DOCUMENT'S OWN DEFINITION, or the pin holds a
@@ -5575,18 +5946,37 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # `test_graph_census_8882.py` — neither carrying any of the four markers this
     # tuple used to hold, so adding either to `carve_out:` (or leaking it into
     # `slow_files:`) left "holds **one**" / "hold none" false with the pin GREEN.
-    # A review reproduced exactly that. The two extra markers are the document's own
-    # globs, and they are the whole set the document names: four globs, four-name
-    # expansion, no fifth. Widening PAST them would start refusing unrelated files,
-    # which is a false block rather than coverage — so the tuple is pinned to the
-    # document, and the residual it still leaves is stated below.
-    capstone = ("7949", "capstone", "pack_logic", "writeprobe",
-                "v4_declared", "graph_census")
+    # A review reproduced exactly that.
+    #
+    # ⛔ SO THE ENTRY MATCHES BY EQUALITY, and everything else by the document's four
+    # globs — NOT by five markers. `pack_logic`/`writeprobe` are not among the
+    # document's globs; they were here to catch the entry itself, and they also
+    # caught a registered sibling: `test_pack_logic_census_11083.py` (in no
+    # sixteen-name row) put into `slow_files:` turned this arm RED while the
+    # document's claim was still true — a FALSE BLOCK, the opposite failure from the
+    # one the widened tuple was fixing. Equality on `ENTRY` catches exactly the file
+    # the sentence names; the four globs catch exactly the set the document defines.
+    capstone_globs = ("capstone", "7949", "v4_declared", "graph_census")
     ENTRY = "test_pack_logic_writeprobe_11083.py"
 
-    # ⛔ PARSED ONCE. The manifest is ~1.3 MB and one strict parse is ~0.8 s on a
-    # shared cell; asking `_section_entries` per section re-parsed it three times, for
-    # ~1.6 s of this test. The refusal is unchanged — only the repetition goes.
+    def _is_capstone(name: str) -> bool:
+        """The document's four `durations:` globs, plus the entry ITSELF by basename.
+
+        The basename, not the raw string: a PATH-PREFIXED entry is this file's own
+        convention (70 rows spell theirs that way, e.g. `- bench/test_smoke_embedded.py`
+        in `carve_out:`), and comparing `name == ENTRY` let
+        `- tests/test_pack_logic_writeprobe_11083.py` sit in `slow_files:` with the
+        document's "hold none" FALSE and the pin GREEN — and the same form in
+        `carve_out:` produced a false "it was deleted, renamed, or moved". The globs
+        already survive a prefix, being substrings.
+        """
+        return PurePosixPath(name).name == ENTRY or any(g in name for g in capstone_globs)
+
+    # ⛔ PARSED ONCE. One strict parse is ~0.8 s on a shared cell; asking
+    # `_section_entries` per section parsed it once per section (three parses), and
+    # keeping one removes the other two — ~1.6 s of this test. The refusal is
+    # unchanged — only the repetition goes. (No size is quoted: a byte count is a
+    # tree state, and this PR is about not typing one into prose — including its own.)
     manifest = _parse_manifest(ci_lines, block_failures)
 
     def _has_top_level(section: str) -> bool:
@@ -5644,7 +6034,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"into a surface block moves this entry, and `03-test-design.md` "
                 f"states it. If the manifest is reordered, the paragraph that "
                 f"explains the rot is now false; re-derive it, do not delete this")
-        carve = [e for e in carve_all if any(k in e for k in capstone)]
+        # …compared by BASENAME, so a path-spelled row (`- tests/<entry>`, this file's
+        # own convention in 70 rows) is the same entry and not a false "different"
+        # capstone file.
+        carve = [PurePosixPath(e).name for e in carve_all if _is_capstone(e)]
         if not carve:
             block_failures.append(
                 f"config/ci-surfaces.yml's `carve_out:` block holds NO capstone "
@@ -5674,7 +6067,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                     f"— 03-test-design.md states it holds NONE of the capstone files, "
                     f"which is a claim about a block that must EXIST to be checked")
             continue
-        leaked = [e for e in entries if any(k in e for k in capstone)]
+        leaked = [e for e in entries if _is_capstone(e)]
         if leaked:
             block_failures.append(
                 f"config/ci-surfaces.yml's `{other}:` block carries {leaked!r} — "
@@ -5695,12 +6088,35 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             f"03-test-design.md: the scoping phrase '`carve_out:` holds **one**' "
             f"occurs {len(doc_hits)} time(s) — this claim needs exactly one line")
     else:
-        if ENTRY not in doc_hits[0]:
+        # ⛔ THE ENTRY MUST BE BOUND TO THE PHRASE, NOT MERELY PRESENT ON THE LINE.
+        # `ENTRY not in doc_hits[0]` is a substring test on the whole row, so these
+        # four rewrites all kept it GREEN while asserting the block holds MORE than
+        # one — which the manifest arm alone cannot contradict (measured before this
+        # arm existed):
+        #
+        #     `carve_out:` holds **one** file besides `test_pack_logic_writeprobe_11083.py`
+        #     `carve_out:` holds **one**: `test_pack_logic_writeprobe_11083.py` and one more
+        #     `carve_out:` holds **one**: e.g. `test_pack_logic_writeprobe_11083.py`, among several
+        #     `carve_out:` holds **one** of the two: `test_pack_logic_writeprobe_11083.py`
+        #
+        # The pattern mirrors the row's own grammar: the phrase, an optional noun, a
+        # colon, its ONE filename — and nothing quantifier-shaped in between.
+        _ONE_ENTRY = (
+            r"`carve_out:`\s*holds\s*\*\*one\*\*\s*(?:entry|file)?\s*:\s*`"
+            + ENTRY + r"`"
+            # …and NOTHING may follow it that adds another: by the
+            # comma/'and one more'/plus/besides/among/except the same row can
+            # contradict itself in a handful of characters.
+            r"(?![^|]{0,12}\b(?:and|plus|besides|among|other than|except)\b)")
+        if not re.search(_ONE_ENTRY, doc_hits[0]):
             block_failures.append(
-                f"03-test-design.md's `carve_out:` sentence does not name {ENTRY!r} "
-                f"— the sentence is the only place the document says WHICH entry it "
-                f"means, so a sentence that names another file, or none, is the "
-                f"defect this pin exists to catch")
+                f"03-test-design.md's `carve_out:` sentence does not say, in the row's "
+                f"own grammar, that the block holds **one**: {ENTRY!r} — the sentence "
+                f"is the only place the document says WHICH entry it means, and a "
+                f"quantifier between the phrase and the name (`besides`, `and one "
+                f"more`, `among several`, `of the two`) asserts MORE than one while "
+                f"keeping the filename on the line. Restore 'holds **one**: "
+                f"`{ENTRY}`' with no qualifier between.")
         # ⛔ THE DOCUMENT'S "hold none" HALF IS PART OF THE CLAIM, and it was
         # unchecked: the tree was verified to hold none in `uri_requiring:` and
         # `slow_files:`, but the SENTENCE could be rewritten to claim the opposite
@@ -5708,7 +6124,32 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # because the doc arm only looked for the phrase, the entry name and a
         # cite. Reproduced before this arm existed. D2 closed the REPLACEMENT case
         # only; this closes the ADDITION case.
-        for needed in ("`uri_requiring:`", "`slow_files:`", "hold none"):
+        # ⛔ AND THE CLAUSE MUST NOT BE SATISFIED BY ITS OWN NEGATION. Three substring
+        # tests passed a sentence rewritten to "… `uri_requiring:` and `slow_files:`
+        # do NOT hold none", i.e. the document asserted the OPPOSITE of the tree with
+        # the pin GREEN — measured, then closed with a positive pattern. The pattern
+        # requires the two block names adjacent to `hold none` with no negation
+        # between them, which is the shape the sentence actually uses.
+        # ⛔ BOTH ORDERS, AN OPTIONAL `both` / `, which`, AND NO NEGATION. The first
+        # cut pinned one order and one spelling, so three TRUE phrasings were refused
+        # with a message that named a cause that was not there. The pattern now
+        # accepts either order and the two fillers the sentence may carry; anything
+        # else between the names is where a negation would live.
+        _HOLD_NONE = (
+            r"(?:`uri_requiring:`\s*(?:and|,|/)\s*`slow_files:`"
+            r"|`slow_files:`\s*(?:and|,|/)\s*`uri_requiring:`)"
+            r"\s*(?:both\s+)?(?:,?\s*which\s+)?hold none")
+        if not re.search(_HOLD_NONE, doc_hits[0]):
+            block_failures.append(
+                "03-test-design.md's `carve_out:` sentence does not state, POSITIVELY, "
+                "that `uri_requiring:` and `slow_files:` hold NONE. Three causes, and "
+                "the sentence shows you which: the clause is GONE; it is NEGATED "
+                "(\"do NOT hold none\"), which asserts the opposite of the tree; or "
+                "the two block names were REORDERED or split by words the pattern "
+                "does not carry. The pin checks the tree half of this claim, so a "
+                "sentence that stops stating it is a claim the pin can no longer "
+                "check.")
+        for needed in ("`uri_requiring:`", "`slow_files:`"):
             if needed not in doc_hits[0]:
                 block_failures.append(
                     f"03-test-design.md's `carve_out:` sentence no longer carries "
@@ -5718,26 +6159,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                     f"that drops one of them is a claim the pin can no longer "
                     f"check. Restore the clause; do not narrow the sentence.")
         # Only the ONE named entry may appear: a second `test_*.py` token is the
-        # addition case above in another spelling. ⛔ THE PATH PREFIX IS NOT AN
-        # EXEMPTION. The first cut used `(?<![\w/])`, which let a SECOND capstone
-        # filament through merely by writing it with a path —
-        # "unlike `tests/test_graph_census_7949.py`, which lives elsewhere" was GREEN
-        # while the same name BARE was RED. The fix matches the name anywhere and
-        # exempts exactly one thing: THIS module, whose basename the sentence cites
-        # beside the clause.
-        extra_files = sorted({f for f in re.findall(r"test_\w+\.py", doc_hits[0])
-                              if f not in (ENTRY, Path(__file__).name)})
-        if extra_files:
-            block_failures.append(
-                f"03-test-design.md's `carve_out:` sentence names {extra_files!r} "
-                f"besides {ENTRY!r} — the sentence is the document's claim that the "
-                f"block holds ONE capstone entry, so a second filename on it either "
-                f"contradicts the tree or re-opens the claim to a file the pin "
-                f"does not pick up. Name one entry.")
+        # addition case above in another spelling. The arm's rule, its gate and the
+        # reason for both are in `_stray_entry_finding` — pinned by its own test
+        # rather than by this comment.
+        stray = _stray_entry_finding(doc_hits[0], ENTRY)
+        if stray:
+            block_failures.append(stray)
         # ⛔ scan the sentence with the ENTRY NAME removed: `test_pack_logic_
         # writeprobe_11083.py` carries a 5-digit run that is not a line cite.
-        sentence_numbers = [m.group(0) for m in
-                            _BARE_NUM.finditer(doc_hits[0].replace(ENTRY, ""))]
+        sentence_numbers = _bare_number_hits(doc_hits[0].replace(ENTRY, ""))
         if sentence_numbers:
             block_failures.append(
                 f"03-test-design.md hands a reader a LINE NUMBER on the `carve_out:` "
@@ -5750,31 +6180,61 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                 f"head-qualified history belongs AT THE PIN (this bundle's own D5), "
                 f"so this sentence carries neither a line number nor a head — say "
                 f"that it moved again and point at the pin.")
-        # ⛔ AND THE CLASS IS NOT ONE LINE. Scoping the bare arms to `doc_hits[0]`
-        # left the very form this module documents as "invisible to every sweep"
-        # green ONE LINE BELOW the claim — "the entry itself sat at `:9987` at head
-        # `1a0ace24`" — because the doc-wide arm needs the manifest token and this
-        # document WRAPS prose. Every other line that talks about the block is
-        # scanned with both bare arms. Measured at this head: three lines mention it,
-        # and none of them carries a number the arms fire on, so this is
-        # behaviour-preserving on the current document.
+        # ⛔ AND THE CLASS IS NOT ONE LINE — AND NOT ONE TOKEN. Scoping the bare arms
+        # to `doc_hits[0]` left the form this module documents as "invisible to every
+        # sweep" green ONE LINE BELOW the claim, and the first cut of this loop then
+        # gated on the LITERAL `carve_out:` — which the document carries on ONE line,
+        # the claim's own, so the loop body never executed and the hole stayed open
+        # (`The entry itself sat at `:9987` at head `1a0ace24`.`, with no token, was
+        # GREEN). The population is now "a line that talks about the block", i.e. any
+        # of the block's own names: the token in either spelling, or `entry` / `block`
+        # / `manifest`.
+        #
+        # ⛔ "THE POPULATION IS EMPTY, SO WIDENING IT CANNOT CHANGE THE VERDICT" WAS
+        # WRONG, and a fresh-context review measured it (#12369, P3): widening the
+        # gate to the manifest's FILENAME admits TWO non-claim lines at this head —
+        # the claim table's `durations:` note and the eval-lane row — so the verdict
+        # is preserved by MEASUREMENT, not by emptiness. Both yield `[]` from
+        # `_neighbour_number_strays`, which is what actually keeps the document green;
+        # a comment asserting the population is empty would have been the reassuring
+        # kind of wrong. The widening earns its place by scanning those two lines
+        # harmlessly while catching the `9987th line` spelling on them.
+        # The scanning itself is `_neighbour_number_strays` (module level, and pure),
+        # which is where the "another file's cite is not this claim's" rule and its
+        # two measured false reds live — and where the rule is PINNED, because a rule
+        # that exists only inside a test body cannot be tested.
+        neighbour_findings: list[str] = []
         for other_line in doc_lines:
-            if other_line == doc_hits[0] or "carve_out:" not in other_line:
+            if not _in_neighbour_population(other_line, doc_hits[0]):
                 continue
-            stray = [m.group(0) for m in _LINE_CITE.finditer(other_line)]
-            stray += [m.group(0) for m in _BARE_NUM.finditer(other_line)
-                      if m.group(0) not in stray and ENTRY not in m.group(0)]
+            stray = _neighbour_number_strays(other_line.replace(ENTRY, ""))
             if stray:
-                block_failures.append(
-                    f"03-test-design.md attaches a number to a `carve_out:` line "
-                    f"besides the claim: {stray[0]!r} in {other_line.strip()[:90]!r} — "
-                    f"the claim sentence is the document's single statement about "
-                    f"this block, and a number on a NEIGHBOURING line re-creates the "
-                    f"rot just as surely (the entry's position in "
-                    f"`config/ci-surfaces.yml` is moved by every registration "
-                    f"`tools/ci_selection.py::register_tests` splices above it). "
-                    f"Keep the claim in one place and print no number.")
-                break
+                neighbour_findings.append(
+                    f"{stray[0]!r} in {other_line.strip()[:90]!r}")
+        if neighbour_findings:
+            more = (f" (and {len(neighbour_findings) - 1} more line(s))"
+                    if len(neighbour_findings) > 1 else "")
+            block_failures.append(
+                f"03-test-design.md attaches a number to the block away from the "
+                f"claim: {neighbour_findings[0]}{more} — the claim sentence is the "
+                f"document's single statement about this block, and a number on a "
+                f"NEIGHBOURING line re-creates the rot just as surely (the entry's "
+                f"position in `config/ci-surfaces.yml` is moved by every "
+                f"registration `tools/ci_selection.py::register_tests` splices above "
+                f"it). Keep the claim in one place and print no number. ⚠️ TWO RESIDUALS, "
+                f"both stated rather than left to be discovered: a number on a line "
+                f"that names none of the block, an entry nor the manifest (by the WORD "
+                f"or by its FILENAME — the population is `_BLOCK_WORDS_WITH_MANIFEST`, "
+                f"so both vocabularies are scanned) is not "
+                f"scanned, and ANY number on a line that names ANOTHER source file — "
+                f"`:NNNN`, `N lines down`, `Nth row`, `read 9943` — is not scanned "
+                f"either (that exemption is an EARLY RETURN in "
+                f"`_neighbour_number_strays`, so it is as wide as the line, not as "
+                f"narrow as the separator form: a continuation of that file's cite and "
+                f"a re-typed manifest line are indistinguishable to it — the doc-wide "
+                f"strict arm still catches a manifest-bound cite anywhere, but a line "
+                f"naming the tool and NOT the manifest is caught by neither, and THAT "
+                f"is the shape this residual actually covers).")
         if _LINE_CITE.search(doc_hits[0].replace(ENTRY, "")):
             block_failures.append(
                 "03-test-design.md attaches a LINE NUMBER to "
@@ -5853,6 +6313,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     "`config/ci-surfaces.yml`'s `durations:` row: 166 s",
     "the whole `config/ci-surfaces.yml` on 1450 files",
     "`config/ci-surfaces.yml` — 155 lines of rows",
+    # ⛔ THIS ONE IS THE COUNTER-CASE TO THE POSITIONAL ALTERNATIVE BELOW, and it is
+    # WHY that alternative is tail-gated rather than blanket (#12369 review, P2):
+    # `— 155 lines of rows` is a COUNT beside the manifest's name and must stay
+    # green, while `— 9987 lines into the manifest` is a POSITION and must red. Only
+    # the positional TAIL separates them; making `lines`/`rows` non-units doc-wide
+    # refused this fixture, measured.
     "`config/ci-surfaces.yml` costs — 166 s",
     "`config/ci-surfaces.yml` lists 60 entries in `carve_out:`",
     "`config/ci-surfaces.yml` is 1319360 bytes",
@@ -5865,7 +6331,31 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     "`the manifest`'s `durations:` row: 166 s",
     "`config/ci-surfaces.yml` — 961 tests",
     "`config/ci-surfaces.yml` — 166 min",
+    # ⛔ units the closed `_UNIT` list did not name, each measured RED: `pp`, `pins`
+    # and `GB` are all written in this repo's own prose (`pp` in the `durations:`
+    # block, `pins` for tests), so a missed unit here refuses CORRECT PROSE.
+    "`config/ci-surfaces.yml` — 166 pp above the floor",
+    "`config/ci-surfaces.yml` — 961 pins",
+    "`config/ci-surfaces.yml` — 131 GB",
     "`config/ci-surfaces.yml`'s `slow_files:` row, re-taken on 2026-11-09",
+    # ⛔ three more measured false-REDs, each a different defect in the COUNT rule: a
+    # `%` inside a `\b` group can never match at end-of-input, a thousands-separated
+    # integer backtracked to a matching PREFIX (`1,320` out of `1,320,023`), and the
+    # unit list named no time unit at all. They are fixtures so the next widening of
+    # `_UNIT` cannot quietly re-open them.
+    "`config/ci-surfaces.yml` — 145 %",
+    "`config/ci-surfaces.yml` — 1,320,023 bytes",
+    "`config/ci-surfaces.yml` — 166 hours",
+    "`config/ci-surfaces.yml` — 12 shards",
+    # ⛔ …AND THE FALSE-RED THAT `(?<![\w.])` ON THE SECOND ARM EXISTS FOR. Without
+    # that lookbehind, ANOTHER file's cite sitting BEFORE the manifest's name is read
+    # as a manifest cite (`sdk.py:9612` matches `<sep><num>` and then any gap to the
+    # filename), and the pin accuses the author of a number they never wrote. Measured
+    # by rebuilding the pattern without the lookbehind: both fixtures below become
+    # matches (`True`), and with it they are clean (`False`) — so removing the guard
+    # as noise REDs exactly these two rows, and nothing else in this table does.
+    "the loader (`sdk.py:9612`) reads `config/ci-surfaces.yml` on every run",
+    "`sdk.py:9612` then `config/ci-surfaces.yml`",
 ])
 def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     """A legit reference near the filename is not a line cite — do not red it."""
@@ -5894,6 +6384,15 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     "`config/ci-surfaces.yml` L9987",
     "`config/ci-surfaces.yml` L. 9987",
     "`config/ci-surfaces.yml` row 9987",
+    # ⛔ THE SEPARATOR CARRIES A FILLER WORD IN ORDINARY ENGLISH, and that was the
+    # last reproduced bypass: `… sits at line number 9987 this week` inserted into
+    # `03-test-design.md` left the pin GREEN end-to-end while the arm that claims no
+    # such cite can reappear ANYWHERE in the document stayed silent. `→`, `#` and the
+    # `line number` / `no.` forms are covered by `_SEP`'s optional tail and `_WRAP`.
+    "`config/ci-surfaces.yml` line number 9987",
+    "`config/ci-surfaces.yml` line no. 9987",
+    "`config/ci-surfaces.yml` → 9987",
+    "`config/ci-surfaces.yml` line #9987",
     "`config/ci-surfaces.yml` (entry 9987)",
     "the entry sits at `:9973`, see `config/ci-surfaces.yml`",
     "see `config/ci-surfaces.yml` in its carve-out block; the entry is on line 9973",
@@ -5908,7 +6407,24 @@ def test_the_manifest_line_cite_matcher_does_not_fire_on_correct_prose(prose):
     "the `carve_out:` entry sits on line 9987 of the manifest at this head",
     "(`config/ci-surfaces.yml:9987-9995`)",
     "the manifest, lines 9987-9995",
+    # ⛔ A LINE POSITION WRITTEN WITH A UNIT NOUN (#12369 review, P2, measured):
+    # `_NUM` reads `number + lines` as a COUNT, so all four of these were GREEN
+    # while `:9987` was RED — the same guard, opposite verdicts, for one claim.
+    "`config/ci-surfaces.yml` — 9987 lines into the manifest",
+    "the entry sits 9987 lines down in `config/ci-surfaces.yml`",
+    "`config/ci-surfaces.yml`, 9987 rows from the top",
+    "`config/ci-surfaces.yml` — the entry is 9987 lines into the file",
     "`config/ci-surfaces.yml` lines 9987–9995",
+    # ⛔ THE LONG FORM, and it was GREEN until this arm's `_GAP` was widened from 160
+    # to 400: a heavily qualified sentence put MORE prose than the old bound between
+    # the manifest's name and the number, which is a cite a reader follows and the
+    # matcher did not see. The wording is deliberately ordinary — this is not a
+    # contrived spelling, it is what a careful author writes when they explain the
+    # mechanism before naming the line. The pad is 40 × `"prose "` = 240 characters,
+    # which puts 242 before the `line` separator: comfortably past 160, comfortably
+    # inside 400, so this case neither sits on the old bound's edge nor on the new
+    # one's. Re-narrowing `_GAP` to 160 reds here.
+    ("see `config/ci-surfaces.yml` " + "prose " * 40 + "line 9987"),
 ])
 def test_the_manifest_line_cite_matcher_catches_every_spelling(prose):
     """Every spelling that attaches a NUMBER to the manifest must be refused."""
@@ -5936,6 +6452,40 @@ def test_the_manifest_line_cite_matcher_catches_every_spelling(prose):
     ("row: 166 s", False),
     ("config/ci-surfaces.yml` — 961 tests", False),
     ("the entry's `test_x_11083.py` sibling", False),
+    # ⛔ a lone 19xx/20xx run is a YEAR, not a cite — the separator arms still catch
+    # `:2026`, so refusing it here costs no coverage (stated residual: a line number
+    # of exactly 2026 with no separator is indistinguishable and is not caught).
+    ("the block was reviewed in 2026", False),
+    ("the entry moved in 9987", True),
+    # ⛔ A LINE POSITION WRITTEN WITH A UNIT NOUN — the false-PASS class a review
+    # found (#12369, P2). `_NUM` reads `number + lines`/`rows` as a COUNT, so every
+    # one of these was GREEN while `:9987` was RED: one guard, opposite verdicts for
+    # one claim, on the one sentence whose contract is that it carries no number at
+    # all. `_BARE_NUM` now reads `_LEADING_NUM_NO_POSITION`, so the whole class is
+    # refused instead of four spellings being appended to a list. The cost is stated
+    # where the regex is: a genuine `— 155 lines` on THIS sentence is refused too,
+    # which is the direction this pin prefers (a line count is not a carve-out claim)
+    # and is the only sentence this arm reads.
+    ("the entry sits 9987 lines into the manifest", True),
+    ("9987 rows", True),
+    ("at 9987 lines", True),
+    ("on 9987 lines", True),
+    ("9987 rows down", True),
+    # ⛔ AND THE COUNT UNITS THE CLOSED LIST DOES NOT NAME — measured RED before the
+    # list was extended, every one of them a spelling this repo actually writes: `pp`
+    # in the `durations:` prose, `pins` for tests, `times` / `characters` in this very
+    # module's comments. A missed unit refuses CORRECT PROSE, which is the false-red
+    # half of this guard, so these are pinned here beside the ones that caught it.
+    ("the entry moved 103 times", False),
+    ("the block is 145 characters wide", False),
+    # ⛔ THE HEAD CONTRACT IS DIGIT-HEAVY, NOT "A HEAD" — the comment above `_BARE_NUM`
+    # claims the narrower thing, and these four measured shapes are the proof in both
+    # directions: a head that OPENS with 3+ digits is refused, one that opens with a
+    # letter (or with two digits) is not, because `_NUM` needs `\d{3,}`.
+    ("the entry sat at head `9828250732`", True),
+    ("the entry sat at head 12345678", True),
+    ("the entry sat at head `1a0ace24`", False),
+    ("the entry sat at head `e59e6076`", False),
 ])
 def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(prose, should_match):
     """`_BARE_NUM` catches a bare line number OR head, and no count or decimal.
@@ -5945,11 +6495,180 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     cite one layer up (and D5 keeps it at the pin), and a decimal or a unit-suffixed
     count is neither and must stay green.
     """
-    hit = bool(_BARE_NUM.search(prose))
+    hit = bool(_bare_number_hits(prose))
     assert hit is should_match, (
         f"_BARE_NUM {'missed' if should_match else 'refused'} {prose!r} — the arm "
         f"shares `_NUM`'s vocabulary, so a head, a decimal and a count all behave the "
         f"way the docstring says they do")
+
+
+@pytest.mark.parametrize(("line", "strays"), [
+    # ⛔ THE NEIGHBOUR ARM MUST NOT REFUSE ANOTHER FILE'S CITE, and both of these were
+    # measured RED before `_neighbour_number_strays` existed. They are the natural
+    # prose of a maintainer explaining the block's mechanism — and `03-test-design.md`
+    # is the bundle's cite-heavy document (`sdk.py:9867`/`:9920`, `capstone_run.py`),
+    # so its neighbours WILL name other modules with line numbers.
+    ("`surfaces:` blocks are spliced by `tools/ci_selection.py::register_tests` (its "
+     "`entry_lines` loop, `:4906`) and the entry line moves under them.", []),
+    ("The `corpus` block in `capstone_run.py` is frozen; its literal sits at `:1186`.",
+     []),
+    ("`sdk.py`'s `extraction_mode` pair (`sdk.py:24003` → `:24634`) is the same row.",
+     []),
+    # …and the forms it MUST still catch, so the "another file" exemption cannot become
+    # a bypass: a bare cite with NO other file named, and the history-trimmed number.
+    ("The entry itself sat at `:9987` at head `1a0ace24`.", [":9987`", "9987"]),
+    ("the manifest entry read 9943 before the last re-derivation", ["9943"]),
+    # ⛔ THE EXEMPTION MUST NOT SWALLOW THE MANIFEST'S OWN NAME — measured: this line
+    # returned [] (and the strict arm cannot see it either, because the bare form has
+    # no separator), so the hole the arm exists for was re-opened by the fix for the
+    # false red. `_MANIFEST_FILE` is subtracted before the other-file test.
+    ("The `carve_out:` entry sits in `config/ci-surfaces.yml` and read 9943 before "
+     "the last re-derivation.", ["9943"]),
+    ("The `carve_out:` entry in `config/ci-surfaces.yml` moved to 9987 this week.",
+     ["9987"]),
+    # ⚠️ THE RESIDUAL, pinned so it cannot widen silently: a bare `:NNNN` on a line
+    # that also names another file is NOT seen. That is the deliberate cost of the
+    # exemption above — nothing mechanical can tell a continuation of that file's cite
+    # from a re-typed manifest line — and the doc-wide STRICT arm still catches a
+    # manifest-bound cite on any line at all.
+    ("`capstone_run.py`'s corpus literal; the entry also sat at `:9987`.", []),
+])
+def test_the_neighbour_arm_admits_another_files_cite_and_still_catches_this_claims(
+        line, strays):
+    """A neighbour line's number belongs to the file it is bound to, or to this claim."""
+    assert _neighbour_number_strays(line) == strays, (
+        f"`_neighbour_number_strays({line!r})` — the exemption for another file's cite "
+        f"must not become a bypass, and it must not refuse correct prose")
+
+
+def test_the_neighbour_population_includes_the_line_that_names_the_entry():
+    """A line naming the ENTRY is a line about the claim — measured GREEN when not.
+
+    The neighbour arm gated on the BLOCK's vocabulary, so the most natural way to put
+    the number back was invisible to it: all three of these lines carried no
+    `carve_out`/`entry`/`block`/`manifest` token, so none was scanned and the
+    re-introduced `:9987` stayed green.
+    """
+    entry = "test_pack_logic_writeprobe_11083.py"
+    for line in (f"The row `{entry}` sits at `:9987` on this head.",
+                 f"The row `{entry}` sits at 9987 on this head.",
+                 "The write-probe row sits at `:9987` on this head."):
+        assert (_BLOCK_WORDS.search(line) or _ENTRY_STEMS.search(line)), (
+            f"{line!r} is not in the neighbour population — the entry's own name "
+            f"must put a line under the arm, or the rot returns uncaught")
+        assert _neighbour_number_strays(line.replace(entry, "")), (
+            f"{line!r} is in the population but yields no stray — the arm is inert")
+    # …and the widening must not drag ordinary prose in: a cite of ANOTHER module is
+    # the document's normal writing, and `_neighbour_number_strays` exempts it.
+    prose = ("the block is spliced by `tools/ci_selection.py` "
+             "(its `entry_lines` loop, `:4906`)")
+    assert _neighbour_number_strays(prose) == [], (
+        "a cite of another module on a neighbouring line must stay green")
+
+
+def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file():
+    """A line naming `ci-surfaces.yml` is a line about the claim — measured GREEN when not.
+
+    ⛔ WHY (#12369 review, P2, measured). The population gate admitted the block's
+    vocabulary and the entry's name, but NOT the manifest's FILENAME — while
+    `_MANIFEST`, which the doc-wide arm already binds on, treats `ci-surfaces.yml`
+    as the manifest. So the loop `continue`d before `_neighbour_number_strays` ran,
+    and the most natural way to put the number back stayed green:
+
+        Re-derived again: `config/ci-surfaces.yml` — its 9987th line at this head.
+
+    The identical sentence with the WORD "manifest" instead of the filename WAS
+    scanned and red. One vocabulary admitted, the other not, for the same file — and
+    the arm's own failure message promises a line number "must not reappear ANYWHERE
+    in the document". An ORDINAL (`9987th line`) is unambiguously a POSITION, not the
+    count-ambiguous `number + lines` residual the regex states, so no spelling
+    exemption applies here.
+
+    The second assertion is the one that would have caught it originally: being in the
+    POPULATION is not the same as yielding a finding, and only the second is the arm
+    working.
+    """
+    # ⛔ THESE THREE, and the neighbour arm is STRICT here — it refuses a count beside
+    # the manifest's name as readily as a position, which is why `9987 lines` and
+    # `9987 rows` are asserted RED below rather than exempted. (An earlier cut of this
+    # comment claimed the arm was "deliberately UNIT-AWARE" and named a helper,
+    # `_bare_number_hits_unit_aware`, that no longer exists — stale text from the round
+    # that deleted the tail allow-list, and contradicting the assertions 20 lines on.
+    # An ORDINAL leads because it is the spelling every arm can see.)
+    for line in (
+            "Re-derived again: `config/ci-surfaces.yml` — its 9987th line at this head.",
+            "`ci-surfaces.yml` holds that row, which read 9943 last week.",
+            "`config/ci-surfaces.yml` — read 9943 yesterday",
+            "see `ci-surfaces.yml`, line 9987"):
+        assert _BLOCK_WORDS_WITH_MANIFEST.search(line), (
+            f"{line!r} is not in the neighbour population — a line naming the "
+            f"manifest's FILENAME is a line about this claim, or the rot returns "
+            f"uncaught in the document's own words")
+        assert _in_neighbour_population(line, "the claim line"), (
+            f"{line!r} is refused by `_in_neighbour_population`, which is the "
+            f"function the block arm's loop now CALLS — the constants are not the "
+            f"gate on their own")
+        assert _neighbour_number_strays(line), (
+            f"{line!r} is in the population but yields no stray — the arm is inert")
+    # …and the CLAIM line itself is never a neighbour, or the block arm would report
+    # the claim sentence's own text as a stray beside itself.
+    assert not _in_neighbour_population("`carve_out:` holds one", "`carve_out:` holds one")
+    assert not _in_neighbour_population("an unrelated sentence about the loader",
+                                        "`carve_out:` holds one")
+    # ⛔ THE WIRING PIN (#12369 review, P2). Reverting the loop to the pre-delta gate
+    # (`_BLOCK_WORDS` alone, or the two constants inlined) leaves every constant
+    # assertion above GREEN while the false pass returns; only the CALL SITE is the
+    # gate. Parsed, not grepped: the assertion is that the loop over `doc_lines`
+    # contains a call to `_in_neighbour_population`.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    loops = [node for node in ast.walk(tree)
+             if isinstance(node, ast.For)
+             and isinstance(node.target, ast.Name)
+             and node.target.id == "other_line"]
+    assert loops, ("the block arm's neighbour loop no longer iterates `other_line` "
+                   "— re-point this wiring pin rather than deleting it")
+    for loop in loops:
+        assert any(isinstance(call, ast.Call)
+                   and isinstance(call.func, ast.Name)
+                   and call.func.id == "_in_neighbour_population"
+                   for call in ast.walk(loop)), (
+            "the neighbour loop does not consult `_in_neighbour_population` — the "
+            "population gate was reverted to a narrower spelling, and the false pass "
+            "#12369 closed (a line naming the manifest by FILENAME, or the entry by "
+            "name, going UNSCANNED) comes back with every constant test green")
+    # …and the unambiguous UNITS stay counts on a neighbouring line: `entries`, `s`,
+    # `bytes` are never positional nouns, so they are not what the strict arm refuses.
+    for count in ("`config/ci-surfaces.yml` lists 60 entries in `carve_out:`",
+                  "`config/ci-surfaces.yml`'s `durations:` row: 166 s",
+                  "`config/ci-surfaces.yml` is 1319360 bytes"):
+        assert _neighbour_number_strays(count) == [], (
+            f"an unambiguous COUNT beside the manifest's name must stay green: {count!r}")
+    # ⛔ `N lines` / `N rows` IS A POSITION ON A NEIGHBOURING LINE, IN EVERY SPELLING,
+    # and the four below are the ones that defeated the tail ALLOW-LIST this arm used
+    # to carry (#12369 review, P2 — each measured GREEN under it):
+    #
+    #     … sits 9987 lines up from the bottom.           (tail not listed)
+    #     … sits 9987 lines, measured down from the top.   (tail not adjacent)
+    #     … reads 9987 rows in .                           (space before the period)
+    #     Deep into the block, the entry reads 9987 lines.   (tail BEFORE the number)
+    #
+    # A list whose miss ACCEPTS a false position cannot be made complete by extending
+    # it, so the list is gone and the arm is strict. ⚠️ STATED COST, the benign
+    # direction: `— 155 lines of rows` beside the manifest's name is now refused too.
+    # Measured before choosing — this document's neighbour population is 3 lines and a
+    # strict arm yields ZERO findings on all of them — so the cost is theoretical here
+    # while the false-PASS surface was reachable.
+    for position in (
+            "The `carve_out:` entry sits 9987 lines into the block at this head.",
+            "The `carve_out:` entry sits 9987 lines up from the bottom.",
+            "The `carve_out:` entry sits 9987 lines, measured down from the top.",
+            "The `carve_out:` entry reads 9987 rows in .",
+            "Deep into the block, the `carve_out:` entry reads 9987 lines.",
+            "That `carve_out:` entry is 9987 rows down from the top.",
+            "the block's entry, 9987 lines deep, is the one this claims"):
+        assert _neighbour_number_strays(position), (
+            f"a `lines`/`rows` POSITION on a neighbouring line must be scanned: "
+            f"{position!r} — there is no tail allow-list to slip past any more")
 
 
 def test_the_two_cite_arms_are_complementary_not_duplicate():
@@ -5973,6 +6692,62 @@ def test_the_two_cite_arms_are_complementary_not_duplicate():
         "_MANIFEST_CITE must NOT red a bare `:NNNN` — elsewhere in the document "
         "that is a legitimate cite of some OTHER module, and refusing it is the "
         "false-red class this PR exists to remove")
+
+
+def test_the_stray_entry_arm_never_claims_a_clause_the_sentence_does_not_carry():
+    """The P3 a fresh-context review found: a TRUE red with a FALSE message.
+
+    ⛔ WHY (measured on the D2 state — the sentence rewritten to name
+    `test_graph_census_7949.py` and NOT the entry). Ungated, the arm fired beside
+    the "does not name the entry" arm and said the sentence named
+    `['test_graph_census_7949.py']` *besides* `test_pack_logic_writeprobe_11083.py`
+    — a clause that sentence did not contain. Two findings for ONE defect, one of
+    them false, and the false one names the fix: a reader correcting "besides"
+    would go looking for a second filename that is not on the line while the real
+    defect is that the ONLY filename is the wrong one.
+
+    Nothing was ever accepted that should have been refused — the red stands
+    either way — so this is not a fail-open. It is the *diagnostic* that is
+    pinned here, which is the same "the MESSAGE was the defect" class this pin
+    already closed once for the bare-number arm (`_BARE_NUM`'s table above: an
+    earlier message prescribed the very form the arm refuses).
+
+    Both directions, because a gate that silenced the arm outright would turn the
+    addition case GREEN — the false-PASS direction is the worse one.
+    """
+    entry = "test_pack_logic_writeprobe_11083.py"
+
+    # (a) THE MEASURED D2 STATE: a different filename, entry named nowhere. The
+    #     OTHER arm owns this diagnosis; this one must say nothing rather than
+    #     invent a "besides" clause.
+    replaced = "`carve_out:` holds **one**: `test_graph_census_7949.py` — the E6 lane"
+    assert _stray_entry_finding(replaced, entry) is None, (
+        "the stray-entry arm must stay SILENT when the sentence does not name the "
+        "entry — its wording says 'besides <entry>', which is false there, and the "
+        "'does not name' arm already reports that state with a true message "
+        "(#12369 review P3, measured: both fired and the second one was false)")
+
+    # (b) THE ADDITION CASE — the arm's actual job, and it must still fire. The
+    #     path prefix is not an exemption: this spelling was GREEN under the first
+    #     cut's `(?<![\w/])` lookbehind while the bare name was RED.
+    added = (f"`carve_out:` holds **one**: `{entry}` — unlike "
+             "`tests/test_graph_census_7949.py`, which lives elsewhere")
+    finding = _stray_entry_finding(added, entry)
+    assert finding is not None, (
+        "a SECOND capstone filename on the claim sentence must be refused, "
+        "including when it is written with a path prefix")
+    assert "test_graph_census_7949.py" in finding, (
+        f"the finding must name the offending file so it is actionable: {finding!r}")
+
+    # (c) THE CONTROL: the sentence as this document actually carries it must not
+    #     fire — the arm is not red-on-red. `Path(__file__).name` is exempt because
+    #     the sentence cites this module beside the clause.
+    clean = (f"`carve_out:` holds **one**: `{entry}` — the pin reads the block "
+             f"(`{Path(__file__).name}::_section_entries`); `uri_requiring:` and "
+             f"`slow_files:` hold none")
+    assert _stray_entry_finding(clean, entry) is None, (
+        "the arm must not fire on the document's own sentence — this module's "
+        "basename is exempt because the sentence cites it beside the clause")
 
 
 def test_a_cite_that_names_a_directory_names_a_file_that_exists():
