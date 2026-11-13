@@ -5769,7 +5769,32 @@ def _index_search(search: dict) -> dict:
 def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[dict | None, str]:
     """(existing, mode) — exact kind match first (namespace-preserved, case-
     folded); bare-form fallback ONLY when unambiguous; 'ambiguous' when
-    multiple namespaces collide on the bare form (never guess which one)."""
+    multiple namespaces collide on the bare form (never guess which one).
+
+    ⛔ #12295 — THE FOLDED RUNG, and why it is a SECOND arm rather than a
+    replacement. ``_norm`` (``:4225``) is whitespace collapse + lowercase only;
+    it is byte-identical to Zep's ``_normalize_string_exact``
+    (``dedup_helpers.py``), i.e. the exact rung of the field's ladder. `#11901`
+    measured what that costs: **0 of 419 real surface variants attach at every
+    ``k`` in both retrieval modes**, while 62 % of them are already INSIDE the
+    window — so the loss is in the comparison, not in the retrieval or the
+    width.
+
+    The folded arm compares :func:`tortoise.entity_blocking.key_of`, which is
+    ``entity_resolver.normalize_entity_name`` — the key every write door already
+    stores as ``canonical_name`` since `#12047` (``sdk.py:45593``,
+    ``api.py:2628``, ``projection/entities.py:5077``). It differs from ``_norm``
+    exactly where the measured variant classes live: it drops a leading article
+    and folds every punctuation run to a space, so ``the plan-doc``,
+    ``The Plan Doc`` and ``the plan doc`` share one key.
+
+    ⛔ It is EQUALITY, never a similarity score — no threshold, no second
+    constant (`#2730` §6.7 refused one; a false merge is invisible, a false split
+    is cheap). The non-injective keys (path basename, leading ``#``) attach only
+    when exactly ONE candidate carries them, which is the same discipline the
+    bare-kind arm below already applies. ``name`` is never rewritten; the key is
+    derived for the comparison and discarded.
+    """
     norm_name = _norm(name)
     kind_folded = str(kind).strip().lower()
     exact = [e for e in entities
@@ -5784,6 +5809,44 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     if len(matches) == 1:
         return matches[0], "bare"
     if len(matches) > 1:
+        return None, "ambiguous"
+    return _find_by_folded_key(entities, name, kind_folded, bare)
+
+
+def _find_by_folded_key(entities: list[dict], name: str, kind_folded: str,
+                        bare: str) -> tuple[dict | None, str]:
+    """#12295: the comparison-side fold, tried only after the exact arms miss.
+
+    Two arms, mirroring the two above (kind-preserved, then bare-kind):
+
+    * ``folded``     — one candidate folds to the mention's key, same kind;
+    * ``folded_bare`` — same, across namespace-folded kinds, only when unique;
+    * ``ambiguous``  — the fold collides on two or more live names. Fail closed:
+      an unresolved identity is never asserted ``new`` (§4.4 I1, ``#11653``), so
+      the caller holds it instead of minting a duplicate.
+
+    The non-injective keys are checked in ``entity_blocking.attach_matches``,
+    which refuses to pick between two basename carriers.
+    """
+    from .entity_blocking import attach_matches, key_of
+
+    if not key_of(name):
+        return None, "none"
+    ranked = attach_matches(name, entities)
+    if not ranked:
+        return None, "none"
+    by_id = {str(e.get("id") or ""): e for e in entities}
+    hits = [by_id[m["id"]] for m in ranked if m["id"] in by_id]
+    same_kind = [e for e in hits
+                 if str(e.get("kind", "")).strip().lower() == kind_folded]
+    if len(same_kind) == 1:
+        return same_kind[0], "folded"
+    if len(same_kind) > 1:
+        return None, "ambiguous"
+    same_bare = [e for e in hits if _norm_kind(e.get("kind", "")) == bare]
+    if len(same_bare) == 1:
+        return same_bare[0], "folded_bare"
+    if len(same_bare) > 1:
         return None, "ambiguous"
     return None, "none"
 

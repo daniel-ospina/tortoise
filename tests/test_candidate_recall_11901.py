@@ -349,23 +349,95 @@ def test_derive_queries_emits_one_object_query_per_entity_name():
     assert queries["object"] == ["the plan doc", "the timeout command"]
 
 
-def test_the_matcher_is_exact_norm_equality_plus_kind():
-    """§4/§5's premise: a surface variant is invisible to phase 1.
+def test_the_matcher_is_norm_exact_AND_gains_the_folded_rung_12295():
+    """§4/§5's premise, RESTATED — and the pin that moved is named (#12295).
 
-    ``_norm`` is whitespace-collapse + lowercase and nothing else, so a mention
-    differing by an article or a separator does not match even when the node is
-    in the window — which is why the fold belongs in the comparison and NOT in
-    ``_norm`` (whose other consumers assume exactly this narrow contract).
+    ``_norm`` is whitespace-collapse + lowercase and nothing else. That stays
+    true, and it must: ``_norm``'s other consumers assume exactly this narrow
+    contract, which is why the fold belongs in the COMPARISON and not in
+    ``_norm``.
+
+    What changed: phase 1 now tries the comparison-side fold (`#12295`,
+    ``entity_blocking.attach_matches``) after the exact arms miss, so a surface
+    variant IS visible to phase 1. ⚠️ The committed artifacts
+    (``measurement.json`` / ``measurement-fts-only.json``) were taken BEFORE
+    this rung landed, so their ``attached: 0`` arm describes the pre-#12295
+    matcher — the ``docs/research/2026-11-12-12295-*`` measurement is the
+    before/after that supersedes it. This test pins both halves so neither can
+    drift silently in the "0 %" direction (the arm the brief's headline rests on)
+    or in the "it always worked" direction.
     """
     from tortoise.extractor_v2 import _find_existing_entity, _norm
 
     assert _norm("The  Plan-Doc") == "the plan-doc"
     existing = [{"id": "obj-1", "name": "the plan doc", "kind": "core:other"}]
     assert _find_existing_entity(existing, "the plan doc", "core:other")[1] == "exact"
+
+    # The old arms are byte-identical, so the pre-#12295 number is reproducible:
+    # `_norm` still folds nothing here, i.e. the EXACT arm still misses.
     for variant in ("plan doc", "the-plan-doc", "the plan-doc"):
+        assert _norm(variant) != _norm("the plan doc"), (
+            f"{variant!r} is now folded by _norm — the fold escaped the comparison")
         ex, mode = _find_existing_entity(existing, variant, "core:other")
-        assert ex is None, f"{variant!r} resolved — the brief's 0% arm is stale"
-        assert mode == "none"
+        assert mode not in ("exact", "bare"), (
+            f"{variant!r} bound through the pre-#12295 arm ({mode}) — the folded "
+            "rung's contribution would be hidden")
+    # …and the #12295 folded rung binds them, on the SAME node (id, not name):
+    for variant in ("plan doc", "the plan-doc"):
+        ex, mode = _find_existing_entity(existing, variant, "core:other")
+        assert ex is not None and ex["id"] == "obj-1", (
+            f"{variant!r} did not resolve via the folded rung — #11901's 0 %/419 "
+            "arm is only beaten if this binds")
+        assert mode == "folded"
+
+    # ⛔ THE RESIDUAL, pinned so it cannot be mistaken for coverage.
+    # ``the-plan-doc`` keeps its article: ``normalize_entity_name`` anchors the
+    # article strip on a real whitespace boundary BEFORE folding punctuation
+    # (#12047 round-4 finding 5 — the fix that stopped ``a-b`` folding to
+    # ``b``). So an article + separator variant of a ``the …`` name does NOT
+    # bind, and the measurement must say so rather than imply the whole
+    # separator class moved.
+    ex, mode = _find_existing_entity(existing, "the-plan-doc", "core:other")
+    assert ex is None and mode == "none", (
+        "the-plan-doc now binds — if that is a deliberate new comparison key it "
+        "must arrive with its own precision pin for 'a-b' vs 'b' (#12047 R4F5)")
+
+
+def test_the_article_anchor_decision_is_not_reversed():
+    """#12047 round-4 finding 5, pinned from the outside (#12295 touches the
+    comparison and must not re-open the fold): `a-b` is NOT `b`."""
+    from tortoise.extractor_v2 import _find_existing_entity
+
+    existing = [{"id": "obj-b", "name": "b", "kind": "core:other"}]
+    ex, mode = _find_existing_entity(existing, "a-b", "core:other")
+    assert ex is None and mode == "none", f"'a-b' folded onto 'b' as {mode}"
+
+
+def test_a_different_noun_never_binds_through_the_folded_rung():
+    """The fold must not become a fuzzy matcher (#2730 §6.7: a false merge is
+    invisible and hard to undo). No similarity, no threshold — so a near-miss
+    stays a near-miss."""
+    from tortoise.extractor_v2 import _find_existing_entity
+
+    existing = [{"id": "obj-1", "name": "the plan doc", "kind": "core:other"}]
+    for other in ("the play doc", "plan", "the plan docs", "the doc"):
+        ex, mode = _find_existing_entity(existing, other, "core:other")
+        assert ex is None and mode == "none", f"{other!r} bound as {mode} — too fuzzy"
+
+
+def test_the_folded_rung_refuses_an_ambiguous_collision():
+    """Two live carriers of one fold is legal since #3590 — never guess.
+
+    §4.4 I1: an unresolved identity is NEVER asserted `new`, so the caller holds
+    it. Returning either id would be a silent pick (`entity_identity`'s own
+    route-then-refuse rule).
+    """
+    from tortoise.extractor_v2 import _find_existing_entity
+
+    existing = [{"id": "obj-1", "name": "the plan doc", "kind": "core:other"},
+                {"id": "obj-2", "name": "plan-doc", "kind": "core:other"}]
+    ex, mode = _find_existing_entity(existing, "plan_doc", "core:other")
+    assert ex is None and mode == "ambiguous"
 
 
 def test_the_variant_classes_are_the_ones_norm_does_not_fold():

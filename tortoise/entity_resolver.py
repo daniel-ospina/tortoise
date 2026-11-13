@@ -387,11 +387,39 @@ def entity_candidates(graph, *, limit: int | None = 50,
         entities = scan_entities(graph, labels=labels)
         if not entities:
             return []
-        blocks: dict[tuple, list[dict]] = {}
-        for ent in entities:
-            if not ent["folded"]:
+        # ⛔ #12295 — MULTI-KEY BLOCKING. This used to group on ONE key,
+        # ``block_key(folded)`` = the first ``MIN_BLOCK_CHARS`` folded
+        # characters, so ``the project alpha`` and ``alpha project`` — a
+        # transposition, and one of the classes `#11901` measured at a 0.0 %
+        # attach rate — landed in different blocks and the pair was never
+        # compared, at ANY similarity. The block set is now the union of the
+        # folded key, the folded prefix (kept, so the exact rung can still never
+        # be missed by the wider set), per-token prefixes and LSH shingle bands
+        # (``entity_blocking``, Zep's shape, ``dedup_helpers.py``). Candidate
+        # generation only: every rung below still decides, and nothing here can
+        # auto-merge on a similarity.
+        from .entity_blocking import MAX_BLOCK_SIZE, BlockIndex
+
+        index = BlockIndex.from_rows(entities)
+        oversized = 0
+        blocks = []
+        for members_ids in index.blocks():
+            if len(members_ids) > MAX_BLOCK_SIZE:
+                oversized += 1
                 continue
-            blocks.setdefault((ent["label"], block_key(ent["folded"])), []).append(ent)
+            blocks.append(members_ids)
+        if oversized:
+            _logger.warning(
+                "entity blocking: %d block(s) exceeded %d members and were not "
+                "compared — narrow the key set or review that cluster by hand "
+                "(#12295: a silently dropped block reads as 'nothing shares "
+                "this key', a false negative attributed to the data)",
+                oversized, MAX_BLOCK_SIZE)
+        by_id = {str(ent["id"]): ent for ent in entities}
+        #: Pairs already emitted. A union of keys puts one pair in SEVERAL
+        #: blocks, and the review surface must not show it twice (nor let the
+        #: second sighting re-elect a survivor the first already settled).
+        emitted: set[tuple[str, str]] = set()
 
         sem: dict = {}
         if include_semantic and len(entities) <= SEMANTIC_MAX_ENTITIES:
@@ -407,7 +435,8 @@ def entity_candidates(graph, *, limit: int | None = 50,
             _SEM_FLOOR = 1.0
 
         pairs: list[dict] = []
-        for (_label, _key), members in sorted(blocks.items(), key=lambda kv: kv[0]):
+        for member_ids in blocks:
+            members = [by_id[i] for i in member_ids if i in by_id]
             if len(members) < 2:
                 continue
             members.sort(key=lambda e: (str(e["createdAt"] or ""), e["id"]))
@@ -469,6 +498,16 @@ def entity_candidates(graph, *, limit: int | None = 50,
                     kind_mismatch = bool(
                         survivor["kind"] and candidate["kind"]
                         and survivor["kind"] != candidate["kind"])
+                    # ⛔ #12295: a union of blocking keys puts the SAME pair in
+                    # several blocks. Emit it once here; which METHOD represents
+                    # it is decided below, where the per-duplicate reduction keeps
+                    # the best-scoring row — so a pair that is `exact` in one
+                    # block and merely `fuzzy` in another is still reviewed as the
+                    # exact twin it is.
+                    _pair_key = (survivor["id"], candidate["id"])
+                    if _pair_key in emitted:
+                        continue
+                    emitted.add(_pair_key)
                     pairs.append({
                         "id": candidate["id"],
                         "candidate_id": candidate["id"],
