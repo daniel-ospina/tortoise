@@ -5278,8 +5278,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # transcription slip: the number is owned by another tool, so every
         # landing PR above it is a re-derivation this pin cannot do for itself.
         #
-        # So it is re-derived from THIS rebased tree, and every value below is
-        # stated with the tree it was read from, never carried across a rebase:
+        # So it is re-derived from THIS MERGED tree, and every value below is
+        # stated with the tree it was read from, never carried across a rebase or
+        # a merge:
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
         # 9943 at `9828250732`; 9949 at `ba84fbfabf`, 9965 at `e200623286` and
@@ -5287,15 +5288,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # registered lines above it; 9987 at `f1f74135a15b` (+13 at 2237 and +1
         # at 9150, the #12294 name-entropy gate); 10021 at `87c07462a807`, whose
         # own +34 was made by three commits (32 at 7535, 1 at 1039, 1 at 2237);
-        # and 10022 at the `main` tip `42409813a7` (+1 at 2237, #12348). This
+        # 10022 at `42409813a7` (+1 at 2237, #12348); and 10076 at the `main`
+        # tip `ca74f2375e`, whose +54 came from THREE landings in FIVE hunks
+        # (12 at 1610, 7 at 2250, 8 at 6830, 5 at 9737, 22 at 7565). This
         # branch adds +13 at 2239 (its own `core:` registration), so the tree
-        # that adds BOTH parents reads 10035 = 10022 + 13 = 9943 + 92.
-        # `carve_out:` opens 9909 and `uri_requiring:` 10240 at THIS tree, so
-        # 10035 is inside the section, and the identical text also sits at 6119
-        # and 8550 (over `9828250732`'s 6082 / 8459 — the two move at DIFFERENT
+        # that adds BOTH parents reads 10089 = 10076 + 13.
+        # `carve_out:` opens 9963 and `uri_requiring:` 10294 at THIS tree, so
+        # 10089 is inside the section, and the identical text also sits at 6138
+        # and 8599 (over `9828250732`'s 6082 / 8459 — the two move at DIFFERENT
         # rates, because only the hunks above each one count), which is what the
         # 5th element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2236, `sdk:` 8316 at THIS tree) of `surfaces:`, so the
+        # (`core:` 2248, `sdk:` 8365 at THIS tree) of `surfaces:`, so the
         # resolver's nearest-column-zero-key rule reports the PARENT: a cite onto
         # either refuses with `sits in section 'surfaces:', not 'carve_out:'` —
         # measured, so a re-derivation onto it does not get told `sdk:` and
@@ -5346,8 +5349,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # own `core:` registration adds +13, so the tree that adds BOTH reads
             # 10089 = 10076 + 13. ⛔ BOTH sides of this merge carried a stale
             # number (10035 ours, 10034 main's) and NEITHER describes a tree that
-            # adds both — five `main` landings since `42409813a7` moved the entry
-            # 10022 -> 10076. ⛔ Naming only the FIRST hunk above the entry is how
+            # adds both — `main`'s +54 since `42409813a7` came from THREE
+            # landings in FIVE hunks, and moved the entry 10022 -> 10076. ⛔ Naming
+            # only the FIRST hunk above the entry is how
             # `9951` stood here — re-derive the SUM of every hunk above it.
             ("10089", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
