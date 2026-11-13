@@ -57,8 +57,11 @@ The SDK serves **two audiences**:
 **The builder pays for their end-customers.** An end-customer never has an organisation
 account — they are a memory graph inside the builder's account. Verified against
 `tortoise/pricing.py`: `tier_limits()` exposes `max_graphs_per_team`, whose value is
-**`None` = unlimited** on the **pro** and **team** plans (the tiers are free, solo,
-pro, team, anon — there is no "builder" plan; a builder buys pro or team).
+**`None` = unlimited** on the **Builder** and **Team** plans — `pro` and `team` in
+`product/pricing.json`. **Builder *is* the `pro` tier:** the identifier is `pro` and
+`Builder` is the name it is sold under (#4336), declared in one place in code as
+`pricing.TIER_DISPLAY_NAMES` so a reader does not have to infer it from the website's
+label map (#12444).
 
 **The audience labels used below:** *agent* (a model using the MCP surface — it never constructs a
 client and never touches tenancy), *builder* (code integrating the SDK for an app), *admin* (a
