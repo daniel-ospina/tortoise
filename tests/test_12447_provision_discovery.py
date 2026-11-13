@@ -207,11 +207,63 @@ class TestTheGuardClaimsOneCredentialClassOnly:
                          json={"name": "nested-attempt"},
                          headers={"Authorization": f"Bearer {token}"})
             detail = _detail(r2)
-            assert detail["error_code"] in (
-                "PROVISION_REQUIRES_ORG_KEY", "KEY_NOT_USER_MINTED"), detail
+            # EXACTLY this code, not a set: every provisioned key carries a
+            # data scope (`_mint_graph_key` defaults to `graphs:read`), so
+            # `get_current_org_gated`'s dormancy arm passes it through and the
+            # provisioning door's own deleg gate is what refuses it. Accepting
+            # `KEY_NOT_USER_MINTED` here would stay green if that ever changed,
+            # while the refusal this PR ships became unreachable.
+            assert detail["error_code"] == "PROVISION_REQUIRES_ORG_KEY", detail
             # …and the refusal points at the account-level door, never at a
             # way to elevate this key.
             assert ORG_ENDPOINT in detail["message"], detail
+        finally:
+            gen.close()
+
+
+class TestTheListingDoorTeachesTheSameWay:
+    """#12447 measured `GET /v1/graphs` → `401` as the second wall. Teaching
+    only the create door would leave a builder who has ALREADY provisioned
+    unable to enumerate their graphs, answered by the same "your key is bad"."""
+
+    def test_api_key_on_the_listing_door_names_the_real_remedy(self, tmp_path):
+        gen = _setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            token = _honest_graph_scoped_key(sdk, tid)
+            r = tc.get(f"/v1/graphs?org_id={tid}",
+                       headers={"Authorization": f"Bearer {token}"})
+            detail = _detail(r)
+            assert detail["error_code"] == "GRAPH_LISTING_VIA_SESSION", detail
+            # The remedy is the truthful one: no key-driven listing exists, so
+            # the graph id comes from the provisioning 201 — named here.
+            assert ORG_ENDPOINT in detail["message"], detail
+            assert "graph id" in detail["message"], detail
+            # …and it says what the account surface DOES answer, so the reader
+            # is not left guessing where the limits live.
+            assert "/v1/team" in detail["message"], detail
+        finally:
+            gen.close()
+
+    def test_a_session_listing_is_untouched(self, tmp_path):
+        import tortoise.hosted_api as ha_mod
+        gen = _setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            ha_mod.app.dependency_overrides[ha_mod.get_current_user] = \
+                lambda: {"user_id": "list-owner", "email": "o@x.com"}
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:'list-owner', org_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"tid": tid},
+            )
+            try:
+                r = tc.get(f"/v1/graphs?org_id={tid}")
+                assert r.status_code == 200, r.text
+                assert r.json()[0]["kind"] == "default"
+            finally:
+                ha_mod.app.dependency_overrides.pop(
+                    ha_mod.get_current_user, None)
         finally:
             gen.close()
 

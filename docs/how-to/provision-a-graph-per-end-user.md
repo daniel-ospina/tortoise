@@ -20,11 +20,12 @@ reaches *only their* graph and **cannot** create more.
 invisible: the obvious request failed with a message that named neither the right
 endpoint nor the missing scope.
 
-> **Canonical terms** (`docs/ONTOLOGY.md`): an **organisation account** is the
-> billing and plan boundary; it owns many **memory graphs**; a **credential**
-> (API key) authenticates to an account or to one graph. The mid tier is called
-> **Builder** in the product and `pro` in the API (#12444) — they are the same
-> plan.
+> **Canonical terms** (`docs/ONTOLOGY.md` §1.1 for **organisation account**, and
+> `docs/registry-graph-schema.md` for the account layer it owns): an
+> **organisation account** is the billing and plan boundary; it owns many
+> **memory graphs**; a **credential** (API key) authenticates to an account or to
+> one graph. The mid tier is called **Builder** in the product and `pro` in the
+> API (#12444) — they are the same plan.
 
 ---
 
@@ -47,8 +48,8 @@ rolls the graph back).
 
 ## 1. Confirm the plan and the credential
 
-**Plan.** Custom graphs require **Builder** (`pro`) or **team**
-(#2111 Gate #2):
+**Plan.** Any tier from **`solo`** up may provision custom graphs (#2111
+Gate #2 blocks only `free`/`anon`):
 
 | tier | custom graphs | `max_api_keys` |
 |---|---|---|
@@ -119,7 +120,10 @@ The `201` body:
 
 `key_plaintext` is shown **once** — nothing retrieves it again (the store holds
 only a salted hash). Persist it into your own secret store before dropping the
-response.
+response — and persist `graph.id` with it: there is **no key-driven listing
+route** today, so the 201 is the only call that returns a graph's id (the
+session-only `GET /v1/graphs` answers an API key with
+`403 GRAPH_LISTING_VIA_SESSION`, which says exactly this).
 
 **Do not call `POST /v1/graphs` for this.** That endpoint is the *dashboard's*
 session-authenticated alias for the same service. With an API key it answers
@@ -186,25 +190,43 @@ curl -s -X DELETE "https://app.premiselabs.co/v1/graphs/$GRAPH_ID?org_id=$ORG_ID
   -H "Authorization: Bearer $TORTOISE_API_KEY"   # needs graphs:delete (owner-class)
 ```
 
-This is a **recoverable** soft delete (a tombstone, restorable via
-`POST /v1/graphs/trash/{graph_id}/restore`). It revokes every key bound to the
-graph, drops its ACL user, frees the quota slot and the graph name, and deletes
-nothing irreversibly. `graphs:delete` is **not** in the child policy, so a
-minted key can never do this — deletion is an account-level operation, which is
-the same one-level-deep rule seen from the other side.
+This is a **soft delete** — a tombstone, not an erasure — but read the two
+caveats before you build a churn story on it:
+
+- **Restore is not callable with your API key.**
+  `POST /v1/graphs/trash/{graph_id}/restore` is a *session + owner/admin*
+  surface, so it is a dashboard/operator step, not something your server can do
+  with the credential this guide uses.
+- **A restored graph has no live keys.** The delete revoked every key bound to
+  the graph and restore does not resurrect them — re-mint and re-deliver to the
+  end user (step 2). The data itself is intact (the graph's namespace is
+  gid-keyed and untouched by the tombstone), restore re-occupies the quota slot,
+  and it is refused once the grace window has passed (the tombstone is then
+  purgeable and nothing is restorable).
+
+The delete itself revokes every key bound to the graph, drops its ACL user, frees
+the quota slot and the graph name, and deletes nothing irreversibly.
+`graphs:delete` is **not** in the child policy, so a minted key can never do this
+— deletion is an account-level operation, which is the same one-level-deep rule
+seen from the other side.
 
 ---
 
 ## 6. Refusals, and what each one means
 
-All are `403` with `detail: {"error_code", "message"}` — the shape
-`GRAPH_SCOPED_TEAM_SURFACE` set for credential-scope refusals (#2114).
+**The four credential-scope refusals** are `403` with
+`detail: {"error_code", "message"}` — the shape `GRAPH_SCOPED_TEAM_SURFACE` set
+for credential-scope refusals (#2114). The plan/quota gates below them keep
+their pre-existing shape: a **string** `detail`, plus their own header
+(`X-Upgrade-CTA` / `X-Graph-Quota`). Do not write a client that assumes
+`detail.error_code` exists on every error.
 
 | `error_code` | You did | Remedy |
 |---|---|---|
 | `PROVISION_VIA_ORG_ENDPOINT` | called `POST /v1/graphs` with an API key (the session alias) | call `POST /v1/organizations/{org_id}/graphs`, §2 |
 | `PROVISION_REQUIRES_ORG_KEY` | called the provisioning door with a **minted** key | provision from the account-level key; §4 |
 | `PROVISION_SCOPE_REQUIRED` | called it with an account key that lacks `graphs:create` | mint/grab a key carrying `graphs:create`, §1 |
+| `GRAPH_LISTING_VIA_SESSION` | called `GET /v1/graphs` with an API key | nothing to call — keep `graph.id` from the 201, §2 |
 | `GRAPH_SCOPED_TEAM_SURFACE` | a minted key touching a team/account surface | expected — the key is graph-scoped, §3 |
 | `402` + `X-Upgrade-CTA: pro` | the account is `free`/`anon` | upgrade to Builder (`pro`), §1 |
 | `409` + `X-Graph-Quota: n/max` | the graph quota is full | `solo` holds 1 custom graph; upgrade, or delete a graph |
@@ -212,7 +234,7 @@ All are `403` with `detail: {"error_code", "message"}` — the shape
 
 ---
 
-## 7. What is not shipped (do not build against it)
+## 7. What is not shipped — and what this model is not
 
 **A separate account per end-user** — the tenant-of-tenant model where each
 end-user gets their own *organisation* and membership — is **designed, not
@@ -221,6 +243,22 @@ guide: **one account, one graph per end-user, one graph-scoped key per end-user*
 The end-user has no Tortoise account, no membership row and no PII on our side —
 they hold a key. If you need per-end-user *accounts* (their own billing, their own
 teammates), that is `#8693` and it is not available yet.
+
+⛔ **And the shape in this guide is not the sub-tenancy tier.**
+`docs/scoping/2026-10-19-8693-end-customer-credential-design.md` records this
+exact shape — *one embedder org, one graph per end user, credential bound to that
+graph* — as **Design B, a rejected alternative**: it contradicts that design's
+D2 (each end user = one *team* + one graph), and the key-cap arithmetic in §1 is
+precisely why it was rejected as the tier. So:
+
+- it is **supported as a builder pattern** — that is what this guide documents,
+  and it is the only per-end-user isolation that ships today;
+- using it **as** the tenant-of-tenant tier is not a decision this guide makes.
+  That is a reopen of `#557` Q1, argued in its own home, not a conclusion drawn
+  from a how-to.
+
+If you are designing the tier rather than integrating against it, read `#8693`
+first and do not treat this guide as its endorsement.
 
 ---
 

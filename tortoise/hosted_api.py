@@ -26418,8 +26418,9 @@ def _revoke_graph_keys(org_id: str, graph_id: str | None) -> None:
 # `GET /v1/team`) answered `401 Invalid session token`, `401`, and an
 # actionable `403 GRAPH_SCOPED_TEAM_SURFACE` — so the ONE working door
 # (`POST /v1/organizations/{org_id}/graphs`) was the fourth thing tried, and
-# nothing in any of the three refusals named it or the `graphs:create` scope it
-# wants.
+# nothing in either of the two 401s named it or the `graphs:create` scope it
+# wants. Both of those doors are taught below (`get_current_user_provisioning`,
+# `get_current_user_graph_listing`); the third already carried its own remedy.
 #
 # The remedy is a REFUSAL THAT TEACHES, in the shape #2114 already sanctioned
 # for a credential-scope refusal (`GRAPH_SCOPED_TEAM_SURFACE` ->
@@ -26455,6 +26456,30 @@ def _provision_refusal(error_code: str, message: str) -> HTTPException:
                                  "message": message})
 
 
+def _api_key_bearer(request: Request) -> bool:
+    """True iff the request carries an API key (``tt_``/``tk_``) as its bearer.
+
+    #12447: the ONE credential class the session-only graph doors mis-reported
+    as `401 Invalid session token`. A session JWT starts with ``eyJ``, so it is
+    never claimed here; a missing or malformed credential falls through to
+    `verify_session_jwt`, whose 401s are unchanged."""
+    auth = request.headers.get("Authorization", "")
+    return auth.startswith("Bearer ") and auth[7:].startswith(API_KEY_PREFIXES)
+
+
+async def _session_user_with_overrides(request: Request) -> dict:
+    """Resolve the session user, honouring the test-suite override seam.
+
+    FastAPI applies overrides at DI time, so a DIRECT call to
+    ``get_current_user`` would bypass the auth-bypass overrides ~70 suites
+    install. Mirrors ``get_current_org_gated``/``get_current_org_session``,
+    which honour the same seam for the same reason."""
+    override = request.app.dependency_overrides.get(get_current_user)
+    if override is not None:
+        return await _invoke_override(override, request)
+    return await get_current_user(request)
+
+
 async def get_current_user_provisioning(request: Request) -> dict:
     """Session-authenticated user for a SESSION-ONLY provisioning door.
 
@@ -26468,16 +26493,9 @@ async def get_current_user_provisioning(request: Request) -> dict:
 
     So: a `tt_`/`tk_` bearer gets the teaching refusal, naming the org-level
     endpoint and `graphs:create`. A session JWT (or no credential at all) falls
-    straight through to ``get_current_user``, whose 401s are unchanged — this
-    function only claims the one credential class that was being mis-reported.
-
-    The dependency-override honour is deliberate and mirrors
-    ``get_current_org_gated``: FastAPI applies overrides at DI time, so a
-    DIRECT call to ``get_current_user`` would bypass the test suite's auth
-    bypass. Reading it here keeps every existing override working unchanged.
+    straight through to ``get_current_user``.
     """
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer ") and auth[7:].startswith(API_KEY_PREFIXES):
+    if _api_key_bearer(request):
         raise _provision_refusal(
             "PROVISION_VIA_ORG_ENDPOINT",
             "This endpoint provisions from a signed-in session, not from an "
@@ -26488,10 +26506,33 @@ async def get_current_user_provisioning(request: Request) -> dict:
             "graph and handing them a credential is ONE call. A key minted "
             "that way cannot provision further graphs (one-level-deep by "
             "design), so keep the account-level key on your server.")
-    override = request.app.dependency_overrides.get(get_current_user)
-    if override is not None:
-        return await _invoke_override(override, request)
-    return await get_current_user(request)
+    return await _session_user_with_overrides(request)
+
+
+async def get_current_user_graph_listing(request: Request) -> dict:
+    """Session-authenticated user for `GET /v1/graphs` — the SAME mis-report,
+    one door over.
+
+    #12447 measured three refusals before the builder found the working door:
+    `POST /v1/graphs` → 401, `GET /v1/graphs` → 401, `GET /v1/team` → an
+    actionable 403. Teaching only the first would leave a builder who has just
+    provisioned successfully unable to ENUMERATE their graphs, answered by the
+    identical "your key is bad" message. There is no key-driven listing route
+    today (the account surface `GET /v1/team` reports limits, not graph ids), so
+    the remedy this door teaches is the true one: the graph id lives in the
+    provisioning 201, which is also the only place the graph's key is returned.
+    """
+    if _api_key_bearer(request):
+        raise _provision_refusal(
+            "GRAPH_LISTING_VIA_SESSION",
+            "This endpoint lists an account's graphs from a signed-in session, "
+            "and there is no key-driven listing route today: an API key cannot "
+            "enumerate graphs. Keep the graph id from the provisioning 201 — "
+            f"{_PROVISION_ENDPOINT} returns it together with the graph's key "
+            "(revealed once), which is the only call that returns either. "
+            "`GET /v1/team` with an account-level key reports the account's "
+            "limits (max_graphs, max_api_keys), not its graph list.")
+    return await _session_user_with_overrides(request)
 
 
 @app.post("/v1/organizations/{org_id}/graphs", status_code=201)
@@ -26521,12 +26562,17 @@ async def create_org_graph(org_id: str, body: dict,
     if key_ctx.get("delegation_depth") == 0 or key_ctx.get("key_id") is None:
         # Minted/unknown key → 403 (one-level-deep: minted keys cannot
         # provision, E2E-4). #12447: name the door, the scope, and the rule.
+        # ⚠️ Worded as the RULE, not as an observation: this arm also covers a
+        # caller with no key at all (`key_id is None`), and registry mode can
+        # hold a `deleg=0` row that *does* carry the scope (the DB CHECK is the
+        # Supabase backstop) — so "they never carry it" would be false here even
+        # though the refusal is correct.
         raise _provision_refusal(
             "PROVISION_REQUIRES_ORG_KEY",
-            "This is a minted per-graph key, and minted keys are "
-            "one-level-deep by design: they never carry "
-            f"{_PROVISION_SCOPE}, so they cannot provision. Provision from "
-            "your server with the account-level key that holds "
+            "This key cannot provision graphs: minted per-graph keys are "
+            "one-level-deep by design and are not granted "
+            f"{_PROVISION_SCOPE}, so provisioning is never theirs to do. "
+            "Provision from your server with the account-level key that holds "
             f"{_PROVISION_SCOPE} at {_PROVISION_ENDPOINT}, then hand this "
             "graph's key to your end user.")
     scopes = key_ctx.get("scopes") or []
@@ -28597,7 +28643,7 @@ async def trash_graph_points(graph_id: str, org_id: str,
 
 
 @app.get("/v1/graphs")
-async def list_graphs(org_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
+async def list_graphs(org_id: str, user: dict = Depends(get_current_user_graph_listing)):  # noqa: B008
     """E7 — list graphs in an org (graph switcher). C2 (#2111): rows gain
     status + key_count; point_count dropped (no consumer; a per-row
     data-plane count on every list). Default-first via the seam.
