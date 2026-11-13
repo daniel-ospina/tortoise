@@ -104,6 +104,10 @@ CUT = 10
 POOL = 40
 #: A passage must be long enough to yield a query and short enough to read.
 MIN_CHARS, MAX_CHARS = 120, 900
+#: …and long enough in WORDS to be a passage rather than a fragment. Named, not
+#: an inline literal, because the brief's cost table describes this population
+#: and a restated floor there cannot be derived from a bare ``40``.
+MIN_WORDS = 40
 #: Fixed query-set size per construction rule.
 QUERY_RULES: tuple[str, ...] = ("prefix", "midspan")
 
@@ -145,7 +149,7 @@ def harvest_passages(sessions_dir: Path, limit: int) -> list[dict]:
                     if "```" in text or "`" in text[:40]:
                         continue
                     words = _WORD.findall(text)
-                    if len(words) < 40:
+                    if len(words) < MIN_WORDS:
                         continue
                     out.append({
                         "content": text,
@@ -195,7 +199,7 @@ def _rr(rank: int | None, k: int = CUT) -> float:
 
 
 def _arm_block() -> dict:
-    return {"queries": 0, "pool_absent": 0,
+    return {"queries": 0, "pool_absent": 0, "rerank_skipped_read": 0,
             "recall_at_10_before": 0, "recall_at_10_after": 0,
             "ndcg10_before": 0.0, "ndcg10_after": 0.0,
             "mrr_before": 0.0, "mrr_after": 0.0,
@@ -203,6 +207,36 @@ def _arm_block() -> dict:
             "mean_rank_before": 0.0, "mean_rank_after": 0.0,
             "_rank_sum_before": 0, "_rank_sum_after": 0,
             "_found_before": 0, "_found_after": 0}
+
+
+#: Reasons ``rerank_pool`` reports BEFORE the scorer is consulted: the read
+#: handed it nothing to score. They are READ outcomes, not rerank failures, and
+#: the instrument already models them — the gold stays in the denominator,
+#: ``_ndcg(None)`` is 0, and the block counts ``pool_absent``. Refusing on them
+#: would abort a ~46-minute run over a single query whose derived text matched
+#: nothing, and would blame the reranker for what the read returned.
+READ_SIDE_DEGRADES = frozenset({"disabled", "empty_pool", "empty_query"})
+
+
+def resolve_arm_model(args) -> str:
+    """The cross-encoder this run measures — the one the PRODUCT would load.
+
+    ⛔ ``args.model`` is None on an ordinary run, and the SCORING call resolves
+    its own default through ``rerank_pool`` → ``load_scorer(model or
+    fused_rerank_model())``, which honours ``TORTOISE_FUSED_RERANK_MODEL``.
+    Writing ``args.model or RERANK_MODEL_DEFAULT`` into the artifact therefore
+    records a name the scorer may not have loaded when that knob is set — an
+    artifact that misnames its model is worse than one that says nothing.
+
+    A function so the pin on it is BEHAVIOURAL: a source grep is satisfied by the
+    prose above (measured), and a test of this helper alone is satisfied by a
+    hard-coded id at the call site (measured in the sibling tool), so both are
+    pinned.
+    """
+    if args.model:
+        return args.model
+    from tortoise.rerank import fused_rerank_model
+    return fused_rerank_model()
 
 
 def rerank_degrade_refusal(stats: dict) -> str | None:
@@ -222,6 +256,8 @@ def rerank_degrade_refusal(stats: dict) -> str | None:
     needs a DB before it can reach a real degrade.
     """
     if stats.get("applied"):
+        return None
+    if (stats.get("degrade_reason") or "") in READ_SIDE_DEGRADES:
         return None
     return (f"REFUSED: the rerank DEGRADED on this query "
             f"({stats.get('degrade_reason') or 'no reason given'}) — the arm did "
@@ -263,7 +299,6 @@ def run(args: argparse.Namespace) -> int:
 
     from tortoise.rerank import (
         DEFAULT_FUSED_RERANK_POOL,
-        fused_rerank_model,
         get_scorer,
         rerank_pool,
     )
@@ -319,7 +354,7 @@ def run(args: argparse.Namespace) -> int:
         # ``args.model or RERANK_MODEL_DEFAULT`` into the artifact therefore
         # records a name the scorer may not have loaded when that knob is set —
         # an artifact that misnames its model is worse than one that says nothing.
-        model = args.model or fused_rerank_model()
+        model = resolve_arm_model(args)
         scorer, reason = get_scorer(model)
         if scorer is None:
             print(f"REFUSED: the cross-encoder would not load ({reason}) — a "
@@ -359,6 +394,10 @@ def run(args: argparse.Namespace) -> int:
                     query, pool_rows, text_key="content",
                     pool=args.limit, enabled=True, model=model)
                 score_s += time.perf_counter() - t1
+                if not stats.get("applied") and (
+                        stats.get("degrade_reason") or "") in READ_SIDE_DEGRADES:
+                    # counted, not refused: see READ_SIDE_DEGRADES
+                    block["rerank_skipped_read"] += 1
                 _refusal = rerank_degrade_refusal(stats)
                 if _refusal:
                     print(_refusal, file=sys.stderr)

@@ -2935,10 +2935,12 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
                                   # leg's recall@3 on the #11901 noun-path corpus
                                   # at the SHIPPED width (40): exact arm
                                   # 244→300 / 300 (+56, every mention inside the
-                                  # window); variant arm 406→424 of 426, i.e.
-                                  # **−1**: a candidate fusion ALREADY HAD inside
-                                  # the cut is dropped, which is the risk this
-                                  # record exists to state. (At the narrower width
+                                  # window); variant arm 406→424 of 426 — NET
+                                  # **+18**, of which **19 gained** and **−1**: a
+                                  # candidate fusion ALREADY HAD inside the cut is
+                                  # dropped, which is the risk this record exists
+                                  # to state. (The three figures are distinct; a
+                                  # bare "−1" beside an arrow reads as the delta.) (At the narrower width
                                   # 15 the same arms read 244→277 and 406→425.) The
                                   # width is named because the pool-15 arm is not
                                   # the shippable configuration and quoting it

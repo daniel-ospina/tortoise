@@ -936,19 +936,20 @@ def test_an_all_tied_page_is_NOT_a_recency_order_in_force(sdk, monkeypatch):
     a single capture burst) with no row reordered. The predicate is the SPREAD of
     the effective weights.
     """
-    # ⛔ THE SAME `createdAt` ON EVERY ROW, written straight to the graph:
-    # ``create_point`` stamps a microsecond timestamp, and on this build a later
-    # ``update_point(properties={"createdAt": …})`` leaves the stored value
-    # untouched (measured), so a tie group cannot be seeded through the API.
+    # ⛔ THE SAME `createdAt` ON EVERY ROW, through the PUBLIC write door:
+    # ``create_point`` stamps a microsecond timestamp, and ``update_point``'s
+    # ``**props`` is what overwrites it (``properties={…}`` is NOT a kwarg — it
+    # writes a property of that literal name, which FalkorDB refuses, #7369; a
+    # first version of this fixture used it and silently changed nothing).
     # `_recency_factors` groups by EQUAL sort key, so distinct timestamps would be
     # distinct dates and the spread would be real — a bulk import or a single
     # capture burst writes exactly the shape below.
-    ids = [_id(sdk.create_point(kind="statement",
-                                content=f"zebra migration claim number {i:02d}"))
-           for i in range(5)]
-    sdk._get_proj().g.query(
-        "MATCH (n:Point) WHERE n.id IN $ids SET n.createdAt = $ts",
-        params={"ids": ids, "ts": "2026-01-01"})
+    ids = []
+    for i in range(5):
+        pid = _id(sdk.create_point(kind="statement",
+                                   content=f"zebra migration claim number {i:02d}"))
+        sdk.update_point(pid, createdAt="2026-01-01")
+        ids.append(pid)
     probe = {"recency_field": "createdAt", "recency_boost": 0.5}
 
     # PREMISE, asserted at the MECHANISM and not only at the order: a no-op ORDER

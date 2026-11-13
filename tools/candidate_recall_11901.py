@@ -409,6 +409,22 @@ NDCG_K = 10
 RERANK_POOLS: tuple[int, ...] = (15, 40)
 
 
+def build_rerank_arm(args, sample, window, variants) -> dict:
+    """The ``--rerank`` arm, built from the model the RESOLVER names.
+
+    A seam rather than an inline call so the wiring is pinnable without a graph:
+    a test that drives ``resolve_rerank_model`` alone stays green over a
+    hard-coded model id at this call site (measured — that mutation passed all 43
+    tests, which is exactly the regression this arm's provenance depends on).
+    """
+    return _rerank_arm(
+        sample, window, variants,
+        model=resolve_rerank_model(args),
+        pools=tuple(args.rerank_pool or RERANK_POOLS),
+        top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K,
+        threads=args.rerank_threads)
+
+
 def resolve_rerank_model(args) -> str:
     """The cross-encoder this arm measures — resolved the way the PRODUCT does.
 
@@ -1532,12 +1548,7 @@ def run(args: argparse.Namespace) -> int:
         #           the failure a rerank-only story hides, and the reason the
         #           net is reported beside both components.
         if args.rerank:
-            arms["rerank"] = _rerank_arm(
-                sample, window, variants,
-                model=resolve_rerank_model(args),
-                pools=tuple(args.rerank_pool or RERANK_POOLS),
-                top_k=TOP_K_RERANK_CUT, ndcg_k=NDCG_K,
-                threads=args.rerank_threads)
+            arms["rerank"] = build_rerank_arm(args, sample, window, variants)
 
         # ── #12297 residual 1: the LEXICAL BASELINE CONTROL ──────────────────
         # Same arms, same pools, same pairs, same cut — only the scorer changes.

@@ -143,37 +143,44 @@ def test_the_default_pool_is_the_wired_default():
 def test_the_briefs_cost_table_is_the_artifacts_and_names_the_admitted_range():
     """§5's two cells are the artifacts' figures, and its range is the harness's.
 
-    ⛔ The first version of this cell said "~150 words", which is the corpus CAP
-    (MAX_CHARS) presented as the typical — and "~20 words", which the harvest's
-    own ``len(words) < 40`` floor excludes. Both were the class of claim a reader
-    would size a decision on, so the range is recomputed from the tool's own
-    constants here rather than restated as prose.
+    ⛔ ROW-SCOPED, not document-wide: ``5.179`` and ``85.227`` each appear in
+    several places in the brief, so ``f"{ms}" in text`` stayed green with BOTH
+    §5 cells rewritten to other runs' figures (measured — 5.179 → 5.463, the
+    lexical-control run's number, and 85.227 → 62.900). Each figure is asserted
+    in the row that names its own artifact, which is the binding the §8 test
+    already uses.
+
+    ⛔ And the range is DERIVED: ``MIN_CHARS``/``MAX_CHARS`` are named constants,
+    and the word floor is ``MIN_WORDS`` — a restated ``40`` here could not see
+    the harvest move.
     """
     doc = ROOT / "docs" / "research" / "2026-11-12-12297-rerank-calibration"
     text = (doc / "research-brief.md").read_text()
     noun = json.loads((doc / "measurement-noun-path.json").read_text())
     user = json.loads((doc / "measurement-user-search.json").read_text())
 
-    for art, label in ((noun, "noun-path"), (user, "user-search")):
-        ms = art["latency"]["ms_per_pair"] if "latency" in art else (
-            art["arms"]["rerank"]["latency"]["ms_per_pair"])
-        assert f"{ms:.3f}" in text, (
-            f"§5 does not carry the {label} artifact's ms/pair ({ms})")
+    rows = [ln for ln in text.splitlines() if ln.startswith("|")]
+    for art, artifact_name, label in (
+            (noun, "measurement-noun-path.json", "noun-path"),
+            (user, "measurement-user-search.json", "user-search")):
+        ms = (art["latency"]["ms_per_pair"] if "latency" in art
+              else art["arms"]["rerank"]["latency"]["ms_per_pair"])
+        row = next((r for r in rows if artifact_name in r), "")
+        assert row, f"§5 has no cost row naming {artifact_name}"
+        assert f"{ms:.3f}" in row, (
+            f"§5's {label} row does not carry that artifact's ms/pair ({ms}): "
+            f"{row}")
 
     assert f"{cal.MIN_CHARS}–{cal.MAX_CHARS} chars" in text, (
         "§5 must name the harness's own char admission range")
-    # …and the STATED word floor must be the harvest's (a passage under 40 words
-    # never enters the corpus, so it cannot be in the population a cost figure
-    # describes).
     # …scoped to the §5 cell itself: the brief legitimately discusses 2/4/8-word
     # spans elsewhere, so a document-wide sweep would read those as cost cells.
-    cell = next((ln for ln in text.splitlines()
-                 if ln.startswith("|") and "passage-length" in ln), "")
+    cell = next((ln for ln in rows if "passage-length" in ln), "")
     assert cell, "§5's passage-length cost cell is gone"
     floor = min(int(w) for w in re.findall(r"(\d+)\s*words", cell))
-    assert floor >= 40, (
+    assert floor >= cal.MIN_WORDS, (
         f"§5's passage-length cell states {floor} words, below the harvest's "
-        f"40-word floor: {cell}")
+        f"{cal.MIN_WORDS}-word floor: {cell}")
 
 
 # ── 6. the run refuses a baseline that is not the fused order ──────────────
@@ -187,6 +194,37 @@ def _run_ns(**over):
               out=None)
     ns.update(over)
     return type("NS", (), ns)()
+
+
+def test_the_run_measures_the_model_the_PRODUCT_would_load(monkeypatch):
+    """The artifact's ``model`` field must name what was actually timed.
+
+    ⛔ Pinned BEHAVIOURALLY and at the WIRING. A source grep is satisfied by this
+    file's own prose, and a test of ``resolve_arm_model`` alone is satisfied by a
+    hard-coded id at the call site (measured in the sibling tool: all 43 tests
+    green over exactly that mutation). The shipped read resolves through
+    ``rerank_pool`` → ``load_scorer(model or fused_rerank_model())``, so
+    ``TORTOISE_FUSED_RERANK_MODEL`` decides which cross-encoder the product
+    loads; reverting to ``RERANK_MODEL_DEFAULT`` would have the artifact misname
+    the model behind its own ``ms_per_pair``.
+    """
+    from tortoise import rerank
+
+    monkeypatch.setattr(rerank, "fused_rerank_model",
+                        lambda: "cross-encoder/from-the-knob")
+    assert cal.resolve_arm_model(_run_ns()) == "cross-encoder/from-the-knob"
+    assert cal.resolve_arm_model(_run_ns(model="cross-encoder/pinned")) == (
+        "cross-encoder/pinned")
+
+    # …and the run must CONSULT it (a helper nobody calls pins nothing).
+    import inspect
+    src = inspect.getsource(cal.run)
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.strip().startswith("#"))
+    assert "model = resolve_arm_model(args)" in code, (
+        "the run no longer resolves its model through the resolver")
+    assert "get_scorer(model)" in code and "model=model" in code, (
+        "both the load check and the timed call must use the SAME resolved id")
 
 
 def test_a_degraded_arm_is_refused_and_says_so():
@@ -203,6 +241,22 @@ def test_a_degraded_arm_is_refused_and_says_so():
     it can reach a real degrade; the run's own call is pinned in the test below.
     """
     assert cal.rerank_degrade_refusal({"applied": True, "scored": 40}) is None
+
+    # ⛔ A READ-side skip is NOT a degrade: ``rerank_pool`` returns
+    # ``applied: False`` for ``empty_pool`` / ``empty_query`` / ``disabled``
+    # BEFORE the scorer is consulted, and the instrument already models that
+    # outcome (gold stays in the denominator, ``_ndcg(None)`` = 0, counted as
+    # ``pool_absent``). Refusing on it would abort a ~46-minute run over one
+    # query whose derived text matched nothing — and blame the reranker.
+    for read_side in sorted(cal.READ_SIDE_DEGRADES):
+        assert cal.rerank_degrade_refusal(
+            {"applied": False, "degrade_reason": read_side}) is None, read_side
+    # …and the read-side skip must still be COUNTED, or the tolerance becomes a
+    # silent hole.
+    import inspect
+    src = inspect.getsource(cal.run)
+    assert 'block["rerank_skipped_read"] += 1' in src
+    assert "rerank_skipped_read" in str(cal._arm_block())
 
     msg = cal.rerank_degrade_refusal(
         {"applied": False, "degrade_reason": "score_exception", "scored": 0})

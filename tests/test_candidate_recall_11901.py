@@ -1595,6 +1595,31 @@ def test_the_rerank_arm_measures_the_model_the_PRODUCT_would_load(
         "--rerank-model must still override the resolver")
 
 
+def test_the_rerank_ARM_is_handed_the_resolved_model(tool_mod, monkeypatch):
+    """The WIRING, not just the helper: a hard-coded id at the call site passes.
+
+    ⛔ Measured the hard way — driving ``resolve_rerank_model`` alone left all 43
+    tests green when the arm was handed
+    ``model="cross-encoder/ms-marco-MiniLM-L6-v2"`` directly. So this records what
+    `_rerank_arm` is actually CALLED with.
+    """
+    seen: dict = {}
+
+    def _record(*a, **kw):
+        seen.update(kw)
+        return {"arm": "rerank"}
+
+    monkeypatch.setattr(tool_mod, "_rerank_arm", _record)
+    monkeypatch.setattr(tool_mod, "resolve_rerank_model",
+                        lambda _args: "cross-encoder/from-the-resolver")
+    ns = type("NS", (), {"rerank_model": None, "rerank_pool": None,
+                         "rerank_threads": tool_mod.RERANK_THREADS})()
+    built = tool_mod.build_rerank_arm(ns, sample=[], window=0, variants=None)
+    assert built == {"arm": "rerank"}
+    assert seen.get("model") == "cross-encoder/from-the-resolver", (
+        f"the arm was handed {seen.get('model')!r}, not the resolved model")
+
+
 def test_the_control_arms_are_not_labelled_with_the_models_cost_story(lexical):
     """A lexical arm must not carry the cross-encoder's latency note.
 
