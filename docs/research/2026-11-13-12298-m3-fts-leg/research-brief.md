@@ -70,7 +70,7 @@ beat the current scorer (Reading 1). A lane may not decline pre-authorised scope
 more than it may adopt something over a decision: both are reversals of the same ruling, and the route
 in either direction is a **reopen argued in front of the owner**, in this issue's own home. So what this
 brief records is the **measurement, plus a recommendation** — that C3's premise is falsified and the
-learned-sparse lever should be reconsidered — and it leaves the ruling open for the owner. ⛔ **`#12298` is CLOSED** (`COMPLETED`, 2026-11-13T05:21:53Z) on the reading *"M3 FAILS"*, which this measurement contradicts: its own falsifier sentence is **satisfied** by the deployable arm. The C3 ruling therefore lives in the OPEN homes — epic `#12186` and the pre-registration issue `#12192` — not in `#12298`, which records a closure this PR's numbers do not support and which needs the owner's correction rather than a lane's.
+learned-sparse lever should be reconsidered — and it leaves the ruling open for the owner. ⛔ **`#12298` is CLOSED** (`COMPLETED`, 2026-11-13T05:21:53Z) on the reading *"M3 FAILS"*, which this measurement contradicts: the closing condition in its own falsifier sentence is **not triggered** — a deployable BM25-in-Postgres beats the current scorer. The C3 ruling therefore lives in the OPEN homes — epic `#12186` and the pre-registration issue `#12192` — not in `#12298`, which records a closure this PR's numbers do not support and which needs the owner's correction rather than a lane's.
 **Until that ruling, C3 is neither closed nor proceeding.** Everything downstream of the deferral
 (§6.2's decision, V1, `#12186`) therefore keeps its existing status rather than being re-stated here;
 the evidence for the reopen is in §0 and §3.
@@ -243,7 +243,7 @@ what the shipped leg scores** there (0.2000). And on paths the **in-place fix be
 option by 30 points** (0.9333 vs 0.6333): the migration is not uniformly better even where it does move.
 
 **The identifier class decomposes, and it matters for §4.3:** of its 90 names, the 17 `#n` shapes
-(`#2258`, `PR #12298`) are found by the **shipped** leg **17 of 17** — they carry no `_` and are
+(`#2258`, `#3484`) are found by the **shipped** leg **17 of 17** — they carry no `_` and are
 unaffected. The movement is entirely the **73 `snake_case` names: 1 of 73 (0.014) shipped → 68 of 73
 (0.932) with the in-place fix, +91.8 pts**.
 
@@ -302,7 +302,7 @@ Two of those are decisive and none of them is about the scorer:
   window and at k=15**. ⛔ Stated as what the artifact records (`rank` and
   `rank_wide`, both `None`), not as a row COUNT: the harness does not record the size of an empty
   result set, so "zero rows" was a stronger claim than the committed evidence carries.
-  (`abc|def`, and the index holds `abc_def`). The `#8933` machinery does not help: its alias tail
+  (`abc` and `def` are two terms the index does not hold; it holds `abc_def`). The `#8933` machinery does not help: its alias tail
   (`err4032`) and adjacency phrase (`"err 4032"`) are *whitespace/punctuation* composites, and the index
   does not hold `abc_def` as `abc def` either.
 * **The 4-segment run needs the widened criterion** — the in-place fix reaches it at k=15 (rank 4) among

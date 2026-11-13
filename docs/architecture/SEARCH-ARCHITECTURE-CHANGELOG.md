@@ -99,15 +99,15 @@ return, which is what §6.2's deferral exists to establish.
 step 3 is a recorded owner instruction to proceed into SPLADE without re-litigation, and the literal
 falsifier it states is *not* met — a deployable BM25-in-Postgres does beat the current scorer. The
 measurement is evidence that C3's **premise** (a ranking limit in the text index) is falsified, and the
-brief records that as a recommendation; the ruling on C3 stays in the OPEN homes — epic `#12186` and the pre-registration issue `#12192` — where the owner can take it. ⛔ NOT on `#12298`: that issue is **CLOSED** (`COMPLETED`, 2026-11-13T05:21:53Z) on the reading *"M3 FAILS"*, which this measurement contradicts (its own falsifier sentence IS satisfied, by the deployable arm).
+brief records that as a recommendation; the ruling on C3 stays in the OPEN homes — epic `#12186` and the pre-registration issue `#12192` — where the owner can take it. ⛔ NOT on `#12298`: that issue is **CLOSED** (`COMPLETED`, 2026-11-13T05:21:53Z) on the reading *"M3 FAILS"*, which this measurement contradicts: the closing condition in its own falsifier sentence is NOT triggered — a deployable BM25-in-Postgres beats the current scorer.
 A lane may no more decline pre-authorised scope on its own reading than it may adopt something over a
 decision.
 
 **The `#8933` identifier fixture is part of the DoD, and the shipped leg fails it.** Five fixture records
 queried at the production window: shipped **3 of 5 reachable**, the in-place query **5 of 5**, BM25 fed
-our terms **3 of 5**, BM25 with its own analyser **5 of 5**. On the shipped leg the `abc_def` row is **absent
-from its own name's window at the production limit and at k=15**. The identifier capability the product
-believes it has is defeated on exactly the shapes `#8933` was built for.
+our terms **3 of 5**, BM25 with its own analyser **5 of 5**. The `abc_def` row is **absent from its own name's window at the production
+limit and at k=15** on the shipped leg. The identifier capability the product believes it has is defeated on exactly
+the shapes `#8933` was built for.
 
 **The defect it found, stated as a design fact rather than as tracker state.** RediSearch treats `_` as a
 word character; `sparse.tokenize_sparse_query` (`tortoise/sparse.py:381`, splitting on `[^a-z0-9]` at
