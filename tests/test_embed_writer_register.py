@@ -4648,8 +4648,13 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
     # `GATE_then_a_BUILDER` and `TYPE_CHECKING_then_a_builder` "were `gated` before the ranked fix"
     # and that `BUILDER_then_a_GATE` was the reversed-order CONTROL — and it drew an empty
     # two-clause distinction from that. Measured over all 40 rows by driving each through
-    # `origin/main`'s `_embedding_writers` (which carries NO rank rule at all), all three already
-    # measure `unresolved_write`, so none of them is evidence about the ranking in either direction.
+    # `origin/main`'s `_embedding_writers`, all three already measure `unresolved_write`, so none of
+    # them is evidence about the ranking in either direction. ⛔ And the reason they read that on
+    # `main` is NOT "no rule there": `main` carries the BUILDER-ONLY preference (`previous not in
+    # WRITE_CLAUSE_BUILDERS and alias.name in WRITE_CLAUSE_BUILDERS`), which is exactly why the
+    # reversed order does not fall back to `gated` — an unranked first-seen/LIFO walk WOULD give
+    # `gated` there. An earlier version of this note said `main` "carries NO rank rule at all", and
+    # that is false in the same way the probe's twin comment was.
     # Exactly FIVE rows change verdict between `origin/main` and this head, and THEY are the arms
     # that discriminate it: the two `UNGATED…SEAM` arms (`gated` → `ungated`) and the three
     # WRITER-SCOPE cross-scope arms (`gated` → `unresolved_write`, `producer` → `unresolved_write`,
@@ -4662,8 +4667,8 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
     # `try: import encode_for_store` / `except ImportError: import encode_for_row` idiom resolved to
     # the seam that never runs and the writer measured `gated`: HIDDEN. ⛔ NOT "a regression against
     # `main`", which is what this note said until `#12182`'s rebase review measured it FALSE —
-    # `origin/main` `f33f5e2c32` has no rank rule and reads `gated` for this arm too, so the ranked
-    # rule closes a pre-existing hide. Both orders must now resolve to `ungated`,
+    # `origin/main` `f33f5e2c32` keeps the BUILDER-ONLY half of the rule and reads `gated` for this
+    # arm too, so the ranked rule closes a pre-existing hide. Both orders must now resolve to `ungated`,
     # which is INSIDE `NEEDS_A_DECLARATION`.
     # ⛔ `#12020` round 8 cycle 5 (P1) — the rank rule was applied INSIDE one `_import_aliases`
     # call while the two maps were merged plainly (`{**module, **writer}`), so a WRITER-scope binding
