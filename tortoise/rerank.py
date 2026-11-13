@@ -89,7 +89,8 @@ FUSED_RERANK_POOL_ENV = "TORTOISE_FUSED_RERANK_POOL"
 FUSED_RERANK_MODEL_ENV = "TORTOISE_FUSED_RERANK_MODEL"
 #: How many of the fused pool's leading candidates get SCORED. The retrieval
 #: pool is ~120 per leg (`retrieval.DEFAULT_POOL_SIZE`), so scoring all of it is
-#: 2x the cost for candidates the caller's `limit` will never show. 40 is the
+#: ~3x the pairs (120 / 40) for candidates the caller's `limit` will never show.
+#: 40 is the
 #: SIZE of #11901's measured mean effective candidate set for a production
 #: capture, which is the surface this lever is calibrated on: #11901 measured
 #: **40.4** at `k=3` — the capture prior's own per-query `limit`, UNIONED over the

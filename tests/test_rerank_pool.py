@@ -267,29 +267,47 @@ def test_the_pool_key_on_the_SKIP_arms_is_the_resolver_and_not_the_constant(
     skipped.
 
     ⛔ Three documents say so (``RERANK_POOL_KEY``'s docstring, the brief's §5,
-    ``.env.example``), and all three arms could be replaced by a literal with the
-    whole file green (measured: ``fused_rerank_pool_width()`` → ``40`` at the
-    three skip sites left 62 passing). The applied arm has its own pin; this is
-    the other two shapes — the caller's opt-out, and a non-relevance order.
+    ``.env.example``), and every arm could be replaced by a literal with the file
+    green (measured: ``fused_rerank_pool_width()`` → ``40`` at the three skip
+    sites left 62 passing). The applied arm has its own pin; these are the other
+    THREE shapes — the caller's opt-out, a non-relevance order, and a recency
+    order whose reorder could not be applied.
+
+    ⛔ AND THE COUNTERS, not just the reason: all three arms hardcode
+    ``scored=0`` / ``unscored=len(result_ids)``, and blanking ``unscored`` to 0
+    left every test green (measured) — a skipped read then reported ``scored=0,
+    unscored=0``, i.e. "the reranker saw everything and left nothing unseen" on a
+    read where it never ran, which is the false all-clear the applied arm's own
+    comment forbids.
     """
     _seed(sdk, 4)
+    candidates = _candidate_count(sdk, monkeypatch, "zebra migration", 4)
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     monkeypatch.setenv(rerank.FUSED_RERANK_POOL_ENV, "7")
     _inject(rerank.FakeScorer(), monkeypatch)
 
+    def _check_skip(entry, reason):
+        assert entry["ran"] is False, entry
+        assert entry["reason"] == reason, entry
+        assert entry[rerank.RERANK_POOL_KEY] == 7, entry
+        assert entry[rerank.RERANK_SCORED_KEY] == 0, entry
+        assert entry[rerank.RERANK_UNSCORED_KEY] == candidates, entry
+
     opt_out: list[dict] = []
     sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
                            _rerank_candidates=False, leg_trace=opt_out)
-    skipped = _rerank_entries(opt_out)[0]
-    assert skipped["ran"] is False, skipped
-    assert skipped[rerank.RERANK_POOL_KEY] == 7, skipped
+    _check_skip(_rerank_entries(opt_out)[0], "order_owned_downstream")
 
     ordered: list[dict] = []
     sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
                            order_by="confidence", leg_trace=ordered)
-    by_order = _rerank_entries(ordered)[0]
-    assert by_order["reason"] == "order_by_not_relevance", by_order
-    assert by_order[rerank.RERANK_POOL_KEY] == 7, by_order
+    _check_skip(_rerank_entries(ordered)[0], "order_by_not_relevance")
+
+    recency: list[dict] = []
+    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
+                           recency_field="createdAt", recency_boost=10.0,
+                           leg_trace=recency)
+    _check_skip(_rerank_entries(recency)[0], "recency_order_applied")
 
 
 def test_the_SCORER_is_handed_the_knob_width_and_not_the_constant(
@@ -1040,8 +1058,11 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # assertion; this stops the sweep from being silently shrunk.
     #
     # ⛔ EVERY SITE IN `tortoise/` BY AST, plus a DERIVED population in `tools/`,
-    # `battery/` and `benchmarks/` (test files are excluded: ~90 of them read
-    # this method and none is a product surface) — because
+    # `battery/` and `benchmarks/`. Test files are mostly excluded (~90 of them
+    # read this method and almost none is a product surface) — but "mostly", not
+    # "all": `tests/eval/harness/runner.py` is a recorded-baseline harness and
+    # `tests/repro/284_capstone_verify.py` a membership probe, so both are NAMED
+    # below. The exclusion is not a claim about `tests/` — because
     # both weaker forms were measured green over a real defect:
     #   * a FILE-SCOPED SUBSTRING missed the call sites inside `tortoise/sdk.py`
     #     (deleting `_rerank_candidates=False` from any of the eight left the
@@ -1195,7 +1216,12 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                 # the product in the same commit that wrote this comment, and a
                 # census whose list is a literal tuple does not grow by itself —
                 # deleting that kwarg kept every test green (measured).
-                "tests/eval/harness/runner.py"):
+                "tests/eval/harness/runner.py",
+                # ⛔ A MEMBERSHIP PROBE one directory over: `limit=10` and the
+                # assertion is `feature["id"] in ids`, so an armed rerank re-picks
+                # the page and turns a healthy graph into a false FAIL (measured:
+                # it was uncensused and did not opt out).
+                "tests/repro/284_capstone_verify.py"):
         found = _sites(root / rel)
         assert found, f"{rel} no longer reads the rerankable page — check the pin"
         for owner, opted_out in found:
