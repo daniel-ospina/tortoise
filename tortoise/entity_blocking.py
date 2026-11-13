@@ -59,11 +59,14 @@ Zep/Graphiti (`graphiti_core/utils/maintenance/dedup_helpers.py`, read at
    similarity constant appears here (`#2730` refused one; the semantic rung
    reuses ``embeddings.DEFAULT_THRESHOLD``).
 3. **A non-injective key never attaches alone.** A path basename
-   (``lib/config.py``) is carried by every file of that name, and a bare ``#``
-   reference by every issue of that number. Those keys are marked
-   :data:`AMBIGUOUS_KEYS` and attach **only when exactly one live candidate
-   carries them** — the same "bare-form fallback ONLY when unambiguous"
-   discipline ``_find_existing_entity`` already applies to kinds.
+   (``lib/config.py``) is carried by every file of that name, so it is marked
+   :data:`AMBIGUOUS_KEYS` and attaches **only when exactly one live candidate
+   carries it AND the population is known complete** — the same "bare-form
+   fallback ONLY when unambiguous" discipline ``_find_existing_entity`` already
+   applies to kinds. ⚠️ A bare ``#`` reference is NOT in this class:
+   ``normalize_entity_name`` folds ``#12295`` to ``12295``, so it travels the
+   ordinary ``E`` key and attaches on equality like any other fold. It was the
+   documented reason for a ``H`` key namespace that this module does not have.
 
 THE METRIC
 ----------
@@ -392,7 +395,10 @@ class BlockIndex:
             "keys": self._keys,
             "max_block_size": max(sizes) if sizes else 0,
             "oversized_skipped": dict(sorted(self._oversized.items())),
-            "max_block_size_allowed": MAX_BLOCK_SIZE,
+            #: The QUERY path's cap. Published under a name that says so: the scan
+            #: takes no cap, and a key called `max_block_size_allowed` beside an
+            #: observed `max_block_size` of 500 reads as a bound the scan honoured.
+            "query_candidate_cap": MAX_BLOCK_SIZE,
         }
 
 

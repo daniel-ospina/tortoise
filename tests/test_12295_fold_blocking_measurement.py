@@ -45,6 +45,17 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
     assert r["uniform_windows"] is True
     assert report.get("measured_for") == 12295, (
         "the artifact does not name the issue it is evidence for")
+    #: The run MUST be identifiable from the brief alone. Without these three the
+    #: brief can describe a different run than the artifact holds — which it did
+    #: (#12295 round-2 B2): the header named elapsed/graph/digest from the run
+    #: BEFORE the reviewer fixes, so a reader reproducing via the digest landed on
+    #: a population the artifact does not contain.
+    brief = BRIEF.read_text()
+    corpus = report["corpus"]
+    for field in ("graph", "population_digest", "elapsed_s"):
+        assert str(corpus[field]) in brief, (
+            f"the brief does not name the artifact's corpus.{field} "
+            f"({corpus[field]!r}) — the header describes a different run")
     assert report.get("code_head"), "the artifact does not name the commit it measured"
     assert r["legs_seen"].get("vector") is True, (
         "the artifact is not the fused read — re-run with the embeddings extra "
@@ -161,5 +172,6 @@ def test_the_brief_exists_and_quotes_the_artifact(report):
     for needle in (str(b["pairs"]), str(attached),
                    f"{b['multikey']['candidates_mean_per_mention']}",
                    f"{b['fts_only']['pooled_candidates_per_capture']}",
-                   str(report["arms"]["variant"]["3"]["attached_folded"])):
+                   str(report["arms"]["variant"]["3"]["attached_folded"]),
+                   f"{b['multikey']['reduction_ratio']}"):
         assert needle in text, f"the brief does not quote {needle!r} from the artifact"
