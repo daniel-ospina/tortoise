@@ -20,7 +20,12 @@ import logging
 
 from .entity_identity import (  # #3633 structured non-folded record
     display_holder_ids,
+    name_key_space_same_entity,  # #12120: the writer's key space, node-returning
     record_non_folded,
+)
+from .entity_resolver import (  # #12120: the merge hop (entity grouping) + the fold
+    follow_resolved_from,
+    normalize_entity_name,
 )
 from .exceptions import UnaddressableClaimError  # #9754 per-item refusal
 from .live import (
@@ -790,7 +795,573 @@ class _PerRecordWarnBudget:
         return max(0, self.total - self._limit)
 
 
-def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
+def _fold_key(name: str) -> str:
+    """The writer's folded key for ``name`` — one definition, never a second fold."""
+    return normalize_entity_name(name) or ""
+
+
+def _same_successor(stored: str, successor: str, candidate_names=()) -> bool:
+    """Do the STORED ``supersededBy`` and this record's spelling name one successor?
+
+    #12120: the fold stores a NODE's spelling (see :func:`_one_successor_spelling`),
+    so an unchanged conversation re-ingested after a fold-equivalent success may
+    compare byte-different spellings of ONE entity. Comparing the raw strings
+    turned that idempotent dedup into a reported DIVERGENCE plus a ``skipped``
+    entry — the fold's keep-first asymmetry inverted on the writer's own key.
+    Both call sites (Object and Subject lanes) use this ONE comparison, so the
+    two families cannot drift on what "same successor" means.
+
+    ``candidate_names`` is the spelling set the successor PROBE resolved for this
+    very record — the CARRIERS' spellings, flattened from ``_entity_rows``'
+    groups (never the representatives: a group's representative is the
+    merged-away SURVIVOR, whose spelling this record may never have resolved, and
+    it can be ``None`` for a group whose survivor was deleted). It is required,
+    not decoration: ``_entity_rows`` collapses a merged-away carrier onto its
+    SURVIVOR, so a record whose successor is spelled ``"Acme"`` can store the
+    survivor's ``"Acme Corporation"`` — a spelling that folds DIFFERENTLY, and
+    the fold arm alone would then report every re-ingest of that record as a
+    divergence. A stored value that exactly names one of the candidates this
+    record resolved IS this record's successor, whichever spelling won.
+
+    ``#5370`` legacy rows carry the old 200-char PREFIX of a long successor
+    name, so that form stays accepted (a same-successor re-ingest of a legacy
+    row stays a dedup).
+    """
+    stored = stored or ""
+    successor = successor or ""
+    if stored == successor:
+        return True
+    if stored and stored in {str(n) for n in candidate_names if n}:
+        return True
+    _a, _b = _fold_key(stored), _fold_key(successor)
+    if _a and _a == _b:
+        return True
+    return len(successor) > 200 and stored == successor[:200]
+
+
+def _one_successor_spelling(names, default: str) -> str:
+    """The stored spelling the fold records in ``supersededBy``.
+
+    #12120: ``supersededBy`` is read back BY NAME by every consumer that is not
+    this fold — ``audit``'s 4b/4c carrier probes (``carrier.name =
+    sup.supersededBy``), ``assembly._probe_visible_successors`` (``o.name IN
+    $names``) and the renderer. Those readers are RAW; the successor PROBE here is
+    the writer's folded union. Recording the record's spelling therefore records a
+    value that names NO node whenever the successor resolved by a fold-equivalent
+    spelling, and the ask path then reports "no successor record found" about a
+    live successor — the #5370 harm, re-created from the reader side. Storing a
+    candidate's OWN spelling keeps the property resolvable by all of them.
+
+    ⛔ Two visible carriers spelled differently under one folded key make "the"
+    successor spelling a choice, and choosing one by ROW ORDER is the
+    backend-order dependence #2164 P2-2 forbids — so the tie is broken
+    deterministically (`min`), and the record's own spelling is preferred only
+    when a carrier actually carries it: the record's spelling is whatever the
+    extractor wrote, and when no node is spelled that way the stored value names
+    nothing, so `audit`'s ``superseded_by_unresolvable`` fires and the renderer
+    reports "no successor record found" about a live successor — measured with a
+    merged carrier under one folded key (review round 9, P2; a merged entity
+    contributes BOTH spellings once the gate reads its carriers, which is what
+    narrowed this from "candidates agree").
+
+    ⛔ STATED RESIDUAL — the one path back to the record's spelling, and why it is
+    kept. ``spellings`` is empty when EVERY visible candidate carries the folded
+    key through ``canonical_name``/``aliases`` with no ``name`` of its own — and
+    "visible" means id-bearing (`mid is not None`), so the shape is an
+    id-PRESENT legacy row with a NULL ``name``, NOT an id-less one: an id-less
+    candidate never reaches this arm (it is refused `no visible successor`
+    earlier, measured). The value stored is then the record's spelling, which
+    those RAW readers resolve against NO node even though the fold is CORRECT —
+    the exact case ``#5370``'s prefix tolerance and ``audit``'s
+    ``superseded_by_unresolvable`` exist for. Refusing the fold instead was
+    considered and rejected: the successor is real and visible, refusing leaves
+    the superseded entity ``live`` and search-visible (the harm this lane
+    removes), and the pre-fix behaviour stored the record's spelling
+    unconditionally — so this arm can only ever be reached on input the pre-fix
+    code also mis-recorded, never on input it got right. That is a RESIDUAL, not
+    a guarantee: the claim "never a blind fallback" would be false here, which is
+    why it is written down.
+    """
+    spellings = {str(n) for n in names if n}
+    if not spellings:
+        return default
+    if default in spellings:
+        return default
+    return min(spellings)
+
+
+def _id_claimant_counts(g, label: str, rows, id_idx: int) -> dict:
+    """How many NODES claim each logical id — counted in the GRAPH, not in ``rows``.
+
+    #12120 (review round 13): :func:`_entity_rows` keeps a duplicate-id entity APART
+    before the merge hop, because ``follow_resolved_from`` reads ONE node's
+    ``resolved_from`` for an id (``entity_resolver.follow_resolved_from`` — a single
+    ``MATCH (n:<label> {id:$id})``). Counting the claimants among ``rows`` was not
+    enough: the probe's result set is a SUBSET of the graph, so a duplicate the probe
+    did not return left the count at 1, the hop then read the OTHER claimant's
+    pointer, and the fold addressed a survivor that no probe had returned — while the
+    opposite creation order addressed the probed row instead. Measured: the same
+    logical graph grouped onto ``surv`` in one order and onto the row's own id in the
+    other, which is the backend-order dependence #2164 P2-2 forbids.
+
+    One query for the whole probe (the property is indexed-free here, so batching
+    matters), returning ``{}`` when no row carries an id.
+    """
+    ids = sorted({str(row[id_idx]) for row in rows
+                  if id_idx < len(row) and row[id_idx]})
+    if not ids:
+        return {}
+    return {str(r[0]): int(r[1]) for r in g.query(
+        f"MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id, count(*)",
+        params={"ids": ids}).result_set}
+
+
+def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
+                 projection: str | None = None, with_groups: bool = False):
+    """One representative row per ENTITY — a merged-away carrier is not a second one.
+
+    #12120 supersession-probe site (review round): ``apply_entity_merge`` is NON-destructive, so
+    a pair the queue exists to merge keeps TWO live nodes under ONE folded key —
+    the retired candidate keeps its own ``canonical_name`` and gains a
+    ``resolved_from`` pointer, while the survivor records the same folded key in
+    ``aliases``. A probe widened to the writer's folded union therefore returns
+    two rows for ONE entity, and counting NODES there disagrees with the writer in
+    BOTH directions: it can turn a self-supersession into a real fold (the
+    successor arm sees a second "candidate"), and it can refuse a record the write
+    door addresses (the ref arm sees a second "carrier").
+
+    Grouping by the ``resolved_from`` hop is HALF the writer's rule
+    (``entity_identity._live_holders_same_entity``); liveness is the CALLER's half,
+    and this helper deliberately does NOT apply it. The writer is live-only on both
+    sides (it reads live holders, then drops a terminal survivor); here a group's
+    representative MAY be terminal, and the representative is a NODE carrying its
+    own status, so every caller narrows on that column — in ONE of two shapes:
+
+    * the two REF probes narrow only when the never-guess count is >1 (a single
+      terminal ex-incarnation is not ambiguity, so it stays a candidate);
+    * the two SUCCESSOR probes filter UNCONDITIONALLY and refuse the record when
+      nothing visible remains — AT COUNT 1 AS WELL, because folding onto a
+      successor no recall surface shows would bury the target behind a dead link
+      (``_RECALL_OBJECT_EXCLUDED_STATUS`` / ``SUBJECT_TERMINAL_STATUSES``).
+
+    ⛔ A caller must NOT skip its own narrowing on the strength of this helper: it
+    applies NONE, so a SINGLE terminal representative reaches the caller entirely
+    unfiltered. A row
+    with NO pointer, or two hops to two DIFFERENT survivors, stays its own entity —
+    so the never-guess refusal is unchanged for genuinely distinct carriers of one
+    folded name.
+
+    The returned row for a group is the SURVIVOR's, because folding onto a
+    retired incarnation is the defect this collapse exists to prevent; when the
+    survivor is not itself among ``rows`` it is fetched with ``projection`` (the
+    caller's own row shape, so the representative stays readable by the caller).
+    ``id_idx`` is the id column of that shape — the ref probes carry
+    ``(ID(n), n.id, n.name, …)`` while ``_successor_candidates`` carries
+    ``(n.id, n.name, n.status)``, and one column index cannot serve both.
+
+    ⛔ Two rows that CLAIM the same id are NOT one entity — that is the
+    raw-corruption shape this module already has a refusal for (``len(by_id) > 1``,
+    ``\"ambiguous … id\"``). Such rows are kept apart BEFORE the merge hop, each as
+    its own entity, so the caller's never-guess discipline still sees two — and so
+    the verdict cannot depend on backend row order, which it would if the hop ran
+    for a duplicated id and only one duplicate carried ``resolved_from`` (review
+    rounds 2 and 6; keying a group on the ``resolved_from`` return, which is the id
+    UNCHANGED when there is no pointer, otherwise merges duplicate-id nodes into
+    one \"entity\"). Duplicates reached only through the survivor FETCH are caught
+    there (``LIMIT 2``).
+
+    ⛔ ``with_groups=True`` returns ``(representative, entity_key, members)``
+    instead of the representative alone, and the SUCCESSOR side needs that: its
+    questions are asked at two levels. *Is this candidate a different entity than
+    the target* is entity-level (a merged carrier is not a second candidate), but
+    *is anything under that name VISIBLE* is node-level — `recall_state` and the
+    render probe show a live carrier even when the entity's survivor has since
+    been retired. A survivor-only representative answered the second question with
+    the survivor's own status, so a retired survivor beside a live carrier refused
+    a fold that used to apply (review round 8). ``representative`` is ``None`` when
+    the survivor is GONE: the group still carries its members, because a live
+    carrier is exactly what the visibility question must see (review round 9).
+    """
+    if not rows:
+        return []
+    proj = projection or "ID(n), n.id, n.name, n.status, n.supersededBy"
+    groups: dict = {}
+    # The synthesised per-row keys, kept as a SET rather than recognised by their
+    # `row:` prefix — an entity id is opaque text and may itself start with
+    # `row:`, and prefix-testing would then skip the survivor fetch and hand back
+    # a retired CARRIER (review round 3).
+    per_row_keys: set[str] = set()
+    # An id claimed by MORE THAN ONE NODE is the duplicate-id corruption. Such rows
+    # are kept apart BEFORE the merge hop: `follow_resolved_from` reads one node's
+    # `resolved_from` for the id, so the group key — and therefore whether the
+    # caller's never-guess fires at all — would depend on backend row order when
+    # only one of the claimants carries a pointer (review rounds 2 and 6).
+    # ⛔ The claimant count is taken in the GRAPH (see `_id_claimant_counts`), never
+    # from `rows`: a duplicate outside the probe's result set is still corruption,
+    # and counting only the probed rows let the hop read the OTHER claimant's
+    # pointer and address a survivor no probe returned (review round 13).
+    _claimants = _id_claimant_counts(g, label, rows, id_idx)
+    for row in rows:
+        own = row[id_idx] if id_idx < len(row) else None
+        own = str(own) if own else None
+        # `follow_resolved_from` returns the id UNCHANGED when there is no
+        # pointer, so this is the survivor's id for a carrier and the row's own
+        # id otherwise; an id-less row cannot be keyed on an id at all.
+        hop = None
+        if own and _claimants.get(own, 0) <= 1:
+            hop = follow_resolved_from(g, label, own)
+        if hop:
+            key = str(hop)
+        else:
+            key = f"row:{id(row)}"
+            per_row_keys.add(key)
+        groups.setdefault(key, []).append(row)
+    out = []
+    for key, group in groups.items():
+        rep = next((r for r in group
+                    if r[id_idx] and str(r[id_idx]) == key), None)
+        if rep is None and key in per_row_keys:
+            # An id-less row IS its own entity (it cannot be merged, so it cannot
+            # be a carrier): its group holds exactly itself and there is no
+            # survivor to fetch. Dropping it here would make the caller see
+            # FEWER candidates than the graph holds — the never-guess refusal
+            # stops firing for a live id-less carrier beside a fold-equal one
+            # (measured: four suites red, review round 5).
+            rep = group[0]
+        elif rep is None:
+            fetched = g.query(
+                f"MATCH (n:{label} {{id:$id}}) RETURN {proj} LIMIT 2",
+                params={"id": key}).result_set
+            if len(fetched) > 1:
+                # Two nodes claim the survivor's id: the corruption the caller's
+                # never-guess discipline exists to refuse, reached THROUGH the
+                # fetch (neither duplicate is among `rows`, so the pre-pass cannot
+                # see it). Returning both hands the caller the same ambiguity it
+                # counts for its own rows; taking `fetched[0]` would pick the
+                # representative by backend row order — the #2164 P2-2 defect.
+                # ⛔ The SHAPE must match the caller's: a group-aware caller
+                # unpacks `(rep, key, members)`, so a bare row here raised
+                # `not enough values to unpack` out of `apply_supersessions` — a
+                # corrupt-id graph must be REFUSED, never an exception that
+                # aborts the rest of the batch (review round 9, P1).
+                if with_groups:
+                    # ⛔ The MEMBERS must survive the fetch (review round 15): the
+                    # group's carriers are the rows the widened probe matched, and
+                    # one of them may be the record's only VISIBLE successor.
+                    # Sending `[dup]` alone replaced them with nodes that MAY be
+                    # terminal, or MAY be the target itself — so when that was the
+                    # whole member set, the successor-visibility gate reported
+                    # "no visible successor" about a live, id-bearing successor and
+                    # a fold `main` applied was lost (measured round 15: applied=0,
+                    # the target left live and search-visible). The spellings set
+                    # lost the resolved spelling the same way.
+                    out.extend((dup, key, [*group, dup])
+                               for dup in fetched)
+                else:
+                    out.extend(fetched)
+                continue
+            rep = fetched[0] if fetched else None
+        if rep is None:
+            # The survivor is not fetchable (deleted while the `resolved_from`
+            # pointer stayed). The REPRESENTATIVE must not be invented — falling
+            # back to `group[0]` is the RETIRED CARRIER, and folding onto it is
+            # the defect this collapse exists to prevent (review round 5) — but
+            # the group is not empty of EVIDENCE either: its members are exactly
+            # the carriers the graph holds, and a live one is what `recall_state`
+            # shows. A REF probe addresses the representative, so it keeps
+            # dropping the group and reporting (the two REF probes then fall
+            # through to the Subject lane, whose refusal
+            # `"ref carrier's survivor is gone"` names the true reason); a
+            # GROUP-AWARE caller is handed `(None, key, group)` and decides for
+            # itself — dropping it refused a fold the pre-widening raw arm
+            # applied whenever the carrier was still live (review round 9, P2).
+            if not with_groups:
+                continue
+            out.append((None, key, group))
+            continue
+        out.append((rep, key, group) if with_groups else rep)
+    return out
+
+
+def _ref_candidates(entities, label: str, *, id_idx: int = 1,
+                    status_idx: int = 3) -> tuple[list, dict]:
+    """The candidate ROWS a REF probe may address, from grouped entities.
+
+    Two rules meet here and must not be traded for each other:
+
+    * a group's representative is its SURVIVOR, and a RETIRED carrier is never
+      folded onto — which is why the representative is the survivor in the first
+      place (review round 5);
+    * a group whose survivor is GONE still holds the carriers the graph has, and
+      a carrier that is still LIVE is addressable and visible. Dropping the whole
+      group made the ref probe refuse a fold the raw arm applied — the same defect
+      round 9 fixed on the SUCCESSOR side, reached from the ref side, where the
+      refusal ("no addressable carrier") even claimed the carrier was
+      unaddressable while it sat in the graph with an id and a live status
+      (review round 10).
+
+    Which rows a group contributes — three arms, in this order:
+
+    * a LIVE representative contributes ITSELF (the survivor is the entity);
+    * a TERMINAL representative, or a gone one, contributes its LIVE members —
+      a retired survivor beside a live carrier must not refuse a fold the raw arm
+      applied (rounds 18/19), and folding onto a TERMINAL member is still the
+      round-5 defect, so terminal members are dropped;
+    * a TERMINAL representative with no live member contributes itself, because it
+      IS the target and the keep-first arms own it (an idempotent re-ingest stays a
+      silent dedup).
+
+    The existing never-guess count then reproduces the raw arm's behaviour exactly
+    (two live carriers → refuse, one → fold).
+
+    Returns ``(rows, widened_ids)``. ``widened_ids`` names the rows contributed by
+    a GONE-SURVIVOR group — the only rows for which the never-guess count is a
+    NODE count over ONE entity (two live carriers of one merged entity), not a
+    count of entities. A caller that refuses on that count must say so: the
+    refusal is "this merged entity's survivor is gone, so its carriers cannot be
+    addressed one-of-them", NOT the duplicate-name corruption the ordinary
+    never-guess arm reports (review round 17) — otherwise the durable
+    ``record_non_folded`` entry claims a repair the graph's own grouping denies and
+    the dangling ``resolved_from`` is reported nowhere on this path.
+
+    ``id_idx``/``status_idx`` are the row columns of the projection the caller
+    passed to ``_entity_rows`` (the REF probes' 5-column shape by default; the
+    successor probes' 3-column ``_SUCCESSOR_PROJECTION`` cannot be read here —
+    indexing it blind raised ``IndexError`` out of ``apply_supersessions``, which
+    the module's "corruption is a REFUSAL, never an exception" rule forbids).
+    """
+    terminal = (SUBJECT_TERMINAL_STATUSES if label == "Subject"
+                else _RECALL_OBJECT_EXCLUDED_STATUS)
+    rows = []
+    # ⛔ Carrier id → the GONE-SURVIVOR GROUP it came from (review round 17, second
+    # finding). A set of ids alone can only answer "every refused candidate came
+    # from SOME gone-survivor group"; two distinct entities with two dangling
+    # `resolved_from` pointers then report as "ONE entity whose survivor is gone"
+    # and downgrade `main`'s `ambiguous-name` record to `unaddressable-name`, losing
+    # the fact that there are two separate repairs to make. Keeping the group key
+    # lets `_ref_is_one_gone_entity` ask the question its name states.
+    widened: dict = {}
+    for rep, key, members in entities:
+        # ⛔ A TERMINAL representative is the same question as a GONE one (review
+        # round 18): `_entity_rows` makes the representative the SURVIVOR, so a
+        # merge-then-supersede graph hands back the RETIRED survivor while a LIVE
+        # carrier still holds the name. Replying with the survivor alone sent the
+        # ref into the keep-first arm with a terminal target, which refused a fold
+        # `main` applied and left the carrier live and search-visible — measured on
+        # both families. Same answer as the gone case: contribute the LIVE members.
+        if rep is not None and (rep[status_idx] or "") not in terminal:
+            rows.append(rep)
+            continue
+        contributed = False
+        for m in members:
+            if not m[id_idx] or (m[status_idx] or "") in terminal:
+                continue
+            rows.append(m)
+            contributed = True
+            if rep is None and m[id_idx]:
+                # ONLY a genuinely GONE survivor's carriers are "widened": a
+                # present-but-retired survivor is a real target, not a dangling
+                # pointer, so it must not be reported as "survivor is gone".
+                widened[str(m[id_idx])] = key
+        if rep is not None and not contributed:
+            # no live member: the retired survivor IS the target, and the keep-first
+            # arms own it (an idempotent re-ingest stays a silent dedup).
+            rows.append(rep)
+    return rows, widened
+
+
+def _ref_is_one_gone_entity(rows, widened: dict, *, id_idx: int = 1) -> bool:
+    """Every refused REF candidate came from the SAME gone-survivor group.
+
+    The never-guess refusal then means "one merged ENTITY whose survivor is gone",
+    not "two entities claim this name" (review round 17). ⛔ "SAME group" is the
+    load-bearing word (review round 17, second finding): `widened` maps each carrier
+    to the group key it came from, because a set of ids cannot tell one entity from
+    several — and two distinct entities with dangling pointers must keep `main`'s
+    `ambiguous-name` record rather than be reported as one repairable entity. False
+    otherwise, so a genuine duplicate-name/duplicate-id refusal keeps its own arm
+    and its own ``record_non_folded`` shape.
+
+    ⛔ The test is PER ROW, not on the surviving id set (review round 18): an
+    id-less holder of the same name is NOT in ``widened``, so dropping it from the
+    set makes two holders read as one gone entity — the same false report, reached
+    by a row the map cannot represent. A row with no id, or an id the map does not
+    carry, therefore makes this False and the ordinary never-guess arm reports.
+
+    ``rows`` first, matching :func:`_ref_candidates`' return order: the pair is
+    always unpacked together, and a transposed splat is a ``TypeError`` out of a
+    corruption path.
+    """
+    if not widened:
+        return False
+    keys = set()
+    for r in rows:
+        rid = str(r[id_idx]) if r[id_idx] else ""
+        if not rid or rid not in widened:
+            return False
+        keys.add(widened[rid])
+    return len(keys) == 1
+
+
+def _id_claimant_count(g, label: str, node_id: str) -> int:
+    """How many NODES claim one logical id — the single-id form of
+    :func:`_id_claimant_counts`.
+
+    #12120 (review round 14): :func:`_entity_key_of` asks the TARGET the same
+    question ``_entity_rows`` asks of its rows, so it must use the same primitive —
+    a second, narrower count is how the target's entity became backend-order
+    dependent.
+
+    ⛔ Round 16 changed the ANSWER, not the place: the guard still sits in
+    :func:`_entity_key_of`, but it returns the refusal (``(None, reason,
+    claimants)``) for its callers to report, instead of ``None`` as an ordinary key.
+    ``None`` disarmed both consumers — no candidate key can equal it, so
+    ``all_candidates_are_target`` could never fire, and every key differs from it, so
+    the merged-carrier exclusion stopped excluding. Refusing is what a corrupt id
+    requires; where the refusal is REPORTED (after the keep-first arm, so an
+    idempotent re-ingest on a corrupt graph stays a dedup) is the lanes' choice.
+    """
+    if not node_id:
+        return 0
+    return _id_claimant_counts(g, label, [(None, str(node_id))], 1).get(
+        str(node_id), 0)
+
+
+def _entity_key_of(g, label: str, node_id) -> tuple[str | None, str | None, tuple[str, ...]]:
+    """The ENTITY a node belongs to: its survivor's id, or its own — plus the
+    REFUSAL that makes the question unanswerable, and what the refusal counted.
+
+    The same rule ``_entity_rows`` groups by, for the one node it does not hand
+    back a group for — the supersession TARGET, which is resolved by its own
+    probe and compared against successor candidates at entity level.
+
+    Returns ``(key, None, ())`` when the question is answerable, and
+    ``(None, reason, claimants)`` when it is NOT: the id has more than one
+    claimant, which is corruption, not two incarnations. The claimant guard is
+    the one `_entity_rows` applies (review round 14) — ``follow_resolved_from``
+    reads ONE node for an id, so a second claimant makes the target's ENTITY, and
+    every question compared against it, depend on which claimant the backend
+    happened to bind (#2164 P2-2).
+
+    ``claimants`` is what the refusal COUNTED, one entry per claiming NODE — the
+    same id repeated when the corruption is a duplicated id (the shape the
+    ref-side duplicate-id refusals record at ``len(by_id) > 1``), so the durable
+    ``record_non_folded`` entry names the evidence rather than a single carrier
+    for a two-claimant refusal (#9876/#12203 review round 16).
+
+    ⛔ The refusal is the SECOND RETURN VALUE, never a ``None`` key
+    (review round 15). ``None`` does not refuse anything at the two sites that
+    consume this: no candidate key can ever equal it, so the self-supersession
+    guard stops firing, and every candidate key differs from it, so the
+    merged-carrier exclusion stops excluding — the target's OWN entity group is
+    offered as a successor candidate — and the fold stamps EVERY node claiming
+    that id, including one that is not the record's target. Measured pre-fix:
+    ``applied=1, skipped=[]``, silently. A caller MUST refuse when the reason is
+    non-empty, before any key comparison.
+
+    ``(None, None, ())`` is the id-less case: no key and no refusal — both
+    callers refuse an id-less target earlier, and it is not an ambiguity.
+    """
+    if not node_id:
+        return None, None, ()
+    claimants = _id_claimant_count(g, label, str(node_id))
+    if claimants > 1:
+        return None, f"ambiguous {label.lower()} id", (str(node_id),) * claimants
+    return str(follow_resolved_from(g, label, str(node_id)) or node_id), None, ()
+
+
+_SUCCESSOR_PROJECTION = "n.id, n.name, n.status"
+
+
+def _successor_candidates(g, label: str, space: str, params: dict) -> list:
+    """The successor-name candidates of ONE family, over the writer's key space.
+
+    ``space`` must be built against the variable ``n`` (``name_key_space_same_entity("n",
+    …)``) — the predicate is per-variable and this query's variable is ``n``.
+    """
+    if not space:
+        return []
+    return g.query(
+        f"MATCH (n:{label}) WHERE {space} "
+        "RETURN n.id, n.name, n.status",
+        params=params).result_set
+
+
+def _exact_subject_ref_ids(proj, ref: str) -> list:
+    """`:Subject` ids whose own ``name`` IS ``ref`` — the family-defer exactness test.
+
+    ⛔ The answer is about PRESENCE, and an ID-LESS holder counts: a `None` entry
+    means "an exact-named Subject holds this name and carries no id", which is
+    still a yes to the family question and still a refusal the Subject lane owns.
+    See the body for the measured regression that filtering it caused.
+
+    #12120 review: a Subject that holds the ref only by FOLD is a TIE, and a tie
+    must not silently pick a family; a Subject that holds it EXACTLY is the one
+    case where the Object lane was demonstrably the wrong family.
+    # ⛔ ONE CALLER, and this is NOT the collapsed-carrier guard (review round 29).
+    # The only caller is the family DEFER (`apply_supersessions`, `and
+    # _exact_subject_ref_ids(proj, ref)`). The collapse-report guard asks
+    # `_subject_family_holds_ref` instead — a DIFFERENT question, and deliberately:
+    # that helper's docstring records WHY exactness is the wrong question there (a
+    # Subject holding the ref by FOLD or by ID is invisible to it), and the GUARD's
+    # own note records the measurement — asking this helper there dropped a fold the
+    # Subject lane applies (`applied=0`, `applied=1` once the family's own space is
+    # asked). Do not "reconcile the two
+    # call sites" by restoring this helper at that guard: it is the bug the commit
+    # that introduced `_subject_family_holds_ref` removed.
+    """
+    space, params = name_key_space_same_entity("s", ref)
+    if not space:
+        return []
+    # ⛔ FLATTENED to ids (review round 25): this returned the query's raw
+    # `result_set` — one `[id]` ROW per holder — while its name, its `-> list`
+    # annotation and its docstring all promise *ids*. The next caller that iterates
+    # or sets it got a list of one-element lists (`unhashable type: 'list'`). The
+    # siblings (`_live_holders_same_entity`) already flatten.
+    # ⛔ PRESENCE, NOT IDENTITY (review round 26, P1): the filter is `if r`, NOT
+    # `if r and r[0]`. The caller asks "does the SUBJECT family hold this ref by its
+    # exact spelling?" — a PRESENCE question — and an ID-LESS `:Subject` still holds
+    # the name. Filtering the falsy id returned `[]` for that holder, which read as
+    # "no exact Subject" and let the Object lane fold a fold-only carrier where
+    # `main` refused with `id-less subject target` (measured both directions on a
+    # lane graph: `if r and r[0]` → `applied=1` and a journaled fold onto the wrong
+    # node; `if r` → `applied=0`, the refusal `main` gives). So an id-less holder
+    # contributes `None` to the list ON PURPOSE: non-empty is the answer, and a
+    # caller that needs real ids must filter `None` itself rather than inherit a
+    # silently different question.
+    return [r[0] for r in proj.g.query(
+        f"MATCH (s:Subject) WHERE {space} AND s.name = $ref RETURN s.id",
+        params={**params, "ref": ref}).result_set if r]
+
+
+def _subject_family_holds_ref(proj, ref: str) -> bool:
+    """Does the SUBJECT family hold ``ref`` AT ALL — the space its lane resolves in?
+
+    The guard that reports ``"ref carrier's survivor is gone"`` may only fire when
+    the Subject lane cannot take the record either, so it must ask the question that
+    lane actually asks. :func:`_exact_subject_ref_ids` answers the DEFER's narrower
+    question (a Subject holding the ref by its EXACT name spelling, which outranks a
+    fold-only Object); a Subject holding the ref by FOLD is invisible to it, and so
+    is one holding it by ID.
+
+    ⛔ BOTH arms, because ``_apply_subject_supersession`` resolves the ref in two
+    steps: ``MATCH (s:Subject {id:$ref})`` first, and only then the writer's name
+    space. Asking the name space alone dropped a fold the Subject lane applies by
+    id, with a warning that no ``:Subject`` holds the ref about a live one
+    (review round 16, second finding — measured: applied=0 against a live Subject
+    whose id IS the ref; applied=1 once the id arm is asked too).
+    """
+    if not ref:
+        return False
+    space, params = name_key_space_same_entity("s", ref)
+    where = "s.id = $ref" + (f" OR {space}" if space else "")
+    return bool(proj.g.query(
+        f"MATCH (s:Subject) WHERE {where} RETURN s.id LIMIT 1",
+        params={**params, "ref": ref}).result_set)
+
+
+def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
+                                sb_entities, *,
                                 session_id, evidence, warn, _skip) -> bool:
     """#1423: apply ONE entity supersession whose endpoints are `:Subject`.
 
@@ -823,7 +1394,11 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
       a re-fold (the Object lane's ``_RECALL_OBJECT_EXCLUDED_STATUS`` check).
     * **never-guess** — an id-form ref must match exactly one Subject; a
       name-form ref must match exactly one carrier. Two id-claimants or two
-      name-carriers are ambiguous and are refused with a warning.
+      name-carriers are ambiguous and are refused with a warning. The TARGET's
+      own id is asked the same question: a name-form ref that resolves to ONE
+      node whose ``id`` is claimed by two is corruption too, and it is refused
+      (``"ambiguous subject id"``) rather than compared against a key
+      ``_entity_key_of`` could not resolve.
     * **visible distinct successor** — the successor must carry an id, differ
       from the target, and not itself be terminal; otherwise folding would
       bury the target with no successor a recall surface can show.
@@ -863,6 +1438,19 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
         "RETURN ID(s), s.id, s.name, s.status, s.supersededBy",
         params={"ref": ref},
     ).result_set
+    # Every row the ref RESOLVED to, from either arm — the keep-first arm reads
+    # the TARGET ENTITY'S rows (never the whole arm) to keep an idempotent
+    # re-ingest silent when the entity's representative (the SURVIVOR) stores
+    # something else (rounds 19-20).
+    _subj_raw: list = []
+    # ⛔ Bound HERE, not inside the name arm (review round 20/21, P1): the
+    # keep-first arm below reads it from EITHER arm, so an ID-matched terminal
+    # Subject with a divergent successor hit `UnboundLocalError` — and because an
+    # exception is not a refusal, one such record aborted the whole batch (the
+    # module's contract is the opposite), 500-ing the hosted §6b caller whose
+    # earlier steps had already written. The name branch narrows it to the
+    # target's own group.
+    _subj_target_rows = list(by_id)
     if len(by_id) > 1:
         # #1423 review P2: the Object twin records this refusal durably
         # (``record_non_folded``) as well as warning — the entry IS the
@@ -877,12 +1465,84 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
     if by_id:
         _nid, target_id, target_name, target_status, target_sb = by_id[0]
     else:
-        by_name = proj.g.query(
-            "MATCH (s:Subject) WHERE s.name = $ref "
-            "RETURN ID(s), s.id, s.name, s.status, s.supersededBy",
-            params={"ref": ref},
-        ).result_set
+        # #12120 supersession-probe site: the RAW `name` here was narrower than the write this
+        # fold describes, so a fold-equivalent Subject REF was skipped with
+        # "ref is not a Subject" and its successor stayed live. The union comes
+        # from `entity_identity.name_key_space_same_entity`; the >1 never-guess
+        # below is unchanged — it counts candidates over the writer's space, and
+        # the rows are grouped by ENTITY first so a merged-away carrier is not
+        # counted as a second carrier (see `_entity_rows`).
+        _ref_space, _ref_params = name_key_space_same_entity("s", ref)
+        _subj_raw = _entity_rows(
+            proj.g, "Subject",
+            proj.g.query(
+                f"MATCH (s:Subject) WHERE {_ref_space} "
+                "RETURN ID(s), s.id, s.name, s.status, s.supersededBy",
+                params=_ref_params,
+            ).result_set if _ref_space else [],
+            with_groups=True)
+        by_name, _ref_widened = _ref_candidates(_subj_raw, "Subject")
+        # ⛔ The terminal-target rescue below reads the TARGET'S OWN GROUP, never the
+        # whole name arm (review round 20): `_subj_raw` is every holder the WIDENED
+        # key space matched — multi-entity by construction — so asking all of it
+        # whether "the fold happened" answers for other nodes. Measured: one
+        # unrelated terminal Subject with a dangling survivor (its rows are dropped
+        # by `_ref_candidates`, leaving the target the only candidate) made a
+        # GENUINE divergence vanish — `applied=0, skips=[], warns=[]` where `main`
+        # warned and where the same graph minus that node reported
+        # `terminal subject target`. That is the Object twin's round-19 finding, in
+        # the arm the Object twin's fix did not reach.
+        if by_name:
+            _the_target_node = str(by_name[0][0])
+            for _rep, _k2, _members in _subj_raw:
+                _group_rows = ([_rep] if _rep is not None else []) + list(_members)
+                if any(str(_r[0]) == _the_target_node for _r in _group_rows):
+                    _subj_target_rows = _group_rows
+                    break
         if len(by_name) > 1:
+            # ⛔ A DUPLICATE-ID pair is CORRUPTION, not two incarnations, and the
+            # live narrowing below cannot tell them apart: with one claimant
+            # terminal it collapses the pair to ONE row, the never-guess refusal
+            # never fires, and the fold is applied to a corrupt graph — measured
+            # (review round 14) `applied=1, skipped=[]` with two nodes sharing an
+            # id, one live and one superseded, where `main` refused. Two rows
+            # claiming one id therefore refuse here, BEFORE any narrowing, which is
+            # the apart-ness `_entity_rows` documents it preserves.
+            _claimed_ids = [str(r[1]) for r in by_name if r[1]]
+            if len(_claimed_ids) != len(set(_claimed_ids)):
+                record_non_folded("Subject", ref,
+                                  display_holder_ids(_claimed_ids),
+                                  shape="duplicate-id")
+                warn(f"subject supersession {ref!r} matches "
+                     f"{len(by_name)} Subjects claiming duplicate ids — "
+                     f"skipped (never-guess)")
+                _skip(ref, supersedes_by, "ambiguous subject id")
+                return False
+        if len(by_name) > 1:
+            # #12120 review round 6: count the writer's question — LIVE carriers
+            # only (`entity_identity._live_holders_same_entity` is live-only, so a
+            # terminal ex-incarnation beside a live one is not ambiguity). Narrow
+            # to the live rows when one is live; keep the full set when all are
+            # terminal (the keep-first arms below own that case).
+            _live_rows = [r for r in by_name
+                          if (r[3] or "") not in SUBJECT_TERMINAL_STATUSES]
+            if _live_rows:
+                by_name = _live_rows
+        if len(by_name) > 1:
+            if _ref_is_one_gone_entity(by_name, _ref_widened):
+                # ⛔ One merged ENTITY, not two carriers claiming a name: every
+                # refused candidate came from a GONE-survivor group, so the true
+                # condition is the dangling `resolved_from`, and the durable
+                # shape says so instead of claiming duplicate-name corruption
+                # the graph's own grouping denies (review round 17).
+                record_non_folded("Subject", ref,
+                                  display_holder_ids([r[1] for r in by_name]),
+                                  shape="unaddressable-name")
+                warn(f"subject supersession {ref!r} resolves to "
+                     f"{len(by_name)} carriers of ONE entity whose merged "
+                     f"survivor is gone — skipped (no addressable carrier)")
+                _skip(ref, supersedes_by, "ref carrier's survivor is gone")
+                return False
             # #1423 review P2: durable record, not just a log line — the
             # Object twin's `:1184` call mirrored with `label="Subject"`.
             record_non_folded("Subject", ref,
@@ -893,6 +1553,63 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
             _skip(ref, supersedes_by, "ambiguous subject name")
             return False
         if not by_name:
+            # ⛔ `by_name` can be empty because `_ref_candidates` DROPPED the
+            # matched carriers (terminal, under a gone survivor) — not because the
+            # graph has no such `:Subject`. Saying so was measurably false about a
+            # node the graph holds (review round 18), and it also turned an
+            # idempotent re-ingest into a fresh refusal where `main` was silent.
+            _matched_subj = [r for _rep, _key, _members in _subj_raw
+                             for r in _members]
+            _matched_subj += [rep for rep, _key, _members in _subj_raw
+                              if rep is not None]
+            # ⛔ Same requirement as the Object twin below (review round 19): the
+            # successor's CARRIER spellings, flattened from the probe's groups —
+            # never the representatives, whose spelling this record may never have
+            # resolved.
+            # ⛔ ONE ENTITY only (review round 21, P3 — the Object twin below):
+            # this set is the whole widened probe, so an unrelated dangling
+            # incarnation storing this successor must not answer for the record.
+            # The group key alone (review round 22, as the Object twin above).
+            _matched_is_one_entity = (
+                len({_k for _rep, _k, _m in _subj_raw}) <= 1)
+            if (_matched_is_one_entity and any(_same_successor(
+                    str(r[4] or ""), supersedes_by,
+                    candidate_names=[mname
+                                     for _rep, _key, members in sb_entities
+                                     for _mid, mname, _mst in members])
+                   for r in _matched_subj if len(r) > 4)):
+                return False
+            if _matched_subj:
+                # ⛔ Same ENTITY-COUNT classification as the Object twin below
+                # (review round 25): `unaddressable-name` tells a repair consumer
+                # to fix ONE dangling pointer, which is true only when the matched
+                # carriers are carriers of ONE entity. Two distinct entities with
+                # dangling pointers keep `main`'s `ambiguous-name` record — the
+                # rule `_ref_is_one_gone_entity` states for the sibling arm
+                # (round 17) and `test_an_id_less_holder_is_not_a_gone_entity`
+                # pins. Answering both shapes alike was the round-23 mis-classification.
+                if not _matched_is_one_entity:
+                    record_non_folded(
+                        "Subject", ref,
+                        display_holder_ids(
+                            [r[1] for r in _matched_subj if r[1]]),
+                        shape="ambiguous-name")
+                    warn(f"subject supersession {ref!r} matches "
+                         f"{len({_k for _rep, _k, _m in _subj_raw})} Subject "
+                         f"entities by name, none addressable — skipped "
+                         f"(never-guess)")
+                    _skip(ref, supersedes_by, "ambiguous subject name")
+                    return False
+                record_non_folded(
+                    "Subject", ref,
+                    display_holder_ids([r[1] for r in _matched_subj if r[1]]),
+                    shape="unaddressable-name")
+                warn(f"subject supersession {ref!r} matched "
+                     f"{len(_matched_subj)} Subject carrier(s) of ONE entity "
+                     f"whose merged survivor is gone — skipped "
+                     f"(no addressable carrier)")
+                _skip(ref, supersedes_by, "ref carrier's survivor is gone")
+                return False
             warn(f"subject supersession {ref!r} not found in the graph as "
                  f"a :Subject — skipped (fail-open)")
             _skip(ref, supersedes_by, "ref is not a Subject")
@@ -903,11 +1620,32 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
     # DIVERGENT successor warns — the Object lane's exact asymmetry, so a
     # conflict stays auditable instead of vanishing.
     if (target_status or "") in SUBJECT_TERMINAL_STATUSES:
-        if (target_sb or "") != supersedes_by:
+        # ⛔ A node matched for the REF may already store exactly this successor
+        # while the entity's representative (the SURVIVOR) does not — the Object
+        # twin's round-19 guard, and the same reading of the re-ingest rule: an
+        # unchanged conversation re-ingested is a dedup, not a divergence.
+        if not (
+                _same_successor(
+                    target_sb or "", supersedes_by,
+                    candidate_names=[mname
+                                     for _rep, _key, members in sb_entities
+                                     for _mid, mname, _mst in members])
+                or (not _same_successor(target_sb or "", supersedes_by)
+                    and any(_same_successor(
+                        str(r[4] or ""), supersedes_by,
+                        candidate_names=[mname
+                                         for _rep, _key, members in sb_entities
+                                         for _mid, mname, _mst in members])
+                        for r in _subj_target_rows if len(r) > 4))):
             warn(f"subject supersession {ref!r} already terminal "
                  f"(status={target_status!r}, supersededBy={target_sb!r}) — "
                  f"conflict with {supersedes_by!r} skipped "
                  f"(keep-first, the fold never blind-overwrites)")
+            # #5365 + round-3 review: the DIVERGENT arm is a refusal and must
+            # reach the caller's `skipped`; only the same-successor arm above
+            # stays silent (an unchanged conversation re-ingested is an
+            # idempotent dedup, not a refusal).
+            _skip(ref, supersedes_by, "terminal subject target")
         return False
     if not target_id:
         warn(f"subject supersession {ref!r} resolved to an id-less "
@@ -916,10 +1654,35 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
         _skip(ref, supersedes_by, "id-less subject target")
         return False
     # ── successor must be a VISIBLE, DISTINCT Subject ────────────────────
-    has_visible_distinct = any(
-        sid is not None and sid != target_id
-        and (sst or "") not in SUBJECT_TERMINAL_STATUSES
-        for sid, _sname, sst in sb_rows)
+    _target_key, _target_refusal, _target_claimants = _entity_key_of(
+        proj.g, "Subject", target_id)
+    if _target_refusal:
+        # ⛔ REFUSE, never compare against a key that was never resolved
+        # (review round 15): two nodes claiming one id is corruption, and the
+        # entity-level questions below answer "the successor is distinct" for
+        # every candidate when the key is ``None`` — the fold would then stamp
+        # both claimants, including one that is not this record's target.
+        # Ordering is deliberate: this sits where the key used to be computed,
+        # AFTER the keep-first arm above. Keep-first never WRITES (it dedups or
+        # refuses), so nothing corrupt can be folded before the refusal — and
+        # moving it above keep-first would turn every idempotent re-ingest on a
+        # corrupt graph into a new reported refusal (the Object twin's placement
+        # is the same, review round 16).
+        record_non_folded("Subject", ref, _target_claimants,
+                          shape="duplicate-id")
+        warn(f"subject supersession {ref!r} resolves to an id "
+             f"{target_id!r} claimed by more than one Subject — skipped "
+             f"(never-guess)")
+        _skip(ref, supersedes_by, _target_refusal)
+        return False
+    _visible_successors = [
+        (mid, mname)
+        for _rep, key, members in sb_entities
+        if key != _target_key
+        for mid, mname, mst in members
+        if mid is not None and str(mid) != str(target_id)
+        and (mst or "") not in SUBJECT_TERMINAL_STATUSES]
+    has_visible_distinct = bool(_visible_successors)
     if not has_visible_distinct:
         warn(f"subject supersession {ref!r} skipped — successor "
              f"{supersedes_by!r} resolves only to id-less, target-identical, "
@@ -940,7 +1703,14 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
     # carries both. The record itself still goes through the ONE builder
     # (`_journal_entity_mutation`), so the shape cannot drift.
     from tortoise.projection import _now_iso
-    state = {"status": "superseded", "supersededBy": supersedes_by,
+    # #12120: record the SUCCESSOR's spelling, not the record's — every RAW
+    # name-keyed reader of `supersededBy` (audit 4b/4c, assembly's
+    # visible-successor probe, the renderer) must be able to resolve it, and the
+    # probe that found this successor was the WRITER's folded union. See
+    # `_one_successor_spelling`.
+    _stored_successor = _one_successor_spelling(
+        [sname for _sid, sname in _visible_successors], supersedes_by)
+    state = {"status": "superseded", "supersededBy": _stored_successor,
              "supersededAt": _now_iso()}
     keys = list(state)
     try:
@@ -1193,10 +1963,48 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # duplicate names (distinct ids) are ambiguous — the successor probe
         # must NOT pick one by LIMIT 1 (the same discipline the ref-side
         # probe below applies to ITS >1-name matches).
-        sb_rows = proj.g.query(
-            "MATCH (o:Object {name:$sb}) RETURN o.id, o.name, o.status",
-            params={"sb": supersedes_by},
-        ).result_set
+        #
+        # #12120 supersession-probe site: the successor probe asked the RAW `name` while every
+        # write this fold describes resolves the FOLDED union (`name` ·
+        # `canonical_name` · `aliases`, raw and folded). A record whose successor
+        # is named by a fold-equivalent spelling therefore found NO Object, fell
+        # through to the Subject lane, and was then skipped as a "dangling
+        # successor" (#1183-1188) — the superseded entity stayed `live` and
+        # search-visible. The key space is the writer's, from
+        # `entity_identity.name_key_space_same_entity` (the ONE definition of who
+        # holds a name) — the `has_visible_distinct` / self-alias gates below are
+        # unchanged and still see EVERY candidate, so this widens the spelling
+        # set, never the decision.
+        # The successor arms are written against ONE variable (`n`), which is the
+        # variable `_successor_candidates` queries per family: the predicate is
+        # per-variable, so an `o.` clause inside `MATCH (s:Subject)` would be a
+        # Cypher error (`'o' not defined`), not a miss.
+        _sb_space, _sb_params = name_key_space_same_entity("n", supersedes_by)
+        # The successor rows are grouped by ENTITY (a merged-away carrier is not
+        # a second candidate): the self-alias guard below asks "is every candidate
+        # the target", and that question is about entities, not nodes (#12120
+        # finding 2 review).
+        sb_entities = _entity_rows(
+            proj.g, "Object",
+            _successor_candidates(proj.g, "Object", _sb_space, _sb_params),
+            id_idx=0, projection=_SUCCESSOR_PROJECTION, with_groups=True)
+        sb_rows = [_rep for _rep, _key, _members in sb_entities]
+        # ⛔ The CARRIERS' spellings, flattened from the GROUPS — never the
+        # representatives. A representative can be None (round 9's
+        # gone-survivor sentinel: a group whose `resolved_from` target has been
+        # deleted keeps its members and reports `(None, key, members)`) and it
+        # can be the merged-away SURVIVOR, whose spelling this record may never
+        # have resolved. Unpacking the representative rows as `(id, name,
+        # status)` triples raised `TypeError: cannot unpack non-iterable
+        # NoneType` out of `apply_supersessions` — aborting the WHOLE batch with
+        # that record in neither `skipped` nor a warn, against the contract the
+        # docstring above states ("a bad record still never aborts the ingest"),
+        # and on the hosted §6b path turning a deterministic payload into one
+        # that can never be ingested.
+        _sb_carrier_spellings = {
+            str(mname)
+            for _rep, _key, members in sb_entities
+            for _mid, mname, _mst in members if mname}
         if not sb_rows:
             # #1423: the successor may be a :Subject. #1370 routes the
             # extractor's declared §5 Subject kinds (team / role /
@@ -1208,10 +2016,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # role/team/person `live` forever AND search-visible. The Subject
             # family has its own lane below; it is tried ONLY when no Object
             # carries the successor name, so the Object path is byte-identical.
-            subj_rows = proj.g.query(
-                "MATCH (s:Subject {name:$sb}) RETURN s.id, s.name, s.status",
-                params={"sb": supersedes_by},
-            ).result_set
+            subj_rows = _entity_rows(
+                proj.g, "Subject",
+                _successor_candidates(proj.g, "Subject",
+                                      _sb_space, _sb_params),
+                id_idx=0, projection=_SUCCESSOR_PROJECTION,
+                with_groups=True)
             if subj_rows:
                 if _apply_subject_supersession(
                         proj, sdk, ref, supersedes_by, subj_rows,
@@ -1228,22 +2038,25 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # (post ref-side resolution) decides. Duplicate names are only
         # harmful when a candidate is the target itself; otherwise the fold
         # is deterministic (display-string-only successor).
-        # #5370: the fold stores supersededBy VERBATIM (the FULL successor
-        # name) — it no longer truncates to 200 chars. That cap was the
-        # fold's OWN behaviour, never a property of the general write path
-        # (`create_entity`/`_upsert_object` store Object names verbatim), so
-        # it was LOSSY: a >200-char successor was stored as a prefix that
-        # names NO Object, so the ask-path name-keyed probe could not verify
-        # it and the renderer reported "no successor record found" (fixed
+        # #5370: the fold stores the successor name in FULL — no 200-char cap.
+        # That cap was the fold's OWN behaviour, never a property of the general
+        # write path (`create_entity`/`_upsert_object` store Object names
+        # verbatim), so it was LOSSY: a >200-char successor was stored as a
+        # prefix that names NO Object, so the ask-path name-keyed probe could not
+        # verify it and the renderer reported "no successor record found" (fixed
         # here + in projection/entities.py + assembly._state_header_hit).
-        # The DEDUP/keep-first probe below compares against the STORED form;
-        # rows folded BEFORE #5370 still carry the old 200-char prefix, so
-        # the compare accepts EITHER the full name (new rows) or its
-        # 200-char prefix (legacy rows) — a same-successor re-ingest stays a
-        # dedup on both. The FULL name was always kept for the journaled
-        # event (round-2 review, ISSUE 2 — §11: the event log is the
-        # reconstruction source), so for rows folded AFTER #5370 live and
-        # replay agree byte-for-byte. A LEGACY row does not: live holds the
+        # ⛔ #12120: WHOSE spelling is stored changed. The value is now the
+        # SUCCESSOR NODE's own spelling (`_one_successor_spelling`), not this
+        # record's, because every RAW reader of `supersededBy` (audit 4b/4c,
+        # `assembly._probe_visible_successors`, the renderer) compares `name` by
+        # equality while the successor probe resolves the writer's folded union.
+        # The DEDUP/keep-first probe below therefore compares against that stored
+        # form in the writer's key space (`_same_successor`), accepting: the
+        # stored value, this record's FOLD-EQUAL spelling, a spelling that IS one
+        # of the candidates this record resolved, or — for rows folded BEFORE
+        # #5370 — the old 200-char prefix. The stored value is also what the
+        # journaled event carries (one value, live == journal == replay), so for
+        # rows folded AFTER #5370 live and replay agree byte-for-byte. A LEGACY row does not: live holds the
         # old prefix while the journal holds the full name, so a rebuild
         # REWRITES the prefix to the full name. That is a benign one-way
         # healing — the journal is the reconstruction source and its value
@@ -1255,24 +2068,148 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # into two probes, deduped by NODE IDENTITY (``ID(o)``) — the
         # disambiguation below is unchanged (an id match is unambiguous and
         # wins; the >1-name never-guess stays).
+        #
+        # #12120 supersession-probe site: the NAME arm asked the RAW `name` while the write
+        # this fold describes resolves the FOLDED union, so a fold-only REF was
+        # skipped with the wrong reason ("ref is not a Subject" for a Subject
+        # ref, "not found" for an Object one) and its successor stayed live. The
+        # arm's key space is the writer's, from
+        # `entity_identity.name_key_space_same_entity`; the never-guess/duplicate-
+        # id discipline below is unchanged — it still counts every candidate
+        # under that space.
         _id_rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id = $ref "
             "RETURN ID(o), o.id, o.name, o.status, o.supersededBy",
             params={"ref": ref},
         ).result_set
+        _ref_space, _ref_params = name_key_space_same_entity("o", ref)
         _name_rows = proj.g.query(
-            "MATCH (o:Object) WHERE o.name = $ref "
+            f"MATCH (o:Object) WHERE {_ref_space} "
             "RETURN ID(o), o.id, o.name, o.status, o.supersededBy",
-            params={"ref": ref},
-        ).result_set
-        _seen_nodes: set = set()
-        rows = []
-        for _row in list(_id_rows) + list(_name_rows):
-            if _row[0] in _seen_nodes:
+            params=_ref_params,
+        ).result_set if _ref_space else []
+        # A node the ID arm already claimed is an id match, not a name match:
+        # the dedupe keeps the id side's precedence (and the by_name arm must
+        # not count it twice). The name arm's rows are then grouped by ENTITY, so
+        # a merged-away carrier does not read as a second carrier and the
+        # `len(by_name) > 1` refusal below asks the writer's question (#12120
+        # supersession-probe site review).
+        _id_node_keys = {_row[0] for _row in _id_rows}
+        rows = [list(_row[1:]) for _row in _id_rows]
+        _name_entities = _entity_rows(
+            proj.g, "Object",
+            [_row for _row in _name_rows if _row[0] not in _id_node_keys],
+            with_groups=True)
+        _name_arm_rows, _name_widened = _ref_candidates(_name_entities, "Object")
+        # Does every matched row belong to ONE entity? The gone-survivor dedup
+        # below may only answer for a single entity (review round 21, P3).
+        # ⛔ The GROUP KEY is the entity test and nothing else may be conjoined
+        # with it (review round 22): one entity legitimately holds TWO carriers
+        # (a non-destructive merge of two candidates onto one survivor), so adding
+        # a distinct-id count made a merged entity's idempotent re-ingest refuse as
+        # "ref carrier's survivor is gone" — the regression class this branch
+        # forbids. Two DIFFERENT entities can never share a key.
+        _name_is_one_entity = len({_k for _rep, _k, _m in _name_entities}) <= 1
+        if (not rows and _name_rows and not _name_arm_rows
+                and not _subject_family_holds_ref(proj, ref)):
+            # #12120 review: the name arm DID match carriers and every one of
+            # them collapsed away (its `resolved_from` survivor is gone), so the
+            # Object lane has nothing to fold. Reporting the WRONG reason is the
+            # only defect here — and it is only a defect when the SUBJECT lane
+            # cannot take the record either: a ref that is a live `:Subject`
+            # whose successor is carried by both families still folds below
+            # (`#1423`), and skipping it here would DROP a fold that applies.
+            # So ask the FAMILY's question — `_subject_family_holds_ref`, i.e. the
+            # space `_apply_subject_supersession` resolves the ref in (its `s.id`
+            # arm, then the writer's name space) — not the defer's EXACTNESS test: a
+            # Subject that holds the ref only by fold (or by id) is invisible to
+            # that narrower test, so asking it dropped a fold the Subject lane
+            # applies and reported "no :Subject holds the ref" about a live one
+            # (review round 16, measured: applied=0; applied=1 once the guard asks
+            # the family's own question).
+            # ⛔ "Collapsed away" is now true only of groups with NO live member:
+            # `_ref_candidates` hands a gone-survivor group's LIVE carriers back
+            # as addressable (review round 10), so reaching this branch means the
+            # matched nodes are all terminal or id-less — not merely orphaned.
+            # ⛔ An IDEMPOTENT re-ingest must stay silent (review round 18): the
+            # target may already carry exactly this successor, in which case the
+            # keep-first arms would have deduped it without a word — but the guard
+            # runs BEFORE them, so reporting here turned every re-ingest into a
+            # fresh `skipped` entry and two warnings, which the branch's own rule
+            # forbids ("only the same-successor arm stays silent … an idempotent
+            # dedup, not a refusal"). Measured on `main`: `applied=0, skips=[],
+            # warns=[]` for that shape.
+            # ⛔ `candidate_names` is REQUIRED here (review round 19): the fold
+            # stores the successor NODE's spelling (`_one_successor_spelling`), so
+            # the ordinary success path — a successor resolved by its folded key —
+            # stores a value that is NOT this record's, and the fold arm cannot see
+            # that it is the same successor. Without the candidate set, a re-ingest
+            # of an ALREADY-FOLDED record was reported as a fresh refusal and wrote
+            # a durable `unaddressable-name` entry (the round-18 class, for the
+            # shape where the stored spelling happens to equal the record's, was
+            # fixed the same way).
+            # ⛔ ONE ENTITY only (review round 21, P3): `_name_rows` is the whole
+            # widened probe — multi-entity by construction — so one unrelated
+            # dangling incarnation storing this successor must not answer for the
+            # record. Measured: two gone-survivor entities, one storing this
+            # successor and one storing another, were absorbed SILENTLY
+            # (`applied=0, skips=[], warns=[]`) where `main` recorded
+            # `ambiguous-name` with its own warn and NO `_skip` — a divergence with
+            # no `skipped` entry, which is the one-entry-per-unapplied-record
+            # contract (#5365). ⛔ `main` does NOT refuse this shape "with
+            # `ambiguous object name`": that string does not exist in `main` at all
+            # (corrected — review round 31; see the round-29/30 note below, which
+            # this paragraph contradicted).
+            if (_name_is_one_entity
+                    and any(_same_successor(str(r[4] or ""), supersedes_by,
+                                            candidate_names=_sb_carrier_spellings)
+                            for r in _name_rows)):
                 continue
-            _seen_nodes.add(_row[0])
-            rows.append(list(_row[1:]))
-        if not rows:
+            # ⛔ The DURABLE SHAPE is classified by ENTITY COUNT, not chosen here
+            # (review round 25): the `not by_name` arm is reached by shapes the
+            # `by_name > 1` arm above classifies two different ways, and answering
+            # both with `unaddressable-name` told a repair consumer to fix ONE
+            # dangling pointer where the graph holds two entities — the exact
+            # downgrade `_ref_is_one_gone_entity` was written to prevent (round 17:
+            # "two distinct entities with dangling pointers must keep `main`'s
+            # `ambiguous-name` record rather than be reported as one repairable
+            # entity"). ⛔ `main` refuses this SHAPE with an `ambiguous-name` record
+            # and then `continue`s with NO `skipped` entry
+            # (`by_name = [r for r in rows if r[1] == ref]; len(by_name) > 1`) — the
+            # `_skip` below is THIS branch's #5365 fix, not parity, and `main` never
+            # emits the string "ambiguous object name" at all — its only two
+            # `ambiguous …` skip reasons are `ambiguous subject id` and `ambiguous
+            # subject name` (main's Object duplicate-id arm records `duplicate-id` and
+            # `continue`s with no `_skip` either; the Object twin's missing `_skip` is
+            # exactly the gap #5365 names — review round 30).
+            # `test_an_id_less_holder_is_not_a_gone_entity` already pins that rule
+            # on the sibling arm — so the `_name_is_one_entity` test decides the
+            # shape HERE too, rather than gating only the silent-dedup `continue`.
+            if not _name_is_one_entity:
+                record_non_folded(
+                    "Object", ref,
+                    display_holder_ids([r[1] for r in _name_rows if r[1]]),
+                    shape="ambiguous-name")
+                warn(f"supersession ref {ref!r} matches "
+                     f"{len({_k for _rep, _k, _m in _name_entities})} Object "
+                     f"entities by name, none addressable — skipped "
+                     f"(never-guess)")
+                _skip(ref, supersedes_by, "ambiguous object name")
+                continue
+            # The entry is the record (review round 18): both twin refusals
+            # (`unaddressable-name` on the Subject lane and on the Object id arm)
+            # write one, so a warn + `_skip` alone was invisible to the repair
+            # consumer that reads `non_folded_entries()`.
+            record_non_folded(
+                "Object", ref,
+                display_holder_ids([r[1] for r in _name_rows if r[1]]),
+                shape="unaddressable-name")
+            warn(f"supersession ref {ref!r} matched {len(_name_rows)} "
+                 f"Object(s) of ONE entity whose merged survivor is gone, and no "
+                 f":Subject holds the ref — skipped (no addressable carrier)")
+            _skip(ref, supersedes_by, "ref carrier's survivor is gone")
+            continue
+        if not rows and not _name_arm_rows:
             # #1423 review P2: the SUCCESSOR probe above is Object-FIRST, so a
             # successor name carried by BOTH families routes this record into
             # the Object lane even when the REF is a Subject (`Subject(A)`,
@@ -1287,12 +2224,55 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # reported exactly once rather than silently dropped. The ref
             # looks the same either way — the successor probe is what chose
             # the lane, and the successor is the family's identity.
-            subj_rows = proj.g.query(
-                "MATCH (s:Subject {name:$sb}) RETURN s.id, s.name, s.status",
-                params={"sb": supersedes_by},
-            ).result_set
+            subj_rows = _entity_rows(
+                proj.g, "Subject",
+                _successor_candidates(proj.g, "Subject",
+                                      _sb_space, _sb_params),
+                id_idx=0, projection=_SUCCESSOR_PROJECTION,
+                with_groups=True)
             if _apply_subject_supersession(
                     proj, sdk, ref, supersedes_by, subj_rows,
+                    session_id=session_id, evidence=evidence,
+                    warn=warn, _skip=_skip):
+                applied += 1
+            continue
+        # #12120 supersession-probe site review: a FOLD-ONLY Object ref match must not outvote
+        # an EXACT Subject ref match. The lane is chosen by the SUCCESSOR probe
+        # (Object-first), so once the successor probe widened, a record whose
+        # successor happens to share a folded key with some Object was routed
+        # here even when its REF is a Subject's own name — and the widened ref
+        # probe then found the case-variant Object and superseded it instead (a
+        # silent wrong-node write that replays). Defer to the Subject lane when
+        # the Object match is not by id and not by an EXACT name, and the Subject
+        # family holds the ref; otherwise the Object lane keeps its precedence.
+        # #12120 supersession-probe site review (round 3): the defer needs the SAME exactness
+        # test on BOTH sides. The Object side is "not by id and not by an exact
+        # name"; a Subject that holds the ref only by FOLD is a tie, and a tie
+        # must not silently pick a family — the Object lane keeps its recorded
+        # Object-first precedence (the successor probe chose it), and a Subject
+        # that holds the ref EXACTLY is the only case where the Object lane was
+        # demonstrably the wrong family.
+        # ⛔ The exactness test reads the UNGROUPED arm (`_name_rows`), not the
+        # collapsed representatives: `_name_arm_rows` holds one row per ENTITY
+        # and that row is the SURVIVOR's, so an Object whose OWN name IS `ref`
+        # but which a merge collapsed onto a differently-named survivor would
+        # read as "not exact" and hand the record to the Subject lane —
+        # superseding a Subject while the exact-name Object carrier stayed live,
+        # inverting the precedence this branch exists to keep (review round 13).
+        _exact_object_hold = any(
+            str(_row[2]) == ref for _row in _name_rows
+            if _row[0] not in _id_node_keys)
+        if (not rows
+                and not _exact_object_hold
+                and _exact_subject_ref_ids(proj, ref)):
+            subj_entities = _entity_rows(
+                proj.g, "Subject",
+                _successor_candidates(proj.g, "Subject",
+                                      _sb_space, _sb_params),
+                id_idx=0, projection=_SUCCESSOR_PROJECTION,
+                with_groups=True)
+            if _apply_subject_supersession(
+                    proj, sdk, ref, supersedes_by, subj_entities,
                     session_id=session_id, evidence=evidence,
                     warn=warn, _skip=_skip):
                 applied += 1
@@ -1312,12 +2292,71 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                               shape="duplicate-id")
             warn(f"supersession ref {ref!r} matches {len(by_id)} Objects "
                  f"by id — skipped (never-guess)")
+            _skip(ref, supersedes_by, "ambiguous object id")
             continue
         if by_id:
             obj_id, obj_name, o_status, o_sb = by_id[0]
         else:
-            by_name = [r for r in rows if r[1] == ref]
+            # The NAME arm's rows are the candidates the widened key space
+            # matched — read from the arm itself rather than re-comparing
+            # ``r[1] == ref``: a fold-equivalent holder (or one reached through
+            # the merge's `aliases`) keeps its OWN raw name, so a spelling
+            # comparison would discard exactly the rows this fix exists to see.
+            # They are grouped by ENTITY (``_entity_rows``), so a merged-away
+            # carrier of the SAME entity does not read as ambiguity.
+            by_name = [list(_row[1:]) for _row in _name_arm_rows]
+            # #12120 review round 6: the never-guess COUNT must ask the writer's
+            # question, which is LIVE-only — a terminal ex-incarnation is not a
+            # competing carrier (the door mints a second live node under one
+            # folded key exactly because `_live_holders_same_entity` is
+            # live-only). Without this, widening the probe made a SUPERSEDED
+            # node's `canonical_name` count as a second carrier and a fold that
+            # used to apply was refused — the reader/writer disagreement this
+            # issue removes, in the other direction. Narrow to the LIVE rows when
+            # one entity is live; keep the full set when every row is terminal
+            # (the keep-first arms below own that case).
             if len(by_name) > 1:
+                # ⛔ A DUPLICATE-ID pair is CORRUPTION, not two incarnations, and
+                # the live narrowing below cannot tell them apart: with one
+                # claimant terminal it collapses the pair to ONE row, the
+                # never-guess refusal never fires, and a corrupt fold is APPLIED —
+                # measured (review round 14) `applied=1, skipped=[]` with two
+                # nodes sharing an id, one live and one superseded, and the
+                # live/journal/replay paths then disagreed (`main` refused this
+                # shape outright). Two rows claiming one id therefore refuse
+                # here, BEFORE any narrowing — the apart-ness `_entity_rows`
+                # documents it preserves.
+                _claimed_ids = [str(r[0]) for r in by_name if r[0]]
+                if len(_claimed_ids) != len(set(_claimed_ids)):
+                    record_non_folded("Object", ref,
+                                      display_holder_ids(_claimed_ids),
+                                      shape="duplicate-id")
+                    warn(f"supersession ref {ref!r} matches "
+                         f"{len(by_name)} Objects claiming duplicate ids — "
+                         f"skipped (never-guess)")
+                    _skip(ref, supersedes_by, "ambiguous object id")
+                    continue
+            if len(by_name) > 1:
+                _live_rows = [r for r in by_name
+                              if (r[2] or "") not in _RECALL_OBJECT_EXCLUDED_STATUS]
+                if _live_rows:
+                    by_name = _live_rows
+            if len(by_name) > 1:
+                if _ref_is_one_gone_entity(by_name, _name_widened, id_idx=0):
+                    # ⛔ One merged ENTITY, not two carriers claiming a name
+                    # (review round 17): the refusal is the dangling
+                    # `resolved_from`, and its durable shape must not claim the
+                    # duplicate-name corruption this graph does not have.
+                    record_non_folded("Object", ref,
+                                      display_holder_ids(
+                                          [r[0] for r in by_name]),
+                                      shape="unaddressable-name")
+                    warn(f"supersession ref {ref!r} resolves to "
+                         f"{len(by_name)} carriers of ONE entity whose merged "
+                         f"survivor is gone — skipped (no addressable carrier)")
+                    _skip(ref, supersedes_by,
+                          "ref carrier's survivor is gone")
+                    continue
                 # never-guess: two Objects claim the same name, do not pick
                 # one (a blind LIMIT 1 would fold an arbitrary carrier).
                 record_non_folded("Object", ref,
@@ -1325,10 +2364,15 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                                   shape="ambiguous-name")
                 warn(f"supersession ref {ref!r} matches {len(by_name)} Objects "
                      f"by name — skipped (never-guess)")
+                # #5365: the caller's one-entry-per-unapplied-record contract —
+                # the Subject twin always reported this, the Object branch did
+                # not, so the refusal was invisible to whoever reads `skipped`.
+                _skip(ref, supersedes_by, "ambiguous object name")
                 continue
             if not by_name:  # pragma: no cover - probe WHERE clause guarantees
                 warn(f"supersession ref {ref!r} matched a row via neither id "
                      f"nor name — skipped (never-guess)")
+                _skip(ref, supersedes_by, "nameless object target")
                 continue
             obj_id, obj_name, o_status, o_sb = by_name[0]
         # #3590: the target's id IS the identity, and there is no synthesized
@@ -1345,8 +2389,17 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # payload became {} — the ObjectSuperseded journaled NOWHERE (the
             # M2 provenance gap). Never guess an id when the name is also gone.
             if not obj_name:
+                # #12120 review round 7: REACHABLE now, and it must report. The
+                # widened arm matches `canonical_name`/`aliases`, so a legacy
+                # Object carrying a folded key with NEITHER id NOR name arrives
+                # here — pre-widening `o.name = $ref` could not match a NULL
+                # name, so this branch fell through to the "ref is not a
+                # Subject" report instead. Dropping it silently would be the
+                # #5365 gap this lane closes everywhere else (and three lines
+                # below for the id-less-but-named case).
                 warn(f"supersession ref {ref!r} resolved to an Object with "
                      f"neither id nor name — skipped (never-guess)")
+                _skip(ref, supersedes_by, "id-less nameless object target")
                 continue
             # #3590: REFUSE, never synthesize. The old branch fabricated the
             # canonical name-derived id (`obj-<sha26(name)>`) so the journal
@@ -1358,13 +2411,20 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # ⛔ The candidates must name what the refusal COUNTED (#9876 review
             # round 14, minor): this branch is reached with exactly one holder —
             # the id-less one — and `[]` said the refusal had none. `shape` is
-            # the module's own spelling for it (`entity_identity._refuse`'s
-            # `unaddressable-name`): the target IS registered, it just carries
-            # no id, so `unregistered-reference` described the wrong thing.
+            # the module's own spelling for it (`entity_identity`'s
+            # `_record_unaddressable`, which records `["<id-less>"]`): the target
+            # IS registered, it just carries no id, so `unregistered-reference`
+            # described the wrong thing.
             record_non_folded("Object", ref, display_holder_ids([obj_id]),
                               shape="unaddressable-name")
             warn(f"supersession ref {ref!r} resolves to an id-less Object "
                  f"(no id to address or journal) — skipped (#3590)")
+            # #5365 (review round 6): the Subject twin already reports this
+            # (`"id-less subject target"`); an id-less Object is reachable —
+            # `_entity_rows` deliberately keeps an id-less row as its own
+            # representative — so the drop must reach the caller's `skipped`
+            # too, together with the `record_non_folded` entry above.
+            _skip(ref, supersedes_by, "id-less object target")
             continue
         # #2164 review (P1 advisory + round-2 ISSUE 4): the string-equality
         # self-guard above only catches ref == supersedes_by on the SAME
@@ -1398,15 +2458,32 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # absorbed by the string-equality guard above; any id-less row
         # reaching this scan is a DISTINCT successor (different name) and
         # correctly forces all() to False.
-        all_candidates_are_target = bool(sb_rows) and all(
-            sid is not None and real_obj_id is not None
-            and sid == real_obj_id
-            for sid, _sname, _sst in sb_rows)
+        # The target's ENTITY, for the two entity-level questions below and the
+        # node-level one in the visible-successor gate (#12120 review round 8).
+        # ⛔ The refusal is NOT consumed here (review round 16): with a ``None``
+        # key the self-supersession scan below can never fire (`key == None` is
+        # never true), so the scan decides nothing about an unresolved key — and
+        # refusing HERE would pre-empt the terminal keep-first arm, turning every
+        # idempotent re-ingest on a corrupt graph into a new reported refusal
+        # (the Subject twin's placement, and its reasoning, are identical).
+        # `not _target_refusal` keeps that explicit rather than incidental.
+        _target_key, _target_refusal, _target_claimants = _entity_key_of(
+            proj.g, "Object", real_obj_id)
+        all_candidates_are_target = (
+            bool(sb_entities) and not _target_refusal
+            and all(real_obj_id is not None and key == _target_key
+                    for _rep, key, _members in sb_entities))
         if all_candidates_are_target:
             warn(f"supersession record skipped (self-supersession via "
                  f"id/name aliasing): {record!r} resolves both sides to "
                  f"{obj_name!r} (id {real_obj_id!r}) — no distinct "
                  f"successor exists under that name")
+            # #5365: `apply_supersessions` promises one `{ref, successor,
+            # reason}` dict for EVERY record it did not apply — the sibling
+            # string-equality guard (`"self-supersession"`) and both refusals
+            # above report, so this branch must too; a budgetable warn alone left
+            # the drop invisible to whoever reads `skipped` (review round 2).
+            _skip(ref, supersedes_by, "self-supersession via id/name aliasing")
             continue
         # round-4 review (P2-2): any target already in a recall-excluded
         # status (superseded/deprecated/archived/retracted — the #1350
@@ -1416,15 +2493,57 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # fell through to the fold, clobbering e.g. archived→superseded
         # (and for retracted, reversing the #689 leak-guard direction).
         if (o_status or "") in _RECALL_OBJECT_EXCLUDED_STATUS:
-            # #5370: the fold now stores the FULL successor name, but rows
-            # folded BEFORE the fix carry the old 200-char prefix (#2164's
-            # fold cap). Accept EITHER form so a long same-successor
-            # re-ingest stays a silent dedup on new AND legacy rows.
+            # ⛔ A node matched for the REF may already carry exactly this
+            # successor even when the TARGET's representative does not (review
+            # round 19): `_entity_rows` hands back the entity's SURVIVOR, so a
+            # merge-then-supersede graph reports the RETIRED survivor's stored
+            # value while the live carrier that was folded stores this record's.
+            # Comparing only the representative turned a second identical call
+            # into a reported divergence plus a `skipped` entry — where `main`
+            # (whose raw arm hit the carrier) was silent, and where hosted counts
+            # a warn as a real keep-first conflict.
+            # ⛔ The rescue reads the TARGET'S OWN GROUP, never the whole name arm
+            # (review round 19, two passes). `_name_rows` is every holder the
+            # WIDENED key space matched — multi-entity by construction — so asking
+            # it whether the fold happened answered for other nodes: measured, an
+            # unrelated terminal entity with a dangling survivor (whose rows
+            # `_ref_candidates` drops, leaving the target the only candidate) made
+            # a genuine divergence vanish — `applied=0, skips=[], warns=[]` where
+            # `main` warned and where the same graph minus that node reported
+            # `terminal object target`. Scoping to `_target_key` keeps the intended
+            # shape (a merge-then-supersede target whose CARRIERS store this
+            # record's successor) and restores the refusal + warn otherwise.
+            _stored_here = (o_sb or "")
+            _carrier_rows = [m for _rep, _key, _members in _name_entities
+                             if _key == _target_key for m in _members]
+            # ⛔ `candidate_names` here too (review round 20): the fold stores
+            # `_one_successor_spelling`, i.e. a CARRIER spelling that may fold
+            # differently from the record's, so a rescue without it reports the
+            # very divergence this arm exists to prevent - measured on a
+            # merge-then-supersede shape: second apply `skips=[{'reason':
+            # 'terminal object target'}]` + a divergence warn, silent once the
+            # candidate set is passed.
+            if (not _same_successor(_stored_here, supersedes_by)
+                    and any(_same_successor(str(r[4] or ""), supersedes_by,
+                                            candidate_names=_sb_carrier_spellings)
+                            for r in _carrier_rows if len(r) > 4)):
+                continue
+            # #5370/#12120: the fold stores the successor NODE's spelling; rows
+            # folded BEFORE #5370 carry the old 200-char prefix (#2164's fold
+            # cap) and rows folded after it may store a spelling that folds
+            # differently from this record's. All three forms are one successor,
+            # so `_same_successor` accepts them — a same-successor re-ingest
+            # stays a silent dedup on new AND legacy rows.
             stored = o_sb or ""
-            same_successor = stored == supersedes_by or (
-                len(supersedes_by) > 200 and stored == supersedes_by[:200])
+            _candidate_spellings = _sb_carrier_spellings
+            same_successor = _same_successor(
+                stored, supersedes_by,
+                candidate_names=_candidate_spellings)
             if same_successor:
-                if stored != supersedes_by:
+                if stored != supersedes_by and stored not in \
+                        _candidate_spellings and not (
+                            _fold_key(stored) and
+                            _fold_key(stored) == _fold_key(supersedes_by)):
                     # Matched via the 200-char-prefix tolerance: the
                     # stored value is a 200-char name, so a DIVERGENT
                     # successor sharing those 200 chars is indistinguishable
@@ -1439,15 +2558,18 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                     # whose name is EXACTLY 200 chars (a genuine full name),
                     # and the row alone cannot say which it is.
                     #
-                    # The exact-equality branch (stored == supersedes_by)
-                    # is deliberately SILENT, and cannot be otherwise:
-                    # that equality is exactly what an idempotent
-                    # same-successor re-ingest looks like on new rows AND
-                    # on legacy rows, and a stored 200-char value that was
-                    # really a legacy prefix is indistinguishable from a
-                    # genuinely 200-char successor name. The ambiguity is
-                    # inherent to the width of the old cap, not introduced
-                    # here.
+                    # The other three arms are deliberately SILENT: exact
+                    # equality (the ordinary re-ingest), a FOLD-EQUAL
+                    # spelling (`_same_successor` — a fold-variant re-ingest
+                    # of an unchanged conversation), and a stored value that
+                    # IS one of the candidates this record resolved (the
+                    # merged-away-carrier hop, which may store a spelling
+                    # that folds differently). Only the 200-char-prefix
+                    # tolerance stays loud, because a stored 200-char value
+                    # that was really a legacy prefix is indistinguishable
+                    # from a genuinely 200-char successor name. That
+                    # ambiguity is inherent to the width of the old cap, not
+                    # introduced here.
                     warn(f"supersession ref {ref!r} re-folded to a "
                          f"successor sharing a 200-char prefix with the "
                          f"stored fold — treated as idempotent "
@@ -1459,6 +2581,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                  f"(status={o_status!r}, supersededBy={o_sb!r}) — "
                  f"conflict with {supersedes_by!r} skipped "
                  f"(keep-first, the fold never blind-overwrites)")
+            # #5365 (review round 5): the DIVERGENT arm is a refusal and must
+            # reach the caller's `skipped` — its Subject twin already does
+            # (`"terminal subject target"`). Only the same-successor arm above
+            # stays silent: an unchanged conversation re-ingested is an
+            # idempotent dedup, not a refusal.
+            _skip(ref, supersedes_by, "terminal object target")
             continue
         # round-4 review: the fold-through decision (target is LIVE) needs a
         # successor VISIBLE to recall_state's default Object view. That view
@@ -1485,10 +2613,44 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # being made. Also: id-less legacy targets fold by name via the
         # journaled synthesized id + name fallback — their SUCCESSORS
         # carrying canonical ids are unaffected by the id-present rule.)
-        has_visible_distinct = any(
-            sid is not None and sid != real_obj_id
-            and (sst or "") not in _RECALL_OBJECT_EXCLUDED_STATUS
-            for sid, _sname, sst in sb_rows)
+        # #12120 review round 8: the two halves of this question live at
+        # different levels, and asking both of the SURVIVOR row refused a fold
+        # that used to apply. "Is the candidate a DIFFERENT entity than the
+        # target" is entity-level (a merged carrier is not a second candidate);
+        # "is anything under that name VISIBLE" is node-level — recall_state and
+        # the render probe show a LIVE carrier even after its entity's survivor
+        # has been retired. Pre-widening the raw arm matched that live carrier
+        # directly, so a retired survivor beside a live carrier applied; the
+        # collapse to one representative per entity handed this gate the retired
+        # survivor's own status and refused ("no visible successor").
+        # The collected (id, name) pairs stay the CARRIERS' own spellings — the
+        # fold records one of them (`_one_successor_spelling`), and the survivor's
+        # row is the MERGE's spelling, not necessarily a live successor's.
+        # ⛔ REFUSE an unresolvable target key HERE, before the comparison below
+        # (review rounds 15-16). With a ``None`` key every candidate passes
+        # `key != _target_key`, so the merged-carrier exclusion stops excluding —
+        # the target's own entity group is offered as a successor candidate — and
+        # the fold stamps EVERY node claiming that id, including one that is not
+        # the record's target. The placement is deliberate: after the terminal
+        # keep-first arm, which never writes (it dedups or refuses), so nothing
+        # corrupt can be folded before the refusal and an idempotent re-ingest on
+        # a corrupt graph stays the silent dedup it is (the Subject twin's rule).
+        if _target_refusal:
+            record_non_folded("Object", ref, _target_claimants,
+                              shape="duplicate-id")
+            warn(f"supersession ref {ref!r} resolves to an id "
+                 f"{real_obj_id!r} claimed by more than one Object — skipped "
+                 f"(never-guess)")
+            _skip(ref, supersedes_by, _target_refusal)
+            continue
+        _visible_successors = [
+            (mid, mname)
+            for _rep, key, members in sb_entities
+            if key != _target_key
+            for mid, mname, mst in members
+            if mid is not None and str(mid) != str(real_obj_id)
+            and (mst or "") not in _RECALL_OBJECT_EXCLUDED_STATUS]
+        has_visible_distinct = bool(_visible_successors)
         if not has_visible_distinct:
             warn(f"entity supersession {ref!r} skipped — successor "
                  f"{supersedes_by!r} resolves only to id-less, "
@@ -1502,9 +2664,18 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # ∈ _GRAPH_EVENT_TYPES (#432) synthesizes the GraphEvent payload
             # from the same kwargs — provenance reaches BOTH stores. The
             # emitted id is the synthesized canonical id for legacy nodes.
+            #
+            # #12120: `supersedes_by` here is the SUCCESSOR's own spelling (see
+            # `_one_successor_spelling`), not the record's, so the stored value
+            # is one the RAW name-keyed readers resolve — audit's 4b/4c carrier
+            # probes, `assembly._probe_visible_successors` and the renderer.
+            # Live, journal and replay take it from THIS one value, so R8 parity
+            # is structural.
+            _stored_successor = _one_successor_spelling(
+                [sname for _sid, sname in _visible_successors], supersedes_by)
             sdk._emit_event(
                 "ObjectSuperseded",
-                id=obj_id, name=obj_name, supersedes_by=supersedes_by,
+                id=obj_id, name=obj_name, supersedes_by=_stored_successor,
                 session_id=session_id, evidence=evidence,
             )
             # #3590: the fold is ID-KEYED, and the name-keyed fallback is
@@ -1512,7 +2683,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # carrier — the #3573/#2164 burial class). `legacy_no_id` can no
             # longer be set (the id-less target is refused above), so the id is
             # always present here.
-            fold_ev = {"name": obj_name, "supersedes_by": supersedes_by,
+            fold_ev = {"name": obj_name, "supersedes_by": _stored_successor,
                        "id": obj_id}
             folded, fold_matched = proj._fold_object_superseded(
                 fold_ev, cas=True)  # #2242: the LIVE path opts into the CAS
@@ -1534,11 +2705,21 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                     warn(f"ObjectSuperseded emitted for {obj_name!r} but the "
                          f"fold matched no Object — event stays journaled "
                          f"(rebuild retains the truth)")
+                    # #5365 (review round 13): this record was NOT applied and
+                    # `apply_supersessions` promises one `skipped` entry for every
+                    # such record — the sibling branches in this same loop report
+                    # (`ambiguous object id/name`, `id-less object target`,
+                    # `terminal object target`), so ending the enumeration one
+                    # branch short left the one outcome a caller can never
+                    # re-derive (the fold's own result) invisible.
+                    _skip(ref, supersedes_by, "fold matched no object")
                 else:
                     warn(f"ObjectSuperseded emitted for {obj_name!r} but the "
                          f"fold lost a concurrent race — the Object is "
                          f"already superseded (keep-first); event stays "
                          f"journaled (rebuild retains the truth)")
+                    _skip(ref, supersedes_by,
+                          "fold lost a concurrent race")
             else:
                 applied += 1
         except Exception as exc:

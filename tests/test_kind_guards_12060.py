@@ -1640,7 +1640,7 @@ def _capture_extractor(payload: dict):
 
 
 def _capture_payload(entity_name: str, entity_kind: str,
-                     content: str) -> dict:
+                     content: str, about: list | None = None) -> dict:
     import tortoise.extractor_v2 as ev2
 
     return {
@@ -1653,7 +1653,8 @@ def _capture_payload(entity_name: str, entity_kind: str,
         "points": [{"id": ev2._content_id("pt", content), "content": content,
                     "pointKind": "statement", "reason": "NEW",
                     "confidence": 0.5, "c_cal": 0.5,
-                    "about_entities": [entity_name], "source_ref": "session.md",
+                    "about_entities": ([entity_name] if about is None else about),
+                    "source_ref": "session.md",
                     "quote": "", "status": "draft", "search_keys": []}],
         "events": [], "operators": [], "supersessions": [],
         "telemetry": {"counts": {"kept": 1}},
@@ -2813,3 +2814,58 @@ depends_on: []
              "reason": "x"},
             guard_extra={"layer": "object", "onConfusions": []})
         assert errs and "onConfusions" in " ".join(errs), errs
+
+
+def test_the_folded_subject_set_is_re_derived_after_the_correction(
+        sdk, monkeypatch):
+    """#12341: the folded set must be derived from the LANDED layers, not the payload kind.
+
+    ⛔ The ORDER is the subject here, and that is why this pin is shaped the way it
+    is. A `core:naturalPerson` name enters `subject_entity_names` (it IS a declared
+    subject kind) and a CORE guard then redirects the write to `:Object`/
+    `core:Project`; the `#12060` correction loop sees the landed layer and DISCARDS
+    the name. A comprehension placed ABOVE that loop therefore retains a folded key
+    for a name that is no longer a Subject, and a claim naming the same entity in a
+    fold-equal spelling ("DANIEL-OSPINA/AGENT-INFRA") then makes `_subject_fold_only`
+    TRUE — narrowing the `aboutObject` probe to `o.name = $exact`, a spelling no node
+    carries — and the edge is LOST silently.
+
+    ⚠️ CORRECTED (review round 24). An earlier version of this docstring, the commit
+    body and the #12341 closure claimed that DELETING the re-derive reds this test.
+    It does not, and it cannot: with the comprehension gone the folded set is empty,
+    `_subject_fold_only` is False, and the widened probe runs — measured, deleting
+    it leaves this file at 101 passed. What this test pins is the POSITION of the
+    derive (moving it above the correction loop: `1 failed`), and the ABSENCE of the
+    derive is pinned elsewhere, by
+    `tests/test_subject_binding_1370.py::TestCaptureSeam::test_a_fold_variant_of_a_subject_kind_name_skips_the_fold_only_carrier`
+    (`assert 1 == 0`, measured) — which only became discriminating once the redundant
+    seed `add` in the entity loop was removed (with the seed present it masked the
+    missing re-derive, which is exactly why the ten-file sweep in #12341 was
+    1036-green). Both directions are pinned; neither is pinned by this test alone.
+    """
+    import tortoise.extractor_v2 as ev2
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    name = "daniel-ospina/agent-infra"
+    monkeypatch.setattr(ev2, "extract_session_v2", _capture_extractor(
+        _capture_payload(name, "core:naturalPerson",
+                         "the repo ships a kind guard",
+                         about=["DANIEL-OSPINA/AGENT-INFRA"])))
+    r = sdk._capture_session(_CAPTURE_CONV, session_id="s12060_f1")
+    assert r.get("ok") is True, r
+    g = sdk._get_proj().g
+    # Not vacuous: the guard MOVED the write, which is what discards the name from
+    # the exact set while the folded set would keep it.
+    assert [list(row) for row in g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.objectKind",
+        params={"n": name}).result_set] == [["core:Project"]]
+    assert not g.query("MATCH (s:Subject {name:$n}) RETURN s",
+                       params={"n": name}).result_set
+    # THE PIN: the claim's edge survives the fold-equal spelling.
+    assert [list(row) for row in g.query(
+        "MATCH (p:Point)-[rel:aboutObject]->(x {name:$n}) RETURN type(rel)",
+        params={"n": name}).result_set] == [["aboutObject"]], (
+        "the aboutObject edge was lost for a fold-equal reference to a "
+        "guard-REDIRECTED subject-kind name — `subject_entity_names_folded` was "
+        "left stale by the landed-layer correction (#12341)")

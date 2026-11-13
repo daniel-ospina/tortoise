@@ -123,6 +123,7 @@ from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
     ambiguous_holder_ids as _ambiguous_holder_ids, entity_create_lock,
+    name_key_space_same_entity,
     resolve_document_target_id, resolve_entity_id_same_entity)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
@@ -18052,16 +18053,28 @@ class TortoiseSDK:
         # `about_entities` topic channel below SKIPS subject-kind names (it
         # must not emit an un-gated aboutSubject, and it must not mint an
         # id-less Object stub for one).
-        # F6: EXACT names, derived only from payload entities whose KIND is a
-        # subject kind — the same population the resolver checks against. A
-        # `.lower()` fold here would skip a legitimately-cased Object whose
-        # name only case-insensitively matches a subject name, while the
-        # `MATCH (o:Object {name:$n})` resolution below is case-SENSITIVE.
+        # F6 (corrected, #12120 review rounds 3-6): the names come from payload
+        # entities whose KIND is a subject kind — the same population the
+        # resolver checks against — and the SKIP stays EXACT (F6's rule: a
+        # legitimately-cased Object keeps its edge). The probe below, however, is
+        # FOLD-WIDE (`name_key_space_same_entity`), so a spelling that only
+        # FOLD-equals a declared subject-kind name (`"the acme corp"` beside a
+        # declared Subject `"Acme Corp"`) must be attributed to an EXACT-name
+        # Object only — otherwise a fold-equal Object takes the un-gated
+        # `aboutObject` edge the #4934 rule forbids, on a spelling the pre-fix raw
+        # probe could not reach. The fold therefore NARROWS THE LOOKUP; it never
+        # widens the skip (round 6 corrected round 4: dropping here is NOT free -
+        # it drops F6's case too).
         subject_entity_names: set[str] = set()
+        subject_entity_names_folded: set[str] = set()
         # #11237: `{name: [(graph_id, kind), …]}` — every entity THIS capture
         # wrote, so the S5 Job 1 relation leg can resolve a stated endpoint
         # name to the node it denotes (see the write leg below).
         entity_index: dict[str, list[tuple[str, str | None]]] = {}
+        # One fold for this whole function: the skip sets below and the
+        # `about_entities` loop compare in the writer's key space.
+        from .entity_resolver import normalize_entity_name as _fold
+
         # #12060 (review F1): every layer this capture's entity writes actually
         # LANDED on, by name. `subject_entity_names` above is seeded from the
         # payload's PRE-WRITE kind (an entity write can fail before any fact
@@ -18081,6 +18094,16 @@ class TortoiseSDK:
             _ekind = _payload_entity_kind(e)
             _is_subject = is_subject_kind(_ekind or "")
             if _is_subject:
+                # ⛔ The FOLDED set is NOT maintained here (review round 23): it is
+                # derived once, AFTER the `#12060` landed-layer correction below,
+                # because a guard redirect moves a name between the entity labels
+                # and the derived set must follow the write that LANDED. Maintaining
+                # it here as well was a dead store — written once per
+                # SUBJECT-KIND payload entity, then discarded before its only
+                # reader — and a trap: a
+                # later reader would take the seed as load-bearing and try to
+                # delta-maintain it, which cannot express "another name still holds
+                # this folded key".
                 subject_entity_names.add(name)
             try:
                 if _is_subject:
@@ -18141,6 +18164,18 @@ class TortoiseSDK:
                 subject_entity_names.add(_ln)
             else:
                 subject_entity_names.discard(_ln)
+        # ⛔ RE-DERIVED, not delta-maintained (review round 23): the correction
+        # above moves names in and out of `subject_entity_names`, and the folded
+        # set feeds `_subject_fold_only` — the discriminator that decides whether
+        # the `aboutObject` probe may be widened. A stale folded key made a
+        # pack-guard-redirected name (`"the operator"` → `core:role`, a `:Subject`)
+        # miss the exact-name narrowing and take the widened probe, attaching to an
+        # `:Object` whose folded name matches — the #4934-class un-gated edge `main`
+        # never wrote. Rebuilding is also the only correct form: an incremental
+        # `discard` would drop a folded key another subject-spelled name still
+        # holds.
+        subject_entity_names_folded = {
+            _fold(_n) for _n in subject_entity_names}
         if entity_failures:
             warnings.extend(entity_failures)
             warnings.append(
@@ -18428,12 +18463,52 @@ class TortoiseSDK:
                                 # aboutSubject edge; the topic channel must
                                 # not produce an un-gated one, nor an
                                 # id-less Object stub for a subject-kind
-                                # name (the #4934 label leak).
+                                # name (the #4934 label leak). EXACT, per F6:
+                                # a legitimately-cased Object whose name only
+                                # fold-equals a subject name keeps its edge
+                                # (`test_case_only_mismatch_still_gets_its_
+                                # about_object_edge`).
                                 continue
-                            _oid_rows = proj.g.query(
-                                "MATCH (o:Object {name:$n}) "
+                            # #12120 review round 3: the probe below is
+                            # FOLD-WIDE, so when this spelling only FOLD-equals
+                            # a declared subject-kind name (`"the acme corp"`
+                            # against a Subject `"Acme Corp"`) a fold-only
+                            # Object carrier must not be attributed — that is
+                            # the #4934 leak on a spelling the pre-fix raw probe
+                            # could not reach. An EXACT-name Object is still
+                            # attributed (F6's case), so the constraint is
+                            # exactness, never a blanket skip.
+                            _subject_fold_only = (
+                                _fold(_n) in subject_entity_names_folded)
+                            # #12120 about-anchor site: this twin of hosted_api's anchor
+                            # read the RAW `name` only, so a fold-equivalent
+                            # spelling of an already-registered Object matched
+                            # NOTHING and the `aboutObject` edge was silently
+                            # dropped on the local path while the write it
+                            # describes resolved on the folded union. One probe
+                            # over the WRITER's key space
+                            # (`name_key_space_same_entity`) — never a second
+                            # copy of the arms — and the id-less arm below reads
+                            # the SAME space, so an id-less holder reached only
+                            # by the folded spelling keeps its edge too.
+                            #
+                            # ⛔ ATTACH-TO-EVERY-CARRIER is kept (the recorded
+                            # disposition for this site): a resolver call here
+                            # would REFUSE on two live same-name carriers where
+                            # capture writes, silently losing an attachment.
+                            _space, _space_params = name_key_space_same_entity(
+                                "o", _n)
+                            if _subject_fold_only and _space:
+                                # Exact spelling only — the reference IS the
+                                # subject channel's name in the writer's key
+                                # space, so a fold-only carrier is ambiguous.
+                                _space = f"({_space}) AND o.name = $exact"
+                                _space_params = {**_space_params, "exact": _n}
+                            _oid_rows = (proj.g.query(
+                                f"MATCH (o:Object) WHERE {_space} "
                                 "RETURN o.id",
-                                params={"n": _n}).result_set
+                                params=_space_params).result_set
+                                if _space else [])
                             _idless = False
                             for _row in _oid_rows:
                                 _oid = _row[0] if _row else None
@@ -18449,13 +18524,16 @@ class TortoiseSDK:
                                 # MERGEs on {id:...} and would mint a
                                 # DIFFERENT node. Fall back to main's
                                 # name-based MERGE so the edge is not silently
-                                # dropped — live-only, honestly unjournaled.
+                                # dropped — live-only, honestly unjournaled —
+                                # over the SAME widened key space, or an
+                                # id-less holder reached by the folded spelling
+                                # would still lose its edge (#12120 about-anchor site).
                                 proj.g.query(
-                                    "MATCH (p:Point {id:$pid}), "
-                                    "(o:Object {name:$n}) "
-                                    "WHERE o.id IS NULL OR o.id = '' "
+                                    f"MATCH (p:Point {{id:$pid}}), (o:Object) "
+                                    f"WHERE ({_space}) "
+                                    "AND (o.id IS NULL OR o.id = '') "
                                     "MERGE (p)-[:aboutObject]->(o)",
-                                    params={"pid": pid, "n": _n})
+                                    params={"pid": pid, **_space_params})
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
@@ -24388,11 +24466,22 @@ class TortoiseSDK:
             # hands a caller a terminal id). Nothing live to build a chain on.
             return []
         if unaddressable:
+            # #12120 review: the resolver above admitted this holder over the
+            # WRITER's widened union, so re-spelling the predicate here as raw
+            # `name`/`canonical_name` asked a NARROWER key space than the read it
+            # justifies — an id-less stub matched only by the folded spelling or
+            # an `alias` resolved, then matched NOTHING, and `belief_timeline`
+            # reported "no decisions" about a topic it had just resolved. The
+            # uniqueness excuse in the census was a different question: unique is
+            # not the same as spelled-this-way.
+            _space, _space_params = name_key_space_same_entity("o", topic)
+            if not _space:  # pragma: no cover - the resolver refuses a blank
+                return []
             entity_predicate = (
-                "(o.name = $topic OR o.canonical_name = $topic) "
-                f"AND {_terminal_excluded('o.status')}")
+                f"({_space}) AND {_terminal_excluded('o.status')}")
         else:
             entity_predicate = "o.id = $oid"
+            _space_params = {}
         # The DB window MUST be taken from the NEWEST end (#7293). The former
         # `ORDER BY p.validFrom LIMIT` was ASCENDING, so it truncated to the
         # OLDEST rows and the `entries[-limit:]` tail below could only re-take
@@ -24412,7 +24501,7 @@ class TortoiseSDK:
             f"AND {entity_predicate} "
             "RETURN p.id, p.content, p.validFrom, p.status, p.outdated "
             "ORDER BY (p.validFrom IS NULL), p.validFrom DESC LIMIT $limit",
-            params={"oid": entity_id, "topic": topic, "limit": limit},
+            params={"oid": entity_id, "limit": limit, **_space_params},
         ).result_set
         entries = [list(r) for r in rows]
         # Superseded priors dropped out of the topic query (supersede_point
