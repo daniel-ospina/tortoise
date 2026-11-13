@@ -897,6 +897,22 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
         f"that is a lever skipped for a cause that never applied ({entry2})")
     assert entry2["reason"] == "ok", entry2
 
+    # ⛔ AND THE THIRD SHAPE — a recency field that is VALID CYPHER and carried by
+    # NO row. 4b runs, reads nulls for every candidate, weighs them all 0 and
+    # leaves the order untouched: the caller's recency order is NOT in force, so
+    # the rerank must still run. Keying the skip on "the query returned" (or on
+    # "the ids did not move") reports a cause that never bit — reviewed and
+    # measured on the previous round with ``recency_field="sourcePath"``.
+    trace3: list[dict] = []
+    sdk.tortoise_fts_query(q, entity_type="point", limit=5,
+                           recency_field="sourcePath", recency_boost=10.0,
+                           leg_trace=trace3)
+    entry3 = _rerank_entries(trace3)[0]
+    assert entry3["ran"] is True, (
+        "an all-undated pool has no recency order to protect — the rerank must "
+        f"not be skipped for it ({entry3})")
+    assert entry3["reason"] == "ok", entry3
+
 
 def test_an_ALL_empty_pool_says_nothing_scorable(sdk, monkeypatch):
     """#12297 — "the read broke" and "nothing to score" are different facts.

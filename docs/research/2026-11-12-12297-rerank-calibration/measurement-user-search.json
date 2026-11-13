@@ -52,12 +52,13 @@
  "config": {
   "cut": 10,
   "loadavg_1m": 14.0,
-  "model": null,
+  "model": "cross-encoder/ms-marco-MiniLM-L6-v2",
   "pool_scored": 40,
   "pool_scored_is_wired_default": true,
   "pool_size": null,
   "retrieval_limit": 40,
-  "torch_threads": 1
+  "torch_threads": 1,
+  "model_provenance": "recorded after the run: this artifact predates the harness recording the RESOLVED id (it wrote `args.model`, which is None unless --model is passed), so the field read `null`. The id here is the harness default the run resolved through `get_scorer` \u2014 `tortoise.rerank.RERANK_MODEL_DEFAULT`, which is also the id the sibling noun-path artifact records by name for the same model. NO MEASURED VALUE changed; `tools/rerank_calibration_12297.py` now writes the resolved id (plus `model_was_explicit`) so a future run carries it natively."
  },
  "corpus": {
   "dir": "/home/cmux/.tortoise/session-events",

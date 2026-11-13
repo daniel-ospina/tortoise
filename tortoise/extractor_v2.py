@@ -2933,12 +2933,15 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
                                   # effect here was UNMEASURED reordering of the
                                   # persisted prior; #12297 measured exactly this
                                   # leg's recall@3 on the #11901 noun-path corpus
-                                  # (244→277 / 300 exact, 244→300 / 300 at the
-                                  # shipped widening, ZERO regressions, artifact
+                                  # (exact arm 244→277 / 300; variant arm 406→425
+                                  # of 426, i.e. **−1**: a candidate fusion had
+                                  # inside the cut is dropped, which is the risk
+                                  # this record exists to state. Artifact
                                   # `docs/research/2026-11-12-12297-rerank-
-                                  # calibration/measurement-noun-path.json`), and
-                                  # the lever ships OFF by default behind a gate
-                                  # whose OFF path is byte-identical. SCOPE: the
+                                  # calibration/measurement-noun-path.json`, whose
+                                  # brief calls that row the honest counter-case),
+                                  # and the lever ships OFF by default behind a
+                                  # gate whose OFF path is byte-identical. SCOPE: the
                                   # measurement covers candidate COMPOSITION at
                                   # the cut. It does NOT cover downstream
                                   # link-before-create or supersession outcomes,

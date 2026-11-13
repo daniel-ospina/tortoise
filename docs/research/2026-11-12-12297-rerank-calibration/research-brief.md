@@ -180,7 +180,7 @@ So the correct reading is:
   NAMES.** The task it is actually winning is *name matching*, which needs no
   domain knowledge and therefore transfers trivially. A pure token-overlap
   baseline would likely reproduce much of this gain — **and it does: that
-  control was run, and §8 is its result** (identical recall, equal-or-better
+  control was run, and §8 is its result** (identical EXACT-arm recall, equal-or-better
   nDCG, ~1,000× cheaper). So the semantic claim is bounded to nothing here, and
   this section's warning is now a measured finding rather than a suspicion.
 - ⚠️ **IT SAYS NOTHING ABOUT USER SEARCH**, where the query is a passage span and
@@ -255,12 +255,12 @@ paragraph called the table "an AD-HOC observation … at loadavg 2.7" — true o
 7.5 / 62.9 ms micro-benchmark the table REPLACED, false of the table itself, and it
 contradicted the provenance paragraph seven lines above.)
 
-**And one honest gap in the artifact:** `measurement-user-search.json` was
+**And one recorded gap in the artifact:** `measurement-user-search.json` was
 produced before `fused_rerank_gate_armed` was added to the report's `config`, so
 it has no such key. The absence is expected rather than a lost record — and the
 numbers are themselves evidence the baseline was not already reranked
 (`gained 165 / lost 0` is not producible by a rerank-vs-rerank comparison).
-A re-run records the field.
+A re-run records the field. The same is true of `config.model`: it read `null` (the harness recorded the FLAG, not the resolved id) and now carries the id the run resolved — `cross-encoder/ms-marco-MiniLM-L6-v2` — with `model_provenance` stating that it was filled in after the run and that no measured value changed; the harness writes the resolved id natively from now on.
 
 So the user-search rerank **improves ranking and is not affordable**: 3.4 s per
 query on CPU, per query, in the interactive search path. **The lever earns its gate
@@ -341,7 +341,7 @@ noun-path note above should be read as "this lever is worth turning on" **not** 
 ### Residuals (stated, not hidden)
 
 1. **The lexical-baseline control was RUN — see §8, and it does NOT rescue the
-   lever.** It reproduces every recall figure, matches or beats every nDCG figure,
+   lever.** It reproduces every EXACT-arm recall figure (the variant arm is where they differ — see §8's table), matches or beats every nDCG figure,
    and wins the variant arm, at **0.005 ms/pair vs 5.463 ms/pair**. The consequence
    is recorded in §8 rather than left as an open flag: on the noun path the
    cross-encoder is not the implementation that earns this lever. **The user-search
@@ -406,8 +406,12 @@ interface, so **only the scorer changes**. Two declared, untuned modes:
 
 ### What this establishes, exactly
 
-**Recall is identical in every cell** — the cross-encoder recovers no candidate a
-Jaccard token compare does not. On **nDCG the lexicals are equal or better**
+**Recall is identical on the EXACT arm in every cell** — the cross-encoder recovers no
+exact-mention candidate a Jaccard token compare does not. On the VARIANT arm it is
+not identical, in either direction: at pool 15 the cross-encoder recovers 425/426
+against `difflib`'s 424/426 and `overlap`'s 426/426, and at pool 40 it is 424/426 against 426/426 — so the
+sentence below about nDCG is the one that carries the claim, and "identical"
+belongs to the exact arm only. On **nDCG the lexicals are equal or better**
 (1.0000 vs 0.9865 at pool 40; 0.9233 vs 0.9135 at pool 15), and on the variant
 arm `overlap` is **strictly better** — 100.0 % with **zero** regressions where the
 cross-encoder loses one row. And the cost difference is not marginal: **0.005

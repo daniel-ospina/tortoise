@@ -238,6 +238,7 @@ def run(args: argparse.Namespace) -> int:
 
     from tortoise.rerank import (
         DEFAULT_FUSED_RERANK_POOL,
+        RERANK_MODEL_DEFAULT,
         get_scorer,
         rerank_pool,
     )
@@ -391,7 +392,13 @@ def run(args: argparse.Namespace) -> int:
                     args.limit == DEFAULT_FUSED_RERANK_POOL),
                 "retrieval_limit": args.limit,
                 "pool_size": args.pool_size,
-                "model": args.model,
+                # ⛔ The RESOLVED id, not the flag: ``args.model`` is None on
+                # every ordinary run (the scorer is resolved internally by
+                # ``get_scorer``), and an artifact that says ``null`` cannot
+                # tell a reader which cross-encoder produced its ms/pair —
+                # the sibling noun-path artifact records the default by name.
+                "model": args.model or RERANK_MODEL_DEFAULT,
+                "model_was_explicit": args.model is not None,
                 "torch_threads": args.threads,
                 # ⛔ The read path's OWN gate decides what the baseline IS. It is
                 # False on every legitimate run (a True here means the caller
