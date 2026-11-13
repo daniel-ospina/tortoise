@@ -1778,6 +1778,15 @@ class TestDoctorHostedCredential:
                 self._sink = sink
                 self.served = 0
 
+            @property
+            def length(self):
+                """Remaining DECLARED length, like `http.client.HTTPResponse`.
+
+                A real `HTTPError` delegates `length` to its `fp`, so a fake
+                without it cannot express the cut shapes production sees.
+                """
+                return self.getbuffer().nbytes - self.tell()
+
             def read(self, n=-1):
                 self._sink.append(None if n is None or n < 0 else n)
                 data = super().read(n)
@@ -1846,11 +1855,13 @@ class TestDoctorHostedCredential:
         # without this a cap of 10 MB reads as green.
         assert error_stream.served == 65536, error_stream.served
         hosted = _row(out, "Hosted")
-        # This 400 body is SMALL and COMPLETE, so it is evidence: the refusal is
-        # reported with its own text. (A body cut by the CAP is the different
-        # case, pinned by test_a_v1_team_body_over_the_cap_*.)
-        assert hosted is not None and "❌" in hosted, out[-1200:]
-        assert "API error 400" in hosted, hosted
+        # ⛔ This 400 body is 69,632 bytes — OVER the cap — so the fragment is
+        # NOT evidence: the row must say CUT/UNPROVEN rather than grade the
+        # refusal from 64 KiB of it (fresh review round 21 corrected my own
+        # comment here, which called the same body "small and complete").
+        assert hosted is not None, out[-1200:]
+        assert "CUT" in hosted, hosted
+        assert "❌" not in hosted, hosted
 
     def test_an_unreadable_store_directory_is_a_refusal_not_an_environment_note(
             self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):

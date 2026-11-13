@@ -12995,7 +12995,11 @@ def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
     if outstanding is None:
         inner = getattr(resp, "fp", None)
         outstanding = getattr(inner, "length", None)
-    return b"".join(chunks), outstanding not in (None, 0)
+    # ⛔ At the CAP, `None` means NO DECLARED LENGTH (chunked / close-delimited),
+    # not "the stream ended" — only `length == 0` is proof of completeness. The
+    # opposite reading let a chunked body over the cap pass as complete and put a
+    # fragment back in front of the no-identity arm (fresh review round 21).
+    return b"".join(chunks), outstanding != 0
 
 
 def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> None:
@@ -13361,9 +13365,14 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             try:
                 raw_health, _cut = _doctor_read_capped(resp, _DOCTOR_BODY_CAP, deadline)
                 if _cut:
+                    # Cause-neutral: a cut is the deadline OR the size cap, and
+                    # naming a bound that never fired (e.g. "at the 0.00s
+                    # deadline" on a cap cut) is a false provenance claim in an
+                    # operator-facing row (fresh review round 21).
                     health_read_error = (
-                        f"the body was CUT at the {_fmt_bound(deadline - started)}s"
-                        " deadline before it completed")
+                        "the body was CUT before it completed (deadline or size "
+                        f"cap; {_fmt_bound(_DOCTOR_BODY_CAP)} bytes / "
+                        f"{_fmt_bound(deadline - started)}s leg bound)")
                 elif isinstance(raw_health, bytes) and raw_health:
                     parsed_health = _json.loads(raw_health.decode("utf-8", "replace"))
                     if isinstance(parsed_health, dict):
