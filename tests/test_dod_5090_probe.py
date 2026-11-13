@@ -3828,6 +3828,7 @@ def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, mon
     assert not shipped["disarming_assignments"], shipped["disarming_assignments"]
 
 
+
 def test_the_LEGACY_ENV_space_form_is_a_deployment_hit(tmp_path, monkeypatch):
     """`ENV KEY value` (no `=`) sets KEY — the third form the Dockerfile grammar has.
 

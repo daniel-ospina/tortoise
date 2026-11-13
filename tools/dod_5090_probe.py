@@ -3331,7 +3331,14 @@ def per_file_scope_note(deployment: dict) -> str:
     if unsets or overrides:
         parts = []
         if unsets:
-            parts.append(f"{unsets} declaration(s) with no value UNSET it")
+            # ⛔ QUALIFIED BY ORDER, like the overrides part: an unset declaration only
+            # DISARMS the file when it is the file's LAST word. A LATER truthy assignment
+            # leaves the arm standing, and the per-surface line above then reads the file
+            # `ON` — so an unqualified "this tree DISARMS it" contradicted the state the
+            # same note had just printed (fresh review of PR #12474, P2, measured).
+            parts.append(f"{unsets} declaration(s) with no value UNSET it — the LAST of "
+                         "them by FILE order decides, and a LATER truthy assignment "
+                         "leaves the arm standing")
         if overrides:
             parts.append(f"{overrides} value(s) leave it OFF — the LAST of them by compose "
                          "override or by FILE order (an earlier truthy assignment does not "
