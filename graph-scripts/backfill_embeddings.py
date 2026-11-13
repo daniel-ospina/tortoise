@@ -579,9 +579,13 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
         embedded NORMALLY; the CASE now selects the non-string and BOTH passes
         raise ``Type mismatch`` (the live one inside the select, before
         ``text.strip()`` is reached). It fails CLOSED — an abort, never a
-        silent wrong vector — and nothing can write the row: the composer
-        returns a ``str`` for every arm, and a caller-supplied ``embeddingText``
-        is refused by ``_sanitize_props``.
+        silent wrong vector — and no in-tree MINTING writer produces one (the
+        composer returns a ``str`` for every arm; a caller-supplied
+        ``embeddingText`` is refused by ``_sanitize_props``). The REPLAY does
+        write it, though — ``_upsert_point_props`` copies
+        ``p.get("embeddingText")`` verbatim into ``n.embeddingText`` — so a
+        malformed or hand-edited journaled Point produces exactly this row, the
+        same ``#2958`` class named above for ``content``.
     Hardening this (a predicate or a live guard that skips non-``str`` text) is
     NOT done here: it widens the change past "which text is embedded".
     """
