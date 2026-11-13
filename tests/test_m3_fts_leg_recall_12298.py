@@ -509,6 +509,10 @@ _DIRECTIONAL = frozenset({
     # `does beat it` (the verb the whole §6.2 paragraph turns on) and
     # `the same 300` (`same`/`different` is the reuse claim's content).
     "beat", "beats", "same", "different",
+    # ⛔ The inflected pair of `strictly` (round-25 reviewer, P2): the §5 pivot
+    # `stricter`/`looser` is exactly the word that round turned on, and it was
+    # absent — the `find`/`found` gap again.
+    "stricter", "looser",
     # ⛔ §5's declared-limits bullet says the harness measures a STRICTER leg than
     # the capture prior uses, so `understate` is its entire content: a one-token
     # `understate` → `overstate` rewrite planted GREEN at round 25 (finding 4), the
@@ -3704,18 +3708,16 @@ def test_brief_derived_prose_figures_are_the_artifact(
         "§3.4's identifier-class miss count",
         values=(str(ident_misses),))
 
-    # ── §3.3 — the score the BM25 arm EXACTLY matches on that class ─────────
-    # "a *BM25* index FED OUR TERMS" — the tokens arm, not the native one.
-    tokens_pc = artifact["arms"]["postgres_bm25/tokens"]["per_class"]["ident"]["3"]
-    assert tokens_pc == ident_recall, (
+    # ── §3.3's `(0.2000)` is pinned ONCE, by the sentence-carrying pin above
+    # (round-25 reviewer, P2): this head had added a SECOND pin for the same
+    # physical sentence, and that one embedded the literal `**` pair, so an
+    # emphasis-only edit false-redded it. The EQUALITY the sentence claims ("a
+    # BM25 index fed our terms scores EXACTLY what the shipped leg scores") is
+    # still asserted here, on the tokens arm — not the native one.
+    assert artifact["arms"]["postgres_bm25/tokens"]["per_class"]["ident"]["3"] \
+        == ident_recall, (
         "§3.3 says BM25 fed our terms scores EXACTLY what the shipped leg scores "
-        f"on the identifier class; the artifact now differs ({tokens_pc} vs "
-        f"{ident_recall})")
-    _only_claim(
-        _scoped(brief, "3.3"),
-        f"what the shipped leg scores** there ({ident_recall:.4f})",
-        "§3.3's identifier-class score",
-        values=(f"{ident_recall:.4f}",), free=("shipped",))
+        "on the identifier class; the artifact now differs")
 
     # ── §4.4 — the DECISION summary's "at any k" count ──────────────────────
     per_k_zero = [artifact["arms"]["falkordb_tfidf"]["recall_by_k"][k]["rows_zero"]
