@@ -184,12 +184,14 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from . import entity_verdict as _entity_verdict  # #12296: the verdict step's bands
 from . import failure_policy as _failure_policy  # #5095: S3's failure policy (§4.4 G3)
 from . import identity_hold as _identity_hold  # #10997: S3's HOLD
 from . import referentiality as _referentiality  # #11021: the referentiality test
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from ._gate_memo import GateMemo
+from .entity_resolver import normalize_entity_name  # #12296: the alias fold
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 
 # #5006: D12/O4's FUSION half — the union of both sides' attachments, executed
@@ -2988,6 +2990,285 @@ def _enrich_point_priors(sdk, points: list[dict]) -> None:
             p["created_at"] = row[3]
 
 
+#: S3's entity legs address ONE label each, and a prior row carries no label (the
+#: resolution table's shape is ``id | name | kind``) — so the closure guard below
+#: is TOLD which label its ids belong to instead of inferring it.
+_ENTITY_LABEL = {"object": "Object", "subject": "Subject"}
+
+#: How many ``resolved_from`` hops the batched guard follows before it gives up on
+#: a row. ``entity_resolver.follow_resolved_from`` walks to a fixpoint with its own
+#: cycle guard; this bound exists because the walk here is BATCHED. It is
+#: deliberately small: ``apply_entity_merge`` hops the survivor to ITS fixpoint
+#: before writing, so a chain longer than 1 cannot be created — a longer walk is a
+#: corrupt-record signal rather than normal traffic, and hitting the bound on a
+#: still-retired node RAISES rather than emitting the carrier (#12296 review).
+_PRIOR_HOP_BOUND = 8
+
+
+def _entity_facts(graph, label: str, ids: list[str]) -> dict[str, tuple]:
+    """``{id: (resolved_from, name, kind, aliases)}`` for the ``ids`` on ``label``.
+
+    LABEL-SCOPED on purpose — the rule ``entity_resolver`` states for its own
+    reads: an unlabelled ``MATCH (n) WHERE n.id = $id`` full-scans every label in
+    the graph, and ``id`` is a natural key on exactly two of them.
+
+    ``aliases`` is the survivor's folded spellings: a folded row carries them so a
+    mention spelled the way the CARRIER was spelled still resolves (see
+    ``_find_existing_entity``) — otherwise the fold replaces the carrier's id and
+    loses its spelling, and a re-mention reads as a measured ABSENCE.
+    """
+    if label not in ("Object", "Subject"):
+        raise ValueError(f"not an identity label: {label!r}")
+    if not ids:
+        return {}
+    kind_prop = "objectKind" if label == "Object" else "subjectKind"
+    rows = graph.query(
+        f"MATCH (n:{label}) WHERE n.id IN $ids "
+        f"RETURN n.id, n.resolved_from, n.name, n.{kind_prop}, n.aliases",
+        params={"ids": list(ids)}).result_set
+    return {str(r[0]): (r[1], r[2], r[3], r[4]) for r in rows
+            if r and r[0] is not None and str(r[0])}
+
+
+def _absorb_spellings(folded_row: dict, row: dict, fact: tuple | None) -> None:
+    """Union the spellings ``row`` (and the survivor's ``aliases``) into it.
+
+    ``aliases`` is undeclared-but-writable, so a caller may have stored a bare
+    STRING — iterating it would yield one spelling per character. The two sibling
+    readers (`apply_entity_merge`, `_entity_verdict_facts`) normalise the same way;
+    a third copy that forgot is how one of them silently loses an alias.
+    """
+    raw = fact[3] if fact is not None else None
+    if isinstance(raw, str):
+        stored = [raw]
+    elif isinstance(raw, (list, tuple, set)):
+        stored = [a for a in raw if a is not None]
+    else:
+        stored = []
+    # ⛔ The folded row's OWN name is NOT an alias. `aliases[]` is the MERGE's
+    # record ("these two are one entity"); the row's own spelling is not a record
+    # of anything, and `_find_existing_entity`'s last rung is deliberately
+    # kind-agnostic — so an own-name entry made EVERY prior row match itself by
+    # `alias`, phase 1 passed `mention_is_alias` for it, and all three SPELLING
+    # vetoes stood down: `plan "Acme"` bound onto `org "Acme"` with no hold and no
+    # warning. The CARRIER's spelling is the reason this function exists: where it
+    # differs from the survivor's name it is unioned below, and where it folds to
+    # the survivor's own name the injection is skipped — that spelling is then
+    # matched by the name rungs, not by `aliases[]`.
+    # ⛔ But only the INJECTION is skipped: a STORED `aliases[]` entry is a
+    # reviewer's record (`apply_entity_merge` unions the candidate's fold
+    # unconditionally, so a merge of two same-fold rows legitimately leaves the
+    # survivor's own fold in there), and dropping it would delete a decision the
+    # tree made (round-6 review). It still participates in MATCHING, so such a
+    # mention is never re-published as measured absence; whether it BINDS is then
+    # decided by the kind rungs, which is where "same spelling, different kind"
+    # belongs.
+    own_fold = normalize_entity_name(str(folded_row.get("name") or ""))
+    row_name = str(row.get("name") or "")
+    injected = True
+    for source in (row_name, *stored):
+        folded = normalize_entity_name(source) if source else ""
+        skip = injected and folded == own_fold
+        injected = False
+        if folded and not skip and folded not in folded_row["aliases"]:
+            folded_row["aliases"].append(folded)
+
+
+class _PriorFoldUnresolvable(RuntimeError):
+    """A ``resolved_from`` chain the batched fold cannot resolve (#12296, D-1).
+
+    Carries the rows the fold DID resolve. The failure is known for ONE row, and
+    discarding the whole entity prior set would turn a per-row unknown into a
+    whole-capture unknown — whose only answer downstream is a CREATE.
+    """
+
+    def __init__(self, message: str, *, folded: list[dict],
+                 unresolved: list[str],
+                 unresolved_names: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.folded = folded
+        self.unresolved = unresolved
+        #: The withheld rows' SPELLINGS. The caller needs them: a row that left the
+        #: candidate set un-named reads downstream as measured absence, and that is
+        #: the one state §4.4 I1 makes license a CREATE.
+        self.unresolved_names = list(unresolved_names or [])
+
+
+def _current_entity_priors(sdk, rows: list[dict],
+                           labels: dict[str, str]) -> list[dict]:
+    """The S3 entity prior set with MERGED-AWAY carriers folded onto their survivor.
+
+    ⛔ **The defect this closes (D-1, `#12186` comment `6839898289`; same root as
+    `#12244`, at a site that issue does not name).** ``apply_entity_merge`` is
+    non-destructive: the retired carrier keeps its ``name`` and gains
+    ``resolved_from``, and it writes **no** ``status``
+    (``entity_resolver.apply_entity_merge``'s candidate props).
+    ``:Object``/``:Subject`` are full-text
+    indexed on ``name`` alone (``projection._FULLTEXT_INDEX_LABEL_FIELDS``) and the
+    FTS leg filters ``status`` only — so **a name search returns the survivor AND
+    the carrier**. The capture path never called the resolver, and this leg then
+    opts *back into* the terminal-inclusive view (``include_terminal=True``), so
+    nothing opted back out of ``resolved_from``: the resolution table was handed
+    the retired carrier and could bind a mention to a node the merge already
+    retired. The tie rule makes it worse, not better — the rows are accumulated
+    into ID-KEYED dicts so order is discarded (the ``#8487`` comment on this leg),
+    and inside one query the carrier and the survivor tie on the ``name``-only
+    index.
+
+    What it TESTS, per row: does this id carry ``resolved_from``? If yes, the row
+    is REPLACED by its fixpoint — the survivor's id, name and kind — so the
+    verdict sees one candidate per ENTITY. Replacement, not deletion: the survivor
+    is the entity the mention should bind to, and dropping the row instead would
+    turn a merged mention into a measured absence, i.e. a fresh duplicate. The
+    survivor is deliberately NOT status-filtered here — this leg's whole point is
+    the terminal-inclusive prior set (``#3301``), and a merge-retired carrier is a
+    different question from a terminal incarnation.
+
+    ⛔ **Cannot-answer is not an answer.** A read that fails after a projection was
+    resolved RAISES: this helper never returns the pre-hop rows, because returning
+    them is precisely the binding this guard exists to prevent — the same rule
+    ``follow_resolved_from`` states at ``entity_resolver.py:562-572``. (The raise
+    is caught by ``search_graph``, which grades the lookup PARTIAL and keeps the
+    rows this helper already folded — never the pre-hop rows, and never an aborted
+    capture; see the call site.) The one client SKIPPED is one with no
+    projection at all (a lightweight test double, the ``_sdk_backend_is_embedded``
+    and ``_enrich_point_priors`` idiom): such a client holds no ``resolved_from``
+    state, so there is nothing to withhold.
+    """
+    if not rows:
+        return []
+    get_proj = getattr(sdk, "_get_proj", None)
+    if not callable(get_proj):
+        return list(rows)
+    proj = get_proj()
+    graph = getattr(proj, "g", None)
+    if graph is None:
+        return list(rows)
+    by_label: dict[str, list[str]] = {}
+    for row in rows:
+        rid = str(row.get("id") or "")
+        label = labels.get(rid)
+        if rid and label:
+            by_label.setdefault(label, []).append(rid)
+    facts: dict[tuple[str, str], tuple] = {}
+    for label, ids in by_label.items():
+        for nid, fact in _entity_facts(graph, label, ids).items():
+            facts[(label, nid)] = fact
+    # Batched hop: each round fetches only the targets not already known, so an
+    # ordinary graph (no chains) costs exactly ONE read per label.
+    for _ in range(_PRIOR_HOP_BOUND):
+        pending: dict[str, list[str]] = {}
+        for (label, _nid), (resolved, _n, _k, _a) in facts.items():
+            if resolved and (label, str(resolved)) not in facts:
+                pending.setdefault(label, []).append(str(resolved))
+        if not pending:
+            break
+        for label, ids in pending.items():
+            for nid, fact in _entity_facts(graph, label, ids).items():
+                facts[(label, nid)] = fact
+    out: list[dict] = []
+    #: The emitted row per fixpoint id. A row that folds onto an id already emitted
+    #: must UNION its spellings into that row, never be skipped: which row reaches
+    #: the fold first is FTS order, and the SPELLING is what makes a re-mention
+    #: resolve (`_find_existing_entity`) — dropping it is the measured-absence
+    #: defect one level down, and it was order-dependent (measured: the same graph
+    #: resolved `the team` in one row order and created a duplicate in the other).
+    emitted: dict[str, dict] = {}
+    #: Rows this pass could not resolve to a fixpoint. They are collected rather
+    #: than raised on, because the failure is known for ONE row and abandoning the
+    #: loop would drop every LATER row too — and a silently-missing prior reads
+    #: downstream as measured absence, which licenses a duplicate for entities that
+    #: have nothing to do with the bad row.
+    unresolved: list[str] = []
+    unresolved_names: list[str] = []
+    for row in rows:
+        rid = str(row.get("id") or "")
+        label = labels.get(rid) if rid else None
+        if not label:
+            # An id-less / label-less row carries no `resolved_from` evidence and
+            # stays a candidate in its own right — kept verbatim, per row.
+            out.append(row)
+            continue
+        #: The CARRIER's own fact, captured before the walk rebinds `fact` to the
+        #: fixpoint's. Its `aliases[]` are spellings the group folded earlier and
+        #: they are only on this retired node — dropping them makes a re-mention a
+        #: measured absence (a duplicate create), which is the defect the forward
+        #: union in `apply_entity_merge` exists to prevent. Reachable whenever the
+        #: carrier was retired before that union shipped (a pre-#12296 group), or
+        #: its aliases came from `canonical_name`.
+        carrier_fact = facts.get((label, rid))
+        current, hops = rid, 0
+        while hops < _PRIOR_HOP_BOUND:
+            fact = facts.get((label, current))
+            if not fact or not fact[0]:
+                break
+            current, hops = str(fact[0]), hops + 1
+        if hops >= _PRIOR_HOP_BOUND and (facts.get((label, current))
+                                          or (None,))[0]:
+            # ⛔ The walk did not reach a fixpoint. `apply_entity_merge` hops the
+            # survivor and re-points the group, so a chain longer than 1 is a
+            # corrupt/legacy record. Emitting `current` here would return a
+            # still-retired carrier (the exact node this guard exists to exclude)
+            # with no marker; the row is withheld and named instead.
+            unresolved.append(rid)
+            unresolved_names.append(str(row.get("name") or ""))
+            continue
+        if current in emitted:
+            _absorb_spellings(emitted[current], row, fact)
+            _absorb_spellings(emitted[current], row, carrier_fact)
+            continue
+        fact = facts.get((label, current))
+        if fact is None or not fact[1]:
+            if current != rid:
+                # The walk hopped at least once and its target is not readable on
+                # the label — a DANGLING `resolved_from` (`delete_entity` leaves
+                # the pointer behind) or a cross-label one. Emitting `row` here
+                # would be the PRE-HOP carrier, the one thing this guard promises
+                # never to return: S4 would render it as an EXISTING ENTITY and
+                # `link_before_create` would record `found: True … existing
+                # <carrier> — connect, do not re-create`.
+                unresolved.append(rid)
+                unresolved_names.append(str(row.get("name") or ""))
+                continue
+            # Nothing hopped: the id is in the FTS result but not on its label (a
+            # row that vanished between the two reads). Kept AS IT CAME rather than
+            # dropped, because a silently-missing prior reads downstream as
+            # measured absence and licenses a duplicate (#11653).
+            out.append(row)
+            continue
+        # ⛔ The folded row carries the SPELLINGS, not only the id. Replacing the
+        # carrier's row with the survivor's `name` alone silently deletes the
+        # carrier's spelling from the candidate set, and every name-keyed consumer
+        # (`_find_existing_entity`) then answers "no such entity" for a mention
+        # spelled exactly the way the merged variant was spelled — which is a
+        # measured ABSENCE (`found: False · no match — created`), the one state
+        # §4.4 I1 makes license a CREATE. The aliases are the carrier's recorded
+        # spellings plus the survivor's stored `aliases[]` — never the survivor's
+        # own injected name (it would alias the row with itself and stand
+        # `kind_conflict` down for a same-spelling, different-kind mention, round-5
+        # review). The carrier's spelling therefore still resolves here
+        # deterministically. The survivor's OWN name is matched by the name rungs,
+        # which are `_norm`-equal by #11901's decision (a surface variant is
+        # deliberately invisible to phase 1 — see `_find_existing_entity`).
+        folded_row = {"id": current, "name": str(fact[1]),
+                      "kind": "" if fact[2] is None else str(fact[2]),
+                      "aliases": []}
+        _absorb_spellings(folded_row, row, fact)
+        _absorb_spellings(folded_row, row, carrier_fact)
+        emitted[current] = folded_row
+        out.append(folded_row)
+    if unresolved:
+        # ONE raise for the whole pass, carrying EVERY row that resolved: the
+        # caller grades the lookup PARTIAL and keeps them (see `search_graph`).
+        raise _PriorFoldUnresolvable(
+            "; ".join(unresolved) + " — could not be resolved to a fixpoint "
+            "(a dangling `resolved_from` or a chain longer than "
+            f"{_PRIOR_HOP_BOUND}); refusing to return a pre-hop row (#12296 D-1)",
+            folded=list(out), unresolved=unresolved,
+            unresolved_names=[n for n in unresolved_names if n])
+    return out
+
+
 def search_graph(sdk, embed_list: dict, story: str, *,
                  max_queries: int = 15, limit: int = 3,
                  session_id: str | None = None) -> dict:
@@ -3012,7 +3293,17 @@ def search_graph(sdk, embed_list: dict, story: str, *,
 
     Returns:
         {"mode": str, "degraded": bool, "reason": str|None,
-         "entities": [{id, name, kind}], "points": [{id, content, kind}],
+         "entities": [{id, name, kind}],
+         "entities_unresolved": [str]  # #12296: spellings the D-1 fold WITHHELD
+                                       # (present only on that PARTIAL exit). A
+                                       # caller that reads `entities` alone sees
+                                       # no trace of them — an EMPTY set when
+                                       # every row was withheld, and otherwise a
+                                       # set that looks complete while silently
+                                       # omitting them — and either way reads
+                                       # measured absence, which §4.4 I1 makes
+                                       # license a CREATE.
+         "points": [{id, content, kind}],
          "events": [{id, content, kind}], "queries_run": int,
          "query_coverage": {"derived"|"ran"|"failed": {leg: int}},
          "query_results": {"ran": [key], "failed": [key]}}
@@ -3064,7 +3355,12 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     }
     ran_keys: list[str] = []
     failed_keys: list[str] = []
+    #: Which label each entity prior id came from. The guard after the loop needs
+    #: it (a prior row carries no label) and the bucket below merges both legs into
+    #: one ``entities`` list, so it cannot be re-derived from the row shape.
+    entity_labels: dict[str, str] = {}
     q_run = 0
+    degraded: str | None = None
     try:
         first = True
         for entity_type, qs in queries.items():
@@ -3079,6 +3375,8 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                         if not rid or rid in results[bucket[entity_type]]:
                             continue
                         results[bucket[entity_type]][rid] = row
+                        if entity_type in _ENTITY_LABEL:
+                            entity_labels[str(rid)] = _ENTITY_LABEL[entity_type]
                 except Exception:
                     # FIRST-query failure = the backend is unreachable → the
                     # outer handler degrades the whole search. Later single-
@@ -3097,11 +3395,73 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                     ran_keys.append(key)
                 first = False
     except Exception as e:  # backend unreachable — degrade, don't raise
-        _enrich_point_priors(sdk, list(results["points"].values()))
+        degraded = f"S3 degraded: graph search failed ({type(e).__name__}: {e})"
+    _enrich_point_priors(sdk, list(results["points"].values()))
+    # ⛔ D-1 (`#12244`'s root, at the site no issue names) — #12296's non-negotiable:
+    # the candidate set the verdict sees must exclude every node a merge retired.
+    # One pass, after the union, so BOTH exits carry the same folded set and a
+    # degraded run cannot smuggle a retired carrier through the other door.
+    #
+    # ⛔ **Cannot-answer is not an answer, and it is not an ABORT either — and it
+    # is not `degraded` either.** A read that fails after a projection resolved
+    # must never be answered with the pre-hop rows (that is the binding this guard
+    # exists to prevent), and its raise must not escape this function: its ONE
+    # caller (`extract_session_v2` — `search_graph` has no other call site) holds
+    # no `try`, so it would abort a
+    # capture. But `degraded` is the wrong grade for it — `degraded` means the
+    # search never got through its FIRST query and therefore carries ZERO priors
+    # (this function's `except …: degraded = …` arm, graded by
+    # `failure_policy.lookup_state`),
+    # and `_render_search_results` acts on
+    # that by withholding every prior and telling the gap reviewer the lookup did
+    # not run. Here the queries RAN and their point/event priors are real, so the
+    # honest grade is PARTIAL (#5095 §4.4 G3): keep the rows the fold did resolve,
+    # report the entity legs as failed, and record a reason.
+    reason: str | None = None
+    #: Spellings the fold withheld. A withheld row is NOT the same as an absent
+    #: one: the caller must HOLD these names rather than let them read as measured
+    #: absence, or the run creates the duplicate the fold exists to prevent.
+    entities_unresolved: list[str] = []
+    try:
+        entities = _current_entity_priors(
+            sdk, list(results["entities"].values()), entity_labels)
+    except Exception as e:  # noqa: BLE001, RUF100 — degrade the leg, not capture
+        entities = list(getattr(e, "folded", None) or [])
+        entities_unresolved = list(getattr(e, "unresolved_names", None) or [])
+        if not isinstance(e, _PriorFoldUnresolvable):
+            # ⛔ A read that failed BEFORE any hop resolved (`_entity_facts`
+            # raised — a driver error, a timeout) carries no per-row payload, so
+            # the arm above would withhold every prior row and NAME NONE of them:
+            # the candidate set empties, D3 is skipped outright, `resolution_held`
+            # stays `[]` and the run CREATES the mention the FTS read had just
+            # found. Every prior row is unreadable, so every one is WITHHELD
+            # (never absent) — the per-row arm's disposition, applied whole-arm.
+            entities_unresolved = [str(r.get("name") or "").strip()
+                                   for r in results["entities"].values()]
+            entities_unresolved = [n for n in entities_unresolved if n]
+        reason = ("S3 partial: the entity prior-set fold could not resolve every "
+                  f"row ({type(e).__name__}: {e}) — refusing pre-hop rows")
+        for _leg in ("object", "subject"):
+            if _leg in coverage["failed"]:
+                # The counters must stay consistent: `ran` says the leg's queries
+                # completed, and a leg cannot both complete and be impaired. Bump
+                # BOTH sides so `ran + failed <= derived` holds and
+                # `failure_policy._short_legs` (which tests `ran < derived`) NAMES
+                # the entity legs in the S4 note — otherwise the note blames the
+                # query budget in a run where every query ran.
+                if coverage["ran"].get(_leg):
+                    coverage["ran"][_leg] = max(0, coverage["ran"][_leg] - 1)
+                coverage["failed"][_leg] += 1
+        # An entity candidate whose fixpoint was not established has NO resolved
+        # identity, so its own query must not read as "ran and matched nothing":
+        # dropping the entity keys makes `_candidate_covered` answer False and the
+        # create record say `found: None`, never `found: false` (#5095).
+        ran_keys = [k for k in ran_keys
+                    if not k.startswith(("object:", "subject:"))]
+    if degraded is not None:
         return {
-            "mode": mode, "degraded": True,
-            "reason": f"S3 degraded: graph search failed ({type(e).__name__}: {e})",
-            "entities": list(results["entities"].values()),
+            "mode": mode, "degraded": True, "reason": degraded,
+            "entities": entities,
             "points": list(results["points"].values()),
             "events": list(results["events"].values()),
             "queries_run": q_run,
@@ -3112,16 +3472,18 @@ def search_graph(sdk, embed_list: dict, story: str, *,
             "query_coverage": coverage,
             "query_results": {"ran": [], "failed": []},
         }
-    _enrich_point_priors(sdk, list(results["points"].values()))
-    return {
-        "mode": mode, "degraded": False, "reason": None,
-        "entities": list(results["entities"].values()),
+    out = {
+        "mode": mode, "degraded": False, "reason": reason,
+        "entities": entities,
         "points": list(results["points"].values()),
         "events": list(results["events"].values()),
         "queries_run": q_run,
         "query_coverage": coverage,
         "query_results": {"ran": ran_keys, "failed": failed_keys},
     }
+    if entities_unresolved:
+        out["entities_unresolved"] = entities_unresolved
+    return out
 
 
 def _candidate_covered(search: dict, entity_type: str, raw: str) -> bool:
@@ -5771,6 +6133,16 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     folded); bare-form fallback ONLY when unambiguous; 'ambiguous' when
     multiple namespaces collide on the bare form (never guess which one).
 
+    ⛔ A row also answers to its `aliases` (#12296 D-1): S3's prior set folds a
+    merge-retired carrier onto its survivor, and the survivor's `aliases[]` hold
+    the folded spellings the merge retired — so a mention spelled the way the
+    merged VARIANT was spelled must resolve here, deterministically, or it reads
+    downstream as a measured absence (`found: False · no match — created`), the
+    one state that licenses a CREATE. Aliases are compared with the tree's own
+    `normalize_entity_name` fold, which is what `apply_entity_merge` wrote them
+    with; the mode is reported as ``alias`` so a record never claims an exact
+    name match that did not happen.
+
     ⛔ #12295 — THE FOLDED RUNG, and why it is a SECOND arm rather than a
     replacement. ``_norm`` (``:4232``) is whitespace collapse + lowercase only;
     it is byte-identical to Zep's ``_normalize_string_exact``
@@ -5811,19 +6183,89 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     and discarded.
     """
     norm_name = _norm(name)
+    alias_name = normalize_entity_name(name)
     kind_folded = str(kind).strip().lower()
-    exact = [e for e in entities
-             if _norm(e.get("name", "")) == norm_name
-             and str(e.get("kind", "")).strip().lower() == kind_folded]
-    if exact:
-        return exact[0], "exact"
+
+    def _name_hit(e: dict) -> bool:
+        # ⛔ `_norm` ONLY — deliberately NOT `normalize_entity_name`. A surface
+        # variant (article, separator, punctuation) is INVISIBLE to phase 1 by
+        # #11901's decision: the candidate-recall harness measures the fallback's
+        # contribution FROM that gap, and its 0% arm is pinned by
+        # `tests/test_candidate_recall_11901.py::test_the_matcher_is_exact_norm_equality_plus_kind`.
+        # Round 6 proposed folding this comparison to make a variant bind
+        # deterministically here; that CONTRADICTS the recorded #11901 conclusion,
+        # so it is refused and recorded rather than adopted. The variant's home is
+        # the write door's fold (`entity_identity.resolve_or_mint`), which folds on
+        # `canonical_name`, so no duplicate node is created.
+        return _norm(e.get("name", "")) == norm_name
+
+    def _alias_hit(e: dict) -> bool:
+        aliases = e.get("aliases")
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        if not isinstance(aliases, (list, tuple, set)):
+            return False
+        # Fold the STORED side too: `aliases` is undeclared-but-writable, so a
+        # caller may have stored `"The Team"` verbatim. Comparing a folded mention
+        # against an unfolded alias would make the one spelling the merge recorded
+        # fail to resolve — the permanent loss this lookup exists to prevent.
+        return alias_name in {normalize_entity_name(a) for a in aliases
+                              if a is not None}
+
+    def _kind_exact(e: dict) -> bool:
+        return str(e.get("kind", "")).strip().lower() == kind_folded
+
     bare = _norm_kind(kind)
-    matches = [e for e in entities
-               if _norm(e.get("name", "")) == norm_name
-               and _norm_kind(e.get("kind", "")) == bare]
-    if len(matches) == 1:
-        return matches[0], "bare"
-    if len(matches) > 1:
+
+    def _kind_bare(e: dict) -> bool:
+        return _norm_kind(e.get("kind", "")) == bare
+
+    # ⛔ NAME BEFORE ALIAS, and an alias tie is AMBIGUOUS — and the name rungs
+    # come first ACROSS kind levels, not only within one. `_mention_hit` used to
+    # return one undifferentiated True for both, and the caller took `[0]` — so the
+    # answer depended on candidate ORDER: a row that matched by NAME could lose to
+    # a row that merely carried the spelling as an alias, and two rows claiming the
+    # same alias resolved silently to whichever came first. Either way the claim
+    # was rewritten onto an entity nothing had decided, recorded `band: merge`.
+    # The name rungs keep their old semantics exactly (exact-kind first-wins, then
+    # unique-or-ambiguous bare-form) and a NAME hit never loses to an ALIAS hit of
+    # a more specific kind; aliases are the lower dimension entirely and must be
+    # unique.
+    named_exact = [e for e in entities if _kind_exact(e) and _name_hit(e)]
+    if named_exact:
+        return named_exact[0], "exact"
+    named_bare = [e for e in entities if _kind_bare(e) and _name_hit(e)]
+    if len(named_bare) == 1:
+        return named_bare[0], "bare"
+    if len(named_bare) > 1:
+        return None, "ambiguous"
+    aliased_exact = [e for e in entities if _kind_exact(e) and _alias_hit(e)]
+    if len(aliased_exact) == 1:
+        return aliased_exact[0], "alias"
+    if len(aliased_exact) > 1:
+        return None, "ambiguous"
+    aliased_bare = [e for e in entities if _kind_bare(e) and _alias_hit(e)]
+    if len(aliased_bare) == 1:
+        return aliased_bare[0], "alias"
+    if len(aliased_bare) > 1:
+        return None, "ambiguous"
+    # ⛔ The LAST rung is kind-AGNOSTIC, and it is load-bearing. An alias is the
+    # MERGE's own record that this spelling names that entity; the kind spelled on
+    # the retired variant need not match the survivor's (`approve_merge` merges a
+    # `kind_mismatch` pair on a human verdict, and `other` is the write-time
+    # coalesce default). Kind-gating every alias rung therefore returned
+    # `(None, "none")` for a survivor whose kind is `other`/empty/different — the
+    # mention fell through to `new` (a CREATE, the D-1 duplicate) or to a phase-2
+    # guess that cannot see aliases at all. What keeps a genuinely conflicting
+    # declared kind honest is the caller's `mention_is_alias` fact: this rung
+    # reports `mode: alias`, phase 1 passes it for a spelling that is NOT the
+    # row's own name, and `hard_vetoes` stands the three spelling vetoes down on
+    # THAT fact alone — never on `mention_is_own_name`, because a same spelling
+    # must keep vetoing (`plan` "Acme" vs `org` "Acme").
+    aliased_any = [e for e in entities if _alias_hit(e)]
+    if len(aliased_any) == 1:
+        return aliased_any[0], "alias"
+    if len(aliased_any) > 1:
         return None, "ambiguous"
     return _find_by_folded_key(entities, name, kind_folded, bare)
 
@@ -5869,19 +6311,87 @@ def _find_by_folded_key(entities: list[dict], name: str, kind_folded: str,
     return None, "none"
 
 
+def _verdict_facts(facts, node_id, mention_name: str = "") -> dict:
+    """The graph facts the verdict reads about ONE candidate id (#12296).
+
+    Tolerant on purpose: a caller with no fact map (a test, a replayed `search`
+    dict, `_index_search`) gets ``{}`` and therefore the name/kind vetoes only.
+    That is not a fail-open — the closure facts describe state a graph has and an
+    offline caller does not, and inventing a default ("not retired", "no
+    dependents") for a node nobody read is how a guard reports protection it does
+    not have.
+
+    ``mention_name`` closes the cases where the group-join veto would refuse
+    evidence the tree already holds: when the mention's FOLDED spelling is the
+    candidate's OWN name, or one already in its ``aliases[]``
+    (`entity_resolver.apply_entity_merge` writes it there, and the by-name resolver
+    reads `$k IN n.aliases` as a resolution), the membership is *recorded* rather
+    than inferred, so the veto stands down. The own-name half is load-bearing on
+    its own: phase 1's name rungs are kind-gated, so a mention with an UNSTATED
+    kind reaches phase 2, and a spelling test over `aliases` alone refused a
+    mention spelled exactly like its target. The fold is the tree's own
+    (`normalize_entity_name`) — the same one the alias was written with, so the
+    two cannot disagree about a spelling.
+    """
+    if not isinstance(facts, dict):
+        return {}
+    entry = facts.get(str(node_id or ""))
+    if not isinstance(entry, dict):
+        return {}
+    out = dict(entry)
+    aliases = entry.get("aliases")
+    spellings = {normalize_entity_name(a) for a in aliases
+                 if a is not None} if isinstance(aliases, (list, tuple, set)) else set()
+    # ⛔ TWO facts, not one, and the split is load-bearing.
+    #
+    # `mention_is_alias` means the spelling is one a MERGE RECORDED in the
+    # candidate's `aliases[]` — the reviewer already decided these two are one
+    # entity, so the verdict must not re-litigate the identifier/date/kind
+    # spellings (an entity hold is not carried forward, so re-litigating LOSES the
+    # mention forever). `aliases[]` ONLY: folding the candidate's own name in here
+    # would stand `kind_conflict` down for every phase-2 proposal of the form
+    # "same spelling, different declared kind", which is the DOMINANT phase-2
+    # shape (phase 1's name rungs are kind-gated, so that pair is exactly what
+    # reaches phase 2) — a silent false merge, with no alias record behind it.
+    # ⛔ The candidate's OWN name is not an alias, here as much as in the fold
+    # (`_absorb_spellings`) and in phase 1. `apply_entity_merge` folds the
+    # CANDIDATE's name into the survivor's `aliases[]`, so merging two
+    # IDENTICALLY-NAMED nodes (the canonical exact-name pair) leaves the survivor
+    # aliased with its own name — and without this exclusion a phase-2 proposal of
+    # "same spelling, different declared kind" read `mention_is_alias: True`, stood
+    # all three SPELLING vetoes down, and merged two entities the doc pins as
+    # different (`plan "Acme"` vs `org "Acme"`). Measured live: phase 1 HELD that
+    # pair (kind_conflict) while phase 2 MERGED it.
+    spellings.discard(normalize_entity_name(entry.get("name") or ""))
+    mention_folded = normalize_entity_name(mention_name) if mention_name else ""
+    out["mention_is_alias"] = bool(mention_folded and mention_folded in spellings)
+    # `mention_is_own_name` means the mention is spelled exactly like the target.
+    # That is not an inference about a group, so it stands `group_join` down —
+    # but it is not a reviewer's record either, so the spelling vetoes still run.
+    out["mention_is_own_name"] = bool(
+        mention_folded and entry.get("name")
+        and mention_folded == normalize_entity_name(entry["name"]))
+    return out
+
+
 #: Why a candidate's identity is UNRESOLVED — the reason a HOLD record carries
 #: (#11653). Every one of them is a state in which the run has NOT established
 #: that the entity does not exist, so §4.4's I1 forbids asserting `new`.
 HOLD_AMBIGUOUS = "ambiguous"
 HOLD_DISAMBIGUATION_FAILED = "disambiguation_failed"
 HOLD_DISAMBIGUATION_UNDECIDED = "disambiguation_undecided"
+#: #12296 — a candidate the VERDICT refused: a hard veto or the closure
+#: re-verification said the proposal is not a merge. Its own reason rather than
+#: folding into `disambiguation_undecided`, because the two are different facts
+#: ("the resolver did not answer" vs "the answers contradicted") and a run's
+#: census has to be able to tell them apart.
+HOLD_VETOED = "vetoed"
 HOLD_REASONS: tuple[str, ...] = (HOLD_AMBIGUOUS, HOLD_DISAMBIGUATION_FAILED,
-                                 HOLD_DISAMBIGUATION_UNDECIDED)
+                                 HOLD_DISAMBIGUATION_UNDECIDED, HOLD_VETOED)
 #: …and the declared set is ENFORCED, not merely documented: `execute_embed`
 #: normalises an unknown reason arriving through its `held_entities` parameter to
 #: the undecided class with a warning, so the vocabulary cannot widen silently at
 #: a call site (see the comment at that seam).
-
 #: The ``held`` record kind of an ENTITY candidate S3 could not identify (#11653).
 #: A DISTINCT kind from `identity_hold.HOLD_ENDPOINT` on purpose: the hold store's
 #: drain mints POINTS from the records it reads, so an entity written there would
@@ -6025,15 +6535,22 @@ def _resolution_prompt(existing: list[dict], new_names: list[str],
 
 def resolve_entities(entity_refs: list[dict], search: dict,
                      model=None, stats: dict | None = None,
-                     narrative: str = "") -> dict:
+                     narrative: str = "",
+                     facts: dict | None = None) -> dict:
     """D3: two-phase entity resolution — returns
     {"map": {name: {"id", "name"}}, "records": [{"name", "resolves_to",
-    "mode"}], "new": [name], "held": [{"name", "kind", "reason"}],
+    "mode", "band"}], "new": [name], "held": [{"name", "kind", "reason",
+    "vetoes"}],
     "warnings": [...]}.
 
-    Phase 1 (deterministic): the existing ``_find_existing_entity`` (exact →
-    bare → folded → folded_bare → ambiguous; the folded arms are the `#12295`
-    comparison-side key) for every ref — no model call.
+    Phase 1 (deterministic): ``_find_existing_entity`` for every ref — no model
+    call. Its ladder is exact-kind NAME → bare-kind NAME → exact-kind ALIAS →
+    bare-kind ALIAS → kind-agnostic ALIAS → folded → folded_bare → ``ambiguous``:
+    each alias rung is unique-or-ambiguous and NAME always outranks ALIAS (a
+    spelling the merge RECORDED in a survivor's ``aliases[]`` therefore binds
+    here, with ``mode: "alias"`` — `#12296`), and the two folded arms are the
+    `#12295` comparison-side key (`mode: "folded"` / `"folded_bare"`), tried
+    LAST because the non-injective fold is the widest net on the ladder.
     Phase 2 (LLM fallback): fires ONLY when ``model`` is set AND the search
     has entity candidates AND >=1 ref is unmatched/ambiguous. ONE
     ``_complete`` call (existing 600s wall-clock bound; temperature 0.0 via
@@ -6052,9 +6569,11 @@ def resolve_entities(entity_refs: list[dict], search: dict,
       That is the one state that licenses an ADD.
     * UNRESOLVED (`held`) — everything else, with the reason: ``ambiguous``
       (phase 1 found >1 namespace-colliding matches and phase 2 did not pick
-      one), ``disambiguation_failed`` (the phase-2 call raised/timed out) or
+      one), ``disambiguation_failed`` (the phase-2 call raised/timed out),
       ``disambiguation_undecided`` (the call answered and named neither a
-      resolution nor `new` for this name).
+      resolution nor `new` for this name) or ``vetoed`` (#12296: a hard veto or
+      the closure re-verification refused the proposal, so it is HELD rather than
+      merged — and never asserted `new`).
 
     A name phase 2 RESOLVED is in NEITHER population (it is in `map`): the two
     populations are the disposition of what is left UNRESOLVED, so a resolved
@@ -6089,6 +6608,26 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     narrative-blind, and an empty narrative renders the pre-#11654 prompt
     unchanged. It is evidence for the decision, never a source of ids —
     the candidate-table validation below is untouched.
+
+    ``facts`` (#12296) is what the GRAPH says about the candidate ids, as
+    ``{id: {"retired": bool, "dependents": int, "suppressed": bool,
+    "name": str, "aliases": [str]}}`` (built by ``_entity_verdict_facts``; the
+    last two are the spellings the candidate answers to, and ``_verdict_facts``
+    turns a mention that matches one of them into ``mention_is_alias`` — a map
+    WITHOUT them silently re-creates the ``group_join`` refusal of a mention
+    spelled exactly like its target). It feeds the verdict's hard vetoes and its
+    closure re-verification; absent, only the name/kind vetoes run. A phase-2
+    proposal that a veto or the closure refuses is not resolved and not `new` —
+    it is HELD with reason ``vetoed``, and every successful record carries the
+    BAND it reached.
+
+    ⛔ THE BANDS (#12296), and why `link` is not one of them: see
+    ``entity_verdict``'s module docstring — a non-retiring pointer exists
+    (``aliases[]`` on the survivor) but a pointer is not a verdict, and writing
+    ``dedup_reviewed='link'`` silently DEQUEUES the row from content review. A
+    proposal that is neither provable identity nor measured absence therefore
+    leaves as ``review`` (held), which is the same disposition minus the lost
+    review.
     """
     existing = [e for e in (search or {}).get("entities", []) or []
                 if isinstance(e, dict) and e.get("id")]
@@ -6096,6 +6635,10 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     resolved: dict[str, dict] = {}
     records: list[dict] = []
     unmatched: list[dict] = []
+    #: Names the VERDICT refused (#12296): ``{name: (kind, [veto codes])}``. They
+    #: are HELD (``HOLD_VETOED``) — never resolved, and never `new`, because a
+    #: contradiction between two spellings says nothing about absence (§4.4 I1).
+    vetoed: dict[str, tuple[str, list[str]]] = {}
     for ref in entity_refs:
         name = str(ref.get("name") or "").strip()
         kind = str(ref.get("kind") or "").strip()
@@ -6103,11 +6646,73 @@ def resolve_entities(entity_refs: list[dict], search: dict,
             continue
         ex, mode = _find_existing_entity(existing, name, kind)
         if ex is not None:
+            # #12296: phase 1 binds on an exactly-equal folded name+kind OR on an
+            # alias the merge recorded (`mode == "alias"`). On the ALIAS path the
+            # three spelling vetoes stand down: `aliases[]` is written only after a
+            # reviewer approved the merge, so it is the tree's own record that these
+            # two spellings are ONE entity, and re-litigating it refuses a binding
+            # the tree already made — permanently, because an entity hold is not
+            # carried forward, which LOST every later re-mention of the variant
+            # (measured: `billing v2 ledger` merged into `billing v3 ledger`, then
+            # refused `identifier_conflict` forever). The alias rung of
+            # `_find_existing_entity` exists for exactly this pair: the kind spelled
+            # on the retired variant need not match the survivor's. On the EXACT
+            # path they still fire — a same spelling with a different kind is two
+            # entities in different namespaces, which no merge recorded otherwise.
+            # What phase 1 deliberately does NOT apply
+            # is `group_join`: an exactly-equal
+            # spelling (or one the survivor's `aliases[]` already records) is the
+            # strongest evidence the tree has, and `_pair_reviewed`'s own rule
+            # already lets an exact re-mention bind. `target_suppressed` is not
+            # applied here either, and for a stated reason: a target-less `reject`
+            # was recorded against an ambiguous SET rather than this spelling, so
+            # an exact/alias re-mention does not re-ask it — and an entity hold is
+            # not carried forward, so refusing here would DROP every re-mention of
+            # that candidate for the life of the rejection. The rejection keeps
+            # its own homes: the merge queue never re-offers the pair
+            # (`_pair_reviewed`), and a phase-2 PROPOSAL to bind it is refused.
+            # `retired` DOES apply: this is
+            # D-1's second door, because a `search` dict built by another caller (a
+            # test, `_index_search`, a replayed run) carries whatever that caller
+            # fetched.
+            cfacts = _verdict_facts(facts, ex.get("id"), name)
+            refusal = _entity_verdict.hard_vetoes(
+                {"name": name, "kind": kind},
+                {"name": ex.get("name") or "", "kind": ex.get("kind") or ""},
+                {"retired": cfacts.get("retired"),
+                 # `mention_is_alias` means a spelling a MERGE recorded — and a
+                 # row's own name is never one, whoever produced the `mode`
+                 # (round-5 review: the fold used to alias every row with its own
+                 # name, so this read `True` for a same-spelling pair and stood
+                 # `kind_conflict` down). `mention_is_own_name` is what the
+                 # own-name half means, and it does not escape the spelling vetoes.
+                 "mention_is_alias": (
+                     mode == "alias"
+                     and normalize_entity_name(name)
+                     != normalize_entity_name(str(ex.get("name") or ""))),
+                 "mention_is_own_name": (
+                     normalize_entity_name(name)
+                     == normalize_entity_name(str(ex.get("name") or "")))})
+            if refusal:
+                vetoed[name] = (kind, refusal)
+                # The sentence names what actually fired: the veto codes carry the
+                # rule, and a message that hard-codes "RETIRED carrier" asserts a
+                # retirement on a row that is not retired (measured: an
+                # `identifier_conflict` on the alias path printed exactly that).
+                warnings.append(
+                    f"entity '{name[:60]}' matches a candidate the verdict "
+                    f"refused ({', '.join(refusal)}) — HELD, not bound (#12296)")
+                continue
             resolved[name] = {"id": str(ex.get("id") or ""),
                               "name": str(ex.get("name") or name)}
             records.append({"name": name,
                             "resolves_to": resolved[name]["id"],
-                            "mode": mode})
+                            "mode": mode,
+                            # The band the verdict reached. `exact` is the
+                            # strongest evidence class, so it is a `merge` by
+                            # construction — published rather than implied, so a
+                            # reader never has to infer the band from the mode.
+                            "band": _entity_verdict.BAND_MERGE})
         else:
             unmatched.append({"name": name, "kind": kind, "mode": mode})
     #: The names phase 2 positively declared ABSENT (distinct referents). Only
@@ -6115,6 +6720,9 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     declared_new: set[str] = set()
     disambiguation_ran = False
     disambiguation_failed = False
+    #: The kind each unmatched candidate was emitted with — the mention side of a
+    #: veto (#12296). Built once, beside the population it describes.
+    _kinds = {u["name"]: u["kind"] for u in unmatched}
     # Phase 2 — bounded LLM fallback for the unmatched/ambiguous remainder
     if model is not None and existing and unmatched:
         disambiguation_ran = True
@@ -6166,11 +6774,31 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                     warnings.append(f"resolution {cand!r} → {target!r} does "
                                     "not match an existing entity — dropped")
                     continue
+                # ⛔ #12296: the model PROPOSES; the band decides. Every proposal
+                # passes the hard vetoes and the closure re-verification, and a
+                # refusal is a HOLD — the one disposition that neither merges nor
+                # manufactures a duplicate. This is where precision is bought:
+                # the model is the only part of the path that can say "same" about
+                # two spellings that are not equal, and a groundless "same" is the
+                # expensive direction.
+                verdict = _entity_verdict.judge(
+                    {"name": cand, "kind": _kinds.get(cand, "")},
+                    {"name": hit.get("name") or "",
+                     "kind": hit.get("kind") or ""},
+                    _verdict_facts(facts, hit.get("id"), cand))
+                if verdict["band"] != _entity_verdict.BAND_MERGE:
+                    vetoed[cand] = (_kinds.get(cand, ""), verdict["vetoes"])
+                    warnings.append(
+                        f"resolution {cand!r} → {target!r} VETOED "
+                        f"({', '.join(verdict['vetoes'])}): HELD for review, "
+                        "never asserted new (#12296)")
+                    continue
                 resolved[cand] = {"id": str(hit.get("id") or ""),
                                   "name": str(hit.get("name") or cand)}
                 records.append({"name": cand,
                                 "resolves_to": resolved[cand]["id"],
-                                "mode": "llm"})
+                                "mode": "llm",
+                                "band": verdict["band"]})
         except Exception as e:  # noqa: BLE001, RUF100 — degrade, never block
             disambiguation_failed = True
             warnings.append(
@@ -6189,7 +6817,14 @@ def resolve_entities(entity_refs: list[dict], search: dict,
             # would publish a hold that did not happen (measured: `Joe -> Joseph`
             # reported "identity UNRESOLVED" while the run created Joseph).
             continue
-        if u["mode"] == "ambiguous":
+        if name in vetoed:
+            # ⛔ #12296: a VETO is a refusal to merge, so the candidate belongs to
+            # neither `resolved` nor `new` — it is HELD. Checked BEFORE the
+            # disambiguation reasons: an undecided verdict and a refused one are
+            # different facts, and reporting the refusal as "undecided" would make
+            # the band invisible in exactly the runs it exists for.
+            reason = HOLD_VETOED
+        elif u["mode"] == "ambiguous":
             # A mechanical collision the resolver did not pick between: §4.4's S3
             # row is FAIL-CLOSED on `new`, so nothing but a positive choice
             # attaches a name matching SEVERAL existing entities.
@@ -6206,19 +6841,138 @@ def resolve_entities(entity_refs: list[dict], search: dict,
             # answered said otherwise: the one measured absence.
             new.append(name)
             continue
-        held.append({"name": name, "kind": u["kind"], "reason": reason})
+        held.append({"name": name, "kind": u["kind"], "reason": reason,
+                     "vetoes": vetoed.get(name, (None, []))[1]})
         warnings.append(
             f"entity '{name[:60]}' — identity UNRESOLVED ({reason}): HELD, not "
             "created (§4.4 I1, #11653)")
+    # A phase-1 refusal never enters `unmatched` (the model must not be asked to
+    # re-decide a target the verdict already refused), so it is appended here.
+    for name, (kind, codes) in vetoed.items():
+        if name in resolved or any(h["name"] == name for h in held):
+            continue
+        held.append({"name": name, "kind": kind, "reason": HOLD_VETOED,
+                     "vetoes": codes})
     # F4/F2: identity is `_norm` (F3). A raw-name subtraction licensed an alias of a
     # held identity; dropped from `new` alone it is in neither population → HOLD.
     _alias = {_norm(h["name"]): h["reason"] for h in held}
-    _kind_of = {u["name"]: u["kind"] for u in unmatched}
-    held += [{"name": n, "kind": _kind_of.get(n, ""), "reason": _alias[_norm(n)]}
+    held += [{"name": n, "kind": _kinds.get(n, ""), "reason": _alias[_norm(n)],
+              "vetoes": vetoed.get(n, (None, []))[1]}
              for n in new if _norm(n) in _alias]
     return {"map": resolved, "records": records, "held": held,
             "new": [n for n in new if _norm(n) not in _alias],
             "warnings": warnings}
+
+
+def _entity_verdict_facts(sdk, entities: list[dict]) -> dict:
+    """The graph facts #12296's verdict reads, keyed by candidate id.
+
+    One read per identity label over the SUPPLIED candidate ids only (never a
+    scan), returning::
+
+        {id: {"retired": bool,      # carries `resolved_from`
+              "dependents": int,    # nodes already folded into this one
+              "suppressed": bool,   # `reject` that named no survivor
+              "name": str,          # the candidate's own surface spelling
+              "aliases": [str]}}    # the folded spellings it also answers to
+
+    ⛔ ``aliases`` is read here because the ``group_join`` veto needs it: a
+    mention whose folded spelling is already one of the candidate's aliases is a
+    membership the MERGE RECORDED, not one the verdict must infer — see
+    ``_verdict_facts``, which derives ``mention_is_alias`` from this list (this
+    function cannot: it never sees the mention). A caller that hands this map
+    straight to ``entity_verdict.judge`` gets the alias escape only if it adds
+    that key itself.
+
+    What each fact is FOR, so a later reader does not have to reverse-engineer it:
+
+    * ``retired`` — D-1 (`#12244`'s root). The S3 prior set already folds a
+      carrier onto its survivor (``_current_entity_priors``); this is the fact the
+      verdict's own ``target_retired`` veto reads, so a candidate table built by
+      another route cannot bind a mention to a retired node either.
+    * ``dependents`` — M-4's cross-group re-verification. A candidate that is
+      itself a merge SURVIVOR stands for a group; binding a new mention to it
+      asserts "mention matches group" from a pairwise comparison never made
+      against the group's other members (`entity_resolver.follow_resolved_from`
+      walks that closure silently). ``dependents >= 1`` is the readable form of
+      "this target is a group".
+    * ``suppressed`` — the persisted no-merge verdict in the ONE shape a
+      name-only mention can honour: `_pair_reviewed`'s documented case of a
+      `reject` that recorded NO survivor, which *"suppresses the candidate
+      outright — re-offering it against a different survivor would re-ask a
+      question the reviewer already answered"* (`entity_resolver.py:236-250`).
+    * ``aliases`` — the folded spellings this id answers to. ``apply_entity_merge``
+      writes them (`entity_resolver.apply_entity_merge`), and the by-name resolver
+      reads `$k IN n.aliases` AS a resolution — so ``_verdict_facts`` turns a
+      mention that is one of them into ``mention_is_alias``, which stands
+      ``group_join`` down. This reader cannot derive that key: it never sees the
+      mention.
+
+    ⛔ **Cannot-answer is not an answer, and this read RAISES.** A verdict computed
+    from a fact map that silently omitted the graph's own state would report
+    precision it did not have — the false-PASS shape. The caller CATCHES the raise
+    around THIS READ ALONE (never around the resolver): the fact-dependent vetoes
+    are skipped for the run and recorded, while phase 1 and — load-bearing — the
+    HOLD population still run. Swallowing it into the resolver's own `except`
+    would empty `resolution_held` and turn every entity S3 could not identify into
+    a CREATE, which is the §4.4 I1 inversion the hold exists to prevent.
+    """
+    ids = [str(e.get("id")) for e in entities or []
+           if isinstance(e, dict) and e.get("id")]
+    if not ids:
+        return {}
+    get_proj = getattr(sdk, "_get_proj", None)
+    if not callable(get_proj):
+        return {}
+    graph = getattr(get_proj(), "g", None)
+    if graph is None:
+        return {}
+    out: dict[str, dict] = {}
+    for label in ("Object", "Subject"):
+        rows = graph.query(
+            f"MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id, "
+            "n.resolved_from, n.dedup_reviewed, n.dedup_target_id, "
+            "n.dedup_rejected_targets, n.aliases, n.name",
+            params={"ids": ids}).result_set
+        if not rows:
+            continue
+        present = [str(r[0]) for r in rows if r and r[0] is not None]
+        for row in rows:
+            if not row or row[0] is None:
+                continue
+            reviewed = str(row[2] or "")
+            targets = [t for t in (row[4] or []) if t is not None] if isinstance(
+                row[4], (list, tuple)) else []
+            if row[3] is not None:
+                targets.append(row[3])
+            # `aliases` is undeclared-but-writable, so a caller may have stored a
+            # bare string (`update_entity(id, aliases="foo")` is reachable) — the
+            # same trap `apply_entity_merge` guards when it reads them back.
+            raw_aliases = row[5]
+            if isinstance(raw_aliases, str):
+                alias_list = [raw_aliases]
+            elif isinstance(raw_aliases, (list, tuple, set)):
+                alias_list = [str(a) for a in raw_aliases if a is not None]
+            else:
+                alias_list = []
+            out[str(row[0])] = {
+                "retired": bool(row[1]),
+                "dependents": 0,
+                "suppressed": reviewed == "reject" and not targets,
+                "name": "" if row[6] is None else str(row[6]),
+                "aliases": alias_list,
+            }
+        dep_rows = graph.query(
+            f"MATCH (d:{label}) WHERE d.resolved_from IN $ids "
+            "RETURN d.resolved_from",
+            params={"ids": present}).result_set
+        for dep in dep_rows:
+            if not dep or dep[0] is None:
+                continue
+            key = str(dep[0])
+            if key in out:
+                out[key]["dependents"] += 1
+    return out
 
 
 def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
@@ -8873,6 +9627,21 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
     return minted
 
 
+def _alias_hit_for(folded_mention: str, aliases) -> bool:
+    """Is ``folded_mention`` one of ``aliases``? Folds the stored side too.
+
+    `aliases` is undeclared-but-writable, so a caller may have stored an unfolded
+    spelling; comparing a folded value against raw strings is how one spelling the
+    merge recorded stops resolving.
+    """
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    if not isinstance(aliases, (list, tuple, set)):
+        return False
+    return bool(folded_mention) and folded_mention in {
+        normalize_entity_name(a) for a in aliases if a is not None}
+
+
 def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | None:
     """Resolve an entity ``supersedes`` ref to the S3-returned existing
     ENTITY dict: by id (content-addressed, unique), or by name filtered to
@@ -8888,11 +9657,61 @@ def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | Non
     for e in entities:
         if e.get("id") == ref:
             return e
-    matches = [e for e in entities
-               if _norm(e.get("name", "")) == _norm(ref)
-               and (not kind or _norm_kind(e.get("kind", "")) == _norm_kind(kind))]
-    if len(matches) == 1:
-        return matches[0]
+    # ⛔ FOLDED, name OR alias (#12296). The D-1 fold replaces a merge-retired
+    # carrier's row with the SURVIVOR's row, so the carrier's spelling survives
+    # only in `aliases[]` — and a name-only arm here then failed to resolve a
+    # `supersedes` ref spelled the way the merged variant was spelled, which DROPS
+    # the supersession (the entity that should be retired stays live) and warns
+    # that it was "recorded without a graph id" for a record that is not recorded
+    # at all. The discipline is `_find_existing_entity`'s — fold both sides, and
+    # never guess when more than one row answers — but the LADDER below is not
+    # that function's: see the three-rung note further down, which states the
+    # divergence (#11901 keeps surface variants out of phase 1 by never folding a
+    # NAME there; here the ref is an authored string).
+    want = normalize_entity_name(ref)
+    # ⛔ NAME FIRST, fold/alias only as the FALLBACK. In one match list, a rival
+    # row that merely folds or aliases to the ref made the set ambiguous and a
+    # supersession that previously landed was DROPPED (the entity that should be
+    # retired stayed live), while nothing about the ref's own spelling had
+    # changed.
+    # ⛔ The KIND filter belongs to EACH rung, not to the merged result: applied
+    # after the ladder, one same-spelling row of a DIFFERENT kind emptied the name
+    # rung's survivors, so the fold/alias fallback was never consulted and a
+    # `supersedes` ref that resolves through an alias was DROPPED — the same
+    # defect, through a narrower door. `_find_existing_entity` gates each of its
+    # first FOUR rungs — name-exact, name-bare, alias-exact, alias-bare — on kind
+    # per rung for this reason; its FINAL rung (`aliased_any`) is deliberately
+    # kind-AGNOSTIC (#11653: kind-gating every alias rung fell through to a CREATE
+    # for a survivor whose kind is `other`/empty/different). THIS function does not
+    # adopt that last rung: a kind-mismatched alias target still resolves to None
+    # rather than retiring an entity of another kind. Recorded as a residual, not a
+    # precedent, so the next reader does not "align" the two.
+    def _same_kind(e: dict) -> bool:
+        return (not kind
+                or _norm_kind(e.get("kind", "")) == _norm_kind(kind))
+
+    # THREE rungs, in this order, and each one is complete before the next is
+    # consulted: an EXACT-spelling name hit, then a FOLDED name hit, then the
+    # alias arm. Rungs 2 and 3 were one list, so a folded-name row and an
+    # alias-bearing rival of the same kind made the set ambiguous and the
+    # supersession was DROPPED even though a NAME row answered — the same
+    # symptom the ordering above exists to remove, one spelling down.
+    # ⛔ This is NOT `_find_existing_entity`'s ladder: that one never folds a NAME
+    # with `normalize_entity_name` (#11901 — a surface variant is invisible to
+    # phase 1). Here the ref is an AUTHORED `supersedes` string, not a mention
+    # S3 recalled, so the folded-name rung stays — it is pre-existing behaviour
+    # of this function, kept, and it is why this comment no longer claims parity.
+    named = [e for e in entities
+             if _norm(e.get("name", "")) == _norm(ref) and _same_kind(e)]
+    if not named:
+        named = [e for e in entities
+                 if normalize_entity_name(e.get("name", "")) == want
+                 and _same_kind(e)]
+    if not named:
+        named = [e for e in entities
+                 if _alias_hit_for(want, e.get("aliases")) and _same_kind(e)]
+    if len(named) == 1:
+        return named[0]
     return None  # 0 or >1 → caller warns, never guesses
 
 
@@ -9258,10 +10077,17 @@ def _supersession_records(entity_refs: list[dict], search: dict,
         if not existing:
             if warnings is not None:
                 warnings.append(f"entity '{name[:60]}' supersedes={ref!r} does not "
-                                "resolve to an S3 search result — recorded without "
-                                "a graph id")
+                                "resolve to an S3 search result — the supersession "
+                                "is DROPPED (no graph id to record it against)")
             continue
-        if (_norm(existing.get("name", "")) == _norm(name)
+        # ⛔ The self-supersession guard must use the SAME predicate the resolver
+        # matched on, or it is narrower than the thing it guards: a ref that folds
+        # onto the new entity's own recorded spelling (`aliases[]`) resolves to the
+        # entity ITSELF and was then recorded as superseding itself.
+        _name_folded = normalize_entity_name(name)
+        if ((_norm(existing.get("name", "")) == _norm(name)
+             or normalize_entity_name(existing.get("name", "")) == _name_folded
+             or _alias_hit_for(_name_folded, existing.get("aliases")))
                 and _norm_kind(existing.get("kind", "")) == _norm_kind(kind)):
             if warnings is not None:
                 warnings.append(f"entity '{name[:60]}' supersedes itself "
@@ -14546,7 +15372,28 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # candidates, the only state in which a DISAMBIGUATION can happen at all.
     # A run whose lookup did not run has nothing to disambiguate, and its create
     # gate is §4.4's separate S3-lookup row (#10998), not this one.
-    if search and not search.get("degraded") and (search.get("entities") or []):
+    #: Spellings the D-1 fold WITHHELD (a dangling `resolved_from`, a corrupt
+    #: chain). They are not absent — they are unreadable — so they are HELD below
+    #: rather than left to read as measured absence, and the pass still runs even
+    #: when the fold withheld every row: an empty candidate set from THIS cause
+    #: must not turn a partial lookup into a create window — for the spellings it
+    #: names. TWO producers fill this list, and both are stated because they
+    #: reached it in different rounds: (1) the fold's PER-ROW withholding, which
+    #: carries the names it refused (`_PriorFoldUnresolvable.unresolved_names`);
+    #: and (2) a read that failed BEFORE any hop resolved (`_entity_facts`
+    #: raising — a driver error, a timeout), which carries no per-row payload at
+    #: all, so `search_graph` names EVERY prior row (round-27); this gate still
+    #: fires on that key, and the run HOLDS them.
+    #: Neither arm may be reverted to "empty set, no names": that is the create
+    #: window this key exists to close. What #10998 still owns is narrower — a
+    #: lookup that produced no rows at all, or a client with no projection.
+    #: ⚠️ The hold key is `_norm` (F3), so an ARTICLE variant of a withheld
+    #: spelling is a different key and is not caught (#12424, residual).
+    _unresolved_names = [str(n).strip()
+                         for n in (search or {}).get("entities_unresolved") or []
+                         if str(n or "").strip()]
+    if search and not search.get("degraded") and (
+            (search.get("entities") or []) or _unresolved_names):
         ent_refs = [{"name": str(e.get("name", "")).strip(),
                      "kind": str(e.get("kind", "")).strip()}
                     for e in (complete_list.get("entities") or [])
@@ -14556,17 +15403,68 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # #11654: the run's narrative is S3's disambiguation
                 # context (§S3) — computed a stage earlier, and until now
                 # never handed to the resolver.
+                # ⛔ #12296 review: the facts read is a BOUNDED, OPTIONAL input to
+                # the verdict — not the pass. It costs four label reads on every
+                # capture, so a transient read failure is realistic; letting it
+                # escape into the pass's own `except` below would SKIP
+                # `resolve_entities` entirely, `resolution_held` would stay empty,
+                # and every entity S3 could not identify would then be CREATED
+                # rather than withheld — the §4.4 I1 inversion this issue exists to
+                # remove (pre-#12296 a healthy S3 always produced the hold
+                # population). Fail the FACTS read, not the pass: phase 1 and the
+                # hold population survive, and the only thing lost for this run is
+                # the fact-dependent vetoes (`target_retired` / `group_join` /
+                # `target_suppressed`), whose primary guard — the
+                # `_current_entity_priors` fold — is upstream and unaffected.
+                try:
+                    verdict_facts = _entity_verdict_facts(
+                        sdk, search.get("entities") or [])
+                except Exception as e:  # noqa: BLE001, RUF100 — optional input
+                    verdict_facts = None
+                    errors.append(
+                        "entity verdict facts unavailable: "
+                        f"{type(e).__name__}: {e} — the closure vetoes are "
+                        "skipped for this run; the S3 prior-set fold still "
+                        "excludes every merge-retired carrier (#12296)")
                 res = resolve_entities(ent_refs, search, model=model,
                                        stats=resolution_stats,
-                                       narrative=story_arc)
+                                       narrative=story_arc,
+                                       facts=verdict_facts)
                 # ⛔ #11653: captured BEFORE the apply — a raise from it must not
                 # lose the hold (the entity it could not identify is then MINTED).
                 resolution_records = res.get("records") or []
                 resolution_warnings = res.get("warnings") or []
                 resolution_held = res.get("held") or []
-                if resolution_held:
-                    # §4.4's *"recorded loudly, never only in `warnings`"*: one deterministic census class per run, with the reasons and the candidates named on `result["resolution_held"]`.
-                    _bump_census_class(error_census, "entity_identity_held")
+                # #12296: the fold withheld these spellings, so their identity was
+                # never resolved — HOLD them (never create). Same disposition the
+                # facts-reader failure gets, for the same reason.
+                # ⛔ Compare IDENTITY KEYS, not raw spellings: a mention that
+                # RESOLVED can be spelled differently from the withheld graph row
+                # (`The Team` vs `the team`), and an exact-string test then
+                # appended a hold for a name that was resolved — a loss recorded
+                # under I2 that did not occur, contradicting `resolve_entities`'
+                # own invariant that a resolved name is never also reported held.
+                # The key is `_norm` (case/whitespace folds, F3's hold identity),
+                # NOT `normalize_entity_name`: an ARTICLE variant (`The Team` vs
+                # `Team`) is still two keys here, so it can be created while a
+                # fold-equal spelling is withheld — #12424 tracks that residual
+                # (widening this key alone would not close it either; the create
+                # gate at `execute_embed` keys on the same `_norm`).
+                _resolved_folds = {_norm(str(k))
+                                   for k in (res.get("map") or {})}
+                _held_names = {_norm(str(h.get("name") or ""))
+                               for h in resolution_held}
+                for _name in _unresolved_names:
+                    if _norm(_name) in _resolved_folds or _norm(_name) in _held_names:
+                        continue
+                    resolution_held.append({
+                        "name": _name, "kind": "",
+                        "reason": HOLD_DISAMBIGUATION_UNDECIDED, "vetoes": []})
+                    _held_names.add(_norm(_name))
+                # (the `entity_identity_held` census class is bumped ONCE for the
+                # run, at the shared site after this try/except — §4.4's *"recorded
+                # loudly, never only in `warnings`"* — so a run that both resolved
+                # holds and had a withheld spelling is not counted twice)
                 if res.get("map"):
                     complete_list = _apply_entity_resolution(
                         complete_list, res["map"])
@@ -14585,6 +15483,32 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # D1 (#1746): deterministic class for the previously-
                 # uncensused resolution failure path.
                 _bump_census_class(error_census, "entity_resolution_failed")
+                # ⛔ #12296: the fold withheld these spellings whether or not the
+                # resolver got to run. Seeding the hold only on the SUCCESS path
+                # left this arm with `resolution_held == []`, so `execute_embed`
+                # created every spelling the D-1 fold refused to resolve — the
+                # duplicate the fold exists to prevent, reached by a raising
+                # resolver. Nothing resolved here, so no `map` filter is needed.
+                # De-duped on the `_norm` key, as on the success arm: the same
+                # withholding can be named twice in two spellings, and one hold per
+                # KEY — not per spelling — is the invariant both arms share (the
+                # article-variant residual is the same one #12424 tracks).
+                _held_folds_on_failure = {_norm(str(h.get("name") or ""))
+                                          for h in resolution_held}
+                for _name in _unresolved_names:
+                    if _norm(_name) in _held_folds_on_failure:
+                        continue
+                    resolution_held.append({
+                        "name": _name, "kind": "",
+                        "reason": HOLD_DISAMBIGUATION_UNDECIDED, "vetoes": []})
+                    _held_folds_on_failure.add(_norm(_name))
+                # (the census class is bumped once, at the shared site below —
+                # not here: a second bump on the same run double-counts)
+    # One census bump for the run, on BOTH arms: the resolver's own holds and the
+    # spellings the D-1 fold withheld land in the same population, and a per-arm
+    # bump double-counted a run that had both.
+    if resolution_held:
+        _bump_census_class(error_census, "entity_identity_held")
     # #3359: roll the D3 resolution stage's cost driver into the session
     # roll-up — outside the try/except so the spend already made is reported
     # even when the resolution itself failed. A resolve_entities call that

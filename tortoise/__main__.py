@@ -11462,12 +11462,30 @@ def _cmd_onboard(args) -> int:
         print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
     from tortoise.config import is_db_uri
+    # #11912: forward `--offline` so the wizard's own step 5 honours the escape
+    # hatch its docs promise (`docs/quickstart-cloud.md`). Before the hosted
+    # block existed this step made no request at all; now a credential-bearing
+    # box behind a blackholing proxy would block the LAST onboarding step for
+    # the block's whole 75 s worst case with no supported way to skip it.
+    doctor_offline = bool(getattr(args, "offline", False))
     if is_db_uri(db_target):
-        _cmd_doctor(argparse.Namespace(cmd="doctor", db=db_target, path=None))
+        doctor_rc = _cmd_doctor(argparse.Namespace(
+            cmd="doctor", db=db_target, path=None, offline=doctor_offline))
     else:
-        _cmd_doctor(argparse.Namespace(cmd="doctor", db=None, path=db_target))
+        doctor_rc = _cmd_doctor(argparse.Namespace(
+            cmd="doctor", db=None, path=db_target, offline=doctor_offline))
 
     print(f"\n{'='*50}")
+    # ⛔ The wizard's last step is its VERDICT (#11912). It used to discard the
+    # health check's exit code and print "Onboarding complete." / return 0 under
+    # its own `❌ Hosted: … 401 Invalid API key` row — so a script or agent
+    # gating on the wizard certified a dead hosted credential, and the completion
+    # banner contradicted the report directly above it (fresh review round 12).
+    if doctor_rc != 0:
+        print("Onboarding finished — but the health check FAILED (see above).")
+        print("Fix the ❌ rows and re-run `tortoise doctor` before relying on "
+              "this setup.")
+        return doctor_rc
     print("Onboarding complete.")
     # #2200: a no-Docker wizard run that defaulted onto the canonical
     # embedded path must never read as a durable setup — gate the completion
@@ -12833,6 +12851,1074 @@ def _session_index_rows_without_graph(
              "(see the `Graph: health` row)")]
 
 
+#: `doctor`'s hosted probe bounds (#11912).
+#: The reachability read is cheap, so it gets a short bound. The AUTHENTICATED
+#: read is where the hosted app's cold start lands — a first request after an
+#: idle period measured >10s while a warm app answers in 0.2–1.6s (`tortoise
+#: team info` retries for exactly this reason) — so EACH leg gets ONE bounded
+#: retry rather than reporting a waking service as a broken credential.
+#: ⛔ Worst case for the SOCKET timeouts is 5 + 30 + 10 + 30 = 75 s, and only when
+#: the network is timing out on both legs. An outer watchdog must size itself at
+#: **105 s**, not 45 and not 75, because DNS resolution (`getaddrinfo`) runs
+#: before any socket timeout is applied, while `connect()` consumes — rather than
+#: adds to — a leg's own bound (`socket.create_connection` sets the timeout before
+#: connecting). 105 s is therefore a conservative margin over the 75 s of bounds,
+#: not a derivation. A 45 s cap pre-empts the `/health` retry and reproduces the
+#: "cold box reported as a broken endpoint" failure this whole retry exists to
+#: prevent. The budget below is what stops the CUMULATIVE drift.
+#: ✅ A BODY read is no longer part of that residue: the deadline arms a socket
+#: watchdog (`_doctor_read_capped`), so a `read1` already blocked when it passes is
+#: interrupted rather than left to run to its own socket bound (fresh review
+#: round 19 — that was true of an earlier head, not of this one).
+#: ⚠️ Those are per-`recv` bounds, NOT a wall-clock cap on their own: a server
+#: that drips bytes just slowly enough keeps one `read()` alive past them. That is
+#: why the body is read in CHUNKS against a deadline under the
+#: `_DOCTOR_TOTAL_BUDGET_S` wall clock below AND the read is interrupted at that
+#: deadline — measured with a real dripping server: `doctor` returns in ~18 s
+#: instead of the ~200 s a single `read(cap)` was held for.
+_DOCTOR_HEALTH_TIMEOUT_S = 5
+_DOCTOR_TEAM_TIMEOUT_S = 10
+_DOCTOR_TEAM_RETRY_TIMEOUT_S = 30
+#: Most bytes of a reply this diagnostic will hold in memory. The bodies it reads
+#: are small JSON objects; the cap exists so a proxy/captive portal cannot make
+#: `doctor` buffer an unbounded stream on a memory-tight box.
+_DOCTOR_BODY_CAP = 65536
+
+#: The hosted probe's wall-clock budget (#11912). It bounds leg STARTS, caps each
+#: leg at `min(its own bound, what is left)`, AND is passed into every body read
+#: as a deadline (`_doctor_read_capped`), so a leg already inside a body read stops
+#: at it too: a dripping server that held one leg for ~200 s now returns in
+#: ~18 s total. ✅ That body read IS a hard interrupt: the deadline arms a watchdog
+#: that shuts the socket down, because checking the deadline between `read1` calls
+#: says nothing about a SINGLE call — on a chunked body `read1` loops inside
+#: `fp.readline` for the chunk-size line, so a byte-drip under the socket bound
+#: held one call for 12.0 s against a 0.5 s bound (x24, measured) and never
+#: returned at all if the drip did not end (fresh review round 19). Between-calls
+#: checking is what bounds a Content-Length body; the watchdog is what bounds
+#: both, on both reply types (`HTTPResponse` and the `HTTPError` whose `fp` is
+#: one). ⛔ What the budget is still NOT: an interrupt for DNS resolution, which
+#: runs before any socket timeout is applied — that is the 105 s margin the
+#: constant block above REQUIRES OF an outer watchdog (nothing in this tree wraps
+#: the verb with one; the sentence states what a caller must allow, not what exists).
+#: Why the budget exists at all:
+#: without it a spent socket bound was invisible and `min()` had nothing to
+#: subtract from, so `doctor` (and `onboard`'s last step) could chain four slow
+#: legs on exactly the network `--offline` exists for.
+_DOCTOR_TOTAL_BUDGET_S = 75
+
+#: The key prefixes a HOSTED mint produces (`signup`, `key create`). #11912 uses
+#: this ONLY to decide whether an env-only `TORTOISE_API_KEY` may be aimed at a
+#: hosted endpoint — see the gate in `_doctor_hosted_rows`.
+#: ⛔ Deliberate duplicate of `tortoise/auth.py::API_KEY_PREFIXES`, not an import:
+#: `tortoise/auth.py` RAISES at import time when `TORTOISE_API_KEY` is set and
+#: `TORTOISE_SECRET_PEPPER` is not — which is exactly the self-host box this gate
+#: exists for, so importing it here would crash `doctor` on the case it protects.
+#: `tests/test_doctor.py::test_the_hosted_prefixes_match_the_auth_contract` pins
+#: the two definitions together.
+_HOSTED_KEY_PREFIXES = ("tt_", "tk_")
+
+#: The prefix of an OAuth 2.1 ACCESS TOKEN — a Bearer family this tree accepts at
+#: the MCP boundary only (`tortoise/mcp_auth.py:1251-1258`), never on REST
+#: `/v1/*` (ADR-010: "`oat_` tokens are MCP-only"). The hosted probe asks REST,
+#: so an `oat_` identity must be refused with its OWN remedy rather than aimed
+#: at an endpoint that answers 401 by design.
+_OAUTH_ONLY_KEY_PREFIX = "oat_"
+
+
+def _doctor_response_socket(resp) -> object | None:
+    """The socket behind a `urllib` reply, or None when there is not one.
+
+    ⛔ WALK the `fp` chain, do not assume one hop (fresh review round 19). An
+    `HTTPResponse` is `resp.fp` (BufferedReader) → `.raw` (SocketIO) → `._sock`,
+    but an `HTTPError` sets `self.fp` to the **`HTTPResponse` itself**, so a
+    one-hop lookup returns None for the third call site — the error body read —
+    and silently disarms the watchdog exactly where the reply is server-chosen
+    (measured: a 500 whose chunk-size line dripped under the socket bound blocked
+    for 10.05 s against a 0.5 s deadline, and did not return at all while the
+    drip continued). A body read with no watchdog is the single-call spin this
+    reader exists to close, so the chain is walked rather than guessed.
+
+    Bounded at four hops on purpose: a test double wrapping `io.BytesIO` has no
+    socket anywhere (None, which is the documented no-watchdog path), and an
+    unbounded walk over an arbitrary object graph is not something a diagnostic
+    should do on the way to printing a row.
+    """
+    node = resp
+    for _ in range(4):
+        if node is None:
+            return None
+        sock = getattr(getattr(node, "raw", None), "_sock", None)
+        if sock is not None:
+            return sock
+        node = getattr(node, "fp", None)
+    return None
+
+
+
+def _doctor_read_capped(resp, cap: int, deadline: float) -> tuple[bytes, bool]:
+    """Read at most `cap` bytes, stopping when `deadline` passes.
+
+    ⛔ `urlopen(timeout=…)` is a PER-RECV bound, not a wall-clock one: a
+    server dripping one byte at a time keeps every gap under it and holds the
+    caller for as long as it likes (measured: `timeout=1` returned 30 bytes
+    after 12.0 s). `read(cap)` alone therefore leaves a started leg unbounded
+    — and the four legs times two reads each is how "the probe is bounded"
+    was true on paper only (fresh review round 15). Reading in chunks and
+    checking the deadline between them makes the bound real, and the cap
+    still bounds the memory.
+
+    ⛔ AND the between-calls deadline check is not a wall clock either (round 19):
+    it bounds the NUMBER of `read1` calls, not the time inside one. On a chunked
+    body `read1` → `_read1_chunked` → `_get_chunk_left` → `fp.readline(_MAXLINE+1)`
+    loops on `recv` until a NEWLINE arrives, so a server that drips the chunk-size
+    line just under the socket bound keeps ONE call alive indefinitely — measured
+    on this box: one `read1(4096)` took 12.01 s against a 0.5 s per-recv bound
+    (x24) and the deadline check ran zero times. A proxy or CDN normalises a reply
+    to chunked, so that is the LIVE shape, not a corner. The deadline therefore
+    arms a watchdog that `shutdown()`s the underlying socket. What that produces
+    depends on the body shape, and both are honest: a chunked body raises
+    `IncompleteRead` (a read error, which the callers report as an unread body),
+    while a close-delimited body simply returns `b""` — indistinguishable from a
+    normal end except by the CLOCK, which is why an EOF with nothing declared is
+    a CUT at or past the deadline and only the peer's end before it (fresh review
+    at `fb2926ef9e`/`a424e32d6f`). A DECLARED length still outranks the clock in
+    both directions: bytes owed is a cut, a satisfied length is complete even past
+    the deadline (round 17). `close()` alone does not reliably wake a blocked recv;
+    `shutdown()` does. The socket is found by WALKING the `fp` chain
+    (`_doctor_response_socket`), because an `HTTPError` puts the `HTTPResponse` one
+    hop deeper than a 2xx reply does.
+
+    A response with no resolvable socket (a test double, a transport shim) simply
+    gets no watchdog: the between-calls check still applies, and the cap still
+    bounds the memory.
+
+    """
+    import socket
+    import threading
+    import time
+
+    sock = _doctor_response_socket(resp)
+    watchdog: threading.Timer | None = None
+    # ⛔ The interrupt must be OBSERVABLE. Shutting the socket down does not
+    # always RAISE: on a close-delimited body (no `Content-Length`, no
+    # `Transfer-Encoding`) `read1` simply returns `b""`, and `length` is None for
+    # that shape exactly as it is for chunked — so OUR OWN interrupt used to be
+    # graded "the stream declared its end". It is now detected WITHOUT a flag: the
+    # watchdog is armed AT the deadline, so an EOF with nothing declared at/after
+    # the deadline is ours (see the EOF branch below), and the flag the first
+    # attempt added was both redundant with that clock and ordered before the
+    # declared-length settlement (fresh review round 29).
+    if sock is not None:
+        def _interrupt() -> None:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)     # `close()` does not wake a blocked recv
+
+        watchdog = threading.Timer(max(0.0, deadline - time.monotonic()),
+                                   _interrupt)
+        watchdog.daemon = True
+        watchdog.start()
+    try:
+
+
+        chunks: list[bytes] = []
+        total = 0
+        # ⛔ A body without `read1` is read ONE byte per call: `read(n)` blocks until
+        # `n` bytes or EOF, so a chunk-sized fallback would put the leg's deadline
+        # back where the chunking exists to remove it.
+        reader = getattr(resp, "read1", None) or (lambda n: resp.read(min(n, 1)))
+        while total < cap:
+            if time.monotonic() >= deadline:
+                # ⛔ CUT is REPORTED, never silent: a body truncated by the
+                # deadline is an UNREAD verdict, and a silent break here made a
+                # `degraded` /health read ✅ and a healthy /v1/team read ❌
+                # (fresh review round 16 — the two false verdicts this reader
+                # could produce).
+                #
+                # ...but only when the body is genuinely incomplete. The check
+                # runs BEFORE the EOF probe, so a body whose last chunk arrived
+                # exactly at the boundary (or a fixed-length body fully read)
+                # would otherwise be reported CUT and downgrade a healthy ✅ to a
+                # "we stopped early" ⚠️ — a false claim about the body (fresh
+                # review round 17). `HTTPResponse.length` is the remaining
+                # declared length: 0 means COMPLETE. `None` (chunked, no
+                # Content-Length) stays an honest "unknown, so assume cut".
+                # ⛔ `HTTPResponse.length` is the remaining DECLARED length; an
+                # `HTTPError` carries no `length` of its own — its `fp` does. Reading
+                # the attribute off the error itself made every cut 4xx look cut even
+                # when it had completed (fresh review round 19).
+                length_owner = resp
+                if getattr(length_owner, "length", None) is None:
+                    inner = getattr(resp, "fp", None)
+                    if inner is not None and getattr(inner, "length", None) is not None:
+                        length_owner = inner
+                complete = getattr(length_owner, "length", None) == 0
+                return b"".join(chunks), not complete
+            # ⛔ A read error PROPAGATES: "the body could not be READ" is a
+            # distinct verdict from "the body carried no status", and swallowing
+            # it here made a stalled-but-200 `/health` read as green again —
+            # the exact arm round 13 added. The callers already handle it.
+            chunk = reader(min(4096, cap - total))
+            if not chunk:
+                # ⛔ EOF is NOT automatically a COMPLETE body: `read1` returns `b""`
+                # on a premature close instead of raising `IncompleteRead` (declared
+                # 200, closed after 10, `length == 190`, no exception), so a
+                # truncated reply would report "not cut" and reach the captive-portal
+                # arm — the false red the CUT signal removes, on a different trigger.
+                # `length` is the bytes still OWED; `None` (chunked OR
+                # close-delimited) carries NO information.
+                outstanding = getattr(resp, "length", None)
+                if outstanding is None:
+                    inner = getattr(resp, "fp", None)
+                    outstanding = getattr(inner, "length", None)
+                if outstanding not in (None, 0):
+                    return b"".join(chunks), True      # bytes still owed
+                if outstanding == 0:
+                    return b"".join(chunks), False     # declared length satisfied
+                # ⛔ NO declared length: EOF is AMBIGUOUS at/after the deadline,
+                # because OUR OWN watchdog closes the socket and `read1` reports
+                # that as EOF. Reading it as "the stream ended" reported a body
+                # THIS READER cut as complete — a close-delimited reply then
+                # reached the no-identity arm and a healthy setup read
+                # `❌ … captive portal` (fresh review round 24). Before the
+                # deadline, an EOF with nothing declared is the stream's own end.
+                return b"".join(chunks), time.monotonic() >= deadline
+            # A reader that IGNORES `n` (a test double, a custom transport, a
+            # proxy shim) would otherwise append the same bytes on every pass
+            # until the cap — duplicating the body instead of bounding it.
+            chunk = chunk[: cap - total]
+            chunks.append(chunk)
+            total += len(chunk)
+        # ⛔ The CAP is a truncation trigger too (fresh review round 20): exiting here
+        # means `total == cap`, and if the response still OWES bytes the body is as
+        # cut as a deadline stop — a 2xx fragment then parsed to `identity is None`
+        # and read `❌ … captive portal … Check your TORTOISE_API_URL` on a HEALTHY
+        # setup (and a cut 403 lost its `error_code`). The cap needs no slow network,
+        # so it was the easiest trigger to hit.
+        outstanding = getattr(resp, "length", None)
+        if outstanding is None:
+            inner = getattr(resp, "fp", None)
+            outstanding = getattr(inner, "length", None)
+        if outstanding is not None:
+            # A declared length settles it: `0` means complete, anything else means
+            # the cap cut us short.
+            return b"".join(chunks), outstanding != 0
+        # ⛔ No declared length (chunked / close-delimited) carries NO information at
+        # the cap: it is equally "the stream ended exactly at cap" and "there is
+        # more". One bounded probe byte decides it — reading `None` as "cut" (round
+        # 21) downgraded a healthy body that ended exactly at the cap, and reading it
+        # as "complete" (round 20) put a fragment in front of the no-identity arm
+        # (round 22).
+        if time.monotonic() >= deadline:
+            return b"".join(chunks), True
+        # ⛔ The probe is ONE byte, and a probe that RAISES is not caught: "the
+        # body could not be READ" is a distinct verdict from "it was cut", and the
+        # callers already report read errors as such. Collapsing the two
+        # diagnosed a stall or a premature close as "too big / too slow" (fresh
+        # review round 23).
+        probe = reader(1)
+        # An interrupted probe returns `b""` for the same reason a completed body
+        # does, and nothing is declared on this path, so the CLOCK decides: a
+        # probe that came back at/after the deadline cannot prove completeness.
+        # A "cut" claim is the safe one; "complete" is the one that puts a
+        # fragment in front of the verdict.
+        return b"".join(chunks), bool(probe) or time.monotonic() >= deadline
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
+
+
+
+def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> None:
+    """#11912: report the hosted identity AND whether it works.
+
+    THE GAP THIS CLOSES. `doctor` answered "is the local graph healthy" and
+    nothing else, so a box whose `~/.tortoise/credentials.json` held a revoked
+    key printed `5 pass, 5 warn, 0 fail` and exited 0 — while every hosted
+    command failed with `401 Invalid API key` in the same minute. `config show`
+    (#10655) built the reporter; this is the first-run verb reaching it.
+
+    Two rows at most, and they are DIFFERENT questions:
+
+    * `Credentials` — what this shell would actually send, resolved through the
+      ONE authority (`_resolve_config_path`, the same ladder every command
+      uses: `TORTOISE_API_KEY` → `<cwd>/.tortoise` →
+      `~/.tortoise/credentials.json`). Never the secret: a mask plus a
+      fingerprint, and a fingerprint is WITHHELD for a short key because a
+      48-bit digest over a guessable secret is brute-forceable offline.
+    * `Hosted` — does that identity work: `GET /health` reachable (with the
+      measured latency) and `GET /v1/team` accepted, or the server's exact
+      refusal. This is the row that was missing.
+
+    ⛔ NO NETWORK WHEN THERE IS NO CREDENTIAL. A self-hosted box must make zero
+    requests (asserted by a test), and a store the resolver REFUSED is a local
+    fault naming a local remedy — dialling to "confirm" it would be a probe
+    against a host the store did not supply.
+
+    Side-effect-free by construction, which is the standing rule for this verb
+    (#2204): both reads are unauthenticated-nothing GETs. Neither creates a
+    graph, a point, or a team.
+
+    `--offline` skips the two requests and SAYS SO, so "not tested" can never be
+    read as "tested and fine" — a network-under-test box (a proxy, an air-gapped
+    runner) has a supported way to answer the local question alone.
+    """
+    import http.client
+    import json as _json
+    import os as _os
+    import time
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    raw_env_key = _os.environ.get("TORTOISE_API_KEY")
+    env_key = raw_env_key if (raw_env_key and raw_env_key.strip()) else None
+
+    winner_path: Path | None = None
+    api_key: str | None = None
+    api_url: str | None = None
+    try:
+        winner_path, winner_cfg, api_key, api_url = _resolve_config_path()
+    except _ConfigError as exc:
+        # The resolver REFUSED a store (corrupt, unreadable, non-string key).
+        # Every command fails on this, so it is a FAIL, not a warning — and the
+        # remedy is local, so no request is made.
+        offender = str(exc.args[0]) if exc.args else "(unknown store)"
+        reason = str(exc.__cause__) if exc.__cause__ else "api_key missing or invalid"
+        results.append(("Credentials", "❌",
+                        f"refused at {_printable(offender)} — {_printable(reason)}; "
+                        "no hosted request was made. `tortoise config show` "
+                        "names which store won"))
+        return
+    except (OSError, RuntimeError) as exc:
+        # A bare `OSError` is TWO different findings and they must not be folded
+        # together (#11912 review round 5). `Path.is_file()` sits OUTSIDE the
+        # resolver's own try, so a store behind an inaccessible PARENT DIRECTORY
+        # (`~/.tortoise` left root-owned 0700 by a `sudo tortoise init`, EACCES;
+        # or EIO) escapes as a bare OSError — and that state makes EVERY command
+        # fail, so it is a refusal, not an environment quirk. `_cmd_config`
+        # already attributes this from `exc.filename` (see its `offender` block);
+        # this arm used to call it "resolver could not run" + ⚠️, which let the
+        # report exit 0 on exactly the box #11912 is about.
+        offender = getattr(exc, "filename", None)
+        blamed: str | None = None
+        if offender:
+            try:
+                blamed_store = Path(offender)
+            except (TypeError, ValueError):
+                blamed_store = None
+            if blamed_store is not None:
+                try:
+                    _candidates = (Path.cwd() / ".tortoise",
+                                   Path.home() / ".tortoise" / "credentials.json")
+                except (OSError, RuntimeError):
+                    _candidates = ()
+                if any(_same_path(blamed_store, cand) for cand in _candidates):
+                    blamed = str(blamed_store)
+        if blamed is not None:
+            # A named STORE is the blocker: every command fails on it.
+            results.append(("Credentials", "❌",
+                            f"unreadable at {_printable(blamed)} "
+                            f"({type(exc).__name__}: {_printable(exc)}); no hosted "
+                            "request was made. `tortoise config show` names "
+                            "which store won — a parent directory this process "
+                            "cannot read is the usual cause (e.g. a store left "
+                            "root-owned by `sudo tortoise init`)"))
+            return
+        # No store to blame (a deleted cwd, an unresolvable HOME): the
+        # ENVIRONMENT, which is a warning about what could not be read.
+        results.append(("Credentials", "⚠️",
+                        f"the credential resolver could not run "
+                        f"({type(exc).__name__}: {_printable(exc)}); hosted "
+                        "identity unknown"))
+        return
+
+    source = ("env:TORTOISE_API_KEY" if env_key
+              else (str(winner_path) if winner_path is not None else "none"))
+    # ⛔ WHICH knob actually moves this endpoint (fresh review round 19).
+    # `TORTOISE_API_URL` applies to an ENV-sourced key only: `_resolve_config_path`
+    # takes a file-sourced key's URL from the SAME file or the built-in default
+    # (#2369 D1.1), so naming the env override to a store-credential user sends
+    # them at a knob that cannot change the result — the "remedy names an inert
+    # knob" class this file has already paid for twice.
+    _from_env = source == "env:TORTOISE_API_KEY"
+    #: For a transport failure (nothing answered): the open question is whether
+    #: the endpoint is reachable, and which knob moves it.
+    _transport_remedy = (
+        "check https://api.premiselabs.co/health or your TORTOISE_API_URL, then "
+        "`tortoise config show`"
+        if _from_env else
+        "check the endpoint is reachable, then `tortoise config show` to see the "
+        "`api_url` this store supplies")
+    #: For an answered-but-not-an-identity reply: reachability is PROVEN, so the
+    #: only useful fact is which `api_url` is being answered by something else.
+    _identity_remedy = (
+        "check your TORTOISE_API_URL points at the Tortoise API, then `tortoise "
+        "config show`"
+        if _from_env else
+        "`tortoise config show` to see the `api_url` this store supplies — if it "
+        "is not the Tortoise API, that is where this request went")
+    api_url = api_url if isinstance(api_url, str) else str(api_url or "")
+    # A store/proxy-supplied endpoint ending in `/` would ask for `//health` and
+    # `//v1/team` — the 404-that-reads-as-a-broken-key every other hosted caller
+    # in this file already normalizes away (`tortoise/__main__.py`'s
+    # "a trailing slash would produce ``//v1/team`` → 404"). Normalize HERE once,
+    # so the probe and the reported target agree.
+    api_url = api_url.rstrip("/")
+
+    if not api_key:
+        # The honest answer for a plain self-host install — and the reason this
+        # branch makes NO request (#11912 target: "0 network calls when no
+        # credential is configured").
+        results.append(("Credentials", "ℹ️",
+                        "none configured — self-hosted only; no hosted request "
+                        "was made (hosted: `tortoise signup`)"))
+        return
+
+    masked = _printable(_mask_secret_tail(api_key))
+    fingerprint = _publishable_fingerprint(api_key)
+    detail = f"{_printable(source)} — {masked}"
+    if fingerprint is not None:
+        detail += f" (fingerprint {fingerprint})"
+    # The coordinates this identity carries are OFFLINE information (#11912 lists
+    # them in the block): the endpoint, and the org the store names. The org is
+    # store-supplied, so it is printed through `_printable` — a newline in
+    # `org_name` would otherwise forge a whole results row.
+    if api_url:
+        detail += f", api_url {_printable(_mask_display_target(api_url))}"
+    _org = (winner_cfg or {}).get("org_name") if isinstance(winner_cfg, dict) else None
+    if isinstance(_org, str) and _org.strip():
+        detail += f", org {_printable(_org)}"
+    if not _is_sendable_key(api_key):
+        # `http.client` refuses a CR/LF or non-latin-1 header value by raising a
+        # ValueError that ECHOES THE KEY; refuse here where the message is ours.
+        results.append(("Credentials", "❌",
+                        f"{detail} — cannot be sent in a request header (not "
+                        "latin-1 encodable, or contains CR/LF). Re-mint it: "
+                        "`tortoise signup` or `tortoise recover`"))
+        return
+    results.append(("Credentials", "✅", detail))
+
+    # The credential's PROVENANCE, disclosed on every row that names the target.
+    # ⛔ The probe DOES obey the ladder including `<cwd>/.tortoise`, deliberately:
+    # `tortoise init --api-key` — the documented hosted setup — writes `./.tortoise`
+    # and the quickstart tells the user to run the CLI from that directory, so
+    # skipping it left the most common hosted layout with "not probed" and exit 0
+    # on a REVOKED key, i.e. #11912's own target broken on the documented path
+    # (fresh review round 4). What the note must NOT claim is that this file
+    # authorizes TRANSMISSION: the transmitting verbs deliberately exclude it
+    # (#3660, D1b/D1.2), and saying otherwise would contradict a recorded
+    # decision on the very surface a user consults to ask "who am I" (round 10).
+    _cwd_provenance = False
+    try:
+        _cwd_store: Path | None = Path.cwd() / ".tortoise"
+    except OSError:
+        _cwd_store = None
+    if winner_path is not None and _cwd_store is not None and _same_path(winner_path, _cwd_store):
+        _cwd_provenance = True
+    _provenance_note = (
+        " (the credential is the checkout-local `./.tortoise` — a file this"
+        " directory controls; the transmitting verbs skip it by design, #3660)"
+        if _cwd_provenance else "")
+
+    if offline:
+        # Not probed is NOT "healthy". ⚠️ rather than ℹ️ is deliberate: `_cmd_doctor`
+        # counts ℹ️ in NEITHER the pass nor the warn column, so on an otherwise
+        # configured box the summary would read `N pass, 0 warn, 0 fail` /
+        # `✅ All checks passing!` beside a row saying the credential was never
+        # tested — #11912's target reachable through the new flag, and a reader
+        # who believes the summary line (fresh review round 3). ⚠️ changes no exit
+        # code (only ❌ does) and keeps the report's two halves consistent.
+        results.append(("Hosted", "⚠️",
+                        f"{_printable(_mask_display_target(api_url or ''))} — "
+                        "not probed (`--offline`); hosted reachability and key "
+                        f"validity were NOT tested{_provenance_note}"))
+        return
+
+    # ⛔ An env-only `TORTOISE_API_KEY` is NOT proof of a HOSTED identity, and
+    # probing one sends a LOCAL SECRET off the box (#11912 review round 15).
+    # `TORTOISE_API_KEY` is also the documented shared key for a self-hosted
+    # `serve --http --auth static` (`.env.example:149-150`, `tortoise/auth.py`
+    # `require_auth`, `docs/quickstart-selfhosted.md:65`), and the resolver aims
+    # ANY env key at `TORTOISE_API_URL` or the production default:
+    # `_resolve_config_path` computes
+    # `env_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")`.
+    # So a healthy self-host box that exports the variable — exactly what the
+    # self-host quickstart tells it to do — had its static secret sent to
+    # api.premiselabs.co, 401'd there, and read `❌ Hosted … the stored API key at
+    # this host is not valid` + exit 1: #11912's false PASS mirrored into a false
+    # FAIL, with a `signup`/`recover` remedy wrong for a user who has no hosted
+    # account. `onboard` inherits it through its final `doctor` step.
+    #
+    # THIS IS #1708 §D1b APPLIED TO THE PROBE. §D1b records the hazard for this
+    # shape (`TORTOISE_API_KEY` is commonly exported in dev shells for
+    # `serve --http --auth static`, "so an env-first resolver would silently
+    # flip … a silent backend switch") and mitigates it there with
+    # `include_env=False`. It literally governs `_cmd_context`'s resolver
+    # argument rather than `doctor` — but `doctor` has just become a
+    # TRANSMITTING surface whose flip is triggered by env alone, which is the
+    # shape that decision exists to prevent, so the same gate applies here.
+    #
+    # Deliberately NARROW: it fires only when the identity is env-ONLY, the
+    # endpoint was NOT named, and the key is not hosted-shaped. A FILE store
+    # always probes (the whole point of #11912 — a revoked stored key must never
+    # read green), and so does an explicit `TORTOISE_API_URL` or a `tt_`/`tk_`
+    # key (the prefixes `signup` and `key create` mint).
+    _env_url_explicit = bool((_os.environ.get("TORTOISE_API_URL") or "").strip())
+    if (env_key and winner_path is None and not _env_url_explicit
+            and not api_key.startswith(_HOSTED_KEY_PREFIXES)):
+        # ⚠️, not ℹ️: the `--offline` arm above is ⚠️ for the reason recorded
+        # there, and it applies identically — ℹ️ counts in neither column, so the
+        # summary could read `All checks passing!` beside an untested credential.
+        #
+        # ⛔ The remedy is SPLIT BY FAMILY, because one of the three Bearer
+        # families this tree accepts is hosted-only and would be LIED TO by the
+        # generic text. `oat_` tokens are OAuth 2.1 access tokens, "hosted-only,
+        # introspected … at the MCP boundary" (`tortoise/mcp_auth.py:1251-1258`),
+        # and REST `/v1/*` "stays key/JWT-only — `oat_` tokens are MCP-only"
+        # (`docs/adr/ADR-010-auth-planes-session-agent-key.md:62-64`). So telling
+        # that user to "set TORTOISE_API_URL" would aim a working OAuth token at
+        # a REST endpoint that answers 401 BY DESIGN and then print
+        # `❌ … re-mint it` — a false FAIL for a correct setup, which is the same
+        # defect class as the gate itself (fresh review at `e19d160c27`).
+        if api_key.startswith(_OAUTH_ONLY_KEY_PREFIX):
+            why = ("`TORTOISE_API_KEY` holds an OAuth access token (`oat_`), which "
+                   "the REST endpoint this probe uses does not accept by design "
+                   "— `oat_` tokens are MCP-only (ADR-010), so probing here "
+                   "would read 401 for a working setup")
+            remedy = ("Use the MCP endpoint with this token, or store a `tt_` "
+                      "key with `tortoise signup` if you want the REST verdict")
+        else:
+            why = ("`TORTOISE_API_KEY` is set with no `TORTOISE_API_URL`, and it "
+                   "is not a hosted-shaped key (`tt_`/`tk_`) — that is also the "
+                   "documented self-host `serve --http --auth static` secret, "
+                   "and sending a local auth secret to a hosted endpoint is not "
+                   "this verb's call")
+            remedy = ("If it IS a hosted key, set `TORTOISE_API_URL` (or store "
+                      "it with `tortoise signup`)")
+        results.append(("Hosted", "⚠️",
+                        f"{_printable(_mask_display_target(api_url or ''))} — not "
+                        f"probed: {why}, so no request was made. {remedy}; "
+                        f"`tortoise config show` names which store won"
+                        f"{_provenance_note}"))
+        return
+
+    # ── the reachability read (no credential in the request) ──
+    # `_printable` is not cosmetic here: `api_url` is store-supplied (a
+    # `<cwd>/.tortoise` is attacker-controllable by this module's own reckoning)
+    # and it is interpolated into EVERY row below — a newline in it would forge
+    # whole `doctor` rows, which is the one thing a verdict report must not do.
+    base = _printable(_mask_display_target(api_url or ""))
+    probe_deadline = time.monotonic() + _DOCTOR_TOTAL_BUDGET_S
+
+    def _leg_budget(own: int) -> float | None:
+        """The bound for ONE leg: `min(its own bound, budget left)` — or None.
+
+        None means the budget is spent, and the leg must not be STARTED:
+        starting it is what turns a slow link into an unbounded wait. The 0.25 s
+        floor is the shortest bound worth opening a socket with.
+        """
+        left = probe_deadline - time.monotonic()
+        if left <= 0.25:
+            return None
+        return max(0.25, min(float(own), left))
+
+    def _fmt_bound(value: float) -> str:
+        """Render a bound the way it is REPORTED (5s, 30s, 3.2s) — the used one.
+
+        ⛔ Never the constant: when the budget truncates a leg, printing the
+        configured 30 s would report a wait that never happened (fresh review
+        round 14).
+        """
+        v = float(value)
+        return f"{v:.0f}" if v.is_integer() else f"{v:.1f}"
+
+    def _reason_text(reason: object) -> str:
+        """The scrubbed reason — or its TYPE when the exception stringifies empty.
+
+        `http.client.RemoteDisconnected()` (the peer accepted and closed without
+        a response) has `str() == ""`, so the row rendered a dangling em dash on
+        the first attempt (`cannot reach … — .`) and an empty parenthesis on a
+        retry (`… timed out at 5s ().`): a diagnostic that carries no diagnosis,
+        on a common proxy/restart shape (fresh review round 18).
+        """
+        return (_printable(_scrub(str(reason), api_url, api_key))
+                or type(reason).__name__)
+
+    def _retry_wait_claim(reason: object, silent: str, refused: str,
+                          failed: str) -> str:
+        """What a retry row may CLAIM about the retry (fresh review rounds 16/17).
+
+        A retry is only ENTERED because the first attempt timed out, but the
+        retry's OWN failure was never classified — so an instant `ECONNREFUSED`
+        printed "and none in 30s on retry", asserting a wait that did not happen
+        and sending the reader after a slow network when the endpoint is refusing
+        in microseconds. Same family as round 14's fix, which corrected WHICH
+        number is printed but left the wait claim unconditional.
+
+        ⛔ THREE buckets, not two. "Everything that is not a timeout" is not one
+        event: a DNS failure, an expired certificate, a closed connection and a
+        malformed status line all reach this handler, and calling them all
+        "refused" replaced one unmeasured claim with another (measured: a
+        `gaierror` and an `SSL` cert error both rendered "refused on retry").
+        Only `ConnectionRefusedError` is a refusal; the rest say the retry
+        FAILED, and the scrubbed reason carries what actually happened.
+        """
+        scrubbed = _reason_text(reason)
+        if _is_timeout_reason(reason):
+            return f"{silent} ({scrubbed})"
+        if isinstance(reason, ConnectionRefusedError):
+            return f"{refused} ({scrubbed})"
+        return f"{failed} ({scrubbed})"
+
+    #: `/health`'s verdict notes, populated in place after the reachability read.
+    #: Declared HERE (before the helpers) so `_budget_spent_row` closes over the
+    #: same list object — a `locals()` lookup inside a nested function reads that
+    #: function's OWN locals and would never see it (fresh review round 15).
+    _health_notes: list[str] = []
+
+    def _budget_spent_row(leg: str) -> tuple[str, str, str]:
+        """A budget stop is UNPROVEN, not wrong: ⚠️, never `❌` + exit 1.
+
+        It still has to CARRY a `/health` verdict already established before the
+        stop: dropping it withheld a known "the service is degraded / returned
+        5xx" from the report and told the user only to re-run (fresh review round
+        15). `_combine` is defined later, so the note is applied inline here.
+        """
+        carried = (" — " + "; ".join(_health_notes)) if _health_notes else ""
+        return ("Hosted", "⚠️",
+                f"{base} — the hosted probe ran out of its "
+                f"{_DOCTOR_TOTAL_BUDGET_S} s budget before {leg}; the credential "
+                f"is UNPROVEN rather than wrong{carried}. Re-run, or use "
+                f"`tortoise doctor --offline` to skip the hosted half"
+                f"{_provenance_note}")
+
+    health_code: int | None = None
+    health_status: str | None = None
+    health_read_error: str | None = None
+    latency: float | None = None
+    health_retried = False
+    health_first_bound = 0.0
+    health_retry_bound = 0.0
+
+    def _health_request(timeout: float, deadline: float) -> None:
+        nonlocal health_code, health_status, health_read_error, latency
+        started = time.monotonic()
+        with urlopen(Request(f"{api_url}/health"), timeout=timeout) as resp:
+            health_code = getattr(resp, "status", None) or resp.getcode()
+            # The service's OWN verdict rides the body (`{"status": "degraded",
+            # …}`) — a 200 whose body says degraded is a reachable-but-unhealthy
+            # service, and that is the difference between "the key works" and
+            # "the product works". ⛔ BOUNDED AT THE READ, not after it: a proxy
+            # or captive portal streaming a chunked body would otherwise be
+            # buffered whole into a memory-tight box's RSS (fresh review round 3
+            # — `read()` then `len()` bounds the terminal, not the process).
+            try:
+                raw_health, _cut = _doctor_read_capped(resp, _DOCTOR_BODY_CAP, deadline)
+                if _cut:
+                    # Cause-neutral: a cut is the deadline OR the size cap, and
+                    # naming a bound that never fired (e.g. "at the 0.00s
+                    # deadline" on a cap cut) is a false provenance claim in an
+                    # operator-facing row (fresh review round 21).
+                    health_read_error = (
+                        "the body was CUT before it completed (deadline or size "
+                        f"cap; {_fmt_bound(_DOCTOR_BODY_CAP)} bytes / "
+                        f"{_fmt_bound(deadline - started)}s leg bound)")
+                elif isinstance(raw_health, bytes) and raw_health:
+                    parsed_health = _json.loads(raw_health.decode("utf-8", "replace"))
+                    if isinstance(parsed_health, dict):
+                        candidate_status = parsed_health.get("status")
+                        if isinstance(candidate_status, str) and candidate_status.strip():
+                            health_status = candidate_status
+            except (OSError, ValueError, TypeError, RecursionError,
+                    http.client.HTTPException) as read_exc:
+                # ⛔ "the body could not be READ" is NOT "the body carried no
+                # status": collapsing the two left `_health_notes` empty, so a
+                # service that sent headers and then stalled (a saturated app, a
+                # streaming proxy) printed `✅ … /health 200 in 0.00s` and
+                # `All checks passing!` with its own verdict never read — the
+                # reachable-but-unhealthy-reads-green class the health note was
+                # added to remove (fresh review round 13). Recorded so the row
+                # downgrades to ⚠️ below.
+                health_status = None
+                # ⛔ SCRUB FIRST, TRUNCATE SECOND (fresh review round 15): an
+                # 80-char cut that lands inside a userinfo password makes it a
+                # fragment `_scrub` can no longer match, so a later scrub printed
+                # all but one character of it. Every other site in this file
+                # scrubs the whole text and only bounds the DISPLAY.
+                health_read_error = _printable(
+                    _scrub(f"{type(read_exc).__name__}: {read_exc}",
+                           api_url, api_key)[:200])
+        latency = time.monotonic() - started
+
+    _health_budget = _leg_budget(_DOCTOR_HEALTH_TIMEOUT_S)
+    if _health_budget is None:
+        results.append(_budget_spent_row("the `/health` read"))
+        return
+    health_first_bound = _health_budget
+    try:
+        _health_request(_health_budget, min(probe_deadline,
+                                            time.monotonic() + _health_budget))
+    except HTTPError as exc:
+        # A 4xx/5xx IS an answer — the host is reachable and something is
+        # serving. The code is reported; it does not need the transport branch.
+        health_code = exc.code
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        reason = getattr(exc, "reason", None) or exc
+        if not _is_timeout_reason(reason):
+            # A REFUSAL/RESET is definitive (no retry) but it is NOT a credential
+            # verdict: nothing was asked of the key. ⚠️ for the same reason the
+            # authenticated leg's reset is ⚠️ (round 7) — a Fly machine
+            # replacement answers ECONNREFUSED in under a second, and grading that
+            # `❌` + exit 1 redded `doctor` on a sub-second blip with a remedy
+            # blaming the user's config (fresh review round 12). It can never read
+            # "all checks passing" either: a warning is enough to suppress that
+            # line.
+            #
+            # The reason is `_scrub`ed as well as the target: `http.client`
+            # embeds the URL in its own message, and a URL with userinfo embeds a
+            # PASSWORD (`InvalidURL: nonnumeric port: '<password>@host'`).
+            # `_scrub` expands each supplied value into its user/password
+            # fragments, the one rule #5109 established for this file.
+            results.append(("Hosted", "⚠️",
+                            f"cannot reach {base} — "
+                            f"{_reason_text(reason)}"
+                            ". The credential is UNGRADED (nothing was asked of "
+                            f"it) — {_transport_remedy}"
+                            f"{_provenance_note}"))
+            return
+        # ⛔ A HEALTHY endpoint is allowed to time out here. The hosted app
+        # wakes slowly after idle (>10s measured — the reason `team info`
+        # retries), and 5s is BELOW that, so without this retry every cold
+        # first run (`tortoise onboard` ends by calling `doctor`) reports a
+        # broken endpoint, blames the user's config, and exits 1. The `/health`
+        # leg is retried for the SAME reason as the authenticated one, and the
+        # wider bound that was used is named in the output.
+        _retry_budget = _leg_budget(_DOCTOR_TEAM_RETRY_TIMEOUT_S)
+        if _retry_budget is None:
+            results.append(_budget_spent_row("the `/health` retry"))
+            return
+        try:
+            health_retried = True
+            health_retry_bound = _retry_budget
+            _health_request(_retry_budget, min(probe_deadline,
+                                              time.monotonic() + _retry_budget))
+        except HTTPError as retry_exc:
+            health_code = retry_exc.code
+        except (OSError, http.client.HTTPException, ValueError) as retry_exc:
+            retry_reason = getattr(retry_exc, "reason", None) or retry_exc
+            results.append(("Hosted", "⚠️",
+                            f"cannot reach {base} — "
+                            f"{_retry_wait_claim(retry_reason, silent=(f'no answer in {_fmt_bound(health_first_bound)}s, and none in {_fmt_bound(health_retry_bound)}s on retry'), refused=(f'refused on retry after the first attempt timed out at {_fmt_bound(health_first_bound)}s'), failed=(f'the retry failed after the first attempt timed out at {_fmt_bound(health_first_bound)}s'))}"
+                            ". The credential is UNGRADED (nothing was asked of "
+                            f"it) — {_transport_remedy}"
+                            f"{_provenance_note}"))
+            return
+
+    # ── the `/health` verdict, computed ONCE (#11912 review round 5) ──
+    # It used to be consulted only inside the 2xx-accepted arm, so a graph-scoped
+    # key (a DOCUMENTED, supported key type) dropped `/health`'s own answer
+    # entirely: `200 {"status":"degraded"}` rendered `ℹ️ … /health 200` — counted
+    # in neither column — and `doctor` printed `✅ All checks passing!` during a
+    # real outage, which is the under-block the health note exists to remove.
+    _health_notes.clear()
+    if isinstance(health_status, str) and health_status.strip().lower() not in (
+            "ok", "healthy", "pass"):
+        # `_scrub` as well as `_printable`: the status STRING is server-controlled
+        # and can echo the request URL (a proxy writing `blocked: <url>`), which
+        # for a userinfo `api_url` is a password — in the very row that masks that
+        # URL two fields earlier (#5109; fresh review round 8).
+        _health_notes.append(
+            f"the service reports "
+            f"`{_printable(_scrub(str(health_status), api_url, api_key))}` on /health")
+    if not (isinstance(health_code, int) and 200 <= health_code < 400):
+        _health_notes.append(f"/health returned {health_code}")
+    if health_read_error:
+        # Same rule as the status string: server/transport bytes go through
+        # `_scrub` (a URL-embedded password) and `_printable` (a forged row).
+        _health_notes.append(
+            "`/health`'s body could not be read "
+            f"({_printable(_scrub(health_read_error, api_url, api_key))}) — the "
+            "service's own verdict is UNREAD, not 'healthy'")
+    _health_note = (" — " + "; ".join(_health_notes)) if _health_notes else ""
+
+    def _combine(icon: str, detail: str) -> tuple[str, str, str]:
+        """The `Hosted` row, carrying the health verdict and the provenance note.
+
+        A reachable-but-unhealthy SERVICE is a ⚠️ whatever the credential's own
+        verdict is: the user cannot fix it, and it must never leave `doctor` able
+        to print `All checks passing!` over a `degraded` endpoint.
+        """
+        if _health_notes and icon in ("✅", "ℹ️"):
+            icon = "⚠️"
+        return ("Hosted", icon, f"{detail}{_health_note}{_provenance_note}")
+
+    # ── the authenticated read: the ONLY thing that proves the key ──
+    team_code: int | None = None
+    team_body = ""
+    team_cut = False
+    reach_error: str | None = None
+    team_first_bound = 0.0
+    team_retry_bound = 0.0
+
+    def _team_request(timeout: float, deadline: float) -> None:
+        nonlocal team_code, team_body, team_cut
+        req = Request(f"{api_url}/v1/team",
+                      headers={"Authorization": f"Bearer {api_key}"})
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                team_code = getattr(resp, "status", None) or resp.getcode()
+                # Bounded at the read (see the `/health` note above): a proxy
+                # echoing a large body must not be buffered whole.
+                raw_team, team_cut = _doctor_read_capped(resp, _DOCTOR_BODY_CAP, deadline)
+                team_body = raw_team.decode("utf-8", "replace")
+        except HTTPError as exc:
+            team_code = exc.code
+            try:
+                if exc.fp:
+                    raw_team, team_cut = _doctor_read_capped(exc, _DOCTOR_BODY_CAP,
+                                                       deadline)
+                    team_body = raw_team.decode("utf-8", "replace")
+                else:
+                    team_body = ""
+            except (OSError, http.client.HTTPException):
+                # ⛔ A RAISED read is an UNREAD body, so it is a CUT (fresh review
+                # round 19). `_doctor_read_capped` propagates read errors on
+                # purpose, and on a CHUNKED reply a mid-stream drop raises
+                # `http.client.IncompleteRead` (a fixed-length one returns `b""`
+                # and takes the reader's own cut exit instead). Leaving
+                # `team_cut` False here dropped the cut signal, so the guard below
+                # never fired and a documented `403 GRAPH_SCOPED_TEAM_SURFACE`
+                # whose body a proxy cut mid-chunk fell through to the generic
+                # `❌ … API error 403: (empty body)` + exit 1 — the false red this
+                # flag exists to remove, reached through the raise path. It is
+                # MORE reachable since the reader arms a socket watchdog at the
+                # deadline: the interrupt surfaces as exactly this raise.
+                team_body = ""
+                team_cut = True
+
+    _team_budget = _leg_budget(_DOCTOR_TEAM_TIMEOUT_S)
+    if _team_budget is None:
+        results.append(_budget_spent_row("the `/v1/team` read"))
+        return
+    team_first_bound = _team_budget
+    try:
+        _team_request(_team_budget, min(probe_deadline,
+                                        time.monotonic() + _team_budget))
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        reason = getattr(exc, "reason", None) or exc
+        if not _is_timeout_reason(reason):
+            reach_error = _reason_text(reason)
+        else:
+            # Cold start, not a broken credential: retry once, bounded.
+            _team_retry_budget = _leg_budget(_DOCTOR_TEAM_RETRY_TIMEOUT_S)
+            if _team_retry_budget is None:
+                results.append(_budget_spent_row("the `/v1/team` retry"))
+                return
+            try:
+                team_retry_bound = _team_retry_budget
+                _team_request(_team_retry_budget,
+                              min(probe_deadline,
+                                  time.monotonic() + _team_retry_budget))
+            except (OSError, http.client.HTTPException, ValueError) as retry_exc:
+                retry_reason = getattr(retry_exc, "reason", None) or retry_exc
+                reach_error = _retry_wait_claim(
+                    retry_reason,
+                    silent=(f"no answer in {_fmt_bound(team_first_bound)}s, and none "
+                            f"in {_fmt_bound(team_retry_bound)}s on retry"),
+                    refused=(f"refused on retry after the first attempt timed out "
+                             f"at {_fmt_bound(team_first_bound)}s"),
+                    failed=(f"the retry failed after the first attempt timed out "
+                            f"at {_fmt_bound(team_first_bound)}s"))
+
+    if reach_error is not None:
+        # ⛔ The credential is UNPROVEN, NOT wrong — and that is a ⚠️ (fresh review
+        # round 7). This arm is only reachable once `/health` has ANSWERED (a
+        # transport failure on the reachability leg returns above), so the
+        # endpoint is up and something reset/dropped the authenticated leg: a
+        # restart, a drained machine, a proxy hiccup. The SAME event answered as
+        # `503` is a warning two arms below, so grading the reset as `❌` + exit 1
+        # redded `doctor` (and anything gating on its exit code) on a Fly restart
+        # and blamed the user's own config — contradicting
+        # `docs/quickstart-cloud.md`, which promises a blip leaves the key
+        # unproven rather than wrong.
+        results.append(_combine("⚠️",
+                        f"{base} — the authenticated check could not complete: "
+                        f"{reach_error}. `/health` answered, so a wrong key is "
+                        "unlikely — but the key is UNPROVEN, not verified: only "
+                        "an authenticated read can prove it. Re-run; if it "
+                        "persists, look for a proxy that rewrites `Authorization`. "
+                        "`tortoise config show` reports what this machine knows"))
+        return
+
+    health_part = (f"/health {health_code}"
+                   + (f" in {latency:.2f}s" if latency is not None else ""))
+    if health_retried:
+        # Say so: a first attempt that timed out and a second that answered is a
+        # sleeping service, and the reader should not mistake it for fast.
+        health_part += f" (first attempt timed out at {_fmt_bound(health_first_bound)}s)"
+    body = _scrub(team_body, api_url, api_key)
+    parsed: object = None
+    try:
+        parsed = _json.loads(body) if body else None
+    except (ValueError, TypeError, RecursionError):
+        parsed = None
+
+    if team_cut and team_code != 401:
+        # ⛔ A CUT body cannot carry a verdict — and that applies to a 4xx too
+        # (fresh review round 18). A 403 whose body was cut loses its
+        # `error_code`, so the arms below fall through to the generic `❌ … API
+        # error 403: <fragment>`: a documented graph-scoped key (or a suspended
+        # org's appeal path) reads RED with a fragment of its own body as
+        # evidence. 401 is exempt because that arm reads no body at all.
+        results.append(_combine("⚠️",
+                        f"{health_part}; /v1/team answered {team_code} but its "
+                        f"body was CUT before it completed "
+                        f"({_printable(body[:160]) if body else 'no bytes'}) — the "
+                        "credential is UNPROVEN rather than wrong, and the "
+                        "refusal's reason is unread. Re-run, or use `--offline`"))
+        return
+
+    if team_code == 401:
+        # ⛔ AN `oat_` TOKEN IS NOT A BROKEN KEY (fresh review at `0604e2f015`).
+        # The env-only gate refuses to PROBE one, but two other routes reach this
+        # arm with an OAuth token — an explicit `TORTOISE_API_URL`, and a STORE
+        # file holding one — and both graded `❌ … Re-mint it: tortoise signup
+        # (new team)` + exit 1 for a WORKING setup. REST `/v1/*` accepts keys and
+        # JWTs only: `oat_` access tokens are MCP-only
+        # (`docs/adr/ADR-010-auth-planes-session-agent-key.md:62-64`), and the
+        # server enforces it (`tortoise/hosted_api.py` rejects any Bearer that is
+        # not `API_KEY_PREFIXES`, so `/v1/team` never resolves one). The 401 is
+        # therefore the EXPECTED answer, not a verdict on the credential — and
+        # "refused the STORED key" is false for an env-supplied one either way.
+        if api_key.startswith(_OAUTH_ONLY_KEY_PREFIX):
+            results.append(_combine("⚠️",
+                            f"{health_part}; /v1/team 401 — this is an `oat_` "
+                            "OAuth access token, which REST `/v1/*` does not "
+                            "accept by design (ADR-010: `oat_` tokens are "
+                            "MCP-only), so the 401 is expected and the token is "
+                            "NOT proven broken. Use it against the MCP endpoint, "
+                            "or store a `tt_` key with `tortoise signup` if you "
+                            "want the REST verdict"))
+            return
+        # ⛔ "the STORED key" is false for an env-supplied one, and this file
+        # already says so 10 lines up (the `oat_` arm) — printing it anyway told
+        # an env user a store refused them and that `config show` "names which
+        # store won" when nothing is stored (fresh review at `7f206d2266`,
+        # measured: `❌ … https://api.example.test refused the stored key` on a box
+        # with `TORTOISE_API_KEY` set and no store at all). Same split as the two
+        # remedy strings above (`_transport_remedy`/`_identity_remedy`).
+        results.append(_combine("❌",
+                        f"{health_part}; /v1/team 401 Invalid API key — "
+                        f"{base} refused the "
+                        + ("key in TORTOISE_API_KEY" if _from_env
+                           else "stored key")
+                        + ". Re-mint it: `tortoise signup` (new team) or "
+                        "`tortoise recover` (same team, needs your st_ recovery "
+                        "token); "
+                        + ("`tortoise config show` shows what this shell sends"
+                           if _from_env else
+                           "`tortoise config show` names which store won")))
+        return
+
+    error_code = None
+    if isinstance(parsed, dict):
+        detail_obj = parsed.get("detail")
+        if isinstance(detail_obj, dict):
+            candidate = detail_obj.get("error_code")
+            if isinstance(candidate, str):
+                error_code = candidate
+
+    # SUSPENDED outranks the graph-scope remedy — `_explain_org_info_failure`'s own
+    # order, and the reason it exists: both can ride the same 403, and a suspension
+    # carries the one actionable fact (an appeal path) that the generic arm's
+    # truncated body would cut in half (#308).
+    if team_code == 403:
+        suspended = _suspended_info(body)
+        if suspended is not None:
+            message, appeal_url = suspended
+            suffix = f" Appeal: {appeal_url}" if appeal_url else ""
+            body_message = (message[:-len(suffix)]
+                            if (suffix and message.endswith(suffix)) else message)
+            results.append(_combine("❌",
+                            f"{health_part}; /v1/team 403 — the organization is "
+                            f"suspended: {_printable(body_message)}"
+                            + (f". Appeal: {_printable(appeal_url)}" if appeal_url else "")))
+            return
+
+    if team_code == 403 and error_code in _ORG_INFO_REMEDIES:
+        # A DELIBERATE refusal, not a fault: the server authenticated the key and
+        # then declined team-level scope. `❌` here would tell a correctly-scoped
+        # user to re-mint a working key.
+        results.append(_combine("ℹ️",
+                        f"{health_part}; /v1/team 403 {error_code} — "
+                        f"{_ORG_INFO_REMEDIES[error_code]}"))
+        return
+
+    if isinstance(team_code, int) and 200 <= team_code < 300:
+        # ⛔ A 2xx is NOT proof on its own. `TORTOISE_API_URL` can be aimed at a
+        # proxy that answers everything with 200 (a captive portal, a soft-200
+        # login page, the wrong service), and an empty or HTML body read as
+        # "accepted" certifies a setup on which every hosted command fails — the
+        # exact false green #11912 exists to remove. Acceptance = we READ an
+        # identity off the reply.
+        identity = None
+        for field in ("org_id", "org_name", "tier"):
+            value = parsed.get(field) if isinstance(parsed, dict) else None
+            if isinstance(value, str) and value.strip():
+                identity = field
+                break
+        if identity is None:
+            results.append(_combine("❌",
+                            f"{health_part}; /v1/team answered "
+                            f"{team_code} but with no team identity in the body "
+                            f"({_printable(body[:160]) if body else '(empty body)'}) "
+                            "— a proxy or captive portal answering for the "
+                            "endpoint also returns 200, so the key is NOT proven. "
+                            # ⛔ The SAME inert-knob split as the transport rows
+                            # (fresh review round 19): for a STORE-sourced key
+                            # `TORTOISE_API_URL` cannot move the endpoint, so this
+                            # row sent the user at a knob that does nothing.
+                            f"{_identity_remedy}"))
+            return
+        org = None
+        if isinstance(parsed, dict):
+            for field in ("org_name", "org_id"):
+                value = parsed.get(field)
+                if isinstance(value, str) and value.strip():
+                    org = value
+                    break
+        tier = parsed.get("tier") if isinstance(parsed, dict) else None
+        extra = ""
+        if isinstance(tier, str) and tier.strip():
+            extra += f", tier {_printable(tier)}"
+        if isinstance(org, str) and org.strip():
+            extra += f", org {_printable(org)}"
+        results.append(_combine("✅",
+                        f"{base} — {health_part}; /v1/team accepted{extra}"))
+        return
+
+    # A service-side refusal is NOT a credential verdict. `/v1/team` runs a
+    # usage count, which answers `503 graph_unavailable` on a saturated graph
+    # pool and `429` when the rate limit bites — the same transients `_cmd_init`
+    # retries instead of failing. A `❌` here (with a remedy pointing at the
+    # user's own config) reds `doctor` — and any CI/agent gating on its exit
+    # code — during a deploy or capacity blip, for a healthy key (fresh review
+    # round 4).
+    if isinstance(team_code, int) and (team_code in (408, 429) or 500 <= team_code < 600):
+        results.append(_combine("⚠️",
+                        f"{health_part}; /v1/team answered {team_code} — the "
+                        "SERVICE refused this request, so the key stays UNPROVEN "
+                        "rather than wrong (capacity, rate limit or a restart). "
+                        f"Re-run shortly; `tortoise team info` reports the same "
+                        f"state. {_printable(body[:400]) if body else ''}"))
+        return
+
+    code_display = team_code if team_code is not None else "no status"
+    results.append(_combine("❌",
+                    f"{health_part}; /v1/team → API error {code_display}: "
+                    f"{_printable(body[:2000]) if body else '(empty body)'}. "
+                    "`tortoise config show` reports what this machine knows"))
+
+
 def _cmd_doctor(args):
     """Health check — verify Tortoise setup is healthy."""
     import importlib
@@ -13478,6 +14564,31 @@ def _cmd_doctor(args):
     except Exception as e:
         results.append(("Capture spool", "⚠️",
                         f"check unavailable: {str(e)[:60]}"))
+
+    # 8. Hosted identity (#11912). The one surface this verb could not see: a
+    # box whose stored key was revoked read `0 fail` while every hosted command
+    # 401'd. `--offline` is read via getattr because `_cmd_doctor` must tolerate a
+    # bare `Namespace(cmd="doctor")` from any caller (#703) — the same reason
+    # every other attribute above is read that way. `_cmd_onboard` now passes it
+    # explicitly (both of its branches), so this is a tolerance, not the
+    # onboard path.
+    try:
+        _doctor_hosted_rows(results, offline=bool(getattr(args, "offline", False)))
+    except MemoryError:
+        raise
+    except Exception as e:
+        # ⛔ NOT a warning (#11912 review round 6). `_cmd_doctor` counts only ❌
+        # toward the exit code, so a crash in this block would leave `N pass,
+        # 0 fail` + exit 0 on a box whose credential is broken — the exact state
+        # the issue exists to remove, reachable through any bug in it. A hosted
+        # verdict that could not be produced is not a passing hosted verdict.
+        # Every EXPECTED failure inside the block is already handled with its own
+        # row; reaching here means the block itself failed.
+        results.append(("Hosted", "❌",
+                        f"the hosted check could not run "
+                        f"({type(e).__name__}: {_printable(str(e)[:80])}) — the "
+                        "hosted half of "
+                        "this setup is UNGRADED; `tortoise config show` for detail"))
 
     # Print results
     for check, icon, detail in results:
@@ -14981,6 +16092,15 @@ def main(argv: list[str] | None = None) -> int:
     setup.add_argument("--output", default=None, help="Save config to file instead of stdout")
     doctor = sp.add_parser("doctor", help="Health check — verify Tortoise setup")
     doctor.add_argument("--path", default=None, help="Path for embedded mode")
+    # #11912: the hosted block dials only when a credential EXISTS, and this flag
+    # is the supported way to answer the local question alone (a proxy or an
+    # air-gapped runner). `not probed` is reported, never rendered as healthy.
+    doctor.add_argument(
+        "--offline", action="store_true", default=False,
+        help="Do not probe the HOSTED endpoint (no request to it): report the "
+             "resolved credential and the local checks. The graph-health probe "
+             "still dials the configured DB target",
+    )
     doctor.add_argument(
         "--db", default=None,
         help="Docker URI (docker://, redis://, rediss://) or embedded DB file "
@@ -14988,6 +16108,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     onboard = sp.add_parser("onboard", help="Guided onboarding: init → index → demo → doctor")
     onboard.add_argument("--path", default=None, help="Path for embedded mode")
+    # #11912: step 5 is `doctor`, which probes the hosted identity when one is
+    # configured. The wizard must offer the same escape hatch as the verb it
+    # calls, or an air-gapped/proxied box has no way to finish onboarding
+    # without paying that probe's whole timeout budget.
+    onboard.add_argument(
+        "--offline", action="store_true", default=False,
+        help="Do not probe the HOSTED endpoint in the final health check (no "
+             "request to it); the graph-health probe still dials the configured "
+             "DB target. Same as `tortoise doctor --offline`",
+    )
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")

@@ -295,7 +295,7 @@ def test_doctor_probe_client_carries_the_bounded_read(monkeypatch, capsys):
 
     _cmd_doctor(argparse.Namespace(
         cmd="doctor", db="docker://:pw@probe.example.com:6379/tortoise",
-        path=None))
+        path=None, offline=True))
     capsys.readouterr()
 
     assert captured, "the doctor graph probe must construct a client"
