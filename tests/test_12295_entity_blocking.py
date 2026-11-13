@@ -271,13 +271,14 @@ def test_reduction_ratio_is_reported_beside_completeness():
 # ── the LIVE consumer: `entity_resolver.entity_candidates` ────────────────
 # ⛔ These exist because the module's own tests are not coverage of the scan: a
 # wider block set is MONOTONE, so every pre-existing `entity_candidates` test
-# stayed green when the hunk landed. The three tests below each red without the
+# stayed green when the hunk landed. The four tests below each red without the
 # hunk they name — verified by reverting it, not asserted:
 #   * the transposition  → 0 rows / 0 `similarity` calls under the single key
+#   * the pair dedupe    → the shared pair reported once per block, not once
 #   * the stored fold    → 0 rows when the index re-folds `name`
 #   * the size cap       → 0 rows when a `<= MAX_BLOCK_SIZE` filter is restored
 # `test_the_scan_still_reports_the_pair_a_prefix_shared_name_makes_exact` is the
-# baseline those three are read against: it pins the rung itself (which the
+# baseline those four are read against: it pins the rung itself (which the
 # wider block set must NOT change), and it shares `P:pla` under BOTH old and new
 # keys — so it is deliberately NOT a regression witness for the union.
 
@@ -413,9 +414,11 @@ def test_the_scan_reports_its_largest_block_and_caps_NOTHING(monkeypatch):
     here folds to one key, so the block IS the population.
 
     The row count is the witness: a capped scan drops the whole block and
-    reports 0 rows, while an uncapped one reports one row per duplicate. The
-    exact number is not asserted — it depends on the survivor/tie rules — only
-    that it is the same as the uncapped index's own view and strictly positive.
+    reports 0 rows, while an uncapped one reports one row per duplicate — so
+    this asserts EXACTLY `n - 1` rows, i.e. `MAX_BLOCK_SIZE` duplicates read
+    against the single survivor. The count comes from the FIXTURE, not from the
+    survivor/tie rules: every name here folds to one key and the block IS the
+    population, so an uncapped scan cannot report any fewer than `n - 1`.
     """
     from tortoise.entity_blocking import MAX_BLOCK_SIZE, BlockIndex
 

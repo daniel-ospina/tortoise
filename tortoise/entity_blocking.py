@@ -206,7 +206,17 @@ def minhash_signature(key: str) -> tuple[int, ...]:
 
 
 def lsh_bands(signature: tuple[int, ...]) -> tuple[tuple[int, int, ...], ...]:
-    """LSH bands ``(band_index, values…)``; a partial trailing band is dropped."""
+    """LSH bands ``(band_offset, values…)``; a partial trailing band is dropped.
+
+    The first element is the band's byte OFFSET into the signature
+    (``0, 4, 8, …``), **not** a ``0..n-1`` band index: it is ``start`` from the
+    ``range`` below. Zep's ``_lsh_bands`` returns **bare** bands and its caller
+    (``_build_candidate_indexes``) supplies the ``enumerate`` index, so the two
+    tables are not interchangeable across libraries — the offset here is
+    ``band_index * MINHASH_BAND_SIZE``. No behaviour depends on which is used
+    (the tuple is only stringified into a bucket key and both sides scale
+    identically), so the name is stated rather than the value changed.
+    """
     out = []
     for start in range(0, len(signature), MINHASH_BAND_SIZE):
         band = signature[start:start + MINHASH_BAND_SIZE]
@@ -395,7 +405,11 @@ class BlockIndex:
         return {
             "members": len(self._members),
             "blocks": len(self._blocks),
-            "keys": self._keys,
+            #: `_keys` counts (member, block) PAIRS, not distinct keys — one member
+            #: usually lands in several blocks, so this exceeds `blocks` and a
+            #: key count it cannot be. Named for what it is; renaming this field
+            #: is why the artifact's `index_stats` uses the same name.
+            "key_memberships": self._keys,
             "max_block_size": max(sizes) if sizes else 0,
             "oversized_skipped": dict(sorted(self._oversized.items())),
             #: The QUERY path's cap. Published under a name that says so: the scan

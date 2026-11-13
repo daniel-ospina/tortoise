@@ -613,6 +613,25 @@ had asked whether the credential could push at all.
   "push":true,…}` while every push it makes is refused. On a fine-grained PAT, `Issues: write`,
   `Pull requests: write` and `Contents: write` are **separately granted** — `issues=write` can
   be present while the PR surface 403s on the same token in the same minute (#10930).
+- **`X-Oauth-Scopes` is EMPTY/ABSENT for a fine-grained PAT**, so its absence is not evidence
+  either: the header that names scopes does not exist on this credential kind.
+
+⛔ **THE 201-vs-403 TRAP — a measurement that invites a CAUSE it cannot support.** MEASURED
+(#10930): the SAME token, in the SAME minute, returns `201` on
+`POST /repos/{o}/{r}/issues/{n}/comments` for an ISSUE number and `403 Resource not accessible by
+personal access token` for a PR number (a PR comment is created through the issues endpoint, where
+`{n}` is the PR) — and **both** responses carry the identical
+`X-Accepted-Github-Permissions: issues=write; pull_requests=write`, so that header does **NOT**
+explain the difference. ⛔ **The CAUSE is NOT isolated and NO causal explanation may be recorded from
+that measurement alone** — not "needs `Pull requests: write`", not "needs PR read": GitHub's
+endpoint page says the fine-grained token "must have at least one of the following permission sets:
+'Issues' repository permissions (write), 'Pull requests' repository permissions (write)" — only
+WRITE sets, and no read one — so a token holding `Issues: write` is **documented as sufficient** for
+a PR comment. What IS documented and load-bearing is the endpoint mapping: `git push`,
+`POST /git/refs` and LANDING (`PUT /pulls/{n}/merge`) all sit under **Contents** on GitHub's
+permissions-required page, so they are all `Contents: write` — a token with `Issues` +
+`Pull requests` write and `Contents: read` passes a two-surface probe and then cannot publish its
+own branch or land.
 
 ⛔ **THE CLAIM IS NO WIDER THAN THE MEASUREMENT — this proves `Contents: write` and nothing else.**
 It does **not** probe `Issues: write` or `Pull requests: write`, so `exit 0` does **not** promise a PR
