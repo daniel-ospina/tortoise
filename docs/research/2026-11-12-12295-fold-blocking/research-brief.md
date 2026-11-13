@@ -78,14 +78,14 @@ run, on one corpus**, with the pre-`#12295` matcher frozen inside the harness ra
 from the old artifact: a before/after against a moving before is not a measurement. ⚠️ **The same
 limit applies one field down, inside ARM 2:** this run's `attached_folded` = **386** is not
 comparable with `#11901`'s `attached_folded` = **114** either — and the movement is **both** terms,
-not either one alone: **386 = 114 + 186 CODE + 86 CORPUS**. The **186** is the classes the arm could
+not either one alone: **386 = 114 + 186 CODE + 86 INPUT**. The **186** is the classes the arm could
 not bind AT ALL before the shipped rung existed (`article-drop` 0 → 175, `hash-dropped` 0 → 11 —
 both `attached_folded` 0 in `#11901`); the **86** is the separator classes that were already **100 %
 of in-window in BOTH runs** (`space-to-hyphen` 101/101 → 179/179, `hyphen-to-space` 13/13 → 21/21),
 so their growth is on the INPUT side — the two runs differ in both corpus size and retrieval
 configuration (`legs_seen.structural` is `false` there, `true` here), so the mechanism stays
-undiagnosed, exactly as §6.2 says. ⛔ **The split is not optional bookkeeping, and
-the reason is structural:** the arm gates on `cand2.get("id") == row["id"]` and `cand2` is chosen only
+undiagnosed, exactly as §6 item 2 says. ⛔ **The split is not optional bookkeeping, and
+the reason is arithmetic:** the arm gates on `cand2.get("id") == row["id"]` and `cand2` is chosen only
 from `rows`, which IS the window — so `attached_folded <= in_window` always. `#11901`'s own
 `in_window` at `k=3` is **260**, so a code-only re-run of THAT corpus could reach at most 260 and
 never 386; a "code move" reading of the total is arithmetically impossible, not merely imprecise.
