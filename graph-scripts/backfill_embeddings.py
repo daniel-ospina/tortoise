@@ -541,17 +541,22 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     semantically EQUAL to the Python guard — see residual (b).
     Residual, recorded rather than silently over-reported, in TWO parts:
     (a) a surface with only a bare property still uses ``IS NOT NULL``, so a
-    *non-empty-check* miss is limited to a whitespace-only value on those
-    surfaces; (b) even a ``text_pred`` surface is not perfectly aligned with
+    *non-empty-check* miss is limited to an EMPTY or whitespace-only value on
+    those surfaces; (b) even a ``text_pred`` surface is not perfectly aligned with
     the live guard, because Cypher ``trim()`` strips SPACES only while the live
     pass's Python ``str.strip()`` also strips tab, NBSP and em-space — measured
     on this surface: four Points whose ``content`` was ``"\\t"``, ``"\\u00a0"``,
     ``"\\u2003"``, ``"\\t \\t"`` gave ``dry_total=4`` against ``updated=0,
     skipped=4``. Pre-existing as a CLASS (the pre-fix bare ``IS NOT NULL``
-    counted the same four), but #12489 WIDENS the population: a whitespace-only
-    ``embeddingText`` over a non-empty ``content`` now takes this skip path,
-    where the pre-fix expression embedded ``content`` (measured: dry 1 /
-    updated 0 with the fix, dry 1 / updated 1 without it).
+    counted the same four), but #12489 WIDENS the population: a ``embeddingText``
+    whose whitespace `trim()` does not strip (tab / NBSP / em-space) over a
+    non-empty ``content`` now takes this skip path, where the pre-fix expression
+    embedded ``content`` (measured: dry 1 / updated 0 with the fix, dry 1 /
+    updated 1 without it). A SPACE-only ``embeddingText`` is excluded by BOTH
+    passes instead (`trim()` does strip a space, so the predicate is false and
+    the dry run never counts it) — a silent miss the dry run does not report at
+    all; the CASE is still faithful there (Python ``or`` also treats ``" "`` as
+    text), the divergence is this same pre-existing live-guard class.
     """
     g = db.select_graph(graph_name)
     total = 0
