@@ -8275,22 +8275,22 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #     is not a file in this repo (agent-infra's is `tools/fleet/claim_lanes.py`), so it
 #     could not have been the one measured. `tools/dod_5090_probe.py`
 #     itself does — it is a `CORE_ALSO` entry in `tools/ci_selection.py` (the
-#     instrument has to be selected by its own subject; 830 test files, this one
+#     instrument has to be selected by its own subject; 832 test files, this one
 #     PRESENT) — which is the file `#11996`'s duplicate lived in, and why a
 #     duplicate born there at a merge IS caught. It is pinned by
 #     `test_the_instrument_is_selected_by_its_own_subjects` in this module.
-#   * `tortoise/` — 31 of 285 do NOT reach it (`tortoise/ranking.py` → `ep`,
+#   * `tortoise/` — 31 of 287 do NOT reach it (`tortoise/ranking.py` → `ep`,
 #     `tortoise/hosted_api.py` → `api`+`onboarding`, `tortoise/reader.py` → `sdk`, …).
 #     The mechanism is the one this module already documents: a named-surface match
 #     REPLACES the `core` fallback that would otherwise sweep this file in.
-#   * `tests/` — 1,490 of 1,491 reach it; the exception is `tests/_html_links.py`
+#   * `tests/` — 1,492 of 1,493 reach it; the exception is `tests/_html_links.py`
 #     (`onboarding`).
 #
 # So the honest bound is per root and NOT a rule you can generalise: any full-lane run
 # (push and schedule select in FULL, which is what makes the born-at-merge case
 # catchable), plus a per-file `pull_request` selection that covers every `tests/`
 # module but one, 140 of 195 `tools/` modules (`tools/dod_5090_probe.py` — the file
-# `#11996`'s duplicate lived in — among them), and 254 of 285 `tortoise/` modules.
+# `#11996`'s duplicate lived in — among them), and 256 of 287 `tortoise/` modules.
 # Anything outside that is lint's alone.
 
 #: Roots the declaration dicts live under today. ⛔ NOT the whole repo: `battery/`,
@@ -8335,15 +8335,15 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #: probe, and naming files here would re-open the hole the moment a declaration moves
 #: into one not named.
 #:
-#: ⛔ IT IS NOT FREE, measured on this tree: 1,971 modules (`tortoise/` 285,
-#: `tools/` 195, `tests/` 1,491), **19.1 s** of `ast.parse`+walk, inside a file whose
+#: ⛔ IT IS NOT FREE, measured on this tree: 1,975 modules (`tortoise/` 287,
+#: `tools/` 195, `tests/` 1,493), **19.1 s** of `ast.parse`+walk, inside a file whose
 #: own run is ~2 min. Recorded so the next reader does not assume it is cheap — and so
 #: a future budget discussion has a figure. There is no sound cheap pre-filter:
 #: narrowing the roots narrows the guard, which is the hole the scan exists to close.
 _DUP_KEY_ROOTS = ("tortoise", "tools", "tests")
 
 #: Per-root FLOOR for the scan's own non-vacuity check, deliberately per root and not
-#: as an aggregate: measured 285 / 195 / 1,491 on the tree above, so an aggregate floor
+#: as an aggregate: measured 287 / 195 / 1,493 on the tree above, so an aggregate floor
 #: (>1,000) still passes if the `tortoise/` AND `tools/` walks silently yield nothing —
 #: and `tools/` is exactly where this class's original instance lived. Set well under
 #: what each root holds so ordinary churn does not red it, but non-zero, so a renamed or

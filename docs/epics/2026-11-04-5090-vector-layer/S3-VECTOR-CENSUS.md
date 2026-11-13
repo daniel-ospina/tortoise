@@ -348,10 +348,12 @@ caught `#11996`'s pair, post-merge), and three by `#12265`'s generalisation of t
 `tools/` and `tests/`, and the RED arm driven over a planted tree (a duplicate must be NAMED with
 its file and both line numbers, an unparseable module must be named rather than skipped green, and
 a clean module must contribute nothing) — and the scan's reach is deliberately not "repo-wide" and
-asserts no file count (`battery/`, `graph-scripts/`, `docs/`, `eval/` and several smaller roots sit
-outside the three it walks, and a file count there has already gone stale once), so the three make a
-silently-shadowed declaration key a PYTEST red on any tree that holds both rows AND whose diff
-selects this file, including the MERGE tree, where the duplicate is actually born and where
+asserts no repo-wide file count: it pins only a per-root floor (`_MIN_MODULES`: 100 / 50 / 500) so a
+renamed or vanished root fails instead of narrowing silently (`battery/`, `graph-scripts/`, `docs/`,
+`eval/` and several smaller roots sit outside the three it walks, and a file count there has already
+gone stale once), so the three make a silently-shadowed declaration key a PYTEST red on any tree that
+holds both rows AND whose diff selects this file, including the MERGE tree, where the duplicate is
+actually born and where
 `main-lint.yml`'s ruff gate (`#2174`) only reds it after the fact; the scan also found the live
 `# noqa: F601` duplicate in `tests/test_commit_schema.py`, which the census-scoped pin cannot see —
 and which lint itself does NOT catch, because the suppression is on the repeated line)
