@@ -196,12 +196,13 @@ jobs:
       # Best-effort: a job killed before the upload has no artifact, and that is a fact the
       # body states rather than a reason to fail the report.
       - name: Fetch the canary transcript
-        # `!cancelled()`, like every other step here: the gate is stated, not inherited from
-        # the implicit `success()` that would skip the fetch whenever an earlier report step
-        # failed. A missing transcript is already harmless (`continue-on-error: true`), so
-        # this is about an explicit contract rather than a newly reachable state (#12363
-        # round 12). Pinned by
-        # `test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code`.
+        # `!cancelled()`, like the three gate steps below: the gate is stated, not inherited
+        # from the implicit `success()` that would skip the fetch whenever an earlier report
+        # step failed. (The two SETUP steps above carry no `if:` on purpose — a checkout or a
+        # tool-provisioning step running on a cancelled job would be worse, not better.) A
+        # missing transcript is already harmless (`continue-on-error: true`), so this is about
+        # an explicit contract rather than a newly reachable state (#12363 round 12). Pinned
+        # by `test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code`.
         if: ${{ !cancelled() }}
         continue-on-error: true
         uses: actions/download-artifact@v4

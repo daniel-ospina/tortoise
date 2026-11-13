@@ -826,10 +826,13 @@ def test_the_gate_steps_cannot_be_DEFUSED_into_a_green_job():
       * `continue-on-error: true` (or `if: false`) on the canary job's `id: canary` step:
         the job reads SUCCESS with `steps.canary.outputs.exit_code` `1`, so the alarm and
         `File or refresh the alert issue` (both `needs.canary.result != 'success'`) are
-        SKIPPED while the close gate (`result == 'success'` disjunct) RUNS — `af_resolve`
-        called with "Green: the published artifact now passes its documented first
-        command." A daily green run that files nothing and falsifies its own release-owed
-        issue, indefinitely.
+        SKIPPED — and, since #12363 round 12 removed the close gate's `result == 'success'`
+        disjunct, `Close the alert issue on a green run` (`exit_code == '0'`) is skipped too
+        (measured at `3b32ddb458`; before that commit the close DID run, `af_resolve` called
+        with "Green: the published artifact now passes its documented first command",
+        falsifying the release-owed issue). Either way the run is green and the ledger is
+        wrong: a daily silent run that files nothing, or one that closes on a broken
+        artifact. A gate step that cannot fail its job is not a gate.
 
     ⛔ Asserting the mechanism (`exit "$rc"` present) is NOT this pin: that assertion stays
     true under `continue-on-error`, which is why the property is asserted separately. This is
@@ -851,16 +854,14 @@ def test_the_gate_steps_cannot_be_DEFUSED_into_a_green_job():
         "steps"
     ]
     preupload = [
-        step
-        for step in build_steps
-        if "published_artifact_canary.py" in str(step.get("run") or "")
+        step for step in build_steps if "published_artifact_canary.py" in str(step.get("run") or "")
     ]
     assert len(preupload) == 1, "the pre-upload gate step is missing"
     undefused(preupload[0], "publish-pypi build / the pre-upload gate")
 
-    canary_steps = yaml.safe_load((workflows / "release-artifact-canary.yml").read_text())[
-        "jobs"
-    ]["canary"]["steps"]
+    canary_steps = yaml.safe_load((workflows / "release-artifact-canary.yml").read_text())["jobs"][
+        "canary"
+    ]["steps"]
     canary_step = [step for step in canary_steps if step.get("id") == "canary"]
     assert len(canary_step) == 1, "the `id: canary` step is missing"
     undefused(canary_step[0], "release-artifact-canary / the `id: canary` step")
@@ -1488,22 +1489,31 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
         "the alarm needs its own branch for a run that REACHED a verdict (exit 0) and then "
         "hit a runner fault, or that state stays unexplained"
     )
-    # ⛔ ANCHORED, never `'= "0"'` (round 12 re-review): that form is a SUBSTRING of
-    # `'!= "0"'`, so the runner-fault predicate could be INVERTED (`= "0"` -> `!= "0"`)
-    # with both assertions still green — and then exit 2 and exit 1 both enter the
-    # runner-fault branch, so the summary explains a REAL release finding as "a runner
-    # fault … nothing is owed". Measured: that mutation left the suite green.
-    assert '[ "${EXIT_CODE:-}" = "0" ]' in alarm_text, (
-        'the runner-fault branch must test exit code 0 positively — `= "0"` matches '
-        '`!= "0"` as a substring, which inverts the branch (#12363 round 12)'
+    # ⛔ The BODY must be bound to its own PREDICATE — order-and-spelling-tolerant, because a
+    # literal pin cannot express it (#12363 round 12, cycle-2 findings, each measured green
+    # before this):
+    #   * `'= "0"'` is a SUBSTRING of `'!= "0"'`, so a spelling pin passed with the
+    #     runner-fault predicate INVERTED — exit 1 and exit 2 then both entered the runner-
+    #     fault branch and a REAL release finding was explained as "nothing is owed";
+    #   * swapping the two branch BODIES (predicates and order untouched) kept every literal
+    #     assertion true while the exit-0 branch printed "detector outage — do NOT cut a
+    #     release".
+    # So the headings must sit WHERE they belong: each inside its own branch.
+    runner_at = alarm_text.index("RUNNER fault")
+    outage_at = alarm_text.index("DETECTOR outage")
+    release_at = alarm_text.index("RELEASE finding")
+    zero_at = alarm_text.index('= "0" ]')
+    not_one_at = alarm_text.index('!= "1" ]')
+    assert '!= "0"' not in alarm_text, (
+        'the runner-fault predicate must be a POSITIVE `= "0"` — `!= "0"` inverts it, and '
+        "then every non-zero exit (a real release finding included) is explained as a runner "
+        "fault that owes nothing"
     )
-    # ⛔ ORDER, not presence (round 12): swapping the `= "0"` and `!= "1"` branches left the
-    # suite green, and the summary then explained an exit-0 runner fault as a DETECTOR outage.
-    assert alarm_text.index('[ "${EXIT_CODE:-}" = "0" ]') < alarm_text.index(
-        '[ "${EXIT_CODE:-}" != "1" ]'
-    ), (
-        "the exit-0 runner-fault branch must be tested BEFORE the not-1 outage branch, else "
-        "an exit-0 post-reading failure is reported as a detector outage"
+    assert zero_at < runner_at < not_one_at < outage_at < release_at, (
+        "the three branch HEADINGS are not inside their own predicates: the RUNNER-fault text "
+        "must sit between the `= 0` and `!= 1` tests, and DETECTOR outage after `!= 1` — "
+        "swapping the branch BODIES kept every literal assertion green while an exit-0 "
+        "runner fault was explained as a detector outage"
     )
 
     file_step = steps["File or refresh the alert issue"]
@@ -1524,10 +1534,11 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
         'close must not key on the job result: a lost `exit "$rc"` makes the job read '
         f"success while the tool exited 1, resolving the release-owed ledger — got {close_if!r}"
     )
-    # ⛔ `!cancelled()` on EVERY step of the report job (round 12): the implicit `success()`
-    # otherwise skips a step whose predecessor failed, so a failed `Runner tool contract`
-    # step silently skipped the transcript fetch, or filed nothing, or never resolved the
-    # ledgers on a green run — while the comment above them said they all carry it.
+    # ⛔ `!cancelled()` on each of the FOUR GATE STEPS (round 12): the implicit `success()`
+    # otherwise skips a step whose predecessor failed, so a failed `Runner tool contract` step
+    # silently skipped the transcript fetch, or filed nothing, or never resolved the ledgers on
+    # a green run. The two SETUP steps above them deliberately carry no `if:` — a checkout or
+    # tool-provisioning step that ran on a cancelled job would be worse, not better.
     for name in (
         "Fetch the canary transcript",
         "What a red here means",
@@ -1707,6 +1718,22 @@ def test_the_canary_cannot_be_SILENCED_without_reding_this_file():
     # outage" for every severity, including a real release finding).
     assert smoke_run.index("GITHUB_OUTPUT") < smoke_run.index('exit "$rc"'), (
         '`echo exit_code=… >> $GITHUB_OUTPUT` must come BEFORE `exit "$rc"`'
+    )
+    # ⛔ The PRODUCER end of the chain the close gate now depends on: the `echo` must write the
+    # KEY the job output READS. `echo "rc=$rc" >> $GITHUB_OUTPUT` left the whole suite green —
+    # `exit_code` is then empty forever, so the close step never resolves the release-owed
+    # ledger, and every red files as a detector outage. Bind the two ends rather than spelling
+    # either one (#12363 round 12, cycle-2 finding: measured, 55 passed with the key renamed).
+    output_key = (
+        str(workflow["jobs"]["canary"]["outputs"]["exit_code"])
+        .split("steps.canary.outputs.")[1]
+        .strip(" }")
+    )
+    assert f'echo "{output_key}=$rc"' in smoke_run, (
+        f"the canary step must write `{output_key}` to $GITHUB_OUTPUT: the job output reads "
+        f"`steps.canary.outputs.{output_key}`, so a renamed key leaves it permanently empty "
+        "— nothing then closes the release-owed ledger and every red reads as a detector "
+        "outage (#12363 round 12)"
     )
 
 
