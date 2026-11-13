@@ -8241,13 +8241,16 @@ def test_the_census_has_no_DUPLICATE_dict_key_in_its_source() -> None:
     tree = ast.parse(src)
     wanted = {"WRITER_CENSUS", "CENSUS_EVIDENCE", "WRITER_LABEL_OVERRIDES"}
     seen: dict[str, list[str]] = {}
-    # ⛔ MODULE TOP LEVEL ONLY (`tree.body`), NOT `ast.walk` (`#12182` review, P2 — measured). The
-    # walk visits a same-named literal ANYWHERE, and `seen[names[0]] = keys` is last-wins, so a
-    # 23-key `WRITER_CENSUS` literal inside a function OVERWROTE the real table and the duplicate in
-    # it became invisible — the final count check then compared 23 against 23 and passed. Reproduced
-    # on this tree: injecting a duplicate key alone reds (correct), and injecting it together with
-    # such a decoy came back CLEAN. These three tables are module-level declarations, so a top-level
-    # scan is both sufficient and the only scope where "the table" is a single object.
+    # ⛔ MODULE TOP LEVEL ONLY (`tree.body`), NOT `ast.walk`. These three tables are module-level
+    # declarations, so a top-level scan is both sufficient and the only scope where "the table" is a
+    # single object: a walk also visits a same-named literal inside a function, and that literal is
+    # not the table.
+    # ⚠️ What this scope is NOT: a duplicate fail-open fix. `assert not dupes` below fires PER
+    # VISITED NODE, so a duplicate in the real table reds whether or not a decoy literal exists —
+    # re-measured on the pre-`tree.body` version: real duplicate plus a 23-key decoy → RED, not
+    # clean. `seen` is last-wins, so a decoy can only shadow the TRAILING count-agreement check,
+    # which compares a literal's key count against the runtime dict. Narrowing the scan removes that
+    # window; it does not close a duplicate fail-open, because there was none.
     for node in tree.body:
         if not isinstance(node, ast.AnnAssign | ast.Assign):
             continue
@@ -8267,7 +8270,7 @@ def test_the_census_has_no_DUPLICATE_dict_key_in_its_source() -> None:
     # A vacuous pass is the failure mode of a source-reading test: if none of the three literals was
     # found AT TOP LEVEL, nothing was checked. All three exist there today, so a MISS means a table
     # was moved into a scope this detector no longer reads — re-derive it deliberately, do not widen
-    # it back to `ast.walk` (see the decoy above).
+    # it back to `ast.walk` (a decoy literal would then also feed `seen`, masking the count check).
     assert set(seen) == wanted, (
         f"these census dict literals were not found in {probe.__file__}: "
         f"{sorted(wanted - set(seen))} — the detector checked nothing for them")
