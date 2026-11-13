@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -469,6 +471,38 @@ def test_the_brief_quotes_the_recall_the_artifact_holds(report, control):
         f"§3 does not state that the width fixes {past} of {total} misses")
     assert f"{absent} misses ({100 * absent / report['corpus']['sample']:.1f} % of the sample)" in text, (
         f"§3 does not state the {absent} misses absent even at k=15")
+
+
+def test_the_brief_scopes_the_lexical_identical_to_the_EXACT_arm(lexical):
+    """§7 must not generalise the lexical control's match beyond the exact arm.
+
+    ⛔ "matches every recall figure" is false and the artifact it cites says so:
+    on the VARIANT arm the lexical control is BETTER, not equal (pool 15:
+    426 vs 425; pool 40: 426 vs 424). §8 states the scope; §7 is the sentence a
+    reader takes the recommendation from, so an unqualified "every" there is a
+    claim the artifact contradicts — measured, review round 11.
+    """
+    # ⛔ RERANK_BRIEF, not the #11901 brief: this sentence is §7 of the
+    # #12297 calibration document, the one the lexical control lives in.
+    text = _squash(RERANK_BRIEF.read_text())
+    assert "matches every recall figure" not in text, (
+        "§7 generalises the lexical match past the exact arm — §8 and the "
+        "artifact both contradict it")
+    def _variant(arm: dict, pool: str) -> int:
+        """Both arms nest it the same way: ``arm[str(pool)]["variant"]``."""
+        return arm[str(pool)]["variant"]["in_window_3_after"]
+
+    before = lexical["arms"]["rerank"]
+    lex_arm = lexical["arms"]["lexical_overlap"]
+    for pool in ("15", "40"):
+        delta = _variant(lex_arm, pool) - _variant(before, pool)
+        assert delta > 0, (
+            f"premise: the lexical arm is better on the variant arm at pool "
+            f"{pool}, so 'identical' cannot cover it ({delta})")
+        # the brief states the gap as "better by 1 at pool 15 and by 2 at pool
+        # 40", so match the MEASURED delta against the pool it belongs to
+        assert f"by {delta} at pool {pool}" in text, (
+            f"§7 must state the variant-arm gap at pool {pool} ({delta})")
 
 
 def test_the_brief_quotes_the_class_rates_and_the_mean_rank(report, control):
@@ -1348,3 +1382,556 @@ def test_the_artifact_records_every_miss_so_a_cap_cannot_return(tool_mod, monkey
     assert arms["exact_misses_total"] == arms["exact_misses_recorded"] == 300, (
         f"total={arms['exact_misses_total']} vs "
         f"recorded={arms['exact_misses_recorded']}: with no cap these are equal")
+
+
+# ── #12297 residual 1: the LEXICAL BASELINE CONTROL ──────────────────────────
+#
+# The control exists to answer one question and the answer is load-bearing for
+# the #12297 recommendation: does a ~5 microsecond string compare reproduce what
+# the cross-encoder is paid ~207 ms/mention for? The pins below keep the control
+# HONEST in three independent ways — its contract, its artifact, the document
+# that quotes it, and the fact that it never reaches product code.
+
+LEXICAL_ARTIFACT = (DOC_DIR.parent / "2026-11-12-12297-rerank-calibration"
+                    / "measurement-lexical-control.json")
+RERANK_BRIEF = (DOC_DIR.parent / "2026-11-12-12297-rerank-calibration"
+                / "research-brief.md")
+
+
+@pytest.fixture(scope="module")
+def lexical() -> dict:
+    assert LEXICAL_ARTIFACT.exists(), (
+        f"missing committed control artifact {LEXICAL_ARTIFACT}")
+    return json.loads(LEXICAL_ARTIFACT.read_text())
+
+
+@pytest.fixture(scope="module")
+def noun() -> dict:
+    """The noun-path artifact — the OTHER committed copy of the same generated
+    note, and the one no test read before (measured: hand-editing its figure
+    left the suite green)."""
+    path = RERANK_BRIEF.parent / "measurement-noun-path.json"
+    assert path.exists(), f"missing committed artifact {path}"
+    return json.loads(path.read_text())
+
+
+def test_the_lexical_scorer_has_the_cross_encoder_interface(tool_mod):
+    """Same call shape, so ONLY the scorer changes and the pools stay identical.
+
+    A control that had to reshape the arm would not be a control — the before
+    order, the cut and the tie-break would all be free to differ.
+    """
+    for mode in tool_mod.LEXICAL_MODES:
+        scorer = tool_mod.LexicalScorer(mode)
+        out = scorer.score("the credential",
+                           ["the credential", "the deployment", ""])
+        assert isinstance(out, list) and len(out) == 3, (
+            f"{mode}: score() must return one float per candidate")
+        assert all(isinstance(x, float) for x in out), (
+            f"{mode}: score() must return floats, got {[type(x) for x in out]}")
+        assert scorer.score("q", []) == [], (
+            f"{mode}: an empty candidate list must score to an empty list")
+
+
+def test_the_lexical_scorer_is_deterministic_and_ranks_identity_first(tool_mod):
+    """Deterministic (so a re-run is comparable) and sane on the exact case.
+
+    ⛔ These are properties of a CONTROL, not accuracy claims: the exact case is
+    the one surface where the whole §3 arm admits its query is byte-identical to
+    the gold's name, so a scorer that did NOT rank identity first would not be a
+    fair opponent to the cross-encoder.
+    """
+    for mode in tool_mod.LEXICAL_MODES:
+        scorer = tool_mod.LexicalScorer(mode)
+        cands = ["the deployment pipeline", "the credential", "a credential file"]
+        first, second = scorer.score("the credential", cands), scorer.score(
+            "the credential", cands)
+        assert first == second, f"{mode}: score() is not deterministic"
+        assert max(range(3), key=lambda i: (first[i], -i)) == 1, (
+            f"{mode}: identity did not rank first: {first}")
+
+
+def test_an_unknown_lexical_mode_is_refused(tool_mod):
+    """A typo must not silently become a scorer nobody declared."""
+    with pytest.raises(ValueError):
+        tool_mod.LexicalScorer("semantic-ish")
+
+
+def test_the_control_never_reaches_product_code():
+    """⛔ The control is a control. If it is ever WIRED, this reds.
+
+    This is the pin that keeps #12297 residual 1 from turning into an unmeasured
+    product change by drift: the lexical scorer is allowed to exist in
+    `tools/`, and is not allowed to appear in the shipped rerank path.
+    """
+    rerank_src = (Path(__file__).resolve().parent.parent
+                  / "tortoise" / "rerank.py").read_text()
+    assert "LexicalScorer" not in rerank_src, (
+        "the #12297 lexical baseline was wired into tortoise/rerank.py — it is "
+        "a CONTROL for the calibration, not an implementation; wiring it is a "
+        "product decision that needs its own measurement")
+    assert "candidate_recall_11901" not in rerank_src, (
+        "tortoise/rerank.py imports the calibration tool")
+
+
+def test_the_control_artifact_covers_both_pools_and_all_three_scorers(lexical):
+    """Every cell §8 quotes must exist in the artifact, at both pool widths."""
+    arms = lexical["arms"]
+    for arm in ("rerank", "lexical_difflib", "lexical_overlap"):
+        assert arm in arms, f"artifact is missing the {arm} arm"
+        for pool in ("15", "40"):
+            assert pool in arms[arm], f"{arm} is missing pool {pool}"
+            exact = arms[arm][pool]["exact"]
+            assert exact["mentions"] == lexical["corpus"]["sample"], (
+                f"{arm}/{pool}: {exact['mentions']} mentions scored against a "
+                f"sample of {lexical['corpus']['sample']}")
+            # ⛔ No `or (… >= 0)` escape hatch: that clause is True for every
+            # non-negative count, so IT — not the equality — decided the
+            # assertion, and a wrong pair count in a future artifact passed.
+            assert exact["pairs_scored"] == exact["mentions"] * int(pool)
+    for arm in ("lexical_difflib", "lexical_overlap"):
+        assert "lexical_control" in arms[arm], (
+            f"{arm} does not carry the note saying it is a control")
+    # ⛔ THE CEILING NOTE IS A CLAIM, so it is pinned, not just generated: the
+    # retracted wording ("its ceiling is arm 1's miss_past_k … the
+    # miss_absent_at_max_k rows are unreachable at every pool width") is FALSE on
+    # this artifact's own data (miss_past_k at k=P is 0 by construction, and the
+    # pool-40 arm returns every gold), and it survived in this file after the
+    # brief retracted it — the artifact contradicting the document it is the
+    # evidence for.
+    for arm in ("rerank", "lexical_difflib", "lexical_overlap"):
+        note = arms[arm]["ceiling_note"]
+        assert "in_window(P)" in note, f"{arm}: {note!r}"
+        assert "unreachable at every pool width" not in note, (
+            f"{arm} still carries the retracted claim: {note!r}")
+        assert "miss_past_k" in note and "BY CONSTRUCTION" in note, (
+            f"{arm} no longer explains WHY miss_past_k is not the ceiling")
+
+
+def _run_ns(**over):
+    """The minimum Namespace `run` touches before its first refusal."""
+    ns = dict(sessions_dir="~/.tortoise/session-events", records=1, span=8,
+              limit=120, pool_size=None, model=None, threads=1, namespace="x",
+              graph=None, per_query=False, allow_reranked_baseline=False,
+              out=None, rerank=False, rerank_pool=None, rerank_model=None,
+              rerank_threads=1, lexical_baseline=None, population="auto")
+    ns.update(over)
+    return type("NS", (), ns)()
+
+
+def test_an_armed_read_gate_refuses_the_run(tool_mod, monkeypatch, capsys):
+    """This instrument's "before" must really be the fused order.
+
+    With ``TORTOISE_FUSED_RERANK`` armed the read reranks the pool first, so every
+    arm's "before" is a rerank and the cells report ``gained 0 / lost 0`` — a false
+    zero indistinguishable from a real one, on the instrument that produced the
+    artifacts this PR cites. Its sibling (``rerank_calibration_12297``) has refused
+    this since the round that added the gate; this one did not, which is the
+    asymmetry this pins.
+
+    ⛔ THE STDERR ASSERTION IS THE DISCRIMINATING HALF: the store refusal also exits
+    3, and this test unsets the URI, so an exit-code-only assertion passes with the
+    gate refusal deleted.
+    """
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert tool_mod.run(_run_ns()) == 3
+    err = capsys.readouterr().err
+    assert "TORTOISE_FUSED_RERANK" in err
+    assert "TORTOISE_DB_URI" not in err      # the gate fired, not the store
+
+
+def test_an_armed_gate_is_measurable_only_when_asked_for(
+        tool_mod, monkeypatch, capsys):
+    """``--allow-reranked-baseline`` opts in deliberately; the refusal that fires
+    then is the STORE one, which is how this test tells the two apart without a DB."""
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert tool_mod.run(_run_ns(allow_reranked_baseline=True)) == 3
+    assert "TORTOISE_DB_URI" in capsys.readouterr().err
+
+
+def test_the_artifacts_ceiling_note_is_the_one_the_tool_emits(
+        lexical, noun, tool_mod):
+    """The artifact's ceiling_note must be REPRODUCIBLE by the tool that writes it.
+
+    §7 points at this JSON as its citation, so a note left over from an earlier
+    draft hands an auditing reader an inference the PR says it removed: the
+    committed file still called the ceiling "arm 1's miss_past_k" — which is 0 at
+    k=P BY CONSTRUCTION, and therefore no bound at all — two revisions after the
+    brief and the body were corrected. The note is a GENERATED string, so the pin
+    is against the generator, not against a copy of its text: change either side
+    and this reds.
+    """
+    source = Path(tool_mod.__file__).read_text()
+    start = source.index('"ceiling_note": (')
+    literal = source[start:source.index("}", start)]
+    literal = literal[literal.index("(") + 1:]
+    emitted = "".join(re.findall(r'"([^"]*)"', literal))
+    assert emitted, "could not read the tool's ceiling_note literal"
+    # ⛔ THE FIGURES ARE NOT IN THIS STRING ANY MORE, and that is the point:
+    # it used to hardcode one run's pair, so a re-run on a grown corpus shipped a
+    # note contradicting its own ``arms.exact.<P>.in_window`` — and the NOUN-PATH
+    # copy was pinned by nothing at all (measured: rewriting its figure left the
+    # suite green). Both artifacts are checked here, and the note may not carry a
+    # measured figure.
+    assert not re.search(r"\b\d+/\d+", emitted), (
+        f"the ceiling note restates a measured figure: {emitted}")
+    for artifact, name in ((lexical, "measurement-lexical-control.json"),
+                           (noun, "measurement-noun-path.json")):
+        for arm, arm_data in artifact["arms"].items():
+            if not isinstance(arm_data, dict) or "ceiling_note" not in arm_data:
+                continue
+            got = arm_data["ceiling_note"]
+            assert got == emitted, (
+                f"{name}:{arm}: the artifact's ceiling_note is not what the tool "
+                f"emits — regenerate the artifact (it is generated, never "
+                f"hand-edited)")
+            assert "its ceiling is arm 1" not in got, (
+                f"{arm}: the retracted 'arm 1's miss_past_k' reading is back")
+
+
+def test_the_rerank_arm_measures_the_model_the_PRODUCT_would_load(
+        tool_mod, monkeypatch):
+    """The arm's model must come from the resolver the shipped read uses.
+
+    ⛔ BEHAVIOURAL, not a source grep: ``inspect.getsource`` returns comments
+    too, so the first version of this test was satisfied by its own docstring —
+    measured, swapping the code for a hard-coded model id left it green. This
+    drives the resolver the arm actually calls.
+
+    The read passes no model to ``rerank_pool``, which resolves through
+    ``load_scorer(model or fused_rerank_model())``, so
+    ``TORTOISE_FUSED_RERANK_MODEL`` decides which cross-encoder the product
+    loads. A hard-coded ``RERANK_MODEL_DEFAULT`` measured (and recorded, in the
+    arm's own ``model`` field) a model the product would not load whenever that
+    knob was set: an artifact misnaming its model is worse than one that says
+    nothing.
+    """
+    from tortoise import rerank
+
+    monkeypatch.setattr(rerank, "fused_rerank_model",
+                        lambda: "cross-encoder/from-the-knob")
+    bare = type("NS", (), {"rerank_model": None})()
+    assert tool_mod.resolve_rerank_model(bare) == "cross-encoder/from-the-knob", (
+        "the arm must measure the model the product's own resolver returns")
+
+    pinned = type("NS", (), {"rerank_model": "cross-encoder/pinned-by-flag"})()
+    assert tool_mod.resolve_rerank_model(pinned) == "cross-encoder/pinned-by-flag", (
+        "--rerank-model must still override the resolver")
+
+
+def test_the_rerank_ARM_is_handed_the_resolved_model(tool_mod, monkeypatch):
+    """The WIRING, not just the helper: a helper-only pin passes over this.
+
+    ⛔ Measured the hard way — driving ``resolve_rerank_model`` alone left all 43
+    tests green when the arm was handed
+    ``model="cross-encoder/ms-marco-MiniLM-L6-v2"`` directly, and driving
+    ``build_rerank_arm`` alone left all 44 green when `run` was put back to the
+    inline ``_rerank_arm(...)`` form. So this records what `_rerank_arm` is
+    actually CALLED with, AND asserts from the AST that `run` reaches it only
+    through the seam.
+    """
+    seen: dict = {}
+
+    def _record(*a, **kw):
+        seen.update(kw)
+        return {"arm": "rerank"}
+
+    monkeypatch.setattr(tool_mod, "_rerank_arm", _record)
+    monkeypatch.setattr(tool_mod, "resolve_rerank_model",
+                        lambda _args: "cross-encoder/from-the-resolver")
+    ns = type("NS", (), {"rerank_model": None, "rerank_pool": None,
+                         "rerank_threads": tool_mod.RERANK_THREADS})()
+    built = tool_mod.build_rerank_arm(ns, sample=[], window=0, variants=None)
+    assert built == {"arm": "rerank"}
+    assert seen.get("model") == "cross-encoder/from-the-resolver", (
+        f"the arm was handed {seen.get('model')!r}, not the resolved model")
+
+    # …and `run` must CALL the seam. AST, not a source grep: the comments above
+    # name both identifiers, so a substring test would be satisfied by itself.
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(tool_mod.run).lstrip())
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    names = {n.func.id for n in calls if isinstance(n.func, ast.Name)}
+    assert "build_rerank_arm" in names, (
+        "the --rerank branch no longer goes through the seam")
+    # ⛔ …and the branch must still be `args.rerank`: `ast.walk` sees nodes in
+    # branches that are dead at runtime, so `if args.rerank and False:` kept this
+    # green while a --rerank run would emit an artifact with no `arms.rerank` at
+    # all (measured) — the cross-encoder column §8's control comparison rests on.
+    # ⛔ The INNERMOST guard whose body holds the assignment, not `guards[0]`:
+    # taking the outermost one reds a behaviour-preserving `elif args.rerank:`
+    # (its test is the preceding branch's) and `if args.rerank is True:`.
+    guards = [n for n in ast.walk(tree)
+              if isinstance(n, ast.If)
+              and any(isinstance(x, ast.Call) and isinstance(x.func, ast.Name)
+                      and x.func.id == "build_rerank_arm"
+                      for x in ast.walk(n))]
+    assert guards, "the seam is not behind any guard"
+    innermost = min(guards, key=lambda n: len(list(ast.walk(n))))
+    test = ast.unparse(innermost.test)
+    assert test in ("args.rerank", "args.rerank is True", "bool(args.rerank)"), (
+        f"the --rerank branch is guarded by {test!r}")
+    # ⛔ The LEXICAL arms legitimately call `_rerank_arm` directly, and they DO
+    # pass a `model` kwarg — but it is a label (`lexical:difflib`), not a
+    # cross-encoder id. What distinguishes them structurally is that they supply
+    # their own `scorer`; the cross-encoder arm supplies none and must come from
+    # the seam, where the resolver lives.
+    direct = [n for n in calls
+              if isinstance(n.func, ast.Name) and n.func.id == "_rerank_arm"]
+    unscored = [n for n in direct
+                if not any(k.arg == "scorer" for k in n.keywords)]
+    assert direct and not unscored, (
+        "an inline _rerank_arm call with no scorer of its own bypasses the "
+        "resolver the seam exists to apply")
+
+
+class _ToyScorer:
+    """The minimum a scorer needs to be for ``_rerank_arm``: opaque scores."""
+
+    def score(self, query, texts):
+        return [0.0 for _ in texts]
+
+
+def test_the_arm_measures_the_SHIPPED_reorder_not_a_copy_of_it(
+        tool_mod, monkeypatch):
+    """A textless candidate must not be scored-and-promoted by the ARM either.
+
+    ⛔ The arm used to be a SECOND implementation: it scored every row (including
+    one whose name is ``""``) and reordered all of them. ``rerank_pool`` scores
+    only the slots with text and writes them back into their own slots, and an
+    empty passage outranks an unrelated real one — so the copy credited the
+    reranker with a promotion the product structurally refuses, and counted a
+    pair the product never scores. Measured on the copy: a textless gold rose to
+    rank 3 and ``pairs_scored`` said 4 where the product scores 3.
+
+    The arm now calls ``rerank_pool`` (through its ``scorer`` seam), so the two
+    cannot drift: this drives the same rows and asserts the numbers the product
+    would produce.
+    """
+    # the arm pins torch's intra-op threads before the first score; this box has
+    # no torch, and the pin is not what this test is about
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
+        set_num_threads=lambda n: None))
+    rows = [{"id": "r1", "name": "alpha"},
+            {"id": "r2", "name": "beta"},
+            {"id": "r3", "name": "gamma"},
+            {"id": "gold", "name": ""}]
+
+    class _BlankLovingScorer:
+        """The inverse of a real ranker: it loves empty passages."""
+
+        def score(self, query, texts):
+            return [1.0 if not t.strip() else 0.0 for t in texts]
+
+    # ⛔ TWO MENTIONS AND A VARIANT SURFACE, on purpose. With ONE mention and no
+    # variants this test passed over a real P1 in the instrument: the arm
+    # compared its CUMULATIVE pair counter against this call's ``scored``, which
+    # agrees on the first call and raises on every one after it (measured — the
+    # tool aborted on any real corpus). A one-shot fixture cannot see that.
+    sample = [{"id": "gold", "name": "alpha", "cls": "exact"},
+              {"id": "r1", "name": "beta", "cls": "exact"}]
+
+    def window(_name, _pool):
+        return list(rows)
+
+    def variants(_name, _cls):
+        return [("surface", "alpha surface")]
+
+    arm = tool_mod._rerank_arm(
+        sample, window, variants, model="cross-encoder/toy",
+        pools=(4,), top_k=3, scorer=_BlankLovingScorer())
+
+    exact = arm["4"]["exact"]
+    variant = arm["4"]["variant"]
+    assert exact["rerank_degraded"] == 0, exact
+    assert variant["rerank_degraded"] == 0, variant
+    assert exact["mentions"] == 2, exact
+    assert variant["pairs"] == 2, variant
+    # the product scores 3 of the 4 rows on EVERY call, and the textless one is
+    # never promoted; a cumulative-vs-per-call slip makes the second call raise
+    assert exact["pairs_scored"] == 6, exact
+    # the arm's own latency counter covers BOTH arms: 2 mentions × 3 scorable
+    # exact + 2 variants × 3 scorable
+    assert arm["latency"]["pairs_scored"] == 12, arm["latency"]
+    # ⛔ NO MEMBERSHIP MOVED. A promotion of the textless row would show up as
+    # ``gained`` (the textless gold enters the top-k) — and, in the copy, as
+    # ``recall_3_after`` above ``recall_3_before``.
+    assert exact["gained"] == 0 and exact["lost"] == 0, exact
+    assert exact["recall_3_after"] == exact["recall_3_before"], (
+        "the arm's reranked page differs in membership from the product's")
+    assert variant["gained"] == 0 and variant["lost"] == 0, variant
+
+
+def test_a_degraded_rerank_on_the_arm_is_COUNTED_not_measured(
+        tool_mod, monkeypatch):
+    """"Rerank ran and changed nothing" and "rerank did not run" are different
+    measurements, and the artifact must not average them together.
+
+    The product degrades instead of raising, so an arm that took the degraded
+    pool as the "after" order would report the before/after pair as a measured
+    zero. ``rerank_degraded`` is the disclosure.
+    """
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
+        set_num_threads=lambda n: None))
+    rows = [{"id": "r1", "name": "alpha"}, {"id": "r2", "name": "beta"}]
+    sample = [{"id": "r1", "name": "alpha", "cls": "exact"}]
+
+    def window(_name, _pool):
+        return list(rows)
+
+    class _Raises:
+        def score(self, query, texts):
+            raise RuntimeError("no model here")
+
+    arm = tool_mod._rerank_arm(
+        sample, window, lambda n, c: [], model="cross-encoder/toy",
+        pools=(2,), top_k=3, scorer=_Raises())
+
+    exact = arm["2"]["exact"]
+    assert exact["rerank_degraded"] == 1, exact
+    assert exact["mentions"] == 0, (
+        "a degraded pool was measured as if the reranker had run")
+
+
+def test_the_latency_note_matches_what_happened_to_torch(tool_mod, monkeypatch):
+    """A ``--rerank-threads 0`` run must not claim a pin it never made.
+
+    ⛔ The note is the ONE field a reader uses to decide whether a latency figure
+    describes the model or the scheduler. ``0`` leaves torch's default pool in
+    place, and the artifact still said "PINNED to 0" — a pin the run never made,
+    on the field that answers exactly that question.
+    """
+    rows = [{"id": "g-0", "name": "gym"}, {"id": "g-1", "name": "gyms"}]
+    sample = [{"id": "g-0", "name": "gym", "cls": "exact"}]
+
+    def window(_name, _pool):
+        return list(rows)
+
+    def arm(threads):
+        return tool_mod._rerank_arm(
+            sample, window, lambda n, c: [], model="cross-encoder/toy",
+            pools=(5,), threads=threads, scorer=_ToyScorer())
+
+    # the thread pin itself: recorded where torch would have received it
+    applied: list[int] = []
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
+        set_num_threads=applied.append))
+
+    assert "PINNED to 1" in arm(1)["latency"]["note"]
+    assert applied == [1], applied
+    unpinned = arm(0)["latency"]["note"]
+    assert applied == [1], "threads=0 must leave torch's default pool alone"
+    assert "PINNED" not in unpinned, unpinned
+    assert "NOT pinned" in unpinned, unpinned
+
+
+def test_the_control_arms_are_not_labelled_with_the_models_cost_story(lexical):
+    """A lexical arm must not carry the cross-encoder's latency note.
+
+    The artifact's note is a SHARED string in `_rerank_arm`; a lexical arm that
+    inherited "including the torch sigmoid / threads PINNED to 1" would describe
+    a 5 us string compare with the model's cost, which is the false-label class
+    this repo refuses. Pinned because the string is generated, not literal.
+    """
+    for arm in ("lexical_difflib", "lexical_overlap"):
+        note = lexical["arms"][arm]["latency"]["note"]
+        assert "LEXICAL control" in note, (
+            f"{arm} latency note does not say it is a lexical control: {note!r}")
+        assert "torch sigmoid" not in note, (
+            f"{arm} latency note claims a torch sigmoid it never ran: {note!r}")
+        assert "PINNED" not in note, (
+            f"{arm} latency note claims a pinned torch thread it never used: "
+            f"{note!r}")
+    assert "torch sigmoid" in lexical["arms"]["rerank"]["latency"]["note"], (
+        "the cross-encoder arm's note lost the cost it actually pays")
+
+
+def test_the_brief_does_not_still_call_the_control_unrun():
+    """§8 is the control's RUN; §4 must not tell a reader it was never run.
+
+    §4 is the section the brief labels "read before quoting §3", and it said a
+    token-overlap baseline "would likely reproduce much of this gain — and that
+    control was **not run here** (see §7)" three correction passes after §8 was
+    written as its result. A reader obeying the document's own instruction
+    concluded the decisive experiment did not exist, which is the inverse of the
+    PR's headline. Unpinned is why it survived; this is the pin.
+    """
+    text = _squash(RERANK_BRIEF.read_text())
+    assert "not run here" not in text, (
+        "the brief still says the lexical control was not run — §8 is its run")
+    assert "that control was run" in text, (
+        "the brief's §4 no longer points at the control that WAS run (see §8)")
+
+
+def test_the_briefs_lexical_section_recomputes_from_the_artifact(lexical):
+    """§8's central claims are RECOMPUTED, never trusted from the prose.
+
+    §8 is the section that changes the recommendation, so a stale figure there
+    is worse than a stale figure anywhere else: a reader acts on it.
+    """
+    arms = lexical["arms"]
+    # ⛔ THE WHOLE BRIEF IS NOT THE SECTION. Every figure §8 quotes also appears in
+    # §3/§6/§7 (the same pools, the same metrics), so a whole-document grep is
+    # satisfied by THOSE copies while §8's own table is arbitrarily wrong —
+    # measured: corrupting all three §8 rows left this test green. Scope the text
+    # to §8, then assert each figure inside it.
+    raw = RERANK_BRIEF.read_text()
+    assert "## 8." in raw, "the brief no longer has an §8"
+    text = _squash(raw.split("## 8.", 1)[1].split("\n## ", 1)[0])
+    # and the tables themselves: each §8 row must carry its OWN recall and nDCG
+    # cell, so a row edited to a figure borrowed from another section still reds.
+    section = raw.split("## 8.", 1)[1].split("\n## ", 1)[0]
+    table_rows = [ln for ln in section.splitlines()
+                  if ln.startswith("|") and "%" in ln and "." in ln]
+    assert len(table_rows) >= 3, (
+        f"§8's cost/quality table is gone or reshaped ({len(table_rows)} rows)")
+    for pool in ("15", "40"):
+        ce = arms["rerank"][pool]["exact"]
+        lo = arms["lexical_overlap"][pool]["exact"]
+        # 1. recall is IDENTICAL — the control's headline claim
+        assert ce["recall_3_after"] == lo["recall_3_after"], (
+            f"pool {pool}: §8 claims identical recall@3, artifact holds "
+            f"{ce['recall_3_after']} vs {lo['recall_3_after']}")
+        # 2. the lexical is at least as good on nDCG — the claim that decides it
+        assert lo["ndcg_mean_after"] >= ce["ndcg_mean_after"], (
+            f"pool {pool}: §8 claims the lexical matches or beats the "
+            f"cross-encoder on nDCG, artifact holds {lo['ndcg_mean_after']} "
+            f"vs {ce['ndcg_mean_after']} — the conclusion inverted")
+        # 3. and every figure §8 prints is the artifact's own
+        for value in (f"{ce['recall_pct_after']:.1f} %",
+                      f"{ce['ndcg_mean_after']:.4f}",
+                      f"{lo['ndcg_mean_after']:.4f}"):
+            assert value in text, (
+                f"§8 does not carry the recomputed pool-{pool} figure {value}")
+        # the figures must sit on TABLE ROWS of their own, not merely appear in
+        # the section's prose: a row whose cell was swapped for another section's
+        # number would still be found by the check above.
+        #
+        # ⛔ ALL THREE ARMS, NAME-BOUND. An earlier draft checked the
+        # cross-encoder row only — the two LEXICAL rows are §8's actual subject
+        # and the rows its conclusion rests on, and a corrupted lexical cell
+        # passed (measured: pool-15 `difflib` nDCG 0.9233 → 0.9135, the
+        # cross-encoder's own figure; pool-40 `1.0000` → `0.9500`). The label
+        # substring is load-bearing because the two lexical rows can carry
+        # IDENTICAL values (1.0000 / 0.9233), so value-matching alone would let
+        # one row's numbers be pasted into the other.
+        for arm, label in (("rerank", "cross-encoder"),
+                          ("lexical_difflib", "difflib"),
+                          ("lexical_overlap", "overlap")):
+            exact = arms[arm][pool]["exact"]
+            want = (label,
+                    f"{exact['recall_pct_after']:.1f} %",
+                    f"{exact['ndcg_mean_after']:.4f}")
+            assert any(all(w in row for w in want) for row in table_rows), (
+                f"§8 has no {label} table row carrying the recomputed pool-{pool} "
+                f"figures {want[1:]}")
+    # 4. the cost gap §8 prints is the artifact's
+    ce_ms = arms["rerank"]["latency"]["ms_per_pair"]
+    lo_ms = arms["lexical_overlap"]["latency"]["ms_per_pair"]
+    assert f"{ce_ms}" in text and f"{lo_ms}" in text, (
+        f"§8 does not carry the measured ms/pair pair ({ce_ms} / {lo_ms})")
+    assert ce_ms > lo_ms, (
+        f"the cost claim inverted: cross-encoder {ce_ms} <= lexical {lo_ms}")

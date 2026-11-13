@@ -496,6 +496,60 @@ def parse_uri_userinfo(uri: str) -> tuple[str | None, str | None]:
     )
 
 
+#: The keys the MCP DAEMON's ladder actually reads — and nothing else.
+#: ⛔ The legacy `FALKORDB_*` trio is deliberately ABSENT: the CLI honours it
+#: (`__main__._resolve_db_target`, a migration guard) and the daemon NEVER reads
+#: it. That asymmetry is a documented fact of the two ladders, and a disclosure
+#: that listed the trio as daemon-relevant would report a divergence where the
+#: daemon simply ignores the file's key (#12407).
+DAEMON_DB_KEYS = ("TORTOISE_DB_URI", "TORTOISE_DB_PATH")
+
+def daemon_db_target() -> tuple[str | None, str]:
+    """The MCP daemon's DB target — ONE implementation, TWO consumers (#12407).
+
+    `tortoise.mcp_server._get_sdk` is the daemon's real resolver, and the
+    `config show` / `doctor` disclosure has to report *its* answer rather than
+    the CLI's. They are DIFFERENT ladders, and the difference is substantive:
+
+        | rung          | daemon (`_get_sdk`)                     | CLI (`_resolve_db_target`) |
+        |---------------|-----------------------------------------|----------------------------|
+        | supported URI | `from_uri`                              | same                       |
+        | scheme-less URI | `resolve_db_path(uri)` — URI WINS     | `TORTOISE_DB_PATH` WINS    |
+        | `FALKORDB_*`  | **never read**                          | honoured (migration guard) |
+        | nothing set   | REFUSES to start (`main` → exit 1)      | embedded default           |
+
+    So computing the daemon's target with the CLI's resolver invents a divergence
+    the daemon does not have (`FALKORDB_*` only → reported "the daemon serves
+    docker://…" when it refuses to start) and HIDES a real one (env
+    `TORTOISE_DB_PATH=/a.db` + `.env` `TORTOISE_DB_URI=/b.db` → the daemon opens
+    `/b.db`, the CLI `/a.db`, and the report said "the same graph target") —
+    measured, PR #12428 review round 1. That is why this function exists, and why
+    `_get_sdk` calls it: one implementation, so the report cannot describe a
+    resolver that no longer runs.
+
+    Returns ``(target, rung)``. ``target`` is ``None`` only for the ``refuses``
+    rung, where the daemon has NO target because `mcp_server.main()` exits 1
+    telling the user to set `TORTOISE_DB_URI` or `TORTOISE_DB_PATH`; for
+    ``embedded-allowed`` (the `TORTOISE_ALLOW_EMBEDDED=1` test hatch) the target
+    is the canonical embedded path the daemon then opens.
+
+    Raises ValueError exactly where the daemon's own resolution would (a
+    relative or otherwise unpalatable `TORTOISE_DB_URI`/`TORTOISE_DB_PATH`).
+    """
+    uri = os.environ.get("TORTOISE_DB_URI", "")
+    if is_db_uri(uri):
+        return uri, "uri"
+    if uri:
+        # `_get_sdk`: "File path — use Lite mode (backward compat: bare
+        # non-docker URI)". The URI wins; TORTOISE_DB_PATH is not consulted.
+        return resolve_db_path(uri), "file-uri"
+    if os.environ.get("TORTOISE_DB_PATH"):
+        return resolve_db_path(), "path"
+    if os.environ.get("TORTOISE_ALLOW_EMBEDDED") == "1":
+        return resolve_db_path(), "embedded-allowed"
+    return None, "refuses"
+
+
 def resolve_db_path(explicit: str | None = None) -> str:
     """Resolve the canonical embedded DB path with explicit precedence.
 

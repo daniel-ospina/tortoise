@@ -108,14 +108,15 @@ def _measure_pools(sdk, query: str, *, limit: int, pools, repeats: int) -> dict:
         sdk.tortoise_fts_query(query, limit=limit, pool_size=pool,
                                include_terminal=True, leg_trace=trace,
                                keep_numeric=True, search_keys_prf=True,
-                               _valid_time_rerank=False)
+                               _valid_time_rerank=False,
+                               _rerank_candidates=False)
         lat: list[float] = []
         for _ in range(repeats):
             t0 = time.perf_counter()
             hits = sdk.tortoise_fts_query(
                 query, limit=limit, pool_size=pool, include_terminal=True,
                 keep_numeric=True, search_keys_prf=True,
-                _valid_time_rerank=False)
+                _valid_time_rerank=False, _rerank_candidates=False)
             lat.append((time.perf_counter() - t0) * 1000.0)
         per[pool] = {
             "n_returned": len(hits),

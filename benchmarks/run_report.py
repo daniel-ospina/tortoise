@@ -323,6 +323,10 @@ def _sdk_e2e(sdk, qi: dict, elevated: int | None, *, pool_size: int | None = Non
             query=qi.get("query"), kind=qi.get("kind"), limit=10,
             pool_size=pool_size,
             _elevated_timeout_ms=int(elevated) if elevated is not None else None,
+            # #12297: this arm measures the RETRIEVAL stack against a recorded
+            # baseline; the fused rerank is a third pre-cut pool mover that
+            # would both add its own latency and re-pick the page at limit=10.
+            _rerank_candidates=False,
         )
         count = len(rows)
     except Exception as e:  # noqa: BLE001, RUF100
@@ -715,7 +719,8 @@ def _run_with_sdk(args, sdk) -> dict:
             # arms (pool_size=arm_limit) so the cold figure is not desynced.
             sdk.tortoise_fts_query(
                 query=picks[0].get("query"), kind=picks[0].get("kind"), limit=10,
-                pool_size=arm_limit)
+                pool_size=arm_limit,
+                _rerank_candidates=False)  # #12297: same recorded baseline
             cold_start["e2e"] = (time.perf_counter() - c0) * 1000
 
             censored = _run_column("e2e", e2e_fn, picks, CAP_MS, args,

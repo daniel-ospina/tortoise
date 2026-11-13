@@ -596,7 +596,14 @@ _COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp,
 #: 6): `[_set for _set in rows]` binds `_set` for the element only, so counting it as a writer-scope
 #: binding dropped the writer's module alias and — for a clause-builder alias — the writer itself:
 #: measured `{}` for a body whose control is `unresolved_write`, and `_shadowed_names` already
-#: skipped comprehension subtrees for exactly this reason. One tuple, so the two walks cannot drift.
+#: skipped comprehension subtrees for exactly this reason. ⛔ One tuple, so `_walk_own_scope` and
+#: `_comprehension_walrus_targets` cannot drift — but `_shadowed_names` is NOT a reader of it (it
+#: spells its own scope test by hand), and that gap is how round 8 cycle 7 found two asymmetries
+#: between the walks: `ast.Lambda` added by hand HERE, the PEP 572 containing-scope rule absent THERE.
+#: ⚠️ A THIRD asymmetry is named, not closed, in `_walk_own_scope`'s docstring (`#12317`): the walk
+#: yields a nested scope's NODE and skips its DEFAULTS, which PEP 572 binds in the enclosing scope —
+#: so a walrus there can leave a writer `gated`. Disclosed there because closing it widens this
+#: walk's readers, not because it is benign.
 _NEW_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
                     *_COMPREHENSION_NODES)
 
@@ -615,6 +622,23 @@ def _walk_own_scope(root: ast.AST):
     while a PARAMETER of a nested function (`def helper(_set)`) binds only inside `helper` and must
     NOT shadow the writer's module alias — recording it deleted a real clause-builder writer from
     the population (see `_locally_bound` for the measured A/B).
+
+    ⛔ NAMED RESIDUAL, NOT CLOSED HERE (`#12317`): a walrus in a nested `def`/`lambda` DEFAULT binds
+    in the ENCLOSING scope (PEP 572; `symtable` puts it in this writer's locals), and this walk skips
+    `args` for every nested scope node — so it never sees that rebind, and it is the reader that feeds
+    `_locally_bound` → `_keep_shadowed_aliases`. ⛔ Do NOT read the sibling mention walk as covering
+    this: the coverage is SPLIT, not one-sided. `_shadowed_names` walks a **lambda's** defaults
+    unwidened, so for that spelling the two walks genuinely disagree (measured: the same shape is a
+    suppressed by-reference mention THERE and an unseen rebind HERE); for a nested **`def`/`class`**
+    default BOTH walks are blind — the def/class branch records only the NAME and `continue`s before
+    any default walk — so there the two AGREE, and a fix for this issue must not assume the mention
+    walk already handles it. Measured at this head: `_enc` bound by `from … import encode_for_row as
+    _enc` then REBOUND in `f = lambda v=(_enc := print): v` leaves the writer **`gated`** (outside
+    `NEEDS_A_DECLARATION`, i.e. HIDDEN) while never reaching the gate, whereas the equivalent plain
+    rebind drops the writer from the census entirely. It is PRE-EXISTING on `main` `f33f5e2c32`
+    (measured identical there, on both the lambda-default and def-default spellings), and closing it
+    means walking the DEFAULTS of every nested `def`/`class`/`lambda` — a wider change than this
+    PR's subject, hence the issue rather than a silent third asymmetry.
     """
     stack: list[ast.AST] = [root]
     while stack:
@@ -743,6 +767,77 @@ def _scope_bound_names(root: ast.AST) -> set[str]:
     return _own_scope_bindings(root)
 
 
+def _lambda_body_bindings(body: ast.AST) -> frozenset[str]:
+    """Names a lambda BODY binds in the LAMBDA's own scope — the walrus targets (`#12182` review).
+
+    PEP 572 puts a walrus target in the scope that contains it, so one inside the lambda body is the
+    lambda's local, not the enclosing method's. A NESTED lambda is its own scope again (its defaults
+    are evaluated where it sits, so they are walked), and a comprehension's walrus binds in the
+    containing scope — which for a comprehension inside this lambda is this lambda, so its targets
+    are collected rather than skipped.
+    """
+    out: set[str] = set()
+    stack: list[ast.AST] = [body]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, ast.Lambda):
+            stack.extend(n.args.defaults)
+            stack.extend(d for d in n.args.kw_defaults if d is not None)
+            continue
+        if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
+            out.add(n.target.id)
+        stack.extend(ast.iter_child_nodes(n))
+    return frozenset(out)
+
+
+def _alias_credit_rank(name: str) -> int:
+    """How much a credited alias HELPS the writer stay visible — higher is safer (`#12020` round 8).
+
+    The rank is `_import_aliases`' collision rule: when one local name resolves to two primitives,
+    the resolution must not depend on source order, so the higher rank wins.
+    ⛔ The SAME rank also arbitrates the MODULE↔WRITER merge in `_embedding_writers`
+    (`#12020` round 8 cycle 5), where the two candidates are not siblings in one map and neither is
+    necessarily LIVE — so a DEAD higher-rank binding beats a LIVE lower-rank one. Liveness is not
+    statically knowable (`if TYPE_CHECKING:` is the idiom that made the point), so the rank decides.
+    ⛔ What that buys, stated as measured rather than as a bound (round 8 cycle 7, P3): rank 0 always
+    loses, so no collision can HIDE a writer behind `gated`. Ranks 1 and 2 are never worse than
+    that — but they are not always inside `NEEDS_A_DECLARATION`: an `UNGATED_CALLS` winner carries
+    `ungated` (inside) when the writer also writes, and `producer` (outside) when it does not,
+    which is a lateral move out of `gated` rather than a hide.
+
+    * 2 — `WRITE_CLAUSE_BUILDERS`: the alias is the ONLY discovery signal, so the writer is
+      discovered and owes a declaration.
+    * 1 — `UNGATED_CALLS`: `ungated` (INSIDE `NEEDS_A_DECLARATION`) when the writer also writes,
+      `producer` (OUTSIDE) when it does not — never worse than the `gated` the seam rank would give,
+      but NOT an invariant that the writer ends up inside (the paragraph above measures it).
+    * 0 — `SEAM_CALL`: `gated`, which is OUTSIDE `NEEDS_A_DECLARATION` — the only rank that can
+      HIDE a writer, so it loses every collision.
+    """
+    if name in WRITE_CLAUSE_BUILDERS:
+        return 2
+    if name in UNGATED_CALLS:
+        return 1
+    return 0
+
+
+#: Canonical order for the EQUAL-rank tie-break (`#12182` review P3). The rank decides the KIND; it
+#: does not decide which of two same-rank names is credited — and that name is what is published as
+#: `callee`/`callees`, which a `recognised_producer` route claim is re-derived from (#11444). Two
+#: builders and two ungated calls share a rank, so a bare `>` left the credited NAME dependent on
+#: source order (measured: `encode_for_store`+`compute_session_embedding` on one local name credit
+#: a different one per order). This tuple makes the tie deterministic and independent of the walk.
+_ALIAS_CANONICAL_ORDER: tuple[str, ...] = (
+    *WRITE_CLAUSE_BUILDERS, *UNGATED_CALLS, SEAM_CALL)
+
+
+def _alias_preference(name: str) -> tuple[int, int]:
+    """Sort key: rank first, then the canonical name order — so a TIE is order-independent too."""
+    try:
+        return (_alias_credit_rank(name), -_ALIAS_CANONICAL_ORDER.index(name))
+    except ValueError:  # pragma: no cover - every aliasable name is in the tuple
+        return (_alias_credit_rank(name), -len(_ALIAS_CANONICAL_ORDER))
+
+
 def _import_aliases(*roots: ast.AST) -> dict[str, str]:
     """Local name -> the name it was IMPORTED AS, for the seams and clause builders (`#11274`).
 
@@ -801,14 +896,27 @@ def _import_aliases(*roots: ast.AST) -> dict[str, str]:
                 # writer measured `gated` (outside `NEEDS_A_DECLARATION`, i.e. it stopped owing a
                 # declaration; measured). Neither binding is a "rebinding" (`_imports_that_REBIND`
                 # skips every import that RESOLVES), so no other rule sees the collision.
-                # ⛔ Prefer the BUILDER in every collision, which is fail-closed in BOTH orders:
-                # the builder outcome is `unresolved_write`/`ungated`, both inside
-                # `NEEDS_A_DECLARATION`, while a source-order-dependent answer is right in one order
-                # and a silent hide in the other.
-                if previous is None or (
-                    previous not in WRITE_CLAUSE_BUILDERS
-                    and alias.name in WRITE_CLAUSE_BUILDERS
-                ):
+                # ⛔ ⛔ A BUILDER-ONLY preference is NOT a total order, and saying it was cost a P1
+                # (round 8 cycle 4). It left `SEAM_CALL` vs `UNGATED_CALLS` — both NON-builder — to
+                # the first-seen rule, which is source-order-dependent; and because the walk is LIFO,
+                # "first-seen" is the lexically LAST binding, so the common idiom
+                # `try: import encode_for_store as _a / except ImportError: import encode_for_row as _a`
+                # resolved to the SEAM spelling that never runs and the writer measured `gated` —
+                # HIDDEN. ⛔ That is NOT a "regression against `main`", which is what this comment
+                # said and what `#12182`'s rebase review measured FALSE: `origin/main` at `f33f5e2c32`
+                # has the BUILDER-ONLY preference only (the `previous not in WRITE_CLAUSE_BUILDERS and
+                # alias.name in WRITE_CLAUSE_BUILDERS` test that this change deletes) and yields
+                # `gated` for this same arm too. The ranked rule CLOSES a pre-existing
+                # hide; it does not restore one.
+                # ⛔ So the collision is decided by what the CREDIT DOES to the writer, highest wins,
+                # independent of source order: builders (KEEP the writer, `unresolved_write`) >
+                # `UNGATED_CALLS` (`ungated` INSIDE `NEEDS_A_DECLARATION` when the writer also writes,
+                # `producer` OUTSIDE when it does not — `_alias_credit_rank`'s rank-1 bullet states
+                # it; do not re-tighten it to a guarantee) > `SEAM_CALL` (`gated`, outside it — the
+                # only rank that can hide a writer, so it loses every collision).
+                # ⛔ `_alias_preference`, not a bare rank: two names can share a rank, and the tie
+                # must not fall back to source order (round 8 cycle 8, P3).
+                if previous is None or _alias_preference(alias.name) > _alias_preference(previous):
                     found[local] = alias.name
     return found
 
@@ -1143,6 +1251,94 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "are prose — the DOCSTRING reproducing the measured `_emit(...)` calls and the body "
         "comments recording later measured cases — because `_EMBED_WRITE` reads raw source, as "
         "it does for `tortoise.projection::_prewipe_synthetic_write_scope`'s"),
+    # ⛔ ONE entry per name: a second literal key for the same name SILENTLY OVERRIDES the
+    # first (Python's last-wins dict semantics — the LATER row wins and the earlier one is
+    # dead; an active override, not a harmless no-op). `ruff`'s F601 is the only LINTER that
+    # catches it, and it caught this one only post-merge on `main` — the pytest lane could
+    # not, until `#9314`'s pin
+    # (`tests/test_dod_5090_probe.py::test_the_census_has_no_DUPLICATE_dict_key_in_its_source`).
+    # ⛔ That pin exists TWICE this merge: `main`'s `#9314` version and #12182's review cycle-7 P2
+    # version are the same detector written independently, and this rebase keeps ONE of them — the
+    # `#12182` one, which also covers `WRITER_LABEL_OVERRIDES` and asserts each literal's key count
+    # still equals its runtime dict's. Only the NAME changed here; re-derive the pin, never cite the
+    # deleted name. ⛔ And do not RE-WIDEN that pin's source scan to `ast.walk`: the three tables are
+    # module-level declarations, so the top level is the only scope where "the table" is a single
+    # object. (This is not a duplicate fail-open fix — the duplicate assert fires per visited node,
+    # so a decoy cannot hide one. What a decoy CAN shadow is the trailing checks that read `seen`:
+    # the runtime-dict key count and the per-literal key floors, plus the vacuity set when the decoy
+    # names a table absent at top level. Re-measured: a real duplicate plus a 23-key decoy still
+    # reds.)
+    # Provenance and the carrier rationale are merged into this row so neither reading is lost.
+    "tortoise.sdk::create_source": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::create_source` — the instrument's ONE match is a REFUSAL MESSAGE, "
+        "not a store: the `#11858` marker family's error string says \u201cpass `embedding=` and it "
+        "declares the truth\u201d, and `_EMBED_WRITE` reads raw SOURCE, so quoting the rejected "
+        "keyword enrols the function — the same PROSE class as `tortoise.api::_emit` and "
+        "`tortoise.api::_verify_record_vector_width`. That match is an OPERATOR-FACING REFUSAL, "
+        "and the only `embedding=` in the body is that guard's own `ValueError`: it refuses a "
+        "caller-supplied MARKER over the ASSEMBLED `ev` **before** the props write (measured at "
+        "`tortoise/sdk.py`'s `_caller_markers` raise, above the money gate and this door's "
+        "`props` write), so the exemption rests on a guard ORDERED AHEAD of what it protects — "
+        "not on the absence of a write. ⛔ What was measured is the ABSENCE OF A "
+        "CYPHER LITERAL IN THIS FUNCTION'S OWN SOURCE: zero `.query(`, no `SET `, in 35,275 "
+        "CHARACTERS (35,541 bytes — the function carries 140 non-ASCII characters, so the character "
+        "count and the byte count differ and the figure must say which); its `MERGE`/`CREATE` "
+        "spellings are ALL prose — docstring and `#` comments, none in executable code. The "
+        "COUNT, with its tokenisation named because that is what two readers disagreed about "
+        "(`#12182` cycles 7-8): 8 word-boundary spellings — 3 in the docstring, 5 in `#` "
+        "comments — plus 2 forms that are not the keyword (`re-MERGEs`, `MERGEs`), which is why "
+        "an unanchored substring count reads 10. Both figures reproduce; only the anchored one is "
+        "the published split, so say which when quoting it. ⛔ And the door's own write path "
+        "issues NO CLAUSE OF ITS OWN — but it DOES PERSIST THE CALLER'S VECTOR, which an earlier "
+        "revision of this row denied (`#12182` cycle 9, P1, corrected). The old measurement was taken "
+        "on the STATIC clause text and is true only there: it delegates the `:Source` MERGE to "
+        "`self._create_entity` (`tortoise.sdk::_create_entity` — a SYMBOL, not a "
+        "`path:LINE`, which this table bans because an offset rots silently), which funnels "
+        "to `tortoise.projection.entities::_upsert_source`, whose `SET` "
+        "lists carry no vector property and whose one occurrence of `embedding` is the comment "
+        "“Identity is a canonicalised URL — NEVER an embedding (STORAGE §9.4)” — but which ends by "
+        "funnelling extra props through `_persist_extra_props(..., allow_keys=_allow)`, "
+        "where `_allow = self._SOURCE_EXTRA_PROPS` and is widened ONLY under `_stub_completion` by "
+        "`_SOURCE_CAPTURE_REPLAY_PROPS` (`sessionId`/`capturedAt`/`eventId`) — so name the SET, not "
+        "the bare constant (`#12182` cycle 10, P3); that closed surface DECLARES `embedding` and "
+        "emits `SET n += $extra`. Measured live: "
+        "`create_source(url, kind, props={'embedding': [0.1, 0.2, 0.3]})` then "
+        "`MATCH (s:Source {url:$u}) RETURN s.embedding` returns the caller's array, and a no-props "
+        "control node has no such key. ⛔ So `#12180`'s PREMISE IS CORRECT (a caller vector lands on "
+        "`:Source` with no gate and no width check) and this row does NOT close it. That is the "
+        "`#5004` caller-vector contract, which arrived on `main` in `18d43e0462` (`#12113`); the "
+        "disposition is the one `tortoise.api::add_point` carries — exempt as a CARRIER, and "
+        "`tortoise/projection/entities.py::_upsert_source`'s passthrough legitimately stores "
+        "`s.embedding` for the vector retrieval leg to read — NOT because no store is reachable "
+        "through it. ⛔ A `:Source` "
+        "vector ALSO exists — `_upsert_document` writes one via `set_embedding_clause(\"s\")` on the "
+        "document path — so `no-live-vector` here is a claim about this body, not about the label "
+        "(`#12182` review cycle 3, P3). Added by `#12113` and landed on `main` undeclared; `#12180` "
+        "owns that finding, and the probe was RED on `main` before this branch touched it "
+        "(measured: 5 failures whose only unclassified name is this one). `NO_LIVE_VECTOR` in "
+        "`tortoise/embed_writer_register` STILL HOLDS for this body — the door issues no clause "
+        "of its own and carries no label; it is the caller's vector, persisted by "
+        "`_upsert_source`'s passthrough, that the retrieval leg reads. \u26d4 Its guard is no longer RED: the register REFUSES a "
+        "duplicate declaration of this key at import (`#12182` review cycles 6/9). \u26d4 COUNT the "
+        "declarations, do not assume an ordinal or a per-table shape: `#12016` added one in EACH dict "
+        "and `#11996` another in EACH (two additions per commit), and at `11e733f938` the key sat TWICE "
+        "INSIDE EACH OF THE TWO DICTS — `WRITER_CENSUS` (24 keys, 2 of them this one) and "
+        "`CENSUS_EVIDENCE` (25 keys, 2 of them this one) — i.e. FOUR declarations in the file and TWO "
+        "in any ONE dict, which is the last-wins shape this row warns about. No table ever held "
+        "THREE. (Re-counted in `#12182` cycle 10 by AST over every commit that touched this file; "
+        "`main`'s `f33f5e2c32` says the same — `WRITER_CENSUS` and `CENSUS_EVIDENCE` EACH carried the "
+        "key twice.) The reading this row carried was WRONG — \"a second … a third\" — and so was the "
+        "per-dict appositive written into the REGISTER's sentence mid-review, \"one per dict\": at "
+        "`11e733f938` the CENSUS dicts EACH "
+        "held the key TWICE, not once. \u26d4 The REGISTER's ordinal is NOT thereby wrong, and an earlier "
+        "revision of this sentence said it was: `_DECLARATIONS` is ONE table and held the key 1\u00d7 after "
+        "`#12016` and 2\u00d7 after `#11996`, so \"the FIRST … a SECOND\" measures TRUE there (`#12182` "
+        "cycle 11). Only its per-dict appositive was false, because it described the CENSUS population "
+        "while naming a register count. Two tables, two counts — do not carry one onto the other. "
+        "This is the surviving census row — surviving a "
+        "de-duplication, not a refutation",
+    ),
     "tortoise.api::_int_is_float_exact": (
         CENSUS_EXEMPT,
         "`tortoise/api.py::_int_is_float_exact` — a pure PREDICATE (`float(value) == value`, "
@@ -1278,32 +1474,6 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "chain — the same direction, and for the same reason, as "
         "`_journal_event_raw_write`: its record IS what the rebuild reads the "
         "vector back from (`#8488`), not a store reached around the gate"),
-    # ⛔ ONE entry per name: a second literal key for the same name SILENTLY OVERRIDES the
-    # first (Python's last-wins dict semantics — the LATER row wins and the earlier one is
-    # dead; an active override, not a harmless no-op). `ruff`'s F601 is the only LINTER that
-    # catches it, and it caught this one only post-merge on `main` — the pytest lane could
-    # not, until `#9314`'s pin
-    # (`tests/test_dod_5090_probe.py::test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently`).
-    # Provenance and the carrier rationale are merged into this row so neither reading is lost.
-    "tortoise.sdk::create_source": (
-        CENSUS_EXEMPT,
-        "`tortoise/sdk.py::create_source` — the instrument's match is an operator-facing "
-        "REFUSAL message, not a write clause: the only `embedding=` in the body is the "
-        "`#11858` guard's own `ValueError`, whose text says \"pass `embedding=` and it "
-        "declares the truth\" — it names the keyword to say the "
-        "`_SERVER_MANAGED_EMBEDDING_MARKERS` family may NOT be set by hand, and it refuses "
-        "a caller-supplied MARKER before the props write. `_EMBED_WRITE` reads raw SOURCE, "
-        "so that prose enrols the function. The door computes no vector of its own: a "
-        "caller-supplied `embedding` is CARRIED into `_create_entity`'s `:Source` write, by the "
-        "same `_emit_event` / `_create_entity` path every other `:Source` writer uses — the "
-        "`#5004` caller-vector contract — and it names no label of its own "
-        "(`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`). Exempt as a CARRIER — the "
-        "same disposition `tortoise.api::add_point` carries, and the reason "
-        "`tortoise/projection/entities.py::_upsert_source`'s passthrough legitimately stores "
-        "`s.embedding` for the vector retrieval leg to read — NOT because no store is "
-        "reachable through it. ⛔ Arrived on `origin/main` in `18d43e0462` (`#12113`) WITHOUT "
-        "a census entry, so the probe was red on `main` before this branch touched it "
-        "(measured: 5 failures whose only unclassified name is this one)"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
         "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
@@ -1704,7 +1874,27 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # aliased `encode_for_row` reds the population as an unresolved producer (a false
             # declaration owed) and an aliased clause builder is a SILENT MISS (a false `bypass`
             # answer, the direction that matters).
-            aliases = {**module_aliases, **_import_aliases(node)}
+            # ⛔ ⛔ RANK ACROSS THE MERGE, not only within it (`#12020` round 8 cycle 5, P1). A plain
+            # `{**module_aliases, **writer_aliases}` lets a WRITER-scope binding overwrite the
+            # module's whatever its rank — and a writer-scope import is not automatically the live
+            # one: the PR's own pins use `if TYPE_CHECKING:` for exactly this idiom, so a DEAD
+            # writer-scope seam import beat a live module-level BUILDER alias and the writer measured
+            # `gated` (outside `NEEDS_A_DECLARATION`). ⛔ Measured at `origin/main` `f33f5e2c32`: that
+            # arm reads `gated` there as well (plain `{**module, **writer}`), and the rank-1 variant
+            # reads `ungated` — so these are a pre-existing HIDE and a pre-existing DEMOTION this rule
+            # closes, NOT a regression against `main` (the rebase review measured the earlier wording
+            # false). Ranks are the
+            # same ones `_import_aliases` uses for a same-scope collision, so the resolution cannot
+            # depend on WHICH map a binding came from either.
+            aliases = dict(module_aliases)
+            for _name, _canon in _import_aliases(node).items():
+                _previous = aliases.get(_name)
+                # ⛔ `_previous is None` FIRST, not `rank(canon) > rank(aliases.get(name, ""))`: an
+                # absent key is not rank 0, it is "no binding" — and a SEAM alias IS rank 0, so the
+                # sentinel silently dropped every writer-level seam import (measured: the
+                # `closure_scoped_alias` blind shape flipped from `gated` to `{}`).
+                if _previous is None or _alias_preference(_canon) > _alias_preference(_previous):
+                    aliases[_name] = _canon
             # ⛔ `#12020` round 3: an alias the writer REBINDS is not that reach. Measured —
             # `from … import encode_for_row as _enc` followed by a writer-local `_enc = lambda p: p`
             # still credited `encode_for_row`, classing a writer that never reaches the gate as
@@ -5234,6 +5424,16 @@ def _sdk_methods_on_vector_leg(
         Not modelled, and named rather than implied: `global` / `nonlocal` (they rebind a name whose
         scope this walk does not track). Both are OVER-reports at worst, and a foreign receiver that
         happens to be named exactly like the enclosing class is the same direction.
+
+        ⛔ …and the PEP 572 CONTAINING-SCOPE half of the comprehension skip below (`#12182` review,
+        P3). This walk `continue`s past a comprehension subtree, but a walrus INSIDE one binds in the
+        CONTAINING scope, not the comprehension's — so `[(_pool := r) for r in rows]` followed by a
+        mention of `_pool` is published as a genuine by-reference reach. That is the OVER-report
+        direction (a cry-wolf caveat on an otherwise complete table), i.e. the safe side, which is
+        why it is disclosed here rather than fixed in a lane that came to land something else. It is
+        the same asymmetry `_NEW_SCOPE_NODES`' comment names as "the PEP 572 containing-scope rule
+        absent THERE", and the LAMBDA half of that asymmetry is what this change fixes; the
+        comprehension half is tracked separately as `#12306`.
         """
         shadowed: set[str] = set(_parameter_names(fn.args))
         for sub in list(fn.body):
@@ -5251,6 +5451,25 @@ def _sdk_methods_on_vector_leg(
                 # under-report direction this guard exists to narrow, not create
                 # (#11389 review). Comprehension scopes are skipped entirely.
                 if isinstance(n, _COMPREHENSION_NODES):
+                    continue
+                # ⛔ AND a LAMBDA is its own scope too (`#12020` round 8 cycle 6, P3). The two skips
+                # above were the only ones, so the walk descended into a lambda BODY and a walrus
+                # there (`f = lambda: (_pool := 1)`) landed in the METHOD's shadow set and suppressed
+                # a genuine by-reference mention of `_pool` further down — the UNDER-report
+                # direction, and the same asymmetry `#11397` closed one spelling over (nested `def`
+                # body vs comprehension body). `dis` confirms the lambda's walrus is `STORE_FAST` in
+                # the lambda, leaving the enclosing binding untouched. A lambda binds no NAME here,
+                # so there is nothing to add before `continue`.
+                if isinstance(n, ast.Lambda):
+                    # ⛔ …but its DEFAULTS are evaluated in the ENCLOSING scope, so a walrus there DOES
+                    # bind here (`symtable`: `f = lambda v=(_p := 1): v` puts `_p` in the METHOD's
+                    # locals, and the lambda's in `v` only). Skipping the whole node made this walk
+                    # disagree with the mention walk, which already walks lambda defaults
+                    # unwidened — and it traded the correct verdict for the body case (round 8
+                    # cycle 7, P3: the default spelling was shadowed before the body fix and was
+                    # published as a reach after it). Walk the enclosing-scope half, THEN stop.
+                    stack_s.extend(n.args.defaults)
+                    stack_s.extend(d for d in n.args.kw_defaults if d is not None)
                     continue
                 if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
                     shadowed.add(n.id)
@@ -5372,7 +5591,13 @@ def _sdk_methods_on_vector_leg(
             # DEFAULTS are evaluated in the ENCLOSING scope (like the outer `for` iterable), so
             # they are walked unwidened.
             if isinstance(node, ast.Lambda):
-                lam_bound = comp_bound | _parameter_names(node.args)
+                # ⛔ AND THE BODY'S OWN BINDINGS (`#12182` review P3): a walrus in the lambda body
+                # binds in the LAMBDA, so a mention of that name later in the SAME lambda is not a
+                # method reach. Parameters were threaded and body targets were not, so
+                # `lambda: (_safe((_p := 1)), _safe(_p))` was published as a by-reference use of the
+                # method's `_p` — the cry-wolf direction. Mirrors `comp_bound`'s rule one scope over.
+                lam_bound = (comp_bound | _parameter_names(node.args)
+                             | _lambda_body_bindings(node.body))
                 for default in node.args.defaults:
                     stack.append((default, comp_bound))
                 for default in node.args.kw_defaults:

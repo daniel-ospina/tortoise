@@ -89,7 +89,9 @@ def _seed_graph(sdk, *, namespace: str) -> None:
 def _run_one(sdk, query: str) -> float:
     """One search call; returns latency ms. Raises on hard failure."""
     t0 = time.monotonic()
-    sdk.tortoise_fts_query(query, limit=10)
+    # #12297: a LATENCY probe against a recorded baseline — the fused rerank
+    # would add its own cost and re-pick the page at limit=10.
+    sdk.tortoise_fts_query(query, limit=10, _rerank_candidates=False)
     return (time.monotonic() - t0) * 1000.0
 
 

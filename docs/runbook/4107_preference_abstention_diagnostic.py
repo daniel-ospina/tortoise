@@ -200,6 +200,11 @@ def measure(*, replay: bool) -> dict:
                 limit=caps["limit"],
                 pool_size=caps["pool_size"],
                 include_terminal=True,
+                # #12297: the ask lane's own caps (``limit`` is well inside the
+                # pool width), so an armed rerank would re-pick which rows this
+                # rank sees — and there is no leg trace reader here to disclose
+                # it. Same class as ``tools/why_layer_rate.py``'s probe.
+                _rerank_candidates=False,
                 leg_trace=leg_trace,
                 keep_numeric=ask_env_bool("TORTOISE_ASK_NUMERIC_TOKENS", True),
                 search_keys_prf=ask_env_bool("TORTOISE_ASK_SEARCH_KEYS_PRF", True),  # A4 pinned ON (lane defaults OFF, #4593)

@@ -1,4 +1,4 @@
-// tortoise-hook-version: 19
+// tortoise-hook-version: 21
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -40,6 +40,19 @@
 // shipped bytes move. `session verify`'s "it captures with older logic"
 // wording is imprecise for this one generation; the classification and the
 // repair it prompts are right.
+//
+// Generation 21 (#11802): the capture drain stops DESTROYING a spool entry it
+// could not read. Reading and parsing were one `catch`, so a `PermissionError`
+// at `open` was recorded as "meta is not valid JSON" — a claim about bytes the
+// process never opened — and the transcript was quarantined while the meta (the
+// only copy of the session id, the capture instant and the retry state) was
+// unlinked. 1,356 of 3,384 lost sessions were this class. A read refusal is now
+// `meta_unreadable`, RETAINED and retryable with both files left in place; only
+// a real parse failure keeps the quarantine path. A behavioural edit, so the
+// generation moves with it: a generation-20 install must read as STALE
+// ("reinstall"), never as `modified-artifact` ("local edit"). Both halves of the
+// Pi seam move together — `contract_version_for("pi")` grades them as ONE
+// contract.
 //
 // Generation 19 (#11662): the MARKER moves onto bytes that already shipped —
 // the same shape as generation 4. #11636 edited this artifact and left the
@@ -1047,6 +1060,26 @@ export const DISCARD_TRANSCRIPT_EMPTY = "transcript_empty";
  *  read/decode failure must not delete the only copy of a conversation. */
 export const DISCARD_TRANSCRIPT_TORN = "transcript_torn";
 export const DISCARD_CORRUPT = "corrupt_entry";
+/** The meta could not be READ (EACCES, EIO, EISDIR, or an ENOENT raced between
+ *  `readdir` and `open`) — we never saw its bytes, so we know nothing about
+ *  whether they are valid (#11802).
+ *
+ *  Distinct from {@link DISCARD_CORRUPT}, which now means only "the bytes were
+ *  read and are not a usable meta". The two used to share one `catch`, and the
+ *  shared arm reported a READ refusal as "meta is not valid JSON" — a
+ *  statement about bytes the process never opened — then quarantined the turn
+ *  log and unlinked the meta.
+ *
+ *  This arm RECORDS and KEEPS: `retained: true`, the meta and the turn log
+ *  left exactly where they are, so the next drain retries. A read refusal is a
+ *  property of WHO IS ASKING, not of the entry — the same file is often
+ *  perfectly readable a second later, or by another uid — so destroying it
+ *  turns a permission mismatch into permanent loss. The meta is also the only
+ *  copy of the `session_id` and `client_captured_at` that anchor the
+ *  `AgentSession` Event (`docs/ONTOLOGY.md` §5, content-addressed `eventId`),
+ *  and of the retry state (`capture_key`/`attempts`/`filed_key`), so removing
+ *  it makes the entry unfilable by ANY verb. */
+export const DISCARD_META_UNREADABLE = "meta_unreadable";
 /** A filesystem error while writing the spool — recorded, never silent. */
 export const DISCARD_WRITE_FAILED = "spool_write_failed";
 /** The spool's own `entries/` listing cannot be read — every capture is invisible. */
@@ -1137,6 +1170,14 @@ export interface SpoolMeta {
    *  equal. */
   filed_stamp?: number;
   filed_at?: string;
+  /** #12379: the Python drain filed this entry with an extraction outcome the
+   *  server never recorded (`extraction_outcome: "unknown"`). Written ONLY by
+   *  that leg; this one PRESERVES it across snapshots, because a growing session
+   *  rewrites the meta on every turn and the state is not resolved by a new turn
+   *  (a NULL-outcome session replays instead of re-extracting). Without the carry
+   *  a Python-stamped entry loses its only durable trace the next time the Pi leg
+   *  re-snapshots it — the two legs share this directory. */
+  extraction_outcome?: string;
   /** #7708: set when a PERMANENT HTTP refusal was recorded. The entry is KEPT
    *  but `flushSpool` skips it — terminal, never destructive. Cleared when a
    *  later snapshot REBUILDS the meta (genuinely new content → a fresh,
@@ -1400,7 +1441,31 @@ export function readSpoolTurns(dir: string, sessionId: string): Turn[] {
   return turns;
 }
 
-/** All spool metas (unreadable metas are surfaced as `corrupt_entry` discards). */
+/** All spool metas.
+ *
+ *  Two distinct non-meta outcomes, and they are NOT the same event (#11802):
+ *
+ *  - `meta_unreadable` — the meta could not be READ (EACCES/EIO/EISDIR, or an
+ *    ENOENT that raced another drain's unlink). Nothing is concluded about the
+ *    entry, and NOTHING IS DESTROYED: the record is `retained: true`, the meta
+ *    and its turn log stay exactly where they are, and the next drain retries.
+ *  - `corrupt_entry` — the bytes WERE read and are not a usable meta (invalid
+ *    JSON, or valid JSON with no usable `session_id`). This keeps the #7708
+ *    repair path: record it, quarantine the turn log, remove the meta.
+ *
+ *  Sharing one repair between them reported a permission refusal as data
+ *  corruption and destroyed 1,356 sessions the draining process was never
+ *  allowed to read (#11802). Pinned by
+ *  `tests/test_capture_spool.py` (Python leg) and `tortoise-capture.test.ts`
+ *  (this leg), in BOTH directions.
+ *
+ *  Mirrors `capture_spool.list_spool_metas` EXCEPT on non-UTF-8 bytes, and the
+ *  exception is stated rather than papered over: Python's decoder raises
+ *  `UnicodeDecodeError` (→ corrupt, entry destroyed) while Node's
+ *  `readFileSync(…, "utf8")` never throws and substitutes U+FFFD (→ a usable
+ *  meta, entry filed). The two legs drain ONE directory, so this is a
+ *  pre-existing divergence, NOT something this change introduced — filed
+ *  separately rather than widened here. */
 export function listSpoolEntries(
   dir: string,
   opts: { repair?: boolean } = {},
@@ -1415,6 +1480,10 @@ export function listSpoolEntries(
   const repair = opts.repair !== false;
   const metas: SpoolMeta[] = [];
   const discards: DiscardRecord[] = [];
+  // #11802 review cycle 2: an unreadable meta is STATE, not a per-turn event, so
+  // it is recorded ONCE per distinct unreadable SET (see the aggregate below)
+  // rather than once per file per scan.
+  const unreadable: { stem: string; message: string }[] = [];
   const root = entriesDir(dir);
   let names: string[];
   try {
@@ -1441,10 +1510,31 @@ export function listSpoolEntries(
   for (const name of names) {
     if (!name.endsWith(".meta.json")) continue;
     const path = join(root, name);
+    // ⛔ READING and PARSING are two different diagnoses and must not share one
+    // `catch` (#11802). A read refusal proves we never saw the bytes; a parse
+    // failure proves we saw them and they are unusable. Collapsing them made
+    // this function report "meta is not valid JSON" about files the process
+    // never opened, and — worse — act on that conclusion destructively.
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch (err) {
+      // ENOENT here is a race with another drain's unlink, not a corruption —
+      // wrong MOMENT, not wrong bytes. Every errno in this arm is the same
+      // class: the entry was not read, so nothing may be concluded about it.
+      if (repair) {
+        unreadable.push({
+          stem: name.replace(/\.meta\.json$/, ""),
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      continue;
+    }
     let meta: SpoolMeta | undefined;
     try {
-      meta = JSON.parse(readFileSync(path, "utf8")) as SpoolMeta;
+      meta = JSON.parse(raw) as SpoolMeta;
     } catch {
+      // Now this really IS a parse failure: the bytes were read and rejected.
       meta = undefined;
     }
     if (!meta || typeof meta.session_id !== "string" || !meta.session_id) {
@@ -1470,6 +1560,68 @@ export function listSpoolEntries(
       continue;
     }
     metas.push(meta);
+  }
+  // ── #11802: ONE record per distinct unreadable SET ─────────────────────────
+  // An unreadable meta is STATE ("these entries cannot be read by this uid"),
+  // not a per-turn event. Recorded per FILE per scan, `discarded.jsonl` grows
+  // with turns: the repairing scan also runs on the per-turn write path
+  // (`pruneSpool`), and 1,356 unreadable entries is the measured population.
+  //
+  // Two things make this bounded, and the FIRST is the subtle one:
+  //  - The dedupe stamp is a digest of the unreadable STEM SET, NOT `entries/`
+  //    mtime. A turn writes a NEW (readable) meta, which moves `entries/` mtime
+  //    on every turn — so a dir-stamp key suppresses nothing on exactly the path
+  //    this exists for. The stem set is unchanged by a new session, so a steady
+  //    state is ONE line no matter how many turns pass.
+  //  - ONE aggregate per distinct SET consumes ONE slot of the (32-wide)
+  //    refusal window, so N unreadable entries in a STABLE set cost one slot, not
+  //    N. That is not the same as "cannot crowd the window": the digest is in the
+  //    pair key, so K distinct sets occupy up to K slots and can evict an
+  //    admission refusal once K approaches 32 (measured, review cycle 4). That
+  //    outcome is FAIL-SAFE — `refusedAtCurrentState` misses and pays a full scan
+  //    instead of short-circuiting, and the evicted refusal simply re-records
+  //    once — so it costs work, never correctness. Stated exactly because the
+  //    invariant a reader trusts here is what decides whether the window is safe.
+  //
+  //  ⚠️ The trade, stated: the record names a COUNT and one example path, not one
+  //  record per entry, so an operator holding only `discarded.jsonl` cannot
+  //  enumerate all of them from the ledger — they read the count here and list
+  //  `entries/` for the rest. Boundedness is worth that; an unbounded per-entry
+  //  ledger is not an audit trail, it is a second problem.
+  if (unreadable.length) {
+    const stems = unreadable.map((u) => u.stem).sort();
+    const stamp = stemSetStamp(stems);
+    const example = unreadable[0]!.message;
+    discards.push(
+      recordRefusal(
+        dir,
+        {
+          // The digest is IN the pair key, not only in the stamp. Only ONE
+          // observation is remembered per (session_id, reason), so a fixed id
+          // would remember just the newest set — and an alternating set (the
+          // ENOENT race this very arm names, or real prune churn) would re-record
+          // BOTH directions on every alternation, forever. Keying on the set
+          // makes each distinct set its own pair: bounded by the 32-wide window —
+          // a set is recorded once while the number of DISTINCT unreadable sets
+          // seen inside that window stays <= 32; past that a cycling set is
+          // evicted and re-records, which costs one ledger line per scan and
+          // never correctness.
+          session_id: `unreadable:${stamp}`,
+          reason: DISCARD_META_UNREADABLE,
+          // RETAINED: every one of these metas AND its turn log stay on disk,
+          // unquarantined and un-unlinked, so the next drain retries. Never a
+          // loss — a read refusal is reversible (fix the permission / run as
+          // the right uid), and each entry keeps its ONLY copy of the session
+          // id and the retry state.
+          retained: true,
+          detail:
+            `cannot read ${unreadable.length} spool meta(s): ${example}` +
+            " — left in place and retryable; the bytes were never seen, so these" +
+            " are NOT corrupt entries",
+        },
+        { stamp },
+      ),
+    );
   }
   return { metas, discards };
 }
@@ -1657,6 +1809,31 @@ function entriesDirStamp(dir: string): string {
   }
 }
 
+/** A stable dedupe stamp for a SET of names (#11802).
+ *
+ *  `entriesDirStamp` above exists to answer "is this refusal verdict still true?",
+ *  so it deliberately includes `entries/` mtime — which ANY write to the
+ *  directory moves. That is right for an admission refusal and wrong for a set of
+ *  unreadable files: a turn writes a new (readable) meta, the mtime moves, and a
+ *  dir-stamp key therefore suppresses nothing on exactly the per-turn path the
+ *  dedupe is for. This stamp changes only when the SET changes.
+ *
+ *  ⛔ Do NOT "restore" the mtime term here. It was the cycle-1 bug: the key
+ *  looked right and suppressed nothing in production, while passing a test that
+ *  never wrote between scans.
+ *
+ *  Byte-identical to the Python leg's `_stem_set_stamp`, so the two legs — which
+ *  share one spool root and one ledger — dedupe each other's records, for every
+ *  entry EITHER leg writes (stem = an `entryKey()` hex digest). Scope, stated
+ *  because it is not the whole directory: both sort the stem list (JS by UTF-16
+ *  code unit, Python by code point) and the scan does not filter names to key
+ *  shape, so a foreign/hand-placed file whose ordering differs between the two
+ *  sorts yields two digests and the legs record one line each for the same set —
+ *  cost, never correctness (the retention decision is per entry, not per digest). */
+function stemSetStamp(stems: string[]): string {
+  return `set:${createHash("sha256").update(stems.join("\n"), "utf8").digest("hex").slice(0, 16)}`;
+}
+
 /** The ceilings a refusal was measured against, as ONE string.
  *
  * `<maxEntries>:<maxTotalBytes>` — the EXACT string the Python leg's
@@ -1785,12 +1962,16 @@ export function recordRefusal(
     bounds?: SpoolBounds;
     projectedBytes?: number;
     replacesSessionId?: string;
+    /** Override the `entries/` dir stamp as the dedupe stamp. Used by the
+     *  unreadable-set aggregate (#11802), whose identity is the SET of stems and
+     *  NOT the directory state — see {@link stemSetStamp}. */
+    stamp?: string;
   },
 ): DiscardRecord {
   const fingerprint = {
     session_id: rec.session_id,
     reason: rec.reason,
-    entries_stamp: entriesDirStamp(dir),
+    entries_stamp: verdict?.stamp ?? entriesDirStamp(dir),
     // The verdict's INPUTS, alongside its key — `admissionSaturated` reuses this
     // stamp to answer "is this refusal still true?" without a scan, and that
     // reuse is only sound for the same ceilings and a projection no smaller than
@@ -2064,6 +2245,30 @@ export function writeSpoolEntry(
     // (attempts=0) and a genuinely fresh entry starts at zero.
     attempts: clampAttempts(prior?.attempts),
     next_attempt_at_ms: carriedWindow(prior?.next_attempt_at_ms),
+    // #12379: the Python drain's "extraction outcome was never recorded" marker
+    // is CARRIED, not rebuilt. This leg never WRITES it and never CLEARS it: the
+    // drain's filing CAS (`capture_spool._flush_one`) does both, stamping on a
+    // body that says the outcome was never recorded and clearing on a body that
+    // instead REPORTS it (`filed` / `unextracted`).
+    //
+    // ⚠️ This leg DOES file (its own `flushSpool`), but its filing path reads no
+    // response body — `PostResult` carries none — so it CANNOT stamp or clear
+    // this key. Its obligation is therefore PRESERVATION, and stating the
+    // residual rather than implying it: a session whose growth is filed by this
+    // leg keeps a marker that a Python-side filing of the same verdict would
+    // have cleared, until the entry is pruned. That over-reports an unknown state
+    // (it can never hide a resolved one), which is why the `session health` line
+    // is worded historically; porting the clear here needs the body on this path.
+    //
+    // The carry itself matters because the two legs share this directory: a
+    // growing session rewrites the meta on EVERY turn, so a fresh meta literal
+    // without it would erase a Python-stamped entry's only durable trace on the
+    // next Pi snapshot. A new turn cannot resolve the state (a NULL-outcome
+    // session replays rather than re-extracts), so preserving it is the safe
+    // answer for the leg that cannot decide.
+    ...(prior?.extraction_outcome === "unknown"
+      ? { extraction_outcome: "unknown" }
+      : {}),
     // A lane UPGRADE also invalidates the filing marker: `filed_key` is
     // content-derived (the lane is not part of it), so an entry already filed
     // lane-less would otherwise keep its marker and be skipped by the drain
