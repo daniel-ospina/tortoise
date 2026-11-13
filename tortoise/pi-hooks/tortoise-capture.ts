@@ -2073,16 +2073,26 @@ export function writeSpoolEntry(
     attempts: clampAttempts(prior?.attempts),
     next_attempt_at_ms: carriedWindow(prior?.next_attempt_at_ms),
     // #12379: the Python drain's "extraction outcome was never recorded" marker
-    // is CARRIED, not rebuilt. This leg never WRITES it and never CLEARS it —
-    // the drain's filing CAS (`capture_spool._flush_one`) does both, stamping on
-    // a body that says the outcome was never recorded and clearing on a body
-    // that instead REPORTS it (`filed` / `unextracted`). This leg's obligation
-    // is PRESERVATION only, and it matters because the two legs share this
-    // directory: a growing session rewrites the meta on EVERY turn, so a fresh
-    // meta literal without this carry would erase a Python-stamped entry's only
-    // durable trace on the next Pi snapshot. A new turn cannot resolve the state
-    // (a NULL-outcome session replays rather than re-extracts), so preserving it
-    // is always the safe answer for the leg that never drains.
+    // is CARRIED, not rebuilt. This leg never WRITES it and never CLEARS it: the
+    // drain's filing CAS (`capture_spool._flush_one`) does both, stamping on a
+    // body that says the outcome was never recorded and clearing on a body that
+    // instead REPORTS it (`filed` / `unextracted`).
+    //
+    // ⚠️ This leg DOES file (its own `flushSpool`), but its filing path reads no
+    // response body — `PostResult` carries none — so it CANNOT stamp or clear
+    // this key. Its obligation is therefore PRESERVATION, and stating the
+    // residual rather than implying it: a session whose growth is filed by this
+    // leg keeps a marker that a Python-side filing of the same verdict would
+    // have cleared, until the entry is pruned. That over-reports an unknown state
+    // (it can never hide a resolved one), which is why the `session health` line
+    // is worded historically; porting the clear here needs the body on this path.
+    //
+    // The carry itself matters because the two legs share this directory: a
+    // growing session rewrites the meta on EVERY turn, so a fresh meta literal
+    // without it would erase a Python-stamped entry's only durable trace on the
+    // next Pi snapshot. A new turn cannot resolve the state (a NULL-outcome
+    // session replays rather than re-extracts), so preserving it is the safe
+    // answer for the leg that cannot decide.
     ...(prior?.extraction_outcome === "unknown"
       ? { extraction_outcome: "unknown" }
       : {}),

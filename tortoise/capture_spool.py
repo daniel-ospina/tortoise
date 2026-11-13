@@ -1743,10 +1743,16 @@ def write_spool_entry(
     # way, so a new turn only ever PRESERVES what the last filing concluded.
     # ⛔ MIRRORED on the Pi leg — `writeSpoolEntry` in
     # `tortoise/pi-hooks/tortoise-capture.ts` carries the same key forward as a
-    # PRESERVATION obligation (that leg never drains, so it never stamps or
-    # clears), since the two legs share this directory and its fresh meta literal
-    # would otherwise erase a Python-stamped entry's marker (the cross-leg gap a
-    # reviewer proved).
+    # PRESERVATION obligation, because a fresh meta literal there would otherwise
+    # erase a Python-stamped entry's marker (the cross-leg gap a reviewer proved).
+    # ⚠️ RESIDUAL, stated rather than implied: that leg ALSO files (its own
+    # `flushSpool`), but its filing path reads no response body (`PostResult`
+    # carries none), so it can neither stamp this key nor CLEAR it — a session
+    # whose growth is filed by the Pi leg keeps a marker that a Python-side
+    # filing of the same verdict would have cleared. Not a false PASS (the trace
+    # only ever over-reports an unknown state, never hides one) and it is what
+    # the health line's HISTORICAL wording exists to survive; porting the clear
+    # to the Pi CAS needs the body on that path.
     if (prior or {}).get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE:
         meta[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
     # Set-only-when-present, FIRST-WRITER-WINS, and — unlike `model` below,

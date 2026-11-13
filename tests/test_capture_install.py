@@ -4856,7 +4856,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: trace survives past the session's next `turn_end` (BEHAVIOUR moved, so the
 #: generation moved with it).
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    20, "eeaf012ec8561fd067bef8100c91afa405f28bccc6d8cb679b7581cfd28573df")
+    20, "bf1a5b39a0b1433aa6b7e3e9a2231aed974e56f2133cb8f321cdb4de2a00ce9a")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4977,7 +4977,7 @@ _GENERATION_DIGESTS = {
     # next turn. BEHAVIOUR MOVED, so the generation moves with it: an installed
     # generation-19 copy still erases the marker, and a byte change under an
     # unchanged generation would read as a user's `modified-artifact`.
-    20: "eeaf012ec8561fd067bef8100c91afa405f28bccc6d8cb679b7581cfd28573df",
+    20: "bf1a5b39a0b1433aa6b7e3e9a2231aed974e56f2133cb8f321cdb4de2a00ce9a",
 }
 
 #: The READ half of the same Pi seam (#2119) — a SECOND shipped artifact of the
