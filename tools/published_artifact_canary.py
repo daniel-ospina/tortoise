@@ -905,8 +905,10 @@ def install_and_run(
             # pip's absence vocabulary matched — but pip prints it for an UNREACHABLE
             # index too (measured), so probe before telling a human that users cannot
             # install the release. THREE answers, not two (#12363 round 11):
-            #   INDEX_UNREADABLE → UNKNOWN. The probe got no answer, so the pip failure
-            #     is unexplained: a detector outage, never a release call.
+            #   anything that is not one of the two NAMED states below → UNKNOWN — an
+            #     ALLOW-LIST. INDEX_UNREADABLE is that case, and so is every unnamed value:
+            #     the probe got no usable answer, so the pip failure is unexplained — a
+            #     detector outage, never a release call.
             #   INDEX_ABSENT     → FAIL. The project is gone from the index.
             #   INDEX_OK         → FAIL. ⛔ THIS BRANCH USED TO RETURN UNKNOWN, WHICH MADE
             #     THE FAIL ARM BELOW UNREACHABLE. `_main` only calls this function after a
@@ -924,14 +926,22 @@ def install_and_run(
             #     exact version — a finding about the ARTIFACT, not about the detector.
             probe = absent_probe or (lambda name: index_absence_probe(name))
             confirmed = probe(package)
-            if confirmed == INDEX_UNREADABLE:
+            # ⛔ AN ALLOW-LIST, not `== INDEX_UNREADABLE` (#12422 round-19 review P2).
+            # The two NAMED states below are the only ones that justify a verdict; every
+            # other value — `None`, `""`, or a state a later refactor introduces — means
+            # the probe produced no reading, so it must not be rendered as "the index
+            # still serves the project (None)" and must not return the FAIL that sends a
+            # human to cut an IRREVERSIBLE release. Deny-listing the UNKNOWN put the
+            # unknown side of the fork on the dangerous verdict — the mirror of the
+            # round-11 defect this same block already fixed.
+            if confirmed not in (INDEX_ABSENT, INDEX_OK):
                 return (
                     Arm(
                         "engine-init",
                         UNKNOWN,
-                        f"`pip install {spec}` failed and the index could not be re-read "
-                        f"to establish whether the release exists ({confirmed}) — a "
-                        f"detector outage, not a reading about the artifact",
+                        f"`pip install {spec}` failed and the index probe returned no "
+                        f"usable state ({confirmed!r}) — a detector outage, not a reading "
+                        f"about the artifact",
                     ),
                     "\n".join(transcript),
                 )

@@ -660,6 +660,20 @@ def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_
     )
     assert "users cannot even install" in ok_arm.detail, ok_arm.detail
     assert "detector outage" not in ok_arm.detail, ok_arm.detail
+    # ⛔ AN UNNAMED PROBE STATE IS NEVER THE RELEASE CALL (#12422 round-19 review P2).
+    # This branch used to DENY-LIST: only INDEX_UNREADABLE reached UNKNOWN, so `None` — no
+    # reading at all — fell into BOTH the FAIL and the "the index still serves the project
+    # (None)" sentence, i.e. it told a human to perform an IRREVERSIBLE upload on a detector
+    # that had produced nothing. Every value that is not one of the two NAMED states must
+    # route to UNKNOWN, whatever a future refactor decides to call a state.
+    for unnamed in (None, "", "some-future-state"):
+        unnamed_arm = _run(unnamed)
+        assert unnamed_arm.status == canary.UNKNOWN, (
+            f"probe state {unnamed!r} is not a reading about the artifact, so it must not "
+            f"become a release call (got {unnamed_arm.status}: {unnamed_arm.detail})"
+        )
+        assert "users cannot even install" not in unnamed_arm.detail, unnamed_arm.detail
+        assert "detector outage" in unnamed_arm.detail, unnamed_arm.detail
     # and a failure pip does not attribute to a missing distribution is never a FAIL
     arm = canary.install_and_run(
         package="tortoise-graph",
