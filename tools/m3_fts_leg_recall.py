@@ -109,6 +109,21 @@ WHAT THIS DOES NOT MEASURE (declared, not buried)
 """
 from __future__ import annotations
 
+import sys
+
+# #5128 (the repo's entry-point contract): refuse a <3.12 interpreter HERE, before
+# the rest of the imports, so a stale local `python3` fails LOUDLY with a remedy
+# instead of with whichever 3.12-only construct happens to trip first.
+# `tests/test_entry_point_python_guard.py` asserts structurally that this guard
+# precedes every other import and behaviourally that it names the floor, the
+# interpreter it got, and the invocation that works.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/m3_fts_leg_recall.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/m3_fts_leg_recall.py`"
+    )
+
 import argparse
 import collections
 import hashlib
@@ -117,7 +132,6 @@ import math
 import os
 import re
 import statistics
-import sys
 import time
 from pathlib import Path
 
@@ -150,7 +164,7 @@ def _import_instrument():
     #11901's definitions of the population. A copy would let the two
     measurements drift, and the drift would be invisible in both artifacts.
     """
-    from tools.candidate_recall_11901 import (  # noqa: PLC0415 — deliberate lazy import
+    from tools.candidate_recall_11901 import (
         _allocate_shares,
         _interleave,
         build_population,
@@ -234,7 +248,7 @@ def production_terms(query: str) -> tuple[list[str], bool]:
     verified, never assumed: a drifted "controlled" arm would measure a
     tokenizer that is not the product's and look perfectly healthy.
     """
-    from tortoise.sparse import (  # noqa: PLC0415 — lazy, keeps import cheap
+    from tortoise.sparse import (
         DEFAULT_MAX_OR_TERMS,
         identifier_aliases,
         identifier_phrase_terms,
@@ -262,7 +276,7 @@ def production_terms(query: str) -> tuple[list[str], bool]:
 
 def assert_terms_match(queries: list[str]) -> None:
     """Fail closed unless the term list reproduces ``build_or_query`` byte-exactly."""
-    from tortoise.sparse import (  # noqa: PLC0415
+    from tortoise.sparse import (
         build_or_query,
         escape_redisearch_literal,
     )
@@ -339,7 +353,7 @@ def _fts_cypher(graph, or_string: str, limit: int) -> list[tuple[str, float]]:
     reproducing ``run_fts_query`` — a replica nobody checks is a second
     implementation.
     """
-    from tortoise.search_engine import (  # noqa: PLC0415
+    from tortoise.search_engine import (
         _exclude_status_clause,
         _status_vocab_for,
         recency_tie_clause,
@@ -362,8 +376,8 @@ def _fts_cypher(graph, or_string: str, limit: int) -> list[tuple[str, float]]:
 
 def verify_cypher_parity(graph, queries: list[str]) -> None:
     """Refuse unless :func:`_fts_cypher` reproduces ``run_fts_query`` exactly."""
-    from tortoise.search_engine import run_fts_query  # noqa: PLC0415
-    from tortoise.sparse import build_or_query  # noqa: PLC0415
+    from tortoise.search_engine import run_fts_query
+    from tortoise.sparse import build_or_query
     for q in queries:
         want = run_fts_query(graph, q, entity_type="object", limit=10)
         got = _fts_cypher(graph, build_or_query(q), 10)
@@ -376,10 +390,10 @@ def verify_cypher_parity(graph, queries: list[str]) -> None:
 
 def arm_falkordb(rows: list[dict], graph_name: str, namespace: str,
                  ks: tuple[int, ...], *, recovery: bool = False) -> dict:
-    from tortoise.extractor_v2 import _sanitise_query_text  # noqa: PLC0415
-    from tortoise.sdk import TortoiseSDK  # noqa: PLC0415
-    from tortoise.search_engine import run_fts_query  # noqa: PLC0415
-    from tortoise.sparse import build_or_query  # noqa: PLC0415
+    from tortoise.extractor_v2 import _sanitise_query_text
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.search_engine import run_fts_query
+    from tortoise.sparse import build_or_query
 
     sdk = TortoiseSDK(namespace=namespace, graph_name=graph_name)
     proj = sdk._get_proj()
@@ -430,7 +444,7 @@ def arm_falkordb(rows: list[dict], graph_name: str, namespace: str,
             # recover nothing.
             built = build_or_query(q)
             extra = [t for t in recovery_terms(q) if t not in built.split("|")]
-            or_string = "|".join([built] + extra) if extra else built
+            or_string = "|".join([built, *extra]) if extra else built
         by_class[row["cls"]]["n"] += 1
         found_at: int | None = None
         for k in ks:
@@ -503,15 +517,16 @@ def _wait_indexed(proj, expected: int, timeout_s: float = 60.0) -> tuple[int, fl
 # ── the Postgres arm ────────────────────────────────────────────────────────
 
 def arm_postgres(rows: list[dict], dsn: str, ks: tuple[int, ...]) -> dict:
-    from tortoise.extractor_v2 import _sanitise_query_text  # noqa: PLC0415
-    import psycopg2  # noqa: PLC0415
+    import psycopg2
+
+    from tortoise.extractor_v2 import _sanitise_query_text
     conn = psycopg2.connect(dsn)
     conn.autocommit = True
     cur = conn.cursor()
     cur.execute("CREATE EXTENSION IF NOT EXISTS pg_search")
     cur.execute("DROP TABLE IF EXISTS m3_objects")
     cur.execute("CREATE TABLE m3_objects (id text PRIMARY KEY, name text NOT NULL)")
-    from psycopg2.extras import execute_values  # noqa: PLC0415
+    from psycopg2.extras import execute_values
     execute_values(cur, "INSERT INTO m3_objects (id, name) VALUES %s",
                    [(r["id"], r["name"]) for r in rows], page_size=500)
     cur.execute("CREATE INDEX m3_objects_bm25 ON m3_objects USING bm25 (id, name)")
@@ -733,7 +748,7 @@ def run(args: argparse.Namespace) -> int:
             art["comparisons"][f"falkordb_tfidf__vs__{other}"] = compare(
                 base, art["arms"][other], ks)
         primary = art["comparisons"][
-            f"falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
+            "falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"]
         passed = (primary["b_recall"] > primary["a_recall"]
                   and primary["mcnemar_p_two_sided"] < 0.05)
         art["verdict"] = {
@@ -775,7 +790,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _sanitise(name: str) -> str:
-    from tortoise.extractor_v2 import _sanitise_query_text  # noqa: PLC0415
+    from tortoise.extractor_v2 import _sanitise_query_text
     return _sanitise_query_text(name)
 
 

@@ -177,7 +177,7 @@ the **terms**.
 RediSearch treats `_` as a **word character**. `tortoise/sparse.py:71` does not. Probe on the lane graph
 (v4.20.6), verbatim:
 
-```
+```text
 'web_search'                       -> [['web_search', 8.0]]
 'web'                              -> []
 'selection'                        -> []
