@@ -4383,6 +4383,9 @@ def _cmd_config(args) -> int:
                 elif _src == "env":
                     print("     the ENVIRONMENT's own value does not resolve; this")
                     print("     file did not supply it")
+                elif _src == "file-unloadable":
+                    print("     this `.env` cannot be applied at all, so none of its")
+                    print("     values is in effect")
                 else:
                     print("     which entry point supplied the value is not")
                     print("     attributable from here")
@@ -4394,20 +4397,25 @@ def _cmd_config(args) -> int:
                     print("     fail here")
             else:
                 if env_file.get("daemon_rung") == "refuses":
-                    # ⛔ "neither … is set" is false when the file sets one and an
-                    # EXPLICITLY BLANK export blocks it (the daemon's ladder skips
-                    # a blank value). Name the blocker instead (#12428 review).
-                    from os import environ as _environ_daemon
-
-                    _blank_keys = sorted(
-                        key for key in (env_file.get("file_graph_keys") or ())
-                        if key in _environ_daemon
-                        and not str(_environ_daemon.get(key) or "").strip())
+                    # ⛔ "neither … is set" is false when the key IS set and the
+                    # value is empty (the daemon's ladder skips a blank), and the
+                    # BLAME differs by origin: an exported empty value is the
+                    # user's to fill, an empty line in the file is the file's
+                    # (#12428 review).
+                    _blank = env_file.get("blank_graph_keys") or {}
+                    _blank_file = list(_blank.get("file") or ())
+                    _blank_env = list(_blank.get("env") or ())
                     print("  daemon        (none — `tortoise serve` REFUSES to")
-                    if _blank_keys:
-                        print("                start: "
-                              f"{_printable(', '.join(_blank_keys))} is exported EMPTY")
-                        print("                and the daemon's ladder skips a blank value)")
+                    if _blank_file or _blank_env:
+                        _who = []
+                        if _blank_file:
+                            _who.append(f"{_printable(', '.join(_blank_file))} is EMPTY "
+                                        "in this `.env`")
+                        if _blank_env:
+                            _who.append(f"{_printable(', '.join(_blank_env))} is "
+                                        "exported EMPTY")
+                        print("                start: " + "; and ".join(_who))
+                        print("                — the daemon's ladder skips a blank value)")
                     else:
                         print("                start: neither TORTOISE_DB_URI nor")
                         print("                TORTOISE_DB_PATH is set)")
@@ -11525,6 +11533,19 @@ def _dotenv_divergence(graded_target: str | None = None, *,
     payload["shadowed_graph_keys"] = [
         key for key in _DB_LADDER_KEYS
         if (os.environ.get(key) or "").strip()]
+    # ⛔ A key can be PRESENT and still select nothing: the daemon's ladder skips
+    # an empty value (`if uri:`), so a blank export — or a blank line in the file —
+    # is the whole reason there is no store. Published WITH its origin, because a
+    # screen that says "exported EMPTY" about a value the FILE supplied sends the
+    # user to unset a variable that does not exist (#12428 review).
+    payload["blank_graph_keys"] = {
+        "file": [key for key in _DB_LADDER_KEYS
+                 if key in assignments
+                 and not str(assignments.get(key) or "").strip()],
+        "env": [key for key in _DB_LADDER_KEYS
+                if key in os.environ
+                and not str(os.environ.get(key) or "").strip()],
+    }
 
     if graded_unresolved:
         # The caller TRIED to resolve a target of its own and failed (an invalid
@@ -11624,6 +11645,11 @@ def _dotenv_divergence(graded_target: str | None = None, *,
             # is reported instead.
             daemon_error = (f"{type(exc).__name__}: {exc} — this `.env` cannot "
                             "be loaded at all")
+            # ⛔ This one IS attributable, and to the FILE: the overlay could not
+            # APPLY it, so no value of it is in effect. Leaving the source unset
+            # made both printing arms say the message "names the value that
+            # failed" when it names none (#12428 review).
+            payload["daemon_error_source"] = "file-unloadable"
         if daemon_rung in ("refuses", "embedded-allowed"):
             # No target to compare: `refuses` means the daemon exits 1 (unless
             # TORTOISE_ALLOW_EMBEDDED=1, which is the only reason
@@ -11824,21 +11850,22 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
         # whose `.env` carries provider keys but no local daemon has done
         # nothing wrong, and `doctor` must not fail that setup (#3615). It IS a
         # warning, because the rows below grade a store the daemon does not serve.
-        # ⛔ The file's own keys may be present yet blocked by an EXPLICITLY BLANK
-        # export (the daemon's ladder skips a blank value), so "neither … is set"
-        # was false and named nothing the user could act on (#12428 review).
-        from os import environ as _environ_blank
-
-        _blank = sorted(
-            key for key in (env_file.get("file_graph_keys") or ())
-            if key in _environ_blank
-            and not str(_environ_blank.get(key) or "").strip())
-        if _blank:
-            _why = (f"the file sets {_printable(', '.join(env_file['file_graph_keys']))}, "
-                    f"but {_printable(', '.join(_blank))} is exported EMPTY and the "
-                    "daemon's ladder skips a blank value")
+        # ⛔ A key can be SET and still select nothing (the daemon's ladder skips a
+        # blank), and the BLAME differs by origin — see `blank_graph_keys` in
+        # `_dotenv_divergence` (#12428 review).
+        _blank = env_file.get("blank_graph_keys") or {}
+        _blank_file = list(_blank.get("file") or ())
+        _blank_env = list(_blank.get("env") or ())
+        if _blank_file or _blank_env:
+            _who = []
+            if _blank_file:
+                _who.append(f"{_printable(', '.join(_blank_file))} is EMPTY in this `.env`")
+            if _blank_env:
+                _who.append(f"{_printable(', '.join(_blank_env))} is exported EMPTY")
+            _why = ("; and ".join(_who) +
+                    " — the daemon's ladder skips a blank value")
         else:
-            _why = ("neither TORTOISE_DB_URI nor TORTOISE_DB_PATH is set")
+            _why = "neither TORTOISE_DB_URI nor TORTOISE_DB_PATH is set"
         rows.append(("Config: .env", "⚠️",
                      f"{path} selects no store for the daemon — {_why}, and "
                      "`tortoise serve` REFUSES to start in that state (it will "
@@ -11852,7 +11879,7 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
         # some reachable state, and the arm is only reachable when this run's own
         # target RESOLVED (#12428 review).
         _src = env_file.get("daemon_error_source") or "unknown"
-        if _src in ("file", "both"):
+        if _src in ("file", "both", "file-unloadable"):
             _lead = f"{path} makes the DAEMON's target unresolvable: "
         elif _src == "env":
             _lead = ("the DAEMON's target is unresolvable from the environment "
@@ -11867,6 +11894,8 @@ def _dotenv_rows(env_file: dict) -> list[tuple[str, str, str]]:
         elif _src == "env":
             _why = ("the ENVIRONMENT's own value does not resolve; this file did "
                     "not supply it")
+        elif _src == "file-unloadable":
+            _why = "this `.env` cannot be applied at all, so none of its values is in effect"
         else:
             _why = "the message above names the value that failed"
         rows.append(("Config: .env", "❌",

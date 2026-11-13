@@ -1462,6 +1462,51 @@ def test_doctor_health_row_never_echoes_a_password_head(capsys, _isolated, monke
     assert "<redacted>" in health[0], health[0]
 
 
+def test_a_blank_key_is_named_with_the_side_that_supplied_it(capsys, _isolated,
+                                                            monkeypatch):
+    """An EMPTY value is present-but-inert, and WHICH side set it is the remedy.
+
+    Measured (#12428 review): an environment-only blank export printed "neither
+    TORTOISE_DB_URI nor TORTOISE_DB_PATH is set" while the user's own shell showed
+    `TORTOISE_DB_URI=`; and a blank line in the FILE (applied) was blamed on an
+    "exported EMPTY" value that does not exist, sending the user to unset a
+    variable instead of filling the line in.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    _write_env(_isolated, "TORTOISE_PROVIDER=deepseek\n")
+
+    out = _show_text(capsys)
+
+    assert "neither TORTOISE_DB_URI nor" not in out, out
+    assert "TORTOISE_DB_URI is exported EMPTY" in out, out
+
+
+def test_a_blank_line_in_the_file_is_not_blamed_on_the_environment(capsys, _isolated):
+    """The file is the supplier here, so "exported EMPTY" would send the user astray."""
+    _write_env(_isolated, "TORTOISE_DB_URI=\n")
+
+    out = _show_text(capsys)
+
+    assert "is EMPTY in this `.env`" in out, out
+    assert "exported EMPTY" not in out, out
+
+
+def test_an_unloadable_file_is_attributed_to_the_file(capsys, _isolated):
+    """A `.env` the loader cannot apply names the FILE — not "not attributable".
+
+    Measured (#12428 review): a NUL byte in a value made the overlay raise, the
+    source stayed unset, and both verbs told the user the message "names the value
+    that failed" — it names none.
+    """
+    _write_env(_isolated, "TORTOISE_DB_URI=abc\x00def\n")
+
+    out = _show_text(capsys)
+
+    assert "cannot be applied at all" in out, out
+    assert "not attributable from here" not in out, out
+    assert "names the value that failed" not in out, out
+
+
 def test_a_value_recorded_from_ANOTHER_file_is_not_credited_to_this_one(
         capsys, _isolated, monkeypatch):
     """`APPLIED` is a record of what THIS process applied, scoped to the file reported.
