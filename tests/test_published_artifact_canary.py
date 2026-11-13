@@ -1050,8 +1050,12 @@ def test_the_publish_time_smoke_resolves_EXACTLY_ONE_wheel_before_it_runs():
     correct and NOTHING read it. Reverting it to the exact pre-fix `whl="$(ls dist/*.whl)"`
     left `113 passed`, exit 0 — a guard the PR body presented as covered, whose removal the
     whole suite watched happen. That is the agent-infra#3442 "assertion whose value cannot
-    vary" defect, and it is why the three clauses below are asserted separately: each names
-    one half a plausible "tidy" would drop.
+    vary" defect. The clauses below are asserted separately — `(i)` the glob and its arity,
+    `(i-a)` the empty-glob half of the same `if`, `(i-b)` the no-pipeline rule, `(ii)` the
+    refusal, `(iii)` the resolved variable — and each names a half that a plausible "tidy"
+    would drop. `(i-a)` is the newest: a count-only clause leaves the empty glob free
+    (#12422 round-18 review P3, MEASURED: dropping `[ -z "$whl" ] ||` left this pin green
+    before it existed).
     """
     import yaml
 
@@ -1077,6 +1081,18 @@ def test_the_publish_time_smoke_resolves_EXACTLY_ONE_wheel_before_it_runs():
     assert "-ne 1" in run, (
         "the pre-upload step no longer asserts that the glob matched EXACTLY ONE wheel — with "
         "no count guard `--wheel` receives whatever the glob produced, including nothing"
+    )
+
+    # ⛔ (i-a) the EMPTY-GLOB half of the same `if`, asserted on its own (#12422 round-18
+    # review P3, MEASURED). `-ne 1` cannot see it: `printf '%s\n' "" | wc -l` is 1, so a
+    # dist/ with no wheel passes the arity guard and reaches `--wheel ""` — which the TOOL
+    # refuses (exit 2, "was passed with an empty path"), i.e. bounded and still blocked, but
+    # the diagnosis a human reads becomes the tool's refusal instead of the BUILD defect the
+    # step exists to name. Deleting `[ -z "$whl" ] ||` left this pin green before this clause.
+    assert '-z "$whl"' in run, (
+        "the pre-upload step's guard no longer names the EMPTY glob on its own — `-ne 1` "
+        "cannot see an empty `whl` (printf of an empty string is one line), so a dist/ with "
+        'no wheel reaches `--wheel ""` and only the tool refusal stops it'
     )
 
     # ⛔ (i-b) AND THE GUARD MUST NOT BE DEFANGABLE BY A PIPELINE (#12422 review cycle 3,
@@ -1581,8 +1597,11 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
 
 def test_the_pip_failure_detail_is_the_LAST_stderr_LINE_not_a_list_repr(tmp_path):
     """`splitlines()[-1:]` interpolates a one-element LIST, so the arm detail — rendered
-    verbatim in the step summary and the alert issue's body — read
-    `['ERROR: something weird']` (#12363 round 17)."""
+    verbatim in the step summary and the `--json` payload — read
+    `['ERROR: something weird']` (#12363 round 17). ⛔ NOT in the alert issue's body:
+    `published-artifact-alert.sh` builds that body from `$why` + `tail -n 40` of the
+    TRANSCRIPT, so the detail reaches a human through the transcript's own pip output
+    (measured, #12422 round-18 review P3)."""
     arm, _ = canary.install_and_run(
         package="tortoise-graph",
         version="0.2.0",
