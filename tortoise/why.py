@@ -1166,7 +1166,8 @@ def assemble_why_blocks(
     gate the enrichment on the ENTITY TYPE being a point (``sdk.py``:
     ``entity_type == "point"`` and the ``entity_type == "point"`` filter before
     ``enrich_items``), so a goal ``:Object`` is explainable through
-    ``tortoise_analyze`` and through direct assembly, NOT through search/recall
+    ``tortoise_analyze`` while it existed (its MCP tool was ARCHIVED in #11609
+    batch 1 — see #12480) and through direct assembly, NOT through search/recall
     yet. Widening those gates is its own change; the block is already correct.
 
     ⛔ The consequence is stated rather than implied: an absent dimension cannot

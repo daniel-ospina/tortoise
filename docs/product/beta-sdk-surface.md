@@ -299,12 +299,14 @@ Cognee's config-supplied ontology. Pack curation is a **user/builder** concern, 
 
 **Checked: nothing in this design forecloses per-graph pack curation.** The evidence:
 
-- **Activation is already per-graph state, not global config.** `tortoise_pack_install`
-  (*"stores the manifest in the tenant graph and activates it"*) writes the tenant graph's
-  `PackInstall` records; `tortoise_packs_list` reads *"the shared pack catalog joined with the
-  tenant graph's `PackInstall` activation records"* and masks other tenants. So "the packs on
-  **each graph**" is already the storage shape — the curation surface is a control over existing
-  per-graph state, not a new model.
+- **Activation is already per-graph state, not global config.** The archived MCP tools
+  `tortoise_pack_install` / `tortoise_packs_list` (removed in #11609 batch 1) wrote and
+  read the tenant graph's `PackInstall` activation records, which is what the surviving
+  REST doors do today: `POST /v1/packs/manifests` stores the manifest in the tenant graph
+  and activates it, and `GET /v1/packs` reads the shared pack catalog joined with those
+  records while masking other tenants (`tortoise/hosted_api.py`). So "the packs on
+  **each graph**" is already the storage shape — the curation surface is a control over
+  existing per-graph state, not a new model.
 - **The tenancy block has room.** It has one partial update (`update_memory_graph`) and **no**
   per-graph pack operation. Nothing about the frozen target precludes adding one post-beta; the
   surface is frozen for beta, not permanently closed.
