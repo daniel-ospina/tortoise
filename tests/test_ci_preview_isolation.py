@@ -835,9 +835,89 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
             "ERR_CONNECTION_REFUSED"
         )
     finally:
-        if own is not None:
-            _reap_group(own.pid)
+        # ⛔ NO `own is not None` GUARD HERE (#12330 review, P3). It is dead: this `try:`
+        # is only reached when the FIRST `try:` completed, which requires `_spawn` to have
+        # returned — the path where `own` stayed `None` re-raises out of the `except` above
+        # and never gets here. The guard is load-bearing in that `except`, which is why the
+        # `None` sentinel still exists.
+        _reap_group(own.pid)
         _reap(peer.pid)
+
+
+def test_a_raising_stop_all_still_reaps_the_tree_and_the_peer_decoy(
+    tmp_path: Path, state, monkeypatch
+) -> None:
+    """⛔ THE MOVE IS PINNED BY REVERTING IT (#12330 review, P3).
+
+    `test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone` passes byte-identically whether
+    `result = _script("stop-all", …)` sits INSIDE the `try:` that owns the `finally` or
+    between the two arms: the arms' `assert` text is unchanged, so nothing in the tree
+    reds when the window is reopened — which is how it was reopened once already (#12227
+    closed the guard, and left this one statement outside it).
+
+    So this test exercises the FAILURE MODE the guard exists for, using the real body
+    above rather than a re-implementation of it: `_script` keeps working for every verb,
+    and only `stop-all` raises the `OSError` its own comment names (fork pressure under
+    EAGAIN/ENOMEM; a `timeout=60` expiring is the same shape). `_spawn` is wrapped only to
+    REMEMBER the pids — the body does not return them.
+
+    Measured both ways: with `stop-all` outside the `try:` the supervisor, its two
+    `sleep 120` children (still parented to it, because nothing on that path is killed)
+    and the peer decoy are all alive when the `OSError` surfaces, and this test reds;
+    with it inside, every spawned pid is gone when the raise propagates.
+    """
+    spawned: list[int] = []
+    injected: list[str] = []
+    real_spawn = _spawn
+    real_script = _script
+
+    def recording_spawn(*args, **kwargs):
+        proc = real_spawn(*args, **kwargs)
+        spawned.append(proc.pid)
+        return proc
+
+    def raising_stop_all(*args, **kwargs):
+        verb = args[0] if args else kwargs.get("name")
+        if verb == "stop-all":
+            injected.append(verb)
+            raise OSError(11, "Resource temporarily unavailable")
+        return real_script(*args, **kwargs)
+
+    monkeypatch.setattr(sys.modules[__name__], "_spawn", recording_spawn)
+    monkeypatch.setattr(sys.modules[__name__], "_script", raising_stop_all)
+    # The teardown is asserted AFTER the raise, so a regression here is the one case where
+    # this test must not leak: reap whatever survived before it reports.
+    try:
+        with pytest.raises(OSError, match="Resource temporarily unavailable"):
+            test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path, state)
+        assert injected, (
+            "the body never reached `stop-all`, so this pin did NOT exercise the window "
+            f"it exists for (spawned {spawned})"
+        )
+        assert len(spawned) >= 2, (
+            f"only {spawned} were spawned — the tree or the decoy is missing, so a leak "
+            "check over them would pass vacuously"
+        )
+        # ⛔ A BOUNDED WAIT, NOT ONE SAMPLE (#12330): `_reap_group`/`_reap` send SIGKILL
+        # and return at once, so the very next `/proc` read still sees the process for a
+        # few microseconds (measured: both spawned pids alive on the FIRST sample of the
+        # fixed tree, gone well inside the first 50 ms). A one-sample assertion reds on a
+        # correct tree; the same poll on a REVERTED tree never settles, because nothing on
+        # that path kills these processes at all.
+        deadline = time.time() + 10
+        survived = [pid for pid in spawned if _pid_alive(pid)]
+        while survived and time.time() < deadline:
+            time.sleep(0.05)
+            survived = [pid for pid in spawned if _pid_alive(pid)]
+        assert not survived, (
+            "a raise from `stop-all` left processes alive "
+            f"({survived} of {spawned}) — that is #12227's leak class, reopened by "
+            "moving the call out of the `try:` that owns the `finally`. Nothing may sit "
+            "between the two teardown arms."
+        )
+    finally:
+        for pid in spawned:
+            _reap_group(pid)
 
 
 def test_await_exec_REFUSES_a_decoy_that_never_shows_its_name(tmp_path: Path) -> None:
