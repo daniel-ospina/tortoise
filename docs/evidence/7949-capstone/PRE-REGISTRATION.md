@@ -2801,5 +2801,40 @@ to answer.
   class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4 denominator are the
   ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for *any*
   edit to this file, and the bundle README's present-tense digest with it.
+- ⛔ **Superseded for THIS tree by §10.33 — on the `#548` blank-`pointKind` window only.** Every
+  other number this entry re-derived is still the live one; the window this tree carries is
+  `projection/__init__.py:14272-14274`, not the `:14265-14267` §10.29 measured.
+- **This entry was LIVE for the merged tree at the head it shipped at** — it now has a successor, so
+  the supersede marker above is the record of what moved.
+
+### 10.33 — the `#548` blank-`pointKind` window re-pointed, so the probe and this record agree again (2026-11-13, `#12295`)
+
+> **A successor entry, not an edit to §10.27 or §10.29.** Both are faithful records of the heads they
+> measured; re-numbering either in place would be the false record §10.19/§10.22/§10.24 forbid. This
+> entry supersedes them on the `#548` blank-`pointKind` window and on nothing else — every other
+> number §10.29 owns is §10.32's.
+>
+> ⛔ **And it supersedes §10.32 on that ONE window**, which is why §10.32 now carries a supersede
+> marker in its closing bullet: §10.32's live-for-the-merged-tree claim was true of the head it
+> shipped at, and its own numbers are untouched here.
+
+- **Why it exists.** The `#12304` cite sweep found `probes/capstone_measure.py:3317` citing
+  `tortoise/projection/__init__.py:14265-14267`, which carries `"inputs": inputs}` — seven lines
+  ABOVE the anchor — so `test_the_bundles_cites_resolve_where_the_bundle_says_they_do` was red on it.
+  The probe's cite is re-derived to `:14272-14274`. §10.27's own rule is that the probe's cite and
+  this document's cite are re-pointed TOGETHER so they cannot disagree about this anchor; moving one
+  and leaving the other is what §10.26/§10.27 were written about.
+- **New value — MEASURED at this entry's own head by opening the lines:**
+  `tortoise/projection/__init__.py:14272-14274` — `14272` is
+  `# Ensure pointKind is present (operators often lack it)`, `14273` is
+  `if "pointKind" not in clean:` and `14274` is `clean["pointKind"] = ""`, the same three-line
+  window §10.25–§10.29 tracked under the earlier numbers.
+- **Verified by content, not arithmetic.** The window is confirmed by the anchor's own three lines
+  (comment, guard, assignment); it is not `14265` plus the `+7` the merged tree happens to carry, and
+  `14265` is recorded here as the value §10.29 measured for an earlier head, not as a live one.
+- **What moved: one citation, and nothing that is a protocol value.** No metric, denominator,
+  threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4 denominator
+  are the ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for
+  *any* edit to this file, and the bundle README's present-tense digest with it.
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
   supersede marker.
