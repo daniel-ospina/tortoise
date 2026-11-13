@@ -42000,14 +42000,19 @@ class TortoiseSDK:
         _rr_order_by_ok = order_by == "relevance"
         # ⛔ THE SECOND HALF OF THE SAME GUARD. ``order_by``/recency catch a
         # caller that ASKS for another order; they do not catch a caller that
-        # re-owns the order DOWNSTREAM and passes neither — and six product
-        # lanes do exactly that (``_review_pool``, ``suggest_entry_points``,
-        # ``issue_insight``, ``recall_state``, ``recall_gaps``,
-        # ``_resolve_subgraph_seed``), plus ``search_sessions``, which re-sorts
-        # its pool by the PRE-rerank ``rrf`` score before slicing. Each already passes
-        # ``_valid_time_rerank=False`` for the identical reason; without this
-        # arm the rerank re-picked their page INVISIBLY — the trace said
-        # ``ok``, because nothing in the block knew the caller had opted out.
+        # re-owns the order DOWNSTREAM and passes neither. Two shapes:
+        #   * ``_review_pool``, ``suggest_entry_points``, ``issue_insight``,
+        #     ``recall_state``, ``recall_gaps``, ``_resolve_subgraph_seed`` —
+        #     these six ALREADY pass ``_valid_time_rerank=False`` for the
+        #     identical reason;
+        #   * ``search_sessions``, which re-sorts its pool by the PRE-rerank
+        #     ``rrf`` score before slicing, and ``volunteer_context``, which
+        #     binds this read as a ``_search_fn`` seam — ⛔ NEITHER opts out of
+        #     ``_valid_time_rerank`` (that lever's ordering is what they sort
+        #     on / feed), so do not "restore symmetry" by adding it here.
+        # Without this arm the rerank re-picked their page INVISIBLY — the trace
+        # said ``ok``, because nothing in the block knew the caller had opted
+        # out.
         _rr_recency_conflict = bool(_recency_applied)
         if (result_ids and _rr_on and (query or "").strip()
                 and _rr_order_by_ok and not _rerank_candidates
