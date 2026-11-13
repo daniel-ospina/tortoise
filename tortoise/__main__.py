@@ -3136,6 +3136,16 @@ def _redact_db_value(text: str, *values: object) -> str:
             head = form.split("?", 1)[0].split("#", 1)[0]
             if looks_like_uri_userinfo(head):
                 candidates.append((form, "<redacted: userinfo-shaped>"))
+            elif (head == form and ":" in form and "/" not in form
+                    and form.split(":", 1)[1]):
+                # ⛔ A scheme-less `user:password` DSN whose `@host` tail was lost
+                # in a copy-paste (the #2987 shape). `looks_like_uri_userinfo`
+                # needs the `@`, and the delimiter branch below needs a `#`/`?`,
+                # so this shape fell through and printed the password — caught by
+                # `test_a_scheme_less_user_password_dsn_is_not_printed` when this
+                # function replaced `_scrub` here (#12428 review).
+                _user, _secret = form.split(":", 1)
+                candidates.append((form, f"{_user}:<redacted>"))
             elif head != form:
                 # ⛔ `head + "…"` kept a credential that sat before the delimiter
                 # with no `@` left: `bolt://uu:PwABCD#x@h/db` printed
@@ -3929,8 +3939,14 @@ def _cmd_config(args) -> int:
         # "configured but unusable" is a real verdict — falling through to the
         # default note claimed the variable was unset and told the user to go
         # look at `doctor` for a store the CLI REFUSES.
-        db_error = _scrub(f"{type(exc).__name__}: {exc}", raw_uri,
-                          _os.environ.get("TORTOISE_DB_PATH"))
+        # ⛔ `_redact_db_value`, NOT `_scrub`: `_scrub` removes the WHOLE value, so
+        # a plain relative path became `Relative DB path '<redacted>' rejected` —
+        # over-redacting a value that is not a secret, in the one sentence that
+        # names what was rejected (the rule `_redact_db_value`'s own docstring
+        # states; `doctor`'s arm already uses it) (#12428 review).
+        db_error = _redact_db_value(f"{type(exc).__name__}: {exc}", raw_uri,
+                                    _os.environ.get("TORTOISE_DB_URI"),
+                                    _os.environ.get("TORTOISE_DB_PATH"))
     if _db_notice.getvalue().strip():
         print(_db_notice.getvalue().rstrip(), file=_sys.stderr)
     if db_error is not None:

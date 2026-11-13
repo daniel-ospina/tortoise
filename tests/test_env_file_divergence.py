@@ -1678,3 +1678,33 @@ def test_a_plain_path_survives_the_graph_health_arm():
     target, message = "relative.db", "Relative DB path 'relative.db' rejected"
     out = _mask_uri_userinfo(_redact_credential_fragments(message, target))
     assert message in out, out
+
+
+def test_config_show_keeps_a_rejected_path_legible(capsys, _isolated, monkeypatch):
+    """`config show`'s OWN refusal arm must cut the credential, not the path.
+
+    Measured with no `.env` and `TORTOISE_DB_URI=relative.db`:
+    `⛔ configured but unusable: ValueError: Relative DB path '<redacted>'
+    rejected` — and `--json` carried the same. `relative.db` appears nowhere else
+    in that command, so the one sentence that names the rejected value no longer
+    names it, while `doctor` printed it correctly (#12428 review).
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "relative.db")
+
+    payload = _show_json(capsys)
+
+    error = payload["graph_store"]["error"]
+    assert "relative.db" in error, error
+    assert "<redacted>" not in error, error
+
+
+def test_config_show_cuts_a_credential_in_the_rejected_path(capsys, _isolated,
+                                                            monkeypatch):
+    """The other half: a credential-shaped rejected value is still cut."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "alice:Pw1@h/d.db")
+
+    payload = _show_json(capsys)
+
+    error = payload["graph_store"]["error"]
+    assert "Pw1" not in error, error
+    assert "<redacted: userinfo-shaped>" in error, error
