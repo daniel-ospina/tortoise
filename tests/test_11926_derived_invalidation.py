@@ -1124,11 +1124,71 @@ def test_the_retirement_is_reported_in_full_and_is_IDEMPOTENT(sdk):
 
 
 def test_retiring_a_missing_claim_reports_it_rather_than_raising(sdk):
+    """An absent claim is the idempotent outcome, and it says WHICH one (#12315).
+
+    ``alreadyRetired`` is the honest field for it — a claim that does not exist
+    cannot be stale — and it is what keeps the finding inside a ``counts`` bucket;
+    the previous ``False`` left it in none (see the mid-sweep test below).
+    """
     report = invalidate(sdk, Invalidation(judgement_id="no-such-point",
                                           reason="target-revised", detail="…"))
     assert report["invalidated"] is False
-    assert report["alreadyRetired"] is False
+    assert report["alreadyRetired"] is True
+    assert report["status"] is None
     assert "no such judgement" in report["detail"]
+
+
+def test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket(sdk, monkeypatch):
+    """⛔ #12315, reproduced. ``invalidate``'s MISSING arm returned
+    ``alreadyRetired: False`` with no ``error`` and no ``cache`` — and
+    ``invalidate_stale`` has no bucket for that shape. So a claim deleted between
+    the scan and the retirement (a concurrent purge, a peer's cleanup) produced
+    ``stale: 1`` with ``retired``/``alreadyRetired``/``failed``/``gone`` ALL zero:
+    the per-finding record was honest and the SUMMARY could not be reconciled,
+    which is the rule the ``failed`` and ``gone`` buckets were added to keep.
+
+    The probe is the issue's own reproduction — delete the claim immediately
+    before the retirement, so ``invalidate`` takes its MISSING arm.
+    """
+    i, t, g = _world(sdk, tag="vanish-mid-sweep")
+    made = _judge(sdk, i, t, g)
+    sdk.update_entity(t["id"], threshold=12.0)  # a real stale finding
+
+    from tortoise import derived_invalidation as di
+
+    real_invalidate = di.invalidate
+
+    def vanishing(sdk_, invalidation, **kwargs):
+        sdk_.delete_entity(invalidation.judgement_id)
+        return real_invalidate(sdk_, invalidation, **kwargs)
+
+    monkeypatch.setattr(di, "invalidate", vanishing)
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    counts = report["counts"]
+    assert counts["stale"] == 1, counts
+    assert counts["retired"] == 0, counts
+    assert counts["alreadyRetired"] == 1, (
+        "the vanished claim landed in NO bucket — a consumer totalling the "
+        f"buckets cannot reconcile this summary: {counts}")
+    assert counts["failed"] == 0 and counts["gone"] == 0, counts
+
+    per_finding = report["invalidated"][0]
+    assert per_finding["invalidated"] is False
+    assert per_finding["alreadyRetired"] is True
+    assert "no such judgement" in per_finding["detail"]
+
+    # ⛔ THE RULE THAT HOLDS: every finding lands in AT LEAST one bucket. It is
+    # NOT `stale == retired + alreadyRetired + failed + gone` — a landed
+    # retirement whose cache reconcile failed is counted in both `retired` and
+    # `failed` (one finding, two honest answers: see
+    # test_a_failed_cache_write_counts_as_a_FAILED_sweep, which asserts
+    # retired=1 and failed=1 for a single stale finding).
+    accounted = (counts["retired"] + counts["alreadyRetired"]
+                 + counts["failed"] + counts["gone"])
+    assert accounted >= counts["stale"], (accounted, counts)
+    # nothing was written for a claim that no longer exists (a missing point reads
+    # back as a falsy dict, which is why `_read_claim` folds it to MISSING)
+    assert not sdk.get_entity(made["point_id"])
 
 
 def test_the_derived_state_stops_feeding_the_goal(sdk):

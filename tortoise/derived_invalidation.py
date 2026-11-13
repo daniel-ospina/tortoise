@@ -737,7 +737,8 @@ def invalidate(
        ``alreadyRetired`` — the shared ``live.TERMINAL_EXCLUDED_STATUSES``
        vocabulary plus the legacy ``outdated`` flag, exactly the predicate the
        read paths use, so "already retired" here means the same thing it means
-       everywhere else.
+       everywhere else. An ABSENT claim is reported the same way: it cannot be
+       stale, so there is nothing to retire because it is already gone (#12315).
     3. ``retract_point`` — journal-first ORDER, so a rebuild replays the retirement
        instead of resurrecting a claim the live graph retired. ⚠️ ORDER is what
        the door guarantees and CONFIRMATION is not: its own docstring records
@@ -768,8 +769,17 @@ def invalidate(
     judgement_id = invalidation.judgement_id
     claim = _read_claim(sdk, judgement_id)
     if claim is MISSING:
+        # ⛔ AN ABSENT CLAIM IS `alreadyRetired`, NOT A FIFTH OUTCOME (#12315).
+        # A claim that does not exist cannot be stale, so the idempotent reading
+        # applies. Reporting `alreadyRetired: False` here left the finding in NO
+        # counts bucket at all (`retired`/`alreadyRetired`/`failed`/`gone` all
+        # zero), so a sweep that met a claim deleted between the scan and the
+        # retirement reported `stale: 1` with every counter at 0 — a summary a
+        # consumer totalling the buckets cannot reconcile, which is the same rule
+        # the `failed` and `gone` buckets exist to keep.
         return {"invalidated": False, "judgementId": judgement_id,
-                "alreadyRetired": False, "reason": invalidation.reason,
+                "alreadyRetired": True, "status": None,
+                "reason": invalidation.reason,
                 "detail": "no such judgement — nothing to retire"}
     if claim is None:
         raise RuntimeError(
@@ -944,6 +954,14 @@ def invalidate_stale(
     retirement (which did land) and not a success of the reconcile (which did not
     happen) — it is its own bucket, and it exists so a sweep over deleted goals
     cannot read clean.
+
+    ⛔ THE BUCKETS ARE PER-FINDING PREDICATES, NOT A PARTITION — do not read a
+    bucket total as a finding count. A retirement that landed and whose cache
+    reconcile then failed is counted in BOTH ``retired`` and ``failed`` (and a
+    retired claim whose goal is gone in both ``retired`` and ``gone``), which is
+    correct: each number answers its own question. The reconciliation a consumer
+    CAN rely on is that every finding lands in **at least one** bucket — the
+    failure #12315 records was an arm landing in none.
     """
     found = verdicts(sdk, goal_id=goal_id, indicator_id=indicator_id,
                      target_id=target_id, limit=limit)
