@@ -1000,8 +1000,10 @@ def test_a_goal_retired_by_its_STATUS_does_not_keep_a_derived_word(sdk):
     retiring a goal by its ``status`` used to skip the reconcile entirely (the
     reason was ``goal-retired``), so a goal carrying a derived ``met`` kept it
     forever — the issue's own headline surviving one of its three named inputs,
-    and unrepairable afterwards because no live judgement remains for a later
-    sweep to reconcile."""
+    with no AUTOMATIC repair afterwards because no live judgement remains for a
+    later sweep to reconcile (the manual, public, idempotent
+    ``reconcile_goal_state_cache`` is the route, and this sweep's own step-4
+    reconcile is what the assertions below measure)."""
     i, t, g = _world(sdk, tag="goal-status-word")
     _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"])["goalState"] == "met"
@@ -1648,7 +1650,9 @@ def test_a_claim_that_vanishes_BEFORE_the_retirement_lands_is_alreadyRetired(
     measured before this round, ``goalState`` stayed ``met`` naming a claim that no
     longer existed, and no later sweep could revisit THAT CLAIM — only another of
     the goal's claims going stale could reconcile the word, and that is luck, not
-    a route this arm may rely on.
+    a route this arm may rely on (a later ``judge_and_record`` that reaches a
+    decided state also REWRITES the word, but it mints a new claim, so it is not
+    a repair of this one).
 
     ⚠️ ``found`` here is ``False``, not ``None``, and that is the point: ``None``
     is reserved for a re-read that could not answer (``after is None``). "Gone" is
@@ -2134,6 +2138,7 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
     this pins that the words still agree with it.
     """
     import inspect
+    import re
 
     import tortoise.derived_invalidation as di
 
@@ -2147,8 +2152,18 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
         "the manual route must be scoped to 'no new input': a re-judge that reaches "
         "a decided state also writes the word, so naming it as THE route "
         "over-claims in the other direction")
+    assert "that reaches a decided state" in door, (
+        "and the re-judge route must stay scoped to a DECIDED state: `unknown` "
+        "writes nothing (`_write_goal_state_cache` skips a None)")
     assert "no automatic path" not in door, (
         "the door note states the QUALIFIED form; an absolute may not return here")
+
+    cache_doc = " ".join((di.reconcile_goal_state_cache.__doc__ or "").lower().split())
+    assert "archived sweep retires them together" in cache_doc, (
+        "the archived-goal bullet must say WHY the last-claim shape cannot recur here")
+    assert "no later pass able to repair it" not in cache_doc, (
+        "the old inference is exactly what the sweep removed: a goal IS revisited "
+        "through any other live claim")
 
     # ⛔ ADJACENCY, not co-presence: the 27th-round version asserted the two
     # phrases separately, so an absolute with the qualifier parked in an
@@ -2159,10 +2174,17 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
             "claim") in helper, (
         "an UNQUALIFIED 'no automatic path repairs it' is false while the goal "
         "still holds a live claim: that claim going stale reconciles the word")
+    assert helper.count("no automatic path repairs it") == 1, (
+        "EXACTLY ONE 'no automatic path repairs it' may stand, and it must be the "
+        "qualified one — the positive assertion above cannot see a SECOND "
+        "absolute appended after it")
 
     # The arm COMMENT is the site a maintainer reads while editing exactly that
-    # arm, and it is the one that has regressed before — pin it at source level,
-    # because no docstring assertion can see it.
-    src = inspect.getsource(di.invalidate).lower()
-    assert "once the goal holds no other live claim" in src, (
-        "the absent-arm comment must keep the qualifier too")
+    # arm, and the one that has regressed twice — pin it at source level, because
+    # no docstring assertion can see a comment, and by ADJACENCY, because
+    # presence-in-a-214-line-function is what a parked qualifier defeats.
+    norm = " ".join(
+        re.sub(r"(?m)^\s*#", "", inspect.getsource(di.invalidate)).lower().split())
+    assert ("no automatic path repairs it later once the goal holds no other live "
+            "claim") in norm, (
+        "the absent-arm comment must keep the qualifier IN the sentence")
