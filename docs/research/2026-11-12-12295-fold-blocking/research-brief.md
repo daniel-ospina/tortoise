@@ -8,10 +8,16 @@ measured at code head `437d5d17a5f5` — the commit whose code these numbers des
 itself happened at `e9a572d4b4`, which the `#12304` rebase rewrote out of every ref (a dangling
 local object, absent from a fresh clone); `437d5d17a5f5` is that same commit rebased, and
 `git diff e9a572d4b4 437d5d17a5f5 -- tortoise/entity_resolver.py tortoise/entity_blocking.py
-tortoise/extractor_v2.py` is EMPTY. Commits after it do touch `tortoise/entity_resolver.py`:
-`07033dd926cc` moves the `emitted:` docstring only (no statement, no call), so the semantics these
-numbers describe are the shipped semantics — but the claim is stated as the diff, not as a summary
-of it.
+tortoise/extractor_v2.py` is EMPTY. Commits after it touch those files in two ways, and the
+provenance claim is stated as the diff rather than as a summary of it: (a) DOCSTRINGS/COMMENTS —
+`07033dd926cc` moves the `emitted:` note and `3e75c65c71a8` adds the `complete=True` note;
+(b) LABELS — `ebf7b13fc3cd` renames the `lsh_bands` docstring label and the `stats()` counter key
+`keys` -> `key_memberships`, and `f7c0e819f4` adds a `candidates(label=None)` LABEL FALLBACK in
+`entity_blocking.py`. The fallback is the only statement-level change in those files after
+`437d5d17a5f5`, and this run never reaches it: the harness calls
+`index.candidates(surface, label="Object")` (`tools/candidate_recall_11901.py:717`), so the
+`label is None` branch is not taken. No statement in `entity_resolver.py` or `extractor_v2.py`
+moved after `437d5d17a5f5`.
 
 **Search rung, stated because it was taken twice and failed twice.**
 `mcp__seo-intelligence__perplexity_search` → `Unknown MCP server 'seo-intelligence'` (rung 1
@@ -41,7 +47,7 @@ as of `#12047`. What did not exist, and is what this lane adds:
 
 | gap | site | measured consequence |
 |---|---|---|
-| the capture prior compared `_norm` only — whitespace + lowercase, byte-identical to Zep's `_normalize_string_exact` | `extractor_v2._norm` at `:4232`, the historical arm in `_find_existing_entity` (`:5769` now carries the folded rung this lane added at `:5813`) | **0 of 422** variant pairs attach at any `k`, both modes — the before-half of every rate in §3 |
+| the capture prior compared `_norm` only — whitespace + lowercase, byte-identical to Zep's `_normalize_string_exact` | `extractor_v2._norm` at `:4232`, the historical arm in `_find_existing_entity` (`:5769`), which now delegates to `_find_by_folded_key` (`:5823`, the folded rung this lane added) | **0 of 422** variant pairs attach at any `k`, both modes — the before-half of every rate in §3 |
 | the dedupe scan blocks on ONE key — `folded[:3]` | `entity_resolver.py:394` **on `origin/main`** (this change moves it) | a transposition (`the project alpha` / `alpha project`) is never compared, at any similarity |
 
 External confirmation at source (rung 3): Zep's `_normalize_string_exact` is *"Lowercase text and

@@ -102,7 +102,14 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
                 return subprocess.run(["git", "-C", str(repo), *args],
                                       capture_output=True, timeout=10)
             except subprocess.TimeoutExpired:
-                return None
+                #: ⛔ A TIMEOUT IS "COULD NOT MEASURE" AND MUST SAY SO, not pass.
+                #: Returning None here let both call sites below skip their
+                #: assertions and go GREEN — so the promisor-clone hang, which is
+                #: the whole reason the timeout exists, would disarm the guard in
+                #: the one case it was added for. SKIP is the visible form: it is
+                #: not a pass, and it names itself in the report.
+                pytest.skip("git " + " ".join(args) + " did not answer within 10s — "
+                            "code_head equivalence UNVERIFIED")
 
         def _has(sha: str) -> bool:
             r = _git("cat-file", "-e", f"{sha}^{{commit}}")
@@ -114,13 +121,15 @@ def test_the_artifact_declares_one_uniform_retrieval_mode(report):
                           "tortoise/entity_resolver.py",
                           "tortoise/entity_blocking.py",
                           "tortoise/extractor_v2.py")
-            #: 0 = identical, 1 = differ, None/other = could not answer.
-            if scoped is not None and scoped.returncode in (0, 1):
-                assert scoped.returncode == 0, (
-                    f"code_head {head} and the head the note names ({other}) differ "
-                    "on the files this measurement exercises — the substitution is "
-                    "not code-equivalent, so the numbers no longer describe this "
-                    "tree")
+            #: 0 = identical, 1 = differ, anything else = could not answer.
+            if scoped.returncode not in (0, 1):
+                pytest.skip(f"git diff --quiet answered {scoped.returncode} — "
+                            "code_head equivalence UNVERIFIED")
+            assert scoped.returncode == 0, (
+                f"code_head {head} and the head the note names ({other}) differ "
+                "on the files this measurement exercises — the substitution is "
+                "not code-equivalent, so the numbers no longer describe this "
+                "tree")
     assert r["legs_seen"].get("vector") is True, (
         "the artifact is not the fused read — re-run with the embeddings extra "
         "(a keyword-only figure is never a figure about the production read)")
