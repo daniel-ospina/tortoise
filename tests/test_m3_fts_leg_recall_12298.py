@@ -3531,7 +3531,15 @@ def test_the_falsifier_predicate_is_stated_the_same_way_in_every_document(
 # class this file has closed four times (round 24 reviewer).
 def test_brief_derived_prose_figures_are_the_artifact(
         artifact, population, brief: str) -> None:
-    """Every remaining re-derivable figure in the brief's PROSE, à la §0's bullets.
+    """The prose figures round 25's two review cycles found unpinned.
+
+    ⛔ The claim is THESE claims, not "every figure left in the document" — an
+    earlier cut's docstring said "every remaining re-derivable figure" and two
+    were still falsifiable-green (§3.3's `(0.2000)` and §3.4's `0.20`, both
+    `per_class.ident["3"]`; §6's `21.1 %` beside the `rows_zero` counts), which is
+    the coverage-claim-without-a-pin class this file records at the top of its
+    own module docstring. The second cycle's three are pinned here and the claim
+    is enumerated rather than universal.
 
     Scope is the section that CARRIES each claim, never the whole document: a
     `"0.9633" in brief` is satisfied by four other places, which is how these
@@ -3630,6 +3638,26 @@ def test_brief_derived_prose_figures_are_the_artifact(
         values=(f"{gap:.0f}", f"{in_path:.4f}", f"{nat_path:.4f}"),
         free=("beats",))
 
+    # ⛔ The SENTENCE ABOVE THE GAP, and its own artifact quantity (round-25
+    # re-review, finding 2): "a BM25 index fed our terms scores exactly what the
+    # shipped leg scores there (0.2000)" — `per_class.ident["3"]` on both arms.
+    # `(0.2000)` → `(0.2100)` planted GREEN.
+    ident_shipped = artifact["arms"]["falkordb_tfidf"]["per_class"]["ident"]["3"]
+    ident_tokens = artifact["arms"]["postgres_bm25/tokens"]["per_class"]["ident"]["3"]
+    assert ident_shipped == ident_tokens, (
+        "§3.3 says BM25-fed-our-terms scores EXACTLY what the shipped leg scores "
+        f"on the identifier class; the artifact now records {ident_shipped} vs "
+        f"{ident_tokens}")
+    _only_claim(
+        _scoped(brief, "3.3").replace("*", ""),
+        "a BM25 index fed our terms scores exactly what the shipped leg scores "
+        f"there ({ident_shipped:.4f})",
+        "§3.3's ident-recall sentence",
+        values=(f"{ident_shipped:.4f}",),
+        # ⛔ `shipped` is a DIRECTIONAL entry: the sentence's point is that the
+        # BM25 arm matches the SHIPPED leg, so the word must be wildcarded.
+        free=("shipped",))
+
     # ── §3.4 — the whole-population empty-result count ──────────────────────
     rows_zero = artifact["arms"]["falkordb_tfidf"]["recall_by_k"]["3"]["rows_zero"]
     _only_claim(
@@ -3638,6 +3666,14 @@ def test_brief_derived_prose_figures_are_the_artifact(
         "empty result set at k=3",
         "§3.4's empty-result count",
         values=(str(rows_zero), str(artifact["sample"])))
+
+    # ⛔ §3.4 also states the class's recall@3 (round-25 re-review, finding 2):
+    # `0.20` → `0.21` planted GREEN. Same artifact quantity, 2 dp here.
+    _only_claim(
+        _scoped(brief, "3.4").replace("**", ""),
+        f"the identifier class's `recall@3` is {ident_shipped:.2f}",
+        "§3.4's ident recall@3",
+        values=(f"{ident_shipped:.2f}",))
 
     # ── §3.5 — the mechanism sentence of the DEFECT claim ───────────────────
     # A one-token `does not hold` → `holds` inverted the defect at its mechanism;
@@ -3670,13 +3706,20 @@ def test_brief_derived_prose_figures_are_the_artifact(
     assert CANDIDATE_RECALL_11901_FTS.exists(), (
         f"§6 cross-references #11901's rows_zero and its artifact is missing: "
         f"{CANDIDATE_RECALL_11901_FTS}")
-    other_zero = json.loads(
-        CANDIDATE_RECALL_11901_FTS.read_text())["arms"]["exact"]["3"]["rows_zero"]
+    other = json.loads(CANDIDATE_RECALL_11901_FTS.read_text())
+    other_zero = other["arms"]["exact"]["3"]["rows_zero"]
+    # ⛔ The sentence carries a SECOND artifact-derived figure (round-25
+    # re-review, finding 1): `#11901`'s keyword-only identifier share, which is
+    # `in_window / n` of its `ident` class at k=3 — `21.1 %` → `21.2 %` planted
+    # GREEN while the counts beside it were pinned.
+    other_ident = other["arms"]["exact_by_class"]["ident"]["3"]
+    other_share = round(other_ident["in_window"] / other_ident["n"] * 100, 1)
     _only_claim(
         _scoped(brief, "6"),
-        f"`rows_zero` ({other_zero} there, {rows_zero} here)",
+        f"`rows_zero` ({other_zero} there, {rows_zero} here) and its "
+        f"`{other_share:.1f} %` keyword-only identifier figure",
         "§6's #11901 cross-reference",
-        values=(str(other_zero), str(rows_zero)),
+        values=(str(other_zero), str(rows_zero), f"{other_share:.1f}"),
         # ⛔ `rows_zero` is the COUNTER's name, not a claim value — but the shape
         # tokeniser splits it at `_`, so its `zero` arm was read as a pivot left
         # literal (the gate refuses that). Naming the whole identifier keeps the
