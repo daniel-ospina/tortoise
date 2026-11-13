@@ -161,11 +161,11 @@ than the quantity its own definition names (`#12295` round-2 B3, fixed before th
 property of the blocker alone.** The first is `MAX_BLOCK_SIZE = 200` in `BlockIndex.candidates()`
 (`tortoise/entity_blocking.py`): a block larger than that is **skipped, not scored**, and the skip
 is recorded under `oversized_skipped` — and this table's pair-completeness column is computed
-through that same call — `tools/candidate_recall_11901.py`'s `_in_block` (~:735), which is
+through that same call — `tools/candidate_recall_11901.py`'s `_in_block` (~:741), which is
 `member_id in set(index.candidates(surface, label=label))` — while the candidates-per-mention
 column is a SEPARATE inline count,
-`blocked_ids = set(index.candidates(surface, label="Object"))` (~:1181) reported as
-`mk_len = len(blocked_ids)` (~:1194). `_blocked_pair_set` (~:678) is the third caller of that
+`blocked_ids = set(index.candidates(surface, label="Object"))` (~:1187) reported as
+`mk_len = len(blocked_ids)` (~:1200). `_blocked_pair_set` (~:684) is the third caller of that
 method, and it serves only the **reduction ratio** numerator, not either column in this table.
 All three go through `BlockIndex.candidates()`, so all three sit under the 200 cap. The second
 is the `low_entropy(key)` gate in `block_keys`, which drops

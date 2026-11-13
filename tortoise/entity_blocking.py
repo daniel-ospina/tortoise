@@ -478,8 +478,11 @@ def attach_matches(mention: object, candidates, *,
     * a ``B`` (basename) match decides **only** when at least one of the two
       names is path-shaped AND exactly one candidate matched on ``B`` AND that
       candidate did not also need ``B`` to win a tie. ``complete`` says the
-      caller's candidate list IS the live population (the dedupe scan); a
-      capture-time window is not, so its basename matches are candidates only.
+      caller's candidate list IS the live population; NO production caller passes
+      it today (the module docstring records the same, and the only non-test call
+      site is ``extractor_v2._find_by_folded_key``, which omits it), so every
+      basename match reaching production is a candidate only — a capture-time
+      window is not the population.
       Attaching a shared basename inside a 3-row window would link
       ``lib/config.py`` to ``server/config.py`` on the strength of what happened
       to be retrieved — a false merge, invisible and hard to undo (`#2730` §6.7).
