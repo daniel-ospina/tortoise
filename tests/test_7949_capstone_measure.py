@@ -5272,7 +5272,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # transcription slip: the number is owned by another tool, so every
         # landing PR above it is a re-derivation this pin cannot do for itself.
         # The last move is #12294's (`f1f74135a1`), and it is TWO blocks, not one:
-        # 13 lines in `core` at 2234 plus 1 line in `tier1` at 9134, netting +14
+        # 13 lines in `core` (2237-2249) plus 1 line in `tier1` (9150), netting +14
         # (9973 + 14 = 9987). `carve_out:` opens 9861 and `uri_requiring:` 10192
         # at `14f96b7b3b`, so 9987 is inside the section, and the identical text
         # also sits at 6103 and 8502 — both +13, because the 14th line is the
