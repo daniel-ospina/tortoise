@@ -959,9 +959,16 @@ def invalidate_stale(
     bucket total as a finding count. A retirement that landed and whose cache
     reconcile then failed is counted in BOTH ``retired`` and ``failed`` (and a
     retired claim whose goal is gone in both ``retired`` and ``gone``), which is
-    correct: each number answers its own question. The reconciliation a consumer
-    CAN rely on is that every finding lands in **at least one** bucket — the
-    failure #12315 records was an arm landing in none.
+    correct: each number answers its own question.
+
+    In a sweep that actually retires (``dry_run=False``) every finding lands in
+    **at least one** bucket — the failure #12315 records was an arm landing in
+    none. ⚠️ That does NOT hold for ``dry_run=True``, and the asymmetry is by
+    design rather than an unhandled arm: a dry run retires nothing, so
+    ``invalidated`` stays empty and EVERY bucket is 0 by construction while
+    ``stale`` names what it would have retired — its own test asserts exactly
+    that pair (``stale`` 1, ``invalidated`` empty). Read the buckets against
+    ``dryRun`` before reconciling them.
     """
     found = verdicts(sdk, goal_id=goal_id, indicator_id=indicator_id,
                      target_id=target_id, limit=limit)
