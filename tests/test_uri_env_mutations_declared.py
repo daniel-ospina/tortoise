@@ -646,15 +646,28 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # DELIBERATE_URI: the setenv IS the test input.
     "test_2500_terminal_ep_backfill.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # ⚠️ `test_9079_event_writers_journal.py` is declared ONCE, far below — see the
-    # entry whose regex pins the CONTINUATION shape. #9219/#9253 (e9db05346) added a
-    # SECOND, broader entry for the same file here ("the #9197 site (`b9d99c5e5`),
-    # declared late: it redded the required `test (e)` on `main` while the suite
-    # itself passed"), and a duplicated dict-literal key is a hard `ruff` error
-    # (F601) that also means the FIRST key wins silently — so the reviewed narrow
-    # pin below was never in force, and every PR inherited a red
-    # `agent-infra-ci / lint` (#9259). The #9219 rationale it carried is preserved
-    # verbatim at that entry, which is the one that matches this file's single
-    # mutation site (the `_run_indexer` restoration record).
+    # entry whose regex pins the CONTINUATION shape. `#9219`/`#9253` (`e9db05346`)
+    # added the FIRST, BROAD entry for this file here, and `#9215`'s commit
+    # (`03cefdbf92`) added the NARROW continuation row later — so last-wins kept the
+    # NARROW pin and it was the BROAD row that was dead. ⛔ Getting that order
+    # backwards inverts the conclusion: "the broad one came second" plus last-wins
+    # reads as "the broad row won", which is the opposite of what happened. A
+    # duplicated dict-literal key is also a hard `ruff` error (`F601`). ⛔ This
+    # comment used to say the FIRST key wins and that the reviewed narrow pin was
+    # "never in force"; a fresh review of `#12265` measured the opposite, and a dict
+    # literal is LAST-wins. At `03cefdbf92` the effective entry
+    # was the NARROW continuation pin (`:582`) and the entry that was silently dead
+    # was the BROAD one (`:490`) — so no reviewed pin was bypassed and the harm was
+    # the red `agent-infra-ci / lint` every PR inherited (#9259), plus a rationale
+    # attached to the entry no reader was using. (`ruff`'s `F601` points at the
+    # SURVIVOR — the repeated key — so following "which one did ruff flag" finds the
+    # row that won; the loser has to be read out of the dict by hand, which is what
+    # `tests/test_dod_5090_probe.py`'s duplicate-key scan now does across `tortoise/`,
+    # `tools/` and `tests/`.) The #9219 rationale it carried is preserved verbatim at
+    # the SURVIVING entry — the narrow continuation pin, the one that matches this
+    # file's single mutation site (the `_run_indexer` restoration record) — not at the
+    # dead broad row, which is gone. The quoted `#9197` rationale now sits at that
+    # SURVIVING entry, not at the row that was shadowed.
     # #7017: the engine-probe suite is hermetic — every probe is injected, so
     # the URI's SOLE role is as the input to `graph_target_from_env()`, and the
     # endpoint-resolution tests set/del it precisely to pin which endpoint
@@ -784,12 +797,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # before `main()` writes the var. Function-scoped `monkeypatch` — auto-undone
     # at teardown, so no lane leaks into a later module.
     #
-    # ⛔ ONE ROW ONLY — this module had a SECOND, broad row
+    # ⛔ ONE ROW ONLY — this module had a FIRST, broad row
     # (`[r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"']`) further up the dict.
-    # Python's last-wins dict semantics made the broad row DEAD (it never applied;
-    # ruff `F601` flagged it), so removing it changes no exemption, while MERGING
-    # the two would silently re-widen the shape the entry below deliberately
-    # narrows. Same behaviour, one row, no reading that says otherwise.
+    # Python's last-wins dict semantics made that broad row DEAD (it never applied),
+    # so removing it changes no exemption, while MERGING the two would silently
+    # re-widen the shape the entry below deliberately narrows. ⛔ `ruff`'s `F601`
+    # flagged the SURVIVING (narrow) row, not this dead one — see the `#9219` note
+    # further up this dict, which states it: following "which one did ruff flag"
+    # finds the row that WON, never the loser. ⛔ No line OFFSET is stated here on
+    # purpose: an offset rots on the next insertion above it (this one was "130
+    # lines up" and the block it meant sat 156 lines up), which is the same
+    # stale-figure defect class the `#12265` scan exists to close.
+    # Same behaviour, one row, no reading that says otherwise.
     "test_9079_event_writers_journal.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],
     # The arm's `--db` scoping tests (#1349 isolation): an explicit `--db` must
