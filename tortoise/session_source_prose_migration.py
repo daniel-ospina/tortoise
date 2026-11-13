@@ -1340,6 +1340,16 @@ def _indexed_term_runs(text: str) -> list[str]:
     accent as a separator, which false-blocked ``résumé``/``naïve`` with a
     reason that was factually wrong while letting ``café`` through only because
     its accent happened to be trailing.
+
+    ⚠️ ``_`` IS SPLIT HERE, and that is NOT the index's sense of it — the index
+    treats it as a WORD character (MEASURED, #12360: `queryNodes('Object',
+    'café_menu')` returns a record named ``café_menu`` as ONE term). Splitting it
+    is still right for THIS function's caller, because the question the probe
+    guard asks is *"does one typed token become several QUERY terms?"* — and
+    since #12360 an inner ``_`` does exactly that (``a_bc`` ->
+    ``bc|a_bc``, the composite riding as an extra OR alternative). So the runs
+    are the QUERY's runs, not the index's, for this one character; the refusal
+    message says which of the two reasons fired.
     """
     return [part for part in re.split(r"[\W_]+", text.lower()) if part]
 
@@ -1467,9 +1477,12 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # not counted as a separator.
     if len(runs) > 1:
         return (f"it splits into {len(runs)} alphanumeric runs {runs!r}; the "
-                f"FTS index splits on every non-alphanumeric character, so "
-                f"this cannot address ONE indexed term — pass a SINGLE RARE "
-                f"token (no digits, dashes or punctuation inside it)")
+                f"FTS index splits on every non-alphanumeric character EXCEPT "
+                f"`_` (which it treats as a word character, #12360), so a "
+                f"token with an inner `_` IS one indexed term while the read "
+                f"OR-expands it and any other separator cannot address ONE "
+                f"indexed term at all — pass a SINGLE RARE token (no digits, "
+                f"dashes, underscores or punctuation inside it)")
     # ⛔ AND A TOKEN THE READ WILL **ESCAPE** IS NOT A PROBE (#11536 review
     # round 7, P0). `build_or_query`'s degenerate single-token branch sends the
     # token through :func:`tortoise.sparse.escape_redisearch_literal`, which

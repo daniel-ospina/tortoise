@@ -42,7 +42,7 @@ import pytest
 
 from tortoise.sparse import (
     MAX_ALIASES_PER_POINT,
-    MAX_IDENTIFIER_LEN,
+    MAX_COMPOSITE_RUN_LEN,
     UNDERSCORE_ENV,
     build_or_query,
     tokenize_sparse_query,
@@ -292,10 +292,25 @@ class TestRunTerms:
         assert underscore_run_terms("a ___ b") == []
 
     def test_length_bound(self):
-        long_run = "a_" + "b" * MAX_IDENTIFIER_LEN
-        assert underscore_run_terms(long_run) == []
-        at_bound = "a_" + "b" * (MAX_IDENTIFIER_LEN - 2)
+        """The bound is 128, NOT the alias mechanism's 48 — measured.
+
+        A 48-char bound was the first cut and it dropped
+        ``test_the_12360_underscore_or_terms_preserve_the_composite_run`` (61
+        chars), which a live index holds and returns by its own name: the exact
+        defect #12360 repairs. Live pin:
+        ``TestLiveReachability::test_a_long_snake_case_name_is_reachable``.
+        """
+        over = ("a_" + "b" * MAX_COMPOSITE_RUN_LEN)[:MAX_COMPOSITE_RUN_LEN + 1]
+        assert len(over) == MAX_COMPOSITE_RUN_LEN + 1
+        assert underscore_run_terms(over) == []
+        at_bound = ("a_" + "b" * MAX_COMPOSITE_RUN_LEN)[:MAX_COMPOSITE_RUN_LEN]
+        assert len(at_bound) == MAX_COMPOSITE_RUN_LEN
         assert underscore_run_terms(at_bound) == [at_bound]
+        # the 48..128 band the alias bound would have lost
+        real_shape = ("test_the_12360_underscore_or_terms_preserve_the_"
+                      "composite_run")
+        assert len(real_shape) == 61
+        assert underscore_run_terms(real_shape) == [real_shape]
 
     def test_budget_bound(self):
         runs = " ".join(f"n_{i}_x" for i in range(MAX_ALIASES_PER_POINT + 4))
@@ -392,6 +407,35 @@ class TestLiveReachability:
             "the OFF arm found the record — the fixture is not measuring the "
             f"defect ({before!r}); if the tokenizer changed, re-measure #12360")
 
+    def test_a_long_snake_case_name_is_reachable(self, proj, monkeypatch):
+        """A 61-char run — this repo's own naming style — must ALSO be found.
+
+        The bound is 128 rather than the alias mechanism's 48 because the index
+        holds composites this long (measured). Without this pin, tightening the
+        bound back to 48 would look safe: it reds only on a name nobody in the
+        measured population has.
+        """
+        from tortoise.search_engine import run_fts_query
+
+        name = ("test_the_12360_underscore_or_terms_preserve_the_composite_run")
+        assert len(name) == 61
+        proj._upsert_object({"id": "o-12360-long", "name": name,
+                             "object_kind": "core:other"})
+        self._wait_indexed(proj, 1)
+
+        monkeypatch.setenv(UNDERSCORE_ENV, "1")
+        ids = [i for i, _s in run_fts_query(proj.g, name, entity_type="object",
+                                            limit=3)]
+        assert "o-12360-long" in ids, (
+            f"a 61-char composite was dropped: {build_or_query(name)!r}")
+
+        monkeypatch.setenv(UNDERSCORE_ENV, "0")
+        before = [i for i, _s in run_fts_query(proj.g, name, entity_type="object",
+                                               limit=3)]
+        assert "o-12360-long" not in before, (
+            "the OFF arm found a 61-char snake_case name — the fixture is not "
+            f"measuring the defect ({before!r})")
+
 
 # ── the committed evidence ────────────────────────────────────────────────
 
@@ -461,6 +505,28 @@ class TestTheRecordedMeasurement:
                     surface, arm)
                 assert a[surface][arm]["ndcg@10"] == b[surface][arm]["ndcg@10"], (
                     surface, arm)
+
+
+    def test_the_declared_user_search_set_is_pinned(self):
+        """The contract's SECOND surface — the row round 1 added — is pinned.
+
+        Without this, `user_search_set` and `query_population_substitution`
+        could be deleted from the artifact and every test would stay green,
+        while the brief and the PR body kept asserting a measurement the harness
+        no longer makes.
+        """
+        art = self._artifact()
+        uss = art["user_search_set"]
+        assert uss["available"] is True, uss
+        assert uss["n"] == 50, uss
+        assert uss["with_underscore"] == [], uss
+        for door in ("mcp_search", "capture_prior"):
+            row = uss["arms"][door]
+            assert row["identical_rank_vectors"] == row["n"] == 50, (door, row)
+            assert row["delta_pts"] == 0.0, (door, row)
+        assert uss["emitted_bytes_identical"] == 50, uss
+        sub = art["verdict"]["query_population_substitution"]
+        assert isinstance(sub, str) and len(sub) > 80, sub
 
 
 class TestHarnessStatistics:

@@ -212,6 +212,21 @@ MAX_IDENTIFIER_SEGMENTS = 6
 #: bare numeric noise (the ``19`` never becomes its own OR term).
 MIN_DIGIT_SEGMENT_LEN = 2
 
+#: #12360: how long a `_`-preserving COMPOSITE run may be before it is dropped.
+#:
+#: ⛔ NOT :data:`MAX_IDENTIFIER_LEN` (48), and the difference is MEASURED, not
+#: stylistic. The alias bound is about a NORMALISED concatenation; the composite
+#: is the index's own term, and RediSearch holds long ones: probing a live
+#: FalkorDB 4.20.6 with `:Object` names that ARE the run, the index returns the
+#: record by its own name at 52, 61, 64 and 128 characters and returns NOTHING at
+#: 256 and 600. So 48 would have dropped runs the index really holds — including
+#: this repo's own naming style
+#: (``test_the_12360_underscore_or_terms_preserve_the_composite_run``, 61 chars,
+#: measured reachable by its composite and dropped by a 48-char bound), which is
+#: the exact defect #12360 exists to repair. 128 is the largest measured-good
+#: length; above it a run is dropped and that loss is DECLARED, not silent.
+MAX_COMPOSITE_RUN_LEN = 128
+
 #: How many alias tokens ONE Point may carry (bounds index growth; the write
 #: path is idempotent, so this is a ceiling, never a churn).
 MAX_ALIASES_PER_POINT = 8
@@ -398,7 +413,10 @@ def underscore_run_terms(text: str) -> list[str]:
     :func:`tokenize_sparse_query`.
 
     ⛔ The defect it repairs (MEASURED on #12298, artifact
-    ``docs/research/2026-11-13-12298-m3-fts-leg/``): **RediSearch treats ``_``
+    ``docs/research/2026-11-13-12298-m3-fts-leg/`` — on PR **#12349**, branch
+    ``fix/12298-m3-splade``, which is where that directory lives; the issue is
+    closed and the artifact is NOT on ``main``, so the citation names the branch
+    rather than implying a repo path a reader can open): **RediSearch treats ``_``
     as a word character and this module's tokenizer does not**
     (:data:`_SPLIT_RE`). So for a stored ``web_search`` the index holds ONE
     term, ``web_search``, while :func:`build_or_query` emits ``search|web`` —
@@ -439,18 +457,23 @@ def underscore_run_terms(text: str) -> list[str]:
       not hold.
 
     The run test is the measured arm's, verbatim (``tools/m3_fts_leg_recall.py``
-    ``recovery_terms``): a maximal run of ``[A-Za-z0-9_]`` that still carries an
+    ``recovery_terms`` — same branch, PR #12349): a maximal run of ``[A-Za-z0-9_]`` that still carries an
     ``_`` and is at least 2 characters. A run WITHOUT ``_`` is already a term
     the tokenizer emits, so re-sending it would only duplicate one (and
     duplicates are the caller's problem — :func:`build_or_query` dedupes).
 
-    Two deliberate LOSSLESS hardenings over the measurement arm, both declared
-    rather than silent:
+    Two deliberate hardenings over the measurement arm, both declared rather
+    than silent:
 
-    * no alphanumeric character in the run -> dropped (``___``);
-    * ``len(run) > MAX_IDENTIFIER_LEN`` -> dropped, the same 48-character bound
-      the alias mechanism uses. The measured population's longest run is
-      ``test_7949_capstone_verdict_check`` (31), so this bound moved nothing.
+    * no alphanumeric character in the run -> dropped (``___``); this one is
+      genuinely LOSSLESS — such a run can never be a term worth sending;
+    * ``len(run) > MAX_COMPOSITE_RUN_LEN`` -> dropped, and this one is **LOSSY**:
+      the index holds composites far longer than that (:data:`MAX_COMPOSITE_RUN_LEN`
+      records the probe), so a run above the bound is unretrievable by its own
+      name. The bound exists because an unbounded run makes the query string
+      proportional to the input, and an over-limit query is recorded as an FTS
+      FAILURE — it degrades LATER searches. No run in the measured population
+      reaches it (longest 31).
 
     …plus the two bounds every other tail in :func:`build_or_query` already
     carries, and which are NOT lossless: the dedupe, and
@@ -467,7 +490,7 @@ def underscore_run_terms(text: str) -> list[str]:
     for run in _COMPOSITE_SPLIT_RE.split(text):
         if len(run) < 2 or "_" not in run:
             continue
-        if len(run) > MAX_IDENTIFIER_LEN:
+        if len(run) > MAX_COMPOSITE_RUN_LEN:
             continue
         if not any(c.isalnum() for c in run):
             continue

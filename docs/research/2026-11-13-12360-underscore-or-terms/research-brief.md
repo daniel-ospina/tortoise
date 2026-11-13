@@ -67,7 +67,9 @@ interacts with a live dense leg (declared in §5).
 
 ## 1. What was ported, exactly
 
-`#12298`'s harness arm (`tools/m3_fts_leg_recall.py::recovery_terms`), verbatim in its run
+`#12298`'s harness arm (`tools/m3_fts_leg_recall.py::recovery_terms` — on PR **#12349**,
+branch `fix/12298-m3-splade`; #12298 is closed and that directory is NOT on `main`, so the
+citation names the branch), verbatim in its run
 test — *a maximal run of `[A-Za-z0-9_]` that still carries `_`, lowercased, length ≥ 2* —
 moved out of the harness and into `tortoise/sparse.py::underscore_run_terms`, appended by
 `build_or_query` as a **third additive tail** after the originals, the A4 expansion tail, and
@@ -95,12 +97,28 @@ Three properties the port keeps:
 * **Byte-identical for every query without an inner `_`** — pinned, including `#8933`'s own
   `ERR-4032` → `err|err4032|"err 4032"`.
 
-Two deviations from the measurement arm that are **lossless** (no alnum-free run, and the
-48-char `MAX_IDENTIFIER_LEN` bound), **plus two that are not** — the dedupe and the
-`MAX_ALIASES_PER_POINT` (8) budget cap every other tail already carries, so a query with nine
-distinct `_` runs keeps the first eight. The cap is deliberate (an over-limit query is recorded
-as an FTS FAILURE and degrades LATER searches), and it is stated in the function's docstring
-rather than left for the next lane comparing the port to the arm it came from.
+Four deviations from the measurement arm, and only ONE of them is lossless:
+
+| deviation | lossless? |
+|---|---|
+| an alnum-free run (`___`) is dropped | yes — such a run can never be a term worth sending |
+| a run longer than `MAX_COMPOSITE_RUN_LEN` (128) is dropped | **NO** — measured: the index holds composites at 52, 61, 64 and 128 chars and holds nothing at 256/600 |
+| dedupe against terms already present | no (idempotent in practice) |
+| the `MAX_ALIASES_PER_POINT` (8) budget cap | **NO** — a query with nine distinct `_` runs keeps the first eight |
+
+The two caps are deliberate (an unbounded run makes the query string proportional to its input,
+and an over-limit query is recorded as an FTS FAILURE that degrades LATER searches), and they are
+stated in the function's docstring rather than left for the next lane comparing the port to the
+arm it came from.
+
+⚠️ **The 128 bound is a review-round correction, and the reason is worth carrying.** The first
+cut reused `MAX_IDENTIFIER_LEN` (48) — the alias bound — and called it lossless. Both halves were
+wrong, measured on a live lane: the index holds composites far past 48, and
+`test_the_12360_underscore_or_terms_preserve_the_composite_run` (61 chars, this repo's own naming
+style) is returned by its own name but was **dropped** by the 48 bound, i.e. the exact defect this
+issue repairs. The alias bound is about a NORMALISED concatenation; the composite is the index's
+own term, so it takes the index's own length evidence. Above 128 the run is dropped and that loss
+is declared (a name that long is not in any measured population; the longest here is 31).
 
 ## 2. Per class — where the effect lives (recall@3, before → after)
 
