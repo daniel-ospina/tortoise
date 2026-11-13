@@ -402,6 +402,15 @@ def test_attest_refuses_an_unreadable_artifact(probe_name):
     """
     rc = _load_probe(probe_name)._attest("/nonexistent-attest-target.json")
     assert rc == 2, f"{probe_name}'s unreadable-artifact arm exited {rc}, not 2 (ATTEST-UNREADABLE)"
+    # The OTHER half of the same `except (OSError, ValueError)`: a path that EXISTS but does not
+    # parse. A probe killed mid-write leaves exactly this, and `OSError` alone does not cover it.
+    with tempfile.TemporaryDirectory() as td:
+        truncated = Path(td) / "artifact.json"
+        truncated.write_text("{not json", encoding="utf-8")
+        before = truncated.read_bytes()
+        rc = _load_probe(probe_name)._attest(str(truncated))
+        assert rc == 2, f"{probe_name}'s unreadable-artifact arm exited {rc} on invalid JSON, not 2"
+        assert truncated.read_bytes() == before, "a refused artifact was rewritten anyway"
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits the PROBE-WRITE arm needs")

@@ -135,12 +135,14 @@ subject a 100-word `content` carried, so distinct facts in the same session crow
 
 ## Reproduce
 
-⚠️ **Needs ~2 GB RSS peak**, composed of ~0.98 GB in `_worst_pair` and ~0.5 GB of
-resident torch/embedder plus overhead. `_pair_bands` is chunked (~30 MB), but `_worst_pair`
-materialises the full `n x n` similarity matrix for the whole population — `15,008² x 4 B ≈ 900 MB`
-(measured `ru_maxrss` 104 MB → 976 MB across the call). It is called twice (composed, then raw),
-**one matrix at a time** — the calls are strictly sequential and the matrix is a local freed at
-return, so the term is never doubled. A 15 GB cell already at load 15 has OOM-killed multi-suite
+⚠️ **Needs ~2 GB RSS peak in EACH step — the second one is not the cheap one.** `_pair_bands` is
+chunked (~30 MB), but both probes build the full `n x n` similarity matrix for the whole population
+(`15,008² x 4 B ≈ 900 MB`) and neither doubles it: `_worst_pair` is called twice (composed, then raw)
+but strictly sequentially, one matrix at a time, measured `ru_maxrss` 104 MB → 976 MB. Step 2 —
+described below as "~30 s, no encoding" — allocates the SAME matrix (`raw @ raw.T`, then
+`np.triu(rr >= 0.99999, 1)`), and measured `341 MB → 1,214 MB` after the product and
+**`1,858 MB` after the comparison**: more than step 1, in the probe that encodes nothing. Budget
+the `free -g` check for both. A 15 GB cell already at load 15 has OOM-killed multi-suite
 runs; check `free -g` / `uptime` before starting, because a run killed at 80 % produces no verdict.
 
 Numbers in `gate.json` (the three gates, ~15 min: it encodes 15,008 composed texts) and in
@@ -162,8 +164,9 @@ uv sync --extra embeddings
 #    cache on the box is a LIVE walk, so its numbers are EXPECTED to differ. The provenance
 #    bindings cannot stop that (an overwrite re-attests itself: probe bytes, verdict and bands
 #    all stay valid), though the pinned headline figures do red on a moved population — measured:
-#    rows_walked 15842 -> 15868 re-attested with --attest gave `1 failed, 19 passed`. Write to
-#    scratch anyway: a red you did not intend is still a red.
+#    rows_walked 15842 -> 15868 re-attested with --attest reds
+#    `test_the_headline_figures_are_the_ones_the_index_quotes`. Write to scratch anyway: a red you
+#    did not intend is still a red.
 uv run python docs/evidence/11739-composed-gate/probes/composed_gate.py \
     --out /tmp/gate.json --cache /tmp/11739-rows.jsonl
 # 2. the root cause (no encoding, ~30 s)
