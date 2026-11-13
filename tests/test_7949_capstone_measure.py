@@ -5085,9 +5085,11 @@ _EPIC_CITE_SOURCES = {
     # `03-test-design.md` cites the manifest's OWN `carve_out:` entry — by SYMBOL
     # since #12266 (`_assert_carve_out_entry_is_pinned_by_symbol`, called from the
     # tail of `test_the_epic_bundle_cites_the_branch_rederived_resolve`), by a line
-    # number before that: no SINGLE tool owns its position — `register_tests`'
-    # registration splices account for 43 of the 44 lines it had travelled and a
-    # hand-authored `tier1:` row for the last — so the pin stopped re-staling.
+    # number before that: no SINGLE tool and no single hand-written row owns its
+    # position — the 44 lines it travelled are 4 `  - name.py` registrations spliced
+    # by `register_tests`, the 39 hand-authored comment lines around them in the same
+    # `surfaces:` blocks, and one hand-authored `tier1:` row — so the pin stopped
+    # re-staling.
     # ⛔ Registered because #11837 moved it TWICE without a reader: restoring the
     # `core:` line a merge dropped (+6 above it) shifted the entry 9548 -> 9554
     # while the document went on naming 9548, which is the row above — a cite a
@@ -5295,9 +5297,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # line-number pin over a number other merges move, not a citation anyone
         # mis-copied. The entry is NOT pinned here any more (#12266): its line is MOVED
         # by any insertion above it, so a number in this table re-stales on somebody
-        # else's merge — `tools/ci_selection.py::register_tests`' registration splices
-        # account for 43 of the 44 lines it had travelled and a hand-authored `tier1:`
-        # row (the #12294 name-entropy gate) for the last one. Measured, it read 9943 at
+        # else's merge — of the 44 lines it travelled, four are `  - name.py`
+        # registrations spliced by `tools/ci_selection.py::register_tests`, THIRTY-NINE
+        # are hand-authored comment lines around them in the same `surfaces:` blocks, and
+        # the last is a hand-authored `tier1:` row (the #12294 name-entropy gate), which
+        # no registration tool could have written. Measured, it read 9943 at
         # `9828250732`, then 9949 (+6 @6721), 9965 (+16 @7514), 9973 (+8 @2725), and
         # **9987 twenty-six seconds after 9973's repair merged** (`f1f74135a1`, +13
         # @2237 and +1 @9150, #12294 / PR #12302 — not #12246, which does not touch the
@@ -5501,9 +5505,11 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
         "not the claim this pin reads")
     stale = re.findall(r"ci-surfaces\.yml:\d+", rows[0])
     assert not stale, (
-        f"the `carve_out:` row prints {stale} — no single tool owns that position "
-        "(43 of the 44 lines by `tools/ci_selection.py::register_tests`' registration "
-        "splices, the last by a hand-authored `tier1:` row), so it re-stales on somebody "
+        f"the `carve_out:` row prints {stale} — no single tool and no single "
+        "hand-written row owns that position (4 of the 44 lines are "
+        "`tools/ci_selection.py::register_tests` registrations, 39 are hand-authored "
+        "comment lines in the same `surfaces:` blocks, 1 a hand-authored `tier1:` row), "
+        "so it re-stales on somebody "
         "else's merge and reds a shard whose diff is unrelated (#12266 settled "
         "this four times by hand). Cite the symbol and the section instead.")
 
