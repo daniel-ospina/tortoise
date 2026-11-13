@@ -5171,13 +5171,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("18900", "relation_write = apply_relation_edges("),
+            # ⛔ RE-DERIVED at the #12374 rebase onto `2dbfb046d7`: #12203
+            # (`357e6222df9a`, the name-key space readers) inserted 109 lines
+            # above every anchor in this table, so all ten rows moved by
+            # exactly +109 — the same +109 that moved the `04-plan.md`
+            # `declared = declared_relation_predicates()` pin 25284 -> 25393.
+            # Measured with `grep -nF <anchor> tortoise/sdk.py` on THIS tree,
+            # never carried from a parent; the anchors are keyed on the symbol,
+            # so only the numbers moved.
+            ("19009", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("18899", "from tortoise.relation_write import apply_relation_edges"),
+            ("19008", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18887", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18996", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5187,8 +5195,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("9955", "subject_binding_available,"),
-            ("10008", "and not subject_binding_available(graph):"),
+            # ⛔ RE-DERIVED at the #12374 rebase onto `2dbfb046d7`: #12203
+            # (`357e6222df9a`, the name-key space readers) inserted 109 lines
+            # above every anchor in this table, so all ten rows moved by
+            # exactly +109 — the same +109 that moved the `04-plan.md`
+            # `declared = declared_relation_predicates()` pin 25284 -> 25393.
+            # Measured with `grep -nF <anchor> tortoise/sdk.py` on THIS tree,
+            # never carried from a parent; the anchors are keyed on the symbol,
+            # so only the numbers moved.
+            ("10064", "subject_binding_available,"),
+            ("10117", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6607", "def subject_binding_available(graph) -> bool:"),
@@ -5197,13 +5213,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("9955", "subject_binding_available,"),
-            ("10008", "and not subject_binding_available(graph):"),
+            # ⛔ RE-DERIVED at the #12374 rebase onto `2dbfb046d7`: #12203
+            # (`357e6222df9a`, the name-key space readers) inserted 109 lines
+            # above every anchor in this table, so all ten rows moved by
+            # exactly +109 — the same +109 that moved the `04-plan.md`
+            # `declared = declared_relation_predicates()` pin 25284 -> 25393.
+            # Measured with `grep -nF <anchor> tortoise/sdk.py` on THIS tree,
+            # never carried from a parent; the anchors are keyed on the symbol,
+            # so only the numbers moved.
+            ("10064", "subject_binding_available,"),
+            ("10117", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18547", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18656", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
@@ -5242,8 +5266,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("16346", "The v2 path reports"),
-            ("16347", '"extraction_mode": "llm:<route>"'),
+            ("16455", "The v2 path reports"),
+            ("16456", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         ("04-plan.md", "operator / label path", (
             ("25393", "declared = declared_relation_predicates()"),
