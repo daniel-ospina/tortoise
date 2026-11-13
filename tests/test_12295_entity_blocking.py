@@ -416,7 +416,7 @@ def test_the_scan_blocks_on_the_STORED_fold_not_on_a_re_fold_of_the_name(monkeyp
     """One value, one key: block on what the scan SCORES.
 
     `scan_entities` scores ``normalize_entity_name(canonical or name)``
-    (`entity_resolver.py:269`), and a caller-supplied `canonical_name` is legal
+    (`entity_resolver.py:284`), and a caller-supplied `canonical_name` is legal
     (`api.py:2671`) — as is a pre-`#12047` row whose fold differs from its name.
     Indexing such a row by ``key_of(name)`` blocks on one value and scores on
     another, so an `exact` 1.0 pair silently leaves the queue.

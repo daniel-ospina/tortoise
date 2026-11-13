@@ -18,7 +18,7 @@ What was missing is the **comparison** and the **blocker**:
   ``the plan-doc`` cannot bind the node stored as ``the plan doc``. `#11901`
   measured the consequence: **0 of 419 real surface variants attach at every
   ``k``, in both retrieval modes**, while 62 % of them are *inside* the window.
-* ``entity_resolver.entity_candidates`` (``entity_resolver.py:364``) blocks on
+* ``entity_resolver.entity_candidates`` (``entity_resolver.py:379``) blocks on
   ONE key — ``block_key`` = the first :data:`entity_resolver.MIN_BLOCK_CHARS`
   folded characters — so a transposition or a word-order change
   (``the project alpha`` vs ``alpha project``) lands in two blocks and the pair
@@ -273,8 +273,10 @@ def block_keys(name: object, *, key: str | None = None) -> tuple[str, ...]:
     """Every key this name blocks on — the candidate generators.
 
     ``P`` a folded prefix (this is the `#12047` key — kept because the scan used
-    to block on it, so keeping it preserves **main's pairing set**; ``E`` pairs are
-    a subset of ``P`` pairs, so ``P`` adds no exactness of its own), ``T`` a
+    to block on it, so keeping it preserves **main's pairing set**; where the fold is
+    at least ``MIN_BLOCK_CHARS`` long, ``E`` pairs are a subset of ``P`` pairs, so
+    ``P`` adds no exactness of its own (a SHORTER fold gets no ``P`` key at all and
+    is carried by ``E`` alone)), ``T`` a
     per-token prefix (word order and transposition), ``S`` an LSH shingle band
     (typo/separator classes FTS cannot reach), and the ``E``/``B`` attach keys. A
     low-entropy name blocks on ``E``/``P``/``T`` only: its shingle set is noise,
@@ -321,7 +323,7 @@ class BlockIndex:
 
         ``key`` is the member's STORED fold. Pass it whenever the caller already
         holds one, which `entity_resolver.scan_entities` does: it scores
-        ``normalize_entity_name(canonical or name)`` (``entity_resolver.py:269``),
+        ``normalize_entity_name(canonical or name)`` (``entity_resolver.py:284``),
         so indexing this row by ``key_of(name)`` would BLOCK on one value and
         SCORE on another — and a row whose ``canonical_name`` differs from its
         name's fold (legal: a caller-supplied key, ``api.py:2671``, or a pre-
