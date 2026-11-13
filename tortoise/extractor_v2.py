@@ -5782,18 +5782,25 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
 
     The folded arm compares :func:`tortoise.entity_blocking.key_of`, which is
     ``entity_resolver.normalize_entity_name`` — the key every write door already
-    stores as ``canonical_name`` since `#12047` (``sdk.py:45593``,
-    ``api.py:2628``, ``projection/entities.py:5077``). It differs from ``_norm``
+    stores as ``canonical_name`` since `#12047` (``sdk.py``: the `_emit` fill at
+    ``:45886``; ``api.py:2628``; ``projection/entities.py``: Objects ON CREATE at
+    ``:5094``). It differs from ``_norm``
     exactly where the measured variant classes live: it drops a leading article
     and folds every punctuation run to a space, so ``the plan-doc``,
     ``The Plan Doc`` and ``the plan doc`` share one key.
 
     ⛔ It is EQUALITY, never a similarity score — no threshold, no second
     constant (`#2730` §6.7 refused one; a false merge is invisible, a false split
-    is cheap). The non-injective keys (path basename, leading ``#``) attach only
-    when exactly ONE candidate carries them, which is the same discipline the
-    bare-kind arm below already applies. ``name`` is never rewritten; the key is
-    derived for the comparison and discarded.
+    is cheap). ⛔ The classes the FOLD cannot decide are the ones the
+    non-injective key is for, and a leading ``#`` is NOT one of them: the fold
+    already absorbs it (``#12295`` and ``12295`` both fold to ``12295``, so that
+    class travels the ordinary ``E`` key — see
+    ``entity_blocking.py``'s `key_of` note). What IS non-injective is a path
+    BASENAME, and in THIS path a basename never decides at all: this caller does
+    not pass ``complete=True``, and ``attach_matches`` refuses a basename
+    candidate on anything less than a complete population with exactly one
+    carrier. ``name`` is never rewritten; the key is derived for the comparison
+    and discarded.
     """
     norm_name = _norm(name)
     kind_folded = str(kind).strip().lower()

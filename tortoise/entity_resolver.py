@@ -429,10 +429,17 @@ def entity_candidates(graph, *, limit: int | None = 50,
         #: the difference is deliberate: ``settled`` is per block, so a pair emitted
         #: in one block no longer re-populates a later block's ``settled``, and a
         #: candidate that is an exact twin of two carriers can surface as
-        #: ``ambiguous``/``tied_with`` where the old order hid it (measured 2 in 500
-        #: random populations, only those fields move). That is fail-CLOSED —
-        #: ``approve_merge`` refuses an ``ambiguous`` row rather than merging it —
-        #: and a reviewer fuzzed the rows against ``main`` finding none dropped.
+        #: ``ambiguous``/``tied_with`` where the old order hid it. That is
+        #: fail-CLOSED — ``approve_merge`` refuses an ``ambiguous`` row rather than
+        #: merging it. ⛔ The one arm that is NOT purely additive is the per-candidate
+        #: reduction below (``best``: ONE row per candidate, sorted by
+        #: ``-similarity``): when the extra blocks hand a candidate a
+        #: HIGHER-scoring survivor, that better pair displaces the one ``main``
+        #: offered instead of being emitted beside it, and the read surface
+        #: re-derives its own best from the rows it is given. So do not read this
+        #: key as a strict superset of ``main``'s PAIRS — it is a superset of the
+        #: blocks (nothing is blocked less), and its reduction shows a strictly
+        #: better match where it differs.
         #: ⛔ The dedupe is checked at the TOP of the pair loop, before the vector
         #: lookup, the length prune and ``similarity``: a dedupe placed after them
         #: skips only the append, and the repeated comparison it was added to avoid

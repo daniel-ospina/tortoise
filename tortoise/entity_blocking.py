@@ -5,10 +5,11 @@ WHERE WE ALREADY WERE, MEASURED — read this before adding a key
 The *stored* folded key is not missing. `#12047` landed it: every write door
 (`add_object`, `add_subject`, the `_emit` funnel, a real rename) fills
 ``canonical_name`` with :func:`tortoise.entity_resolver.normalize_entity_name`
-(``sdk.py:45593``, ``api.py:2628``, ``api.py:2671``, ``sdk.py:46935``), and the
-projection writes it ON CREATE with a `coalesce` fill on match
-(``projection/entities.py:5077``, ``:5084``). ``name`` was never rewritten, which
-is exactly the shape `#12295` asks for — the key rides beside it.
+(``sdk.py``: the `_emit` fill at ``:45886``; ``api.py:2628``; ``api.py:2671``;
+``sdk.py``: the rename fill at ``:47229``), and the projection writes it ON CREATE
+with a `coalesce` fill on match (``projection/entities.py``: the object arm at
+``:5094``/``:5101``, the subject arm at ``:4958``/``:4975``). ``name`` was never
+rewritten, which is exactly the shape `#12295` asks for — the key rides beside it.
 
 What was missing is the **comparison** and the **blocker**:
 
@@ -48,7 +49,7 @@ Zep/Graphiti (`graphiti_core/utils/maintenance/dedup_helpers.py`, read at
 -----------------------------------------------------------------------------
 1. **It never rewrites ``name``.** ``name`` is the natural key and identity is
    the minted id (`#3584`/`#3590`: ``merge_key = "id"``,
-   ``projection/entities.py:5061``). Every key here is derived, comparison-side,
+   ``projection/entities.py:4907``). Every key here is derived, comparison-side,
    and never persisted by this module.
 2. **No similarity score attaches an entity.** Zep auto-resolves at Jaccard
    ≥ 0.9; we do **not**. `#2730` §6.7 (a false merge is invisible and hard to
@@ -95,12 +96,14 @@ from tortoise.entity_resolver import (
     normalize_entity_name,
 )
 
-#: A single QUERY's candidate list from one block stops growing at this many
-#: members (**the query path only** — see :meth:`BlockIndex.candidates`). It is a
-#: latency bound on one read, not a limit on a SCAN: `entity_candidates` compares
-#: every block, because a scan's pair set is what the reviewer sees and narrowing
-#: it here would be a silent behaviour change. A block this large is a degenerate
-#: key (one token shared by hundreds of entities) and the caller should narrow it.
+#: A block bigger than this many members is **SKIPPED, never truncated** by a
+#: single QUERY (**the query path only** — see :meth:`BlockIndex.candidates`, which
+#: records the skip in :meth:`stats`): it contributes ZERO candidates, not its
+#: first N. It is a latency bound on one read, not a limit on a SCAN:
+#: `entity_candidates` compares every block, because a scan's pair set is what the
+#: reviewer sees and narrowing it here would be a silent behaviour change. A block
+#: this large is a degenerate key (one token shared by hundreds of entities) and
+#: the caller should narrow it.
 MAX_BLOCK_SIZE = 200
 
 #: 3-gram shingles over the folded name with whitespace removed (Zep `_shingles`).
@@ -318,7 +321,7 @@ class BlockIndex:
 
         ``key`` is the member's STORED fold. Pass it whenever the caller already
         holds one, which `entity_resolver.scan_entities` does: it scores
-        ``normalize_entity_name(canonical or name)`` (``entity_resolver.py:266``),
+        ``normalize_entity_name(canonical or name)`` (``entity_resolver.py:269``),
         so indexing this row by ``key_of(name)`` would BLOCK on one value and
         SCORE on another — and a row whose ``canonical_name`` differs from its
         name's fold (legal: a caller-supplied key, ``api.py:2671``, or a pre-
@@ -364,10 +367,23 @@ class BlockIndex:
         :meth:`stats` — reporting the skip is the point: a silently dropped block
         reads as "nothing shares this key", which is a false negative the caller
         would attribute to the data.
+
+        ⛔ ``label=None`` means **every label this index actually holds**, not the
+        :data:`ENTITY_LABELS` list: an index built by :meth:`from_rows` carries
+        whatever label its rows did (``""`` by default), and iterating the
+        constant instead returned ``[]`` for it — a silent false negative that is
+        indistinguishable from "nothing shares this key". The constant's order is
+        kept first so a scan-path result order is unchanged; any other label the
+        index holds is appended in sorted order for determinism.
         """
         seen: set[str] = set()
         out: list[str] = []
-        labels = [label] if label is not None else list(ENTITY_LABELS)
+        if label is not None:
+            labels = [label]
+        else:
+            present = {lbl for lbl, _ in self._blocks}
+            labels = [lbl for lbl in ENTITY_LABELS if lbl in present]
+            labels += sorted(present - set(ENTITY_LABELS))
         for key in block_keys(name):
             for lbl in labels:
                 members = self._blocks.get((lbl, key))
