@@ -1596,12 +1596,15 @@ def test_the_rerank_arm_measures_the_model_the_PRODUCT_would_load(
 
 
 def test_the_rerank_ARM_is_handed_the_resolved_model(tool_mod, monkeypatch):
-    """The WIRING, not just the helper: a hard-coded id at the call site passes.
+    """The WIRING, not just the helper: a helper-only pin passes over this.
 
     ⛔ Measured the hard way — driving ``resolve_rerank_model`` alone left all 43
     tests green when the arm was handed
-    ``model="cross-encoder/ms-marco-MiniLM-L6-v2"`` directly. So this records what
-    `_rerank_arm` is actually CALLED with.
+    ``model="cross-encoder/ms-marco-MiniLM-L6-v2"`` directly, and driving
+    ``build_rerank_arm`` alone left all 44 green when `run` was put back to the
+    inline ``_rerank_arm(...)`` form. So this records what `_rerank_arm` is
+    actually CALLED with, AND asserts from the AST that `run` reaches it only
+    through the seam.
     """
     seen: dict = {}
 
@@ -1618,6 +1621,28 @@ def test_the_rerank_ARM_is_handed_the_resolved_model(tool_mod, monkeypatch):
     assert built == {"arm": "rerank"}
     assert seen.get("model") == "cross-encoder/from-the-resolver", (
         f"the arm was handed {seen.get('model')!r}, not the resolved model")
+
+    # …and `run` must CALL the seam. AST, not a source grep: the comments above
+    # name both identifiers, so a substring test would be satisfied by itself.
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(tool_mod.run).lstrip())
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    names = {n.func.id for n in calls if isinstance(n.func, ast.Name)}
+    assert "build_rerank_arm" in names, (
+        "the --rerank branch no longer goes through the seam")
+    # ⛔ The LEXICAL arms legitimately call `_rerank_arm` directly, and they DO
+    # pass a `model` kwarg — but it is a label (`lexical:difflib`), not a
+    # cross-encoder id. What distinguishes them structurally is that they supply
+    # their own `scorer`; the cross-encoder arm supplies none and must come from
+    # the seam, where the resolver lives.
+    direct = [n for n in calls
+              if isinstance(n.func, ast.Name) and n.func.id == "_rerank_arm"]
+    unscored = [n for n in direct
+                if not any(k.arg == "scorer" for k in n.keywords)]
+    assert direct and not unscored, (
+        "an inline _rerank_arm call with no scorer of its own bypasses the "
+        "resolver the seam exists to apply")
 
 
 def test_the_control_arms_are_not_labelled_with_the_models_cost_story(lexical):

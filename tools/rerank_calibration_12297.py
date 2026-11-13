@@ -218,6 +218,37 @@ def _arm_block() -> dict:
 READ_SIDE_DEGRADES = frozenset({"disabled", "empty_pool", "empty_query"})
 
 
+def score_pool(query: str, rows: list[dict], *, model: str,
+               limit: int) -> tuple[list[dict], dict]:
+    """The TIMED call, in one place so the model it is handed is pinnable.
+
+    ⛔ A seam rather than an inline call: the claim "the load check and the timed
+    call use the SAME resolved id" was pinned by grepping ``run``'s source, and
+    that was satisfied by a docstring naming the identifiers (measured) — the
+    artifact then recorded the resolved id behind an ``ms_per_pair`` produced by
+    a different model. Imported here so a test can patch
+    ``tortoise.rerank.rerank_pool`` and read the kwarg.
+    """
+    from tortoise.rerank import rerank_pool
+    return rerank_pool(query, rows, text_key="content",
+                       pool=limit, enabled=True, model=model)
+
+
+def record_stats(block: dict, stats: dict) -> None:
+    """Count a READ-side skip on the arm; a scorer degrade is refused elsewhere.
+
+    A pure helper, because the alternative pin was "the increment statement
+    exists" — and inverting the guard to ``if applied and <read-side>`` made the
+    counter unreachable while every test stayed green (measured). Tolerating a
+    read-side skip without counting it is a silent hole: the arm would report a
+    query it never scored as if the reranker had run and changed nothing.
+    """
+    if stats.get("applied"):
+        return
+    if (stats.get("degrade_reason") or "") in READ_SIDE_DEGRADES:
+        block["rerank_skipped_read"] += 1
+
+
 def resolve_arm_model(args) -> str:
     """The cross-encoder this run measures — the one the PRODUCT would load.
 
@@ -300,7 +331,6 @@ def run(args: argparse.Namespace) -> int:
     from tortoise.rerank import (
         DEFAULT_FUSED_RERANK_POOL,
         get_scorer,
-        rerank_pool,
     )
     from tortoise.sdk import TortoiseSDK
 
@@ -390,14 +420,10 @@ def run(args: argparse.Namespace) -> int:
                                if x == row["id"]), None)
 
                 t1 = time.perf_counter()
-                reordered, stats = rerank_pool(
-                    query, pool_rows, text_key="content",
-                    pool=args.limit, enabled=True, model=model)
+                reordered, stats = score_pool(
+                    query, pool_rows, model=model, limit=args.limit)
                 score_s += time.perf_counter() - t1
-                if not stats.get("applied") and (
-                        stats.get("degrade_reason") or "") in READ_SIDE_DEGRADES:
-                    # counted, not refused: see READ_SIDE_DEGRADES
-                    block["rerank_skipped_read"] += 1
+                record_stats(block, stats)
                 _refusal = rerank_degrade_refusal(stats)
                 if _refusal:
                     print(_refusal, file=sys.stderr)
@@ -430,6 +456,19 @@ def run(args: argparse.Namespace) -> int:
                         "rank_before": before, "rank_after": after,
                         "pool": len(ids),
                     })
+
+        # ⛔ A run that scored NOTHING measured no latency: every query was a
+        # read-side skip, so the artifact would report ``ms_per_pair: null``
+        # beside a pool of zero-scored arms — a figure-shaped hole that reads as
+        # "the reranker was cheap here". Refuse instead.
+        if not pairs_scored:
+            print("REFUSED: no pair was ever scored — every query was skipped "
+                  "before the scorer (empty pool / empty query), so this run "
+                  "measures no latency at all. Check the harvest and the pool "
+                  "width, not the model.", file=sys.stderr)
+            return 3
+
+        _skipped = sum(b["rerank_skipped_read"] for b in arms.values())
 
         for block in arms.values():
             n = block["queries"] or 1
@@ -483,12 +522,14 @@ def run(args: argparse.Namespace) -> int:
                 # ``--allow-reranked-baseline``), and recording it is what makes
                 # that decidable from the artifact instead of from memory.
                 "fused_rerank_gate_armed": _ambient_gate,
-                # ⛔ An ASSERTED INVARIANT, not a measurement: the loop refuses
-                # (exit 3) on the first degraded query, so a finished run scored
-                # every pair it counted. Recording it is what makes that
-                # decidable from the artifact instead of from trust — without
-                # it, "gained 0 / lost 0" cannot be told from a degrade.
-                "rerank_applied_on_every_query": True,
+                # ⛔ DERIVED from the arms, never a literal: the loop refuses
+                # (exit 3) on the first scorer degrade, so ``degraded_queries``
+                # is 0 BY CONSTRUCTION — but a READ-side skip is tolerated and
+                # counted, so "applied on every query" is FALSE for a run that
+                # skipped any. Written as a literal once, this said True beside
+                # ``rerank_skipped_read > 0`` in the same artifact.
+                "rerank_applied_on_every_query": _skipped == 0,
+                "rerank_skipped_read": _skipped,
                 "degraded_queries": 0,
                 "loadavg_1m": round(os.getloadavg()[0], 2),
             },

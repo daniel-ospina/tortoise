@@ -15,7 +15,9 @@ query set actually is**, because every figure in that doc is a property of it.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
+import inspect
 import json
 import re
 import sys
@@ -159,7 +161,14 @@ def test_the_briefs_cost_table_is_the_artifacts_and_names_the_admitted_range():
     noun = json.loads((doc / "measurement-noun-path.json").read_text())
     user = json.loads((doc / "measurement-user-search.json").read_text())
 
-    rows = [ln for ln in text.splitlines() if ln.startswith("|")]
+    # ⛔ Scoped to §5 before collecting the rows: with every ``|``-line in the
+    # document, ``next(row for row in rows if artifact_name in row)`` bound to the
+    # first inventory-style row naming the artifact anywhere — adding one in §2
+    # let BOTH §5 cells be rewritten to other runs' figures with the test green
+    # (measured).
+    assert "## 5." in text, "§5's heading is gone — cannot scope the cost table"
+    section = text.split("## 5.", 1)[1].split("\n## ", 1)[0]
+    rows = [ln for ln in section.splitlines() if ln.startswith("|")]
     for art, artifact_name, label in (
             (noun, "measurement-noun-path.json", "noun-path"),
             (user, "measurement-user-search.json", "user-search")):
@@ -178,9 +187,12 @@ def test_the_briefs_cost_table_is_the_artifacts_and_names_the_admitted_range():
     cell = next((ln for ln in rows if "passage-length" in ln), "")
     assert cell, "§5's passage-length cost cell is gone"
     floor = min(int(w) for w in re.findall(r"(\d+)\s*words", cell))
-    assert floor >= cal.MIN_WORDS, (
-        f"§5's passage-length cell states {floor} words, below the harvest's "
-        f"{cal.MIN_WORDS}-word floor: {cell}")
+    # ⛔ EQUALITY, both directions: `floor >= MIN_WORDS` caught a RAISED harvest
+    # floor but stayed green when it was LOWERED to 25 — the direction that
+    # makes the brief overstate the population the cost figure describes.
+    assert floor == cal.MIN_WORDS, (
+        f"§5's passage-length cell states {floor} words; the harvest's floor is "
+        f"{cal.MIN_WORDS} — the cell must state the harvest's own floor: {cell}")
 
 
 # ── 6. the run refuses a baseline that is not the fused order ──────────────
@@ -216,15 +228,36 @@ def test_the_run_measures_the_model_the_PRODUCT_would_load(monkeypatch):
     assert cal.resolve_arm_model(_run_ns(model="cross-encoder/pinned")) == (
         "cross-encoder/pinned")
 
-    # …and the run must CONSULT it (a helper nobody calls pins nothing).
-    import inspect
-    src = inspect.getsource(cal.run)
-    code = "\n".join(ln for ln in src.splitlines()
-                     if not ln.strip().startswith("#"))
-    assert "model = resolve_arm_model(args)" in code, (
-        "the run no longer resolves its model through the resolver")
-    assert "get_scorer(model)" in code and "model=model" in code, (
-        "both the load check and the timed call must use the SAME resolved id")
+    # …and the timed call must be HANDED that id. Behavioural: the seam is
+    # driven with the real ``rerank_pool`` monkeypatched, so no prose can satisfy
+    # it — the previous version grepped ``run``'s source, and a docstring naming
+    # the identifiers passed it while the timed call used another model.
+    from tortoise import rerank as _r
+    seen: dict = {}
+    monkeypatch.setattr(_r, "rerank_pool",
+                        lambda q, rows, **kw: (seen.update(kw), (rows, {}))[1])
+    cal.score_pool("q", [{"id": "a"}], model="cross-encoder/pinned-by-args",
+                   limit=cal.POOL)
+    assert seen.get("model") == "cross-encoder/pinned-by-args", seen
+    assert seen.get("enabled") is True and seen.get("pool") == cal.POOL, seen
+
+    # …and `run` must hand BOTH calls the same NAME, read from the AST so a
+    # comment, a docstring or a string literal cannot satisfy it.
+    tree = ast.parse(inspect.getsource(cal.run).lstrip())
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+
+    def _kw(call, name):
+        return next((k.value for k in call.keywords if k.arg == name), None)
+
+    loader = [c for c in calls
+              if isinstance(c.func, ast.Name) and c.func.id == "get_scorer"]
+    timed = [c for c in calls
+             if isinstance(c.func, ast.Name) and c.func.id == "score_pool"]
+    assert loader and timed, "the run must load and time through these calls"
+    assert isinstance(loader[0].args[0], ast.Name) and \
+        loader[0].args[0].id == "model", ast.dump(loader[0])
+    handed = _kw(timed[0], "model")
+    assert isinstance(handed, ast.Name) and handed.id == "model", ast.dump(timed[0])
 
 
 def test_a_degraded_arm_is_refused_and_says_so():
@@ -252,11 +285,18 @@ def test_a_degraded_arm_is_refused_and_says_so():
         assert cal.rerank_degrade_refusal(
             {"applied": False, "degrade_reason": read_side}) is None, read_side
     # …and the read-side skip must still be COUNTED, or the tolerance becomes a
-    # silent hole.
-    import inspect
-    src = inspect.getsource(cal.run)
-    assert 'block["rerank_skipped_read"] += 1' in src
-    assert "rerank_skipped_read" in str(cal._arm_block())
+    # silent hole. Pinned on the pure helper: "the increment statement exists"
+    # stayed green when the guard was inverted so the counter could never fire
+    # (measured).
+    block = cal._arm_block()
+    for read_side in sorted(cal.READ_SIDE_DEGRADES):
+        cal.record_stats(block, {"applied": False, "degrade_reason": read_side})
+    assert block["rerank_skipped_read"] == len(cal.READ_SIDE_DEGRADES), block
+    # an APPLIED run is not a skip, and a scorer degrade is refused (so it must
+    # not be counted as one either — it would hide inside the skip tally).
+    cal.record_stats(block, {"applied": True, "degrade_reason": "ok"})
+    cal.record_stats(block, {"applied": False, "degrade_reason": "non-finite scores"})
+    assert block["rerank_skipped_read"] == len(cal.READ_SIDE_DEGRADES), block
 
     msg = cal.rerank_degrade_refusal(
         {"applied": False, "degrade_reason": "score_exception", "scored": 0})
@@ -268,6 +308,28 @@ def test_a_degraded_arm_is_refused_and_says_so():
     assert bare is not None and "no reason given" in bare, bare
 
 
+def test_the_applied_invariant_is_DERIVED_from_the_skips():
+    """`rerank_applied_on_every_query` must be computed, not asserted.
+
+    ⛔ Tolerating a read-side skip made the old literal false BY CONSTRUCTION: a
+    finished run can count `rerank_skipped_read > 0` beside
+    `rerank_applied_on_every_query: True` in the same artifact, and a run that
+    skipped EVERY query would still have claimed the reranker ran on all of
+    them. The report now derives both fields from the arms.
+    """
+    import inspect
+    src = inspect.getsource(cal.run)
+    assert '"rerank_applied_on_every_query": _skipped == 0' in src, (
+        "the invariant must be derived from the skip tally")
+    assert '_skipped = sum(b["rerank_skipped_read"] for b in arms.values())' in src
+    # …and a run that scored nothing must refuse rather than emit null latency.
+    assert "if not pairs_scored:" in src, (
+        "a run with no scored pair has no latency to report — it must refuse")
+    taper = src[src.index("if not pairs_scored:"):]
+    assert "return 3" in taper, (
+        "the no-pairs refusal must END the run, not warn")
+
+
 def test_the_run_refuses_on_the_degrade_it_detects():
     """The loop must actually CALL the refusal — the helper returning a string
     is worth nothing if `run` prints it and keeps measuring."""
@@ -277,8 +339,6 @@ def test_the_run_refuses_on_the_degrade_it_detects():
         "the arm no longer consults the degrade refusal")
     assert "return 3" in src[src.index("_refusal = rerank_degrade_refusal"):], (
         "the degrade refusal must END the run, not warn")
-    assert '"degraded_queries": 0' in src, (
-        "the artifact must state the invariant the refusal establishes")
 
 
 def test_an_armed_read_gate_refuses_the_run(monkeypatch, capsys):
