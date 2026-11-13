@@ -1084,10 +1084,13 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
         # ⛔ NOT the same fact as "the goal holds no derived word": there is no
         # node to point at anything, so nothing was reconciled. Reported as
         # `gone` so a sweep cannot read clean on a retirement it could not follow.
-        # A falsy read IS the absent case: `get_entity` answers `{}` for an id
-        # with no node (measured — a deleted node and a never-existent id both
-        # return `{}`, never `None`), which is why the caller must use the same
-        # predicate the read paths do rather than truthiness of a prop.
+        # ⛔ AND A FALSY READ IS *NOT* PROOF OF ABSENCE. `get_entity` answers `{}`
+        # in two different worlds (never `None`): an id with NO node, and an id
+        # this surface cannot ADDRESS — a non-canonical label, an unlabelled
+        # node, or an `:Event` carrying no `eventId` (#12336). So the caller must
+        # OBSERVE the graph (`_GONE_PROBE`) before claiming a deletion; reading
+        # this flag as one is the false "the goal no longer exists" which the
+        # sweep's `unaddressable` arm exists to stop.
         return {"checked": False, "gone": True,
                 "reason": f"the goal {goal_id!r} no longer exists — its cache "
                           "cannot be reconciled"}
@@ -1746,7 +1749,7 @@ def invalidate_stale(
     both edits made BEFORE the sweep instead give ``stale: 0`` and no finding at
     all, because the scan reads live judgements only). It is neither a failure of
     a retirement nor a success of the reconcile, and it exists so a sweep over
-    deleted goals cannot read clean.
+    UNRESOLVED goals cannot read clean.
 
     ⛔ THE BUCKETS ARE PER-FINDING PREDICATES, NOT A PARTITION — do not read a
     bucket total as a finding count. A retirement that landed and whose cache
