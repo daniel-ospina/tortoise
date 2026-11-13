@@ -1604,18 +1604,80 @@ def test_a_goal_whose_word_THIS_ENGINE_never_wrote_is_not_even_a_CANDIDATE(
     assert sdk.get_entity(g["id"])["goalState"] == word
 
 
-def test_the_repair_sweep_covers_a_LEGACY_goal_POINT_not_only_an_OBJECT(sdk):
-    """`goalState` is carried by BOTH `:Object` goals (canonical per ONTOLOGY §5)
-    and legacy `:Point` goals — `projection/entities.py` declares the prop for the
-    point write path precisely because a legacy goal point carries it (#7856). A
-    sweep that enumerated Objects only would leave the legacy half broken, which
-    is the same class of defect one level down."""
+def test_a_LEGACY_goal_POINT_is_NOT_swept_and_the_reason_is_pinned(sdk):
+    """THE BOUNDARY THAT MAKES THE REPAIR DURABLE, not a missing feature.
+
+    `goalState` IS carried by legacy `:Point` goals (`projection/entities.py`
+    declares the prop for the point write path, #7856), so this shape looks like
+    the obvious second half of the sweep — and writing it is WRONG. The generic
+    POINT branch of `sdk.update_entity` journals only the annotator dims and
+    `mentions` (its own SCOPE note), so a `goalState` clear there is live-only.
+    MEASURED on this lane with the durability harness (`check_consistency` +
+    `rebuild_all`), one goal of each label: the OBJECT repair left
+    `ok=True/divergence=None` and stayed cleared after a rebuild, while the POINT
+    repair left `ok=False`, `divergence='unrecorded-mutation'`, and the rebuild
+    restored `met` — a sweep that reports `cleared` every pass of a
+    repair-then-rebuild loop, and that reds the journal/projection parity blaming
+    a rogue writer it is itself.
+
+    So the Point is deliberately NOT a candidate until the point prop write is
+    journalled (#4094's class), and this test is the pin: it fails the day someone
+    ">fixes" the omission by adding the label back without making the write
+    durable.
+    """
     point = sdk.create_point("goal", "legacy goal [sweep-point]",
                              goalState="met")
-    assert sdk.get_entity(point["id"])["goalState"] == "met"
+    assert sdk.get_entity(point["id"])["goalState"] == "met", (
+        "precondition: a legacy goal Point can hold the word")
     report = reconcile_goal_states(sdk)
-    assert report["counts"]["repaired"] == 1, report
-    assert sdk.get_entity(point["id"]).get("goalState") is None
+    assert report["counts"]["scanned"] == 0, report
+    assert report["counts"]["repaired"] == 0, report
+    assert sdk.get_entity(point["id"])["goalState"] == "met", (
+        "the sweep wrote an UNJOURNALLED prop on a Point: the next rebuild "
+        "reverts it and check_consistency blames a rogue writer — see the "
+        "constant's block in tortoise/derived_invalidation.py")
+
+
+def test_the_OBJECT_repair_is_JOURNALLED_so_a_rebuild_cannot_revert_it(tmp_path):
+    """`derived = replay(journal)` must hold AFTER a repair — the same durability
+    gate the retirement path carries, applied to the cache write (#12336).
+
+    This is the test that WOULD have caught the legacy-Point mistake: it asserts
+    the repair is journal-clean and SURVIVES a rebuild, which the Point arm cannot
+    do. Without it the sweep's success is only ever a live-graph illusion on any
+    label whose prop write is unwrapped by a replay fold.
+    """
+    import os
+
+    from tortoise.config import is_db_uri
+    from tortoise.consistency import check_consistency
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events"
+    events.mkdir()
+    log = str(events / "events.jsonl")
+    namespace = (f"test_suite_{os.urandom(4).hex()}"
+                 if is_db_uri(os.environ.get("TORTOISE_DB_URI")) else None)
+    durable = TortoiseSDK(str(tmp_path / "durable.db"), namespace=namespace,
+                          event_log_path=log)
+    try:
+        i, t, g = _world(durable, tag="sweep-durable")
+        made = _judge(durable, i, t, g)
+        durable.delete_entity(made["point_id"])
+        assert durable.get_entity(g["id"])["goalState"] == "met"
+        report = reconcile_goal_states(durable)
+        assert report["counts"]["cleared"] == 1, report
+        proj = durable._get_proj()
+        check_consistency(log, proj)          # adopts the baseline on a healthy run
+        result = check_consistency(log, proj)
+        assert result["ok"], (
+            "the cache repair moved the projection without a replayable record — "
+            f"divergence={result.get('divergence')!r}")
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert durable.get_entity(g["id"]).get("goalState") is None, (
+            "a rebuild resurrected the word the sweep cleared")
+    finally:
+        durable.close()
 
 
 def test_the_repair_sweep_dry_run_writes_nothing_and_names_what_it_would_clear(sdk):

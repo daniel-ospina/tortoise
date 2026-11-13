@@ -910,15 +910,6 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     return {"checked": True, "goalState": None, "from": None, "cleared": True}
 
 
-#: The node labels that can carry a cached ``goalState`` — BOTH, and that is a
-#: fact about the writers rather than defensive padding. ``goalState`` is
-#: declared for the POINT write path in ``projection/entities.py`` precisely
-#: because a legacy goal POINT carries it (#7856), while ONTOLOGY §5 makes the
-#: canonical goal an OBJECT. A sweep that read one label would leave the other
-#: half of the same defect standing, which is the failure this issue is about one
-#: level down.
-GOAL_STATE_LABELS = ("Object", "Point")
-
 #: Candidates are selected by the PROP, never by the node's kind: this module's
 #: gate is the WORD a cache holds (:data:`DERIVED_GOAL_STATES`), so a node holding
 #: a word ``record_judgement`` can write IS a cache of a judgement — whatever its
@@ -926,11 +917,38 @@ GOAL_STATE_LABELS = ("Object", "Point")
 #: goal whose kind is absent or mislabelled keep a stale word forever, which is
 #: the read-side twin of the bug being repaired.
 #:
+#: ⛔ ``:Object`` ONLY, AND THE EXCLUSION OF A LEGACY GOAL ``:Point`` IS A
+#: MEASURED DECISION RATHER THAN AN OVERSIGHT. The prop IS declared for the point
+#: write path (#7856, ``projection/entities.py``), so a legacy goal Point can hold
+#: a derived word and is a real candidate — but the repair cannot be durable on
+#: it: ``sdk.update_entity``'s generic POINT branch journals only the annotator
+#: dims and ``mentions`` (its own SCOPE note, ``tortoise/sdk.py`` — *"Every other
+#: prop this generic surface writes live is still unfolded on replay"*), so a
+#: ``goalState`` clear there is live-only. MEASURED on this lane, one goal of each
+#: label (private test lane, ``check_consistency`` + ``rebuild_all``):
+#:
+#:     [OBJECT] before_ok=True  report cleared=True  live=None
+#:              after_ok=True   divergence=None      rebuilt=None
+#:     [POINT]  before_ok=True  report cleared=True  live=None
+#:              after_ok=False  divergence='unrecorded-mutation'  rebuilt='met'
+#:
+#: i.e. on a Point the sweep would (a) red the journal/projection parity with a
+#: diagnostic that blames a rogue writer it is itself, and (b) be undone wholesale
+#: by the next rebuild — reporting `cleared` on every pass of a repair-then-rebuild
+#: loop. That is the same live-only-prop hazard this module already refuses
+#: elsewhere (the block above :data:`STALE_REASONS`), so the legacy Point is NOT
+#: enumerated until the point prop write is journalled (the #4094 class, its own
+#: lane) and `counts` cannot claim a repair that a rebuild reverts.
+#:
 #: ``LIMIT`` is asked for ``limit + 1`` rows so the caller can tell a scan that
 #: exactly filled its bound from one that OVERFLOWED it — the same disclosure
-#: :func:`invalidate_stale` owes with ``truncated``.
+#: :func:`invalidate_stale` owes with ``truncated``. ONE query over ONE label also
+#: means a node can only be enumerated once: the repo's `DEDUPE CONTRACT`
+#: (``live.py``) exists because an id-keyed read can be issued PER LABEL, and a
+#: ``:Point:Object`` node returned by two scans is counted, reported and
+#: repaired twice.
 _GOAL_STATE_CANDIDATES = (
-    "MATCH (n:{label}) WHERE toStringOrNull(n.goalState) IN $words "
+    "MATCH (n:Object) WHERE toStringOrNull(n.goalState) IN $words "
     "RETURN n.id AS id, n.goalState AS word ORDER BY n.id LIMIT $lim"
 )
 
@@ -941,8 +959,7 @@ def reconcile_goal_states(
     dry_run: bool = False,
     limit: int = 10000,
 ) -> dict:
-    """Repair every goal whose cached ``goalState`` word does not stand — the
-    GOAL-side sweep (#12336).
+    """Repair every goal whose CACHED WORD does not stand — the GOAL-side sweep (#12336).
 
     ⛔ WHY A SWEEP OVER GOALS AND NOT OVER CLAIMS. ``invalidate_stale``
     enumerates LIVE claims, so a claim that stops being live by any route that
@@ -982,11 +999,48 @@ def reconcile_goal_states(
     :func:`invalidate_stale`, and the same reason `mark_definition_change` fires
     on nothing.
 
+    ⛔ WHAT IT DOES NOT REPAIR, stated here rather than discovered by a reader who
+    trusted a wider promise (each is a named residual, not a silent gap):
+
+    * **a legacy goal ``:Point``** — a derived word there IS a candidate and is
+      NOT enumerated, because its repair cannot be durable: the generic POINT
+      write branch journals only the annotator dims and ``mentions``, so a
+      ``goalState`` clear there is live-only, reds the journal/projection parity
+      and is reverted by the next rebuild. The measurement and the reason are on
+      :data:`_GOAL_STATE_CANDIDATES`; the prerequisite is a replayable
+      ``goalState`` record for the point path (#4094's class).
+    * **a node re-labelled off ``:Object``** (the entity door maps a ``subject``
+      kind to ``:Subject``). ``record_judgement`` cannot complete a judgement onto
+      one — its arrow guard refuses — so no ENGINE-written word lives there
+      today; a human could still write one, and it would not be swept.
+      ⚠️ The enumeration is therefore a hardcoded label, which is the shape this
+      module elsewhere calls out as an invisible missing case
+      (the block above :data:`STALE_REASONS`). It is kept because the alternative
+      — a label-free ``MATCH (n)`` — would sweep the legacy Points the arm above
+      must NOT touch. That trade is deliberate and starts its own lane's review.
+    * **a goal holding NO word while a live judgement stands** (the cache write of
+      a FIRST judgement was refused, or the goal was created without a
+      ``goalState``). The candidate set is "holds a derived word", so that shape
+      is not enumerated — the title says CACHED WORD for this reason. The door it
+      delegates to CAN write that shape (its gate falls through on ``None``), so
+      the repair route is the door plus the goal's id, or the next
+      ``judge_and_record`` pass; widening the sweep to it means enumerating goals
+      by kind, which is a separate decision rather than a filter tweak.
+    * **a word written inside the DOOR's read→write window** — see the note on
+      ``preserved`` below.
+
     ⛔ THE GATE IS ON THE WORD, AT BOTH ENDS. Only a goal holding a word in
     :data:`DERIVED_GOAL_STATES` is even a candidate (so a human's ``active``,
     ``blocked``, ``guideline``, ``superseded`` or ``abandoned`` is not scanned, let
-    alone rewritten), and a word a human sets between the scan and the reconcile
-    is PRESERVED and reported — never cleared, never rewritten.
+    alone rewritten), and a word a human has set by the time the door READS the
+    cache is PRESERVED and reported — never cleared, never rewritten.
+    ⚠️ The window the door does not close: it is a read-then-write
+    (``get_entity`` … ``update_entity``), so a human word landing INSIDE that
+    window is overwritten and counted as ``cleared``/``rewritten``. That window
+    is the pre-existing door's, not this sweep's — a sweep makes it graph-wide
+    rather than shrinking it — and closing it needs a compare-and-set write in
+    :func:`reconcile_goal_state_cache`, which is a change to the shared write door
+    and its own lane rather than a comment here.
 
     ``dry_run=True`` reports what it WOULD do and writes nothing: the safe
     preview for a graph-wide call, which is the one shape that can touch every
@@ -1031,18 +1085,16 @@ def reconcile_goal_states(
       ``dry_run`` is false, because nothing was previewed.
     """
     words = sorted(DERIVED_GOAL_STATES)
-    rows: list[tuple[str, str]] = []
-    for label in GOAL_STATE_LABELS:
-        result = sdk._get_proj().g.query(
-            _GOAL_STATE_CANDIDATES.format(label=label),
-            params={"words": words, "lim": limit + 1},
-        ).result_set or []
-        rows.extend((row[0], row[1]) for row in result if row and row[0])
-    # ⛔ DETERMINISTIC, NOT TEMPORAL: two label scans are concatenated above, so
-    # the order is imposed here rather than inherited from the engine. `truncated`
-    # is answered from the UNTRIMMED length, and the bound is one goal over the
-    # caller's limit so a scan that exactly filled it is not read as exhaustive.
-    rows.sort(key=lambda row: row[0])
+    result = sdk._get_proj().g.query(
+        _GOAL_STATE_CANDIDATES,
+        params={"words": words, "lim": limit + 1},
+    ).result_set or []
+    rows: list[tuple[str, str]] = [(row[0], row[1]) for row in result
+                                  if row and row[0]]
+    # `truncated` is answered from the UNTRIMMED length, and the bound is one goal
+    # over the caller's limit so a scan that exactly filled it is not read as
+    # exhaustive. ONE label means one row per node, so no id-dedupe is owed here
+    # (the `DEDUPE CONTRACT` in `live.py` is about per-label reads).
     truncated = len(rows) > limit
     rows = rows[:limit]
 
