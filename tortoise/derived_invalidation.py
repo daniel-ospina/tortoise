@@ -1122,10 +1122,11 @@ def reconcile_goal_states(
     sweep whose first refusal discarded the remaining repairs would hide the very
     words it can fix.
 
-    Returns, always: ``dryRun``, ``truncated`` (true when the candidate scan hit
-    ``limit`` — an arbitrary subset in id order, NOT the newest ``limit`` goals, so
-    a caller that must cover the graph should pass a bound above the candidate
-    count), ``limit``, ``notDurableReason``, ``goals`` (a record per SCANNED goal:
+    Returns, always: ``dryRun``, ``truncated`` (true when the candidate query
+    returned MORE rows than ``limit``, i.e. the window was capped — a scan that
+    exactly filled its bound is not truncated, and the count is taken BEFORE the
+    identity filter so a dropped row cannot hide the cap), ``limit``,
+    ``notDurableReason``, ``goals`` (a record per SCANNED goal:
     ``goalId``, ``from``,
     ``to``, ``action`` — ``cleared``/``rewritten``/``consistent``/``preserved``/
     ``gone``/``failed``, or ``would-clear``/``would-rewrite`` under ``dry_run`` —
@@ -1198,10 +1199,11 @@ def reconcile_goal_states(
     # `truncated: False` over a capped scan whose tail was dropped for having no
     # `id`, i.e. an exhaustive-looking payload over goals never fetched (#12412
     # review, cycle 4). `counts.unaddressable` is window-only for the same reason;
-    # the flag is what says the window was capped.
-    # `truncated` is answered from the UNTRIMMED length, and the bound is one goal
-    # over the caller's limit so a scan that exactly filled it is not read as
-    # exhaustive.
+    # the flag is what says the window was capped. The bound is asked for
+    # `limit + 1` rows so an exactly-full scan is still distinguishable from an
+    # overflowed one. ⚠️ The rows are an arbitrary subset in id order, NOT the
+    # newest `limit` goals — a caller that must cover the graph passes a bound
+    # above the candidate count.
     truncated = len(result) > limit
     rows = rows[:limit]
 
