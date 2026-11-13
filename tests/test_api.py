@@ -7,6 +7,7 @@ or via pytest if installed.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 
@@ -518,15 +519,76 @@ def test_add_operator_rejects_non_string_inputs():
 
 def test_add_operator_rejects_non_string_op_type():
     """#331: non-string op_type must raise ValueError (a bare assert vanishes
-    under python -O — validate explicitly)."""
+    under python -O — validate explicitly).
+
+    #12240: this asserted the word `gate`, which `#12067` removed when it
+    corrected the DIAGNOSIS — the refusal is this door's own limit (it
+    predates the closed mechanism set; `coherence` is SDK-only), not an
+    unknown mechanism. Pinning a word that only ever happened to be in the
+    text decayed into a red on `main` the moment the text improved. Pin the
+    SUBSTANCE instead: the type refusal, and the message naming what this
+    door does accept.
+    """
+    class _EqualToEveryMechanism:
+        """Only the isinstance half refuses this one (#12240 review).
+
+        `x in ("NAND", "IMPL")` is True for it, so the VALUE half passes it and
+        only `not isinstance(op_type, str)` raises. Without this case the test
+        cannot tell the two guards apart: every other value in the loop below is
+        ALSO not a mechanism name, so deleting `not isinstance(op_type, str)`
+        from `tortoise/api.py` left all four green (measured on the pre-fix
+        test). Its own name promises `rejects_non_string_op_type`; this is the
+        case that makes that promise true rather than incidental.
+        """
+
+        def __eq__(self, other):  # equality is the whole point
+            return True
+
     api, _log = _api()
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
-    for bad in (None, 123, b"NAND", ["NAND"]):
+    for bad in (None, 123, b"NAND", ["NAND"], _EqualToEveryMechanism()):
         try:
             api.add_operator(bad, ["a"], prov)
             assert False, f"should have raised ValueError for {bad!r}"  # noqa: B011
-        except ValueError as e:
-            assert "gate" in str(e)
+        except (ValueError, TypeError) as e:
+            # ⛔ TypeError is caught only to RE-LABEL it: without the isinstance
+            # half of the guard, `add_operator` proceeds far enough to JSON-
+            # serialize the value, so the regression surfaces as
+            # "Object of type X is not JSON serializable" — a diagnostic that
+            # blames serialization for a missing type refusal (#12240 review).
+            assert isinstance(e, ValueError), (
+                f"expected ValueError for {bad!r}, got {type(e).__name__}: {e}")
+            msg = str(e)
+            # Pinning the whole sentence would be the same trap one level down:
+            # a good-faith rewording that keeps the claim ("must be one of
+            # 'NAND', 'IMPL'") would red this for nothing. Assert the CLAIM the
+            # message exists to carry — a refusal that is this door's limit,
+            # naming the mechanisms it does accept — so the SURROUNDING PROSE,
+            # ORDER, quoting, separator and CASE are free, while the two
+            # mechanism names must appear AS NAMES: word boundaries, because a
+            # bare substring accepts `implementation` for `IMPL` (measured — the
+            # clause could stop naming `IMPL` at all and still pass).
+            #
+            # The `got {op_type!r}` tail is dropped first: it REPRINTS the
+            # rejected value, so `b"NAND"` and `["NAND"]` would supply the name
+            # to a message whose acceptance clause had been deleted outright
+            # (measured: with the clause gone, both still satisfied the *NAND*
+            # half of a bare-substring form, so that half rested on the echo —
+            # the *IMPL* half did not, because no rejected value's repr contains
+            # it).
+            claim = msg.replace(repr(bad), "")
+            # IGNORECASE is load-bearing, not cosmetic: `75c04668c7` folded case
+            # here on review because a good-faith reword to `nand or impl` was
+            # redding the pin — the same decay class #12240 exists to end. It is
+            # also SAFE for the two mutations this pin must still catch:
+            # `\bIMPL\b` does not match `implementation` (no boundary after
+            # `IMPL`) and a message that dropped the names matches neither.
+            assert re.search(r"\bNAND\b", claim, re.IGNORECASE) and re.search(
+                r"\bIMPL\b", claim, re.IGNORECASE
+            ), (
+                "the refusal must name the mechanisms this door DOES accept — "
+                "a bare 'unknown gate' text reads as a typo rather than as "
+                f"this door's limit (#12067): {msg!r}")
     print("PASS test_add_operator_rejects_non_string_op_type")
 
 def test_add_operator_single_string_input_not_char_split():

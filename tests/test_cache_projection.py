@@ -1151,6 +1151,241 @@ def test_the_PLAN_reports_the_vectors_it_refuses():
         "a projection that withheld nothing must not print a drop clause")
 
 
+# ── 3d. #12015 — a vector may not land on a RELATIONSHIP (no label at all) ───
+
+
+def _relation_row(**over):
+    row = {"rel_type": "IMPL", "src_label": "Point", "src_key": "op-1",
+           "tgt_label": "Point", "tgt_key": "in-1", "idx": 0, "props": {}}
+    row.update(over)
+    return row
+
+
+def test_a_relation_row_may_not_store_a_vector():
+    """`#12015` — the edge's `props` bag is an OPEN set and `embedding` is legal in it.
+
+    `public.relation`'s own CHECK (`chk_relation_props_no_derived`) refuses only the
+    four EP names, so a relation row carrying a vector reached `SET r += $props` and
+    stored it on the EDGE: **no label, nothing `run_vector_query` can reach** (`#5090`
+    DoD row 2, and `#11641`'s words for the same defect at the DR door).
+
+    The drop happens in the row→view map the RECORD READ answers from, so a view
+    cannot advertise bytes the writer refuses — the placement `#11747` chose for the
+    node rule, for the same reason.
+    """
+    rel = cp.relation_from_row(_relation_row(
+        props={"label": "addresses", "embedding": [0.5, 0.25]}))
+    assert "embedding" not in rel.props, rel.props
+    assert rel.props["label"] == "addresses", (
+        "only the vector is withheld — the edge's other open-set props ride it")
+    assert "embedding" in rel.dropped_vectors, rel.dropped_vectors
+    assert "<relationship:IMPL>" in rel.dropped_vectors["embedding"]
+    stmt = cp.relation_statement(rel)
+    assert "embedding" not in stmt.params["props"], (
+        "the vector rides the `props` BAG on an edge (one param), not a top-level "
+        f"param — so the bag is what must be checked: {stmt.params}")
+    assert dict(stmt.dropped_vectors) == dict(rel.dropped_vectors), (
+        "the writer must not report a different drop from the view it was built from")
+
+    # The control: an edge with ordinary props is untouched, and reports nothing.
+    clean = cp.relation_from_row(_relation_row(props={"anchor": "extractedFrom"}))
+    assert clean.dropped_vectors == {}, clean.dropped_vectors
+    assert cp.relation_statement(clean).params["props"] == {
+        "anchor": "extractedFrom"}
+
+
+def test_the_EDGE_writer_refuses_a_directly_built_relation():
+    """The edge writer's OWN check — `record_plan` is public, so a caller may hand it one.
+
+    ⛔ WHAT THIS PINS, stated plainly (`#11747` round-3 review, finding 4b's lesson):
+    `relation_statement`'s check and nothing else. The `RecordRelation` is built HERE,
+    so `relation_from_row`'s drop never runs — deleting the writer's loop reds this
+    test, while the row-door drop is pinned by the test above (which asserts on the
+    VIEW's props/dropped_vectors). Two doors, two attributable pins.
+    """
+    stmt = cp.relation_statement(cp.RecordRelation(
+        rel_type="IMPL", src_label="Point", src_key="a", tgt_label="Point",
+        tgt_key="b", idx=0, props={"embedding": [0.5, 0.25]}))
+    assert "embedding" not in stmt.params["props"], stmt.params
+    assert "embedding" in stmt.dropped_vectors, stmt.dropped_vectors
+    assert "<relationship:IMPL>" in stmt.dropped_vectors["embedding"]
+
+
+def test_the_PLAN_reports_an_edge_drop_as_a_relationship_type():
+    """`#12015` — the plan's drop report carries edges under `#11641`'s spelling.
+
+    A rebuild is what DELETES the vector (the record row is its only carrier), so the
+    count has to reach the operator. `hosted_backup` already reports an edge vector as
+    `<relationship:TYPE>`; the projection uses the SAME spelling so one defect has one
+    vocabulary — and the plan's node loop is bounded by `len(self.nodes)`, so a relation
+    statement can never be read as a node's.
+    """
+    edge = cp.relation_from_row(_relation_row(
+        props={"embedding": [0.5, 0.25]}))
+    assert cp.record_plan([], [edge]).dropped_vectors() == {
+        "<relationship:IMPL>": 1}, cp.record_plan([], [edge]).dropped_vectors()
+    # Nodes and edges in ONE plan, each under its own key — the mixed case a bare
+    # `zip(self.nodes, self.statements)` would get wrong once relation statements exist.
+    node = _node("Session", {"props": {"embedding": [0.5, 0.25]}})
+    mixed = cp.record_plan([node], [edge]).dropped_vectors()
+    assert mixed == {"Session": 1, "<relationship:IMPL>": 1}, mixed
+    # ⛔ ASYMMETRIC on purpose (`#12015` review, finding B — measured MASKED): with a
+    # fixture where every statement drops exactly one vector, swapping the statement
+    # order still yields the right answer by coincidence, so the node loop's bound
+    # (`self.statements[len(self.nodes):]`) can drift unnoticed. Here the node drops
+    # NOTHING: if the edge's drop is credited to the node — or the edge arm reads the
+    # node slice — the answer names an object that dropped nothing and loses the edge
+    # key, which is the wrong-operator-message class this PR exists to remove.
+    clean_node = _node("Session", {"props": {"summary": "no vector here"}})
+    asymmetric = cp.record_plan(
+        [clean_node], [edge, cp.relation_from_row(_relation_row(src_key="op-9"))]
+    ).dropped_vectors()
+    assert asymmetric == {"<relationship:IMPL>": 1}, (
+        "a clean node must never be credited with an edge's drop: " f"{asymmetric}")
+    # ⛔ …and the MIRROR case (`#12015` round 4, finding 3 — MEASURED: deleting the
+    # relation arm's `self.statements[len(self.nodes):]` slice left all 99 tests green).
+    # A dropping NODE beside clean edges must report the node only: with the slice gone,
+    # the node's statement is credited to the first edge type, the plan invents a
+    # `<relationship:TYPE>` drop, and `record_restore.render()` then prints "The nodes and
+    # edges are restored" over a drop that kept a node and lost no edge.
+    mirror = cp.record_plan(
+        [node], [cp.relation_from_row(_relation_row())]
+    ).dropped_vectors()
+    assert mirror == {"Session": 1}, (
+        "a node's drop must not be credited to an edge type — the relation arm is reading "
+        f"the NODE statements: {mirror}")
+    # Two edges of the SAME type aggregate under one key.
+    same = cp.record_plan([], [edge, cp.relation_from_row(_relation_row(
+        src_key="op-2", props={"embedding": [0.5, 0.25]}))]).dropped_vectors()
+    assert same == {"<relationship:IMPL>": 2}, same
+    # A plan that withholds nothing says so.
+    assert cp.record_plan(
+        [], [cp.relation_from_row(_relation_row())]).dropped_vectors() == {}
+    # The report's drop clause must not call an edge type a "label".
+    report = cp.ProjectionReport(nodes_written=1, relations_written=1,
+                                 dropped_vectors=1,
+                                 dropped_vector_labels=("<relationship:IMPL>",))
+    assert "relationship type(s)" in report.render(), report.render()
+    assert "<relationship:IMPL>" in report.render(), report.render()
+
+
+def test_the_declined_edge_property_set_is_DERIVED_not_a_second_list(monkeypatch):
+    """`#12015` — one owner for WHICH properties are vectors, on the edge door too.
+
+    A literal `{"embedding"}` here would be the second declaration `#11747` spent a
+    review round removing on the served-label side: widen the store seam and the edge
+    writer would keep storing the new property with nothing going red.
+
+    ⛔ THE PIN MOVES THE INPUT, or it pins nothing (`#12015` review, finding R3): the
+    body is `return stored_vector_props()`, so asserting equality with
+    `stored_vector_props()` compares the function with its own implementation — a
+    tautology that stays GREEN when the body is replaced by the literal it exists to
+    catch (measured: `frozenset({"embedding"})` passed). WIDENING the set is the
+    falsifier, exactly as the node rule's pin recomputes its derivation independently.
+    """
+    assert "embedding" in cp.relation_vector_declined_properties()
+    monkeypatch.setattr(cp, "STORED_VECTOR_PROPS",
+                        frozenset({"embedding", "embedding_widened"}))
+    assert "embedding_widened" in cp.stored_vector_props()
+    assert "embedding_widened" in cp.relation_vector_declined_properties(), (
+        "the edge rule is a SECOND list: it did not follow the store seam when the "
+        f"seam widened — {sorted(cp.relation_vector_declined_properties())}")
+    # …and the doors actually read THAT callable, not `STORED_VECTOR_PROPS` directly.
+    # ⛔ Widening the set cannot show this (`#12015` review): both sources are widened,
+    # so a door rewritten to `sorted(STORED_VECTOR_PROPS)` stays green on the arm above.
+    # EMPTYING the callable is the discriminating arm — the door must follow it.
+    rel = cp.relation_from_row(_relation_row(
+        props={"embedding_widened": [0.5, 0.25]}))
+    assert "embedding_widened" in rel.dropped_vectors, rel.dropped_vectors
+    monkeypatch.setattr(cp, "relation_vector_declined_properties", lambda: frozenset())
+    assert cp.relation_from_row(_relation_row(
+        props={"embedding": [0.5, 0.25]})).dropped_vectors == {}, (
+        "the row door bypasses `relation_vector_declined_properties` — it is reading "
+        "the property set directly, i.e. a SECOND declaration of the rule")
+
+
+def test_a_dropped_edge_vector_does_not_leave_the_verbatim_marker_behind():
+    """`#12015` review — the marker must not outlive the value it describes.
+
+    A relation row's tail is an OPEN set, so `embedding` and `embedding_verbatim` can
+    arrive together. The node door has carried this exact rule since `#11747`
+    (`node_statement`'s `and not dropped`): a statement that withholds the vector must
+    not also assert a storage FORM for it. Both edge doors, because either can be the
+    one that builds the statement.
+    """
+    rel = cp.relation_from_row(_relation_row(
+        props={"embedding": [0.5, 0.25], "embedding_verbatim": True, "label": "x"}))
+    assert "embedding" in rel.dropped_vectors
+    assert cp.VERBATIM_MARKER not in rel.props, rel.props
+    assert rel.props["label"] == "x"
+    stmt = cp.relation_statement(rel)
+    assert cp.VERBATIM_MARKER not in stmt.params["props"], stmt.params
+    # The direct door too: the marker is dropped when a vector was withheld.
+    direct = cp.relation_statement(cp.RecordRelation(
+        rel_type="IMPL", src_label="Point", src_key="a", tgt_label="Point",
+        tgt_key="b", idx=0,
+        props={"embedding": [0.5, 0.25], "embedding_verbatim": True}))
+    assert cp.VERBATIM_MARKER not in direct.params["props"], direct.params
+    # Control: no vector, no drop — the marker rides the edge exactly as before.
+    clean = cp.relation_from_row(_relation_row(props={"embedding_verbatim": True}))
+    assert clean.dropped_vectors == {}
+    assert cp.VERBATIM_MARKER in clean.props, clean.props
+
+
+def test_the_relationship_target_format_has_ONE_owner(monkeypatch):
+    """`#12015` review — the report key's format is decided in one place, by CONSUMERS.
+
+    `record_restore` discriminates an edge entry from a record label with
+    `is_relationship_target`, and a record label can never shadow it (the only node
+    entries are `UNSERVED_VECTOR_LABELS` ⊆ `NODE_TABLES`). Spelling the format out at
+    each site is how one of them drifts and silently classifies every entry as a node.
+
+    ⛔ OWNERSHIP IS MEASURED THROUGH A PRODUCER, not by comparing the owner with itself
+    (`#12015` review): asserting `relationship_target("IMPL") == "<relationship:IMPL>"`
+    and round-tripping it through `is_relationship_target` stays green even when a
+    consumer spells the literal out. So the owner is REBOUND and the consumer's output
+    must follow it.
+    """
+    assert cp.relationship_target("IMPL") == "<relationship:IMPL>"
+    assert cp.is_relationship_target(cp.relationship_target("IMPL")) is True
+    assert cp.is_relationship_target("Session") is False
+    for label in cp.NODE_TABLES:
+        assert not cp.is_relationship_target(label), label
+    # The PRODUCER: a rebound format must appear in the plan's report key.
+    monkeypatch.setattr(cp, "relationship_target", lambda rel_type: f"<rel:{rel_type}>")
+    edge = cp.relation_from_row(_relation_row(props={"embedding": [0.5, 0.25]}))
+    assert cp.record_plan([], [edge]).dropped_vectors() == {"<rel:IMPL>": 1}, (
+        "the plan's report key is composed by hand instead of by "
+        f"`relationship_target`: {cp.record_plan([], [edge]).dropped_vectors()}")
+    # …and the PROBE reads the owner too (it imports it lazily, so a rebind reaches it
+    # without an extra import step) — a hand-spelled literal there would ignore this.
+    from tools import dod_5090_probe as probe_mod
+
+    assert probe_mod._relationship_target("IMPL") == "<rel:IMPL>", (
+        "the probe composes the report key by hand instead of from "
+        "`cache_projection.relationship_target`")
+    # ⛔ …and so does the OPERATOR LINE (`#12015` review, finding E — measured
+    # UNPINNED: `record_restore.render()` rewritten to `t.startswith("<relationship:")`
+    # red nothing). This is the consumer with the worst failure mode: a destructive
+    # verb telling an operator the wrong object survived. Rebind the PREFIX, not the
+    # helper, because a hand-spelled literal keeps matching the old prefix.
+    from tortoise import record_restore as rrestore
+
+    monkeypatch.setattr(cp, "RELATIONSHIP_TARGET_PREFIX", "<rel:")
+    line = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=1, record_relations=1, nodes_written=1,
+        relations_written=1, target_nodes_before=0,
+        nodes_selected=1, relations_selected=1, coverage="complete",
+        declared_keys=0, dropped_vectors=1,
+        dropped_vector_labels=("<rel:IMPL>",),
+    ).render()
+    assert "The edges are restored" in line, (
+        "`record_restore.render()` classifies an entry by a hand-spelled prefix "
+        f"instead of `is_relationship_target`, so it names the wrong survivor: {line}")
+    assert "The nodes are restored" not in line, line
+
+
 def test_is_verbatim_is_an_or_across_the_sides_it_is_given():
     """One side's flag is enough — a dropped flag must not hide a narrowing."""
     from tortoise.stored_form import is_verbatim

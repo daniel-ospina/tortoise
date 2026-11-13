@@ -500,7 +500,12 @@ class TestNeverRefuses:
             out, logs = capture(lambda b=bad_entry: kg.pack_guards("acme", [b]))
             assert len(out) == 1, (key, out)
             assert getattr(out[0], f"guarded_{key}") is None, (key, out[0])
-            assert any(f"{key} is not a usable" in m for m in logs), (key, logs)
+            # the full path matters: `kind`/`layer` live on the ENTRY, so
+            # naming `onConfusion[0].kind` sends the author to a key that does
+            # not exist there (round-23 review P3)
+            assert any(f"guards[0].{key} is not a usable" in m
+                       for m in logs), (key, logs)
+            assert not any(f"onConfusion[0].{key}" in m for m in logs), (key, logs)
 
         # ⛔ and a member that is KEPT must be stripped: `fromLayers: [" subject "]`
         # compiled `(' subject ',)`, matching no layer — the guard was dead on
@@ -509,19 +514,57 @@ class TestNeverRefuses:
             lambda: kg.pack_guards("acme", [entry(fromLayers=[" subject "])]))
         assert spaced[0][0].from_layers == ("subject",), spaced[0][0].from_layers
 
-        # ⛔ A BLANK/UNUSABLE `linkPredicate` STAYS None — it must not become the
-        # truthy string that makes the guard ABSTAIN where it used to fire
-        # (round-23 review P2, measured: `""` compiled `''`, `0` compiled `'0'`)
-        for bad_link in ("", 0, False, []):
+        # ⛔ THE ABSTENTION IS LOAD-BEARING (round-23 review P2, measured): the
+        # pre-existing expression was `str(c["linkPredicate"]) if
+        # c.get("linkPredicate") else None`, so FALSY meant "no predicate, fire"
+        # and any TRUTHY value meant "a predicate I may not implement, ABSTAIN"
+        # (the no-orphan-role rule). An earlier cut of this round returned None
+        # for the unusable truthy values too, which turned an abstention the
+        # author DECLARED into a redirect — the opposite direction from the fix
+        # it claimed. Both halves are pinned here.
+        for falsy_link in ("", 0, False, []):
             out, logs = capture(
-                lambda v=bad_link: kg.pack_guards(
+                lambda v=falsy_link: kg.pack_guards(
                     "acme", [entry(linkPredicate=v)]))
-            assert out[0].link_predicate is None, (bad_link, out[0])
-            assert any("not a usable linking predicate" in m for m in logs), logs
-        # …and a real one is kept verbatim
+            assert out[0].link_predicate is None, (falsy_link, out[0])
+            assert any("linkPredicate" in m for m in logs), logs
+        for truthy_unusable in (5, True, ["holdsRole"], "  "):
+            out, logs = capture(
+                lambda v=truthy_unusable: kg.pack_guards(
+                    "acme", [entry(linkPredicate=v)]))
+            assert out[0].link_predicate, (truthy_unusable, out[0])
+            assert any("linkPredicate" in m for m in logs), logs
+        # a usable predicate is kept — and STRIPPED, like the sibling fields
         assert kg.pack_guards(
             "acme", [entry(linkPredicate="supports")])[0].link_predicate == \
             "supports"
+        assert kg.pack_guards(
+            "acme", [entry(linkPredicate=" holdsRole ")])[0].link_predicate == \
+            "holdsRole"
+
+        # ⛔ `pattern: ""` matches EVERY name (review P3, measured): one guard
+        # redirecting every write that declares no kind — the inverse of a dead
+        # guard. A blank is unusable, not universal…
+        assert kg.pack_guards("acme", [entry(pattern="")]) == ()
+        assert kg.pack_guards("acme", [entry(pattern="   ")]) == ()
+        # …AND THE INSTALL GATE MUST AGREE, or `pack validate` blesses a rule the
+        # runtime drops (review P2, measured: it accepted `"   "` and printed
+        # `✓ Clean` over a guard that could never fire)
+        ws = __import__("pathlib").Path(__import__("tempfile").mkdtemp())
+        (ws / "ws").mkdir()
+        (ws / "ws" / "manifest.yaml").write_text(
+            'namespace: ws\nname: Ws\nversion: "0.1.0"\ntier: free\n'
+            "ontology:\n  extends: core\n  objectKinds: [widget]\n  guards:\n"
+            "  - kind: widget\n    layer: object\n    onConfusion:\n"
+            "      - when: nameMatches\n        pattern: '   '\n"
+            "        redirect: core:WorkItem\n        fallback: core:WorkItem\n"
+            "        reason: r\n"
+            "depends_on: []\n")
+        _reg = __import__("tortoise.pack_registry", fromlist=["PackRegistry"]) \
+            .PackRegistry(ws)
+        _reg.load_all()
+        assert any("pattern: required non-empty string" in e
+                   for e in _reg.errors.get("ws", [])), _reg.errors
 
         # a falsy predicate is no longer rewritten into the default
         assert kg.pack_guards("acme", [entry(when="")]) == ()
@@ -959,7 +1002,12 @@ class TestAcceptance6PackExtensionPoint:
 
     def test_a_catalog_block_that_is_not_a_sequence_is_READ_not_skipped(
             self, tmp_path, sdk, monkeypatch):
-        """The ONE caller must hand even a malformed block to the reader.
+        """The RUNTIME reader's caller must hand even a malformed block on.
+
+        (`pack_guards` has three call sites — this one plus `check_guard_table`
+        and `pack validate`; all three now gate on `is not None`, one filter for
+        three callers, because three spellings is how the reader's warning became
+        unreachable from one of them.)
 
         Round-22 review P3, measured: `_catalog_pack_guards` gated on
         `if declared:`, so a FALSY non-sequence block (`{}` / `""` / `0` /
@@ -980,8 +1028,8 @@ class TestAcceptance6PackExtensionPoint:
 
         # ⛔ A MANIFEST cannot carry these (`_validate_guards` refuses
         # `guards: {}` outright, measured), so the route is a programmatically
-        # built `PackManifest` — which is exactly why the reader must not be
-        # gated on truthiness by its only caller.
+        # built pack object — which is exactly why no caller may gate on
+        # truthiness.
         for body, token in (({}, "dict"), ("", "str"), (0, "int"), (False, "bool")):
             registry_with(body)
             out, logs = _capture_logs(kg._catalog_pack_guards)
