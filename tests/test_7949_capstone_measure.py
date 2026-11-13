@@ -5264,7 +5264,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # mis-copied. The entry read 9943 at `9828250732` and reads 9987 at
         # `14f96b7b3b` — +44 across FOUR landing PRs that each registered test
         # files above it (`ba84fbfabf` 9949, `e200623286` 9965, `cd22562c24`
-        # 9973, `14f96b7b3b` 9987). ⛔ The `9951` this comment used to defend was
+        # 9973, `f1f74135a1` 9987). ⛔ `14f96b7b3b` is the head the last value was
+        # READ at, not a mover: it does not touch this file (`git show
+        # 14f96b7b3b -- config/ci-surfaces.yml` is empty). The four movers sum to
+        # +44; substituting the read head for `f1f74135a1` in that list would sum
+        # to +30 (+6 +16 +8 +0) and contradict the total one word earlier. ⛔ The `9951` this comment used to defend was
         # never a value on `main`: it was 9943 + the 8 lines #12060 was predicted
         # to add, and two other registrations landed first, so the prediction
         # described no checkable commit — which is why this one number has now
