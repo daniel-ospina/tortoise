@@ -1282,14 +1282,19 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         CENSUS_EXEMPT,
         "`tortoise/sdk.py::create_source` — the instrument's match is an operator-facing "
         "REFUSAL message, not a write clause: the only `embedding=` in the body is the "
-        "`#11858` guard's own sentence, which names the keyword to say the "
-        "`_SERVER_MANAGED_EMBEDDING_MARKERS` family may NOT be set by hand. The door "
-        "computes no vector of its own: a caller-supplied `embedding` is CARRIED into "
-        "`_create_entity`'s `:Source` write — the `#5004` caller-vector contract, the same "
-        "disposition `tortoise.api::add_point` carries, and the reason "
+        "`#11858` guard's own sentence, which says \"pass `embedding=` and it declares the "
+        "truth\" to name the keyword, so `_EMBED_WRITE` (which reads raw SOURCE) enrols the "
+        "function on its own prose. The door computes no vector of its own: a caller-supplied "
+        "`embedding` is CARRIED into `_create_entity`'s `:Source` write by the same "
+        "`_emit_event` / `_create_entity` path every other `:Source` writer uses — the "
+        "`#5004` caller-vector contract — and it names no label of its own "
+        "(`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`). Exempt as a CARRIER — the "
+        "same disposition `tortoise.api::add_point` carries, and the reason "
         "`tortoise/projection/entities.py::_upsert_source`'s passthrough legitimately stores "
-        "`s.embedding` for the vector retrieval leg to read. Exempt as a CARRIER — NOT "
-        "because no store is reachable through it"),
+        "`s.embedding` for the vector retrieval leg to read — NOT because no store is "
+        "reachable through it. ⛔ Arrived on `origin/main` in `18d43e0462` (`#12113`) WITHOUT "
+        "a census entry, so the probe was red on `main` before this branch touched it "
+        "(measured: 5 failures whose only unclassified name is this one)"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
         "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
@@ -1322,6 +1327,13 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
         # sentence: deleting the guard (the `raise`) takes the needle AND the
         # population entry away together, so a stale exemption cannot outlive it.
         # The quoted refusal sentence itself — the whole reason this name enrols.
+        # Needle 1 is the REFUSAL's own prose — the whole reason this name enrols, and the
+        # only `_EMBED_WRITE` match in the body: delete the `raise` and it goes, taking the
+        # population entry with it. Needle 2 is the guard's CONDITION
+        # (`_caller_markers = sorted(set(ev) & …)`, two lines above the `raise`) and is
+        # INDEPENDENT of it — it survives a raise-only deletion, so the two do not travel
+        # together. ⛔ Re-derive both rather than assuming: re-deriving is re-deriving the
+        # instrument's match, and a stale exemption must not outlive what it exempts.
         ("tortoise/sdk.py", "create_source",
          "pass `embedding=` and it declares the truth"),
         # …and the guard that makes the class true (it refuses MARKERS; it writes none).

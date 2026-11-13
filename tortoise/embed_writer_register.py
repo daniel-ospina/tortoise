@@ -705,6 +705,10 @@ def load(
 #:   * `#5008` — the session-chain exemption, stated by the seam that built it;
 #:   * `#4094` — the map-merge exemption (`SET n += $p` keeps a caller-supplied `embedding`);
 #:   * `#10541` — a *reading of the code* the census recorded (this function is not a producer);
+#:   * `#5004` — the caller-vector CARRIER contract: the door stores no vector of its own, the
+#:     vector it persists is the caller's, delegated to `_create_entity`/`_upsert_source`;
+#:   * `#11858` — the instrument-match PROVENANCE of a name the census learned about from a
+#:     guard's own message (that is why it enrols, not why it is `EXEMPT`);
 #:   * `#11085` — the three writers that carried **no declared exemption in the product at all**
 #:     before this register existed. That is this issue's whole job: reading (b) says an exception
 #:     must be NAMED in the product, so the naming is the acceptance — not a re-litigation of what
@@ -974,8 +978,13 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "function — the same false-positive class as "
             "`tortoise.api::_int_is_float_exact` below. ⛔ It arrived at `origin/main` in "
             "`18d43e0462` (`#12113`) without an entry, so the probe was red on `main` "
-            "before this branch touched it (measured)",
-            "#11858",
+            "before this branch touched it (measured); `#11858` owns that instrument-match "
+            "provenance. Exempt as a CARRIER on `#5004`, the same disposition "
+            "`tortoise.api::add_point` carries: the store is DELEGATED to `_create_entity` "
+            "/ `tortoise/projection/entities.py::_upsert_source`, whose passthrough "
+            "stores `s.embedding` for the vector retrieval leg to read — NOT because no "
+            "store is reachable through it",
+            "#5004",
             stores=NO_LIVE_VECTOR,  # the match is the guard's own MESSAGE, all prose
         ),
     ),

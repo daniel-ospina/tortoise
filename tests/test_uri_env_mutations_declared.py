@@ -150,6 +150,38 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #12275: `test_candidate_recall_11901.py` (#12159) landed with three
+    # untriaged URI mutations, which reds this gate on `main` in `test (d)` —
+    # the same "module landed without its entry" shape as #9664 above. None of
+    # the three is this guard's vacuity vector (a docker-half test silently
+    # running embedded); each is a deliberate env control:
+    #   :283  `test_search_graph_unions_the_derived_queries_into_one_id_keyed_dict`
+    #         drives the REAL `extractor_v2.search_graph` against a STUB client
+    #         (`StubSDK()` at :302 — no SDK is constructed and no DB is touched:
+    #         `search_graph` reaches the client only through `tortoise_fts_query`).
+    #         The LOAD-BEARING control for the assertion is `:284`'s
+    #         `TORTOISE_API_URL`: `resolve_backend_mode` maps URI -> `real`,
+    #         else API_URL -> `hosted`, else `embedded`, and `embedded` is the one
+    #         label `_is_searchable_backend` refuses — so without `:284` the test's
+    #         `degraded` would flip. The delenv at `:283` is outcome-neutral TODAY
+    #         (an ambient docker/redis URI yields `real`, equally searchable, and
+    #         nothing asserts the mode): what it does is pin the env-derived label
+    #         path instead of inheriting one from the box. Do not read it as
+    #         load-bearing for the assertion. Intent: the env control IS the point
+    #         (the deliberately-unreachable probe class), not an embedded-lane switch.
+    #   :875  the shared `_drive()` helper (DELIBERATE_URI): `main()` refuses a
+    #         non-`docker://`/`redis://` URI BEFORE the fake SDK is built, so
+    #         the scheme gate needs a docker-shaped value; the SDK is faked.
+    #   :1132 a behavioural `main()` test (DELIBERATE_URI): same scheme gate, with
+    #         port `:1` deliberately dead and every query routed to `_Sdk` (the
+    #         site's own comment says so).
+    # The setenv arm is bound to the line-wrapped form (`…"TORTOISE_DB_URI",`
+    # at end of line) on purpose, and it covers both setenv sites: a future
+    # one-line setenv in this file is a DIFFERENT site and must be triaged, not
+    # authorized by this entry.
+    "test_candidate_recall_11901.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],
     # #9567 capstone: the D11/D12 quota case forces the EMBEDDED lane (delenv
     # the URI, then pin TORTOISE_DB_PATH to a tmp_path db) so the gate's count
     # never rides a shared server graph. The delenv IS the point; the

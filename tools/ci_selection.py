@@ -3401,7 +3401,19 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # suite is hermetic (no DB, no URI, no network; every surface is a fake or a
              # replayed snapshot) and `core` is where it is registered. Pinned by
              # tests/test_ci_selection.py::test_curate_graph_tool_change_selects_core_not_tier1.
-             "tools/curate_graph.py")
+             "tools/curate_graph.py",
+             # #11609: the surface ARCHIVE and its gate. `tools/archive_surface.py` is the only
+             # writer of `archive/MANIFEST.json` and the only thing that can lower the guard
+             # `tests/test_archive.py` holds (an archived symbol must not reappear on the live
+             # surface, and `archive/` must stay outside the shipped package). `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches it, so a tool-only
+             # diff filtered to `changed == []` and took the tier-1 smoke path, where
+             # `test_archive.py` is NOT registered — i.e. the diff most able to weaken the archive
+             # guarantee was the one diff its proof never ran on. Same #1349/#3332/#3616 class.
+             # `archive/` is a PREFIX entry so a batch's archived code is admitted past that same
+             # filter and selects `core` (the archive is a surface-wide artifact, not an sdk one).
+             "tools/archive_surface.py",
+             "archive/")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
