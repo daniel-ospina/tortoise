@@ -46,7 +46,9 @@ sentence alone M3 **passes**, and the instruction that follows is *"proceed stra
 
 * with the query terms held constant, BM25 buys **+1.33 pts** (p = 0.34) overall, **+1.15 pts**
   (p = 0.73) on the subset where the control holds, and **+0.00 pts at k=15 with ZERO discordant
-  pairs**. ⚠️ Zero *discordance* is about the **window**, not the **order**: of the 228 names both arms
+  pairs** — while at k=5 it is **−0.67 pts** (the shipped leg ahead 2–0), so the scorer control has a
+  sign change across k and the honest summary is "no gain that survives its discordant pairs", not a
+  floor. ⚠️ Zero *discordance* is about the **window**, not the **order**: of the 228 names both arms
   find inside k=15, **45 rank differently** (mean rank when found 1.452 vs 1.285, largest move 5 places —
   `m3-000014` goes 1 → 6). What the control rules out is BM25 buying *recall*; it does not say the two
   scorers order documents the same way, and an earlier cut of this sentence did;
@@ -183,14 +185,12 @@ fairer one — so the break is disclosed instead.
 (a) **The index builds on a background cycle.** `db.indexes()` reports `numDocuments`; a query issued
 straight after the writes can see a **partially built** index and book a present name as a miss — an
 artefact in the direction that flatters the wrong arm. The harness **waits** until `numDocuments`
-reaches the population size and **refuses** on timeout; it also **refuses a graph whose stored names do
-not match the pinned population**, because `o.name` is an ON CREATE write (`#8919`) — a second run
-against the same graph would measure the previous population, and the count guard alone cannot see that.
-⚠️ Both guards are narrower than "refuses any reused graph": the wait accepts `numDocuments >= n` (an
-over-full index passes it), and the name check compares the pinned names — so
-`--graph <a previous run's graph>` with the SAME population is ACCEPTED, and the shipped sweep then runs
-over its leftover fixture rows. That is the confound §3.5 and `measurement_notes` disclose; passing no
-`--graph` (the documented reproduction) is what avoids it.
+reaches the population size **exactly** (`==`, not `>=` — an over-count means the graph is not the one
+this run wrote) and **refuses** on timeout; it also **refuses a reused graph** outright, twice over:
+`o.name` is an ON CREATE write (`#8919`), so a second run against the same graph would measure the
+previous population, and the graph's total `:Object` count is asserted against the population so a
+graph carrying a previous arm's `m3fx-*` fixture rows (which `STARTS WITH 'm3-'` does not match) is
+refused too rather than silently measured as 305 documents against 300.
 (b) **Re-upserting into a live graph is not free** — before the wait and run-scoped graphs existed, two
 runs differed by 2 names (0.7133 vs 0.7067, an uncommitted pre-run observation). With both, two
 independent runs return **identical** numbers, and the second one is committed as
@@ -221,6 +221,8 @@ axis both arms are the shipped configuration — and the floor arm is therefore 
 | comparison | k | both | shipped only | other only | Δ pts | exact two-sided p |
 |---|---|---|---|---|---|---|
 | shipped **vs** `pg/tokens` | 3 | 211 | 3 | 7 | +1.33 | 0.344 |
+| shipped **vs** `pg/tokens` | 5 | 221 | 2 | 0 | **-0.67** | 0.500 |
+| shipped **vs** `pg/tokens` | 10 | 227 | 0 | 0 | **0.00** | 1.000 |
 | shipped **vs** `pg/tokens`, **tokens-controlled subset** (n=174) | 3 | 87 | 3 | 5 | **+1.15** | **0.727** |
 | shipped **vs** `pg/tokens` | 15 | 228 | 0 | 0 | **0.00** | 1.000 |
 | shipped **vs** `pg/native` | 3 | 210 | 4 | 79 | +25.00 | <0.001 |
@@ -229,6 +231,18 @@ axis both arms are the shipped configuration — and the floor arm is therefore 
 **Read the `shipped only` column.** The in-place fix has **zero** regressions at k=3 — it is a strict
 superset, which is what an *additive* OR term is supposed to be. `pg/native` loses 4 names the shipped
 leg found.
+
+⛔ **Both directions are in this table, and k=5 is the one that is easy to drop.** The scorer control is
+positive at k=3 (+1.33), **negative at k=5 (−0.67, the shipped leg ahead 2–0)** and flat at k=10 and
+k=15. Quoting only k=3 and k=15 gives a floor where the evidence has a sign change, so the honest
+summary is *"no gain that survives its own discordant pairs"*, not *"a gain of 1.15–1.33 pts"*. The
+verdict does not turn on it (a negative at k=5 reinforces FAIL) — the framing does.
+
+⚠️ **The `p` column is rounded to 5 decimal places by the harness**, so the decisive comparisons record
+`<0.001` in prose and `0.0` in `artifact.json`. `0.0` is not a value an exact binomial test can
+produce: for the in-place arm at k=3 the exact two-sided McNemar p is `2·2⁻⁷⁵ ≈ 5.3e-23`, which rounds
+to `0.0` at 5 dp. Read the artifact's `0.0` as "below the rounding floor", never as "exactly zero" —
+and do not hand-edit the recorded value, which is the output of the run.
 
 ### 3.3 Per class (recall@3 / recall@15) — where the whole effect lives
 
@@ -330,9 +344,12 @@ carries it verbatim, so it cannot be re-chosen per run without editing two place
 byte-equality rather than the label. ⚠️ **What that does not prove:** the harness, the artifact and this
 brief landed in **one commit**, so the *ordering* — that the constant existed before the 300-name run —
 is not checkable from this repository. The repo's own executable form of that claim
-(`tools/capstone_preregistration_check.py`) requires an evidence log that **predates** the registration,
-and this lane has none. Stated rather than implied: the rule is fixed and carried; its chronology is the
-lane's assertion.
+(`tools/capstone_preregistration_check.py`) requires the **registration to be published on the base
+before** every scored evidence log — the log must *postdate* it, and a log that predates the file is
+admitted only as permanently unscored (`#10463`: the ordering must survive a squash merge, so it is
+read from `origin/main`). This lane has no such evidence log, so the discipline is stated and not
+claimed. Stated rather than implied: the rule is fixed and carried; its chronology is the lane's
+assertion.
 
 **Result: FAIL** — on the full arm (+1.33 pts, p = 0.344) and on the tokens-controlled subset (+1.15 pts,
 p = 0.727).
@@ -359,7 +376,7 @@ production figure, and the weighting has to respect the decomposition in §3.3:
 
 | class / sub-class | share of real `:Object` names | Δ recall@3 (in-place fix) | weighted |
 |---|---|---|---|
-| definite description | **62.3 %** (research-brief §3.2, measured) | 0.0 pts (unchanged) | 0.0 |
+| definite description | **62.3 %** (the 2026-09-24 `#2730` attachment audit's `research-brief.md` §3.2 — 4,900 of 7,867 Objects; **not** this file's §3.2, which is the paired tests) | 0.0 pts (unchanged) | 0.0 |
 | `#n` identifiers | **2.2 %** (0.5 % bare `#n` + 1.7 % `PR/issue #n`) | **0.0 pts** (17/17 already found) | 0.0 |
 | `snake_case` identifiers | **NOT RECORDED** — inside the audit's 9.0 % "contains a code token" row, which is a superset | **+91.8 pts** | `share × 91.8` |
 | path | **NOT RECORDED** (the audit has no path share) | +26.7 pts | excluded, declared |

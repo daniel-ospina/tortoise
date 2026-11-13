@@ -464,6 +464,89 @@ def test_brief_headline_matches_the_artifact(artifact, brief, arm: str, want: fl
         f"artifact says {want:.4f} — rewrite the brief, do not relax the pin")
 
 
+#: §0's five rows → the artifact cell each one must equal. The subset row has no
+#: arm of its own (it is a comparison over a subset of the same two arms), so it
+#: is keyed `__subset__`; the shipped row carries em-dashes in both derived
+#: columns because it IS the baseline.
+_HEADLINE_ROWS: tuple[tuple[str, tuple[str, str] | None], ...] = (
+    ("falkordb_tfidf", None),
+    ("postgres_bm25/tokens",
+     ("falkordb_tfidf__vs__postgres_bm25/tokens", "k3")),
+    ("__subset__", ("tokens_controlled_subset", "k3")),
+    ("postgres_bm25/native",
+     ("falkordb_tfidf__vs__postgres_bm25/native", "k3")),
+    ("falkordb_tfidf__tokens_fixed",
+     ("falkordb_tfidf__vs__falkordb_tfidf__tokens_fixed", "k3")),
+)
+
+
+def _signed(cell: str) -> float:
+    """The first SIGNED number in a cell (`+1.33 pts` -> 1.33, `-0.67` -> -0.67).
+
+    ⛔ ``_num`` strips the sign, so it cannot police a Δ column: `+1.33` and
+    `-1.33` would compare equal. The Δ column is exactly where a sign error is
+    the defect, so this reads the sign deliberately.
+    """
+    m = re.search(r"[-+\u2212]?\d+(?:\.\d+)?", _plain(cell))
+    assert m, f"no number in the cell {cell!r}"
+    return float(m.group().replace("\u2212", "-").replace("+", ""))
+
+
+def test_brief_headline_table_pins_every_column_and_the_subset_row(
+        artifact, brief) -> None:
+    """§0's table is the artifact's in ALL FOUR columns, on ALL FIVE rows.
+
+    ⛔ The sibling test above binds the RECALL column only, and its arm regex
+    skips the `⤷` subset row entirely — so §0's Δ and paired-p cells were
+    unpinned while this file's docstring claimed the table was compared CELL BY
+    CELL (#12349 review, P2). Measured before this pin existed: rewriting
+    `+1.33 pts | 0.344` to `+9.99 pts | 0.001`, the subset row's `+1.15 pts` to
+    `+8.88 pts`, and `+25.00 pts` to `+99.00 pts` left every brief-reading test
+    in this file GREEN. This is the pin for that hole.
+    """
+    rows: dict[str, list[str]] = {}
+    for cells in _table(brief, "recall@3", "Δ vs shipped"):
+        if "tokens-controlled subset" in cells[0]:
+            rows["__subset__"] = cells
+            continue
+        m = re.match(r"`([^`]+)`", cells[0])
+        if m:
+            rows[m.group(1)] = cells
+
+    for arm, cell in _HEADLINE_ROWS:
+        assert arm in rows, f"§0's table has no row for {arm!r}"
+        cells = rows[arm]
+        want_recall = (artifact["comparisons"][cell[0]][cell[1]]["b_recall"]
+                       if arm == "__subset__"
+                       else artifact["arms"][arm]["recall_by_k"]["3"]["recall"])
+        # The subset row states BOTH arms in its recall cell (`0.5287 vs 0.5172`).
+        got = [round(_num(c), 4) for c in cells[1].split(" vs ")]
+        assert round(want_recall, 4) in got, (
+            f"§0's row for {arm!r} states {cells[1]!r}; the artifact says "
+            f"{want_recall:.4f}")
+
+        if cell is None:
+            assert "—" in cells[2] and "—" in cells[3], (
+                f"the shipped row IS the baseline and carries em-dashes in both "
+                f"derived columns, got {cells[2]!r} / {cells[3]!r}")
+            continue
+
+        comparison, kk = cell
+        row = artifact["comparisons"][comparison][kk]
+        assert abs(_signed(cells[2]) - row["delta_pts"]) < 0.005, (
+            f"§0's Δ cell for {arm!r} states {cells[2]!r}; the artifact says "
+            f"{row['delta_pts']:+.2f} — rewrite the brief, do not relax the pin")
+        if cells[3].lstrip().startswith("<"):
+            bound = _num(cells[3])
+            assert row["mcnemar_p_two_sided"] < bound, (
+                f"§0's p cell for {arm!r} states {cells[3]!r}; the artifact says "
+                f"{row['mcnemar_p_two_sided']} — the bound does not hold")
+        else:
+            assert abs(_num(cells[3]) - row["mcnemar_p_two_sided"]) < 1e-3, (
+                f"§0's p cell for {arm!r} states {cells[3]!r}; the artifact says "
+                f"{row['mcnemar_p_two_sided']}")
+
+
 def test_the_scorer_control_is_a_tie_and_the_rule_says_fail(artifact, brief_text) -> None:
     """M3's verdict, pinned with BOTH of its parts.
 
@@ -765,10 +848,19 @@ def test_brief_rank_table_is_the_artifact(artifact, brief: str) -> None:
 
 
 def test_brief_paired_table_is_the_artifact(artifact, brief: str) -> None:
-    """§3.2 — both / shipped only / other only / Δ pts / p, for every comparison."""
+    """§3.2 — both / shipped only / other only / Δ pts / p, for every comparison.
+
+    ⛔ k=5 and k=10 are rows of this table ON PURPOSE (#12349 review, P2): k=5 is
+    the only width in the whole artifact where the shipped leg beats BM25 fed our
+    terms, so a table that jumps 3 → 15 reads as a floor where the evidence has a
+    sign change. They are pinned like every other row, so the omission cannot
+    come back.
+    """
     cmp = artifact["comparisons"]
     want = {
         ("pg/tokens", 3): cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k3"],
+        ("pg/tokens", 5): cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k5"],
+        ("pg/tokens", 10): cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k10"],
         ("subset", 3): cmp["tokens_controlled_subset"]["k3"],
         ("pg/tokens", 15): cmp["falkordb_tfidf__vs__postgres_bm25/tokens"]["k15"],
         ("pg/native", 3): cmp["falkordb_tfidf__vs__postgres_bm25/native"]["k3"],
@@ -1309,43 +1401,60 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
         "status note's 'reproduces inside the current index' is now false")
 
 
-def test_the_index_wait_accepts_at_least_and_not_exactly(tool_mod) -> None:
-    """The inequality is a DECISION, so it is pinned where it is written.
+def test_the_index_wait_requires_exactly_the_expected_count(tool_mod) -> None:
+    """The wait requires EXACTLY the expected count, and the polarity is pinned.
 
     ⛔ `>=` is why the 305-document index in §3.5 was accepted without a word:
-    `305 >= 300` returns immediately, where `==` would have timed out and
-    refused loudly. Reversing it (`<=`) would return `-1` at once and reopen the
-    partially-built-index artefact the wait exists to close — with every other
-    test in this file green, which is why the polarity is asserted here.
+    `305 >= 300` returns immediately, where `==` times out and refuses loudly.
+    The previous revision of this test asserted `>=` and FORBADE `==`, on the
+    reading that "a partially built index would then be measured as misses" —
+    that reading is wrong, and it conflated `==` with `<=`: a partial index
+    (say 150 of 300) does not satisfy `==`, so the loop keeps waiting and
+    eventually REFUSES; it never measures. The real hazard `<=` returns `-1` at
+    once, so it stays asserted. `==` is the only operator that both waits for a
+    complete build AND refuses an index that is not the one this run wrote.
     """
     src = inspect.getsource(tool_mod._wait_indexed)
-    assert "last >= expected" in src, (
-        "the index wait no longer accepts an at-least-full index — re-read §3.5 "
-        "and the artifacts' `measurement_notes` before changing this")
-    assert "last <= expected" not in src and "last == expected" not in src, (
-        "the wait became an exact match or an upper bound; a partially built "
-        "index would then be measured as misses")
+    assert "last == expected" in src, (
+        "the index wait must require the EXACT expected count: `>=` accepts an "
+        "over-full index, which is the §3.5 reusable-graph confound")
+    assert "last <= expected" not in src, (
+        "the wait became an upper bound, which returns -1 at once and reopens "
+        "the partially-built-index artefact the wait exists to close")
+    assert "last >= expected" not in src, (
+        "the wait accepts an at-least-full index again — re-read §3.5 and the "
+        "artifacts' `measurement_notes` before changing this")
 
 
 def test_brief_states_what_the_reuse_guards_actually_do(brief_text) -> None:
-    """§2 must not over-claim the reuse guard — it did, and a merge lost the fix.
+    """§2's reuse claim must match the guards — and now it can claim more.
 
-    ⛔ The code refuses a reused graph only when a STORED NAME differs, and the
-    index wait accepts `numDocuments >= n`, so `--graph <a previous run's graph>`
-    with the SAME population is accepted and the sweep then runs over that run's
-    leftover fixture rows — the confound §3.5 and `measurement_notes` disclose.
-    A brief that says "refuses a reused graph outright" tells a reproducer the
-    opposite, and the claim was already lost once in a conflict resolution.
+    ⛔ HISTORY, because this claim has been lost twice. The harness once refused
+    a reused graph only when a STORED NAME differed, and the index wait accepted
+    `numDocuments >= n`, so `--graph <a previous run's graph>` with the SAME
+    population was ACCEPTED and the sweep ran over that run's leftover fixture
+    rows — the confound §3.5 and `measurement_notes` disclose. The brief said
+    "refuses a reused graph outright" and was corrected DOWN to disclose the
+    limitation. Both guards are now closed (`==`, plus a total `:Object` count
+    assert), so the strong claim is TRUE and must not be softened again — a
+    brief that under-claims is as wrong as one that over-claims.
     """
     flat = " ".join(brief_text.replace("**", "").split())
-    assert "refuses a reused graph outright" not in flat, (
-        "§2 claims an outright reuse refusal; the harness refuses only a "
-        "stale-NAME mismatch")
-    assert "with the SAME population is ACCEPTED" in flat, (
-        "§2 must state the case the guards do NOT cover")
-    assert "refuses a graph whose stored names do not match" in flat
-    assert "numDocuments >= n" in flat, (
-        "§2 must name the inequality, which is why an over-full index passes")
+    assert "refuses a reused graph outright" in flat, (
+        "§2 must state the reuse refusal — the harness now refuses it twice "
+        "over (`==` index wait + total `:Object` count)")
+    assert "count is asserted against the population" in flat, (
+        "§2 must name the count guard, which is what catches a previous arm's "
+        "`m3fx-*` fixture rows (`STARTS WITH 'm3-'` does not match them)")
+    assert "`==`, not `>=`" in flat, (
+        "§2 must name the equality, which is what stops an over-full index "
+        "from being accepted silently")
+    assert "with the SAME population is ACCEPTED" not in flat, (
+        "§2 still states the case the guards do NOT cover — that case is now "
+        "refused, so the sentence is stale")
+    assert "numDocuments >= n" not in flat, (
+        "§2 still says the wait accepts an at-least-full index — it requires "
+        "equality now")
 
 
 def test_the_falsifier_predicate_is_stated_the_same_way_in_every_document(

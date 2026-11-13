@@ -91,7 +91,9 @@ identical second run):
 
 **What that says, in the decision's own terms.** The scorer is not the constraint: with the query terms
 held constant, swapping TF-IDF for BM25 moves recall@3 by 1.33 points (1.15 on the subset where the
-control holds) and by **zero** at k=15, with zero discordant pairs. The 25-point difference is real, is
+control holds), is **−0.67 at k=5** (the shipped leg ahead 2–0) and **zero** at k=15, with zero
+discordant pairs at k=15. Both directions are stated because reporting only k=3 and k=15 reads as a
+floor where the evidence has a sign change. The 25-point difference is real, is
 **not BM25**, and is reproducible **inside the current index** — so an index migration earns no recall
 return, which is what §6.2's deferral exists to establish.
 

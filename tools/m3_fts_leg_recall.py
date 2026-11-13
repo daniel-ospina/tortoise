@@ -609,6 +609,21 @@ def arm_falkordb(rows: list[dict], graph_name: str, namespace: str,
             f"{stale[:3]!r}) — `o.name` is ON CREATE (#8919); pass a fresh "
             f"--graph.")
 
+    # ⛔ The name check above only catches a reused graph whose population
+    # CHANGED. It cannot see a graph carrying the SAME population plus extras —
+    # and `m3fx-*` does not match `STARTS WITH 'm3-'`, so a previous run's five
+    # fixture rows are invisible to it entirely. That is the exact `305 vs 300`
+    # contamination the committed artifacts disclose (#12349 review), so the
+    # total is asserted directly rather than inferred from the names.
+    total = proj.g.query(
+        "MATCH (o:Object) RETURN count(o)", params={}).result_set[0][0]
+    if int(total) != len(rows):
+        raise SystemExit(
+            f"REFUSED: the graph carries {int(total)} :Object rows, expected "
+            f"{len(rows)} — a reused graph measures a previous population (or "
+            f"a previous arm's fixture rows) and neither the stale-name check "
+            f"nor a `>=` index wait can see it. Pass a fresh --graph.")
+
     # One warm query so the first measured query does not pay the cold
     # full-scan cost (the #4997 unindexed-label scan, constant across arms),
     # then WAIT for the indexer to catch up: FalkorDB's fulltext index builds on
@@ -728,6 +743,13 @@ def _wait_indexed(proj, expected: int, timeout_s: float = 60.0) -> tuple[int, fl
     """
     t0 = time.time()
     last = -1
+    # ⛔ EQUALITY, not `>=` (#12349 review, P2). `>=` returns immediately on an
+    # index that is TOO BIG, which is how the committed artifacts accepted a
+    # 305-document index for a 300-document population without a word — the
+    # body of that PR says an `==` "would have timed out and refused loudly",
+    # and it is right. A fresh graph reaches exactly `len(rows)` (and exactly
+    # `len(rows) + len(FIXTURES)` after the fixture inserts), so equality is
+    # reachable on every path this harness takes.
     while time.time() - t0 < timeout_s:
         rows = proj.g.query("CALL db.indexes()").result_set
         for row in rows:
@@ -744,13 +766,14 @@ def _wait_indexed(proj, expected: int, timeout_s: float = 60.0) -> tuple[int, fl
                           if isinstance(c, dict) and "numDocuments" in c), None)
             last = int(stats["numDocuments"]) if stats else -1
             break
-        if last >= expected:
+        if last == expected:
             return last, round(time.time() - t0, 2)
         time.sleep(0.2)
     raise SystemExit(
         f"REFUSED: the Object fulltext index reports {last} documents of "
-        f"{expected} after {timeout_s}s — a query against a partially built "
-        f"index books present names as misses.")
+        f"exactly {expected} after {timeout_s}s — a query against a partially "
+        f"built index books present names as misses, and an OVER-count means "
+        f"the graph is not the one this run wrote.")
 
 
 # ── the Postgres arm ────────────────────────────────────────────────────────
