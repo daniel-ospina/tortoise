@@ -3,6 +3,10 @@
 # batch:   b1-removed-no-destination
 # reason:  no destination in the approved 27-tool surface; no replacement (owner ruling, #11609)
 # source:  tortoise/tool_registry.py @ b85194d6bcb15b80a8cc07d2e6a076d7e8af8456
+#          (re-anchored from 73c479ce405b: #12268/#11928 edited the archived
+#           `tortoise_analyze` handler's docstring on `main` while this batch was in
+#           flight, so the commit that LAST held this code is the newer one — the
+#           anchor and `ARCHIVED_AT` below must name the same commit.)
 #
 # This file IS the source of record. To restore: copy each block below back into the
 # file named in ITS OWN `verbatim from <path>` banner (one symbol can span more than

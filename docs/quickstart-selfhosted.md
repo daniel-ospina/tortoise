@@ -437,9 +437,11 @@ path is a pre-release backup per the drill above, not a downgrade.
 Tortoise ships five starter expansion packs by default (`dev`, `marketing`,
 `product-strategy`, `pm`, `agent-ops`) — YAML manifests that extend the core
 ontology with a domain vocabulary, chains, and extraction guidance. The
-starter set loads automatically on every install; `GET /v1/packs` shows
-your active packs (the MCP `tortoise_packs_list` tool was removed in #11609 —
-packs are SDK/REST-only).
+starter set loads automatically on every install, and the packs your
+deployment loaded are the directories under `TORTOISE_PACKS_DIR` (the MCP
+`tortoise_packs_list` tool was removed in #11609 — on self-host, packs are
+configured by DIRECTORY and the `tortoise pack` CLI, never over REST:
+`GET /v1/packs` is a HOSTED-only route and the self-host app does not serve it).
 
 - **Use a custom pack:** put `packs/<namespace>/manifest.yaml` under
   `TORTOISE_PACKS_DIR` and restart (missing/empty dirs warn and fall back —
