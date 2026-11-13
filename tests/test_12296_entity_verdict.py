@@ -1213,6 +1213,28 @@ class TestTheResolverBands:
         assert v2._resolve_superseded("The Team", {"entities": tie},
                                      kind="core:plan") is None, tie
 
+    def test_a_folded_name_row_beats_an_alias_rival(self, sdk_factory):
+        """THREE rungs, each complete before the next (round-27 review, P2).
+
+        A folded-name row and an alias-bearing rival of the same kind were one
+        match list, so the set was ambiguous and `_resolve_superseded` returned
+        `None` — the supersession was DROPPED (the entity that should be retired
+        stayed live) even though a NAME row answered the ref by fold.
+        """
+        sdk = sdk_factory()
+        _create_object(sdk, "obj-named", "The Team", kind="core:plan")
+        _create_object(sdk, "obj-rival", "Other", kind="core:plan")
+        entities = [{"id": "obj-named", "name": "The Team", "kind": "core:plan"},
+                    {"id": "obj-rival", "name": "Other", "kind": "core:plan",
+                     "aliases": ["team"]}]
+        hit = v2._resolve_superseded("Team", {"entities": entities},
+                                    kind="core:plan")
+        assert hit is not None and hit["id"] == "obj-named", hit
+        # …and the alias rung is still reached when no NAME row answers
+        alias_only = v2._resolve_superseded(
+            "Team", {"entities": [entities[1]]}, kind="core:plan")
+        assert alias_only is not None and alias_only["id"] == "obj-rival", alias_only
+
     def test_a_supersedes_ref_spelled_as_the_merged_variant_still_resolves(
             self, sdk_factory):
         """The fold replaces the carrier's row, so its SPELLING lives in `aliases[]`

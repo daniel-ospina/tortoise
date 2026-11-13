@@ -9581,14 +9581,17 @@ def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | Non
     # `supersedes` ref spelled the way the merged variant was spelled, which DROPS
     # the supersession (the entity that should be retired stays live) and warns
     # that it was "recorded without a graph id" for a record that is not recorded
-    # at all. Same rule as `_find_existing_entity`: fold both sides, and never
-    # guess when more than one row answers.
+    # at all. The discipline is `_find_existing_entity`'s — fold both sides, and
+    # never guess when more than one row answers — but the LADDER below is not
+    # that function's: see the three-rung note further down, which states the
+    # divergence (#11901 keeps surface variants out of phase 1 by never folding a
+    # NAME there; here the ref is an authored string).
     want = normalize_entity_name(ref)
-    # ⛔ NAME FIRST, fold/alias only as the FALLBACK — the same ladder
-    # `_find_existing_entity` uses. In one match list, a rival row that merely
-    # folds or aliases to the ref made the set ambiguous and a supersession that
-    # previously landed was DROPPED (the entity that should be retired stayed
-    # live), while nothing about the ref's own spelling had changed.
+    # ⛔ NAME FIRST, fold/alias only as the FALLBACK. In one match list, a rival
+    # row that merely folds or aliases to the ref made the set ambiguous and a
+    # supersession that previously landed was DROPPED (the entity that should be
+    # retired stayed live), while nothing about the ref's own spelling had
+    # changed.
     # ⛔ The KIND filter belongs to EACH rung, not to the merged result: applied
     # after the ladder, one same-spelling row of a DIFFERENT kind emptied the name
     # rung's survivors, so the fold/alias fallback was never consulted and a
@@ -9605,13 +9608,26 @@ def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | Non
         return (not kind
                 or _norm_kind(e.get("kind", "")) == _norm_kind(kind))
 
+    # THREE rungs, in this order, and each one is complete before the next is
+    # consulted: an EXACT-spelling name hit, then a FOLDED name hit, then the
+    # alias arm. Rungs 2 and 3 were one list, so a folded-name row and an
+    # alias-bearing rival of the same kind made the set ambiguous and the
+    # supersession was DROPPED even though a NAME row answered — the same
+    # symptom the ordering above exists to remove, one spelling down.
+    # ⛔ This is NOT `_find_existing_entity`'s ladder: that one never folds a NAME
+    # with `normalize_entity_name` (#11901 — a surface variant is invisible to
+    # phase 1). Here the ref is an AUTHORED `supersedes` string, not a mention
+    # S3 recalled, so the folded-name rung stays — it is pre-existing behaviour
+    # of this function, kept, and it is why this comment no longer claims parity.
     named = [e for e in entities
              if _norm(e.get("name", "")) == _norm(ref) and _same_kind(e)]
     if not named:
         named = [e for e in entities
-                 if (normalize_entity_name(e.get("name", "")) == want
-                     or _alias_hit_for(want, e.get("aliases")))
+                 if normalize_entity_name(e.get("name", "")) == want
                  and _same_kind(e)]
+    if not named:
+        named = [e for e in entities
+                 if _alias_hit_for(want, e.get("aliases")) and _same_kind(e)]
     if len(named) == 1:
         return named[0]
     return None  # 0 or >1 → caller warns, never guesses
@@ -15277,7 +15293,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     #: chain). They are not absent — they are unreadable — so they are HELD below
     #: rather than left to read as measured absence, and the pass still runs even
     #: when the fold withheld every row: an empty candidate set from THIS cause
-    #: must not turn a partial lookup into a create window. Scope: the fold's own
+    #: must not turn a partial lookup into a create window — for the spellings it
+    #: names. The hold key is `_norm` (F3), so an ARTICLE variant of a withheld
+    #: spelling is a different key and is not caught (#12424, residual). Scope: the fold's own
     #: withholding exit only. Any OTHER raise inside `_current_entity_priors`
     #: (e.g. a failed `_entity_facts` read) still leaves `entities == []` with no
     #: unresolved key — the general S3-lookup PARTIAL arm is #10998's row.
@@ -15330,12 +15348,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # #12296: the fold withheld these spellings, so their identity was
                 # never resolved — HOLD them (never create). Same disposition the
                 # facts-reader failure gets, for the same reason.
-                # ⛔ Compare FOLDS, not spellings: a mention that RESOLVED can be
-                # spelled differently from the withheld graph row (`The Team` vs
-                # `the team`), and an exact-string test then appended a hold for a
-                # name that was resolved — a loss recorded under I2 that did not
-                # occur, contradicting `resolve_entities`' own invariant that a
-                # resolved name is never also reported held.
+                # ⛔ Compare IDENTITY KEYS, not raw spellings: a mention that
+                # RESOLVED can be spelled differently from the withheld graph row
+                # (`The Team` vs `the team`), and an exact-string test then
+                # appended a hold for a name that was resolved — a loss recorded
+                # under I2 that did not occur, contradicting `resolve_entities`'
+                # own invariant that a resolved name is never also reported held.
+                # The key is `_norm` (case/whitespace folds, F3's hold identity),
+                # NOT `normalize_entity_name`: an ARTICLE variant (`The Team` vs
+                # `Team`) is still two keys here, so it can be created while a
+                # fold-equal spelling is withheld — #12424 tracks that residual
+                # (widening this key alone would not close it either; the create
+                # gate at `execute_embed` keys on the same `_norm`).
                 _resolved_folds = {_norm(str(k))
                                    for k in (res.get("map") or {})}
                 _held_names = {_norm(str(h.get("name") or ""))
@@ -15375,9 +15399,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # created every spelling the D-1 fold refused to resolve — the
                 # duplicate the fold exists to prevent, reached by a raising
                 # resolver. Nothing resolved here, so no `map` filter is needed.
-                # De-duped on the FOLD, as on the success arm: the same
+                # De-duped on the `_norm` key, as on the success arm: the same
                 # withholding can be named twice in two spellings, and one hold per
-                # fold — not per spelling — is the invariant both arms share.
+                # KEY — not per spelling — is the invariant both arms share (the
+                # article-variant residual is the same one #12424 tracks).
                 _held_folds_on_failure = {_norm(str(h.get("name") or ""))
                                           for h in resolution_held}
                 for _name in _unresolved_names:
