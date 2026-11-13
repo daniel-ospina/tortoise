@@ -219,25 +219,52 @@ def test_the_read_pages_rather_than_relying_on_one_result_set(sdk, monkeypatch):
     INSTANT-newest values even though they are the LEXICALLY last, which reds a
     restore of the pre-fix single ``LIMIT $lim`` query — that query would have
     been asked for 2 rows and answered with the byte-largest two (5.0, 4.0…).
-    Every spelling here is ``Z``, so assertion (1) alone could not tell the old
-    query from the new one at ``limit=100``; (2) is what makes the ordering part
-    of this pin, not only the paging.
+    Every spelling in (1) is ``Z``, so (1) alone could not tell the old query
+    from the new one at ``limit=100``; (2) is what makes the ordering part of
+    this pin, not only the paging.
+
+    ⛔ AND (3) A QUERY-COUNT PIN, because (1) and (2) both survive the paging
+    being deleted: ONE unbounded query over 5 rows returns the same five rows in
+    the same order, which is exactly the regression that would re-introduce
+    #4233's silent store-order truncation. With the page size retuned to 2, a
+    paged read of 5 rows issues **3** queries; a single unbounded one issues 1.
+    Counting is done on the SDK's own `g.query`, so it cannot be satisfied by a
+    different route.
 
     ⚠️ Disclosed bound on what this pins: a lane container reports
     ``RESULTSET_SIZE = -1``, so the server-side cap the paging exists for cannot
-    be reproduced here. This test pins the paging SHAPE (and the app-level cut it
-    replaced), not the cap itself.
+    be reproduced here. This test pins the paging SHAPE (that the read really
+    pages, and that the bound is applied after the ordering), not the cap itself.
     """
     import tortoise.goal_judgement as gj
 
-    monkeypatch.setattr(gj, "_READINGS_PAGE_SIZE", 2)
     indicator = _indicator(sdk, "paging")
     for hour in (1, 2, 3, 4, 5):
         _reading(sdk, indicator, float(hour), at=f"2026-11-12T0{hour}:00:00Z")
 
+    # Count only the READ: the fixture's own writes go through the same client,
+    # so the counting stub is installed after seeding and the tally cleared.
+    calls: list[str] = []
+    real_g = sdk._get_proj().g
+
+    class _Counting:
+        def query(self, cypher, **kwargs):
+            calls.append(cypher)
+            return real_g.query(cypher, **kwargs)
+
+    monkeypatch.setattr(gj, "_READINGS_PAGE_SIZE", 2)
+    monkeypatch.setattr(sdk._get_proj(), "g", _Counting(), raising=False)
+
     got = latest_readings(sdk, indicator["id"])
     assert len(got) == 5, "a page cut lost readings — the read is not paging"
     assert [r.value for r in got] == [5.0, 4.0, 3.0, 2.0, 1.0]
+    assert len(calls) == 3, (
+        f"5 readings at a page size of 2 must take 3 queries, took {len(calls)} "
+        "— a single unbounded query re-opens #4233's silent truncation"
+    )
+    assert all("LIMIT $batch" in c for c in calls)
+    assert all("id(e) >= $cursor" in c for c in calls)
+    calls.clear()
 
     # …and the same read with offset spellings whose INSTANT order inverts their
     # BYTE order, so the two newest are the two lexically SMALLEST rows.
@@ -283,13 +310,21 @@ def test_a_degenerate_page_size_is_refused_loudly_not_read_as_unmeasured(
 
 
 def test_a_doubled_about_object_edge_yields_one_reading_not_two(sdk, monkeypatch):
-    """The query returns one row per MATCH PATH, so a second `aboutObject` edge
-    from the same event would yield the same reading twice — and a single-column
-    `id(e)` cursor could skip the rest of a group straddling a page boundary.
-    The cursor is the pair `(id(e), e.id)` and duplicates are collapsed by id.
+    """A second `aboutObject` edge from the same event must not double a reading
+    — and must not lose one either.
 
-    Seeded with the SDK's own edge write (which MERGEs, so a doubled edge is an
-    outside-write shape) plus a direct Cypher `CREATE` to force the second edge.
+    MEASURED (this is the fact the cursor's comment rests on): with two
+    `aboutObject` edges from one event to one indicator, `RETURN count(r)` is 2
+    but `RETURN id(e), e.id` is **1 row** — the pattern is scoped by node PAIR,
+    not by relationship. That is why a single-column `id(e)` cursor is sufficient
+    and why no Python de-duplication is layered on top (one keyed on `reading_id`
+    could DROP a distinct reading that legitimately shares an `e.id`).
+
+    This is a PROPERTY pin, not a mutant-killer: it stays green under either
+    cursor shape because the engine already returns one row per event. It would
+    red if the query were ever rewritten to traverse the RELATIONSHIP
+    (`MATCH ()-[r:aboutObject]->()`, which returns a row per edge) or if a
+    de-duplication step were added with the wrong key.
     """
     import tortoise.goal_judgement as gj
 
@@ -303,6 +338,13 @@ def test_a_doubled_about_object_edge_yields_one_reading_not_two(sdk, monkeypatch
         "CREATE (e)-[:aboutObject]->(o)",
         params={"eid": first["id"], "iid": indicator["id"]},
     )
+    # The premise, measured in the same graph the read runs against:
+    edges = sdk._get_proj().g.query(
+        "MATCH (e:Event)-[r:aboutObject]->(o) WHERE e.id = $eid AND o.id = $iid "
+        "RETURN count(r)",
+        params={"eid": first["id"], "iid": indicator["id"]},
+    ).result_set
+    assert edges[0][0] == 2, "the doubled edge was not created, so nothing is pinned"
 
     got = latest_readings(sdk, indicator["id"])
     assert len(got) == 4, "a doubled edge duplicated or dropped a reading"
@@ -330,8 +372,14 @@ def test_a_reading_with_no_parseable_instant_sorts_after_every_dated_one(sdk):
 
 
 def test_since_excludes_by_instant_on_the_correctly_ordered_list(sdk):
-    """#11926's boundary filter reads a list that is now ordered by the same
-    comparator it filters with — the two can no longer disagree."""
+    """#11926's boundary filter still excludes by INSTANT, on the ordered list.
+
+    ⚠️ This is a REGRESSION pin, not a defect proof: it PASSES on the pre-fix
+    code too (two rows fit any page, and `since` filtering is order-independent),
+    so it cannot testify that the ordering was fixed. What it pins is that the
+    fix did not change the boundary's meaning — equality still admits, an
+    incomparable boundary still excludes everything (its sibling below).
+    """
     indicator = _indicator(sdk, "since")
     _reading(sdk, indicator, 12.0, at="2026-11-12T01:00:00-05:00")  # 06:00Z
     _reading(sdk, indicator, 5.0, at="2026-11-12T05:00:00Z")  # 05:00Z

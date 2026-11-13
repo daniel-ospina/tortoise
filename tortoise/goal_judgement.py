@@ -1001,25 +1001,23 @@ def latest_readings(
     # keeps rows by BYTE rank, and that string is not the instant (see
     # `_newest_first_key`): the page kept the wrong readings and the judgement
     # was computed from a stale one. The rows are instead fetched by KEYSET PAGES
-    # on `id(e)` — deterministic, and immune to the server's `RESULTSET_SIZE`
-    # truncation, which a single unbounded query is NOT — then ordered in Python
-    # with `limit` applied AFTER that ordering, so no bound can decide WHICH
-    # readings the judgement sees.
+    # — deterministic, and immune to the server's `RESULTSET_SIZE` truncation,
+    # which a single unbounded query is NOT — then ordered in Python with `limit`
+    # applied AFTER that ordering, so no bound can decide WHICH readings the
+    # judgement sees.
     #
-    # The cursor is the PAIR `(id(e), e.id)`, not `id(e)` alone: this query
-    # returns one row per MATCH PATH, so an event carrying TWO `aboutObject`
-    # edges to the same indicator yields two rows with the SAME `id(e)`. A
-    # single-column cursor advanced past that id would skip the rest of a group
-    # straddling a page boundary — silently dropping a reading, which is the very
-    # class of loss this read exists to remove. `hosted_backup._paged_rows` is
-    # safe with `id(n)` alone only because its query is `MATCH (n)` (one row per
-    # node). Duplicate rows for one event are then collapsed by `reading_id`
-    # below, so a doubled edge cannot double a reading in the result.
+    # ONE ROW PER EVENT, so `id(e)` alone is a sufficient cursor. MEASURED on a
+    # lane: an event with TWO `aboutObject` edges to the same indicator gives
+    # `RETURN count(r)` = 2 but `RETURN id(e), e.id` = **1 row** (the pattern is
+    # scoped by node PAIR, not by relationship), which the doubled-edge test
+    # pins. This is why `hosted_backup._paged_rows`' single-column `id(n)` cursor
+    # (and its `>= last + 1` advance) is the right shape to copy, and why no
+    # Python de-duplication is needed — one would be able to DROP a distinct
+    # reading that legitimately shares an `e.id`.
     cypher = (
-        f"{where} AND (id(e) > $cursor_id "
-        "OR (id(e) = $cursor_id AND e.id > $cursor_eid)) "
+        f"{where} AND id(e) >= $cursor "
         "RETURN id(e), e.id, e.value, e.unit, e.startedAt, e.createdAt "
-        "ORDER BY id(e), e.id LIMIT $batch"
+        "ORDER BY id(e) LIMIT $batch"
     )
     if limit < 0:
         raise ValueError(
@@ -1038,13 +1036,10 @@ def latest_readings(
         )
     g = sdk._get_proj().g
     rows: list[Any] = []
-    cursor_id = 0
-    cursor_eid = ""
+    cursor = 0
     while True:
         page = g.query(
-            cypher,
-            params={**params, "cursor_id": cursor_id,
-                    "cursor_eid": cursor_eid, "batch": batch},
+            cypher, params={**params, "cursor": cursor, "batch": batch}
         ).result_set
         # `if not page` FIRST (the order `_paged_rows` uses): an empty tail must
         # end the loop, never reach `page[-1]`.
@@ -1052,19 +1047,14 @@ def latest_readings(
             rows.extend(page)
             break
         rows.extend(page)
-        # The pair STRICTLY increases, so the loop always terminates — and it
-        # never compares a NODE id() negatively (that answers 0 rows on the v6
-        # core, measured — `hosted_backup._paged_rows`, #9226).
-        cursor_id = int(page[-1][0])
-        cursor_eid = str(page[-1][1])
+        # `>= last + 1`, never `> last`: the advance is strictly increasing (the
+        # loop always terminates), and it never compares a NODE id() negatively —
+        # that answers 0 rows on the v6 core (measured —
+        # `hosted_backup._paged_rows`, #9226).
+        cursor = int(page[-1][0]) + 1
     out: list[Reading] = []
-    seen: set[str] = set()
     for row in rows:
         reading_id = row[1] if len(row) > 1 else None
-        identity = str(reading_id if reading_id is not None else f"id:{row[0]}")
-        if identity in seen:
-            continue  # a doubled `aboutObject` edge yields one reading, not two
-        seen.add(identity)
         raw = row[2] if len(row) > 2 else None
         out.append(
             Reading(
