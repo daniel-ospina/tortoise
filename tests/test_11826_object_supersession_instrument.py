@@ -3836,6 +3836,12 @@ def test_an_id_less_neither_arm_row_names_the_shape_step(sdk):
     assert "AND re-point this IMPL edge onto" in fix, (
         "the bare re-point cannot restore the belief on a neither-arm row: " + fix)
     assert f"tortoise_update_entity('{actor['id']}', " in fix, fix
+    # ⛔ The JUNCTION this test is named for: `_shape_repair` is a NOUN phrase, so
+    # splicing it after "the successor on it and " emitted "…and clearing the shape —
+    # … — AND re-point", coordinating a gerund with an imperative. Both needles above
+    # match either form, so this arm needs its own assertion (#12210 review, P3).
+    assert "and clearing the shape" not in fix, fix
+    assert "and clear the shape" in fix, fix
 
 
 def test_an_id_less_neither_arm_repair_restores_the_belief(sdk):

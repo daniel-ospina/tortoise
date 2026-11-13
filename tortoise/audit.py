@@ -1769,10 +1769,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         elif unread:
             # ⛔ Neutral rows never reach here either — the ``neutral`` arm above has
             # already taken them (same note as the DRAFT arm): a ``not neutral``
-            # conjunct here was dead (#12210 review, P3).
+            # conjunct here was dead (#12210 review, P3): the claim it encoded was
             # false (measured: carrying a neutral input onto a live node leaves both
-            # posteriors at the bare prior, ``effective_n 2.0``) and it contradicted
-            # the DROP the same string states (#12210 review, P2).
+            # posteriors at the bare prior, ``effective_n 2.0``) and contradicted the
+            # DROP the same string states (#12210 review, P2).
             # ⛔ A TERMINAL successor is unreadable for a different reason, and the
             # SHAPE wording above is false about it — measured: an 'archived'
             # successor has ``is_operator NULL`` and no ``op_type``, yet the string
@@ -2050,7 +2050,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                    # ``confidences {}`` while the finding goes QUIET (0 rows); add
                    # ``{'is_operator': False, 'op_type': None}`` and it returns
                    # (``effective_n 2.5255``) (#12210 review, P2).
-                   ((f"{_shape_repair} AND re-point this {s['edge_type']} "
+                   ((f"{_shape_repair_imp} AND re-point this {s['edge_type']} "
                      f"{'input' if s['is_operator'] else 'edge'} onto "
                      + (dest if s["carrier_count"] == 1 else "that successor")
                      + ". Delete the edge into the old endpoint")
