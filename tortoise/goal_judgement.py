@@ -873,9 +873,14 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
 #: independent ``count(e)`` aggregate — the guard ``hosted_backup`` calls "the
 #: load-bearing" one, and the only shape a result-set cap cannot truncate to a
 #: lie, because it is ONE row — and RAISES rather than answering from the part it
-#: managed to read. That direction matters: the pages are id-ASCENDING, so the
-#: rows a truncated tail loses are the NEWEST, i.e. exactly the stale-reading
-#: answer #12322 exists to remove.
+#: managed to read. ⛔ THE LOSS IS ARBITRARY BY INSTANT, WHICH IS THE POINT: pages
+#: ascend by `id(e)` = INSERT order, so a truncated tail loses the most recently
+#: CREATED readings — and a backfilled row can be instant-OLD while landing last
+#: (MEASURED: create the 12.0/newest-instant reading first, an older one second,
+#: and truncation keeps the 12.0 while the guard reports the loss). So the guard
+#: is fail-closed on "the answer would be taken from an incomplete set", never on
+#: "the newest reading is certainly gone" — the two are different claims and only
+#: the first is true.
 _READINGS_PAGE_SIZE = 1000
 
 
@@ -932,9 +937,12 @@ def latest_readings(
     ⚠️ ``limit`` DOES NOT BOUND THE FETCH. The whole per-indicator history is
     paged and parsed regardless of ``limit``, because the ordering cannot be
     delegated to the server (see below) — so ``limit=1`` still costs
-    ``ceil(N / _READINGS_PAGE_SIZE)`` round trips and ``N`` instant parses for a
-    history of ``N`` readings. That is the measured price of a correct order
-    (:data:`_READINGS_PAGE_SIZE`); it is not a per-call constant.
+    ``ceil(N / _READINGS_PAGE_SIZE)`` page queries, ONE MORE when ``N`` is an
+    exact multiple of the page size (a FULL page never ends the loop; only a short
+    one does), PLUS the one aggregate ``count(e)`` the truncation guard compares
+    against, and ``N`` instant parses, for a history of ``N`` readings. Measured
+    pin: 5 readings at a page size of 2 take 3 page queries. That is the price of
+    a correct order (:data:`_READINGS_PAGE_SIZE`); it is not a per-call constant.
 
     "Newest first" is ordered by the INSTANT each reading names, using the
     repo's one instant comparator (``search_engine._created_sort_key``) — never
@@ -1067,14 +1075,16 @@ def latest_readings(
         cursor = int(page[-1][0]) + 1
     if len(rows) < expected:
         # A short page is indistinguishable from a last page by shape alone, and
-        # the rows it costs are the NEWEST (pages ascend by id). Refuse rather
-        # than answer from the part that arrived.
+        # the rows it costs are the most recently CREATED (pages ascend by id, not
+        # by instant), so the answer would be taken from an incomplete set. Refuse
+        # rather than answer from the part that arrived.
         raise RuntimeError(
             f"latest_readings read {len(rows)} of {expected} rows for indicator "
             f"{indicator_id!r} — a page came back short of {batch}, which a "
-            "server-side RESULTSET_SIZE below _READINGS_PAGE_SIZE causes. The "
-            "missing rows are the NEWEST (pages ascend by id), so answering would "
-            "report a stale reading as the current state; lower "
+            "server-side RESULTSET_SIZE below _READINGS_PAGE_SIZE causes (or a "
+            "concurrent delete landed mid-read). The missing rows are the most "
+            "recently CREATED (pages ascend by id, not by instant), so an answer "
+            "would be computed from an incomplete set; lower "
             "_READINGS_PAGE_SIZE below the server's cap."
         )
     out: list[Reading] = []

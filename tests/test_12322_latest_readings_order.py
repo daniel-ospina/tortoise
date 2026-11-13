@@ -29,7 +29,7 @@ Every test here is written so that a regression reds it:
 * reverting the ordering to the raw string reds the order/limit/judgement tests;
 * re-introducing a Cypher-side ``LIMIT`` reds
   ``test_the_cap_is_applied_after_the_ordering`` (the two instant-newest rows are
-  the lexically LAST two, so a page cut before the sort cannot contain them);
+  lexically SMALLEST two, so a page cut before the sort cannot contain them);
 * restoring the "complete set" docstring claim reds the disclosure test.
 
 Runnable embedded:
@@ -160,7 +160,7 @@ def test_a_slash_spelled_reading_does_not_outrank_a_newer_dashed_one(sdk):
 def test_the_cap_is_applied_after_the_ordering(sdk):
     """``limit`` is a CAP ON THE ORDERED LIST, never a pre-cut page.
 
-    The two instant-newest readings here are also the two lexically LAST, so a
+    The two instant-newest readings here are also the two lexically SMALLEST, so a
     fix that keeps ``LIMIT $lim`` in Cypher and sorts afterwards still cannot
     return them — this is the assertion that distinguishes a real fix from a
     re-sort of a wrongly-cut page.
@@ -215,13 +215,16 @@ def test_the_read_pages_rather_than_relying_on_one_result_set(sdk, monkeypatch):
     seeding a thousand events.
 
     TWO assertions, because either alone is weak: (1) the FULL read returns all 5
-    rows, which reds a single-page loop; (2) a ``limit=2`` read returns the two
-    INSTANT-newest values even though they are the LEXICALLY last, which reds a
-    restore of the pre-fix single ``LIMIT $lim`` query — that query would have
-    been asked for 2 rows and answered with the byte-largest two (5.0, 4.0…).
-    Every spelling in (1) is ``Z``, so (1) alone could not tell the old query
-    from the new one at ``limit=100``; (2) is what makes the ordering part of
-    this pin, not only the paging.
+    rows, which reds a single-page loop; (2) a ``limit=2`` read on the SECOND
+    indicator (``mixed``, offset spellings) returns the two INSTANT-newest values,
+    which are also the two lexically SMALLEST ("2026-11-12T00:20:00-12:00" and
+    "…T00:30:00-12:00" = 12:20Z / 12:30Z). That reds a restore of the pre-fix
+    single ``LIMIT $lim`` query: asked for 2 rows it would have answered with the
+    byte-LARGEST two, 1.0 (09:00Z) and 2.0 (08:00Z), which are NOT the two
+    instant-newest (the instants ascend 3.0@07:00Z < 2.0@08:00Z < 1.0@09:00Z <
+    8.0@12:20Z < 9.0@12:30Z). Every spelling in (1) is ``Z``, so (1) alone could not tell the old
+    query from the new one at ``limit=100``; (2) is what makes the ORDERING part
+    of this pin, not only the paging.
 
     ⛔ AND (3) A QUERY-COUNT PIN, because (1) and (2) both survive the paging
     being deleted: ONE unbounded query over 5 rows returns the same five rows in
@@ -359,9 +362,9 @@ def test_a_truncated_page_set_raises_instead_of_answering_from_survivors(
     sdk, monkeypatch
 ):
     """A server-side cap below the page size truncates EVERY page, and the rows it
-    costs are the NEWEST (pages ascend by id) — so continuing would report a stale
-    reading as the current state, which is the defect #12322 removes arriving
-    through the read's own transport (#4233).
+    costs are the most recently CREATED (pages ascend by id, not by instant) — so
+    continuing would report a stale reading as the current state, which is the
+    defect #12322 removes arriving through the read's own transport (#4233).
 
     Reproduced without a server cap (a lane reports ``RESULTSET_SIZE = -1``) by
     truncating the PAGE query's rows in the client; the ``count(e)`` aggregate is
