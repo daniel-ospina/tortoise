@@ -5492,6 +5492,15 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("probes/capstone_measure.py", "follows at", (
             ("14696", "edus = _edus_from_conversation(conversation)"),
         )),
+        # ⛔ The `_IDLE_CITES` docstring's OWN early-return cite (#12369 review, P3):
+        # it said `:14649`, the PRE-merge value, while the `follows at` row five lines
+        # above already pinned `:14697` for the same `if not edus:` statement. One
+        # claim, two numbers in one function, and only one of them had a reader — the
+        # bare continuation here sat in no row, so `grep -c '14649'` over this file's
+        # tests was `0`.
+        ("probes/capstone_measure.py", "emits literally", (
+            ("14697", "if not edus:"),
+        )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
             ("15621", 'result["vet"] = {'),
@@ -5596,6 +5605,29 @@ def test_the_bare_continuation_cites_name_what_they_say():
         )),
         ("README.md", "early return (`", (
             ("14697", "if not edus:"),
+        )),
+        # ⛔ THE TWO RESULT BLOCKS — the S2.2/S2.3 rows above name their bounds in the
+        # TABLE, and FOUR prose sites in this same document said `:15563-15569` /
+        # `:15573-15577` instead (#12369 review, P2). A `+48` forward merge moved both
+        # blocks and the bare `:N-N` continuations named no file, so `_BUNDLE_CITE`
+        # could not see them — the document contradicted its own table by 48 lines and
+        # nothing red-ed. Held by CONTENT on the block's opening and closing line, so a
+        # re-derivation that lands mid-comment reds instead of drifting.
+        ("README.md", '`result["classify_later"]` block at', (
+            ("15611", 'result["classify_later"] = {'),
+            ("15617", ("exact", "}")),
+        )),
+        ("README.md", 'the `result["vet"]` block, and it is corrected to', (
+            ("15621", 'result["vet"] = {'),
+            ("15625", ("exact", "}")),
+        )),
+        ("README.md", "the two result blocks)", (
+            ("15611", 'result["classify_later"] = {'),
+            ("15621", 'result["vet"] = {'),
+        )),
+        ("README.md", "and now reaches the receipt through the seam", (
+            ("15611", 'result["classify_later"] = {'),
+            ("15621", 'result["vet"] = {'),
         )),
         # ⛔ THE LITERAL THE SENTENCE QUOTES, on its OWN row because the claim
         # wraps: `:15589` was left pointing inside `_arm_extract`'s
@@ -5772,6 +5804,14 @@ _EPIC_CITE_DOCS = {
 _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "search_engine": _REPO / "tortoise/search_engine.py",
+    # ⛔ `03-test-design.md:82` cites the 402 quota guard and its refusal payload by
+    # NUMBER, and that row was in NO pin: #12369 re-pointed a CORRECT
+    # `hosted_api.py:18494`/`:18519` to `:18493`/`:18518` (both comments) while
+    # deleting the provenance section that said "do not re-point in passing", and
+    # nothing red-ed — the regression was found by a reviewer reading the tree, not
+    # by a test. A source key is the only way `_pin_row_failures` can resolve a
+    # `hosted_api` number at all, so its absence was the hole.
+    "hosted_api": _REPO / "tortoise/hosted_api.py",
     # `03-test-design.md` cites the manifest's OWN `carve_out:` block — by BLOCK and
     # filename now, not by line number: `surfaces:` sits ABOVE `carve_out:` in the
     # manifest, so every registration `tools/ci_selection.py::register_tests` splices
@@ -5937,6 +5977,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("04-plan.md", "operator / label path", (
             ("25393", "declared = declared_relation_predicates()"),
         ), "sdk"),
+        # ⛔ THE 402 QUOTA GUARD, `03-test-design.md`'s A-corpus capture row (#12369
+        # review, P2). This row is the one that would have caught #12369's own
+        # regression: the sentence was CORRECT on `main` and on the merge-base, the
+        # forward merge moved `hosted_api.py` by `+1`, and the PR re-pointed both
+        # cites by arithmetic onto two comment lines instead of two statements — the
+        # exact failure the deleted "Provenance of the numbers" section named. Held by
+        # CONTENT, so a number that lands on a comment cannot satisfy it.
+        ("03-test-design.md", "the A-corpus capture", (
+            ("18494", "if count + est > max_points:"),
+            ("18519", "detail=quota_refusal_payload("),
+        ), "hosted_api"),
         # ⛔ NOT A ROW ANY MORE — the `carve_out:` claim below the rows is checked
         # against the BLOCK (`_section_entries`) and not against a line number: the
         # entry sits BELOW the `surfaces:` blocks `tools/ci_selection.py::register_tests`

@@ -1829,7 +1829,7 @@ def _pass_ran(block: dict) -> bool | None:
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
     pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:14693`` and
     ``edus = _edus_from_conversation(...)`` follows at ``:14696``, whose
-    ``if not edus:`` early return (``:14649``) emits literally ``"vet": {"enabled":
+    ``if not edus:`` early return (``:14697``) emits literally ``"vet": {"enabled":
     vet_enabled, "s2": {}, "union": {}}`` (``:14728``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
     embed_list:`` (``:17804``) and ``if vet_enabled and complete_list:``

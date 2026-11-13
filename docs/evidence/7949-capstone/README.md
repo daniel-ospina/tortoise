@@ -249,8 +249,8 @@ positions are the ones the step tables below print, and every one of those is re
 checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block at `:15563-15569` here, not in the log. The `8288-8292` cite is
-the `result["vet"]` block, and it is corrected to `:15573-15577` here — **not** to the `:8534-8538`
+the `result["classify_later"]` block at `:15611-15617` here, not in the log. The `8288-8292` cite is
+the `result["vet"]` block, and it is corrected to `:15621-15625` here — **not** to the `:8534-8538`
 this bundle's issue (#9919) predicted, because the tree moved again between that reading and this
 head; that is precisely the drift this paragraph exists to stop a reader from re-deriving by
 number. (The SYMBOL is what makes
@@ -378,7 +378,7 @@ one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:14724-14728` — the classify block starts at `:14724`, the vet surface at `:14728` — and `:15563-15569` / `:15573-15577`, the two result blocks). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:14724-14728` — the classify block starts at `:14724`, the vet surface at `:14728` — and `:15611-15617` / `:15621-15625`, the two result blocks). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -422,7 +422,7 @@ proves the flag; a classify or vet block can legitimately carry `enabled: True, 
 list, no classify items, or a fail-open `except`) while doing nothing, and that shape is
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution — the surface is emitted
-unconditionally at `:15563`/`:15573` and now reaches the receipt through the seam at the meta fold
+unconditionally at `:15611`/`:15621` and now reaches the receipt through the seam at the meta fold
 `sdk.py:19051` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
 accordingly, and the "where the fix must target" line with it.
 
