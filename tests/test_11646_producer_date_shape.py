@@ -792,6 +792,40 @@ def _zone_child_env_base() -> dict[str, str]:
     }
 
 
+def test_the_zone_child_gets_the_parents_sys_path_not_just_the_repo_root() -> None:
+    """⛔ THE `sys.path` HAND-OFF IS PINNED STRUCTURALLY, NOT BY IMPORTING (#12330).
+
+    Reverting `_zone_child_env_base` to `"PYTHONPATH": repo_root` leaves this whole file
+    green (measured: 60 passed) — the parent's `pydantic` resolves through the venv prefix,
+    so a LOCAL child imports fine in BOTH shapes and the fix is unpinned on the box its
+    author runs on. An import-based assertion does not rescue that: it only moves the
+    defect to the runner's install shape, which the helper's own docstring argues against.
+
+    So the contract is asserted directly on the value the helper returns: the repo root is
+    FIRST (a stray installed `tortoise` must not shadow the tree under test), EVERY
+    non-empty parent `sys.path` entry is carried (exactly what a scrubbed child was
+    missing), and the list is deduplicated with the parent's ORDER preserved (it is the
+    resolution order). All three hold for any install shape, and reverting to the root
+    alone reds the second.
+    """
+    entries = [p for p in _zone_child_env_base()["PYTHONPATH"].split(os.pathsep) if p]
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    assert entries[0] == repo_root, (
+        "the repo root must be searched FIRST, so a stray installed `tortoise` cannot "
+        f"shadow the tree under test — got {entries[:3]}"
+    )
+    missing = [p for p in sys.path if p and p not in entries]
+    assert not missing, (
+        "the zone child's PYTHONPATH omits parent `sys.path` entries "
+        f"({missing[:5]}) — a child carrying the repo root alone cannot import the "
+        "project's DEPENDENCIES (#11871/#11878), which is the failure #12330 fixed"
+    )
+    assert len(entries) == len(set(entries)), (
+        "PYTHONPATH carries duplicate entries — the parent's order was not deduped: "
+        f"{entries}"
+    )
+
+
 def _run_zone_child(script: str, env_base: dict[str, str], zone: str) -> list[str]:
     """Run ``script`` in a child under ``zone``; return its output lines.
 

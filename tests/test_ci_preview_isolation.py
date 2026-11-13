@@ -953,6 +953,67 @@ def test_a_raising_stop_all_still_reaps_the_tree_and_the_peer_decoy(
             _reap_group(pid)
 
 
+def test_a_raising_ps_poll_still_reaps_the_peer_decoy(
+    tmp_path: Path, state, monkeypatch
+) -> None:
+    """⛔ THE `ps` POLL IS INSIDE THE GUARD, PINNED BY REVERTING IT (#12330).
+
+    The comm poll that proves the peer decoy is NAMED `workerd` has no `timeout=`, so its
+    realistic failure is an `OSError` under fork pressure (EAGAIN/ENOMEM) — the trigger
+    the job-A guard already names — and it runs up to 250 times on every Linux leg. Before
+    this PR the poll sat OUTSIDE the guard that reaps the decoy: only the `assert` after it
+    was inside a `try:`, so a raise from `ps` left a 120 s `workerd` alive, reparented to
+    pid 1.
+
+    Moving the poll back outside the guard leaves the REST of this file GREEN (measured:
+    43 passed) — nothing else injects a failure from the `ps` call, because the raising
+    `_script` arm in `test_a_raising_stop_all_...` never reaches it. So the guard was
+    unpinned while its own comment claimed nothing between the spawn and its reaper is
+    unguarded; this pins it by raising from the poll ONLY and asserting the decoy is gone.
+    """
+    if not Path("/proc").is_dir():
+        pytest.skip("the comm poll is a Linux test (`prctl` names the decoy)")
+
+    spawned: list[int] = []
+    real_spawn = _spawn
+    real_run = subprocess.run
+
+    def recording_spawn(*args, **kwargs):
+        proc = real_spawn(*args, **kwargs)
+        spawned.append(proc.pid)
+        return proc
+
+    def raising_comm_poll(cmd, *args, **kwargs):
+        # ONLY the `ps -o comm= -p <pid>` read raises. `-o command=` (what `_await_exec`
+        # reads) does not contain the literal `comm=`, so the wait for the decoy's argv0
+        # still runs and the body reaches the poll.
+        if isinstance(cmd, (list, tuple)) and "comm=" in cmd:
+            raise OSError(11, "Resource temporarily unavailable")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(sys.modules[__name__], "_spawn", recording_spawn)
+    monkeypatch.setattr(subprocess, "run", raising_comm_poll)
+    try:
+        with pytest.raises(OSError, match="Resource temporarily unavailable"):
+            test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path, state)
+        assert spawned, "the body spawned nothing, so a leak check over it would be vacuous"
+        peer_pid = spawned[0]
+        # A BOUNDED WAIT, for the same reason as the arm above: SIGKILL is asynchronous.
+        # On a tree with the poll outside its guard nothing kills the decoy at all, so
+        # this never settles and the test reds.
+        deadline = time.time() + 10
+        while _pid_alive(peer_pid) and time.time() < deadline:
+            time.sleep(0.05)
+        assert not _pid_alive(peer_pid), (
+            f"a raise from the `ps` comm poll left the peer decoy ({peer_pid}) alive — "
+            "the poll must sit INSIDE the guard that reaps it (#12330). A 120 s `workerd` "
+            "reparented to pid 1 is exactly the leak that guard exists to prevent."
+        )
+    finally:
+        for pid in spawned:
+            _reap_group(pid)
+
+
 def test_await_exec_REFUSES_a_decoy_that_never_shows_its_name(tmp_path: Path) -> None:
     """`_await_exec` is the predicate that can refuse — pin the refusal, not just the pass.
 
