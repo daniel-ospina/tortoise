@@ -3400,7 +3400,9 @@ name, and the sentence says that instead). A carried report **larger than the ca
 and not its size — the excerpt is there to read, so the size adds nothing, and the squeeze loss, when
 there is one, is declared beside it as above — and one under the cap states nothing about its extent,
 because nothing was cut. When the length comparison that detects a squeeze loss **cannot itself be made**
-(a `wc` that yields no number, or a count longer than the 18 digits the guard compares), the body says the loss is **unmeasured** rather than declaring none: an
+— the guard compares a count only when it is a non-empty run of at most 18 ASCII digits, so a `wc` that
+printed no number, two numbers, a non-digit or a count past that bound is not compared — the body says the
+loss is **unmeasured** rather than declaring none: an
 unmeasured comparison is not evidence that nothing was dropped. A carried report whose **own size could not be measured** — the size probe is
 skipped for a path that is not a regular file, and the size is never guessed when the count does not resolve
 to a number — declares the 6000-byte **window** instead of a cut: that only the
