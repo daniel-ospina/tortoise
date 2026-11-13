@@ -6146,7 +6146,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # pin GREEN (measured). A break is what the row actually writes after the
             # name, and anything else is a qualifier this arm has not been taught to
             # understand, so it refuses.
-            r"(?=\s*(?:—|–|\||\.|;|,|$))")
+            r"(?=\s*(?:—|–|\||\.|;|,|$))"
+            # …and `, one of two` / `, among several` turn "holds ONE" into a count
+            # of a larger set while keeping the clause-break shape.
+            r"(?!\s*,?\s*(?:one\s+of|two|three|among|several|many)\b)")
         if not re.search(_ONE_ENTRY, doc_hits[0]):
             block_failures.append(
                 f"03-test-design.md's `carve_out:` sentence does not say, in the row's "
@@ -6174,13 +6177,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # with a message that named a cause that was not there. The pattern now
         # accepts either order and the two fillers the sentence may carry; anything
         # else between the names is where a negation would live.
+        # ⛔ THE TAIL GUARD APPLIES TO **BOTH** ALTERNATIVES, so the whole pattern is
+        # one group and the lookahead sits OUTSIDE it. Appended to a bare
+        # alternation the lookahead binds to the LAST alternative only, which is how
+        # the first cut of this guard let "… hold none — except one capstone entry in
+        # `slow_files:`" through (measured GREEN).
         _HOLD_NONE = (
-            r"(?:`uri_requiring:`\s*(?:and|,|/)\s*`slow_files:`"
+            r"(?:(?:`uri_requiring:`\s*(?:and|,|/)\s*`slow_files:`"
             r"|`slow_files:`\s*(?:and|,|/)\s*`uri_requiring:`)"
             r"\s*(?:both\s+)?(?:,?\s*which\s+)?hold none"
             # …and the same claim the other way round, which is correct prose:
             # "`uri_requiring:` holds none, as does `slow_files:`".
-            r"|`uri_requiring:`\s*holds? none\s*,?\s*as does\s*`slow_files:`")
+            r"|`uri_requiring:`\s*holds? none\s*,?\s*as does\s*`slow_files:`)"
+            # AND THE CLAUSE MUST NOT BE EXTENDED BY AN EXCEPTION. A clause break is
+            # not a licence: an `except`/`but`/`though`/`second`/`two` inside the same
+            # clause turns the claim inside out while the positive form still matches.
+            r"(?![^.;|]*\b(?:except|but|though|although|save|other\s+than|"
+            r"second|third|two|three|also)\b)")
         if not re.search(_HOLD_NONE, doc_hits[0]):
             block_failures.append(
                 "03-test-design.md's `carve_out:` sentence does not state, POSITIVELY, "
@@ -6770,7 +6783,18 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
 ])
 def test_each_block_arm_reds_on_the_mutation_it_guards(mutation, arm, monkeypatch,
                                                       tmp_path):
-    """Removing the named arm must make THIS case pass — i.e. it is load-bearing."""
+    """The named arm REFUSES this mutation — each case is that arm's own shape.
+
+    ⚠️ TWO CONTRACTS, STATED SEPARATELY, because an earlier docstring claimed the
+    strong one for every row and a review measured it false for seven arms:
+
+      * for the arms below that are a shape's ONLY guard (the hold-none clause, the
+        one-entry grammar, the neighbour loop, the doc-wide cite, the leak arm), the
+        case fails if the arm is deleted — verified by deleting each one;
+      * `ceil(len(carve) > 1)` is a MESSAGE refinement: `elif carve != [ENTRY]`
+        refuses the same state, so its case stays RED with the arm deleted. It is
+        listed for the message it produces, not for coverage.
+    """
     doc_text = _EPIC_CITE_DOCS["03-test-design.md"].read_text(encoding="utf-8")
     man_text = _EPIC_CITE_SOURCES["ci_surfaces"].read_text(encoding="utf-8")
     doc_new, man_new = mutation(doc_text, man_text)
