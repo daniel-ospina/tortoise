@@ -3346,6 +3346,38 @@ def _glob_matches(pattern: str, names: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(name, segment) for name in names)
 
 
+def _spells_one_extension(pattern: str, ext: str) -> bool:
+    """A wildcarded pattern that literally spells `ext` and not the other extension.
+
+    POPULATION-INDEPENDENT ON PURPOSE, and the second half of the grade. Matching alone is not
+    enough: `WORKFLOWS.glob("release*.yml")` matches no workflow in this tree (41 files, none
+    starting `release`), so a match-only grade reads it as "not a workflow glob" and passes —
+    while it IS a fourth one-sided enumeration, and a workflow rename or removal can silently
+    disarm a site that reds today (measured, review round 8).
+
+    A wildcard is required. A pattern with none (`python-ci.yml`, a deliberate single-workflow
+    reference or a tuple of required filenames) enumerates nothing and is not graded — that is
+    the over-block review round 7 removed.
+    """
+    segment = pattern.rsplit("/", 1)[-1]
+    if not any(ch in segment for ch in "*?["):
+        return False
+    other = ".yaml" if ext == ".yml" else ".yml"
+    return ext in segment and other not in segment
+
+
+def _opens(pattern: str, names: tuple[str, ...], ext: str) -> bool:
+    """Can this pattern open `ext` workflows — by what it MATCHES, or by what it SPELLS?
+
+    Both arms are needed and neither subsumes the other. Matching is population-dependent (a
+    pattern whose stems the tree does not hold matches nothing), spelling only sees a LITERAL
+    extension (a computed one from an f-string fragment matches but spells nothing). Every
+    grading site asks this ONE question, so the two halves cannot disagree about what a call
+    opens.
+    """
+    return _glob_matches(pattern, names) or _spells_one_extension(pattern, ext)
+
+
 def _one_sided_workflow_pattern_constants(
     yml_names: tuple[str, ...], yaml_names: tuple[str, ...]
 ) -> list[str]:
@@ -3379,8 +3411,8 @@ def _one_sided_workflow_pattern_constants(
         ]
         if not patterns:
             continue
-        opens_yml = any(_glob_matches(pattern, yml_names) for pattern in patterns)
-        opens_yaml = any(_glob_matches(pattern, yaml_names) for pattern in patterns)
+        opens_yml = any(_opens(pattern, yml_names, ".yml") for pattern in patterns)
+        opens_yaml = any(_opens(pattern, yaml_names, ".yaml") for pattern in patterns)
         if opens_yml != opens_yaml:
             one_sided.append(f"{name} = {patterns!r}")
     return one_sided
@@ -3395,7 +3427,11 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
     BOTH extensions — the enumeration derives from `_WORKFLOW_SUFFIXES` through
     `_workflow_paths()`.
 
-    ⛔ IT GRADES WHAT THE PATTERN MATCHES, NOT HOW IT IS SPELLED. Four review rounds are the
+    ⛔ IT GRADES TWO WAYS, BECAUSE ONE OF THEM IS POPULATION-DEPENDENT. It grades what the
+    pattern MATCHES (so a glob this file does not spell literally still reds) AND — for a pattern
+    with a wildcard — whether it literally SPELLS one extension and not the other, through the
+    single question `_opens` (so `release*.yml` reds even though no workflow in today's tree
+    starts with `release`). Five review rounds are the
     specification here, because each cut was falsified by a shape it did not anticipate:
 
       * cut 1 matched the literal `glob("<star>.yml")` — escaped by `**` prefixes, keyword
@@ -3416,6 +3452,12 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         tests passed — a partial reversion of this fix, certified green (measured, review round
         7). A both-extension pair is now RED like any other hand-written enumeration, because the
         module's one enumeration is `_workflow_paths()`: the red names it.
+      * cut 6 adds the SECOND ARM (`_spells_one_extension`, asked through `_opens`), because the
+        match arm alone is population-DEPENDENT: `WORKFLOWS.glob("release*.yml")` matches no
+        workflow in today's 41-file tree, so it graded CLEAN as a live fourth one-sided site —
+        and a workflow rename or removal silently disarms a site that reds today (measured,
+        review round 8). A wildcarded pattern that literally names one extension and not the
+        other is one-sided whatever the tree holds.
 
     SCOPE, so a green run is not read as more than it is — what stays out of reach, declared
     rather than implied:
@@ -3474,9 +3516,16 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         "`_glob_calls` no longer reports (line, receiver, method, literals) for a plain one-sided "
         "glob — the structural scan below would grade nothing and pass"
     )
-    assert any(literals for *_head, literals in _glob_calls(source)), (
-        "`_glob_calls` found no string literal anywhere in this module — the scan is blind, so "
-        "the green below would mean nothing"
+    #: NOT `any(literals …)` unconditionally: holding every pattern in a module constant and
+    #: calling `base.glob(pattern)` is a behaviour-preserving refactor that leaves this module with
+    #: no literal-carrying call at all, and the scan then has nothing to grade — which is not the
+    #: same as being BLIND, and reding it would block the very idiom the constant arm grades
+    #: (measured, review round 8). Blindness is what the shape assertion above pins.
+    _module_calls = _glob_calls(source)
+    assert not _module_calls or any(literals for *_head, literals in _module_calls), (
+        "this module calls glob/rglob but no call carries a literal or an f-string fragment — the "
+        "structural scan graded nothing. If the patterns are held in a constant on purpose, say "
+        "so in SCOPE rather than letting a silent pass stand in for it"
     )
     yml_names, yaml_names = _workflow_probe_names()
     assert yml_names, "the probe population is empty — this pin would grade nothing"
@@ -3491,8 +3540,8 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
     for line, receiver, method, literals in calls:
         if not literals:
             continue
-        opens_yml = any(_glob_matches(lit, yml_names) for lit in literals)
-        opens_yaml = any(_glob_matches(lit, yaml_names) for lit in literals)
+        opens_yml = any(_opens(lit, yml_names, ".yml") for lit in literals)
+        opens_yaml = any(_opens(lit, yaml_names, ".yaml") for lit in literals)
         if opens_yml == opens_yaml:
             continue
         one_sided.append(f"line {line}: {(receiver or '<expression>')}.{method}({literals!r})")
