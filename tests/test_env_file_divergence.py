@@ -1491,6 +1491,29 @@ def test_a_blank_line_in_the_file_is_not_blamed_on_the_environment(capsys, _isol
     assert "exported EMPTY" not in out, out
 
 
+def test_a_blank_line_in_the_file_is_not_reported_as_an_export_when_APPLIED(
+        capsys, _isolated):
+    """The applied state: the FILE wrote the blank, so "exported EMPTY" is false.
+
+    Measured (#12428 review): `doctor` imports the daemon module mid-run, which
+    applies the `.env` — so `os.environ` carries the file's blank by the time the
+    row is built, and a presence test alone reported the same key under BOTH
+    origins ("is EMPTY in this `.env`; and is exported EMPTY"), sending the user to
+    unset a variable that does not exist.
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    _write_env(_isolated, "TORTOISE_DB_URI=\n")
+    _load_dotenv(str(_isolated))
+
+    _run(("doctor",))
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "Config: .env" in line)
+
+    assert "is EMPTY in this `.env`" in row, row
+    assert "exported EMPTY" not in row, row
+
+
 def test_an_unloadable_file_is_attributed_to_the_file(capsys, _isolated):
     """A `.env` the loader cannot apply names the FILE — not "not attributable".
 

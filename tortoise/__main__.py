@@ -11544,9 +11544,15 @@ def _dotenv_divergence(graded_target: str | None = None, *,
         "file": [key for key in _DB_LADDER_KEYS
                  if key in assignments
                  and not str(assignments.get(key) or "").strip()],
+        # ⛔ NOT a key whose blank value THIS PROCESS took from the file: after the
+        # mid-run import applies the `.env`, `os.environ` carries the file's blank,
+        # so a presence test alone reported the same key under BOTH origins —
+        # "is EMPTY in this `.env`; and is exported EMPTY" — and sent the user
+        # looking for an export that does not exist (#12428 review).
         "env": [key for key in _DB_LADDER_KEYS
                 if key in os.environ
-                and not str(os.environ.get(key) or "").strip()],
+                and not str(os.environ.get(key) or "").strip()
+                and _db_value_source(key) != "file"],
     }
 
     if graded_unresolved:
