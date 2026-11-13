@@ -4756,33 +4756,23 @@ _POSITION_TAIL = (r"(?:into|down|deep|below|above|from\s+the\s+top|"
 #: Used where a POSITION must be refused: everything is a unit except `lines`/`rows`.
 _UNIT_NO_POSITION = rf"(?!\s*(?:(?:{_UNIT_WORDS})\b|%))"
 _UNIT = rf"(?!\s*(?:(?:{_UNIT_WORDS}|{_UNIT_POSITION_WORDS})\b|%))"
-#: ⛔ THE THIRD VARIANT, AND IT EXISTS BECAUSE THE FIRST TWO ARE EACH WRONG ON A
-#: DIFFERENT LINE (#12369 review, P2 — measured red->GREEN->red, so this closes a
-#: regression the previous fix introduced, not a hypothetical). A NEIGHBOUR line needs
-#: `lines`/`rows` to be a UNIT when the phrase is a COUNT (`— 155 lines of rows`, the
-#: document's ordinary prose, which `_UNIT_NO_POSITION` refuses) and a POSITION when a
-#: positional TAIL follows (`9987 lines into the block`, which `_UNIT` misses because
-#: it rejects the whole class). So the tail is tested INSIDE the exemption: refuse the
-#: match when `lines`/`rows` follows and is NOT itself followed by a tail.
-_UNIT_NEIGHBOUR = (rf"(?!\s*(?:(?:{_UNIT_WORDS})\b|%))"
-                   rf"(?!\s*(?:{_UNIT_POSITION_WORDS})\b(?!\s*{_POSITION_TAIL}\b))")
+#: ⛔ NO THIRD VARIANT AND NO POSITIONAL-TAIL ALLOW-LIST — see
+#: `_bare_number_hits_neighbour`. An allow-list of tails fails in the DANGEROUS
+#: direction (a tail it omits ACCEPTS a false position), which is why it is gone
+#: rather than widened.
 #: ⛔ `(?!,\d)` IS LOAD-BEARING: without it the thousands-separated alternative
 #: BACKTRACKS to a prefix, so `1,320,023 bytes` matched as the integer `1,320` and was
 #: reported as a line cite. The existing pass-fixture never showed it because its
 #: number had no separator beside it; `config/ci-surfaces.yml — 1,320,023 bytes` did.
 _NUM = rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT}(?![\d])(?!,\d)(?!\.\d)(?!-\d)(?!:\d)"
-#: The same integer, with `lines`/`rows` treated as POSITIONS rather than units.
+#: …and the STRICT variant, which is what a NEIGHBOUR line uses.
 _NUM_NO_POSITION = (
     rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT_NO_POSITION}(?![\d])(?!,\d)(?!\.\d)(?!-\d)(?!:\d)")
-#: …and the NEIGHBOUR variant: `lines`/`rows` is a unit only when no tail follows.
-_NUM_NEIGHBOUR = (
-    rf"(?:\d{{1,3}}(?:,\d{{3}})+|\d{{3,}}){_UNIT_NEIGHBOUR}(?![\d])(?!,\d)(?!\.\d)(?!-\d)(?!:\d)")
 #: ⛔ THE `.` IN THIS LOOKBEHIND IS LOAD-BEARING: without it a DECIMAL FRAGMENT is
 #: read as an integer (`1.093 %` matched `093`), contradicting the rule stated three
 #: paragraphs up. Reproduced, then closed.
 _LEADING_NUM = rf"(?<![\w#.]){_NUM}"
 _LEADING_NUM_NO_POSITION = rf"(?<![\w#.]){_NUM_NO_POSITION}"
-_LEADING_NUM_NEIGHBOUR = rf"(?<![\w#.]){_NUM_NEIGHBOUR}"
 _WRAP = r"[`*]*"
 _SEP = r"(?::|#L|—|–|\bL\.?|\b(?:at|on|line|lines|row|rows|entry|entries|of)\b)"
 #: ⛔ THE GAP IS BOUNDED, AND THE BOUND USED TO TRUNCATE SILENTLY — the module's own
@@ -4913,7 +4903,6 @@ _BARE_NUM = re.compile(_LEADING_NUM_NO_POSITION)
 #: `— its 9987th line` through (the false pass). An ORDINAL is caught by BOTH (the
 #: digit run is all `_NUM` needs), which is why the strictness can differ here without
 #: losing the class that matters.
-_BARE_NUM_NEIGHBOUR = re.compile(_LEADING_NUM_NEIGHBOUR)
 
 #: ⛔ A LONE FOUR-DIGIT 19xx/20xx RUN IS A YEAR AS OFTEN AS A LINE NUMBER, and the bare
 #: arm cannot tell them apart — so it refuses the year rather than punishing prose that
@@ -5008,17 +4997,34 @@ def _neighbour_number_strays(line: str) -> list[str]:
 
 
 def _bare_number_hits_neighbour(text: str) -> list[str]:
-    """The NEIGHBOUR hits — a COUNT stays green, a position with a TAIL does not.
+    """The NEIGHBOUR hits — the SAME strict matcher the claim sentence uses.
 
-    Three patterns for three questions (#12369 review, P2), and the third exists
-    because the first two were each wrong on a real line: `_BARE_NUM` (claim
-    sentence) refuses every `lines`/`rows` phrase, which false-reds the document's
-    own `— 155 lines of rows`; the plain unit-aware `_NUM` misses `9987 lines into
-    the block`, which was a measured red->GREEN regression. This one refuses the
-    phrase only when NO positional tail follows.
+    ⛔ NO POSITIONAL-TAIL ALLOW-LIST, DELIBERATELY, AND THIS IS THE THIRD DESIGN
+    (#12369 review, P2 — measured four ways before settling). The earlier cut exempted
+    `lines`/`rows` from being units when a TAIL followed (`into`, `down`, `deep`, ...).
+    That is a CLOSED ALLOW-LIST WITH INVERTED POLARITY: a tail the list omits does not
+    REFUSE correct prose, it ACCEPTS A FALSE POSITION — the dangerous direction, and
+    measured open four ways:
+
+        ... sits 9987 lines up from the bottom.           GREEN  (tail not listed)
+        ... sits 9987 lines, measured down from the top.   GREEN  (tail not adjacent)
+        ... reads 9987 rows in .                           GREEN  (space before the period)
+        Deep into the block, the entry reads 9987 lines.   GREEN  (tail before the number)
+
+    Each would have needed another list entry, another gap rule, another anchor — and a
+    guard whose completeness is asserted by an enumeration cannot be made complete by
+    extending the enumeration. So the tail is GONE and this arm is STRICT: on a
+    neighbouring line, `N lines` / `N rows` is a POSITION.
+
+    The cost is a FALSE RED — `-- 155 lines of rows` beside the manifest's name is
+    refused — and that is the direction this module already prescribes for its closed
+    unit list ("a missed unit does not weaken the pin, it REFUSES CORRECT PROSE").
+    Measured BEFORE choosing, not assumed: on this document the neighbour population is
+    3 lines and a strict arm yields ZERO findings on all of them, so the cost is
+    theoretical here while the false-PASS surface was real and reachable. Stated
+    residual: a genuine line/row COUNT on a neighbouring line is refused.
     """
-    return [m.group(0) for m in _BARE_NUM_NEIGHBOUR.finditer(text)
-            if not _BARE_YEAR.match(m.group(0))]
+    return _bare_number_hits(text)
 
 
 def _stray_entry_finding(sentence: str, entry: str) -> str | None:
@@ -6482,30 +6488,39 @@ def test_the_neighbour_population_includes_the_line_that_names_the_manifest_file
             f"uncaught in the document's own words")
         assert _neighbour_number_strays(line), (
             f"{line!r} is in the population but yields no stray — the arm is inert")
-    # …and the widening must not drag the manifest's ORDINARY prose in: a count beside
-    # the filename is not a cite, and `_UNIT` is what keeps it green.
-    for count in ("`config/ci-surfaces.yml` — 155 lines of rows",
-                  "`config/ci-surfaces.yml` lists 60 entries in `carve_out:`",
+    # …and the unambiguous UNITS stay counts on a neighbouring line: `entries`, `s`,
+    # `bytes` are never positional nouns, so they are not what the strict arm refuses.
+    for count in ("`config/ci-surfaces.yml` lists 60 entries in `carve_out:`",
                   "`config/ci-surfaces.yml`'s `durations:` row: 166 s",
-                  "the block is 155 lines in the summary"):
+                  "`config/ci-surfaces.yml` is 1319360 bytes"):
         assert _neighbour_number_strays(count) == [], (
-            f"a COUNT beside the manifest's name must stay green: {count!r}")
-    # ⛔ THE TAIL-GATED CLASS — a measured red->GREEN REGRESSION the first version of
-    # this fix introduced (#12369 review, P2). Swapping the neighbour arm to the plain
-    # unit-aware matcher kept the counts green above and ALSO stopped catching a
-    # position spelled `N lines`/`N rows` on a line that names the block or the entry
-    # but not the manifest. `_UNIT_NEIGHBOUR` tests the tail INSIDE the exemption, so
-    # both halves are pinned here rather than only the half that was easy.
+            f"an unambiguous COUNT beside the manifest's name must stay green: {count!r}")
+    # ⛔ `N lines` / `N rows` IS A POSITION ON A NEIGHBOURING LINE, IN EVERY SPELLING,
+    # and the four below are the ones that defeated the tail ALLOW-LIST this arm used
+    # to carry (#12369 review, P2 — each measured GREEN under it):
+    #
+    #     … sits 9987 lines up from the bottom.           (tail not listed)
+    #     … sits 9987 lines, measured down from the top.   (tail not adjacent)
+    #     … reads 9987 rows in .                           (space before the period)
+    #     Deep into the block, the entry reads 9987 lines.   (tail BEFORE the number)
+    #
+    # A list whose miss ACCEPTS a false position cannot be made complete by extending
+    # it, so the list is gone and the arm is strict. ⚠️ STATED COST, the benign
+    # direction: `— 155 lines of rows` beside the manifest's name is now refused too.
+    # Measured before choosing — this document's neighbour population is 3 lines and a
+    # strict arm yields ZERO findings on all of them — so the cost is theoretical here
+    # while the false-PASS surface was reachable.
     for position in (
             "The `carve_out:` entry sits 9987 lines into the block at this head.",
-            "The `carve_out:` entry sits at 9987 lines into the block at this head.",
+            "The `carve_out:` entry sits 9987 lines up from the bottom.",
+            "The `carve_out:` entry sits 9987 lines, measured down from the top.",
+            "The `carve_out:` entry reads 9987 rows in .",
+            "Deep into the block, the `carve_out:` entry reads 9987 lines.",
             "That `carve_out:` entry is 9987 rows down from the top.",
-            "the block's entry, 9987 lines deep, is the one this claims",
-            "The write-probe row is 9987 lines below the `surfaces:` block.",
-            "The `carve_out:` entry reads 9987 rows in."):
+            "the block's entry, 9987 lines deep, is the one this claims"):
         assert _neighbour_number_strays(position), (
-            f"a POSITION with a tail must be scanned as a cite: {position!r} — "
-            f"`lines`/`rows` is a unit only when NO tail follows it")
+            f"a `lines`/`rows` POSITION on a neighbouring line must be scanned: "
+            f"{position!r} — there is no tail allow-list to slip past any more")
 
 
 def test_the_two_cite_arms_are_complementary_not_duplicate():
