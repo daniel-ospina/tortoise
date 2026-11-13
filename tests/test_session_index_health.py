@@ -247,6 +247,16 @@ def _isolate_uninitialized(monkeypatch, tmp_path):
 
     Clears every DB env var, isolates HOME, and patches the canonical default
     so the resolved target has no DB file no matter what the host owns.
+
+    `chdir` as well, because `doctor` now also resolves the HOSTED credential
+    ("#11912") through `_resolve_config_path`, whose second candidate is
+    `<cwd>/.tortoise` — the file the documented `tortoise init --api-key`
+    writes, gitignored and so a normal untracked artifact of a developer's own
+    checkout. `--offline` stops the DIAL, not the READ: a store that cannot be
+    parsed appends `❌ Credentials` and reds these three tests for a reason
+    unrelated to them (measured: with a malformed `./.tortoise` at the worktree
+    root, `3 failed, 4 passed` — `5 pass, 5 warn, 1 fail`, `assert 1 == 0`).
+    Same isolation `tests/test_doctor.py`'s `_hermetic_hosted_identity` applies.
     """
     from tortoise import config as _config
 
@@ -254,6 +264,7 @@ def _isolate_uninitialized(monkeypatch, tmp_path):
                 "FALKORDB_PORT", "FALKORDB_PASSWORD"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(_config, "DEFAULT_DB_PATH",
                         str(tmp_path / ".tortoise" / "tortoise.db"))
 

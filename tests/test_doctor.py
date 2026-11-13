@@ -703,10 +703,17 @@ class TestDoctorHostedCredential:
         # leg is ⚠️ too.
         assert "UNGRADED" in hosted, hosted
         # EXACTLY ONE `Hosted` row (fresh review at `77c1f364b6`): `_row()` returns
-        # the FIRST match, so without this the `return` after this arm could be
-        # deleted — leaving a second, CONTRADICTORY `❌ Hosted … API error no
-        # status` line and exit 1 for a service blip (round 7 undone) — with the
-        # whole suite green. The surviving mutation is what this line kills.
+        # the FIRST match, so without this line deleting the `return` that
+        # follows this arm leaves the mutation SILENT — this `except` block's
+        # non-timeout guard sits ABOVE the timeout-retry code, so the fall-through
+        # does not reach the team leg: it re-enters the retry, asks the endpoint a
+        # second time after a definitive refusal (a non-retryable `ValueError`
+        # reported as "no answer in 5s, and none in 30s on retry"), and prints a
+        # SECOND, contradictory `⚠️ Hosted` row. Measured under that exact
+        # mutation: `9 pass, 5 warn, 0 fail` — rc UNCHANGED at 0 — so the row
+        # count is the only signal there is, not an exit code (fresh review at
+        # `2e8bc5b132` corrected an earlier claim that this reds with a `❌` row
+        # and exit 1; both are wrong, and the assertion below still reds).
         assert len([ln for ln in out.splitlines() if " Hosted:" in ln]) == 1, out[-1500:]
         assert rc == 0
 
@@ -848,6 +855,15 @@ class TestDoctorHostedCredential:
         assert password not in out, "the api_url password reached the retry row"
         # Unreachable is UNGRADED, not a broken key: nothing was asked of it.
         assert "UNGRADED" in hosted, hosted
+        # …and EXACTLY ONE `Hosted` row: the `return` after this retry arm is a
+        # surviving mutation too (fresh review at `2e8bc5b132` measured `100
+        # passed` with it deleted). Losing it prints a SECOND row — the
+        # authenticated leg's — against an endpoint whose `/health` never
+        # answered, i.e. it sends the `Bearer` key to a host that just failed
+        # reachability and spends an extra leg of the probe budget (#5109's
+        # transmission rule, and the budget pin). `_row()` takes the FIRST
+        # match, so only a COUNT can catch it.
+        assert len([ln for ln in out.splitlines() if " Hosted:" in ln]) == 1, out[-1500:]
         assert rc == 0
 
     def test_control_bytes_in_api_url_cannot_forge_a_row(
