@@ -382,7 +382,8 @@ class _FakeGraph:
     # D10) — so it must NOT carry the document predicate. Pinning it as "the same
     # predicate" (an earlier draft did) matches no row and makes the rerank
     # structurally inert on the ``source`` surface, which is a caller-facing MCP
-    # entity_type; the exclusion is asserted in test_the_source_read_carries_no…
+    # entity_type; the exclusion is asserted in
+    # test_the_SOURCE_branch_of_step_7_carries_no_documentKind_predicate.
     ("source", "Source", "url", ["MATCH (n:Source)", "n.url IN $ids",
                                  "NOT documentKind IS NOT NULL"]),
     ("operator", "Point", "id", ["MATCH (n:Point {is_operator: true})"]),

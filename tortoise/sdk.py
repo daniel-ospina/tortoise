@@ -40356,9 +40356,11 @@ class TortoiseSDK:
         #     ``benchmarks/run_report.py`` and ``benchmarks/load_test.py``; also the
         #     ``docs/runbook`` diagnostics whose entire output IS a rank (``w6c``,
         #     ``w7a``, ``5534``, ``4107``) and ``docs/evidence``'s cost probes. They
-        #     pin it for comparability against RECORDED numbers, exactly as they pin
-        #     ``_valid_time_rerank``: the harm is a baseline that silently stops
-        #     being the baseline, not a moved page.
+        #     pin it for comparability against RECORDED numbers — and ⛔ only the
+        #     first three of those also pin ``_valid_time_rerank``, so that
+        #     comparison holds for the ``tools/`` harnesses and not for the
+        #     ``docs/`` and ``benchmarks/`` halves: the harm here is a baseline that
+        #     silently stops being the baseline, not a moved page.
         #   * MEMBERSHIP PROBES that read a page SMALLER than the pool width and ask
         #     "is this row in it" — ``battery/runner/setup.py``'s seed-manifest
         #     guard (a false ``ConfigError`` reading "stale PRE-FIX graph"),

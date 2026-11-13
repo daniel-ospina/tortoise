@@ -108,8 +108,11 @@ DEFAULT_FUSED_RERANK_POOL = 40
 #: the ``leg="rerank"`` entry. Additive keys, the #4999 ``mechanism`` precedent:
 #: the cap is reported ALONGSIDE the leg verdict, never through ``degraded``
 #: (which in a leg trace means "a retrieval leg did not run", #8487 review P1).
-#: ``rerank_pool`` is the WIDTH BOUND APPLIED — the most candidates that COULD
-#: have been scored — not the number that were. ⛔ THE OTHER TWO ARE COUNTED
+#: ``rerank_pool`` is the CONFIGURED WIDTH — the cap the knob resolved — ⛔ NOT
+#: ``min(len(candidates), width)`` and NOT the number that were scored: a
+#: ONE-candidate read at width 40 reports ``pool=40``. (The applied bound is that
+#: min; reporting it would need a fourth key for the candidate count, which the
+#: two counters below already carry between them.) ⛔ THE OTHER TWO ARE COUNTED
 #: AGAINST DIFFERENT DENOMINATORS, so do not cross-check them against the bound:
 #: ``rerank_scored`` is how many were actually scored, and ``rerank_unscored`` is
 #: the CANDIDATE LIST minus ``rerank_scored`` — every row past the width PLUS the
