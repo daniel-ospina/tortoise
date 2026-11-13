@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import inspect
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -404,44 +403,37 @@ def test_a_tag_read_without_filters_still_serves(stub) -> None:
     assert [c[0] for c in stub.calls] == ["query_points_by_tag"], stub.calls
 
 
-#: A refusal ATTACHED TO `filters=` — not merely the word "refus" somewhere in
-#: the bullet. The tag bullet legitimately contains "`entity_type` is REFUSED
-#: there", so a bare substring test passes on the stale wording this test exists
-#: to catch (#12455 round-3 finding 1, measured: restoring `origin/main`'s
-#: "ignores kind/filters/…" left the suite green under the bare test).
-_FILTERS_REFUSAL = re.compile(
-    r"refus\w*\s+`?filters=?`?|`?filters=?`?\s+is\s+refused", re.IGNORECASE)
-
-#: A NEGATED refusal must never satisfy the guard (#12455 round 4). Round 3's
-#: regex was anchored but still matched "...does NOT refuse `filters=` - it
-#: ignores it", a 12-character edit from the shipped text, and the mention gate
-#: was case-sensitive so "ignores `Filters`" slipped past it too. Both mutants
-#: left the suite green; both now fail.
-_NEGATED_REFUSAL = re.compile(r"\b(?:not|never|no\s+longer)\s+refus|n't\s+refus",
-                              re.IGNORECASE)
-
-
-def _refuses_filters(bullet: str) -> bool:
-    """True only for an UNAMBIGUOUS refusal attached to ``filters=``.
-
-    Case-insensitive on the mention, negation-aware on the verb, so neither
-    "does NOT refuse `filters=`" nor "ignores `Filters`" can pass.
-    """
-    if "filters" not in bullet.lower():
-        return True          # the bullet does not discuss filters at all
-    if _NEGATED_REFUSAL.search(bullet):
-        return False
-    return bool(_FILTERS_REFUSAL.search(bullet))
+#: Wordings that ACTUALLY SHIPPED and described behaviour the code does not
+#: have. Pinned VERBATIM so they cannot come back.
+#:
+#: Why a pin and not a proof (#12455 rounds 3-5): each earlier version of this
+#: guard tried to establish "no wording in this bullet states a wrong claim
+#: about `filters`", and each was falsified by a wording the previous one
+#: admitted — head-line-only reads missed a continuation line; an anchored regex
+#: admitted "does NOT refuse `filters=`"; a negation-aware predicate admitted
+#: "nothing in this arm ever REFUSES `filters=`" and a refusal clause that
+#: belonged to the OTHER arm in the same bullet. Prose has no closed set of wrong
+#: phrasings, so that property is not decidable by a test — and a test that
+#: claims it is becomes a false PASS on the very thing it guards, which is the
+#: defect class this whole issue is about.
+#:
+#: What IS decidable is pinned here:
+#:   * each arm's bullet still DISCUSSES `filters` at all (a docstring that
+#:     silently stops mentioning it leaves a caller to infer the old behaviour);
+#:   * the exact sentences that shipped are gone and stay gone.
+#: Everything else about the wording is review's job, and the BEHAVIOUR is owned
+#: by the tests above, which are mutation-verified against the real guard.
+_STALE_WORDINGS = (
+    # origin/main's tag bullet: `filters` presented as merely ignored.
+    "ignores kind/filters/min_confidence/order_by",
+    # the round-1 boundary section: the text= arm did not apply the flag.
+    "the ``text=`` arm still does not apply it",
+)
 
 
-def _docstring_bullets(doc: str, head_prefix: str) -> list[str]:
-    """Each bullet that starts with ``head_prefix``, joined with its
-    continuation lines up to the next ``- `` bullet.
-
-    Joining matters: the served docstring wraps, and the stale claim sat on a
-    CONTINUATION line while a head-line-only read sees neither "filters" nor
-    "REFUS" — which is how a vacuous test looked discriminating.
-    """
+def _bullet_texts(doc: str, head_prefix: str) -> list[str]:
+    """Each bullet starting with ``head_prefix``, joined with its continuation
+    lines up to the next ``- `` bullet (the docstring wraps)."""
     lines = doc.splitlines()
     heads = [i for i, line in enumerate(lines) if line.strip().startswith(head_prefix)]
     out = []
@@ -452,65 +444,57 @@ def _docstring_bullets(doc: str, head_prefix: str) -> list[str]:
     return out
 
 
-def test_no_docstring_bullet_still_says_the_tag_arm_IGNORES_filters() -> None:
-    """The tag twin of the test below (#12455 round-2 finding 1).
+def test_each_refusing_arm_still_discusses_filters_at_all() -> None:
+    """A FLOOR, stated as one: each refusing arm still mentions `filters`.
 
-    The old tag bullet said tag mode "ignores kind/filters/min_confidence/
-    order_by" while a NEW bullet 17 lines later said `filters=` is REFUSED there:
-    two mutually exclusive statements about one argument in the same served
-    docstring, and the stale one is exactly the belief the guard exists to
-    correct.
+    Fails if an arm's bullets stop mentioning `filters` entirely — the cheapest
+    way for the docstring to drift back to "filters applies everywhere" is to
+    delete the sentence, and nothing else here would notice. Case-insensitive on
+    purpose.
 
-    Round 3 measured this test passing against that stale wording put back
-    verbatim, for two independent reasons — it read only head lines (the claim
-    was on a continuation line), and a bare ``"REFUS" in bullet`` was satisfied
-    by the bullet's own "`entity_type` is REFUSED there". So it now joins
-    continuations AND requires the refusal to be attached to `filters=`.
-    """
-    from tortoise.mcp_server import tortoise_query
-
-    bullets = _docstring_bullets(inspect.getdoc(tortoise_query) or "", "- tag=<name>")
-    assert len(bullets) >= 2, (
-        "expected the tag= bullet AND the tag-mode bullet; found "
-        f"{len(bullets)}: {bullets}"
-    )
-    stale = [b for b in bullets if not _refuses_filters(b)]
-    assert stale == [], (
-        "a `tag=` bullet mentions `filters` without refusing it, contradicting "
-        f"the guard: {stale}"
-    )
-
-
-def test_the_docstring_does_not_advertise_filters_for_the_text_arm() -> None:
-    """The issue's other acceptance half: the docs must stop implying it applies.
-
-    Fails if the ``text=`` bullet does not name ``filters`` — the docstring is the
-    only place a caller learns this before making the call. The bullet is read
-    as the head line PLUS its continuation lines (up to the next ``- `` bullet),
-    because that is how a wrapped docstring bullet is written; reading only the
-    head line would make this test unfalsifiable by any wording change that
-    wraps.
+    Deliberately a floor, not a proof. Measured (#12455 round 5): deleting the
+    mention from ONE of the tag arm's two bullets leaves the suite green, and
+    that is CORRECT under this contract — the arm still discusses `filters`. A
+    test that demanded every bullet say the right thing is the lexical proof the
+    rounds above falsified four times; the review owns wording, this owns
+    "somebody still wrote the sentence down".
     """
     from tortoise.mcp_server import tortoise_query
 
     doc = inspect.getdoc(tortoise_query) or ""
-    lines = doc.splitlines()
-    heads = [i for i, line in enumerate(lines)
-             if line.strip().startswith("- text=<query>")]
-    assert heads, "the `text=<query>` docstring bullet is missing"
-    start = heads[0]
-    end = next(
-        (j for j in range(start + 1, len(lines))
-         if lines[j].strip().startswith("- ")),
-        len(lines),
+    for prefix in ("- tag=<name>", "- text=<query>"):
+        bullets = _bullet_texts(doc, prefix)
+        assert bullets, f"no {prefix!r} bullet in the docstring at all"
+        assert any("filters" in b.lower() for b in bullets), (
+            f"not one {prefix!r} bullet mentions `filters`, so the refusal is "
+            f"undocumented on that arm: {bullets}"
+        )
+
+
+def test_the_shipped_stale_wordings_are_gone_and_stay_gone() -> None:
+    """The regression pin: sentences that shipped and were false must not return.
+
+    This replaces the round-2/3/4 attempts at a lexical proof of "the docstring
+    says nothing wrong" — see `_STALE_WORDINGS` for why that property is not
+    decidable and why claiming it made the test a false PASS. Each entry below
+    describes behaviour the code does not have:
+
+    * ``ignores kind/filters/min_confidence/order_by`` — origin/main's tag
+      bullet; the tool REFUSES ``filters=`` there;
+    * ``the text= arm still does not apply it`` — the round-1 boundary section;
+      the arm forwards ``include_retracted`` as ``include_terminal``.
+
+    Fails if either sentence reappears anywhere in the served docstring.
+    """
+    from tortoise.mcp_server import tortoise_query
+
+    doc = " ".join((inspect.getdoc(tortoise_query) or "").split())
+    present = [wording for wording in _STALE_WORDINGS if wording in doc]
+    assert present == [], (
+        "a docstring sentence that describes behaviour this code does not have "
+        f"came back: {present}"
     )
-    bullet = " ".join(lines[start:end])
-    assert "filters" in bullet, (
-        "the `text=` bullet does not mention `filters`, so a caller still reads "
-        f"the structural documentation as applying here: {bullet!r}"
-    )
-    assert _refuses_filters(bullet), (
-        "the `text=` bullet mentions filters without saying they are REFUSED, or "
-        "states it NEGATED ('are ignored, not refused'), which still reads as "
-        f"`applies unless said otherwise`: {bullet!r}"
+    assert len(_STALE_WORDINGS) >= 2, (
+        "the pin must carry at least the two wordings that shipped, or it "
+        "silently stops protecting anything"
     )

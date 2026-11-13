@@ -3901,8 +3901,10 @@ def tortoise_query(kind: str | None = None,
     - tag=<name> mode: a Point reader keyed on the tag only. It has no
       property-filter parameter either, so `filters=` is REFUSED here too rather
       than dropped (#12455). `kind`/`min_confidence`/`order_by` are NOT applied
-      by this arm — a known accepted-and-dropped gap tracked in #12500, not a
-      documented feature.
+      by this arm: the same accepted-and-dropped class as #12500, which tracks
+      the STRUCTURAL arms — this arm's `kind`/`min_confidence`/`order_by` drop is
+      recorded in #12500's comment thread (its body scopes the structural arms
+      only), and is a known gap rather than a documented feature.
     - include_retracted=True surfaces tombstones on every path (structural,
       paginated, text, and tag modes); default False excludes them. Known gap, tracked
       in #12502: the TAG arm's own exclusion is `status != "retracted"` only, so
