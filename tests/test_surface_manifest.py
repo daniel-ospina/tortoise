@@ -508,7 +508,7 @@ def _load_guard():
     return mod
 
 
-REMOVAL_WAYS_HEAD = "Account for each row above by exactly one of:"
+REMOVAL_WAYS_HEAD = "Account for the rows above reported as missing a record"
 
 
 def _load_manifest_tool():
@@ -5111,9 +5111,14 @@ def test_cut_REFUSES_a_dropped_tool_with_no_record(monkeypatch, tmp_path, derive
     out = capsys.readouterr().out
     assert rc == 1, f"a tool vanished with no record and the re-cut passed:\n{out}"
     assert "tortoise_vanished_probe" in out, out
-    assert "archive_surface.py archive" in out, "the archive route was not named:\n" + out
-    assert "RETIRED_USE_INSTEAD" in out, "the forward-retirement route was not named:\n" + out
-    assert "RETIRED_SDK_METHODS" in out, "the SDK-retirement route was not named:\n" + out
+    # ⛔ ASSERT THE ROUTE ITSELF, not the mere presence of a map name. `RETIRED_USE_INSTEAD` and
+    # `RETIRED_SDK_METHODS` also appear in the lines that say they are NOT routes
+    # (`NOT_A_REMOVAL_ROUTE`, `SDK_PAIR_RULE`), so those two assertions passed unchanged even
+    # with every route deleted from `REMOVAL_WAYS` (review of PR #12313, round 15).
+    assert sm.REMOVAL_WAYS[0] in out, "the archive route was not printed:\n" + out
+    assert sm.SDK_PAIR_RULE in out, "the SDK pair rule was not printed:\n" + out
+    assert sm.NOT_A_REMOVAL_ROUTE in out, "the not-a-route line was not printed:\n" + out
+    assert "archive_surface.py archive" in out, "the freeze command was not named:\n" + out
     assert path.read_text(encoding="utf-8") == before, (
         "the refusal WROTE the baseline — the removed symbol is now unforgotten"
     )
@@ -5227,6 +5232,53 @@ def test_cut_REFUSES_a_dropped_sdk_method_recorded_in_the_MAP_but_NOT_archived(
     assert rc == 1, f"a freeze without the map entry was accepted as the record:\n{out}"
     assert "archived but absent from RETIRED_SDK_METHODS" in out, out
     assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+
+def test_a_STATED_RENAME_clears_the_SDK_map_ONLY_half(monkeypatch, tmp_path, derived_baseline, capsys):
+    """The rename remedy the refusal prints must WORK for the shape it is printed over.
+
+    This is the repo's recorded SDK rename procedure — old name into `RETIRED_SDK_METHODS`,
+    method gone from `sdk.py` — which is map-only with no freeze, so the cut refused it and
+    then printed "a genuine RENAME … passes `--allow-removal`" four lines under its own "FREEZE
+    IT FIRST". Re-running with the flag produced a byte-identical refusal, because that arm
+    `continue`d before any waiver was read: a printed remedy that provably did nothing
+    (review of PR #12313, round 15). A rename keeps no code BY DESIGN, so a STATED one is
+    accounted by the map entry plus the override, while an unstated one is still refused.
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:backfill_sources", "method": "backfill_sources"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": set(), "forward_raw": set(), "sdk_retired": {"backfill_sources"}},
+    )
+
+    # Unstated: refused, and the refusal names the freeze (the default for a removal).
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "NOT archived" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+    # Stated rename: ACCEPTED, reported as the map record plus the override.
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["sdk:backfill_sources"],
+            allow_removal_reason="renamed to backfill_documents",
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "RETIRED_SDK_METHODS" in out and "--allow-removal" in out, out
 
 
 def test_cut_ACCEPTS_a_dropped_sdk_method_when_BOTH_halves_are_recorded(

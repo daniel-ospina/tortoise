@@ -137,7 +137,9 @@ enforced at two different seams, deliberately:
   no map entry leaves a caller with a bare `AttributeError`), and map-only is refused by `cut`
   (the map records the departure but keeps no code, and `check` iterates the ARCHIVE MANIFEST,
   so a method that was never frozen is invisible to it — map-only passed both gates while
-  freezing nothing until review round 14 of #12237). A genuine rename passes `cut --allow-removal <symbol>
+  freezing nothing until review round 14 of #12237) unless it is a STATED RENAME, which is the
+  recorded SDK rename shape (old name into `RETIRED_SDK_METHODS`, method gone from `sdk.py`) and
+  keeps no code by design. A genuine rename passes `cut --allow-removal <symbol>
   --allow-removal-reason <why>`, which is logged in the cut output and belongs in the PR body;
   a reason with no symbol is refused, because it records an override that did not happen.
   **The refusal happens BEFORE the write**, so a refused cut never leaves a baseline that has

@@ -2132,9 +2132,12 @@ def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
 ARCHIVE_KIND_BY_CLASS = {"tool": "mcp-tool", "sdk": "sdk-method"}
 
 REMOVAL_WAYS = (
-    "an `archive/MANIFEST.json` entry of the matching kind (freeze the code FIRST: "
+    "an `archive/MANIFEST.json` entry of the matching kind — RESTORE THE DECLARATION FIRST "
+    "if it is already deleted (restore `tortoise/tool_registry.py` for a tool, "
+    "`tortoise/sdk.py` for an SDK method from the commit you are removing it at), because "
+    "`archive_symbol` reads it from the working tree and refuses without it, then freeze: "
     "`uv run python tools/archive_surface.py archive <mcp-tool|sdk-method> <symbol> "
-    "--batch <slug> --reason <text>`) — for an `sdk-method` this is ONE HALF: it must be "
+    "--batch <slug> --reason <text>` (and re-delete the declaration afterwards) — for an `sdk-method` this is ONE HALF: it must be "
     "paired with `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`, because a frozen method "
     "without the map entry strips the caller with a bare `AttributeError` instead of a "
     "recorded departure (the freeze and the map entry are ONE record, and `CONTRIBUTING.md` "
@@ -2292,12 +2295,18 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
         # no gate can see the removal again, which is the #12237 loss reached THROUGH this gate
         # (review of PR #12313).
         for field in ("batch", "reason", "file"):
-            if not isinstance(entry.get(field), str) or not entry[field].strip():
+            # ⛔ MATCH THE WRITER, DO NOT INVENT A STRICTER RULE. `archive_symbol` refuses an
+            # empty `batch`/`reason` (`if not batch or not reason`) but accepts a whitespace
+            # one, and `check` grades only `reason` — so a `.strip()` here refused a row the
+            # other two accept, with a message claiming `check` reds it (review of PR #12313,
+            # round 15).
+            value = entry.get(field)
+            if not isinstance(value, str) or not (value.strip() if field == "file" else value):
                 raise SurfaceEvidenceUnreadable(
-                    f"an `archive/MANIFEST.json` entry ({kind}:{symbol}) carries no `{field}` "
-                    "- `archive_surface.py check` reds a row without it, so it is not a record "
-                    "this gate may accept: a hand-typed row would let `cut` forget the symbol, "
-                    "and the cheapest way to clear the red afterwards is deleting the row"
+                    f"an `archive/MANIFEST.json` entry ({kind}:{symbol}) carries no usable "
+                    f"`{field}` — an entry the writer would never have produced is not a "
+                    "record this gate may accept: a hand-typed row would let `cut` forget the "
+                    "symbol, and the cheapest way to clear it afterwards is deleting the row"
                 )
         if not kind or not symbol:
             # A mapping that names no symbol is the same defect one branch over: skipping it
@@ -2500,6 +2509,23 @@ def removal_report(
             # code that nothing else can see — `archive_surface.check` iterates the archive
             # manifest, so a method that was never frozen is invisible to every other gate).
             # The map records the DEPARTURE; it does not keep the code.
+            if not archived and _waived(symbol, cls):
+                # ⛔ A STATED RENAME IS A ROUTE HERE, and it has to be: the repo's recorded
+                # SDK rename procedure is EXACTLY this shape (`tortoise/sdk_retired.py`: the
+                # old name goes into `RETIRED_SDK_METHODS` and leaves `sdk.py`), so refusing
+                # it unconditionally refused the documented flow and then printed "a genuine
+                # RENAME ... passes `--allow-removal`" four lines under its own "FREEZE IT
+                # FIRST" - a flag that provably changed nothing (the branch `continue`d before
+                # any waiver was read; the refusal was byte-identical with and without it).
+                # A rename keeps no code to inspect BY DESIGN; the map entry IS its record,
+                # and the freeze stays required for a removal (review of PR #12313, round 15).
+                if _waived_by_bare(symbol) and not _waived_by_qualified(symbol, cls):
+                    waived.setdefault(symbol, []).append(cls)
+                accounting[(symbol, cls)] = (
+                    "`--allow-removal` (deliberate rename, stated in the PR) + the "
+                    "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` departure record"
+                )
+                continue
             if not archived:
                 problems.append(RemovalProblem(
                     "no-record",
@@ -2798,9 +2824,13 @@ def cmd_cut(args: argparse.Namespace) -> int:
                   "tell an archived removal from a silent deletion:")
             for problem in problems:
                 print(f"  {problem}")
-            # NEUTRAL WORDING ON PURPOSE: the rows above may be plain drops OR half-records,
-            # so a heading that names one of them mis-describes the other.
-            print("  Account for each row above by exactly one of:")
+            # ⛔ NOT "each row above": a CONTRADICTION row (two records) is above this line
+            # and no route clears it — the block's own problem line says so ("the archive
+            # route is not available for it"), which made the heading contradict the text two
+            # lines up. So the heading is scoped to the rows that actually need a record
+            # (review of PR #12313, round 15).
+            print("  Account for the rows above reported as missing a record — each such "
+                  "line says which half is missing — by exactly one of:")
             for way in REMOVAL_WAYS:
                 print(f"    - {way}")
             print(f"  {SDK_PAIR_RULE}")

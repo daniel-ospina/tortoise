@@ -281,7 +281,10 @@ it is: with the declaration still live the symbol is RETIRED rather than removed
 served, and the baseline's `retired:` half is compared), and with the declaration gone the map
 key dangles, which the cut refuses as a contradiction. A genuine **rename**
 passes `--allow-removal <symbol> --allow-removal-reason <why>`, which is logged in the cut output and belongs in the PR
-body. The refusal runs **before** the write, so a refused cut leaves the baseline intact —
+body — and for an SDK method that is also the route out of the map-only shape: the recorded rename
+procedure (old name into `RETIRED_SDK_METHODS`, method gone from `sdk.py`) is exactly a departure
+with no freeze, so a stated rename accounts it, while an unstated one is refused with "FREEZE IT
+FIRST". The refusal runs **before** the write, so a refused cut leaves the baseline intact —
 the committed baseline is the only list of what USED to be there.
 
 **A red `surface-guard` is the gate working, not a bug.** Do not resolve it by editing the baseline to
