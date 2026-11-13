@@ -60,22 +60,36 @@ DOTENV_NAME = ".env"
 LOADED_PATHS: set[str] = set()
 
 #: The key/value pairs THIS PROCESS actually wrote from a `.env`, recorded by
-#: :func:`load_dotenv`. ``LOADED_PATHS`` answers WHICH file was applied; this
-#: answers WHAT it put in the environment, which is the only way a report can say
-#: "the value it rejects came from the file" without inferring it from "no key
-#: was pending" — the applied state has nothing pending precisely because its
-#: values are already in `os.environ` (#12428 review).
-APPLIED: dict[str, str] = {}
+#: :func:`load_dotenv` **with the file they came from**. ``LOADED_PATHS`` answers
+#: WHICH paths were applied; this answers WHAT they put in the environment, which
+#: is the only way a report can say "the value it rejects came from the file"
+#: without inferring it from "no key was pending" — the applied state has nothing
+#: pending precisely because its values are already in `os.environ`.
+#: ⛔ Keyed by PATH as well as key: a value-only record makes a value written by
+#: ANOTHER `.env` earlier in the process look like this file's, and the report is
+#: about ONE file (#12428 review).
+APPLIED: dict[str, tuple[str, str]] = {}
 
 
-def applied_value(key: str) -> str | None:
-    """The value THIS process wrote for ``key`` from a ``.env``, else ``None``.
+def applied_value(key: str, path: str | None = None) -> str | None:
+    """The value THIS process wrote for ``key`` from the file at ``path``.
 
     Compare it with ``os.environ.get(key)``: equal means the process is holding
     the FILE's value (so the file is a cause of whatever that value does),
-    unequal-or-None means the user's own environment supplied it.
+    unequal-or-None means the user's own environment supplied it. ``path=None``
+    matches any file — only for callers that do not report on a specific one.
     """
-    return APPLIED.get(key)
+    recorded = APPLIED.get(key)
+    if recorded is None:
+        return None
+    from_path, value = recorded
+    if path is not None and _norm(path) != from_path:
+        return None
+    return value
+
+
+def _norm(path: str) -> str:
+    return os.path.abspath(path)
 
 
 def dotenv_path() -> str:
@@ -180,11 +194,14 @@ def load_dotenv(path: str | None = None) -> list[str]:
     without re-deriving it.
     """
     written: list[str] = []
+    applied_path = os.path.abspath(path if path is not None else dotenv_path())
     for key, value in pending_assignments(path).items():
         os.environ[key] = value
         # Recorded even though the environment now carries it: after the fill,
-        # "present" no longer says where the value came from (#12428 review).
-        APPLIED[key] = value
+        # "present" no longer says where the value came from — and the PATH says
+        # which file, so a value another `.env` wrote cannot be read as this
+        # one's (#12428 review).
+        APPLIED[key] = (applied_path, value)
         written.append(key)
     LOADED_PATHS.add(os.path.abspath(path if path is not None else dotenv_path()))
     return written

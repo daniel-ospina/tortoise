@@ -11358,7 +11358,14 @@ def _db_value_source(key: str | None) -> str:
     value = os.environ.get(key)
     if value is None:
         return "unknown"
-    return "file" if _dotenv_file.applied_value(key) == value else "env"
+    # ⛔ Scoped to the file this report is about: a value the record holds from a
+    # DIFFERENT `.env` (another test, another cwd) is not this file's, and a
+    # value-only record would credit it anyway (#12428 review).
+    try:
+        _path = _dotenv_file.dotenv_path()
+    except OSError:
+        _path = None
+    return ("file" if _dotenv_file.applied_value(key, _path) == value else "env")
 
 
 def _dotenv_already_applied() -> bool:

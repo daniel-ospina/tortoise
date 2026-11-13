@@ -73,6 +73,14 @@ def _isolated(monkeypatch, tmp_path):
     # which is exactly what `test_doctor.py::_keyless_llm_env` exists to prevent
     # (#12428 review). Restore EVERY key added or changed while this test ran.
     before = dict(os.environ)
+    # ⛔ The same for `dotenv_file.APPLIED` / `LOADED_PATHS`: they record what this
+    # process took from a `.env`, and the attribution reads them against the
+    # CURRENT environment — so a value an earlier test applied under the same key
+    # would make this test's environment look like the file's. `APPLIED` is
+    # path-scoped now, and this reset closes the remaining window (same tmp file
+    # name, same value). `monkeypatch.setattr` restores the ORIGINAL objects.
+    monkeypatch.setattr(dotenv_file, "APPLIED", {}, raising=False)
+    monkeypatch.setattr(dotenv_file, "LOADED_PATHS", set(), raising=False)
     yield env_path
     for key in list(os.environ):
         if key not in before:
@@ -1394,8 +1402,10 @@ def test_a_broken_target_from_the_FILE_is_not_called_an_environment_error(
     # RECORD says this process took that value from the FILE (#12428 review).
     monkeypatch.setenv("TORTOISE_DB_URI", "relative/x.db")
     monkeypatch.setattr(dotenv_file, "LOADED_PATHS", {str(path)}, raising=False)
-    monkeypatch.setattr(dotenv_file, "APPLIED", {"TORTOISE_DB_URI": "relative/x.db"},
-                        raising=False)
+    monkeypatch.setattr(
+        dotenv_file, "APPLIED",
+        {"TORTOISE_DB_URI": (str(path.resolve()), "relative/x.db")},
+        raising=False)
 
     payload = _dotenv_divergence(graded_target="/tmp/graded-by-the-rows.db")
     assert payload["read_by_this_command"] is True, payload
@@ -1450,6 +1460,34 @@ def test_doctor_health_row_never_echoes_a_password_head(capsys, _isolated, monke
     health = [line for line in out.splitlines() if "Graph: health" in line]
     assert health, out
     assert "<redacted>" in health[0], health[0]
+
+
+def test_a_value_recorded_from_ANOTHER_file_is_not_credited_to_this_one(
+        capsys, _isolated, monkeypatch):
+    """`APPLIED` is a record of what THIS process applied, scoped to the file reported.
+
+    Measured (#12428 review): the record was value-only and process-global, so a
+    value an EARLIER test (or an earlier `.env` in the same process) applied was
+    read as this file's — `config show` then credited the file with a value the
+    USER's environment supplied, in the state where running alone it correctly
+    says "this file did not supply it".
+    """
+    from tortoise import dotenv_file
+
+    other = _isolated.parent / "other.env"
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text("TORTOISE_DB_URI=relative/x.db\n")
+    monkeypatch.setattr(
+        dotenv_file, "APPLIED",
+        {"TORTOISE_DB_URI": (str(other.resolve()), "relative/x.db")},
+        raising=False)
+    monkeypatch.setenv("TORTOISE_DB_URI", "relative/x.db")
+    _write_env(_isolated, "TORTOISE_DB_URI=relative/x.db\n")
+
+    out = _show_text(capsys)
+
+    assert "this `.env` supplied" not in out, out
+    assert "file did not supply it" in out, out
 
 
 def test_a_file_that_was_never_applied_does_not_claim_it_was():
