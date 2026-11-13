@@ -953,11 +953,15 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
 #: unrepairable words is distinguishable from a sweep over an empty graph.
 #:
 #: ``LIMIT`` is asked for ``limit + 1`` rows so the caller can tell a scan that
-#: exactly filled its bound from one that OVERFLOWED it — the same disclosure
-#: :func:`invalidate_stale` owes with ``truncated``. ONE query also means a node
-#: can only be enumerated once: the repo's `DEDUPE CONTRACT` (``live.py``) exists
-#: because an id-keyed read can be issued PER LABEL, and a ``:Point:Object`` node
-#: returned by two scans is counted, reported and repaired twice.
+#: exactly filled its bound from one that OVERFLOWED it. That is NOT the same
+#: predicate :func:`invalidate_stale` answers with ``truncated`` — that one reads
+#: ``len(found) >= limit``, so a scan that exactly filled its bound reports
+#: ``truncated: True`` there and ``False`` here. This side is the deliberate one
+#: (a full scan is not a truncated one); the divergence is named so nobody
+#: "harmonises" the two into the lossy form. ONE query also means a node can only
+#: be enumerated once: the repo's `DEDUPE CONTRACT` (``live.py``) exists because an
+#: id-keyed read can be issued PER LABEL, and a ``:Point:Object`` node returned by
+#: two scans is counted, reported and repaired twice.
 _GOAL_STATE_CANDIDATES = (
     "MATCH (n) WHERE NOT n:Point AND toStringOrNull(n.goalState) IN $words "
     "RETURN n.id AS id, n.goalState AS word ORDER BY n.id LIMIT $lim"
@@ -1022,9 +1026,14 @@ def reconcile_goal_states(
       #7860's D13 ("what triggers the loop?") is unruled.
 
     Both go through the public, idempotent :func:`reconcile_goal_state_cache`, so
-    there is ONE set of cache predicates in this module and this function cannot
-    drift from the door's step 4. It adds no write of its own and no new
-    vocabulary.
+    the repair routes through ONE write door and inherits its gates; it adds no
+    new vocabulary, and it writes nothing itself. ⚠️ The ``consistent``
+    short-circuit above DOES re-spell the door's mapping
+    (:data:`goal_judgement.GOAL_STATE_CACHE`) to avoid a door call per already-
+    correct goal — it models none of the door's ``preserved`` gate, which is why
+    that branch can only ever REPORT ``consistent`` and never write. A change to
+    the door's step-4 gate has to be reflected in that mapping; the two are not
+    mechanically linked.
 
     ⛔ IT IS NOT WIRED INTO ANYTHING, deliberately: it is the repairing caller's
     call today and the trigger's call once D13 rules one — the same posture as
@@ -1054,6 +1063,13 @@ def reconcile_goal_states(
       the repair route is the door plus the goal's id, or the next
       ``judge_and_record`` pass; widening the sweep to it means enumerating goals
       by kind, which is a separate decision rather than a filter tweak.
+    * **a node holding a derived word but no ``id``** — the entity surface cannot
+      address it, so the sweep cannot repair it. Reachability is narrow (the
+      ``:Source`` write surface refuses ``goalState``, so only a raw write and an
+      url-keyed stub produce it) but it is not zero, so it is COUNTED as
+      ``counts.unaddressable`` rather than filtered away silently: a candidate
+      read that matched and then vanished would be the same false PASS as the
+      declined label above.
     * **a word written inside the DOOR's read→write window** — see the note on
       ``preserved`` below.
 
@@ -1066,8 +1082,15 @@ def reconcile_goal_states(
     ⛔ THE GATE IS ON THE WORD, AT BOTH ENDS. Only a goal holding a word in
     :data:`DERIVED_GOAL_STATES` is even a candidate (so a human's ``active``,
     ``blocked``, ``guideline``, ``superseded`` or ``abandoned`` is not scanned, let
-    alone rewritten), and a word a human has set by the time the door READS the
-    cache is PRESERVED and reported — never cleared, never rewritten.
+    alone rewritten), and a word APPEARING BETWEEN THE SCAN AND THE DOOR'S READ
+    that is outside :data:`DERIVED_GOAL_STATES` is PRESERVED and reported — never
+    cleared, never rewritten. ⚠️ The precise scope of that promise: the door's
+    gate is ``current is not None and current not in DERIVED_GOAL_STATES``, so a
+    human who writes ``met``/``unmet`` in that window IS overwritten, and is
+    counted ``cleared``/``rewritten`` like any other derived word. The sweep
+    cannot distinguish a human's ``met`` from the engine's — that is the same
+    limitation the door has, and it is why the promise is scoped by VALUE rather
+    than by who wrote it.
     ⚠️ The window the door does not close: it is a read-then-write
     (``get_entity`` … ``update_entity``), so a human word landing INSIDE that
     window is overwritten and counted as ``cleared``/``rewritten``. That window
@@ -1091,11 +1114,16 @@ def reconcile_goal_states(
     Returns, always: ``dryRun``, ``truncated`` (true when the candidate scan hit
     ``limit`` — an arbitrary subset in id order, NOT the newest ``limit`` goals, so
     a caller that must cover the graph should pass a bound above the candidate
-    count), ``limit``, ``goals`` (a record per SCANNED goal: ``goalId``, ``from``,
+    count), ``limit``, ``notDurableReason``, ``goals`` (a record per SCANNED goal:
+    ``goalId``, ``from``,
     ``to``, ``action`` — ``cleared``/``rewritten``/``consistent``/``preserved``/
     ``gone``/``failed``, or ``would-clear``/``would-rewrite`` under ``dry_run`` —
     plus ``error`` on a failure and ``reason`` where the door reported one), and
     ``counts``.
+
+    ``notDurableReason`` is a STRING when ``counts.notDurable`` is non-zero and
+    ``None`` otherwise: the counter never appears without its meaning beside it,
+    and a consumer can branch on the reason rather than on a bare number.
 
     ``counts`` is a set of PER-GOAL predicates, not a partition, and it is
     deliberately its OWN (this call is not a retirement sweep, so folding it into
@@ -1120,6 +1148,8 @@ def reconcile_goal_states(
       derived word. It is not a failure and not a repair: it is the population
       this call does not cover, counted so `scanned: 0` cannot be read as "this
       graph is clean" (:data:`NOT_DURABLE_REASON` says the same in the payload);
+    * ``unaddressable`` — candidates the scan matched that carry no ``id``, so the
+      entity surface cannot name them and the sweep cannot repair them;
     * ``wouldRepair`` — what a ``dry_run`` WOULD change; always ``0`` when
       ``dry_run`` is false, because nothing was previewed.
     """
@@ -1130,6 +1160,11 @@ def reconcile_goal_states(
     ).result_set or []
     rows: list[tuple[str, str]] = [(row[0], row[1]) for row in result
                                   if row and row[0]]
+    # A matched node with no `id` cannot be named to the entity surface, so it is
+    # not repairable here — and it is COUNTED rather than filtered away: a
+    # candidate that matched the scan and then vanished from the payload is the
+    # same false PASS as the declined label below.
+    unaddressable = len(result) - len(rows)
     # ⛔ THE DECLINED POPULATION IS MEASURED, NOT ASSUMED EMPTY. Without this a
     # sweep over a graph whose only stale words sit on nodes the sweep cannot
     # durably repair returns the SAME payload as a sweep over an empty graph
@@ -1149,7 +1184,8 @@ def reconcile_goal_states(
     goals: list[dict[str, Any]] = []
     counts = {"scanned": 0, "repaired": 0, "cleared": 0, "rewritten": 0,
               "consistent": 0, "preserved": 0, "gone": 0, "failed": 0,
-              "wouldRepair": 0, "notDurable": not_durable}
+              "wouldRepair": 0, "notDurable": not_durable,
+              "unaddressable": unaddressable}
     for goal_id, word in rows:
         counts["scanned"] += 1
         record: dict[str, Any] = {"goalId": goal_id, "from": word}

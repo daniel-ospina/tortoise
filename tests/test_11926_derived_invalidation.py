@@ -1548,7 +1548,16 @@ def test_the_repair_sweep_MOVES_a_LAGGING_word_to_the_newest_LIVE_claim(sdk):
     OLD. A flip whose cache write was refused leaves the PREVIOUS word under a
     live claim (`goal_judgement._cache_then_arrow` documents exactly this), and
     no later pass revisits the goal — so the sweep must move the word forward to
-    the newest live judgement, not merely clear unsupported ones."""
+    the newest live judgement, not merely clear unsupported ones.
+
+    ⚠️ This test's `rewritten` count is NOT its discriminating power: the door
+    re-derives the same word, so it reaches `rewritten` even from a wrong
+    `expected` (measured against the `expected = None` mutation by a reviewer). The
+    MAPPING leg is the dry-run twin, which reports `would-clear` instead of
+    `would-rewrite` when the sweep stops computing it. What this test pins is the
+    pair the sweep REPORTS — `from`/`to` are its own computation, so a sweep that
+    could not say what it moved away from would fail here.
+    """
     i, t, g = _world(sdk, tag="sweep-lagging")
     _lagging_word(sdk, i, t, g)
     report = reconcile_goal_states(sdk)
@@ -1698,6 +1707,67 @@ def test_the_OBJECT_repair_is_JOURNALLED_so_a_rebuild_cannot_revert_it(tmp_path)
         durable.close()
 
 
+def test_the_NON_OBJECT_repair_is_JOURNALLED_too(tmp_path):
+    """The durability property is asserted for the WHOLE swept population, not
+    only the label the defect was found on (#12412 review, cycle 3).
+
+    The sweep's inclusion rule is "every label except `:Point`", justified by the
+    claim that those labels' `goalState` writes are journalled — and the suite
+    pinned that for `:Object` alone. A reviewer MEASURED the gap: making the
+    non-Point journal arm drop `goalState` for `label != 'Object'` left the whole
+    section-9 suite GREEN while every non-Object repair became live-only — the
+    exact repair-then-rebuild loop the `:Point` exclusion exists to prevent,
+    unpinned one label over. `:Subject` is the reachable non-Object case (the
+    entity door routes a `subject` kind there by itself), so it is the one this
+    asserts.
+    """
+    import os
+
+    from tortoise.config import is_db_uri
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events"
+    events.mkdir()
+    log = str(events / "events.jsonl")
+    namespace = (f"test_suite_{os.urandom(4).hex()}"
+                 if is_db_uri(os.environ.get("TORTOISE_DB_URI")) else None)
+    durable = TortoiseSDK(str(tmp_path / "durable-subject.db"),
+                          namespace=namespace, event_log_path=log)
+    try:
+        subject = durable.create_subject("team probe [sweep-durable-subject]")
+        durable.update_entity(subject["id"], goalState="met")
+        before = _records(events)
+        report = reconcile_goal_states(durable)
+        assert report["counts"]["cleared"] == 1, report
+        mutated = [r for r in _records(events)[len(before):]
+                   if r.get("type") == "EntityMutated"
+                   and r.get("id") == subject["id"]
+                   and (r.get("state") or {}).get("goalState", "absent") is None]
+        assert mutated, (
+            "the repair of a non-Object goal left no replayable record carrying "
+            f"goalState, so a rebuild reverts it. new records: "
+            f"{_records(events)[len(before):]}")
+        durable._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        assert durable.get_entity(subject["id"]).get("goalState") is None, (
+            "a rebuild resurrected the word the sweep cleared on a :Subject")
+    finally:
+        durable.close()
+
+
+def test_a_second_sweep_is_a_NO_OP(sdk):
+    """Idempotence at the SWEEP level, not only at the door's: once repaired the
+    goal holds no derived word, so it is not even a candidate — the next pass
+    reports nothing to do instead of re-clearing or re-journalling it."""
+    i, t, g = _world(sdk, tag="sweep-idempotent")
+    made = _judge(sdk, i, t, g)
+    sdk.delete_entity(made["point_id"])
+    assert reconcile_goal_states(sdk)["counts"]["cleared"] == 1
+    second = reconcile_goal_states(sdk)
+    assert second["counts"]["scanned"] == 0, second
+    assert second["counts"]["repaired"] == 0, second
+    assert sdk.get_entity(g["id"]).get("goalState") is None
+
+
 def _records(events):
     """Every journalled record in order — the durability surface a rebuild replays."""
     import json
@@ -1726,6 +1796,32 @@ def test_a_goal_on_a_NON_OBJECT_label_is_swept_too(sdk):
     assert report["counts"]["cleared"] == 1, report
     assert sdk.get_entity(subject["id"]).get("goalState") is None
     assert report["counts"]["notDurable"] == 0, report
+    assert report["notDurableReason"] is None, (
+        "the reason is emitted only when the counter is non-zero — a payload "
+        "that carries a reason on a clean sweep trains a consumer to ignore it")
+    assert report["counts"]["unaddressable"] == 0, report
+
+
+def test_a_goal_with_no_ID_cannot_be_repaired_and_is_COUNTED_not_dropped(sdk):
+    """The second declined population, and the reason it is a COUNTER (#12412
+    review, cycle 3): the scan matches on the word, but the entity surface can
+    only address a node by `id`.
+
+    Reachability is narrow — the `:Source` write surface refuses `goalState`, so
+    only a raw or legacy write produces the shape — which is exactly why a silent
+    `if row[0]` filter would never be noticed: the payload would be byte-identical
+    to an empty graph's while the word stood.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (n:Object {goalState:'met', url:'https://example.test/no-id'})")
+    report = reconcile_goal_states(sdk)
+    assert report["counts"]["scanned"] == 0, report
+    assert report["counts"]["unaddressable"] == 1, (
+        f"the sweep matched a candidate it silently dropped: {report}")
+    standing = sdk._get_proj().g.query(
+        "MATCH (n:Object {url:'https://example.test/no-id'}) RETURN n.goalState"
+    ).result_set
+    assert standing and standing[0][0] == "met", standing
 
 
 def test_the_repair_sweep_dry_run_writes_nothing_and_names_what_it_would_clear(sdk):
@@ -1787,6 +1883,10 @@ def test_a_failed_reconcile_is_REPORTED_and_the_rest_of_the_sweep_survives(sdk):
     assert "transient write failure" in failed["error"], failed
     assert sdk.get_entity(worlds[1]["id"]).get("goalState") is None, (
         "one refused write discarded another goal's repair")
+    assert sdk.get_entity(doomed).get("goalState") == "met", (
+        "the module's own rule is that a sweep may not read clean while a goal "
+        "still displays a word it could not repair — so the failed goal's word "
+        "must still be standing here, and the caller has to see it")
 
 
 def test_a_word_a_HUMAN_sets_mid_sweep_is_PRESERVED_and_reported(sdk):
@@ -1889,8 +1989,15 @@ def test_a_DOOR_reported_reconcile_error_is_a_FAILED_goal_not_a_clean_one(sdk):
     because its own `get_entity` raised) instead of raising. The sweep must fold
     that into `counts.failed` rather than counting the goal as repaired: the word
     is still standing, so a sweep that called it clean is the false PASS this whole
-    module is about — and the distinction from the RAISE case is not cosmetic, it
-    is which layer failed."""
+    module is about.
+
+    ⚠️ SCOPE, so this test is not read as more than it is: a door that RAISED here
+    would land the goal in the same `failed` bucket through the sweep's own catch-
+    all, so this test does NOT discriminate report-vs-raise (verified: making the
+    door re-raise leaves it green). What it pins is that the door's reported
+    failure is not swallowed into `repaired`/`cleared`, and that the goal is
+    repairable once the read works again.
+    """
     i, t, g = _world(sdk, tag="sweep-door-error")
     made = _judge(sdk, i, t, g)
     sdk.delete_entity(made["point_id"])
