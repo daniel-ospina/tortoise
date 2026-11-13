@@ -2278,9 +2278,10 @@ surfaces:
   # `provenance.probe_sha256` over the probe's bytes (the CODE that produced it) and
   # `provenance.payload_sha256` over every field except `provenance` PLUS the `rows_source` those
   # fields are attributed to (the NUMBERS, and where they came from) —
-  # and this pin recomputes both from the committed bytes, so an edit to either probe (re-tuning
-  # the 0.89 band being the move #12436 forbids) OR a hand-edited verdict/count reds here instead
-  # of silently re-pointing the evidence. It also pins the recorded FAIL verdict against an
+  # and this pin recomputes the first from the committed BYTES and the second from each artifact's
+  # PARSED FIELDS plus its `rows_source` (a reformat does not red; a changed number does), so an
+  # edit to either probe (re-tuning the 0.89 band being the move #12436 forbids) OR a hand-edited
+  # verdict/count/cache attribution reds here instead of silently re-pointing the evidence. It also pins the recorded FAIL verdict against an
   # in-place flip (a passing re-run is a NEW artifact — this one is the baseline #12436 is scoped
   # against) and binds the recorded 0.89 / 0.72 bands to
   # `tortoise.embeddings.NEAR_DUPLICATE_THRESHOLD` / `DEFAULT_THRESHOLD`. Hermetic: two probe files
@@ -12767,7 +12768,7 @@ durations:
   # not the weight: "33 passed in 6.46s" (33 cases from 22 `def test_`,
   # embedded SDK fixture, this host, this head) — a later junit sweep re-cuts it.
   test_11739_composed_embed_text.py: 2.0
-  test_11739_composed_gate_probe.py: 2.0  # new in #12436 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: TWELVE test functions (20 collected cases at the head that added the `--attest` arms) — four sha256 digests (two probes, two payloads) recomputed from the committed bytes, two committed JSON artifacts parsed with their quoted figures asserted, the probe-basename/row-source/encoder anchors checked, the `--attest` refusal arms DRIVEN on temp copies of each artifact (exit 2 and the bytes untouched), and one float-pair read from `tortoise.embeddings` (`NEAR_DUPLICATE_THRESHOLD`/`DEFAULT_THRESHOLD`; numpy only, no torch, no model, no key, no network, no DB). The local reading — "20 passed in 4.67s" — is CONTEXT and not the weight: the map's own rule gives a PR-added file the flat default, and the `--attest` cases add probe imports to what was ~0.1 s. `tools/ci_selection.py --integrity` is the authority and replaces this from junit once a push-to-main sweep includes it.
+  test_11739_composed_gate_probe.py: 2.0  # new in #12436 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: TWELVE test functions (20 collected cases at the head that added the `--attest` arms) — four sha256 digests (two probe digests over committed bytes, two payload digests over each artifact's parsed fields plus its `rows_source`), two committed JSON artifacts parsed with their quoted figures asserted, the probe-basename/row-source/encoder anchors checked, the `--attest` refusal arms DRIVEN on temp copies of each artifact (exit 2 and the bytes untouched), and one float-pair read from `tortoise.embeddings` (`NEAR_DUPLICATE_THRESHOLD`/`DEFAULT_THRESHOLD`; numpy only, no torch, no model, no key, no network, no DB). The local reading — "20 passed in 4.67s" — is CONTEXT and not the weight: the map's own rule gives a PR-added file the flat default, and the `--attest` cases add probe imports to what was ~0.1 s. `tools/ci_selection.py --integrity` is the authority and replaces this from junit once a push-to-main sweep includes it.
   test_next_work.py: 7.5
   test_oauth_stray_code_refusal.py: 2.3
   test_reader_aggregation_aware.py: 0.1
