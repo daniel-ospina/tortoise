@@ -974,8 +974,11 @@ _TRADEOFFS_CYPHER = (
 # reading is an Event wired ``aboutObject`` (``goal_judgement.latest_readings``),
 # a target is a ``target`` Object. Both legs are OPTIONAL and keyed on the
 # judgement's OWN ids, so the dimension never carries an invented relationship;
-# a target or reading written as another label degrades its text to null and
-# keeps its id rather than dropping the whole assessment.
+# a target or reading written as another label degrades its text to the EMPTY
+# STRING (``_text_expr``'s absent arm ends in ``, '')`` — never ``null``: §3.1.3
+# reserves null for an unset SCALAR, and a missing text is not one) and keeps its
+# id rather than dropping the whole assessment. ⛔ A consumer that branches on
+# ``content_snippet is None`` never fires — test the empty string.
 _ASSESSMENTS_CYPHER = (
     "MATCH (n:{label}) WHERE n.id IN $ids "
     "WITH n "

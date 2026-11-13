@@ -364,26 +364,62 @@ def test_a_tradeoff_alternative_written_as_an_object_is_surfaced(sdk):
         + repr(block.get("tradeoffs")))
 
 
-# ── 4. the :Point lane is unchanged ───────────────────────────────────────
+def test_option_kind_alternatives_are_surfaced_under_a_NON_decision_anchor(sdk):
+    """The gate's SECOND arm — and the pin the ``alt`` kind cell did not have
+    (review round 2).
+
+    ``_assemble_tradeoffs``'s docstring names two ways to be a decision point:
+    the anchor's own kind is ``decision``, OR the anchor carries ≥ 2 alternatives
+    whose kind is ``option``. Every other tradeoff case in this file satisfies the
+    FIRST arm, so with only those, reverting the ALTERNATIVE's kind cell to
+    ``alt.pointKind`` left the whole file green (measured: 20 passed) while the
+    second arm was dead for ``:Object`` options — the same silent-empty shape one
+    cell over from round 1's finding.
+
+    The anchor here is deliberately a non-decision Object (``objectKind="plan"``),
+    so only ``any(a["kind"] == "option")`` can admit it. Measured as a mutant:
+    revert that one cell and this pin reports ``None``.
+    """
+    anchor = sdk.create_object("how to land the rollout", objectKind="plan")
+    alt_a = sdk.create_object("land it behind a flag", objectKind="option")
+    alt_b = sdk.create_object("land it to everyone", objectKind="option")
+    sdk.create_operator("IMPL", anchor["id"], [alt_a["id"]])
+    sdk.create_operator("IMPL", anchor["id"], [alt_b["id"]])
+
+    block = assemble_why_blocks(sdk._get_proj(), [anchor["id"]])[anchor["id"]]
+    labels = sorted(t["label"] for t in block.get("tradeoffs") or [])
+    assert labels == ["land it behind a flag", "land it to everyone"], (
+        "the option-kind arm of the decision gate is dead for Object options: "
+        + repr(block.get("tradeoffs")))
+
+
+# ── 3d. the decision gate, on BOTH of its arms ────────────────────────────
+# (round 1's finding was the ANCHOR's kind cell; round 2's was the ALTERNATIVE's.
+#  Both pins above sit here, under a header that describes them, instead of below
+#  under ":Point lane" — a case filed under the wrong header is how a coverage
+#  claim goes unread.)
 
 def test_a_decision_written_as_an_object_emits_its_tradeoffs(sdk):
-    """The DECISION-POINT GATE, not only the ``alt`` widening (review round 1).
+    """The gate's FIRST arm (the ANCHOR's kind) on a widened anchor.
 
     ``test_a_tradeoff_alternative_written_as_an_object_is_surfaced`` above passes
     with a POINT anchor, so it exercises the widening and never the gate: the
-    gate reads the anchor's kind from ``n.pointKind`` and the alternative's from
-    ``alt.pointKind``, while an ``:Object`` stores its kind in ``objectKind``
-    (``create_object`` writes that property and leaves ``pointKind`` NULL).
+    gate reads the anchor's kind from ``n.pointKind`` while an ``:Object`` stores
+    its kind in ``objectKind`` (``create_object`` writes that property and leaves
+    ``pointKind`` NULL).
 
-    So the widening admitted the rows and the Python fold then dropped them: a
-    real decision written as an Object with Object options emitted a block with
-    NO ``tradeoffs`` key — the "the widening did not work" shape, and the same
-    silence the #11823/#11928 work exists to end. Measured as a mutant: revert
-    both kind cells to ``pointKind`` and this pin reports ``[]``.
+    ⛔ The alternatives are deliberately NOT ``option``-kind. ``_assemble_tradeoffs``
+    admits a block by EITHER arm, so an ``option``-kind alternative lets the SECOND
+    arm carry the block and the anchor cell goes untested — measured: with the
+    anchor cell alone reverted, an option-kind pair still emitted ``tradeoffs``
+    (21 passed), which is exactly the coverage hole review round 2 found one cell
+    over. These two are ``plan``-kind, so only the anchor's own kind can admit the
+    block. Measured as a mutant: revert the anchor cell alone and this pin reports
+    ``None``, while the option-kind pin below stays green.
     """
     decision = sdk.create_object("how to land the rollout", objectKind="decision")
-    alt_a = sdk.create_object("land it behind a flag", objectKind="option")
-    alt_b = sdk.create_object("land it to everyone", objectKind="option")
+    alt_a = sdk.create_object("land it behind a flag", objectKind="plan")
+    alt_b = sdk.create_object("land it to everyone", objectKind="plan")
     sdk.create_operator("IMPL", decision["id"], [alt_a["id"]])
     sdk.create_operator("IMPL", decision["id"], [alt_b["id"]])
 

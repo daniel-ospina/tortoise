@@ -598,11 +598,16 @@ def epistemic_identity(alias: str) -> str:
 #: per-label answer is NOT the same property and a read that assumes one is
 #: silently blind on the others: ``create_object``/``create_event`` write
 #: ``objectKind``/``eventKind`` and leave ``pointKind`` NULL, so a kind gate
-#: written as ``n.pointKind`` is DEAD on exactly the labels #11928 widened to.
-#: ``ranking._enrich`` already spells this chain inline; this is that same rule
-#: named, so the next consumer does not have to rediscover it (a widening that
-#: admits a node and then drops it in the Python gate reads as "the widening did
-#: not work" — see ``why._assemble_tradeoffs``, where it did).
+#: written as ``n.pointKind`` is DEAD on exactly the labels #11928 widened to
+#: (``why._assemble_tradeoffs`` had two of them; see its ``_TRADEOFFS_CYPHER``).
+#:
+#: ⛔ SCOPED TO THE EPISTEMIC FOUR, deliberately. ``ranking._enrich`` spells a
+#: WIDER chain for its display kind (it appends ``documentKind`` and
+#: ``sourceKind``, ``ranking.py``:2560) — this helper does NOT, because the
+#: fields that consume it are restricted to ``EPISTEMIC_LABELS`` by
+#: ``epistemic_disjunction``. A ``:Document``/``:Source`` kind read through
+#: ``kind_expression`` is therefore ``''``: widen it HERE when a consumer needs
+#: those labels, and never assume the two chains are the same rule.
 KIND_PROPERTIES = ("pointKind", "objectKind", "subjectKind", "eventKind")
 
 
