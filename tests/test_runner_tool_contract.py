@@ -3407,8 +3407,11 @@ def _one_sided_workflow_pattern_constants(
         #: (`WORKFLOWS.glob(...)`), so `_WORKFLOW_GLOBS = ("<star>.yml",)` is the natural fourth
         #: site — and requiring `workflows/` in the member graded only the `REPO.glob(
         #: ".github/workflows/<star>.yml")` spelling (measured, review round 5). Dropping the
-        #: requirement costs nothing: a constant that matches neither witness stem is skipped by
-        #: the symmetry test below, so `.sh`/`.py` pattern tuples stay out.
+        #: requirement costs nothing, for two separate reasons — do not read either as the other:
+        #: `.sh`/`.py` pattern tuples never reach the symmetry test at all, they are dropped by the
+        #: extension-substring filter on `patterns` just below; and a constant is skipped by the
+        #: symmetry test only when BOTH arms open nothing, so `("release*.yml",)` — which matches
+        #: neither witness stem — still REDS, via the spelling arm (measured, review round 11).
         patterns = [
             member
             for member in members
@@ -3436,7 +3439,7 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
     pattern MATCHES (so a glob this file does not spell literally still reds) AND — for a pattern
     with a wildcard — whether it literally SPELLS one extension and not the other, through the
     single question `_opens` (so `release*.yml` reds even though no workflow in today's tree
-    starts with `release`). Five review rounds are the
+    starts with `release`). Six cuts are the
     specification here, because each cut was falsified by a shape it did not anticipate:
 
       * cut 1 matched the literal `glob("<star>.yml")` — escaped by `**` prefixes, keyword
@@ -3448,7 +3451,7 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         `glob("<star>.yaml")` skipping all 41 `.yml` workflows, was never asked at all;
       * cut 4 asked the same stem twice — `.yml` and `.yaml` — so EXACTLY ONE reads as the
         defect, and graded module-level pattern CONSTANTS (this file's own idiom);
-      * cut 5 (this one) REMOVES cut 4's receiver-pairing exemption, which excused any one-sided
+      * cut 5 REMOVES cut 4's receiver-pairing exemption, which excused any one-sided
         call sharing a receiver with a complementary call anywhere in the file. It had zero
         beneficiaries on this module (both exemption sets were empty) and its only observable
         effect was to licence the next narrow site: with a legitimate
@@ -3475,8 +3478,9 @@ def test_no_site_spells_the_workflow_glob_one_sidedly():
         which matches both extensions and stays clean. What that CANNOT catch, declared: an
         extension assembled from placeholders (`f"*{dot}yml"`, `glob("*" + ext)`), or a LITERAL
         concatenation that splits the pattern itself (`glob("*" + ".yml")`, `glob("*." + "yaml")`)
-        — its fragments come back as `['*', '.yml']`, which grade True/True and True/False, so the
-        whole is one-sided while both halves look innocent. ⛔ The reason is
+        — its fragments come back as `['*', '.yml']`, graded SEPARATELY: `"*"` → True/True (it opens
+        both), `".yml"` → False/False (no wildcard, so neither arm fires). The `"*"` operand is
+        therefore what masks the one-sided whole. ⛔ The reason is
         NOT that the fragments match nothing — `fnmatch("ci.yml", "*")` is true, so a lone
         `"*"` fragment matches BOTH witness names. It is that fragments are graded
         INDEPENDENTLY and never joined, so a fragment that opens BOTH extensions (`"*"`) masks a
