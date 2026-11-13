@@ -2138,8 +2138,9 @@ def test_the_daemon_resolver_reports_the_rung_it_was_on(monkeypatch):
     assert blank_err.value.key == "TORTOISE_DB_URI"
 
 
-def test_the_rendered_diagnostic_keeps_its_ValueError_prefix(capsys, _isolated):
-    """The leading token of the USER-VISIBLE message must not move.
+def test_the_rendered_diagnostic_keeps_its_ValueError_prefix(
+        capsys, _isolated, monkeypatch):
+    """The leading token of the USER-VISIBLE message must not move — at BOTH sites.
 
     `config show` prints `env_file["daemon_error"]` verbatim and `doctor`
     truncates it at 90 chars, so the prefix is what an operator grep or a runbook
@@ -2147,14 +2148,27 @@ def test_the_rendered_diagnostic_keeps_its_ValueError_prefix(capsys, _isolated):
     `DaemonTargetError:` now that the resolver raises a subclass — a silent change
     to user-facing text that no test would have caught (review, P3).
 
+    ⛔ TWO render sites, and a pin on one says nothing about the other: measured,
+    reverting ONLY the no-overlay site below left all three affected suites green
+    (440 passed) — the identical round-1 defect, fixed in code and unpinned at the
+    second arm. So both states are driven here.
+
     The subclass exists to carry the rung INTERNALLY; the label stays the base
     class, so every earlier run's output is byte-identical here.
     """
+    # ── Site 1: the OVERLAY arm — the file still has a pending ladder key.
     _write_env(_isolated, "TORTOISE_DB_URI=relative/x.db\n")
-
     payload = _show_json(capsys)["env_file"]
     daemon_error = payload["daemon_error"] or ""
+    assert daemon_error.startswith("ValueError: "), daemon_error
+    assert "DaemonTargetError" not in daemon_error, daemon_error
 
+    # ── Site 2: the NO-OVERLAY arm — nothing is left to fill, because the shell
+    # already carries the file's exact value. This is the state `doctor` reaches
+    # after its own mid-run import.
+    monkeypatch.setenv("TORTOISE_DB_URI", "relative/x.db")
+    payload = _show_json(capsys)["env_file"]
+    daemon_error = payload["daemon_error"] or ""
     assert daemon_error.startswith("ValueError: "), daemon_error
     assert "DaemonTargetError" not in daemon_error, daemon_error
 
@@ -2167,9 +2181,17 @@ def test_the_attribution_reads_the_resolvers_key_not_a_second_walk(
     reachable state — that IS item 5's hazard: a second spelling is only
     detectably wrong after the ladder changes, and then it fails silently. So the
     seam is tested the only way it can be: make the resolver name the LOWER rung
-    and require the attribution to follow it. An implementation that re-walks
-    `DAEMON_DB_KEYS` ignores the forged key, still answers from its own scan, and
-    this assertion fails.
+    and require the attribution to follow it.
+
+    ⛔ WHAT THIS CASE KILLS, precisely (review, P3 — the first version overstated
+    it). It kills a PRESENCE re-walk (`key in os.environ`), demonstrated red. It
+    does NOT kill a first-NON-BLANK re-walk: in this test's own state the overlay
+    makes `TORTOISE_DB_PATH` present AND non-blank, so that spelling coincides
+    with the forged key — a non-blank re-walk is caught by
+    `test_a_blank_env_uri_beside_a_broken_file_key_is_not_reported_as_both` and
+    `test_a_whitespace_only_ladder_key_is_attributed_to_the_ENVIRONMENT`, which
+    redden instead. Both spellings are pinned; this case is not the sole pin, and
+    reading it as one would make those two look redundant.
     """
     import tortoise.config as config
 
@@ -2201,7 +2223,7 @@ def test_the_mixed_shadowed_doctor_row_credits_the_FILE_when_its_key_is_the_top_
     pinned. Measured by injecting `raise SystemExit` at the file-wins arm in the
     #12428 round-11 review: `test_env_file_divergence` + `test_doctor` +
     `test_cli_config_show` — 434 tests at that head — stayed fully green. (The
-    same three files collect 439 with this PR's four extra cases, so the figure is
+    same three files collect 440 with this PR's five extra cases, so the figure is
     not reproducible here; the substantive claim is: the mutant reddens exactly
     ONE test, the new one.) The sentence is true in every state a review reached;
     only its pin was missing, the same class as the `file_graph_keys` clause.
