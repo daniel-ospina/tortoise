@@ -6,9 +6,11 @@ half: what happens to that claim when one of its three inputs is replaced. Befor
 this module the answer was **nothing** — measured on #11926 — and the graph kept
 a conclusion whose justification was gone. ⛔ The phrase is the ISSUE's, not the
 plan's: *"the worst failure mode the EP layer has"* is quoted from issue #11926's
-body — it appears in no document in this tree — and the plan of record applies it
-to the three inputs in
-``docs/plans/2026-11-11-goal-measurement-and-reasoning.md`` §3 rows 8, 9 and 12:
+body, and it appears in no document in this tree — the plan of record does not
+carry it either; it states the three inputs without quoting the phrase. Those
+three are `docs/plans/2026-11-11-goal-measurement-and-reasoning.md` §3 rows 8,
+9 and 12 — revising the target, changing the definition, and a goal's
+lifecycle —:
 
     ===========================  ==========================================
     what changes                 what used to happen
@@ -1548,16 +1550,19 @@ def invalidate_stale(
 
     ``counts.gone`` counts the findings whose goal NO LONGER EXISTS, so its
     ``goalState`` cache could not be reconciled: there is no node to reconcile it
-    on. FOUR shapes set it, and it means the same thing in all of them — "the
-    cache could not be reconciled", never "a retirement landed": a retirement
-    that DID land whose cache follow-up could not; #12315's ABSENT arm (``found:
-    False``), where no retirement was needed at all; #12315's SECOND VANISH
-    window (also ``found: False`` — the claim was deleted between the read and
-    the retirement, so the goal whose word named it may be gone too); and either
-    ALREADY-TERMINAL
-    arm (``found: True``) whose goal has also gone, where the retirement happened
-    out of band. ⛔ So ``gone`` is NOT attributable from ``retired``/``found``
-    alone (measured on the FOURTH, the already-terminal arm: a claim that BECOMES ``retracted`` between the
+    on. FIVE shapes set it — one per reconcile call site in :func:`invalidate` — and
+    it means the same thing in all of them — "the cache could not be
+    reconciled", never "a retirement landed": a retirement that DID land whose
+    cache follow-up could not; #12315's ABSENT arm (``found: False``), where no
+    retirement was needed at all; #12315's SECOND VANISH window (also ``found:
+    False`` — the claim was deleted between the read and the retirement, so the
+    goal whose word named it may be gone too); the ALREADY-TERMINAL arm on the
+    FIRST read (``found: True``); and the POST-REFUSAL TERMINAL arm (``found:
+    True``) whose goal has also gone, where the retirement happened out of band.
+    The last two are SEPARATE paths — the first sources its goal id from
+    ``claim``, the second from ``after`` — which is why this is five arms and not
+    four. ⛔ So ``gone`` is NOT attributable from ``retired``/``found``
+    alone (measured on the second of those two, the post-refusal arm: a claim that BECOMES ``retracted`` between the
     scan and the retirement, with its goal deleted in that same window, gives
     ``{'stale': 1, 'retired': 0, 'alreadyRetired': 1, 'gone': 1, 'failed': 0}`` —
     both edits made BEFORE the sweep instead give ``stale: 0`` and no finding at
@@ -1669,8 +1674,8 @@ def invalidate_stale(
             "alreadyRetired": sum(1 for r in invalidated if r.get("alreadyRetired")),
             # ⛔ ``gone`` IS A CACHE FACT, NOT A RETIREMENT FACT. It counts the
             # findings whose goal no longer exists, so its ``goalState`` could not
-            # be reconciled — there is no node to reconcile it on. FOUR shapes set
-            # it and they mean the same thing in all four (see the
+            # be reconciled — there is no node to reconcile it on. FIVE shapes set
+            # it and they mean the same thing in all five (see the
             # ``invalidate_stale`` docstring, which enumerates them):
             #   1. a retirement that DID land whose cache follow-up could not;
             #   2. #12315's ABSENT arm (``found: False``), where no retirement was
@@ -1679,8 +1684,11 @@ def invalidate_stale(
             #   3. #12315's SECOND VANISH window (also ``found: False`` — the claim
             #      was deleted between the read and the retirement, so the goal
             #      whose word named it may be gone too);
-            #   4. an ALREADY-TERMINAL arm (``found: True``) whose goal has also
-            #      gone, where the retirement happened out of band.
+            #   4. the ALREADY-TERMINAL arm on the FIRST read (``found: True``);
+            #   5. the POST-REFUSAL TERMINAL arm (``found: True``) whose goal has
+            #      also gone, where the retirement happened out of band. 4 and 5
+            #      are separate paths — the first sources its goal id from
+            #      ``claim``, the second from ``after``.
             # So a maintainer reading this counter may NOT infer that a retirement
             # landed.
             "gone": sum(1 for r in invalidated
