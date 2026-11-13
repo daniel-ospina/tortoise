@@ -864,9 +864,12 @@ def definition_boundary(sdk: Any, indicator_id: str) -> Any:
 
 
 #: Rows per keyset page of the readings read. It must stay under the server's
-#: ``RESULTSET_SIZE`` (a hosted deployment pins 10000 in
-#: ``apps/graph-viz/docker-compose.yml``; a lane container reports ``-1`` = no
-#: cap), because ONE unbounded query is truncated BY THE SERVER in store order
+#: ``RESULTSET_SIZE`` (FalkorDB's server-global default is 10000 — restated at
+#: ``tools/backfill_graph_turns.py:32`` and ``tools/turn_parity_census.py:142``;
+#: this repo's LOCAL dev ``apps/graph-viz/docker-compose.yml`` pins the same
+#: value, and a lane container reports ``-1`` = no cap — the hosted deployment
+#: sets no pin at all, so the default is what governs it), because ONE unbounded
+#: query is truncated BY THE SERVER in store order
 #: and says nothing about it — #4515's silent-truncation class (an UNPAGED read
 #: over ``RESULTSET_SIZE`` backs up silently partial and verifies GREEN), whose
 #: remedy is
