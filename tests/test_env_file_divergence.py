@@ -518,9 +518,16 @@ def test_an_unreadable_cwd_env_file_is_reported_not_dropped(
     out = capsys.readouterr().out
     assert str(cwd_env) in out, out
     assert "cannot be read" in out, out
-    # ⛔ The row must not claim the file "sets" a value: that is the state it
-    # could not observe.
-    assert f"sets {DOCKER_URI}" not in out, out
+
+    # ⛔ The OTHER renderer, pinned on its own. `_cmd_config`'s unreadable arm must
+    # say the contents are UNKNOWN rather than print an empty "sets …" — and this
+    # is also the assertion that makes that arm REACHABLE: drop the branch and the
+    # block falls through to `sets          ` with no marker, reddening this row
+    # (#12441 item 3; the marker is quoted in full because `unknown` alone appears
+    # in unrelated rows).
+    out = _show_text(capsys)
+    assert str(cwd_env) in out, out
+    assert "unknown — this file cannot be read" in out, out
 
 
 def test_an_empty_readable_cwd_env_file_stays_silent(capsys, _isolated, tmp_path,
