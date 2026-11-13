@@ -12257,7 +12257,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # MITIGATES op schema and could never pass, while its diagnostic printed the
     # allowlist line and then said that line does NOT carry it (self-contradicting,
     # and a reviewer caught it: #12374 cycle 3). `1773` is measured
-    # (`grep -n 'hasPart' tortoise/extractor_v2.py` → 487, 1773), so the index is
+    # (`grep -n 'hasPart' tortoise/extractor_v2.py` → 487, 1773, 12280 — the third
+    # is a comment line INSIDE this file that merely mentions the token, so it is
+    # stated rather than left out: a command quoted with one of its hits dropped
+    # is not the measurement a reader re-running it gets), so the index is
     # what the number means, not a second place to carry it.
     assert "hasPart" in ext[1773 - 1] and '"predicate":' in ext[1773 - 1], (
         f"extractor_v2.py:1773 reads {ext[1773 - 1].strip()[:90]!r}, not the schema "

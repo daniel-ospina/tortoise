@@ -202,3 +202,39 @@ def test_an_unrecorded_outcome_never_retires_an_existing_deferral(places, tmp_pa
         "retiring the deferral here marks a possibly-unprocessed session "
         "`processed` and cannot be undone")
     assert "outcome not recorded yet" in err
+
+
+def test_the_wire_spelling_is_defined_once_and_the_cli_does_not_retype_it():
+    """#12374 review (P2): the producer and the drain must share ONE spelling.
+
+    `capture_spool.outcome_unrecorded` calls itself "THE one definition of the
+    state #12379 owns, so the three surfaces that see one wire body (the spool
+    drain, the day-file drain and the spool entry's own durable marker) cannot
+    drift apart about it". The CLI retyped that state as string literals in
+    three places anyway — the producer that WRITES the body and the two arms
+    that READ it — and the drift is silent in one direction: the CLI would keep
+    printing the honest sentence (its literals agree with each other) while
+    `_flush_one` / `session_events_drain` stopped counting and stopped stamping
+    the durable marker, so the capture's only surviving trace disappears with
+    every test still green (measured: the sibling tests below fake the 2xx body
+    with the same literals, so they cannot see it).
+
+    Discriminating by construction: reverting any of the three sites to a
+    literal reds the first assertion, and it reds for the reason the state is
+    defined once rather than for its wording.
+    """
+    src = Path(main.__file__).read_text(encoding="utf-8")
+    assert '"extraction_outcome"' not in src and "'extraction_outcome'" not in src, (
+        "`__main__` spells the #12362 wire key as a literal again — the state is "
+        "defined once in `capture_spool.UNRECORDED_OUTCOME_KEY` and read back via "
+        "`outcome_unrecorded`, so a second spelling here can drift from the "
+        "consumer while every behavioural test stays green")
+    # …and the round trip the coupled spelling buys: what the producer writes is
+    # exactly what the consumer recognises.
+    from tortoise import capture_spool
+    produced = {capture_spool.UNRECORDED_OUTCOME_KEY:
+                capture_spool.UNRECORDED_OUTCOME_VALUE}
+    assert capture_spool.outcome_unrecorded(produced) is True, (
+        "the producer's own key/value pair is not recognised by the consumer's "
+        "predicate — the wire contract has two definitions")
+    assert capture_spool.outcome_unrecorded(None) is False
