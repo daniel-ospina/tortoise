@@ -11462,10 +11462,18 @@ def _cmd_onboard(args) -> int:
         print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}", file=_sys.stderr)
         return 1
     from tortoise.config import is_db_uri
+    # #11912: forward `--offline` so the wizard's own step 5 honours the escape
+    # hatch its docs promise (`docs/quickstart-cloud.md`). Before the hosted
+    # block existed this step made no request at all; now a credential-bearing
+    # box behind a blackholing proxy would block the LAST onboarding step for
+    # the block's whole 75 s worst case with no supported way to skip it.
+    doctor_offline = bool(getattr(args, "offline", False))
     if is_db_uri(db_target):
-        _cmd_doctor(argparse.Namespace(cmd="doctor", db=db_target, path=None))
+        _cmd_doctor(argparse.Namespace(cmd="doctor", db=db_target, path=None,
+                                      offline=doctor_offline))
     else:
-        _cmd_doctor(argparse.Namespace(cmd="doctor", db=None, path=db_target))
+        _cmd_doctor(argparse.Namespace(cmd="doctor", db=None, path=db_target,
+                                      offline=doctor_offline))
 
     print(f"\n{'='*50}")
     print("Onboarding complete.")
@@ -13970,9 +13978,11 @@ def _cmd_doctor(args):
 
     # 8. Hosted identity (#11912). The one surface this verb could not see: a
     # box whose stored key was revoked read `0 fail` while every hosted command
-    # 401'd. `--offline` is read via getattr because `_cmd_onboard` calls this
-    # function with a bare `Namespace(cmd="doctor")` (#703) — the same reason
-    # every other attribute above is read that way.
+    # 401'd. `--offline` is read via getattr because `_cmd_doctor` must tolerate a
+    # bare `Namespace(cmd="doctor")` from any caller (#703) — the same reason
+    # every other attribute above is read that way. `_cmd_onboard` now passes it
+    # explicitly (both of its branches), so this is a tolerance, not the
+    # onboard path.
     try:
         _doctor_hosted_rows(results, offline=bool(getattr(args, "offline", False)))
     except MemoryError:
@@ -15508,6 +15518,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     onboard = sp.add_parser("onboard", help="Guided onboarding: init → index → demo → doctor")
     onboard.add_argument("--path", default=None, help="Path for embedded mode")
+    # #11912: step 5 is `doctor`, which probes the hosted identity when one is
+    # configured. The wizard must offer the same escape hatch as the verb it
+    # calls, or an air-gapped/proxied box has no way to finish onboarding
+    # without paying that probe's whole timeout budget.
+    onboard.add_argument(
+        "--offline", action="store_true", default=False,
+        help="Do not probe the hosted endpoint in the final health check "
+             "(no network requests), as `tortoise doctor --offline`",
+    )
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
