@@ -2006,3 +2006,33 @@ def test_a_mixed_shadowed_set_credits_the_FILE_when_its_key_is_the_top_rung(
     assert "ranks above the environment's own TORTOISE_DB_PATH" in out, out
     assert "is the one this file selects" in out, out
     assert "cannot change the target here" not in out, out
+
+
+def test_a_whitespace_only_ladder_key_is_attributed_to_the_ENVIRONMENT(
+        capsys, _isolated, monkeypatch):
+    """The ladder tests TRUTHINESS; the attribution used to test `.strip()`.
+
+    `config.daemon_db_target` reads `if uri:` — so `TORTOISE_DB_URI='   '` is a
+    DECIDING rung carrying a value it rejects (a relative path), not an unset
+    one. The disclosure's attribution scan stripped the value, went blind to it,
+    and credited the FILE's healthy `TORTOISE_DB_PATH` instead — printing "the
+    value is the one this `.env` supplied" about a value the SHELL supplied,
+    while the same payload's `blank_graph_keys["env"]` named the environment as
+    its source. One payload, two opposite claims (#12441, found by #12428's
+    round-11 review).
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "   ")
+    _write_env(_isolated, "TORTOISE_DB_PATH=/tmp/file-path.db\n")
+
+    # The state where the file still has something PENDING (its own scan).
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "env", payload.get("daemon_error")
+    assert "the value is the one this" not in (payload.get("daemon_error") or ""), (
+        payload["daemon_error"])
+
+    # …and the APPLIED state, which reaches the OTHER attribution scan.
+    dotenv_file.load_dotenv()
+    payload = _show_json(capsys)["env_file"]
+    assert payload["daemon_error_source"] == "env", payload.get("daemon_error")
+    assert "the value is the one this" not in (payload.get("daemon_error") or ""), (
+        payload["daemon_error"])
