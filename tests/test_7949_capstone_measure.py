@@ -5261,15 +5261,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         # and the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # At THIS merged tree (`main` `d571adef87` + this PR): entry 10026,
+        # At the `d571adef87` merge tree (`main` `d571adef87` + this PR) — a
+        # HISTORICAL tree, not this one, which reads 10060: entry 10026,
         # `carve_out:` opens 9900, `uri_requiring:` 10231 — so 10026 is inside the
         # section, and the identical text also sits at 6103 and 8541, which is what
         # the 5th element exists to refuse. ⚠️ The `d571ade` advance is the one `main`
         # commit in this range that does NOT touch `config/ci-surfaces.yml`
-        # (`git show --stat d571adef87 -- config/ci-surfaces.yml` is empty), so THIS
-        # merge moved the entry by 0: `b08ff33bbc` already read 10026 and the merged
-        # tree reads 10026. The last +14 belongs to the `abf186f1109a` merge below,
-        # not to this one.
+        # (`git show --stat d571adef87 -- config/ci-surfaces.yml` is empty), so that
+        # merge moved the entry by 0: `b08ff33bbc` already read 10026 and its merged
+        # tree read 10026. The last +14 belongs to the `abf186f1109a` merge below,
+        # not to that one.
         # ⛔ THE ANCHOR IS THIS TREE, not either side of the merge, and the
         # decomposition is measured rather than asserted. The rebase base
         # `f33f5e2c32` read 9949 / 9823 / twins 6082 + 8465. THIS PR alone puts the
@@ -5323,7 +5324,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `main`: it was 9943 + the 8 lines #12060 was predicted to add, and two
         # other registrations landed first, so the prediction described no
         # checkable commit — which is why this one number had been
-        # "re-derived" three times BEFORE this merge (five at this head). That is
+        # "re-derived" FOUR times BEFORE this merge (five at this head: 9988 at
+        # `0c6144d3f9`, 10012 at `cbe855ab`, 10026 at `d60c33b163`, 10058 at
+        # `1d7f9a8b4d`, then 10060 here). That is
         # the row's real defect and not a
         # transcription slip: the number is owned by another tool, so every
         # landing PR above it is a re-derivation this pin cannot do for itself.
