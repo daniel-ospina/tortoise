@@ -26411,6 +26411,89 @@ def _revoke_graph_keys(org_id: str, graph_id: str | None) -> None:
                 pass
 
 
+# ── #12447: the provisioning capability's DISCOVERY surface ────────────────
+# The capability below is real and well-built; what was broken is that nothing
+# told a builder it existed. Measured 2026-11-13 with a real credential: the
+# first three doors a builder tries (`POST /v1/graphs`, `GET /v1/graphs`,
+# `GET /v1/team`) answered `401 Invalid session token`, `401`, and an
+# actionable `403 GRAPH_SCOPED_TEAM_SURFACE` — so the ONE working door
+# (`POST /v1/organizations/{org_id}/graphs`) was the fourth thing tried, and
+# nothing in any of the three refusals named it or the `graphs:create` scope it
+# wants.
+#
+# The remedy is a REFUSAL THAT TEACHES, in the shape #2114 already sanctioned
+# for a credential-scope refusal (`GRAPH_SCOPED_TEAM_SURFACE` ->
+# `{error_code, message}`, `_reject_graph_bound_org_surface`). No new MCP tool,
+# no new public SDK method, no capabilities endpoint: those are surface changes
+# (AGENTS.md -> MCP/SDK Surface Approval) and none is needed, because every
+# caller who cannot provision is already being refused and only the refusal's
+# INFORMATION was missing.
+#
+# ⛔ One-level-deep is the SECURITY MODEL, not an implementation detail
+# (`_MINTABLE_SCOPES`' child policy + `chk_minted_key_no_escalation` + the
+# deleg=0 gate below). Nothing here grants `graphs:create` to a minted key; the
+# minted key's refusal says so as a property, which is the point — the
+# constraint IS the feature.
+_PROVISION_ENDPOINT = "POST /v1/organizations/{org_id}/graphs"
+_PROVISION_SCOPE = "graphs:create"
+
+
+def _provision_refusal(error_code: str, message: str) -> HTTPException:
+    """A cannot-provision refusal that names the remedy.
+
+    ONE shape for every refusal on this path — `{error_code, message}`, the
+    `GRAPH_SCOPED_TEAM_SURFACE` convention (#2114, ``_reject_graph_bound_org_
+    surface``) — so a credential-scope refusal never grows a second style. The
+    endpoint and the scope are the two facts a builder cannot infer, so every
+    message below spells both out verbatim from ``_PROVISION_ENDPOINT`` /
+    ``_PROVISION_SCOPE``: the teaching text and the route cannot drift apart.
+
+    Always 403: the caller is authenticated, and the refusal is about what this
+    credential may do — never a 401, which would read as "your key is bad"."""
+    return HTTPException(status_code=403,
+                         detail={"error_code": error_code,
+                                 "message": message})
+
+
+async def get_current_user_provisioning(request: Request) -> dict:
+    """Session-authenticated user for a SESSION-ONLY provisioning door.
+
+    `POST /v1/graphs` is the dashboard's alias for the one provisioning service
+    (`_provision_graph`), and it authenticates a signed-in session only. An API
+    key presented here used to fall through to `verify_session_jwt` and come
+    back as `401 {"detail": "Invalid session token"}` — the measured first
+    attempt of every builder (#12447), which names no door, no scope and no
+    remedy, and reads as "your key is bad" when the key is fine and only the
+    route is wrong.
+
+    So: a `tt_`/`tk_` bearer gets the teaching refusal, naming the org-level
+    endpoint and `graphs:create`. A session JWT (or no credential at all) falls
+    straight through to ``get_current_user``, whose 401s are unchanged — this
+    function only claims the one credential class that was being mis-reported.
+
+    The dependency-override honour is deliberate and mirrors
+    ``get_current_org_gated``: FastAPI applies overrides at DI time, so a
+    DIRECT call to ``get_current_user`` would bypass the test suite's auth
+    bypass. Reading it here keeps every existing override working unchanged.
+    """
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer ") and auth[7:].startswith(API_KEY_PREFIXES):
+        raise _provision_refusal(
+            "PROVISION_VIA_ORG_ENDPOINT",
+            "This endpoint provisions from a signed-in session, not from an "
+            "API key. To provision with a key, call "
+            f"{_PROVISION_ENDPOINT} with a key that holds the "
+            f"{_PROVISION_SCOPE} scope — the 201 response also mints that "
+            "graph's key (revealed once), so provisioning an end-user's "
+            "graph and handing them a credential is ONE call. A key minted "
+            "that way cannot provision further graphs (one-level-deep by "
+            "design), so keep the account-level key on your server.")
+    override = request.app.dependency_overrides.get(get_current_user)
+    if override is not None:
+        return await _invoke_override(override, request)
+    return await get_current_user(request)
+
+
 @app.post("/v1/organizations/{org_id}/graphs", status_code=201)
 async def create_org_graph(org_id: str, body: dict,
                             key_ctx: dict = Depends(get_current_org_gated)):  # noqa: B008
@@ -26421,7 +26504,14 @@ async def create_org_graph(org_id: str, body: dict,
     (KEY_NOT_USER_MINTED — E2E-4-negative) before this body runs; the
     inline deleg check below is retained defense-in-depth (reactivates at
     C5's data flip when gated deps route deleg=0 keys) plus the legacy
-    key_id=None guard."""
+    key_id=None guard.
+
+    #12447: the two refusals below are the ONE door's teaching surface — they
+    name the endpoint and the scope the caller is missing, in the same
+    `{error_code, message}` shape as `GRAPH_SCOPED_TEAM_SURFACE`. The minted-key
+    arm states one-level-deep as the PROPERTY it is (a minted key is not
+    defective; it is a per-graph capability by design), because a builder who
+    reads it as "my key is broken" retries the same call."""
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="name required")
@@ -26430,13 +26520,27 @@ async def create_org_graph(org_id: str, body: dict,
         raise HTTPException(status_code=404, detail="Unknown organization")
     if key_ctx.get("delegation_depth") == 0 or key_ctx.get("key_id") is None:
         # Minted/unknown key → 403 (one-level-deep: minted keys cannot
-        # provision, E2E-4).
-        raise HTTPException(status_code=403,
-                            detail="Minted keys cannot provision graphs")
+        # provision, E2E-4). #12447: name the door, the scope, and the rule.
+        raise _provision_refusal(
+            "PROVISION_REQUIRES_ORG_KEY",
+            "This is a minted per-graph key, and minted keys are "
+            "one-level-deep by design: they never carry "
+            f"{_PROVISION_SCOPE}, so they cannot provision. Provision from "
+            "your server with the account-level key that holds "
+            f"{_PROVISION_SCOPE} at {_PROVISION_ENDPOINT}, then hand this "
+            "graph's key to your end user.")
     scopes = key_ctx.get("scopes") or []
     if "graphs:create" not in scopes and not key_ctx.get("legacy_full_access"):
-        raise HTTPException(status_code=403,
-                            detail="Missing graphs:create scope")
+        # #12447: a scope gap is the OTHER reason this door refuses an
+        # account-level key, and it used to be indistinguishable ("Missing
+        # graphs:create scope") from a wrong door. Name both.
+        raise _provision_refusal(
+            "PROVISION_SCOPE_REQUIRED",
+            f"This key is not scoped to provision graphs: it lacks the "
+            f"{_PROVISION_SCOPE} scope. Provision at {_PROVISION_ENDPOINT} "
+            f"with a key carrying {_PROVISION_SCOPE} (an owner or admin can "
+            "mint one from the dashboard), or use the account's original "
+            "full-access key.")
     org = await _org_node(org_id)
     if org is None:
         raise HTTPException(status_code=404, detail="Unknown organization")
@@ -26468,7 +26572,7 @@ async def create_org_graph(org_id: str, body: dict,
 
 @app.post("/v1/graphs", status_code=201)
 async def create_graph(body: dict, request: Request,
-                       user: dict = Depends(get_current_user)):  # noqa: B008
+                       user: dict = Depends(get_current_user_provisioning)):  # noqa: B008
     """E5 — session-authed alias for the ONE provisioning service (C2).
     Existing dashboard caller; the response CHANGES from the old top-level
     {graph_id, name, kind, graph_name} to the nested 201 envelope
@@ -26477,6 +26581,12 @@ async def create_graph(body: dict, request: Request,
     change is safe; C7 owns any UI that surfaces the envelope). The stale
     402 here is REMOVED: the shared service owns tier(402)+quota(409)
     semantics (D2).
+
+    #12447: SESSION-authed, and the dependency now says so to the one
+    credential class that used to be mis-reported — an API key here gets
+    `403 PROVISION_VIA_ORG_ENDPOINT` naming the key-driven door and its
+    scope, instead of `401 Invalid session token`. See
+    :func:`get_current_user_provisioning`.
 
     #9667 — ``packs``: create and configure in ONE call, so an unconfigured
     graph is a CHOICE rather than the only possibility. Absent ⇒ the graph
