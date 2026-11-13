@@ -442,6 +442,15 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # exactly the two broken-converter causes here, and `emitted nothing it could convert`
           # is deliberately NOT in this sentence's parenthetical for that reason. Case 17l pins
           # the third cause in the second sentence, where it is the operative one.
+          #
+          # ⛔ AND A FOURTH CAUSE THAT IS NEITHER BROKEN NOR UNDECODABLE (review round 8, P2): a tail
+          # whose only bytes below 0x80 are LINE BREAKS. `iconv` is present, succeeds, and emits
+          # them — but a command substitution strips TRAILING NEWLINES, so the capture is empty and
+          # `tr` (which keeps the same `0a 0a`) is stripped the same way. Measured: `printf
+          # '\n\n\xff'` → `iconv -c` rc 0 emitting `0a 0a`, capture `[]`. All three causes named
+          # before this round are FALSE there — the host's converter worked — so the parenthetical
+          # now enumerates the blank-line case as well. Case 17n drives it with the REAL converter,
+          # because a shim is what hid this state from 17l's arm.
           if [ -n "$excerpt" ]; then
             echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
           else
@@ -462,7 +471,7 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
             if [ "$report_bytes" -gt 6000 ]; then
               cut_note=" (the report itself is ${report_bytes} bytes, and only its last 6000 were read)"
             fi
-            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable, refused to emit, or emitted nothing it could convert), and the ASCII fallback produced no excerpt either — so NOTHING is pasted below${cut_note}; the full report is at the run link above."
+            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable, refused to emit, emitted nothing it could convert, or emitted only blank lines — which a command substitution strips), and the ASCII fallback produced no excerpt either — so NOTHING is pasted below${cut_note}; the full report is at the run link above."
           fi
           echo
         elif [ "$(printf '%s' "$excerpt" | wc -c)" -lt "$(printf '%s' "$raw_tail" | wc -c)" ]; then

@@ -3382,7 +3382,8 @@ bytes** (a tail — the gate prints the actionable block last), and it declares 
 excerpt the losses it makes (the 6000-byte cut; a multibyte character split by the cut and
 dropped by the squeeze; the non-ASCII bytes dropped by the ASCII fallback when `iconv` is
 unavailable, refused to emit, or emitted nothing it could convert — a healthy converter does
-that for a tail that is entirely undecodable). A loss that leaves no excerpt to sit beside is
+that for a tail that is entirely undecodable — or emitted only blank lines, which the shell
+strips as trailing newlines). A loss that leaves no excerpt to sit beside is
 declared in the state sentence instead, which is where that third converter cause lands. When
 neither path produces an excerpt the body says exactly
 which state it is in, and **the two read-failure states point at different places**: a report

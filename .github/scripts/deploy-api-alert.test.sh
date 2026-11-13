@@ -888,6 +888,29 @@ assert_not_contains "$BIGTAIL_BODY" '```' "case 17k: and it pastes no fenced blo
 # was missing while it had just run. The row pins the STATE ("emitted nothing it could convert")
 # and the absence of the two-cause form; it is a phrase-level pin, which is the residual #12283
 # records for this whole harness.
+
+# ── case 17n: a tail whose only ASCII is LINE BREAKS — the converter worked (round 8)
+# The fourth cause of an empty excerpt, and the one a SHIM can never produce: `iconv` is present
+# and succeeds, emitting the tail's line breaks; the shell's command substitution strips
+# TRAILING newlines, so the capture is empty, and `tr` keeps the same `0a 0a` and is stripped the
+# same way. Measured on the real converter: `printf '\n\n\xff'` → `iconv -c` rc 0 emitting
+# `0a 0a`, capture `[]`. Before round 8 every named cause blamed the converter here — a host
+# whose converter had just worked.
+python3 -c 'import sys,pathlib; pathlib.Path(sys.argv[1]).write_bytes(b"\n\n\xff")' "$FIX/drift-report-blank-lines.txt"
+EX17N="$(iconv -f UTF-8 -t UTF-8 -c < "$FIX/drift-report-blank-lines.txt")"
+if [ -z "$EX17N" ]; then
+  ok "case 17n: the fixture captures as EMPTY under the REAL converter (the case is not vacuous)"
+else
+  bad "case 17n: the fixture does NOT capture as empty — this case cannot reach the state it pins"
+fi
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-blank-lines.txt"
+assert_eq "$RC" "0" "case 17n: a tail of nothing but line breaks still files the alert"
+assert_eq "$(count_creates)" "1" "case 17n: and an issue IS filed"
+BLANKLINE_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$BLANKLINE_BODY" "produced no excerpt either" "case 17n: and it names the state it is in"
+assert_contains "$BLANKLINE_BODY" "emitted only blank lines" "case 17n: and the FOURTH cause is named — the converter worked, so blaming it would be false"
+assert_not_contains "$BLANKLINE_BODY" '```' "case 17n: and it pastes no fenced block"
 python3 -c 'import sys,pathlib; pathlib.Path(sys.argv[1]).write_bytes((b"check-migration-drift: BLOCKING 20260926000002\n" * 200) + (b"\x92" * 6000))' "$FIX/drift-report-undecodable-tail.txt"
 reset_case
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-undecodable-tail.txt"
