@@ -2782,12 +2782,18 @@ def test_the_folded_subject_set_is_re_derived_after_the_correction(
     `o.name = $exact` — a spelling no node carries — and the edge is LOST silently
     (no warning, no `skipped` entry).
 
-    Measured: with the re-derive, the edge is written; deleting the twelve lines that
-    rebuild `subject_entity_names_folded` reds exactly this test (`[]`), and
-    disabling the narrowing on top of the mutant makes it green again — i.e. the
-    stale key's narrowing is the cause, not another route. A control with the
-    EXACT spelling writes the edge under both code shapes, which is why this is an
-    exactness question and not a blanket skip.
+    Measured: with the re-derive, the edge is written. ⛔ The mutant is the PRE-FIX
+    PAIR, and both halves are required at this head (review round 28): restore
+    `subject_entity_names_folded.add(_fold(name))` in the payload seed AND delete the
+    rebuild — that reds exactly this test (`[]`). Deleting the rebuild ALONE does
+    NOT: the seed was removed as a dead store in the same commit that added the
+    rebuild, so with no seed and no rebuild the set is simply `set()`, being
+    entirely empty the narrowing never fires, and the test passes green — a reviewer
+    checking this pin by the old recipe would either conclude it is vacuous or
+    "repair" a pin that works. Disabling the narrowing on top of the mutant makes it
+    green again — i.e. the stale key's narrowing is the cause, not another route. A
+    control with the EXACT spelling writes the edge under both code shapes, which is
+    why this is an exactness question and not a blanket skip.
     """
     import tortoise.extractor_v2 as ev2
 
