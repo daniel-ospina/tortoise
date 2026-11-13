@@ -4230,7 +4230,15 @@ def _cmd_config(args) -> int:
         # Printed under "Graph store" because that is the verdict it changes:
         # without this block `doctor` said `health ✅` and this verb said
         # "nothing is configured" about a store the daemon was not using.
-        print("  ·  a `.env` the daemon reads; this command does NOT read it")
+        # ⛔ The HEADER is conditional for the same reason the doctor row is:
+        # when this process already applied the file, "this command does NOT read
+        # it" is FALSE — and printing it three lines above "this process already
+        # applied that file at import" is a block contradicting itself (measured,
+        # #12428 review: it read "does NOT read it" … "already applied").
+        if env_file.get("read_by_this_command"):
+            print("  ·  a `.env` the daemon reads — and THIS PROCESS applied it at import")
+        else:
+            print("  ·  a `.env` the daemon reads; this command does NOT read it")
         print(f"     {_printable(env_file['path'])}")
         if env_file.get("state") == "unreadable":
             print("  ⚠️  it exists but this command cannot read it — the daemon's")
@@ -11031,12 +11039,17 @@ def _daemon_db_keys() -> tuple[str, ...]:
     return tuple(DAEMON_DB_KEYS)
 
 
-#: The graph ladder's keys, in `_resolve_db_target`'s own precedence order
-#: (TORTOISE_DB_URI > FALKORDB_* trio > TORTOISE_DB_PATH). The `.env`
-#: disclosure answers exactly one question — "would the daemon resolve a
-#: DIFFERENT store" — so this is the set that decides it. A provider key in the
-#: file is still disclosed BY NAME (#12407): the file it sits in is not read by
-#: the verb reporting it, and that is the part a user cannot see.
+#: The keys the DAEMON's ladder reads — `config.DAEMON_DB_KEYS`, imported rather
+#: than re-listed here. ⛔ This is deliberately NOT `_resolve_db_target`'s key
+#: list: the CLI honours the legacy `FALKORDB_*` trio (a migration guard) and
+#: ranks `TORTOISE_DB_PATH` above a scheme-less `TORTOISE_DB_URI`, while the
+#: daemon reads neither the trio nor that ranking (see `config.daemon_db_target`'s
+#: table). The `.env` disclosure answers exactly one question — "would the daemon
+#: resolve a DIFFERENT store" — so the DAEMON's set is what decides it; the CLI's
+#: set would report a divergence for a key the daemon never reads, and miss one it
+#: does. A provider key in the file is still disclosed BY NAME (#12407): the file
+#: it sits in is not read by the verb reporting it, and that is the part a user
+#: cannot see.
 _DB_LADDER_KEYS = _daemon_db_keys()
 
 

@@ -899,3 +899,30 @@ def test_the_sets_clause_describes_the_FILE_not_what_is_left_to_fill(
     out = _show_text(capsys)
     assert "sets TORTOISE_DB_URI" in out, out
     assert "no graph key" not in out, out
+
+
+def test_config_show_does_not_deny_reading_a_file_it_just_applied(capsys, _isolated):
+    """The applied state must not say both "does NOT read it" and "already applied".
+
+    Measured before the fix, with a `.env` setting BOTH ladder keys (so the two
+    ladders still rank them differently): one block printed "this command does
+    NOT read it", then "this process already applied that file at import", then
+    reported a DIFFERENT graph. The later lines agree with each other; the
+    HEADER was the one still denying the read (#12428 review).
+    """
+    from tortoise.mcp_server import _load_dotenv
+
+    _write_env(_isolated,
+               "TORTOISE_DB_URI=/tmp/daemon-side.db\n"
+               "TORTOISE_DB_PATH=/tmp/cli-side.db\n")
+    _load_dotenv(str(_isolated))          # what `doctor`'s §5.5 import does
+
+    out = _show_text(capsys)
+
+    assert "THIS PROCESS applied it at import" in out, out
+    assert "does NOT read it" not in out, (
+        "the header denied reading a file this process had just applied"
+    )
+    assert "already applied that file at import" in out, out
+    # …and the divergence it must still report is reported.
+    assert "/tmp/daemon-side.db" in out and "/tmp/cli-side.db" in out, out
