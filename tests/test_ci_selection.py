@@ -3001,12 +3001,17 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
     the removed blanket `*.md`-at-root clause is reintroduced (it admitted
     README.md).
 
-    #8785: CHANGELOG.md and CLAUDE.md are deliberately NOT in
-    this list. They are prose whose CONTENT no test or tool reads (their only
-    mentions are docstrings, a generated-doc link, or `record-review.sh`'s
-    basename case), so they are reprieved to the tier-1 smoke by
-    `NON_CODE_DOC_PATHS` — pinned by
-    `test_non_code_doc_paths_have_no_content_reader`. Every name below IS read
+    #8785: CHANGELOG.md and CLAUDE.md are deliberately NOT in this list. They are
+    prose whose CONTENT no test or tool reads (their only mentions are docstrings,
+    a generated-doc link, or `record-review.sh`'s basename case), so they are
+    reprieved to the tier-1 smoke by `NON_CODE_DOC_PATHS` — pinned by
+    `test_non_code_doc_paths_have_no_content_reader`.
+    ⛔ CONTRIBUTING.md is NOT reprieved (it was, until #12313's
+    `tests/test_surface_manifest.py` started READING its text to hold the
+    documented surface rule to the shipped one). A doc a guard reads must run the
+    full matrix on the PR that edits it, so it left the list and
+    `test_doc_reprieve_is_per_path_not_per_diff` pins the FULL selection it now
+    takes. Every name below IS read
     (README.md by `test_embedded_durability_claim.py:62`; AGENTS.md by the
     base-subset pin; `.gitignore` by `test_kind_index.py:290`; …) and keeps FULL.
     """
@@ -3303,27 +3308,25 @@ def test_the_github_prober_paths_fail_closed_to_the_full_matrix():
 def test_doc_reprieve_is_per_path_not_per_diff():
     """Mixed diffs: dropping the prose must not drop the code, and a
     docs+unknown diff must still escalate."""
-    # ⛔ `CONTRIBUTING.md` is NOT the representative reprieved path here any
-    # more (#12471): `#12313` made `tests/test_surface_manifest.py` content-read
-    # it, so it left `NON_CODE_DOC_PATHS` and now reserves the FULL matrix. This
-    # test's subject is per-PATH reprieve inside a mixed diff, never that one
-    # file, so the representative is a member that still holds. The removal
-    # itself is pinned where it belongs, by
-    # `test_non_code_doc_paths_have_no_content_reader`.
-    assert _sel(["CONTRIBUTING.md"])["full"] is True, (
-        "#12471: CONTRIBUTING.md is content-read by tests/test_surface_manifest.py, "
-        "so it must reserve the full matrix rather than the tier-1 smoke")
-    r = _sel(["CLAUDE.md", "tortoise/api.py"])
+    r = _sel(["CHANGELOG.md", "tortoise/api.py"])
     assert r["full"] is False
     assert "api" in r["surfaces"] and "core" in r["surfaces"]
 
     # The measured #8726 shape: two prose files, no Python -> tier-1 smoke.
-    r2 = _sel(["CLAUDE.md", ".github/pull_request_template.md"])
+    r2 = _sel(["CHANGELOG.md", ".github/pull_request_template.md"])
     assert r2["full"] is False and r2["surfaces"] == []
     assert r2["slow_run"] is False and r2["carve_out_run"] is False
 
-    r3 = _sel(["CLAUDE.md", "mystery-dir/thing.xyz"])
+    r3 = _sel(["CHANGELOG.md", "mystery-dir/thing.xyz"])
     assert r3["full"] is True
+
+    # ⛔ CONTRIBUTING.md is NO LONGER reprieved (`main`, #12313's
+    # `tests/test_surface_manifest.py:5538` READS its text to hold the documented
+    # surface rule to the shipped one). A root prose file outside the census list
+    # falls through to the unknown-path branch, which fails closed to FULL — and
+    # that is the point: the PR that edits the file runs the guard that reads it.
+    r4 = _sel(["CONTRIBUTING.md"])
+    assert r4["full"] is True
 
 
 def test_new_engine_module_maps_to_core():

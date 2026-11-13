@@ -3490,24 +3490,16 @@ def _is_safe_root_file(path: str) -> bool:
 # READS stays out. `README.md` (tests/test_embedded_durability_claim.py:62,
 # tests/test_capacity_page.py:40), `AGENTS.md` (the base-subset pin),
 # `.gitignore` (tests/test_kind_index.py:290) and `.env.example` are therefore
-# NOT here. `CONTRIBUTING.md` was left out of #6786's two-file reprieve on a
-# MENTION census ("the surface tooling") and was re-admitted here on a census
-# that found no content reader — every mention was a docstring, a generated-doc
-# link, or `scripts/record-review.sh`'s basename case.
+# NOT here. At #8785 the census found no content reader for `CONTRIBUTING.md`
+# either — every mention then was a docstring, a generated-doc link, or
+# `scripts/record-review.sh`'s basename case — and it was reprieved.
 #
-# ⛔ AND IT WAS REMOVED AGAIN BY #12471: `#12313` (`45cebfc5df36`) added the
-# reader that census had ruled out, unconditionally, in
-# `tests/test_surface_manifest.py` —
-# `(sm.ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")`, pinning the
-# REMOVAL prose against a route the writer refuses. A reprieved file is one a
-# guard may not depend on: with it here, a PR that edited `CONTRIBUTING.md`
-# selected the tier-1 smoke, so the very pin that reads the paragraph it had
-# just changed DID NOT RUN. The rule above is the rule — a doc a guard READS
-# stays out — and the measured cost of honouring it is the one this comment's
-# opening paragraph already accepts: a `CONTRIBUTING.md`-only edit reserves the
-# full matrix again. Membership is not negotiable against a reader, and a set
-# that disagrees with its own census is what
-# `test_non_code_doc_paths_have_no_content_reader` exists to catch.
+# ⛔ AND IT IS OUT AGAIN (`main`, #12313's `tests/test_surface_manifest.py`): that
+# suite reads the file's TEXT (`(sm.ROOT / "CONTRIBUTING.md").read_text(...)`) to
+# hold the documented surface rule to the shipped one, so a prose edit to
+# `CONTRIBUTING.md` can now change a guard's verdict. The census this list rests
+# on is "does anything READ it", and one reader is enough — the exemption would
+# have dropped exactly that guard from the PR that edits the file it guards.
 #
 # Ratchets: `test_non_code_doc_paths_exist` (liveness) and
 # `test_non_code_doc_paths_have_no_content_reader` (the read census).
