@@ -1011,22 +1011,27 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
     Mutations that must red this: the loop bound no longer following
     `names_reached`; a `gated` count accumulated once per (name x predicate)
     instead of once per name; a per-k table that stops summing to its `_k_sum`;
-    a `pooled_gate` cell whose `rescued_by_union + lost` stops equalling its
-    `gated`.
+    a `pooled_gate` cell whose `rescued_by_union + lost + unreachable_regardless`
+    stops equalling its `gated` — and, separately, collapsing
+    `unreachable_regardless` into `lost`, which is the pre-fix defect (it books a
+    gate-independent miss as the gate's cost, inflating this PR's own evidence).
+    ⛔ `rescued_by_union + lost == gated` is DELIBERATELY not the invariant here:
+    the healthy driven cell is `rescued 1 + lost 16 = 17` against `gated 18`.
     """
-    # every query finds "the canonical": the arms' found-branches all execute,
-    # so `suppressed_correct` / `rescued_by_union` are exercised, not just their
-    # zero defaults. ⛔ The population must be LARGER THAN ONE POOLED GROUP (15
-    # names), or the loop's bound is untestable: with three names `range(...)`
-    # has a single step whatever the bound is, and halving `names_reached` left
-    # this test green (measured).
+    # The arms' found-branches all execute, so `suppressed_correct` /
+    # `rescued_by_union` are exercised rather than left at their zero defaults.
+    # ⛔ The population must be LARGER THAN ONE POOLED GROUP (15 names), or the
+    # loop's bound is untestable: with three names `range(...)` has a single step
+    # whatever the bound is, and halving `names_reached` left this test green
+    # (measured).
     pop = ([{"cls": "definite", "name": f"the item{i}"} for i in range(9)]
            + [{"cls": "ident", "name": f"#{2258 + i}"} for i in range(9)]
            + [{"cls": "path", "name": f"src/mod{i}.py"} for i in range(9)])
     names = [r["name"] for r in pop]
-    # The row set is chosen so BOTH directions of `pooled_gate` are exercised:
-    # every query returns its OWN name's row (so `gated_and_missed` stays 0), and
-    # every query ALSO returns `#2258`'s row — so a gated name whose query is
+    # The row set is chosen so all three `pooled_gate` branches are exercised at
+    # once: every query returns its OWN name's row — EXCEPT `#2266`, whose row no
+    # query returns, so exactly one gated name is unreachable regardless — and
+    # every query ALSO returns `#2258`'s row, so a gated name whose query is
     # never issued is still RESCUED when a KEPT name's query returns it. Without
     # that asymmetry `rescued == gated` and `lost == 0` for every cell, and
     # swapping the two increments — which inverts "6 of 86 rescued" into "80 of
