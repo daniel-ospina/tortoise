@@ -538,8 +538,14 @@ def test_a_whitespace_only_fold_is_never_indexed():
     assert index.stats()["members"] == 0, (
         "a whitespace-only fold was indexed — two unrelated names now share one "
         f"`E:` block: {index.blocks()!r}")
-    assert not [b for b in index.blocks() if b[1].startswith("E:")], (
-        f"an `E:` block was created for an empty fold: {index.blocks()!r}")
+    #: ⛔ Assert the BLOCK COUNT, not a member id: `blocks()` returns member-ids
+    #: lists, so the earlier `b[1].startswith("E:")` form could never red (a member
+    #: id starting with `E:` is the only thing that could trigger it) and would
+    #: `IndexError` on any single-member block. MEASURED with the guard deleted:
+    #: `blocks() == [['a','b'], ['a','b']]` — two real blocks exist while that form
+    #: still evaluated True.
+    assert index.stats()["blocks"] == 0, (
+        f"blocks were created for an empty fold: {index.stats()!r}")
     #: A punctuation-only name is NOT this class: it folds to itself and is indexed.
     index.add("c", "!!!", label="Object")
     assert index.stats()["members"] == 1, (
