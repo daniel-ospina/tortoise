@@ -451,14 +451,17 @@ async def test_the_type_is_gone_at_the_seam(events, stdio):
 
 
 @pytest.mark.asyncio
-async def test_the_wire_is_unchanged_by_the_classification(events, stdio):
+async def test_the_payload_is_unchanged_by_the_classification(events, stdio):
     """#8135 is a TELEMETRY fix: the PAYLOAD the client receives is unchanged.
 
-    Same ``structured_content``, same text. Two things changed AFTER this issue and
-    are asserted separately, one line each, so the two concerns stay legible:
-    ``is_error`` is now ``True`` (#11153 — a refused call must not report itself as
-    a success; before that change this asserted ``False``), and the analytics row
-    says ``exec_error``. Neither is part of the #8135 contract this test pins.
+    ⛔ Named `payload`, not `wire` (review round 8): the WIRE verdict did change
+    with #11153, so a name promising "the wire is unchanged" sat directly above an
+    assertion that it changed. A lane grepping that phrase would land here and
+    either revert the #11153 assertion or read the #8135 contract as unguarded.
+    Same ``structured_content``, same text — that is what is pinned; ``is_error``
+    and the analytics row are asserted separately, one line each, so the two
+    concerns stay legible: ``is_error`` is now ``True`` (#11153; before that
+    change this asserted ``False``) and the analytics row says ``exec_error``.
     """
     def quota_tool() -> dict:
         return ms._safe(_QuotaSDK().query, "statement")

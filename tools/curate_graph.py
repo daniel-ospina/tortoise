@@ -1001,40 +1001,22 @@ def _live_call_tool(name: str, args: dict[str, Any] | None = None) -> Any:
 def _is_refusal_envelope(text: str) -> bool:
     """True when a client error's message IS one of the surface's refusals.
 
-    TWO designed refusal shapes reach a caller as `ToolError`, and both are rc-3
-    material in this file:
+    Delegates to `tortoise.mcp_client.refusal_message`, which OWNS the
+    classification (it owns `call_tool`, the boundary that raises). Three shapes
+    are rc-3 material in this file: a `_safe`/`_quota_gated` refusal (fastmcp
+    raises `content[0].text` — for a `_safe` payload the JSON error dict), and the
+    transport wait-bound refusal's two prose arms (`-32009`, dispatched vs
+    never-dispatched — the routine refusal for an expensive census read). A
+    server-side CRASH's text (`Error calling tool: TypeError: …`) matches none and
+    stays a `ToolError`, so a driver paging on "the run crashed" is not silenced.
 
-    * a `_safe` refusal — fastmcp raises `content[0].text`, which for a `_safe`
-      payload is the JSON error dict (`{"error": "Team points limit reached …",
-      "code": -32006}`);
-    * the TRANSPORT WAIT-BOUND refusal (`-32009`) — its `content` is PROSE, not
-      JSON, and on the hosted surface it is the ROUTINE refusal for a census read
-      (a 34+ call walk of `tortoise_query`/`tortoise_search` against a 10 s
-      budget). Missing it turned the routine refusal into an uncaught traceback
-      with rc 1, which is the wrong signal for a designed refusal (review round 4,
-      measured).
-
-    A server-side CRASH's text is prose too (`Error calling tool: TypeError: …`),
-    which matches neither arm — that stays a `ToolError` so a driver paging on
-    "the run crashed" is not silenced.
+    The rationale for the split, measured: review round 4 (the prose arm, which
+    turned the routine refusal into an uncaught traceback with rc 1) and round 8
+    (a second copy of this predicate would have been the third owner of it).
     """
-    from tortoise.mcp_auth import (
-        _TRANSPORT_WAIT_BOUND_MESSAGE,
-        _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE,
-    )
+    from tortoise.mcp_client import refusal_message
 
-    if isinstance(text, str):
-        for prose in (_TRANSPORT_WAIT_BOUND_MESSAGE,
-                      _TRANSPORT_WAIT_BOUND_NOT_SENT_MESSAGE):
-            # `startswith` and not equality: a wrapped message keeps its prefix,
-            # and the refusal prose itself is the leading sentence either way.
-            if text.startswith(prose[:60]):
-                return True
-    try:
-        payload = json.loads(text)
-    except (TypeError, ValueError):
-        return False
-    return isinstance(payload, dict) and isinstance(payload.get("error"), (str, dict))
+    return refusal_message(text) is not None
 
 
 #: A fallback to the credential's own graph is only legitimate when the refusal is
