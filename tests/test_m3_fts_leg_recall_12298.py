@@ -498,6 +498,10 @@ _DIRECTIONAL = frozenset({
     # `missed`, so an entry that cannot fire is the same false-pass shape as a
     # missing entry — the file already recorded this defect once for `m3-000014`.
     "found", "missed", "sum",
+    # ⛔ Two more of the same class at live claims (round-24 reviewer, cycle 10):
+    # `does beat it` (the verb the whole §6.2 paragraph turns on) and
+    # `the same 300` (`same`/`different` is the reuse claim's content).
+    "beat", "beats", "same", "different",
     "+", "\u2212",
     "==", "!=", ">=", "<=", "<", ">", "\u2192", "\u00d7", "\u00f7", "\u00b1",
     "\u2248",
@@ -2622,9 +2626,13 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     # rounds to 8.3, so the pin compares the ROUNDED product and reds a digit the
     # factors alone cannot see.
     bound_pts = token_share / 100 * snake_delta
+    # ⛔ The FRAME is the identity (round-24 reviewer, cycle 10): with only the
+    # three numbers and both operators wildcarded the shape was `N × N ≈ +N pts`,
+    # so a second TRUE arithmetic sentence in §4.3 false-redded it.
     _only_claim(_s43,
+                f"bounds **that one term**: `"
                 f"{token_share / 100:.2f} \u00d7 {snake_delta:.1f} \u2248 "
-                f"+{bound_pts:.1f} pts",
+                f"+{bound_pts:.1f} pts`",
                 "§4.3's single-term bound",
                 values=(f"{token_share / 100:.2f}", f"{snake_delta:.1f}",
                         f"{bound_pts:.1f}"),
@@ -2801,7 +2809,8 @@ def test_brief_reading_two_bullets_are_the_artifact(artifact, brief: str) -> Non
         # ⛔ Same shape as the scorer bullet's ZERO: when the count is 0 the claim
         # says `zero`, so the word is the value (round-24 reviewer, P2). `inside`
         # is the recovery's DIRECTION (`inside` → `outside` inverts it).
-        free=("recovered", "inside") + (("zero",) if inplace["only_a"] == 0 else ()))
+        free=("recovered|recovered", "inside", "same|different")
+        + (("zero",) if inplace["only_a"] == 0 else ()))
 
     # §4's verdict line restates the same two deltas; it is the sentence a reader
     # quotes as the RESULT, so it is pinned with them rather than left as prose.
@@ -2892,7 +2901,10 @@ def test_the_decision_documents_status_note_is_the_artifact(artifact, search_arc
         f"does beat it ({dep['recall_at_3']:.4f} vs "
         f"{dep['recall_at_3_base']:.4f})",
         "the status note's closing figure pair",
-        values=(f"{dep['recall_at_3']:.4f}", f"{dep['recall_at_3_base']:.4f}"))
+        values=(f"{dep['recall_at_3']:.4f}", f"{dep['recall_at_3_base']:.4f}"),
+        # ⛔ `beat` is the verb the paragraph turns on (round-24 reviewer,
+        # cycle 10): `beat` → `trail` with the truth restated was GREEN.
+        free=("beat",))
     assert recovery["delta_pts"] == dep["delta_pts"], (
         "the recovery arm no longer reproduces the deployable arm's swing, so the "
         "status note's 'reproduces inside the current index' is now false")
@@ -3422,7 +3434,7 @@ def test_brief_states_what_the_reuse_guards_actually_do(brief_text,
                 "nothing else is still accepted",
                 "§2's accepted-reuse disclosure",
                 values=(str(len(population["names"])),),
-                free=("accepted", "nothing", "still|never"))
+                free=("accepted", "nothing", "still|never", "same|different"))
     assert "with the SAME population is ACCEPTED" not in flat
     assert "numDocuments >= n" not in flat, (
         "§2 still says the wait accepts an at-least-full index — it requires "
