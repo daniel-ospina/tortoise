@@ -2830,6 +2830,16 @@ class TestDoctorHostedCredential:
         _data_a, cut_a = _doctor_read_capped(exact, 4096, _time.monotonic() + 5)
         assert cut_a is False, "a chunked body that ends exactly at the cap is complete"
 
+        # (a2) the clock rule's OTHER half, asserted directly: an EOF with
+        # nothing declared that arrives BEFORE the deadline is the PEER ending
+        # the body — complete, not cut (round 30 review). It had only indirect
+        # pins: two tests named for 403 semantics carried the mutation, so a
+        # double that later gains a `length` would lose the arm silently.
+        early = _Chunked(200, b"hi")
+        _data_a2, cut_a2 = _doctor_read_capped(early, 4096, _time.monotonic() + 5)
+        assert cut_a2 is False, (
+            "a close-delimited body that ends before the deadline is complete")
+
         # (b) body OVER the cap → cut.
         over = _Chunked(200, b"y" * (4096 + 10))
         _data_b, cut_b = _doctor_read_capped(over, 4096, _time.monotonic() + 5)

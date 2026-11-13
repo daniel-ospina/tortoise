@@ -13253,7 +13253,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         "config show`"
         if _from_env else
         "`tortoise config show` to see the `api_url` this store supplies — if it "
-        "is not the Tortoise API, that is what answered")
+        "is not the Tortoise API, that is where this request went")
     api_url = api_url if isinstance(api_url, str) else str(api_url or "")
     # A store/proxy-supplied endpoint ending in `/` would ask for `//health` and
     # `//v1/team` — the 404-that-reads-as-a-broken-key every other hosted caller
