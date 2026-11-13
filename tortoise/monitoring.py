@@ -889,6 +889,15 @@ for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
 #: ``TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S``. A window, not a rate: ONE refused
 #: request is enough to say the door refused someone.
 WAIT_BOUND_HEALTH_WINDOW_S = 120.0
+#: How many refusals inside the window mean the DOOR is failing rather than a
+#: client asking for work the budget cannot cover. The transport bound is
+#: breached by DESIGN for slow-but-legitimate calls (the repo's own measurement:
+#: p99 22,476 ms, ~2.1% of calls over a 10 s bound), so a single breach is the
+#: product working. A STREAM of them is the shape #12477 measured (0 -> 70 in
+#: ~20 min). Env ``TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES``; ``0`` disables the
+#: term entirely. A red that fires on every designed long call would fail every
+#: deploy — the opposite failure, and just as useless.
+WAIT_BOUND_HEALTH_MIN_BREACHES = 10
 #: Per-surface monotonic timestamps of recent breaches. Bounded (``maxlen``) so
 #: a breach storm cannot grow the process's memory; old entries are also pruned
 #: by AGE on read, so the bound is memory, never staleness.
@@ -920,6 +929,26 @@ def wait_bound_health_window_s() -> float:
             "default %.0fs", raw, WAIT_BOUND_HEALTH_WINDOW_S)
         return WAIT_BOUND_HEALTH_WINDOW_S
     return max(0.0, value)
+
+
+def wait_bound_health_min_breaches() -> int:
+    """Resolve the refusal threshold for the liveness term; ``0`` disables it.
+
+    Env ``TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES``. A malformed value falls back
+    to the default with a warning rather than raising — this is read on the
+    liveness path, whose contract is that it always answers.
+    """
+    raw = os.environ.get("TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES")
+    if raw is None or raw.strip() == "":
+        return WAIT_BOUND_HEALTH_MIN_BREACHES
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        logger.warning(
+            "TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES=%r is not a number — using "
+            "the default %d", raw, WAIT_BOUND_HEALTH_MIN_BREACHES)
+        return WAIT_BOUND_HEALTH_MIN_BREACHES
+    return max(0, value)
 
 
 def record_wait_bound_breach_recent(surface: str, at: float | None = None) -> None:
@@ -957,11 +986,13 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
     except Exception as exc:  # noqa: BLE001 - a monitoring read must not raise
         return {"window_s": None, "total": None, "by_surface": None,
                 "last_breach_age_s": None, "enabled": False,
+                "min_breaches": None, "refusing": None,
                 "error": f"wait_bound window unreadable: {type(exc).__name__}"}
     if not math.isfinite(window) or window <= 0:
         return {"window_s": window, "total": 0,
                 "by_surface": dict.fromkeys(_WAIT_BOUND_SURFACES, 0),
-                "last_breach_age_s": None, "enabled": False, "error": None}
+                "last_breach_age_s": None, "enabled": False,
+                "min_breaches": 0, "refusing": False, "error": None}
     try:
         now = time.monotonic()
         cutoff = now - window
@@ -980,18 +1011,32 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
                 _WAIT_BOUND_RECENT[surface] = kept
                 by_surface[surface] = len(kept)
                 if kept:
-                    newest = max(newest, kept[-1]) if newest else max(kept)
+                    # a MAX over the kept stamps — the deque's last element is
+                    # only the last APPENDED, and the filter above exists
+                    # because that need not be the newest.
+                    surface_newest = max(kept)
+                    newest = (surface_newest if newest is None
+                              else max(newest, surface_newest))
     except Exception as exc:  # noqa: BLE001 - a monitoring read must not raise
         logger.warning("#12477: wait-bound window unreadable: %r", exc)
         return {"window_s": window, "total": None, "by_surface": None,
                 "last_breach_age_s": None, "enabled": True,
+                "min_breaches": None, "refusing": None,
                 "error": f"wait_bound window unreadable: "
                          f"{type(exc).__name__}"}
-    return {"window_s": window, "total": sum(by_surface.values()),
+    total = sum(by_surface.values())
+    threshold = wait_bound_health_min_breaches()
+    # ``refusing`` is the VERDICT and it lives here, in one place, so `/health`
+    # and the listener cannot disagree: a threshold of 0 disables the term, and
+    # anything at or above it means the door is refusing a stream of requests
+    # rather than answering one long call the budget cannot cover.
+    refusing = bool(threshold > 0 and total >= threshold)
+    return {"window_s": window, "total": total,
             "by_surface": by_surface,
             "last_breach_age_s": (None if newest is None
                                   else round(max(0.0, now - newest), 2)),
-            "enabled": True, "error": None}
+            "enabled": True, "min_breaches": threshold,
+            "refusing": refusing, "error": None}
 
 
 def reset_wait_bound_breach_window() -> None:
@@ -1919,15 +1964,14 @@ def wait_bound_breach_counts() -> dict:
         return {"total": None, "by_surface": None,
                 "error": f"wait_bound_breaches unreadable: "
                          f"{type(exc).__name__}"}
+    # ⛔ SHAPE-STABLE, and that is a pinned contract, not a preference
+    # (`test_10602_wait_bound_breach_visible` asserts this exact key set, and
+    # `monitoring.metrics()` republishes it on `/metrics`). #12477's windowed
+    # read is `wait_bound_breach_window()` — a SEPARATE resolver its consumers
+    # call directly — precisely so this channel's shape and meaning cannot drift
+    # under a reader that only wants the cumulative count.
     return {"total": sum(by_surface.values()), "by_surface": by_surface,
-            "error": None,
-            # #12477: the WINDOWED sibling. Read here so every consumer of this
-            # channel (`/health`, `/metrics`, the `/healthz` listener) gets the
-            # same number from one resolver and cannot disagree about whether
-            # the data plane is refusing requests RIGHT NOW. Additive: the
-            # cumulative `total` keeps its meaning, so a reader keyed on it is
-            # unaffected.
-            "recent": wait_bound_breach_window()}
+            "error": None}
 
 
 def record_silent_revision_loss(reason: str) -> None:
@@ -4825,12 +4869,21 @@ def _reset_heartbeat() -> None:
 # from `start_stall_watchdog` (which is armed only when an operator arms a
 # ceiling, and whose job is to kill, not to diagnose).
 
-#: Heartbeat age (seconds) at which a stack is captured. Above the largest
-#: legitimate on-loop operation the repository records (a 10s socket read; 60s
-#: at the operator maximum) so it does not fire on a healthy slow request, and
-#: far below LOOP_STALE_AFTER (90s) so the capture lands while the loop is still
-#: blocked in the thing that is about to make it stale. ``0`` disables.
-LOOP_BLOCK_SAMPLE_AFTER_S = 2.0
+#: Heartbeat age (seconds) at which a stack is captured. ``0`` disables.
+#:
+#: ⚠️ A CAPTURE IS A CANDIDATE, NOT A VERDICT — read it with the age beside it.
+#: The default is deliberately BELOW the largest legitimate on-loop operation the
+#: repository records (a graph read is 10 s at the socket, 60 s at the operator
+#: maximum), because the artifact's job is to catch the thing that is *becoming*
+#: stale: waiting for 10 s of acknowledged-legitimate work before capturing would
+#: miss every wedge whose first frames are the interesting ones. The cost of that
+#: choice is stated where it can be acted on: a slow-but-legitimate on-loop call
+#: produces one capture per episode in the record, so an operator reading
+#: `/data/loop-blocks.jsonl` must check `loop_age_s` — a `loop_age_s` near 2-10 s
+#: is a slow call, a `loop_age_s` in the tens of seconds or more is a block.
+#: Episodes are 10x-escalated (2s -> 20s -> 200s), so a long wedge yields a
+#: handful of captures, not one per poll.
+LOOP_BLOCK_SAMPLE_AFTER_S = 5.0
 #: Poll period of the sampler. Half a second bounds the sampling error well
 #: below the threshold while costing nothing (one monotonic read).
 LOOP_BLOCK_POLL_INTERVAL_S = 0.5
@@ -4976,7 +5029,13 @@ def record_loop_block(*, age_s: float, frames=None, thread_ident=None) -> dict:
         "loop_age_s": round(float(age_s), 3),
         "loop_ticks": heartbeat_read()[1],
         "workload_in_flight": workload_in_flight(),
-        "loop_thread": threading.current_thread().name if frames is None else None,
+        # The IDENT is the fact (the sampler passes the loop thread's); the NAME
+        # is resolved from it so the artifact never records the SAMPLER's name as
+        # the loop thread — the one line an operator reads to confirm the capture
+        # is of the loop.
+        "loop_thread_ident": ident,
+        "loop_thread": next(
+            (t.name for t in threading.enumerate() if t.ident == ident), None),
         "frames": rendered,
     }
     with _LOOP_BLOCK_LOCK:
@@ -5486,11 +5545,26 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         #
         # `workload_idle` stays in the payload as the DIAGNOSTIC it always was;
         # it just no longer vetoes the verdict.
-        idle = workload_is_idle()
-        plane = dataplane_verdict()
-        recent = wait_bound_breach_window()
-        served = served_progress()
-        recent_total = recent.get("total")
+        # ⛔ EVERY read below is inside ONE guard, and a failure answers 503
+        # rather than escaping: this listener's whole contract is that it always
+        # answers (#2850), and an exception raised between ``info`` and ``_send``
+        # produces no HTTP response at all — a liveness signal that goes DARK.
+        # Fail-CLOSED on a broken read, because a verdict nobody can compute is
+        # not evidence of health (#4034).
+        try:
+            idle = workload_is_idle()
+            plane = dataplane_verdict()
+            recent = wait_bound_breach_window()
+            served = served_progress()
+            episodes = loop_block_report()["episodes"]
+            recent_total = recent.get("total")
+            recent_refusing = recent.get("refusing")
+        except Exception as exc:  # noqa: BLE001 - answer, never vanish
+            self._send(503, {"status": "unhealthy",
+                             "reasons": ["verdict-unreadable"],
+                             "error": f"{type(exc).__name__}: {exc}"[:200],
+                             **info})
+            return
         # A recent breach is a request the product REFUSED moments ago; the
         # verdict's own contract is "the door is refusing", so it fails here.
         # ``None`` (an unreadable window) is NOT folded in: it is reported, and
@@ -5498,7 +5572,13 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         # unmeasurable diagnostic in would make the check red for its own
         # blindness rather than the app's state, and an operator cannot act on
         # that.
-        refusing = bool(recent_total)
+        if recent_refusing is None:
+            # total: None (an unreadable window) is NOT "no refusals" — the
+            # #3253 rule. On the liveness verdict that direction is fail-closed:
+            # a channel the instrument cannot read is not evidence of health.
+            refusing = True
+        else:
+            refusing = bool(recent_refusing)
         plane_failed = plane.get("state") == "failed"
         # ── THE WEDGE TERM (and the #10892 decision it must respect) ────────
         # #10892 recorded, as an OVERRIDES decision, that a liveness answer must
@@ -5534,7 +5614,11 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         failing = bool(wedged or plane_failed or refusing)
         reasons = []
         if wedged:
-            reasons.append("loop-not-serving")
+            # distinct labels, because the evidence is distinct: with a served
+            # reader we saw a missing SERVE, without one we only saw a missing
+            # tick (#2850's original contract).
+            reasons.append("loop-not-serving" if served.get("registered") is True
+                           else "loop-stale")
         if plane_failed:
             reasons.append("data-plane-failed")
         if refusing:
@@ -5544,7 +5628,7 @@ class _HealthzHandler(BaseHTTPRequestHandler):
                               else "stale" if wedged else "unhealthy"),
                     "reasons": reasons,
                     "workload_idle": idle,
-                    "loop_block_episodes": loop_block_report()["episodes"],
+                    "loop_block_episodes": episodes,
                     "dataplane": plane,
                     "served": served,
                     "recent_breaches": recent,

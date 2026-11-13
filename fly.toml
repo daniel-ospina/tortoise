@@ -154,12 +154,19 @@ kill_timeout = 30
 # passing`). It now fails on ANY of three terms (tortoise/monitoring.py):
 #   (a) `loop-not-serving`  — the heartbeat is stale AND work is waiting AND the
 #       app has not SERVED a request inside the staleness window (the served
-#       counter is #10892's instrument, read from `GET /liveness`);
+#       counter is #10892's instrument, read from `GET /liveness`). On a lane
+#       that registers no served counter the reason is `loop-stale`: the tick is
+#       then all the evidence there is (#2850's original contract);
 #   (b) `data-plane-failed` — the DB probe's last result is FRESH and not ok, or
 #       is too OLD to vouch for anything (the refresher runs on the loop, so a
-#       wedge produces this within the probe's 30 s stale window);
-#   (c) `requests-refused` — the transport wait bound refused a request inside
-#       the last 120 s (`TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S`).
+#       wedge produces this within the probe's 30 s stale window), or it has
+#       never produced a result at all past that window;
+#   (c) `requests-refused` — the transport wait bound refused at least
+#       `TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES` (10) requests inside the last
+#       120 s (`TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S`). A THRESHOLD, not "any
+#       breach": the bound is breached BY DESIGN for slow-but-legitimate calls
+#       (~2.1% of them), so a single one is the product working — a red on it
+#       would fail every deploy.
 # `workload_idle` and `loop_stale` stay in the payload as DIAGNOSTICS. A red here
 # is what a wedged or refusing deployment is supposed to look like.
 #

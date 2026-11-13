@@ -64,14 +64,33 @@ def _get(port: int) -> tuple[int, dict]:
         return e.code, json.loads(e.read())
 
 
+_APPS: list = []
+
+
 def _start(app) -> None:
     """Run the app's REAL liveness startup on a throwaway loop."""
+    _APPS.append(app)
 
     async def _boot():
         hosted_api._start_liveness(app)
         await asyncio.sleep(0)
 
     asyncio.run(_boot())
+
+
+@pytest.fixture(autouse=True)
+def _stop_lifespans():
+    """Stop what `_start_liveness` armed — a leaked sampler would poll forever.
+
+    #12477 review P2: these tests run the REAL startup once per test, so without
+    the matching shutdown every test leaks a sampler thread that keeps
+    incrementing the process-global episode counters `test_monitoring.py` asserts
+    exact values on. Green-by-ordering-luck is not green.
+    """
+    yield
+    for app in _APPS:
+        asyncio.run(hosted_api._stop_liveness(app))
+    _APPS.clear()
 
 
 def test_start_liveness_registers_both_readers():
@@ -184,29 +203,37 @@ def test_the_served_reader_reports_the_liveness_counter():
     assert progress["last_served_age_s"] == pytest.approx(2.0, abs=0.5)
 
 
-def test_health_degrades_on_a_recent_refusal_and_says_why():
-    """The reading that was missing on 2026-11-13 (#12477).
+def test_health_reports_the_refusal_window_without_touching_status():
+    """The reading that was missing on 2026-11-13 (#12477), on its own key.
 
-    `wait_bound_breaches.total` reached 18 with the REST lane refusing requests
-    while `/health` answered `status: "ok"`. A WINDOW is what makes the counter
-    usable as a verdict; the cumulative total still never folds in
-    (#10185/#10620's forever-red).
+    `wait_bound_breaches.total` reached 18 while `/health` answered
+    `status: "ok"` — the fact was unreadable. It is now readable as `refusals`,
+    and `status` is NOT derived from it: `#10185`/`#10620` recorded that a
+    refusal counter must never pin a deployment degraded, and the pinned test
+    `test_10602_wait_bound_breach_visible` asserts `status: "ok"` with breaches
+    present. The verdict lives on the liveness listener, which is allowed to say
+    "not now" where `/health` is not.
     """
-    monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_REST)
+    for _ in range(monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES):
+        monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_REST)
     body = asyncio.run(hosted_api.health())
-    window = body["wait_bound_breaches"]["recent"]
-    assert window["total"] >= 1
-    assert window["by_surface"]["rest"] >= 1
-    assert body["degraded_reasons"]["requests_refused_recently"] >= 1
+    refusals = body["refusals"]
+    assert refusals["total"] >= monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES
+    assert refusals["by_surface"]["rest"] >= 1
+    assert refusals["refusing"] is True
+    # Its OWN key: `degraded_reasons` belongs to `record` (a documented
+    # six-value vocabulary), and two schemas under one name is how a consumer
+    # reads the wrong one.
+    assert "degraded_reasons" not in body
     assert "loop_blocks" in body, (
         "/health must carry the wedge evidence channel (#12477)")
 
 
-def test_a_historical_breach_does_not_degrade_the_health_status():
-    """The negative control for the test above (#10185's forever-red rule)."""
+def test_a_historical_breach_does_not_appear_in_the_window():
+    """The negative control: the window is a WINDOW (#10185's forever-red)."""
     monitoring.record_wait_bound_breach_recent(
         monitoring.WAIT_BOUND_SURFACE_REST,
         at=time.monotonic() - (monitoring.WAIT_BOUND_HEALTH_WINDOW_S + 30))
     body = asyncio.run(hosted_api.health())
-    assert body["wait_bound_breaches"]["recent"]["total"] == 0
-    assert "requests_refused_recently" not in (body.get("degraded_reasons") or {})
+    assert body["refusals"]["total"] == 0
+    assert body["refusals"]["refusing"] is False

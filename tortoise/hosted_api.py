@@ -2058,10 +2058,22 @@ def _liveness_dataplane_verdict() -> dict:
                 "error": f"{type(exc).__name__}: {exc}"[:200]}
     age = meta.get("result_age_s")
     in_flight = bool(meta.get("in_flight"))
+    in_flight_s = meta.get("in_flight_s")
     if age is None:
+        # "no result YET" is honest for a few seconds after boot and a FAILURE
+        # forever after: a probe that never completes must not leave the check
+        # green indefinitely (the `in_flight`-true-forever fail-open). The bound
+        # is the same stale window the fresh-result path uses.
+        if in_flight and in_flight_s is not None and \
+                float(in_flight_s) > _health_probe_stale_after_s():
+            return {"state": "failed",
+                    "detail": {"reason": "probe-never-produced-a-result",
+                               "in_flight_s": in_flight_s},
+                    "error": None}
         return {"state": "unknown",
                 "detail": {"reason": "no-probe-result-yet",
-                           "in_flight": in_flight}, "error": None}
+                           "in_flight": in_flight,
+                           "in_flight_s": in_flight_s}, "error": None}
     if age > _health_probe_stale_after_s():
         return {"state": "failed",
                 "detail": {"reason": "probe-result-stale",
@@ -2624,6 +2636,14 @@ def _start_liveness(app) -> None:
     prev_stop = getattr(app.state, "_loop_watchdog_stop", None)
     if prev_stop is not None:
         prev_stop.set()
+    # #12477 review: the loop-block sampler is disarmed the same way. Without
+    # this the attribute is overwritten and the OLD sampler polls forever — two
+    # samplers after one in-process restart, so every wedge is captured twice
+    # (duplicate episodes, duplicate log lines, duplicate record appends) plus a
+    # leaked daemon thread per restart.
+    prev_block_stop = getattr(app.state, "_loop_block_sampler_stop", None)
+    if prev_block_stop is not None:
+        prev_block_stop.set()
     for attr in _LIVENESS_TASK_ATTRS:
         prev = getattr(app.state, attr, None)
         if prev is not None:
@@ -7282,18 +7302,28 @@ async def health():
     # `status: "ok"` and the platform reported `2/2 checks passing` over 30-45s
     # timeouts on every data request. That is the whole defect: green while the
     # data plane is unusable.
-    recent = (breaches or {}).get("recent") or {}
-    recent_total = recent.get("total")
-    refusing = bool(recent_total) if recent_total is not None else False
+    # ⚠️ `status` IS NOT DERIVED FROM THIS. `#10185`/`#10620` recorded that a
+    # refusal counter must never pin the deployment degraded, and a pre-existing
+    # test pins `status: "ok"` with breaches present
+    # (`test_10602_wait_bound_breach_visible`). #12477 reports the WINDOW
+    # (a separate, additive block) and leaves the verdict where the decision put
+    # it — the liveness listener is where a refusal becomes a verdict, because a
+    # deploy gate is allowed to say "not now" while `/health` is not.
+    try:
+        refusals = _monitoring.wait_bound_breach_window()
+    except Exception as exc:  # a monitoring read must never 5xx
+        refusals = {"error": f"unreadable: {type(exc).__name__}", "refusing": None}
     try:
         loop_blocks = loop_block_report()
     except Exception:  # a monitoring read must never 5xx
         loop_blocks = None
-    return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"]
-                              and not refusing)
+    return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"])
             else "degraded",
-            "degraded_reasons": ({"requests_refused_recently": recent_total}
-                                 if refusing else {}),
+            # ⛔ Its OWN key, not `degraded_reasons` — that name is taken by
+            # `record.degraded_reasons` (a documented six-value vocabulary,
+            # `docs/infra-runbook.md`, pinned by `test_record_searchkeys_10620`).
+            # Two schemas under one name is how a consumer reads the wrong one.
+            "refusals": refusals,
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
             # #12477: the loop-block EVIDENCE (in-memory episodes + the last
             # captured stack, loaded from the persisted record at boot when the

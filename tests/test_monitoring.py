@@ -3136,7 +3136,9 @@ class TestHealthzListener:
         assert payload["status"] == "stale"
         assert payload["loop_stale"] is True
         assert payload["workload_idle"] is False
-        assert "loop-not-serving" in payload["reasons"]
+        # no served-progress reader is registered in this test, so the evidence
+        # is the missing TICK and the reason says exactly that
+        assert payload["reasons"] == ["loop-stale"]
 
     def test_a_registered_served_counter_joins_the_tick_in_the_wedge_verdict(self):
         """#10892's decision, applied to THIS check: a tick is not a SERVE.
@@ -3299,7 +3301,9 @@ class TestHealthzListener:
         """
         server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
         monitoring.heartbeat_record()
-        monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_REST)
+        for _ in range(monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES):
+            monitoring.record_wait_bound_breach(
+                monitoring.WAIT_BOUND_SURFACE_REST)
         try:
             status, body = _http_get(server.server_address[1])
         finally:
@@ -3307,8 +3311,27 @@ class TestHealthzListener:
         assert status == 503, body
         payload = json.loads(body)
         assert "requests-refused" in payload["reasons"]
-        assert payload["recent_breaches"]["total"] == 1
-        assert payload["recent_breaches"]["by_surface"] == {"mcp": 0, "rest": 1}
+        assert payload["recent_breaches"]["total"] >= (
+            monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES)
+        assert payload["recent_breaches"]["by_surface"]["rest"] >= (
+            monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES)
+
+    def test_one_designed_long_call_refusal_does_not_fail_the_check(self):
+        """The opposite failure: a red on every legitimate slow call.
+
+        The transport bound is breached BY DESIGN for slow-but-legitimate calls
+        (~2.1% of them, p99 22 s against a 10 s bound), so `any breach -> 503`
+        would fail every deploy. The threshold is what distinguishes the two.
+        """
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_MCP)
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.reset_wait_bound_breach_window()
+        assert status == 200, body
+        assert json.loads(body)["recent_breaches"]["refusing"] is False
 
     def test_a_breach_outside_the_window_does_not_fail_the_check(self):
         """The window is a WINDOW: an old breach must not pin the check red.
@@ -3330,6 +3353,7 @@ class TestHealthzListener:
         payload = json.loads(body)
         assert payload["recent_breaches"]["total"] == 0
         assert payload["recent_breaches"]["enabled"] is True
+        assert payload["recent_breaches"]["refusing"] is False
 
     def test_unknown_path_is_404(self):
         server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
@@ -5303,6 +5327,7 @@ class TestWaitBoundBreachWindow:
         window = monitoring.wait_bound_breach_window()
         assert window["total"] == 2
         assert window["by_surface"] == {"mcp": 1, "rest": 1}
+        assert window["refusing"] is False, "one or two breaches is a long call"
         assert window["last_breach_age_s"] is not None
         assert window["error"] is None
 
@@ -5311,13 +5336,32 @@ class TestWaitBoundBreachWindow:
         assert window["enabled"] is False
         assert window["total"] == 0
 
-    def test_the_cumulative_counter_keeps_its_meaning(self):
-        """Additive, not a rewrite: `total` still counts the process lifetime."""
+    def test_the_cumulative_counter_keeps_its_meaning_and_its_shape(self):
+        """#12477 review P0: the counter's SHAPE is a pinned contract.
+
+        ``test_10602_wait_bound_breach_visible`` asserts the exact key set of
+        this channel, and ``monitoring.metrics()`` republishes it on `/metrics`.
+        The windowed read is therefore a SEPARATE resolver, not an extra key
+        here — a shape that drifts under an unrelated reader is how a metric
+        contract breaks without anyone changing the metric.
+        """
         monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_REST)
         counts = monitoring.wait_bound_breach_counts()
+        assert set(counts) == {"total", "by_surface", "error"}
         assert counts["total"] >= 1
         assert counts["by_surface"]["rest"] >= 1
-        assert counts["recent"]["total"] >= 1
+        assert monitoring.wait_bound_breach_window()["total"] >= 1
+
+    def test_a_stream_of_refusals_is_the_verdict_and_one_is_not(self):
+        """A designed long call is not a red; a STREAM of refusals is."""
+        for _ in range(monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES - 1):
+            monitoring.record_wait_bound_breach(
+                monitoring.WAIT_BOUND_SURFACE_MCP)
+        assert monitoring.wait_bound_breach_window()["refusing"] is False
+        monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_MCP)
+        window = monitoring.wait_bound_breach_window()
+        assert window["refusing"] is True
+        assert window["total"] >= monitoring.WAIT_BOUND_HEALTH_MIN_BREACHES
 
     def test_a_malformed_window_falls_back_to_the_default(self, monkeypatch):
         monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S", "not-a-number")

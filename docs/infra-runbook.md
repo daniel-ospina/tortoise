@@ -1778,7 +1778,7 @@ The check now fails on any of three terms, each an in-memory read:
 |---|---|---|
 | `loop-not-serving` | heartbeat stale **and** work waiting **and** nothing SERVED for `LOOP_STALE_AFTER` (90 s) | the tick alone is not the verdict — #10892's served-request counter (`GET /liveness`) joins it, so a busy loop that is still serving stays green |
 | `data-plane-failed` | the DB probe's last result is fresh and not ok, **or** too old to vouch for anything (30 s window) | the refresher task runs on the loop, so a wedge stops it refreshing — and the check reads it with `peek()`, never `snapshot()`, so the check cannot refresh its own evidence |
-| `requests-refused` | a wait-bound breach inside the last 120 s (`TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S`) | a refusal is the door failing RIGHT NOW; the cumulative total still never folds into a verdict (#10185/#10620) |
+| `requests-refused` | **≥ 10** wait-bound refusals inside the last 120 s (`TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S`, `TORTOISE_WAIT_BOUND_HEALTH_MIN_BREACHES`) | a STREAM of refusals is the door failing RIGHT NOW; ONE is the designed answer to a slow call (~2.1% of calls exceed the bound by design), so a threshold separates them. The cumulative total still never folds into a verdict (#10185/#10620), and `/health` reports the window as `refusals` without touching `status` |
 
 What it deliberately does **not** do: it is still a **top-level** check, so Fly's
 proxy ignores it for routing and a red cannot de-register the machine — it fails
@@ -1791,17 +1791,33 @@ vs "is the product serving"), and the OVERRIDES above is about the latter.
 **The wedge now leaves an artifact.** The same stall that used to end in an
 `os._exit` with no evidence — measured 2026-11-13, nothing was readable after
 the restart — is now captured: a sampler thread takes the LOOP THREAD's Python
-stack as soon as the heartbeat is 2 s stale (`TORTOISE_LOOP_BLOCK_SAMPLE_AFTER_S`),
+stack as soon as the heartbeat is 5 s stale (`TORTOISE_LOOP_BLOCK_SAMPLE_AFTER_S`),
+⚠️ **a capture is a CANDIDATE, not a verdict** — the threshold is deliberately
+below the largest *legitimate* on-loop operation (a 10 s socket read), so read
+the age beside it: `loop_age_s` of 2–10 s is a slow call, tens of seconds or more
+is a block. Episodes escalate 10× (5 s → 50 s → 500 s), so a long wedge yields a
+handful of captures rather than one per poll.
 reports the last one on `GET /health` under `loop_blocks`, and appends it to
 `/data/loop-blocks.jsonl` (beside the journal, bounded to 200 lines / 512 KB)
 where it SURVIVES the restart. Read it after any wedge before restarting again:
 
 ```bash
-curl -s https://api.premiselabs.co/health | jq '.loop_blocks'
+curl -s https://api.premiselabs.co/health | jq '.loop_blocks, .refusals'
 # {"episodes": 1, "max_age_s": 612.4, "last": {"at": "…",
-#   "loop_age_s": 612.4, "frames": ["hosted_api.py:… in …", …]},
+#   "loop_age_s": 612.4, "loop_thread": "MainThread",
+#   "frames": ["hosted_api.py:… in …", …]},
 #  "persist_path": "/data/loop-blocks.jsonl", "enabled": true}
+# {"window_s": 120.0, "total": 70, "by_surface": {"mcp": 14, "rest": 56},
+#  "min_breaches": 10, "refusing": true, …}
 ```
+
+⚠️ **Residual, stated not implied (#12477 review).** The `data-plane-failed` term
+is `probe_db`'s `RETURN 1` against the SDK's **default** projection, not the
+tenant graph a request would touch. So a deployment whose *tenant* graph is
+unusable while the default one answers (or a keyword-only boot, `#2985`) still
+reports `db.ok: true` and this term stays green. The class this closes is the
+one measured on 2026-11-13 — refusals and timeouts — not every possible
+"serving but wrong" shape.
 
 ⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
 `control_ok()` runs only on the restartable path — the restart decision's own
