@@ -946,8 +946,9 @@ def latest_readings(
     boundary included), plus ``M`` for the ordering — ``M`` being the readings
     that SURVIVE ``since``, because the filter runs BEFORE the sort — so a
     ``judge()`` pass that declares a definition boundary parses ``2N + M``: ``3N``
-    at most, never exactly ``3N`` (measured: 5 readings parse 15 times at a
-    boundary that drops none, 14 at one that drops one). Measured pin: 5
+    at most, and EXACTLY ``3N`` when the boundary drops nothing, which is the
+    ordinary case (measured: 5 readings parse 15 times at a boundary that drops
+    none, 14 at one that drops one). Measured pin: 5
     readings at a page size of 2 take 3 page queries. That is the price of a
     correct order (:data:`_READINGS_PAGE_SIZE`); it is not a per-call constant.
 

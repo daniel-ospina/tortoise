@@ -466,8 +466,13 @@ def test_since_excludes_by_instant_on_the_correctly_ordered_list(sdk):
     ⚠️ This is a REGRESSION pin, not a defect proof: it PASSES on the pre-fix
     code too (two rows fit any page, and `since` filtering is order-independent),
     so it cannot testify that the ordering was fixed. What it pins is that the
-    fix did not change the boundary's meaning — equality still admits, an
-    incomparable boundary still excludes everything (its sibling below).
+    fix did not change the boundary's meaning for an INTERIOR boundary — no
+    reading here sits exactly on it.
+
+    The two boundary EDGES are pinned in ``tests/test_11926_derived_invalidation.py``
+    (not in this file): equality still admits
+    (``tests/test_11926_derived_invalidation.py:804``) and an
+    incomparable boundary excludes everything (``since="not-an-instant"`` → ``[]``).
     """
     indicator = _indicator(sdk, "since")
     _reading(sdk, indicator, 12.0, at="2026-11-12T01:00:00-05:00")  # 06:00Z
