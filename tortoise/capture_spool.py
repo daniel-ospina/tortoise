@@ -1420,24 +1420,28 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
             if not repair:
                 continue
             stem = path.name[: -len(".meta.json")]
-            discards.append(record_discard(root, {
+            discards.append(_record_refusal(root, {
                 "session_id": f"unreadable:{stem}",
                 "reason": DISCARD_META_UNREADABLE,
                 # RETAINED: the meta AND the turn log stay on disk, unquarantined
                 # and un-unlinked, so the next drain retries. Never a loss — a
                 # read refusal is reversible (fix the permission, or run as the
-                # uid that owns the file), and an `.orphan` is unreachable to
-                # every surface and reaped FIRST at the byte ceiling, so
-                # quarantining here would be a delayed delete, not a preservation.
+                # uid that owns the file), and the entry keeps its ONLY copy of
+                # the session id and the retry state.
                 "retained": True,
                 "detail": (f"cannot read {path}: {exc} — left in place and retryable;"
                            " the bytes were never seen, so this is NOT a corrupt entry"),
             }))
             continue
-        except UnicodeDecodeError:
+        except UnicodeDecodeError as exc:
             # The bytes were read in full; they are just not UTF-8. That is a
-            # property of the CONTENT, so it takes the corrupt path below.
+            # property of the CONTENT, so it takes the corrupt path below — but
+            # the detail must SAY that, not claim a JSON failure `json.loads`
+            # never reached (the same false-reason class #11802 is about).
             raw = None
+            decode_error: str | None = str(exc)
+        else:
+            decode_error = None
         meta = None
         if raw is not None:
             try:
@@ -1453,7 +1457,9 @@ def list_spool_metas(root: Path, *, repair: bool = True) -> tuple[list[dict], li
                 "session_id": f"unreadable:{stem}",
                 "reason": DISCARD_CORRUPT,
                 "detail": ("meta has no usable session_id" if meta is not None
-                           else "meta is not valid JSON") + f": {path}",
+                           else (f"meta is not valid UTF-8: {decode_error}"
+                                 if decode_error is not None
+                                 else "meta is not valid JSON")) + f": {path}",
             }))
             # The corrupt META is removed (the ledger line is its evidence), but
             # the turn log is QUARANTINED, not deleted (#7708): the transcript

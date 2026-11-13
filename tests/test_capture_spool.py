@@ -2328,7 +2328,38 @@ def test_a_non_utf8_meta_is_corrupt_not_unreadable(tmp_path):
     metas, discards = list_spool_metas(tmp_path)
     assert metas == []
     assert discards[0]["reason"] == "corrupt_entry"
+    # …and the REASON must name the real failure. Claiming "not valid JSON" for
+    # bytes `json.loads` never saw is the same false-reason class #11802 is
+    # about, one arm over.
+    assert "not valid UTF-8" in discards[0]["detail"]
+    assert "not valid JSON" not in discards[0]["detail"]
     assert not (entries / "latin.meta.json").exists()
+
+
+def test_a_repeatedly_unreadable_meta_records_ONCE_not_once_per_turn(tmp_path):
+    """The repairing scan runs on the per-TURN write path as well as every
+    drain, and the entry never becomes readable — so an unconditional record
+    appends one ledger line per turn, forever, into a file that lives in the
+    spool root and is counted against no ceiling (#4714's amplification class).
+
+    MUTATION THAT REDS THIS: use `record_discard` instead of `record_refusal` →
+    the count grows with the number of scans.
+    """
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True)
+    meta_path = entries / "locked.meta.json"
+    meta_path.write_text(json.dumps({"version": 1, "session_id": "s"}), encoding="utf-8")
+    meta_path.chmod(0o000)
+    try:
+        from tortoise.capture_spool import list_spool_metas, read_discards
+        for _ in range(5):
+            list_spool_metas(tmp_path)
+        lines = read_discards(tmp_path)
+        assert len(lines) == 1, f"one event, not one per scan — got {len(lines)}"
+        assert lines[0]["reason"] == "meta_unreadable"
+    finally:
+        if meta_path.exists():
+            meta_path.chmod(0o600)
 
 
 def test_a_spool_directory_that_cannot_be_created_is_discarded_with_a_reason(tmp_path):

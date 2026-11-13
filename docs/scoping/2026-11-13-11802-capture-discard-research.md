@@ -62,17 +62,29 @@ The repo already states this consequence about the same file, in its own words
 
 And `docs/architecture/PI-CAPTURE-ARCHITECTURE.md:160` says the same from the reaper's side: a
 quarantined `.turns.jsonl.orphan` is **"unreachable to every surface"** and is therefore **reaped
-ahead of both delivery classes**. Confirmed in code — `tortoise/capture_spool.py:26-33` allows an
-`.orphan` to be reclaimed because it is "unreachable to every surface", and
-`tortoise/capture_spool.py:2177-2188` spends an orphan's bytes **first**, before any undelivered
-entry, because "an orphan's delivered-ness is unknowable".
+ahead of both delivery classes**.
+
+> ⚠️ **CORRECTION (2026-11-13, review cycle 1).** The eviction ORDER below was first written inverted.
+> `capture_spool.py:2238` states the truth: *"A quarantined log goes LAST of the evictable classes,
+> not first: a FILED entry's content is already on the wire, so reclaiming it is a CERTAIN zero-cost
+> choice, while an orphan's delivered-ness is unknowable"* — and the code agrees (filed pass, then the
+> orphan pass, then unfiled entries which are never evicted). So an orphan is spent **second, not
+> first**; `PI-CAPTURE-ARCHITECTURE.md:160`'s "ahead of both classes" is the imprecise one, and it was
+> repeated here. **The argument is unaffected in substance and is restated correctly below:** the orphan
+> is still reachable by the ceiling and still permanently unfilable, which is what makes quarantine a
+> delayed delete. The order only changes *how long* the delay is.
+
+Confirmed in code: `tortoise/capture_spool.py:26-33` allows an `.orphan` to be reclaimed because it is
+"unreachable to every surface", and the orphan pass sits between the filed-entry pass and the unfiled
+entries (`capture_spool.py:2250-2265`), because "an orphan's delivered-ness is unknowable" while a
+filed entry's reclaim is certain.
 
 **Therefore the current behaviour is not "preserve the transcript for forensics". It is a delayed
-delete**: quarantine strips the transcript of the only key that can re-address it, and the cap then
-reclaims orphan bytes before anything else. An entry whose meta was merely *unreadable at that
-instant* is destroyed on a path that can never retry, and the transcript that "survived" is on a
-path that is reaped first. That is why "never destroy what you could not read" is a durability
-requirement and not politeness.
+delete**: quarantine strips the transcript of the only key that can re-address it, and the cap
+reclaims orphan bytes as soon as the filed entries are exhausted. An entry whose meta was merely
+*unreadable at that instant* is destroyed on a path that can never retry, and the transcript that
+"survived" is on a path that the ceiling will reach and that no surface can file. That is why "never
+destroy what you could not read" is a durability requirement and not politeness.
 
 ---
 
@@ -297,7 +309,7 @@ Checked against every recorded decision that reaches this work:
 
 | Decision | Reached by this fix? | Verdict |
 |---|---|---|
-| **#10175** — owner ruling 2026-10-27: the hosted capture cap is **HELD deliberately**; refusal is correct until the new extractor/storage architecture lands; carries an `OVERRIDES:` line. Must not touch the cap, prune the graph, or file the refusal as a defect. | **No.** The fix changes no ceiling (`SPOOL_MAX_ENTRIES`/`SPOOL_MAX_TOTAL_BYTES`/`MAX_ENTRY_BYTES` untouched), adds no eviction, prunes nothing. | **Not contradicted — and it is the same ruling.** A cap that REFUSES writes and KEEPS the backlog is exactly what #10175 holds; keeping an unreadable entry is *more* consistent with it than destroying one. One consequence is stated rather than hidden: an unreadable entry now continues to occupy a count/byte slot, so a spool full of them can reach saturation and refuse new writes. That is the held-cap behaviour working as ruled (refuse, don't destroy), and the health line already counts unreadable metas as pending (`:3317-3320`), so nothing new becomes invisible. |
+| **#10175** — owner ruling 2026-10-27: the hosted capture cap is **HELD deliberately**; refusal is correct until the new extractor/storage architecture lands; carries an `OVERRIDES:` line. Must not touch the cap, prune the graph, or file the refusal as a defect. | **No.** The fix changes no ceiling (`SPOOL_MAX_ENTRIES`/`SPOOL_MAX_TOTAL_BYTES`/`MAX_ENTRY_BYTES` untouched), adds no eviction, prunes nothing. | **Not contradicted — and it is the same ruling.** A cap that REFUSES writes and KEEPS the backlog is exactly what #10175 holds; keeping an unreadable entry is *more* consistent with it than destroying one. **⚠️ CORRECTION (review cycle 1): the first version of this row claimed a retained unreadable entry "continues to occupy a count/byte slot". That is FALSE and was measured false.** Both legs compute count and bytes from PARSED metas (`capture_spool.py:2247`, `tortoise-capture.ts` `pruneSpool`/`spoolSaturated`), so an unparsed meta and its live `.turns.jsonl` are counted by NEITHER the meta sum NOR `_orphan_paths` — a spool holding one unreadable entry measured 5,422 bytes on disk while `spool_saturated(…, max_total_bytes=1000)` returned `False`. This is a REAL residual of the retained path and is declared in §7; it is not fixed here because grading those bytes against the ceiling would change effective cap semantics, which #10175 holds. Filed separately. |
 | **#10977 comment `6781757043`** (2026-11-10) — one-belief-kind: a claim is a `:Point` with `pointKind: statement`; Object/Event/Subject/Source are different nodes on different layers, never a kind of claim; `decision` is an Event. | **No.** This fix writes no graph node and adds no kind. It reads the ontology only to locate what the spool entry *is*. §1 above obeys the ruling (a session is an `:Event` + `:Source`, not a claim). | **Not contradicted.** |
 
 No `OVERRIDES:` line is added by this lane, because nothing here departs from a default
@@ -336,9 +348,53 @@ Alternatives considered and **rejected**, with the reason:
 
 **Stated residual:** the fix makes the *consumer* honest. It does not make the two uids able to read
 each other's files — until agent-infra#3921 lands, a foreign-uid entry will now **accumulate** rather
-than be destroyed, and the spool can saturate. Saturation refuses writes and records the refusal
-(held cap, #10175); it does not delete. That is the trade this fix deliberately makes: **a visible,
-reversible backlog instead of silent, irreversible loss.**
+than be destroyed. That is the trade this fix deliberately makes: **a visible, reversible backlog
+instead of silent, irreversible loss.**
+
+---
+
+## 7 · Residuals found by review cycle 1 — declared, not absorbed
+
+A fresh-context reviewer broke three claims in the first version of the change and of this document.
+Findings 2 and 3 were **fixed** in the change; findings 1 and 4 are **declared here** because fixing
+them would cross the lane's stated boundary.
+
+**(1) A retained unreadable entry is NOT counted by either ceiling — measured, and the first version
+of §5 said the opposite.** Both legs compute count and bytes from **parsed** metas
+(`tortoise/capture_spool.py:2247`; `prune_spool` → `metas, _ = list_spool_metas(root)`; the TS
+equivalent in `pruneSpool`/`spoolSaturated`). A retained unreadable entry is unparsed, so its meta is
+in neither `len(metas)` nor the byte sum, and its turn log keeps its `.turns.jsonl` name so
+`_orphan_paths` does not see it either. **Measured on this worktree:** `entries/` held **5,422 bytes**
+and `spool_saturated(root, Bounds(max_total_bytes=1000))` returned **`False`** — writes keep being
+admitted past the ceiling with no refusal and no `capture: SATURATED`. Before the change this was
+bounded only because the entry was *destroyed*; the retained path trades that for uncounted growth.
+
+**Why it is not fixed here:** grading those bytes against the ceiling changes effective cap semantics,
+which **#10175 explicitly holds** and the lane brief forbids touching. Per the contradiction test, a
+design that reverses a held decision is **not adopted** — it is reopened in the decision's own home.
+So this is declared and filed, not silently shipped. Bounded in practice by `SPOOL_MAX_ENTRY_BYTES`
+per entry, and fully relieved the moment the permission mismatch is repaired (the entries become
+parsable and re-enter the accounting).
+
+**(4) The two legs disagree destructively on non-UTF-8 metas — pre-existing, not introduced here.**
+Python's decoder raises `UnicodeDecodeError` (→ `corrupt_entry`, entry destroyed); Node's
+`readFileSync(…, "utf8")` never throws and substitutes `U+FFFD`, so `JSON.parse` returns a *usable*
+meta and the Pi leg files it. The two legs drain ONE directory, so which leg touches the file first
+decides whether the entry is filed or deleted. **This divergence predates the change** — it is not
+introduced by the read/parse split — but the first version of the change *documented the function as a
+faithful mirror*, which is false on this axis; the comment now names the divergence explicitly. Filed
+separately rather than widened here.
+
+**Fixed in review cycle 1 (recorded so the correction is not later re-litigated):**
+
+- **(2) Unbounded ledger growth.** The first version recorded the read refusal with an unconditional
+  `recordDiscard`/`record_discard`. Because the repairing scan also runs on the **per-turn** write
+  path and the entry never becomes readable, that appends one line **per turn** into an uncapped
+  `discarded.jsonl` in the spool root — the exact amplification class `_record_refusal`/`recordRefusal`
+  exists to prevent (`capture_spool.py:1025-1041`). Both legs now use the refusal recorder, keyed on
+  `(session_id, reason, entries/ stamp)`. Pinned both sides: 5 scans now produce **1** line, and
+  mutating back to the unconditional recorder reds it (`assert 5 == 1` in Python; a TS failure too).
+- **(3) An inverted eviction-order claim.** Corrected in §1 above and in both code comments.
 
 ---
 

@@ -1446,7 +1446,13 @@ export function readSpoolTurns(dir: string, sessionId: string): Turn[] {
  *  `tests/test_capture_spool.py` (Python leg) and `tortoise-capture.test.ts`
  *  (this leg), in BOTH directions.
  *
- *  Mirrors `capture_spool.list_spool_metas`. */
+ *  Mirrors `capture_spool.list_spool_metas` EXCEPT on non-UTF-8 bytes, and the
+ *  exception is stated rather than papered over: Python's decoder raises
+ *  `UnicodeDecodeError` (→ corrupt, entry destroyed) while Node's
+ *  `readFileSync(…, "utf8")` never throws and substitutes U+FFFD (→ a usable
+ *  meta, entry filed). The two legs drain ONE directory, so this is a
+ *  pre-existing divergence, NOT something this change introduced — filed
+ *  separately rather than widened here. */
 export function listSpoolEntries(
   dir: string,
   opts: { repair?: boolean } = {},
@@ -1503,15 +1509,23 @@ export function listSpoolEntries(
       const stem = name.replace(/\.meta\.json$/, "");
       const code = (err as NodeJS.ErrnoException | undefined)?.code;
       discards.push(
-        recordDiscard(dir, {
+        // `recordRefusal`, NOT `recordDiscard`: the repairing scan runs on the
+        // per-TURN write path (`pruneSpool` → here) as well as every drain, and
+        // the entry never becomes readable, so an unconditional record appends
+        // one line per turn for the life of the box. `discarded.jsonl` lives in
+        // the spool root and is counted against no ceiling — unbounded growth in
+        // the very directory the "bounded disk" claim is about, the same
+        // amplification class (#4714) `DISCARD_SPOOL_SATURATED` already guards.
+        // Its key is (session_id, reason, entries/ stamp), so an
+        // indistinguishable repeat of the same entry in an unchanged spool is
+        // ONE event.
+        recordRefusal(dir, {
           session_id: `unreadable:${stem}`,
           reason: DISCARD_META_UNREADABLE,
           // RETAINED: the meta AND the turn log stay on disk, unquarantined and
           // un-unlinked, so the next drain retries. Never a loss — a read
           // refusal is reversible (fix the permission / run as the right uid),
-          // and an orphaned transcript is unreachable to every surface and is
-          // reaped FIRST at the byte ceiling, so quarantining here would be a
-          // delayed delete rather than a preservation.
+          // and the entry keeps its ONLY copy of the session id and retry state.
           retained: true,
           detail:
             `cannot read ${path}: ${err instanceof Error ? err.message : String(err)}` +

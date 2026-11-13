@@ -3538,6 +3538,28 @@ test("a meta that cannot be OPENED for any reason is the same class — EISDIR t
     "a read failure must never remove the entry");
 });
 
+test("a repeatedly unreadable meta records ONCE, not once per turn (#11802)", () => {
+  // The repairing scan runs on the per-TURN write path (`pruneSpool` → here) as
+  // well as every drain, and the entry never becomes readable — so an
+  // unconditional record appends one line per turn, forever, into a file in the
+  // spool root that is counted against no ceiling (#4714's amplification class).
+  //
+  // MUTATION THAT REDS THIS: use `recordDiscard` instead of `recordRefusal`.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const metaPath = join(spool, "entries", "locked.meta.json");
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: "s" }));
+  chmodSync(metaPath, 0o000);
+  try {
+    for (let i = 0; i < 5; i++) listSpoolEntries(spool);
+    const lines = readDiscards(spool);
+    assert.equal(lines.length, 1, `one event, not one per scan — got ${lines.length}`);
+    assert.equal(lines[0].reason, DISCARD_META_UNREADABLE);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+});
+
 test("a corrupt meta still QUARANTINES — the read/parse split did not soften this arm (#11802)", () => {
   // The other direction. A fix that made everything "retryable" would leave a
   // genuinely corrupt meta wedging the drain on every pass forever.
