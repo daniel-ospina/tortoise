@@ -791,6 +791,269 @@ class RunReaperTestCase(unittest.TestCase):
             self.assertIsNone(row["shard_elapsed_s"],
                               "no shard clock was available, so no shard clock may be claimed")
 
+    def test_an_UNCLAIMED_shard_carrying_a_queue_stamp_is_a_CAPACITY_WAIT(self):
+        """#11045 — `started_at` on an UNCLAIMED job is the JOB's queue-entry stamp.
+
+        MEASURED 2026-11-13, run `43433269949` on daniel-ospina/tortoise: the run's
+        `created_at` is `13:23:45Z`, and its queued jobs carried
+        `created_at = started_at = 13:30:58Z` — the JOB's own queue-entry moment,
+        7m13s after the run was created — with `runner_name` empty and `steps: []`.
+        ⛔ NOT "the run's creation time": an earlier draft of this docstring said
+        that and it is FALSE (review A and E each refuted it by measurement). The
+        general rule is measured across 40 non-completed runs: **144 of 144 queued
+        jobs carried `started_at == job.created_at` exactly**, and a claimed job's
+        stamp becomes its claim time (1-2 s before its first step; 12 s on the job
+        that pulled an image).
+
+        So a queued shard that carries a stamp must stay CLOCKLESS. Reading the
+        stamp made the shard look begun: it escaped the `unstarted` guard, the
+        bound became derivable from the green population, and `decide()` compared
+        a 2h queue wait against a 1200 s ceiling and CANCELLED a run whose shard
+        had never been scheduled — the overrun the `(3b)` comment says must never
+        be charged to a shard.
+
+        ⛔ RED-FIRST: against the pre-fix tool this run is `cancel` with
+        `shard_elapsed_s=7200`; the boundary this test pins is the PREDICATE, not
+        a threshold, so no ceiling can make it pass.
+        """
+        mod = _load_tool_module()
+        run = {"id": 111, "status": "in_progress", "run_started_at": iso(NOW - 7200)}
+        green = [[{"name": "test (g)", "status": "completed", "conclusion": "success",
+                   "started_at": iso(NOW - 600), "completed_at": iso(NOW)}]]
+        parked = job("test (g)", None, status="queued", started_s=7200)
+        parked.update({"runner_name": "", "steps": []})
+        row = mod.decide(run, [job("test (a)", 600), parked], green, now=NOW, floor=300)
+        self.assertEqual(row["action"], "skip",
+                         f"a shard nothing has claimed was judged on queue wait: "
+                         f"{row['action']} via {row.get('reason')} "
+                         f"(shard_elapsed_s={row.get('shard_elapsed_s')})")
+        self.assertEqual(row["reason"], mod.REASON_UNDERIVABLE)
+        self.assertIsNone(row["shard_elapsed_s"],
+                          "a queued shard must never supply a work clock")
+
+    def test_a_CLAIMED_shard_keeps_its_own_clock(self):
+        """The inverse pin: the fix must not make the reaper inert.
+
+        A shard a runner has CLAIMED really did start, so its `started_at` is the
+        work clock and an overrun past the green-derived bound still cancels. This
+        is the shape `job_work_start` returns a stamp for, and without it the
+        previous test could be satisfied by returning None unconditionally.
+        """
+        mod = _load_tool_module()
+        run = {"id": 111, "status": "in_progress", "run_started_at": iso(NOW - 7200)}
+        green = [[{"name": "test (g)", "status": "completed", "conclusion": "success",
+                   "started_at": iso(NOW - 600), "completed_at": iso(NOW)}]]
+        running = job("test (g)", None, status="in_progress", started_s=7200)
+        running.update({"runner_name": "pi-runner-x64-1", "steps": []})
+        row = mod.decide(run, [job("test (a)", 600), running], green, now=NOW, floor=300)
+        self.assertEqual(row["action"], "cancel",
+                         f"a claimed shard over its bound must still be reaped: "
+                         f"{row['action']} via {row.get('reason')}")
+        self.assertEqual(row["shard_elapsed_s"], 7200)
+
+    def test_STEPS_refine_a_begun_clock_and_never_establish_one(self):
+        """The `steps` arm is a REFINER, and it is pinned in both directions.
+
+        ⛔ GATE FIRST, REFINE SECOND (review B, F2). Reading `steps` before the
+        begun-gate let a `queued`/unclaimed job return a clock — a requeued job can
+        retain its step list — which escaped the `unstarted` guard and cancelled on
+        a clock containing the queue wait: the exact outcome the test above
+        forbids, and a disagreement with `ci_cancel_guard.job_has_started` (which
+        ignores `steps`) in the destructive direction.
+
+        ⛔ AND THE REFINEMENT MUST STILL HAPPEN (review A, F3): no test carried
+        steps at all, so deleting the arm left the suite green and every begun
+        shard's clock silently became the claim time. A claimed job whose first
+        step is the true start must be judged from that step.
+
+        ⛔ AND THE REFINEMENT IS FLOORED AT THE CLAIM (rev12421 review, F1). A step
+        cannot start before the attempt that ran it was claimed, so a step stamp
+        EARLIER than `started_at` is a previous attempt's residue (the requeue
+        premise the gate above rests on) and must not be charged to this attempt.
+        Both halves are pinned below: (b) reds if the `steps` arm is deleted, (c)
+        reds if the FLOOR is deleted.
+        """
+        mod = _load_tool_module()
+        green = [[{"name": "test (g)", "status": "completed", "conclusion": "success",
+                   "started_at": iso(NOW - 600), "completed_at": iso(NOW)}]]
+
+        # (a) an UNCLAIMED job with steps present is still a capacity wait
+        queued_with_steps = job("test (g)", None, status="queued", started_s=7200)
+        queued_with_steps.update({"runner_name": "",
+                                  "steps": [{"started_at": iso(NOW - 7200)}]})
+        parked_run = {"id": 111, "status": "in_progress", "run_started_at": iso(NOW - 7200)}
+        row = mod.decide(parked_run, [job("test (a)", 600), queued_with_steps], green,
+                         now=NOW, floor=300)
+        self.assertEqual(row["action"], "skip",
+                         "steps must not establish that an unclaimed job began")
+        self.assertIsNone(row["shard_elapsed_s"])
+
+        # (b) a CLAIMED job's clock is its FIRST STEP, not its claim stamp — the step
+        #     is LATER than the claim (1800 s ago vs the claim's 2400 s ago), which is
+        #     the only ordering a single attempt can produce.
+        claimed = job("test (g)", None, status="in_progress", started_s=2400)
+        claimed.update({"runner_name": "pi-runner-x64-1",
+                        "steps": [{"started_at": iso(NOW - 1800)}]})
+        row = mod.decide({"id": 111, "status": "in_progress",
+                          "run_started_at": iso(NOW - 7200)},
+                         [job("test (a)", 600), claimed], green, now=NOW, floor=300)
+        self.assertEqual(row["shard_elapsed_s"], 1800,
+                         "the first step's start IS the shard's work clock")
+        self.assertEqual(row["action"], "cancel")
+
+        # (c) a step EARLIER than the claim is a PREVIOUS attempt's residue: the claim
+        #     floors it, so the shard is judged on the attempt that is running now
+        #     (1200 s, inside its 1200 s bound) instead of on the requeue gap (2400 s).
+        requeued = job("test (g)", None, status="in_progress", started_s=1200)
+        requeued.update({"runner_name": "pi-runner-x64-1",
+                         "steps": [{"started_at": iso(NOW - 2400)}]})
+        row = mod.decide({"id": 111, "status": "in_progress",
+                          "run_started_at": iso(NOW - 7200)},
+                         [job("test (a)", 600), requeued], green, now=NOW, floor=300)
+        self.assertEqual(row["shard_elapsed_s"], 1200,
+                         "a stale step from a previous attempt must not be charged to "
+                         "this one — the claim stamp is the floor")
+        self.assertEqual(row["action"], "skip",
+                         "a shard claimed 1200 s ago inside a 1200 s bound was cancelled "
+                         "on a previous attempt's step")
+
+        # (d) NO CLAIM STAMP → NO CLOCK (rev12421 review, cycle 1 F1). A step stamp
+        #     alone is not a work clock: with `started_at` absent there is nothing to
+        #     floor a retained step against, and the pre-fix answer for this payload
+        #     was CLOCKLESS → `unstarted` → bound underivable → no cancel. Handing out
+        #     the step re-opens the residue path the floor closes, so the clock is None
+        #     and the run is not cancelled.
+        unstamped = {"name": "test (g)", "status": "in_progress",
+                     "runner_name": "pi-runner-x64-1", "completed_at": None,
+                     "started_at": None,
+                     "steps": [{"started_at": iso(NOW - 2400)}]}
+        self.assertIsNone(
+            mod.job_work_start(unstamped),
+            "a step stamp with no claim stamp is not a work clock — there is nothing "
+            "to floor a previous attempt's residue against")
+        row = mod.decide({"id": 111, "status": "in_progress",
+                          "run_started_at": iso(NOW - 7200)},
+                         [job("test (a)", 600), unstamped], green, now=NOW, floor=300)
+        self.assertEqual(row["action"], "skip",
+                         "a shard with no measured start was cancelled on a step stamp")
+        self.assertIsNone(row["shard_elapsed_s"])
+
+    def test_a_CLAIMED_queued_shard_has_NO_work_clock(self):
+        """rev12421 review cycle 4, F1 [P2]: a `runner_name` on a QUEUED job is a
+        CLAIM, not a work clock — and the gate no longer reads it at all.
+
+        The prior gate accepted any begun status OR a `queued` job whose
+        `runner_name` was a non-blank string, on the premise that such a job's
+        `started_at` is its CLAIM time. That premise is UNMEASURED (0 of 250 job rows
+        across 50 non-completed runs carried a runner while the status was still
+        unstarted) and it is PERMITTING: if the stamp is still the queue-entry
+        stamp, the shard is charged its whole queue wait and a healthy queueing run
+        is CANCELLED. Measured on that head, with the green population below giving
+        a 1200 s bound: `runner_name="pi-runner-x64-1"`, `started_at` 7200 s old →
+        `cancel reason=verified-overrun shard_elapsed_s=7200`, while the same row
+        with an empty `runner_name` was `skip / bound-underivable`.
+
+        ⛔ RED-FIRST: this test reds on that head (action=cancel) and on any head
+        that reintroduces a claim-derived clock, including the `.strip()` form that
+        closed only the whitespace half of the hole. A well-formed, non-blank runner
+        name is the STRONGEST version of the shape, so it is the row that matters —
+        a whitespace-only pin would leave the inference itself uncertified.
+        """
+        mod = _load_tool_module()
+        run = {"id": 111, "status": "in_progress", "run_started_at": iso(NOW - 7200)}
+        green = [
+            [{"name": "test (a)", "status": "completed", "conclusion": "success",
+              "started_at": iso(NOW - 200), "completed_at": iso(NOW - 100)}],
+            [{"name": "test (g)", "status": "completed", "conclusion": "success",
+              "started_at": iso(NOW - 1600), "completed_at": iso(NOW - 1000)}],
+        ]
+        for runner in ("pi-runner-x64-1", "pi-runner-vm-6"):
+            claimed_but_queued = job("test (g)", None, status="queued", started_s=7200)
+            claimed_but_queued.update({"runner_name": runner, "steps": []})
+            self.assertIsNone(
+                mod.job_work_start(claimed_but_queued),
+                f"runner_name={runner!r} on a QUEUED job was read as a work clock")
+            row = mod.decide(run, [job("test (a)", 600), claimed_but_queued], green,
+                             now=NOW, floor=300)
+            self.assertEqual(
+                row["action"], "skip",
+                f"a queued shard's CLAIM caused a cancel on queue wait: "
+                f"{row['action']} via {row.get('reason')} "
+                f"(shard_elapsed_s={row.get('shard_elapsed_s')})")
+            self.assertEqual(row["reason"], mod.REASON_UNDERIVABLE)
+            self.assertIsNone(row["shard_elapsed_s"],
+                              "a claimed-but-queued shard supplied a work clock")
+
+    def test_a_DEGRADED_runner_name_does_not_claim_a_job(self):
+        """T5, review cycles 2 and 4: the permitting-direction flip is closed.
+
+        `not job.get("runner_name")` is only a truthiness test, so a DEGRADED payload
+        (`runner_name` as a dict / list / number) read as "a runner claimed this job"
+        — which made an unclaimed `queued` job hand out its queue stamp as a work
+        clock, escape the `unstarted` guard, make the bound derivable and cancel the
+        run on a queue wait. That is the exact P0 this change exists to prevent,
+        re-entered through the other field. `read_jobs` keeps dict rows without
+        validating inner fields, so it is reachable from a real payload.
+
+        ⛔ CYCLE 2 CLOSED THREE OF THE FOUR DECLARED SHAPES AND MISSED WHITESPACE
+        (cycle 4, F1): the arm was `isinstance(runner, str) and runner`, so `" "`,
+        `"\t"` and `"\n "` — strings, and truthy — STILL read as a claim and handed
+        out the queue stamp measured below. Every row in the tuple is a shape that
+        reds without its arm, and the whitespace rows red without `.strip()`.
+
+        ⛔ AND CYCLE 5 REMOVED THE ARM ENTIRELY (cycle 4, F1 again — the `.strip()`
+        narrowing certified the inference instead of removing it). This test is kept
+        because it is still the right ASSERTION (none of these shapes may yield a
+        clock), and it now holds for a stronger reason: the gate reads `status`
+        alone, so every row here is clockless by construction. The row that would
+        catch a reintroduced claim arm is
+        `test_a_CLAIMED_queued_shard_has_NO_work_clock` — it uses a well-formed,
+        non-blank `runner_name`, which is the shape `.strip()` let through.
+        """
+        mod = _load_tool_module()
+        for bad in ({"name": "runner"}, ["runner"], 7, True, " ", "\t", "\n ", "   "):
+            probe = {"name": "test (g)", "status": "queued", "runner_name": bad,
+                     "started_at": iso(NOW - 7200), "completed_at": None, "steps": []}
+            self.assertIsNone(
+                mod.job_work_start(probe),
+                f"runner_name={bad!r} is not evidence a runner claimed the job")
+            row = mod.decide({"id": 111, "status": "in_progress",
+                              "run_started_at": iso(NOW - 7200)},
+                             [job("test (a)", 600), probe],
+                             [[{"name": "test (g)", "status": "completed",
+                                "conclusion": "success", "started_at": iso(NOW - 600),
+                                "completed_at": iso(NOW)}]],
+                             now=NOW, floor=300)
+            self.assertNotEqual(row["action"], "cancel",
+                                f"runner_name={bad!r} produced a cancel from an "
+                                "unclaimed job")
+
+    def test_an_UNHASHABLE_job_status_does_not_abort_the_sweep(self):
+        """A degraded `status` must not raise out of a pure predicate (review B, F1).
+
+        Set membership on a list/dict status raises TypeError, and `decide` is
+        called per candidate with no per-run `except` — so one bad row in one
+        candidate aborted the WHOLE sweep (exit 5, no report emitted, decisions
+        already taken lost, every later candidate unread), contradicting this
+        module's per-run fail-closed contract. The pre-image tolerated the same
+        payload because it only compared `status != "completed"`.
+        """
+        mod = _load_tool_module()
+        for bad in (["in_progress"], {"s": "in_progress"}, 7, None):
+            probe = {"name": "test (g)", "status": bad, "runner_name": "",
+                     "started_at": iso(NOW - 7200), "completed_at": None, "steps": []}
+            self.assertIsNone(mod.job_work_start(probe),
+                              f"status={bad!r} is not evidence the job began")
+            row = mod.decide({"id": 111, "status": "in_progress",
+                              "run_started_at": iso(NOW - 7200)},
+                             [job("test (a)", 600), probe],
+                             [[{"name": "test (g)", "status": "completed",
+                                "conclusion": "success", "started_at": iso(NOW - 600),
+                                "completed_at": iso(NOW)}]],
+                             now=NOW, floor=300)
+            self.assertNotEqual(row["action"], "cancel",
+                                f"status={bad!r} produced a cancel from an unreadable job")
+
     def test_listing_unreadable_but_explicit_run_still_reaps(self):
         """The listing is an INDEX; an explicit --run stands on its own."""
         self.make_run("111", elapsed_s=25740, workflow_id=7)

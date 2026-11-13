@@ -972,6 +972,144 @@ def test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on():
             f"ungated reach was MASKED; state that instead: {summary_clause[:240]!r}…")
 
 
+def test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_residual():
+    """⛔ `#12020` round 11 review (P3): the delta corrected the register's claim that the shadow is
+    threaded per scope — it is, for the SEAM spelling only — and round 11 measured that reverting
+    BOTH hunks left this whole file GREEN (47 passed). The sibling clauses of the same bullet are
+    pinned (the never-run clause and the `gated` summary above); this one was not, so a later
+    cleanup could restore the false universality silently. Pinned by SLICE + PHRASES: the clause is
+    located between two anchors and must carry the scoping operator, the measured DIRECTION and the
+    naming-entry pointer. ⛔ Not bare tokens — round 12 inverted the direction with a coherent
+    sentence (`never DELETES a real writer at all`) and a token check passed the whole file.
+    """
+    doc = re.sub(r"\s+", " ", (register.__doc__ or "").lower())
+    start = doc.find("for the seam spelling the shadow is threaded")
+    stop = doc.find("this bullet is the seam's")
+    assert start != -1 and stop > start, (
+        "the register's SEAM-shadow sentence moved — this pin reads the clause between \"for the "
+        "SEAM spelling the shadow is threaded\" and \"this bullet is the SEAM's\", so re-anchor "
+        "it deliberately rather than letting the pin cover nothing")
+    clause = doc[start:stop]
+    # ⛔ PHRASES, not bare TOKENS (`#12020` round 12 review, P2 — measured). The first cut of this
+    # pin asserted `"clause builder"` / `"delete"` / `"escapes as an argument"`, and a COHERENT
+    # INVERSION of the paragraph — `so suppressing a shadowed call never DELETES a real writer at
+    # all` — left the WHOLE register file green (48 passed), i.e. the pin held a false statement that
+    # argued the deletion direction does not exist. Dropping the `NOT` from the scoping line was
+    # likewise green. The sibling pin
+    # `test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on` already measured this
+    # weakness and repaired it with clause-scoped exclusions; the phrases below do the same job
+    # without needing them.
+    assert "not threaded for a clause builder" in clause, (
+        "the seam-shadow clause no longer SCOPES itself — it must say the shadow is not threaded "
+        "for a clause builder (a bare `clause builder` token survives deleting the operator, "
+        "measured): "
+        f"{clause[:240]!r}…")
+    assert "deletes a real writer instead of demoting it" in clause, (
+        "the seam-shadow clause no longer states the DIRECTION of the builder exception — it must "
+        "say suppressing a shadowed builder call DELETES a real writer INSTEAD OF demoting it; a "
+        "bare `delete` token survives the coherent inversion \"never DELETES a real writer at "
+        "all\", measured: "
+        f"{clause[:240]!r}…")
+    assert "never deletes" not in clause, (
+        "the seam-shadow clause inverts the measured direction — the shadow-aware builder arm was "
+        "reverted precisely because it DELETES a real writer (`{'tortoise.m::apply': ...}`, `w` "
+        "gone): "
+        f"{clause[:240]!r}…")
+    # ⛔ `#12182` review P2: the token `"a builder alias escapes as an argument"` is present in BOTH
+    # the corrected clause AND the mis-citation it replaced, so asserting it left the correction
+    # undefended — restoring the pre-fix wording kept this test green (measured). Pin the two
+    # phrases the CORRECTION adds, and read them in the direction the clause now states.
+    low = clause.lower()
+    assert "not in `undecidable_write_shapes`" in low, (
+        "the seam-shadow clause no longer says the builder arm's OVER-credit residual is NOT an "
+        "`UNDECIDABLE_WRITE_SHAPES` entry — the pre-`#12020` wording sent readers to the entry that "
+        "documents the OPPOSITE direction (a builder PASSED, writer ABSENT): "
+        f"{clause[:240]!r}…")
+    assert "documents the opposite direction" in low, (
+        "the clause no longer distinguishes the table entry's SIGN from the builder arm's over-"
+        "credit: the entry documents a builder passed as an argument (writer ABSENT), while the arm "
+        "over-credits a CALL in a rebinding scope: "
+        f"{clause[:240]!r}…")
+    assert "a builder alias escapes as an argument" in clause, (
+        "the clause must still NAME the differently-signed table entry — as the one it does NOT "
+        "mean — so a reader who follows it lands on the right residual: "
+        f"{clause[:240]!r}…")
+    # ⛔ `#12182` review cycle 2 (P3): the three assertions above cover the NEGATION and the SIGN, and
+    # left the REDIRECT undefended — deleting `named where it is implemented, `probe._writes_an_embedding`'s
+    # builder-arm comment, and pinned by two arms` kept the file GREEN, and so did restoring the
+    # pre-fix claim ALONGSIDE the negation (a clause that then says the residual both IS and is NOT in
+    # the table). Pin the destination, and forbid the two from co-occurring.
+    assert "named where it is implemented" in clause, (
+        "the clause no longer says WHERE the builder arm's over-credit residual lives — it must "
+        "name the implementation site, because the table entry next to it documents the opposite "
+        "sign: "
+        f"{clause[:240]!r}…")
+    assert "`probe._writes_an_embedding`'s builder-arm comment" in clause, (
+        "the redirect must name the ACTUAL home of the residual "
+        "(`probe._writes_an_embedding`'s builder-arm comment), not a shape that reads similar: "
+        f"{clause[:240]!r}…")
+    assert "pinned by two arms" in clause, (
+        "the redirect must say the residual is PINNED, or a reader cannot tell it is measured "
+        "rather than merely written down: "
+        f"{clause[:240]!r}…")
+    assert "its own naming entry" not in clause, (
+        "the clause asserts BOTH that the residual is not in `UNDECIDABLE_WRITE_SHAPES` and that it "
+        "has its own naming entry there — the two claims contradict, and the pre-fix sentence may "
+        "not co-exist with the correction: "
+        f"{clause[:240]!r}…")
+
+
+def test_an_EQUAL_RANK_alias_collision_credits_the_SAME_name_in_both_source_orders(tmp_path):
+    """`_alias_credit_rank` decides the KIND; it does not decide WHICH same-rank name is credited.
+
+    ⛔ `#12182` review cycle 2 (P3): the tie-break had NO falsifier. Reverting `_alias_preference`
+    to the bare rank `>` left every test in both files green, while the published `callee`/
+    `callees` flipped with the source order — and that name is what a `recognised_producer` route
+    claim is re-derived from (`#11444`). Two aliasable names share rank 2 (the clause builders) and
+    two share rank 1 (`encode_for_store`, `compute_session_embedding`), so the collision is one
+    ordinary two-order test away, which is why the arms below assert the NAME and not the kind.
+
+    Control: the same fixtures must still be writers, so a resolver that stopped crediting them at
+    all cannot pass by making everything `unresolved_write` for the wrong reason.
+    """
+    builder_pair = (
+        "from tortoise.vector_write import set_embedding_clause as _a\n"
+        "from tortoise.vector_write import clear_then_set_prefix as _a\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": _a("y")})\n'
+    )
+    ungated_pair = (
+        "from tortoise.embeddings import encode_for_store as _a\n"
+        # ⛔ the OTHER rank-1 name lives in a different module (`_ALIAS_HOMES`); same-module would
+        # simply not resolve and the arm would pass for the wrong reason.
+        "from tortoise.session_indexer import compute_session_embedding as _a\n"
+        "\n"
+        "def w(proj, text):\n"
+        '    return proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": _a(text, 384)})\n'
+    )
+    for tag, body in (("builders", builder_pair), ("ungated", ungated_pair)):
+        # …and the REVERSED source order, built from the same two import lines swapped.
+        head, rest = body.split("\n\n", 1)
+        first, second = head.split("\n")
+        reversed_body = second + "\n" + first + "\n\n" + rest
+        credited = []
+        for order, src in (("as-written", body), ("reversed", reversed_body)):
+            found = probe._embedding_writers(_scratch_root(tmp_path, f"{tag}-{order}", src))
+            entry = found.get("tortoise.m::w")
+            assert entry is not None, (
+                f"{tag}/{order}: the writer vanished — a resolver that credits nothing is not a "
+                f"tie-break fix: {found}")
+            credited.append(frozenset(entry.get("callees") or ()))
+        assert credited[0] == credited[1], (
+            f"{tag}: the CREDITED name depends on source order \u2014 {sorted(credited[0])} vs "
+            f"{sorted(credited[1])}. `_alias_preference` must make an equal-rank tie deterministic, "
+            "because `callees` is what a route claim is re-derived from")
+        assert credited[0] & {"set_embedding_clause", "clear_then_set_prefix",
+                             "encode_for_store", "compute_session_embedding"}, (
+            f"{tag}: neither same-rank name was credited at all: {sorted(credited[0])}")
+
+
 def test_the_seam_CALL_population_is_the_one_the_register_names():
     """A `gated` writer owes NO declaration — so the register's only duty to it is an accurate
     statement of WHO is in that population, and this is the one claim about it that can go stale.
@@ -2578,21 +2716,26 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str],
                 f"`{'`, `'.join(sorted(rebound))}` is RE-BOUND inside the loop over {constant}, so "
                 "the store is no longer built from the iterated value — the labels are no longer "
                 "derived from that constant")
-        # ⛔ `#12020` round 4: the store must execute in the LOOP's OWN scope. `ast.walk` descends
-        # into a nested `def`/`class`/`lambda`, so the same defect round 2 fixed in
-        # `_carrying_statements` was still open here: a store moved into a nested function the loop
-        # never calls — or one whose PARAMETER shadows the loop binding, or a class-body string —
-        # satisfied the row while nothing stored per iteration (measured: all three GREEN).
-        hits = [n for outer in body for n in _walk_own_scope(outer)
-                if isinstance(n, ast.stmt) and _executes_a_call(n)
-                and _carrier_issues_a_call(n)
-                # ⛔ `#12020` review round 12: a CONTAINER's slice spans its body, so without this
-                # the `If label == "Point":` block inside the loop was the "store" whenever the real
-                # store statements had been replaced by discarded clauses — the row stayed GREEN.
-                and not isinstance(n, _COMPOUND_STATEMENTS)
-                and (_STORE_CARRIER.search(_slice_own_scope(lines, n))
-                     or (merge_store
-                         and _MERGE_STORE_CARRIER.search(_slice_own_scope(lines, n))))]
+        # ⛔ `#12020` rounds 4 and 12: the store must execute in the LOOP's OWN scope, and it must be
+        # EXECUTED rather than merely held. `ast.walk` descends into a nested `def`/`class`/`lambda`,
+        # so the same defect round 2 fixed in `_carrying_statements` was still open here: a store
+        # moved into a nested function the loop never calls — or one whose PARAMETER shadows the loop
+        # binding, or a class-body string — satisfied the row while nothing stored per iteration
+        # (measured: all three GREEN).
+        # ⛔ AND IT MUST NOT KEEP ITS OWN COPY OF THAT PREDICATE (round 13, P2). This arm restated
+        # `_executes_a_call` + a bespoke gate — the drift class rounds 10-12 kept re-finding, inside
+        # the last arm holding a copy. It now calls the choke point, so the two cannot diverge.
+        # ⚠️ What that bought, stated no wider than measured (`#12182` review, P3 — corrected twice,
+        # so this half is MEASURED): on THIS fixture it changed no verdict. Restoring the pre-round-13
+        # inline copy verbatim in this arm leaves the whole two-file suite GREEN (measured here:
+        # 229 passed, 1 skipped), so this fixture cannot discriminate the two copies and must not be
+        # cited as the routing's pin. The two copies were NOT otherwise identical: the pre-PR carrier
+        # test accepted `_STORE_CARRIER`, OR — for a merge-class row — `_MERGE_STORE_CARRIER`, while
+        # the replacement passes exactly one `pattern`. A merge-class row therefore now accepts only
+        # the map-merge carrier. That narrowing is fail-closed and no live row's verdict changes, but
+        # it IS a behaviour change, not a de-duplication.
+        pattern = _MERGE_STORE_CARRIER if merge_store else _STORE_CARRIER
+        hits = [n for outer in body for n in _statements_that_store(outer, lines, pattern)]
         # ⛔ The MINIMAL store statements: without this, the enclosing `for` itself matches (its text
         # contains every store in its body) and any mention of the binding anywhere inside would
         # satisfy the target check — i.e. the arm would degrade to "something in the loop names it".
@@ -2683,13 +2826,46 @@ def _carrier_issues_a_call(statement: ast.stmt) -> bool:
     `bound_store` (its definition is the label PLUS a store), so the one kind that DOES owe an
     executed store was left on the gate that cannot see the discard shape.
 
-    ⚠️ Residual, stated (`#12020` round 10): this does not reach a store clause built into an
-    ASSIGNMENT that is never issued — `_unused = "…" + set_embedding_clause("e")` — nor a
-    `return`/`with`/`yield` that carries it. Those bind or scope a value and proving the built string
-    never reaches a `query(…)` is DATA FLOW, the same limit `UNDECIDABLE_WRITE_SHAPES` names for the
-    map merge. Measured on the reviewed head: the assignment mutation stayed GREEN. It is pinned as a
-    named residual by `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual`, so the
-    blind spot can narrow in neither direction silently.
+    ⚠️ Residual, stated (`#12020` round 10, widened round 13): this does not reach a store clause
+    BUILT into a value and never issued — `_unused = "…" + set_embedding_clause("e")`, and the same
+    for an `AnnAssign`/`AugAssign`/tuple-or-attribute target, an `.append(…)` that only buffers the
+    clause, and a `raise`/`return` that carries it. Those bind, buffer or escape the
+    value, and proving the built string never reaches a `query(…)` is DATA FLOW — the same limit
+    `UNDECIDABLE_WRITE_SHAPES` names for the map merge. Measured on the reviewed head: the assignment
+    and `raise` mutations stayed GREEN. ⛔ `raise` is NAMED rather than decided on purpose (round 13):
+    its value escapes into the exception, so it is the same data-flow class as `return` — unlike
+    `assert`, which discards what it evaluated.
+    ⛔ `with` and `yield` must NOT be listed with the shapes above (`#12182` review, P3, re-measured
+    at this head): they are REJECTED, not accepted, so they are the fail-CLOSED direction — an
+    over-block, not a blind spot. `with` reds because `_COMPOUND_STATEMENTS` is consulted at BOTH
+    gates and `ast.With`/`ast.AsyncWith` are members: `_statements_that_store` skips the container,
+    so the clause in `with <here>:` never reaches a body statement, and `_carrier_stores` sends a
+    container to that same own-scope list rather than reading its slice. `yield` reds because
+    `_carrier_issues_a_call` answers `isinstance(statement.value, ast.Call)` for an `ast.Expr`, which
+    is False for an `ast.Yield`. Both report "'…' is carried by 1 statement(s) in w, and none of them
+    stores anything". ⛔ BOTH gates are load-bearing for `with` — removing the tuple membership OR the
+    `_carrier_stores` container deferral accepts it — so naming one of them would be the same
+    claim-wider-than-mechanism defect this paragraph exists to catch. Listing either as residual
+    invited a maintainer to "decide" them — which would WIDEN the hole instead of narrowing it.
+    The REJECT direction and the residual list's DIRECTION are both pinned by
+    `test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list`, which also pins this
+    paragraph's own wording so the prose cannot drift away from the mechanism again.
+    ⛔ It pins the DIRECTION, not the coverage: measured (`#12182` cycle 15, P3) mutating
+    `_carrier_issues_a_call` so `AnnAssign` / `AugAssign` / tuple-or-attribute targets are
+    DECIDED-AGAINST leaves the file green, so those entries are NAMED and undefended — the
+    accounting below says exactly how many ARE pinned (FOUR), and an earlier draft of THIS sentence
+    claimed "the residual list" was pinned, which that accounting then contradicted three lines
+    later.
+    ⛔ `#12182` review: FOUR of the shapes above are pinned, not the list. The plain `Assign` by
+    `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual` (it rewrites the shipped
+    statement to `_unused = (…`), `raise` by
+    `test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind`, and `return` plus `.append(…)` by
+    `test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list`'s accepted arm.
+    `AnnAssign`, `AugAssign` and the tuple/attribute target are NAMED here and measured by hand, and
+    NOTHING reds if one of THEM silently changes direction — the previous wording ("they are pinned …
+    so the blind spot can narrow in neither direction silently") claimed otherwise, which is the
+    stale-disclosure shape the round-10 test exists to prevent. (`with` and `yield` used to be listed
+    with those three; they are rejected, not accepted, and are accounted for separately ABOVE.)
     """
     if isinstance(statement, ast.Expr):
         return isinstance(statement.value, ast.Call)
@@ -3470,6 +3646,136 @@ def test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind() -> None:
     assert _statements_that_store(ast.parse(match_discarded).body[0],
                                   match_discarded.splitlines()) == [], (
         "`ast.Match` is being counted as a store by its slice")
+
+    # ── the ITERATED arm answers through the SHARED choke point (round 13, P2) ────────────────────
+    # A loop with a GENUINE store that is NOT built from the binding, plus a discarded clause inside
+    # a container that IS. The statement arm passes (the real store carries the needle), so only the
+    # iterated arm can red.
+    # ⚠️ What this pins, stated no wider than measured (`#12182` review cycles 3 and 7): the SHAPE — a
+    # genuine store in the loop plus a discarded clause inside a container. It does NOT pin the
+    # ROUTING, and must not be cited for it.
+    # ⛔ `#12182` review cycle 7, P2 — and this is the SECOND correction of this note, so both halves
+    # are measured, not asserted. The sentence that stood here called "reverting the change left the
+    # suite green" MEASURED FALSE; the RETRACTION was the false half. `git show eb27f96d3:tests/…`
+    # (the pre-PR copy this arm replaced) already carried `and not isinstance(n, _COMPOUND_STATEMENTS)`
+    # beside `_executes_a_call` and `_carrier_issues_a_call`, and `_COMPOUND_STATEMENTS` contains
+    # `ast.If`; this test's `_walk_own_scope` never yields a scope node, so restoring that expression
+    # verbatim runs this file green (measured: 50 passed). Round 13 therefore removed a DUPLICATE and
+    # bought no behaviour change on THIS shape space — which is true of this fixture, not of the
+    # change as a whole: the carrier test narrowed for merge-class rows, where the arm is called.
+    # Reverting the routing leaves THIS fixture green. That is why it cannot be cited as the
+    # routing's pin; it is not a reason to doubt the revert, and the drift class is still real,
+    # because the fixture that would red it does not exist yet. The same measurement is stated above,
+    # at the arm the routing actually lives in.
+    iterated_mutant = (
+        '_KEYS = ("Point",)\n\n\n'
+        'def w(g):\n'
+        '    for label in _KEYS:\n'
+        '        if label == "Point":\n'
+        "            f\"MATCH (n:{label}) SET n += {set_embedding_clause('n')}\"\n"
+        '        g.query("MATCH (q)", {"p": set_embedding_clause("q")})\n')
+    problem_iterated = _evidence_violation(iterated_mutant, "w", "MATCH (q)", claim="store",
+                                           iterated="_KEYS")
+    # ⛔ These messages named the COPY in their first revision (`#12182` cycle 7, P3). They must name
+    # what the fixture actually pins: restoring the per-arm copy leaves this fixture GREEN→RED
+    # unchanged (measured — the pre-PR arm produces a character-identical message), so a message
+    # naming the copy sends a fixer hunting a duplicate that does not exist.
+    # ⛔ Only the FIRST message claimed the copy ("that arm kept its own copy of the store
+    # predicate"). The SECOND **disclaimed** it — "so this fixture does NOT pin the copy that drifted"
+    # — and a later review quoted the disclaimer with the `not` dropped, so this note then attributed
+    # the opposite claim to it (`#12182` cycle 8, P3; measured at `06261a5aa5:tests/…:3649-3651`).
+    # Named by its MESSAGE and not a `:LINE`, because an offset rots — this note pointed at one and
+    # the fix in this same cycle moved the line out from under it.
+    assert problem_iterated is not None, (
+        "a discarded clause inside a loop CONTAINER satisfied the iterated arm — the shape the "
+        "`_COMPOUND_STATEMENTS` exclusion exists to reject. This fixture reds on BOTH the pre- and "
+        "the post-round-13 copies (measured), so a GREEN here means the exclusion itself is gone, "
+        "not that a copy drifted")
+    assert "drives a store" in problem_iterated, (
+        f"the red is not the ITERATED arm's — another check fired first, so this fixture is not "
+        f"exercising the collision it exists for: {problem_iterated}")
+
+    # ── `raise` is NAMED, not decided (round 13, P3) ──────────────────────────────────────────────
+    # An `assert` discards what it evaluated, so it is decidable (round 11). A `raise` ESCAPES its
+    # value into the exception, so it is the `return` class — data flow — and is named in the
+    # residual instead. Both directions asserted: the shape stays GREEN and the name stays present.
+    raise_src = ('def w(g):\n'
+                 "    raise ValueError(f\"MERGE (e:Event) {set_embedding_clause('e')}\")\n")
+    assert violation(raise_src, "MERGE (e:Event)", "store") is None, (
+        "`raise` is now DECIDED against — if that is intended, delete the residual clause that "
+        "names it as data flow, so the two do not disagree")
+    # ⛔ The pin is a PHRASE, not the token (`#12182` review, P3): the docstring contains `raise`
+    # FOUR times — including the historical "the assignment and `raise` mutations stayed GREEN" and
+    # the shape list — so `"raise" in doc` was satisfied after deleting the residual clause it
+    # claims to defend, and by a coherent inversion that kept the word (measured). The sibling pin
+    # in `test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_residual`
+    # records the same weakness at round 12.
+    assert "`raise` is NAMED rather than decided" in (_carrier_issues_a_call.__doc__ or ""), (
+        "`raise` is credited by the choke point and no longer NAMED as a residual — an undisclosed "
+        "fail-open is the claim being wider than the mechanism")
+
+
+def test_WITH_and_YIELD_are_REJECTED_so_they_are_not_in_the_residual_list() -> None:
+    """`#12182` review, P3: `with`/`yield` were listed as fail-OPEN residual shapes and are not.
+
+    `_carrier_issues_a_call`'s docstring grouped `raise`/`return`/`yield`/`with` together as "a store
+    clause BUILT into a value and never issued", i.e. shapes the choke point ACCEPTS. Two of the four
+    do not: measured at this head, a clause in a `with` context expression and a clause in a `yield`
+    both RED the row. That is the fail-CLOSED direction, so the disclosure pointed a maintainer the
+    wrong way — "decide this residual" would have WIDENED the hole.
+
+    The two mechanisms, so this pin is not a transcript of one run:
+      * `_statements_that_store` skips every `_COMPOUND_STATEMENTS` member, and `ast.With`/
+        `ast.AsyncWith` are members — so the clause in `with <here>:` never reaches a body statement
+        and the row reports "carried by N statement(s) … and none of them stores anything".
+      * `_carrier_issues_a_call` returns `isinstance(statement.value, ast.Call)` for an `ast.Expr`,
+        which is False for `ast.Yield` — so `yield <clause>` is carried and not issued.
+
+    ⛔ Pinned in BOTH directions on purpose: the two names must be REJECTED, and the four shapes that
+    really are accepted must stay accepted. If a future change makes `with`/`yield` accepted, the
+    disclosure becomes wrong the OTHER way and this reds instead of silently contradicting itself.
+    """
+    accepted = {
+        "assign": 'def w(x):\n    _unused = "MERGE (e:Event) " + set_embedding_clause("e")\n',
+        "return": 'def w(x):\n    return "MERGE (e:Event) " + set_embedding_clause("e")\n',
+        "raise": 'def w(x):\n    raise ValueError("MERGE (e:Event) " + set_embedding_clause("e"))\n',
+        "append": 'def w(x):\n    _buf = []\n    _buf.append("MERGE (e:Event) " + set_embedding_clause("e"))\n',
+    }
+    rejected = {
+        "with": ('def w(x):\n    with open("MERGE (e:Event) " + set_embedding_clause("e")) as f:\n'
+                 '        pass\n'),
+        "yield": 'def w(x):\n    yield "MERGE (e:Event) " + set_embedding_clause("e")\n',
+    }
+    for name, source in accepted.items():
+        assert _evidence_violation(source, "w", "MERGE (e:Event)", claim="store") is None, (
+            f"the {name} shape is no longer the accepted residual — the docstring now understates "
+            "the blind spot and must name it again")
+    for name, source in rejected.items():
+        violation = _evidence_violation(source, "w", "MERGE (e:Event)", claim="store")
+        assert violation is not None, (
+            f"{name} is ACCEPTED now, so it belongs in the residual list again — the docstring "
+            "claims it is rejected, and an undisclosed fail-open is the claim being wider than "
+            "the mechanism")
+        assert "none of them stores anything" in violation, (
+            f"{name} reds for a DIFFERENT reason than the disclosure names: {violation!r}")
+
+    # ⛔ …and pin the DISCLOSURE, not only the mechanism (`#12182` review, P3). The file's own
+    # convention for this docstring is a phrase pin (see `test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_residual` and the
+    # `raise` pin above), because a mechanism-only pin passes while the sentence a maintainer READS
+    # says the opposite — which is exactly how `with`/`yield` sat in the fail-OPEN list while the
+    # code rejected them. A revert that re-adds them to the residual list must red HERE.
+    doc = _carrier_issues_a_call.__doc__ or ""
+    assert "`with` and `yield` must NOT be listed with the shapes above" in doc, (
+        "`_carrier_issues_a_call` no longer forbids listing `with`/`yield` as accepted residual "
+        "shapes — measured at this head they are REJECTED, so the disclosure would again point a "
+        "maintainer at WIDENING the blind spot instead of narrowing it")
+    assert "and a `raise`/`return` that carries it" in doc, (
+        "the accepted-residual sentence changed — re-derive whether it still names ONLY shapes the "
+        "choke point actually ACCEPTS, then re-cut this pin rather than deleting it")
+    assert "accounted for separately ABOVE" in doc, (
+        "the `with`/`yield` note points somewhere it is not — the corrected accounting sits ABOVE "
+        "the pinned-shapes paragraph, and a stale directional pointer is how a reader concludes the "
+        "sentence was never re-read")
 
 
 def test_a_deleted_vector_write_reds_the_BOUND_STORE_row() -> None:
@@ -4334,8 +4640,98 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
     # LEXICALLY FIRST binding (the walk yields siblings LIFO), so a GATE spelling that never runs
     # replaced the live BUILDER it shares a name with and the writer measured `gated` — outside
     # `NEEDS_A_DECLARATION`, i.e. it stopped owing a declaration. Neither binding is a "rebinding",
-    # so no other rule saw the collision. Resolution now prefers the BUILDER in every collision,
-    # which is fail-closed in both source orders; each arm below is the shape that was `gated`.
+    # so no other rule saw the collision. Resolution is now ordered by what the CREDIT DOES to the
+    # writer (builders > ungated > seam), so it does not depend on source order.
+    # ⛔ The collision arms below are NOT instances of one bug, and this note deliberately states NO
+    # count (a "three arms below" here was wrong within one commit — round 8 cycle 5, P3).
+    # ⛔ AND THIS NOTE NAMED THE WRONG DISCRIMINATORS (`#12182` review cycle 7, P3). It used to say
+    # `GATE_then_a_BUILDER` and `TYPE_CHECKING_then_a_builder` "were `gated` before the ranked fix"
+    # and that `BUILDER_then_a_GATE` was the reversed-order CONTROL — and it drew an empty
+    # two-clause distinction from that. Measured over all 40 rows by driving each through
+    # `origin/main`'s `_embedding_writers` (which carries NO rank rule at all), all three already
+    # measure `unresolved_write`, so none of them is evidence about the ranking in either direction.
+    # Exactly FIVE rows change verdict between `origin/main` and this head, and THEY are the arms
+    # that discriminate it: the two `UNGATED…SEAM` arms (`gated` → `ungated`) and the three
+    # WRITER-SCOPE cross-scope arms (`gated` → `unresolved_write`, `producer` → `unresolved_write`,
+    # `ungated` → `unresolved_write`). Read each arm's own note rather than a summary here: this
+    # paragraph has now been wrong twice about which arms say what.
+
+    # ⛔ `#12020` round 8 cycle 4 (P1) — the collision rule was BUILDER-ONLY, so a `SEAM_CALL` vs
+    # `UNGATED_CALLS` collision (neither is a builder) still fell through to first-seen, which is
+    # source-order-dependent — and LIFO made "first-seen" the lexically LAST binding, so the common
+    # `try: import encode_for_store` / `except ImportError: import encode_for_row` idiom resolved to
+    # the seam that never runs and the writer measured `gated`: HIDDEN. ⛔ NOT "a regression against
+    # `main`", which is what this note said until `#12182`'s rebase review measured it FALSE —
+    # `origin/main` `f33f5e2c32` has no rank rule and reads `gated` for this arm too, so the ranked
+    # rule closes a pre-existing hide. Both orders must now resolve to `ungated`,
+    # which is INSIDE `NEEDS_A_DECLARATION`.
+    # ⛔ `#12020` round 8 cycle 5 (P1) — the rank rule was applied INSIDE one `_import_aliases`
+    # call while the two maps were merged plainly (`{**module, **writer}`), so a WRITER-scope binding
+    # beat the module's whatever its rank — and a writer-scope import is not automatically the live
+    # one (`if TYPE_CHECKING:` is this PR's own idiom for a dead one). Measured: a dead writer-scope
+    # SEAM import beat a live module-level BUILDER alias → `gated`, and the rank-1 variant → `ungated`.
+    # ⛔ Both are `origin/main` `f33f5e2c32`'s OWN answers (measured there: `gated` and `ungated`
+    # respectively), so the ranked merge closes a pre-existing hide and a pre-existing demotion — the
+    # earlier wording called it "a regression against `main`" and the rebase review measured that FALSE.
+    "a_dead_WRITER-SCOPE_seam_import_does_not_beat_a_live_MODULE_builder_alias": (
+        "from typing import TYPE_CHECKING\n"
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    if TYPE_CHECKING:\n"
+        "        from tortoise.embeddings import encode_for_row as _set\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": text})\n'
+        '    return _set("n")\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the rank rule lived only INSIDE one map, so this measured `gated` — the dead gate import "
+        "won the merge and hid a writer whose live binding is the builder",
+    ),
+    "a_WRITER-SCOPE_ungated_import_over_a_module_BUILDER_with_NO_write_clause_is_NOT_demoted_to_producer": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(text):\n"
+        "    if False:\n"
+        "        from tortoise.embeddings import encode_for_store as _set\n"
+        '    return _set(text, 384)\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the cross-scope merge with NO own write clause: unranked, the dead ungated import won and "
+        "the writer measured `producer` — OUTSIDE `NEEDS_A_DECLARATION`, i.e. a hide",
+    ),
+    "a_dead_WRITER-SCOPE_ungated_import_does_not_beat_a_live_MODULE_builder_alias": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    if False:\n"
+        "        from tortoise.embeddings import encode_for_store as _set\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": text})\n'
+        '    return _set("n")\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the same cross-scope merge, one rank down: measured `ungated` here (INSIDE the guard) while "
+        "the maps were merged unranked, so the harm is the demotion this arm still catches, not a "
+        "hide",
+    ),
+    "one_local_name_bound_by_an_UNGATED_then_a_SEAM_import": (
+        "from tortoise.embeddings import encode_for_store as _a\n"
+        "from tortoise.embeddings import encode_for_row as _a\n"
+        "\n"
+        "def w(proj):\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": _a("t", 384)})\n',
+        {"tortoise.m::w": "ungated"},
+        "neither name is a builder, so the builder-only preference left this to source order; the "
+        "seam rank must LOSE every collision because `gated` is the only rank that hides a writer",
+    ),
+    "one_local_name_bound_by_an_UNGATED_import_with_a_try_except_SEAM_fallback": (
+        "try:\n"
+        "    from tortoise.embeddings import encode_for_store as _a\n"
+        "except ImportError:\n"
+        "    from tortoise.embeddings import encode_for_row as _a\n"
+        "\n"
+        "def w(proj):\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": _a("t", 384)})\n',
+        {"tortoise.m::w": "ungated"},
+        "the idiomatic optional-dependency spelling, whose LIVE binding is the ungated one: it "
+        "measured `gated` (hidden) while the fix was builder-only",
+    ),
     "one_local_name_bound_by_a_GATE_then_a_BUILDER_import": (
         "from tortoise.embeddings import encode_for_row as _a\n"
         "from tortoise.vector_write import set_embedding_clause as _a\n"

@@ -5164,21 +5164,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whole sentence's three numbers, so a re-derivation of one cannot leave
         # its neighbours behind the way it did at `a08f7bce3d`.
         ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
-            # 17974 -> 18728 -> 18743: #12060 and then #9649's reviewed guard add
-            # their own lines to sdk.py above this call,
+            # 17974 -> 18728: #12060 adds its own lines to sdk.py above this call,
             # and every forward merge of `origin/main` (`1f28d107cf`, `c7499ac7a7`
             # carrying #12112/#12111, then `9828250732`) moved the region again, so
             # every number in this table moved with them. Re-derived off THIS merged
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("18822", "relation_write = apply_relation_edges("),
+            ("18900", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("18821", "from tortoise.relation_write import apply_relation_edges"),
+            ("18899", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18809", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18887", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5188,8 +5187,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("9954", "subject_binding_available,"),
-            ("10007", "and not subject_binding_available(graph):"),
+            ("9955", "subject_binding_available,"),
+            ("10008", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6607", "def subject_binding_available(graph) -> bool:"),
@@ -5198,13 +5197,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("9954", "subject_binding_available,"),
-            ("10007", "and not subject_binding_available(graph):"),
+            ("9955", "subject_binding_available,"),
+            ("10008", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18469", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18547", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
@@ -5243,11 +5242,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("16345", "The v2 path reports"),
-            ("16346", '"extraction_mode": "llm:<route>"'),
+            ("16346", "The v2 path reports"),
+            ("16347", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         ("04-plan.md", "operator / label path", (
-            ("25189", "declared = declared_relation_predicates()"),
+            ("25284", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry. ⛔ PRE-#12266 HISTORY — and it is the
         # history of a row THIS TABLE NO LONGER CONTAINS: the tuple that lived here
@@ -5369,10 +5368,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # own review).
     # ⛔ AND IT IS CALLED **BEFORE** `assert not failures` ON PURPOSE — THE ORDER IS
     # LOAD-BEARING, so do not tidy it down beside that assert. This test is RED on
-    # `main` for an unrelated row — `04-plan.md` cites `tortoise/sdk.py:25189` for
-    # `declared = declared_relation_predicates()`, which the tree carries at `25195`
-    # (measured at `ca74f2375e`: `git show ca74f2375e:tortoise/sdk.py | sed -n
-    # '25189p'` is a bare `)`); the same cite rot is tracked in #12456 / #12381. And
+    # `main` for an unrelated row — `04-plan.md` cites `tortoise/sdk.py:25284` for
+    # `declared = declared_relation_predicates()`, which the merged tree carries at
+    # `25393` — and it was no better at this branch's old base: at `ca74f2375e` the row
+    # cited `25189` and `git show ca74f2375e:tortoise/sdk.py | sed -n '25189p'` is a
+    # bare `)`; the same cite rot is tracked in #12456 / #12381. And
     # an `assert` that raises ends the test: placed after it, this pin was **never
     # executed at the head that merged** and every arm below was unexercised — measured
     # by appending a `config/ci-surfaces.yml:10076` cite to the document's row,

@@ -1,0 +1,303 @@
+{
+  "measured_at": "2026-11-13T16:30:34Z",
+  "source": "cache:/tmp/11739-rows.jsonl",
+  "endpoint": "",
+  "rows_walked": 15842,
+  "live_rows": 15842,
+  "neighbour_surface": {
+    "about_prefixed_keys_seen": [],
+    "note": "no neighbour material on the live read surface: the names half of the composition is fed an empty name list, so this run measures the text that would actually ship (#11805)"
+  },
+  "population": {
+    "live_rows": 15842,
+    "live_with_quote_and_vector": 15008,
+    "live_with_quote_no_vector_dropped": 0,
+    "live_without_quote_dropped": 287,
+    "encoder_provenance_mean_cosine_vs_stored": 1.0,
+    "embedding_dim": 384
+  },
+  "subject_groups": {
+    "session_groups": 997,
+    "points_in_session_groups": 14941,
+    "worst_session": {
+      "session": "01a19e73-ed35-7a98-a428-1ac03e079bc4",
+      "points": 53,
+      "worst_composed": 1.0,
+      "worst_raw": 0.9973,
+      "worst_pair_ids": [
+        "pt_644045e7da5077608a20ff3be1d823451ace36ec2038414a4d6159f080914f",
+        "pt_18081c93c6cd2a2fbd807477ab4adf53de13dfcd3a579d8492ec506318e01d"
+      ]
+    },
+    "per_session": [
+      {
+        "session": "01a19e73-ed35-7a98-a428-1ac03e079bc4",
+        "points": 53,
+        "worst_composed": 1.0,
+        "worst_raw": 0.9973,
+        "worst_pair_ids": [
+          "pt_644045e7da5077608a20ff3be1d823451ace36ec2038414a4d6159f080914f",
+          "pt_18081c93c6cd2a2fbd807477ab4adf53de13dfcd3a579d8492ec506318e01d"
+        ]
+      },
+      {
+        "session": "01a19a63-be10-7772-a9a2-74d657232790",
+        "points": 49,
+        "worst_composed": 1.0,
+        "worst_raw": 0.9981,
+        "worst_pair_ids": [
+          "pt_c5883dbcbc8d86c924dbbcbd6c0efc28cef76b42e05df3ee4c63ce58cd6bc3",
+          "pt_e239cd72b15a814cf166828c0ad66673251b3e0b1b38cea587e33608f0decd"
+        ]
+      },
+      {
+        "session": "d8c5eeec-722c-4370-95c7-7ba252d1b16f",
+        "points": 46,
+        "worst_composed": 0.9379,
+        "worst_raw": 0.9021,
+        "worst_pair_ids": [
+          "pt_a72e920dc9c4a178f98ec3fcc995b2bb161b302ccab41536ab41311e93f332",
+          "pt_ae527bb60c55e301a7efef63c7cec6d580e9cbb3b8ec27e3de585def33a9b9"
+        ]
+      },
+      {
+        "session": "main-red-baseline-181f29a9e-20261102-a1",
+        "points": 46,
+        "worst_composed": 0.9509,
+        "worst_raw": 0.9401,
+        "worst_pair_ids": [
+          "pt_6152aad8423431091c098ab48c2b65c3fb4040b3dc83caca64d3f9987a83dd",
+          "pt_df993e3dd5c4f94928f9651d7b188f88a957bf7680a91e6afa2efbd45b7d06"
+        ]
+      },
+      {
+        "session": "01a19002-692d-753e-aa98-cd152777449a",
+        "points": 43,
+        "worst_composed": 0.8431,
+        "worst_raw": 0.8426,
+        "worst_pair_ids": [
+          "pt_8aa891df1dfb61a4546531bdd707ffb2ff397067744d8eb1c68921e19376e9",
+          "pt_e4b10c925b42e0cca5d6754018600f8d8d97e3765320fb7dcd48b580cecda4"
+        ]
+      },
+      {
+        "session": "24c97012-213a-42de-85bd-6672797943a8",
+        "points": 43,
+        "worst_composed": 0.9673,
+        "worst_raw": 0.9713,
+        "worst_pair_ids": [
+          "pt_8977b9f23b0cc3c4e65debae352dfecbc2d5c46eab783de33540564d77a139",
+          "pt_929d48ecf5b4bad0f1815f3ad2ff94e4ae424a6efcdcd6f979782f98cbe8a7"
+        ]
+      },
+      {
+        "session": "01a19b4b-2d9a-731c-98f6-943033810e8c",
+        "points": 43,
+        "worst_composed": 1.0,
+        "worst_raw": 0.9099,
+        "worst_pair_ids": [
+          "pt_cf52fe64fce98c529d660ba931b377a7991deb57f8e9bd6c5f3ba87dfb4f6e",
+          "pt_b5fb3e9fe6fdee21781bf25781f2c57c19a6b42ce4f0a3b5f418ac3de26700"
+        ]
+      },
+      {
+        "session": "01a19027-7d30-7ee0-bb89-e79d93bd5450",
+        "points": 39,
+        "worst_composed": 0.9298,
+        "worst_raw": 0.8924,
+        "worst_pair_ids": [
+          "pt_20b90673964514e57784b99d0dfbb557b7a66e56c7d571d099bc5e88daa69c",
+          "pt_34dd7e1b36a514753bd26c6d4bf9d3d5e00055be9e4896b3a3f26245246e1a"
+        ]
+      },
+      {
+        "session": "01a1a6ce-2d5a-757f-ab87-30aeabbe94e3",
+        "points": 38,
+        "worst_composed": 1.0,
+        "worst_raw": 0.9944,
+        "worst_pair_ids": [
+          "pt_cbf519ee5075dd15a1a9f5a425f4b67eebefdbb8cf64b78000626cc4b3e8c3",
+          "pt_33eb06e603f30c085804c6e3811b001cbce6bd6c50dedc45f0cb4f544a4cbf"
+        ]
+      },
+      {
+        "session": "54b1470e-35da-454d-87e4-38e02fcb34d4",
+        "points": 38,
+        "worst_composed": 0.9881,
+        "worst_raw": 0.9695,
+        "worst_pair_ids": [
+          "pt_677f50c35e8b1bc5943eb5acf717cef4021858a44846807c25c931abe6e1c6",
+          "pt_b16025be4b36f4b90bda6c4ca66bd9a815e7c8f36cad9bf289952b4424eae9"
+        ]
+      },
+      {
+        "session": "01a19b66-9dc6-7518-be04-bfb5dd2adc9d",
+        "points": 38,
+        "worst_composed": 1.0,
+        "worst_raw": 0.9569,
+        "worst_pair_ids": [
+          "pt_68f4d5cf9c733e4af9d2b4e90d1a50491a42a170e9421c614373a1d596220f",
+          "pt_e0ebbdb46d14f18a2917187b9bcb5bacaf479df19f98c8a8cb4685f7cccbd0"
+        ]
+      },
+      {
+        "session": "guard-cmdpos-1158-20261103-a1",
+        "points": 38,
+        "worst_composed": 0.985,
+        "worst_raw": 0.9155,
+        "worst_pair_ids": [
+          "pt_386220744b8b3927e5622ce965a8515de5da1ac13105efdb42f5de5859d7a6",
+          "pt_e3babebda834a542ebcd236fbeb97b0928bdc1bf7d0d0b368ae4cfa38da487"
+        ]
+      },
+      {
+        "session": "agent-infra-pr-backlog-landing-plan-2026-11-02T0505Z",
+        "points": 37,
+        "worst_composed": 0.9445,
+        "worst_raw": 0.9676,
+        "worst_pair_ids": [
+          "pt_f855874ed70a0cbc98c76fb9b8891846ea2ac0131c53f043a4557052d7fc9b",
+          "pt_0a12b0362e6b057b85478a1cc5546439f51af4ecb7f0849f67721a4cfec474"
+        ]
+      },
+      {
+        "session": "e5d26878-4c2e-41d8-94be-0e7918d1cf2d",
+        "points": 35,
+        "worst_composed": 0.8945,
+        "worst_raw": 0.9451,
+        "worst_pair_ids": [
+          "pt_3b07740f0424dd0909b52d0cfe29768ab3462f004f0d83ff28236ffd16925f",
+          "pt_303c64088598414c2634631d7e623ef99b549a40c609c3d044af782820d8f9"
+        ]
+      },
+      {
+        "session": "01a19c4f-d692-70d7-b58f-91255939a2d4",
+        "points": 35,
+        "worst_composed": 0.9455,
+        "worst_raw": 0.98,
+        "worst_pair_ids": [
+          "pt_4261e9823bb1ab8da95a7a2e1eccc234ad50b0432cdcf03be12f10def57d95",
+          "pt_bd46cd3bf31553a8c65e1130872dfaa523d1c8bd48500ed8ba35405d5d16ac"
+        ]
+      },
+      {
+        "session": "01a19271-dece-750d-be10-a90752fc1fd8",
+        "points": 34,
+        "worst_composed": 1.0,
+        "worst_raw": 0.9014,
+        "worst_pair_ids": [
+          "pt_e94139e2b144c3ec1055b53946b79bb5d0931f5748d77755ebd1330b74025c",
+          "pt_c3a695cf65b08559e1fd0e7ca4d444d547b724e33b705abd47b75fe8c04832"
+        ]
+      },
+      {
+        "session": "4c4a3f42-2d73-4236-aba5-b06a4178007c",
+        "points": 34,
+        "worst_composed": 0.87,
+        "worst_raw": 0.9736,
+        "worst_pair_ids": [
+          "pt_564f0fe029c11c17afadd4fb0954e52391aa0b84b51521f1ae5e0cd14d4826",
+          "pt_ef780c01399ed96bf2d15b18270c9c208c31e8eff007c865d7a4054c3d5242"
+        ]
+      },
+      {
+        "session": "82bc878a-196a-4a23-a331-0433dd696b06",
+        "points": 33,
+        "worst_composed": 0.9377,
+        "worst_raw": 0.9269,
+        "worst_pair_ids": [
+          "pt_588404ea4b8c51b3499bd9605e9d523301e8bfa5dd85e9f26a9ef23deb8fbb",
+          "pt_eeaff5f62aa1b614bca84b257836474c559eeb0c1010591ee82233527681a0"
+        ]
+      },
+      {
+        "session": "01a19c18-6551-748f-8202-61b528203605",
+        "points": 33,
+        "worst_composed": 1.0,
+        "worst_raw": 0.985,
+        "worst_pair_ids": [
+          "pt_612571fad262aebe5dafc01cb53b0e617dc9266c82c825fa8685ace6e0b571",
+          "pt_1220dc71265f7be8f2420ba2a11a7659cba77e0f950b9a9d9ba45b6aae6ca9"
+        ]
+      },
+      {
+        "session": "01a19d47-b104-701c-add4-44ebbc6635db",
+        "points": 33,
+        "worst_composed": 0.9897,
+        "worst_raw": 0.971,
+        "worst_pair_ids": [
+          "pt_0268a84dce2c9bb452d777c5a9191b8849f17d3954c0e13b6878270d2c5d22",
+          "pt_586bb8e96842e537f28386ab90d9175d3af722a0ec3cd903f78d7b0e219d7d"
+        ]
+      }
+    ]
+  },
+  "gate1_similarity": {
+    "threshold": 0.89,
+    "global_worst_composed": 1.0,
+    "global_worst_raw": 1.0,
+    "global_worst_pair_ids": [
+      "pt_afa69f4a3a80ac57faf63b3f5879ec5dfbf8d1115a58be865ba31eec21b45b",
+      "pt_f670547546e797bdefb14a6a436470faec14be3acaa922f22070c17069697f"
+    ],
+    "pass": false
+  },
+  "gate2_rank": {
+    "counts": {
+      "gt_089": {
+        "raw": 35058,
+        "composed": 51584
+      },
+      "b070_085": {
+        "raw": 2316407,
+        "composed": 3661251
+      },
+      "b085_089": {
+        "raw": 20840,
+        "composed": 10115
+      }
+    },
+    "transitions": {
+      "crossed_089": 27356,
+      "entered_070_085": 2795990
+    },
+    "top_k": {
+      "k": 10,
+      "queries": 500,
+      "items_displaced_from_top_k": 3706,
+      "queries_with_any_displacement": 500,
+      "mean_displaced_per_query": 7.412,
+      "raw_relevant_items_in_raw_top_k": 4186,
+      "raw_relevant_items_lost_from_composed_top_k": 3033
+    },
+    "pass": false
+  },
+  "gate3_false_proposal": {
+    "sample": 1500,
+    "threshold": 0.72,
+    "lens_key": "session_id",
+    "proposals_raw": 10232,
+    "proposals_composed": 17305,
+    "new_proposals": 13691,
+    "new_proposals_crossing_0_89": 20,
+    "new_proposals_entering_0_70_0_85": 11358,
+    "max_similarity_among_new_proposals": 1.0,
+    "pass": false
+  },
+  "verdict": {
+    "all_pass": false,
+    "gates": {
+      "gate1": false,
+      "gate2": false,
+      "gate3": false
+    }
+  },
+  "duration_s": 949.2,
+  "provenance": {
+    "probe_path": "probes/composed_gate.py",
+    "probe_sha256": "6dbb87f488fafde74e401bbbaac46ce839bf8d0015229b358d7197cde3026c0f",
+    "payload_sha256": "cfbe7ad4eaee3868ddc52e5432b79fc7baf92a541e581dbcbff6398cf00693be",
+    "rows_source": "cache:/tmp/11739-rows.jsonl",
+    "encoder": "BAAI/bge-small-en-v1.5 (tortoise.embeddings.EMBEDDING_MODEL)"
+  }
+}

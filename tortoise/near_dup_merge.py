@@ -71,8 +71,9 @@ becomes admissible because nothing is dropped:
    merge through `stats["merges"]` and the `(Session)-[:CONTAINS]->(Point)`
    edge, but NOT the losing quote. Do not read this item as a promise about the
    capture receipt — and note a `NOOP` fold IS surfaced there (as a classified
-   `dedup` entry, `sdk.py:12290-12302`), so the two are **not** alike on that
-   path. Tracked on #9871.
+   `dedup` entry — `sdk.py::TortoiseSDK._extract_session_v2`'s capture receipt,
+   the `extracted.append({... "dedup": dedup})` rows), so the two are **not**
+   alike on that path. Tracked on #9871.
    *A merge a reader cannot find is indistinguishable from a silent drop*, which
    is why that gap is filed rather than absorbed here.
 
@@ -153,7 +154,8 @@ def _entity_names(value: object) -> dict[str, str] | None:
     spell, because `Object.name` is stored **case-preserved** everywhere —
     `projection/entities.py` MERGEs on the verbatim name, capture's own
     attachment pass resolves the SAME `about_entities` list with
-    `name.strip()` (no lowering, `sdk.py:12123`), and the S3 enrichment that
+    `name.strip()` (no lowering — `sdk.py::TortoiseSDK._extract_session_v2`'s
+    `_n = name.strip()` in the `about_entities` loop), and the S3 enrichment that
     fills a prior row reads `collect(o.name)` verbatim. Emitting the
     normalised form here is what made the fusion's central promise fail on
     ordinary data: `MATCH (o:Object {name:'acme'})` matches nothing when the
@@ -285,7 +287,9 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     ``{point_id (the SURVIVOR), about_entities (the union), ...}``.
 
     ``subject_names`` is the SUBJECT-KIND names the caller's payload declared
-    (capture's ``subject_entity_names``, ``sdk.py:11857``). They are SKIPPED —
+    (capture's ``subject_entity_names``; ``sdk.py::TortoiseSDK._extract_session_v2``
+    seeds it at ``subject_entity_names.add(name)`` and skips on it where the
+    ``aboutObject`` edge is written). They are SKIPPED —
     see "the subject channel" below — and reported in ``skipped_subject``.
     Omitting it is safe rather than silently wider: with no set there is
     nothing to skip, which is exactly what a capture whose payload declares no
@@ -308,31 +312,62 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     returned dict is the merge's record of what actually landed, so a reader
     can tell a written union from an attempted one.
 
-    ⚠️ **The lookup is EXACT and case-SENSITIVE on purpose**, and it is the
-    contract `_entity_names` satisfies: the union carries each name spelled the
-    way the graph stores it, so `MATCH (o:Object {name:$n})` addresses the same
-    node capture would. A `WHERE toLower(o.name) = $n` form is deliberately
-    NOT used — nothing else in the code base matches entity names that way, and
-    it would silently conflate two `Object`s that differ only in case.
-    `unresolved` therefore means one thing only: *no node in this graph has
-    that name*.
+    ⚠️ **ONE lookup over the writer's key space — there are no "arms".** The
+    union carries each name spelled the way the caller's payload spells it, and
+    the query below matches `name` · `canonical_name` · `aliases` over the raw and
+    the folded spelling in a SINGLE `WHERE`, then attaches every row it matched.
+    A raw-exact hit therefore does NOT suppress a fold-only hit: if
+    `"Widget"` is one Object's spelling and another Object carries the folded key
+    only, BOTH are attached — capture's own attach-to-every-carrier disposition
+    (§"one `aboutObject` edge per unioned entity name"), not a precedence rule.
+    A `WHERE toLower(o.name) = $n` form is deliberately NOT used — a bespoke
+    lowering written into THIS query would be a second key space beside the
+    writer's, and would equate spellings the fold does not.
 
-    ⚠️ **THE SUBJECT CHANNEL IS SKIPPED, not mis-bound — and the skip is what
-    makes the coincidence case safe.** `about_entities` is not object-only: the
-    SUBJECT channel (team/role/person, the gated `aboutSubject` edge) also
+    #12120 merge-attachment site: the pre-fix lookup was NARROWER than the write it
+    mirrors. `_entity_names` carries the union of names the CLAIMS mention, while
+    the writer resolves them on the FOLDED union (`name` · `canonical_name` ·
+    `aliases`, over the raw and the folded spelling), so a claim naming
+    `"the widget"` for an Object stored as `"Widget"` matched nothing here and
+    the attachment was reported `unresolved` instead of being linked — a
+    measurement that said "no node has that name" about a node the write door
+    reaches. ⛔ The space that comes from
+    `entity_identity.name_key_space_same_entity` is the **SPELLING** space only:
+    unlike `resolve_or_mint`, this site is status-blind and does not collapse
+    merged carriers (capture's recorded attach-to-every-carrier disposition), so a
+    terminal-only holder IS linked and `unresolved` is about spelling, not about
+    the writer's whole resolution (the collapse half is #12244).
+
+    `unresolved` therefore means what it says: *no Object holds that name in the
+    key space the write resolves on* (raw, folded, `canonical_name`, or a merge's
+    `aliases`) — never "the raw spelling missed".
+
+    ⚠️ **THE SUBJECT CHANNEL IS SKIPPED when the spelling is EXACT — and a
+    FOLD-ONLY one is narrowed, not skipped.** `about_entities` is not object-only:
+    the SUBJECT channel (team/role/person, the gated `aboutSubject` edge) also
     contributes names to it. `subject_names` carries the payload's subject-kind
-    names, and a union name in that set is reported in `skipped_subject` and
-    **never written**.
+    names, and the comparison is made in the writer's key space (raw or FOLDED,
+    because the lookup below is fold-wide):
 
-    Why the skip is by NAME and not by "resolution failed": an `:Object` may
-    legitimately share a subject's EXACT name — that is why capture's own pass
-    skips on the name (`sdk.py:12124`, and the F6 note at `sdk.py:11849-11857`
-    explains why the comparison is exact and not case-folded). So
-    `MATCH (o:Object {name:$n})` in that case RESOLVES, and a write without
-    this skip would attach the claim to an Object under a subject's name — the
-    un-gated `aboutObject` edge capture deliberately refuses to write there
-    (`#1370` / the `#4934` label leak). Bounding the consequence to "lands in
-    `unresolved`" was therefore FALSE for exactly that case.
+    * a name whose EXACT spelling is in that set is reported in `skipped_subject`
+      and **never written** (F6's rule: capture's own pass skips on the exact name,
+      `sdk.py::TortoiseSDK._extract_session_v2`'s `if _n in subject_entity_names`
+      skip, and a write there would attach an Object under a subject's
+      name — the un-gated `#4934` edge);
+    * a name that only FOLD-equals one is NOT dropped: the lookup is narrowed to
+      `AND o.name = $exact`, so an Object whose OWN name is the reference keeps its
+      edge (F6's legitimately-cased carrier) and a FOLD-ONLY carrier does not get
+      one. It is reported in `skipped_subject` only when no exact carrier exists
+      (review round 16: the paragraph this replaces said such a name was "never
+      written", which is the opposite of what the narrowing does, and the sibling
+      sites all state the narrowed rule).
+
+    Why the comparison is by NAME and not by "resolution failed": an `:Object` may
+    legitimately share a subject's name, and the shared spelling is what makes the
+    case ambiguous — so the lookup below RESOLVES there, and a write without this
+    skip would attach the claim to an Object under a subject's name. Bounding the
+    consequence to "lands in `unresolved`" was therefore FALSE for exactly that
+    case (#12120 review round 3).
 
     ⚠️ **The pre-existing gap this makes VISIBLE instead of silent.** A merge
     emits no payload point, so `bind_point_subjects` never runs for the
@@ -342,7 +377,8 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     than assumed — ⚠️ **but only for subject-kind names that appear in the
     union's `about_entities`.** A participant that reaches the claim through the
     point's SLOTS is dropped UNREPORTED: the ordinary path binds it via
-    `bind_point_subjects` (`sdk.py:12165`), a merge emits no payload point so
+    `bind_point_subjects` (`sdk.py::TortoiseSDK._extract_session_v2`, the call site
+    after the entity loop), a merge emits no payload point so
     that call never runs for the candidate, and the slots are not carried onto
     the merge record. So "nothing it argued for is silently dropped" is true of
     OBJECT attachments, and for subject binding it holds only for the
@@ -392,15 +428,35 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     if not isinstance(names, (list, tuple, set, frozenset)):
         out["warnings"].append("merge record's about_entities is unreadable")
         return out
-    # Capture's own skip (`sdk.py:12124`), applied here so a merge cannot write
-    # an edge the SAME capture refuses to write on the normal route. Exact
-    # names, case-preserved: the resolution below is case-SENSITIVE too.
+    # #12120 merge-attachment site: the writer's key space for an about-edge name. Lazy for
+    # the same import-cost reason as `link_entity` above (`entity_identity`
+    # pulls `entity_resolver`, and this module is on every extractor import).
+    try:
+        from .entity_identity import name_key_space_same_entity
+    except Exception as e:  # noqa: BLE001, RUF100
+        out["warnings"].append(
+            f"merge attachment skipped, name key space unavailable "
+            f"({type(e).__name__}: {e})")
+        return out
+    # The subject-channel skip below compares in the writer's key space, so it
+    # folds. Local import: this module must stay importable without
+    # `entity_resolver` being pulled in eagerly (see the block above).
+    from .entity_resolver import normalize_entity_name as _ndm_fold
+    # Capture's own skip (`sdk.py::TortoiseSDK._extract_session_v2`'s
+    # `if _n in subject_entity_names`), applied here so a merge cannot write
+    # an edge the SAME capture refuses to write on the normal route. The
+    # comparison is made in the WRITER's key space (raw OR folded), because the
+    # resolution below matches the folded union — an exact-only skip here would
+    # let a fold-equivalent spelling of a subject-kind name reach a fold-equal
+    # Object, which is the #1370/#4934 label leak this skip exists to prevent
+    # (#12120 review round 3).
     # A bare string is ONE name — iterating it would skip single characters and
     # silently drop a one-letter Object attachment for the rest of the capture.
     if isinstance(subject_names, str):
         subject_names = (subject_names,)
     subject_skip = {str(n).strip() for n in (subject_names or ())
                     if isinstance(n, str)}
+    subject_skip_folded = {_ndm_fold(n) for n in subject_skip}
     for name in names:
         if not isinstance(name, str) or not name.strip():
             continue
@@ -410,10 +466,25 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
             # merge runs no binder. See the docstring's subject-channel note.
             out["skipped_subject"].append(_n)
             continue
+        # #12120 review round 3: when this spelling only FOLD-equals a declared
+        # subject-kind name, an EXACT-name Object may still be attributed (F6's
+        # legitimately-cased carrier) but a fold-only one must not — that is the
+        # #4934 leak this skip exists to prevent, on a spelling the pre-fix raw
+        # lookup could not reach.
+        _fold_only = _ndm_fold(_n) in subject_skip_folded
         try:
-            rows = proj.g.query(
-                "MATCH (o:Object {name:$n}) RETURN o.id",
-                params={"n": _n}).result_set
+            # The WIDE space is kept beside the narrowed one: the reporting branch
+            # below has to tell "a fold-equal carrier exists but was not narrowed in"
+            # from "nothing holds this name in any spelling" (review round 13).
+            _wide_space, _wide_params = name_key_space_same_entity("o", _n)
+            _space, _space_params = _wide_space, _wide_params
+            if _fold_only and _space:
+                _space = f"({_space}) AND o.name = $exact"
+                _space_params = {**_space_params, "exact": _n}
+            rows = (proj.g.query(
+                f"MATCH (o:Object) WHERE {_space} "
+                "RETURN o.id",
+                params=_space_params).result_set if _space else [])
         except Exception as e:  # noqa: BLE001, RUF100
             out["warnings"].append(
                 f"merge attachment lookup failed for {_n!r} "
@@ -451,17 +522,53 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
             # absent-endpoint cause.
             try:
                 rows = proj.g.query(
-                    "MATCH (p:Point {id:$pid}), (o:Object {name:$n}) "
-                    "WHERE o.id IS NULL OR o.id = '' "
+                    f"MATCH (p:Point {{id:$pid}}), (o:Object) "
+                    f"WHERE ({_space}) "
+                    "AND (o.id IS NULL OR o.id = '') "
                     "MERGE (p)-[:aboutObject]->(o) RETURN count(*)",
-                    params={"pid": point_id, "n": _n}).result_set
+                    params={"pid": point_id, **_space_params}).result_set
                 out["linked"] += int(rows[0][0]) if rows and rows[0] else 0
             except Exception as e:  # noqa: BLE001, RUF100
                 out["warnings"].append(
                     f"merge id-less attachment failed for {_n!r} "
                     f"({type(e).__name__}: {e})")
         elif not rows:
-            out["unresolved"].append(_n)
+            if _fold_only:
+                # #12120 review round 4: a fold-only match of a declared
+                # subject-kind name is the SUBJECT channel's, not "no node has
+                # that name" — `unresolved` promises exactly that narrower
+                # meaning (and sdk forwards it as "a later backfill can link
+                # it", which can never happen here). The narrowing dropped it on
+                # purpose, so report it where the exact skip reports: as a
+                # subject-channel skip.
+                #
+                # ⛔ `_fold_only` is a property of the REFERENCE, not evidence that
+                # a fold-equal carrier exists (review round 13): `rows` is empty
+                # both when the narrowing suppressed a real carrier AND when no
+                # Object holds the name in ANY spelling, and only the first is a
+                # subject-channel skip. Reporting the second as one told the
+                # caller's own message (`"the binder owns the gated edge"`) a
+                # claim no binder can act on, while this module's docstring
+                # records that a merge runs no binder — and it dropped the name
+                # from `unresolved`, the one channel documented to carry it. Ask
+                # the WIDE space; a failed read asserts neither.
+                try:
+                    _carrier_exists = bool(
+                        _wide_space and proj.g.query(
+                            f"MATCH (o:Object) WHERE {_wide_space} "
+                            "RETURN o.id LIMIT 1",
+                            params=_wide_params).result_set)
+                except Exception as e:  # noqa: BLE001, RUF100
+                    out["warnings"].append(
+                        f"merge attachment key-space recheck failed for {_n!r} "
+                        f"({type(e).__name__}: {e})")
+                    continue
+                if _carrier_exists:
+                    out["skipped_subject"].append(_n)
+                else:
+                    out["unresolved"].append(_n)
+            else:
+                out["unresolved"].append(_n)
     return out
 
 
