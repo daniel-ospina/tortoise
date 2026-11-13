@@ -529,7 +529,7 @@ def test_brief_headline_matches_the_artifact(artifact, brief, arm: str, want: fl
     """
     assert artifact["arms"][arm]["recall_by_k"]["3"]["recall"] == pytest.approx(want)
     got = {}
-    for cells in _table(brief, "recall@3", "Δ vs shipped"):
+    for cells in _table(_scope_slice(brief, "0"), "recall@3", "Δ vs shipped"):
         m = re.match(r"`([^`]+)`", cells[0])
         if m:
             got[m.group(1)] = cells[1]
@@ -582,7 +582,7 @@ def test_brief_headline_table_pins_every_column_and_the_subset_row(
     in this file GREEN. This is the pin for that hole.
     """
     rows: dict[str, list[str]] = {}
-    for cells in _table(brief, "recall@3", "Δ vs shipped"):
+    for cells in _table(_scope_slice(brief, "0"), "recall@3", "Δ vs shipped"):
         if "tokens-controlled subset" in cells[0]:
             rows["__subset__"] = cells
             continue
@@ -739,7 +739,7 @@ def test_the_tie_rule_is_matched(tool_mod, artifact, brief_text) -> None:
     assert "o.createdAt=coalesce($ca, $now)" in entities, (
         "the :Object upsert no longer stamps createdAt on create — the brief's "
         "declared residual for the recency half is now wrong")
-    assert "ascending id order" in brief_text
+    assert "ascending id order" in _scoped(brief_text, "2")
 
 
 def test_the_scorers_do_not_rank_identically(artifact, brief_text) -> None:
@@ -901,7 +901,8 @@ ARM_ORDER_31 = (
 
 def test_brief_rank_table_is_the_artifact(artifact, brief: str) -> None:
     """§3.1 — the whole recall@k table, the empty-row census and the latencies."""
-    rows = {_plain(r[0]).lower(): r for r in _table(brief, "falkordb__tokens_fixed")}
+    rows = {_plain(r[0]).lower(): r for r in _table(
+        _scope_slice(brief, "3.1"), "falkordb__tokens_fixed")}
     assert len(rows) == 6, f"§3.1 no longer has its 6 rows: {sorted(rows)}"
     for k in ("3", "5", "10", "15"):
         cells = rows[k]
@@ -944,7 +945,7 @@ def test_brief_paired_table_is_the_artifact(artifact, brief: str) -> None:
         ("in-place fix", 3): cmp["falkordb_tfidf__vs__falkordb_tfidf__tokens_fixed"]["k3"],
     }
     seen = set()
-    for cells in _table(brief, "shipped only", "other only"):
+    for cells in _table(_scope_slice(brief, "3.2"), "shipped only", "other only"):
         label = _plain(cells[0]).lower()
         k = int(_num(cells[1]))
         if "subset" in label:
@@ -987,7 +988,7 @@ def test_brief_per_class_table_is_the_artifact(artifact, brief: str) -> None:
     seen = set()
     # The header is `| class | n | shipped | pg/tokens | pg/native | in-place fix |`;
     # the `(recall@3 / recall@15)` in the section heading is prose, not a cell.
-    for cells in _table(brief, "class", "in-place fix"):
+    for cells in _table(_scope_slice(brief, "3.3"), "class", "in-place fix"):
         label = _plain(cells[0]).lower()
         cls = next((v for k, v in cls_of.items() if label.startswith(k)), None)
         assert cls, f"§3.3 class row this pin cannot identify: {cells[0]!r}"
@@ -1013,7 +1014,7 @@ def test_brief_fixture_table_is_the_artifact(artifact, brief: str) -> None:
         arm: {r["stored"]: r for r in artifact["arms"][arm]["identifier_fixture"]["results"]}
         for arm in arms
     }
-    rows = _table(brief, "stored name", "query")
+    rows = _table(_scope_slice(brief, "3.5"), "stored name", "query")
     assert len(rows) == 5, f"§3.5 no longer has its five fixture rows: {len(rows)}"
     for cells in rows:
         stored = _plain(cells[0])
@@ -1075,6 +1076,13 @@ def test_the_brief_uses_only_heading_forms_the_scope_helper_can_see(
             f"line {i + 1}: {line[:50]!r} is a hash heading with no space after "
             "the marker, so `_scoped` cannot see it and a scope may run past its "
             "own section")
+        assert not re.match(r"^ {1,3}#{1,6}(?:\s|$)", line), (
+            f"line {i + 1}: {line[:50]!r} is an INDENTED heading — valid "
+            "CommonMark, and invisible to `_scoped`, which anchors on a heading "
+            "at column 0. Measured (#12349 round 18, P2): indenting §3's heading "
+            "by one space grew `_scoped(brief, \"2\")` from 6 765 to 14 731 "
+            "chars, absorbing §3's body, and a §2 claim falsified in place was "
+            "then satisfied from there with every gate green")
     for i in range(end_fm + 1, len(lines)):
         if re.fullmatch(r"(?:-{3,}|={3,})\s*", lines[i]) and lines[i - 1].strip():
             raise AssertionError(
@@ -1138,6 +1146,18 @@ def test_brief_census_and_identifier_decomposition_are_the_artifact(
     by_id = {n["id"]: n for n in population["names"]}
     deg = Counter(by_id[i]["cls"] for i in
                   artifact["arms"]["postgres_bm25/tokens"]["degenerate_ids"])
+    # §2 also publishes the POPULATION's stratification ("a 300-name sample
+    # (180 `definite` / 90 `ident` / 30 `path`)"), a different pair from the
+    # degenerate split — and nothing pinned it, so §2 could be made to contradict
+    # `population.json` and §3.3's pinned cells with all 73 green (#12349 round
+    # 18, P2). Pinned here, from the population itself.
+    strat = Counter(n["cls"] for n in population["names"])
+    assert f"{strat['definite']} `definite`" in section2 and \
+        f"{strat['ident']} `ident`" in section2 and \
+        f"{strat['path']} `path`" in section2, (
+        "§2 must publish the 300-name sample's stratification — the population "
+        f"records {strat['definite']} `definite` / {strat['ident']} `ident` / "
+        f"{strat['path']} `path`, and that pair is NOT the degenerate split")
     assert sum(deg.values()) == census["degenerate"], (
         f"the degenerate ids cover {sum(deg.values())} of the census's "
         f"{census['degenerate']} — the split below would then describe a "
@@ -1464,7 +1484,12 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     path_delta = (pc["falkordb_tfidf__tokens_fixed"]["path"]["3"]
                   - pc["falkordb_tfidf"]["path"]["3"]) * 100
     assert round(path_delta, 1) == 26.7
-    assert "26.7" in brief_text
+    assert f"share(path) × {path_delta:.1f}" in _scoped(brief_text, "4.3"), (
+        "§4.3's prose must name the path term as "
+        f"`share(path) × {path_delta:.1f}` — a bare `26.7` in the §4.3 SCOPE is "
+        "not evidence of the prose: the section's own table carries the number "
+        "as a cell, so a scoped substring alone would be satisfied by it "
+        "(#12349 round 18, P2: falsifying only the prose stayed green)")
 
     snake = [n["id"] for n in population["names"]
              if n["cls"] == "ident" and "#" not in n["name"]]
@@ -1484,7 +1509,7 @@ def test_brief_production_estimate_rederives_from_the_per_class_cells(
     # condemns for §0, reproduced three hundred lines lower. The cells are read
     # from the row they belong to and compared to the recomputed value.
     path_delta = (hit(fixed, path_cls) - hit(shipped, path_cls)) / len(path_cls) * 100
-    table_rows = _table(brief_text, "class / sub-class", "weighted")
+    table_rows = _table(_scope_slice(brief_text, "4.3"), "class / sub-class", "weighted")
     assert len(table_rows) == 5, [r[0] for r in table_rows]
     assert round(_num(table_rows[2][2]), 1) == 91.8, (
         f"§4.3's `snake_case` Δ cell says {table_rows[2][2]!r}; the artifact "
