@@ -483,9 +483,10 @@ class LexicalScorer:
       character-only perturbations produce.
     * ``overlap`` — Jaccard over lowercased alphanumeric tokens. Token-level,
       so it is the strongest fair form of "a 5 us string compare". (An exact
-      match needs no short-circuit: equal token sets make the Jaccard ratio 1.0
-      on its own, and a branch that returned early would have been a second code
-      path to time.)
+      match needs no short-circuit: equal NON-EMPTY token sets make the Jaccard
+      ratio 1.0 on its own, and a branch that returned early would have been a
+      second code path to time. ⛔ Two EMPTY token sets are 0.0 by the guard
+      above, not 1.0 — that is why the shortcut is safe to omit either way.)
     """
 
     def __init__(self, mode: str = "difflib") -> None:
@@ -596,19 +597,24 @@ def _rerank_arm(
         # numbers ("277/300 at a 15-window, 300/300 at 40") as a literal, so a
         # re-run on a grown corpus (this file already records `population_digest`
         # moving between runs) would have shipped a note contradicting its OWN
-        # `arms.exact.<P>.in_window`, and a hand-edit of either artifact's copy was
+        # `arms.rerank.<P>.exact`, and a hand-edit of either artifact's copy was
         # invisible (measured: rewriting 277 -> 299 in the noun-path artifact left
         # every test green). The figures now live only where they are COMPUTED —
-        # `arms.exact.<P>.in_window` / `mentions` — and the note says which cell
-        # to read.
+        # `arms.rerank.<P>.exact.recall_3_after` / `mentions` — and the note says
+        # which cell to read.
         "ceiling_note": (
             "a reranker only reorders rows the legs already returned, so its "
             "ceiling is the number of golds the legs put INSIDE the scored "
-            "window at that width — in_window(P) of `mentions`, WIDTH DEPENDENT: "
-            "read `arms.exact.<P>.in_window` for each width in this artifact "
-            "rather than a figure quoted here (the pool-40 arm returns every gold "
-            "arm 1's maximum window 15 already returned, which is why its "
-            "in_window equals the mention count). miss_past_k at k=P is 0 BY "
+            "window at that width — in_window(P), i.e. recall_3_after, of `mentions`, WIDTH "
+            "DEPENDENT: read `arms.rerank.<P>.exact.recall_3_after` (and its "
+            "`mentions` denominator) for each width in this artifact rather than a "
+            "figure quoted here. ⛔ NOT `arms.exact.<P>`: that table is keyed by "
+            "arm 1's own k (three, five, ten and fifteen) and carries no pool-40 "
+            "entry at all, so the width this note is about has no cell there (the "
+            "two tables coincide only at k=15). The pool-40 arm returns every gold "
+            "arm 1's maximum "
+            "window 15 already returned, which is why its recall_3_after equals the "
+            "mention count. miss_past_k at k=P is 0 BY "
             "CONSTRUCTION (a response has at most P rows, so 'the rank is past P' "
             "cannot occur) and is not the ceiling; miss_absent_at_max_k is not a "
             "width-independent bound either — it counts golds absent within "
@@ -1592,9 +1598,11 @@ def run(args: argparse.Namespace) -> int:
         # ⛔ A reranker REORDERS what retrieval returned; it cannot surface a row
         # the leg never produced. So this arm's ceiling is `in_window(P)` — the
         # golds the legs put INSIDE the scored window at that width — which is
-        # WIDTH DEPENDENT, so the figures live in `arms.exact.<P>.in_window`
-        # (computed) and NOT as a literal here: a re-run moves them, and an
-        # earlier draft hardcoded one run's pair in the emitted note.
+        # WIDTH DEPENDENT, so the figures live in `arms.rerank.<P>.exact`
+        # (`recall_3_after` / `mentions`, computed) and NOT as a literal here: a
+        # re-run moves them, and an earlier draft hardcoded one run's pair in the
+        # emitted note. ⛔ Not `arms.exact.<P>`: that table is arm 1's, keyed by its
+        # own k, with no pool-40 entry.
         #
         # ⛔ `miss_past_k` is NOT that ceiling, and this comment used to say it
         # was: at k=P it is 0 BY CONSTRUCTION (a response has at most P rows, so
