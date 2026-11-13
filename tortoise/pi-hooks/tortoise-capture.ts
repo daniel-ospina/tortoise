@@ -2073,13 +2073,16 @@ export function writeSpoolEntry(
     attempts: clampAttempts(prior?.attempts),
     next_attempt_at_ms: carriedWindow(prior?.next_attempt_at_ms),
     // #12379: the Python drain's "extraction outcome was never recorded" marker
-    // is CARRIED, not rebuilt. This leg never WRITES it (the drain that stamps
-    // it is `capture_spool._flush_one`), but the two legs share this directory
-    // and a growing session rewrites the meta on EVERY turn — so a fresh meta
-    // literal without this carry would erase a Python-stamped entry's only
-    // durable trace on the next Pi snapshot. Sticky on purpose: a new turn does
-    // not resolve the state (a NULL-outcome session replays rather than
-    // re-extracts), and only `session view` can say the server's state changed.
+    // is CARRIED, not rebuilt. This leg never WRITES it and never CLEARS it —
+    // the drain's filing CAS (`capture_spool._flush_one`) does both, stamping on
+    // a body that says the outcome was never recorded and clearing on a body
+    // that instead REPORTS it (`filed` / `unextracted`). This leg's obligation
+    // is PRESERVATION only, and it matters because the two legs share this
+    // directory: a growing session rewrites the meta on EVERY turn, so a fresh
+    // meta literal without this carry would erase a Python-stamped entry's only
+    // durable trace on the next Pi snapshot. A new turn cannot resolve the state
+    // (a NULL-outcome session replays rather than re-extracts), so preserving it
+    // is always the safe answer for the leg that never drains.
     ...(prior?.extraction_outcome === "unknown"
       ? { extraction_outcome: "unknown" }
       : {}),

@@ -1731,12 +1731,22 @@ def write_spool_entry(
     # failure (`prior_capture_ok is False`), so a NULL-outcome session replays
     # instead of re-extracting, however many times it is sent. Without this carry
     # the only durable trace of a session that can never gain memory points would
-    # vanish on its next turn (measured in review). Only the drain's own filing
-    # stamps it; nothing CLEARS it, because only `session view` can say the
-    # server's state changed. ⛔ MIRRORED on the Pi leg — `writeSpoolEntry` in
-    # `tortoise/pi-hooks/tortoise-capture.ts` carries the same key forward, since
-    # the two legs share this directory and its fresh meta literal would otherwise
-    # erase a Python-stamped entry's marker (the cross-leg gap a reviewer proved).
+    # vanish on its next turn (measured in review).
+    #
+    # WHO STAMPS AND WHO CLEARS: the drain's own filing CAS (`_flush_one`) does
+    # BOTH, and this carry is neither. It stamps when the body says the outcome
+    # was never recorded (:func:`outcome_unrecorded`) and CLEARS on the same
+    # content's filing when the body instead REPORTS how it ended
+    # (:func:`outcome_recorded` — `filed` / `unextracted`) — a client-verified
+    # clear, because keeping the marker over a resolved session is the permanent
+    # false alarm a review measured. Nothing on the turn path can decide either
+    # way, so a new turn only ever PRESERVES what the last filing concluded.
+    # ⛔ MIRRORED on the Pi leg — `writeSpoolEntry` in
+    # `tortoise/pi-hooks/tortoise-capture.ts` carries the same key forward as a
+    # PRESERVATION obligation (that leg never drains, so it never stamps or
+    # clears), since the two legs share this directory and its fresh meta literal
+    # would otherwise erase a Python-stamped entry's marker (the cross-leg gap a
+    # reviewer proved).
     if (prior or {}).get(UNRECORDED_OUTCOME_KEY) == UNRECORDED_OUTCOME_VALUE:
         meta[UNRECORDED_OUTCOME_KEY] = UNRECORDED_OUTCOME_VALUE
     # Set-only-when-present, FIRST-WRITER-WINS, and — unlike `model` below,

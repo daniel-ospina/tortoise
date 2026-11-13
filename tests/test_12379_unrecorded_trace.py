@@ -214,6 +214,36 @@ def test_a_recorded_STORE_ONLY_verdict_also_clears_the_marker(tmp_path):
     assert unrecorded_captures(tmp_path) == []
 
 
+def test_only_a_closed_verdict_vocabulary_clears_the_marker(tmp_path):
+    """The clear is a closed allow-list, never "anything that is not pending".
+
+    `confirmed` is client-owned vocabulary (`filed` / `unextracted`, plus
+    #12374's `pending`), but a body is still server input: a typo, a `null`, a
+    future/unknown verdict, or a non-dict 2xx must leave the marker alone. A
+    `!= "pending"` predicate would clear on every one of them, and the trace
+    would disappear for exactly the sessions nobody resolved.
+
+    MUTATIONS THAT RED THIS: `return verdict != "pending"` (or any predicate
+    that treats an unknown value as evidence).
+    """
+    write_spool_entry(tmp_path, _snapshot())
+    flush_spool(tmp_path, _post(UNRECORDED_BODY), now=1000.0)
+    assert unrecorded_captures(tmp_path) == [SESSION]
+
+    # Dict bodies only: `PostOutcome.body` is a parsed 2xx body, and a non-dict
+    # one already fails the filing for its own (pre-existing) reasons.
+    for junk in ({"confirmed": "FLIED"}, {"confirmed": None},
+                 {"confirmed": 1}, {"confirmed": "pending"}, {},
+                 {"mode": "replayed"}):
+        write_spool_entry(tmp_path, _snapshot(
+            turns=[*TURNS, {"role": "user", "content": f"{junk}"}]))
+        summary = flush_spool(tmp_path, _post(junk), now=2000.0)
+        assert summary.filed == 1
+        assert unrecorded_captures(tmp_path) == [SESSION], (
+            f"{junk!r} does not report how the capture ended, so it is not "
+            "evidence — the marker must stand")
+
+
 def test_a_known_store_only_outcome_is_not_counted_as_unrecorded(tmp_path):
     """The #4188 / #4258 direction survives: a keyless capture is a KNOWN
     negative, it keeps its deferral, and it must not be relabelled `unrecorded`.
@@ -351,7 +381,7 @@ def test_session_health_reports_the_unrecorded_count(tmp_path, capsys):
     assert len([ln for ln in out.out.splitlines() if ln.strip()]) == 1, out.out
     # Case-insensitive on purpose: the spelling a Python-only term would take
     # is lower-case, and an upper-case-only check would pass it (#12427).
-    assert "unrecorded" not in out.out.lower(), out.out
+    assert "recorded" not in out.out.lower(), out.out
     assert "NO recorded" in out.err, out.err
     assert SESSION in out.err, out.err
 
