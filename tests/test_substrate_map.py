@@ -114,7 +114,7 @@ def _measurement_paragraph() -> re.Pattern[str]:
     # `tests/`, `:Document` occurs …" — breaks the match instead of sliding in before it.
     return re.compile("^" + pattern, re.MULTILINE)
 
-_COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
+_COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
 
 #: The narrow pattern §5 quotes as its evidence, as ONE owner: `_label_hits()`
 #: measures with this constant and the pin below asserts the document quotes THIS
@@ -1669,23 +1669,28 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
-    moved to the figure §5 states, in four moves, one per workstream:
+    moved to the figure §5 states, in five moves, one per workstream:
     `cache_eviction.py:956` (the #10976 census's note on why labels do not partition
     the node set), #8447's ingest door (`tortoise/ingest.py`, the
     `REFUSED_NOT_FOUND` enum docstring), #11729's runtime-label writers
     (`tortoise/hosted_backup.py` — a file the population had not previously reached,
     carrying no `:Document` mention at `4f68a2aa7`; its added mentions are the
-    dump-and-restore prose about pre-D10 artifacts), and #11682's own
+    dump-and-restore prose about pre-D10 artifacts), #11682's own
     `tortoise/search_engine.py:2107` corpus-join comment (one line, an existing
-    file). Each move is the mechanism
+    file), and #12015's edge-vector prose — three lines in that same
+    `hosted_backup.py` bound plus one in `tortoise/cache_projection.py` (another
+    file the population had not previously reached). Each move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
     of the number being quietly widened or the guard loosened.
 
     §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
-    matching **six** lines now — the RST literals in `migrate_kinds.py` (the
+    matching **nine** lines now — the RST literals in `migrate_kinds.py` (the
     pre-D10 shape comment and `relabel_legacy_documents`'s docstring), that same
-    `cache_eviction.py:956` comment, and the ones in `hosted_backup.py` that name
-    the pre-D10 node shape in double-backtick literals — is what makes *"a guard would have needed a hand-maintained
+    `cache_eviction.py:956` comment, the ones in `hosted_backup.py` that name
+    the pre-D10 node shape in double-backtick literals, and three more that
+    #12015 added to that same file naming `MATCH (n:Document)` as the relabel
+    walk's scope (a Cypher scope the pattern catches by spelling, not a literal) —
+    is what makes *"a guard would have needed a hand-maintained
     allowlist"* a measurement rather than an assertion, and it has moved with the
     line count. The pin is exact for the same reason the
     first one is: a narrow pattern that starts matching most of the prose is the day
@@ -1854,10 +1859,11 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         f"{claimed_narrow} lines; the tree measures {narrow} — re-measure the claim "
         "(§5), never widen the assertion"
     )
-    assert narrow == 6, (
-        f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 6 "
-        "this pin was cut against — the exclusion argument needs re-measuring (§5), "
-        "never the assertion widening"
+    assert narrow == 9, (
+        f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 9 "
+        "this pin was re-cut against by #12015 (six at #11729, plus that workstream's "
+        "three `MATCH (n:Document)` scope notes) — the exclusion argument needs "
+        "re-measuring (§5), never the assertion widening"
     )
 
 

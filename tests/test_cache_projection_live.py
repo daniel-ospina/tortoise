@@ -328,6 +328,56 @@ def test_a_REFUSED_rebuild_does_not_LOG_a_drop_it_never_made(caplog):
     assert report["dropped_vectors"] == 1, report
     logged = [r.getMessage() for r in caplog.records if "#11747" in r.getMessage()]
     assert logged, "an authorised rebuild dropped a vector and said nothing in the log"
+    # ⛔ `#12015` review: the WORDING is part of what the operator reads, and it was
+    # pinned nowhere — reverting it to the pre-`#12015` "on unserved label(s)" red no
+    # test in the tree. The count is beside a TARGET now (a record label OR an edge
+    # type), so the line must not call them all labels.
+    message = "\n".join(logged)
+    assert "target(s) with no query path" in message, message
+    assert "#12015" in message, (
+        "the warning does not name both rules it implements (a node rule and an edge "
+        f"rule): {message}")
+
+
+def test_an_EDGE_vector_is_dropped_AND_named_as_a_relationship_in_the_log(caplog):
+    """`#12015` — the EDGE half of the same warning, through a real rebuild.
+
+    A relation row's open-set `props` bag can carry a vector, and a relationship has no
+    label at all, so the projection drops it and reports `<relationship:TYPE>`. Both the
+    REPORT key and the LOG line must say so: an operator reading "the nodes are restored"
+    over a drop whose survivor was an edge has been told the wrong object.
+    """
+    import logging
+
+    proj = _projection()
+    rel = cp.relation_from_row({
+        "rel_type": "aboutObject", "src_label": "Point", "src_key": "p-1",
+        "tgt_label": "Object", "tgt_key": "o-acme", "idx": 0,
+        "props": {"embedding": [0.5, 0.25]}})
+    assert rel.dropped_vectors, rel.props  # non-vacuity: the drop is in the view
+    node = cp.node_from_row("Point", {"id": "p-1", "content": "the first claim",
+                                      "point_kind": "claim", "status": "live",
+                                      "props": {}})
+    obj = cp.node_from_row("Object", {"id": "o-acme", "name": "acme",
+                                      "object_kind": "org", "props": {}})
+    view = cp.RecordView(nodes=(node, obj), relations=(rel,))
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        report = proj.rebuild_from_record(view, confirm_destructive=True)
+    assert report["dropped_vectors"] == 1, report
+    assert report["dropped_vector_labels"] == ["<relationship:aboutObject>"], report
+    message = "\n".join(r.getMessage() for r in caplog.records
+                         if "#12015" in r.getMessage())
+    assert message, (
+        "an authorised rebuild dropped an EDGE vector and said nothing in the log: "
+        f"{[r.getMessage() for r in caplog.records]}")
+    assert "<relationship:aboutObject>" in message, message
+    assert "target(s) with no query path" in message, message
+    # And the EDGE itself survived: the relationship is kept, only its vector is gone.
+    assert proj.query(
+        "MATCH (:Point {id:'p-1'})-[r:aboutObject]->(:Object {id:'o-acme'}) "
+        "RETURN r.embedding").result_set[0][0] is None
 
 
 def test_a_PRODUCTION_graph_refusal_does_not_log_a_drop_it_never_made(caplog):

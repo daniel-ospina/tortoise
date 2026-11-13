@@ -993,26 +993,57 @@ def _run_code(step: dict) -> str:
 def _run_commands(step: dict) -> str:
     """`_run_code()` with trailing comments removed and continuations joined.
 
-    ` #…` (whitespace before the `#`) is the shell's comment start outside
-    quotes, which is what every call site needs: they match a whole write/entry
-    line, and a trailing comment there is either a tombstone (the value it
-    names is NOT what runs) or noise (the capstone's name in the pin step).
+    A `#` starts a comment wherever a WORD could begin (`; & | (`, a group-closing
+    `)`, unquoted whitespace, column 0) and never inside quotes — see the ⛔ block
+    below, which is the only statement of the rule; this sentence used to state the
+    superseded narrow "whitespace before the `#`" form (#12279 REVIEW 3, P3).
+    Stripping is what every call site needs: they match a whole write/entry line,
+    and a trailing comment there is either a tombstone (the value it names is NOT
+    what runs) or noise (the capstone's name in the pin step).
 
     A BACKSLASH CONTINUATION IS JOINED first (#12051 review round 7): measured,
     `echo "/usr/lib/postgresql/17/bin" >> \\` on one line and `"$GITHUB_PATH"`
     on the next left every row GREEN, because a per-line scan sees neither a
     write nor a mention. It is one shell command, so it is read as one line.
 
-    STATED LIMIT: a `#` inside a quoted string is not special-cased — it is
-    only reached here when a line quotes a literal `#` AND names one of the two
-    paths, which then reds rather than silently passing.
+    ⛔ QUOTE-AWARE, because a `#` inside quotes is DATA, not a comment (#12271,
+    measured FAIL-OPEN). A plain `re.split(r"\\s+#", …)` cut at the FIRST
+    whitespace-then-`#` whatever enclosed it, so a line that merely PRINTED a
+    literal `#` lost everything after it — including a live replacement:
+
+        b=/usr/lib/postgresql; echo " # note"; sudo rsync -a "$b/17/bin/" "$b/16/bin/"
+
+    became `b=/usr/lib/postgresql; echo "` — the rsync never reached any rule, and
+    the step was GREEN. `_strip_trailing_comment` walks the line and cuts at a `#`
+    that BEGINS A WORD — column 0, or after unquoted, unescaped whitespace or one
+    of the list operators `; & | (` — where a word really begins, so NOT after an
+    extglob `(` or the second `(` of a glued `((`, which are word parts — plus,
+    deliberately, NOT `<`/`>`: bash DOES
+    begin a comment word after a redirection operator (`echo hi >#f` is a syntax
+    error because `#f` was eaten as a comment), but a FLAT class cannot tell that
+    context from the ones where the `#` is DATA — inside `(( ))` / `$(( ))` a `<`/`>`
+    is a COMPARISON and inside `${…}` it is literal, so
+    `a=1; (( a >#0 )); cp -a "$b/17/bin/." "$b/16/bin/"` and
+    `echo ${x:->#y}; cp -a …` keep the tail live and bash runs the replacement
+    (measured: `main` and the pushed head both refuse; a class carrying `>` returned
+    GREEN). Omitting them is therefore a fail-CLOSED narrowing — an ambiguous `#`
+    keeps the tail live, so the guard still sees the command instead of erasing it —
+    and `test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary` pins
+    that direction. ⛔ AND IT IS THE **FRAMES** THAT CARRY IT NOW (#12279 review round 3):
+    once `(( … ))` and `${…}` are modelled as word parts, re-adding `<`/`>` to this
+    class no longer changes those two lines — the test measures `#`-as-DATA in those
+    contexts, which holds independently of the class (measured: re-adding the two
+    characters leaves the test green). The characters still stay OUT, because bash's
+    comment-after-a-redirect rule is real at command level and the remaining
+    unmodelled redirect contexts are only fail-closed if the `#` keeps the tail
+    live. It also knows that a
+    substitution/assignment `)` is a word part while a GROUP-closing one is an
+    operator, and that a backslash escapes its partner inside double quotes
+    (#12271 / #12279 review, each measured).
     """
 
     joined = _run_code(step).replace("\\\n", " ")
-    return "\n".join(
-        re.split(r"\s+#", line, maxsplit=1)[0]
-        for line in joined.splitlines()
-    )
+    return "\n".join(_strip_trailing_comment(line) for line in joined.splitlines())
 
 
 def _github_path_writes(steps: list[dict], job: dict | None = None) -> list[tuple[int, str, int | None]]:
@@ -1052,10 +1083,50 @@ def _effective_shell(job: dict | None, step: dict) -> str:
     return "\n".join([default_shell, str(step.get("shell") or "")])
 
 
-def _executed_lines(job: dict | None, step: dict) -> list[str]:
-    """Every line the step EXECUTES: its `shell:` argv plus its `run:` script."""
+def _ambiguous_comment_cuts(line: str) -> list[str]:
+    """`line` cut at EVERY word-position `#`, ignoring quotes/scopes.
 
-    return (_effective_shell(job, step) + "\n" + _run_commands(step)).splitlines()
+    ⛔ A `#` WHOSE DATA-NESS THIS SCANNER CANNOT DECIDE MUST BE READ BOTH WAYS
+    (#12279 FINAL REVIEW 2, P0 — the follow-up to the nested-quote fix, measured).
+    Keeping the tail for a `#` that bash reads as DATA (the nested-quote P1) makes
+    the words after it ordinary OPERANDS, so a destination stops being "the last
+    path" and a complete replacement goes GREEN against `main`:
+
+        cp -a "${b}/17/bin/." "${b}/16/bin/" # restore the client
+
+    The opposite reading (cut at the `#`, what `main` did) loses a replacement that
+    follows genuinely-data `#`. Neither reading is right, so the rule is
+    **refuse if EITHER reading refuses** — `_executed_lines` emits every reading.
+    ⛔ EVERY WORD-POSITION `#`, NOT JUST THE FIRST (#12279 FINAL REVIEW 3, P0,
+    measured 40 RED→GREEN spellings): with only the first cut, a DATA `#` earlier
+    on the line (`echo "old $(pg_dump --version) # was"; cp -a … # pin`) made the
+    only extra reading stop BEFORE the replacement, so neither reading refused and
+    the copy landed.
+    """
+
+    cuts: list[str] = []
+    for index, char in enumerate(line):
+        if char == "#" and (index == 0 or line[index - 1] in COMMENT_START_CHARS):
+            cuts.append(line[:index])
+    return cuts
+
+
+def _executed_lines(job: dict | None, step: dict) -> list[str]:
+    """Every line the step EXECUTES: its `shell:` argv plus its `run:` script.
+
+    ⛔ PLUS THE OPPOSITE READING of every line whose trailing `#` is ambiguous
+    (#12279 FINAL REVIEW 2, P0). A rule arm is a refusal, so scanning both
+    readings can only over-refuse — and over-refusing is the direction this guard
+    is allowed to be wrong in. Scanning only the kept reading let a replacement
+    through whenever the words after an ambiguous `#` stopped the destination from
+    looking like "the last path token".
+    """
+
+    lines = (_effective_shell(job, step) + "\n" + _run_commands(step)).splitlines()
+    out = list(lines)
+    for line in lines:
+        out.extend(_ambiguous_comment_cuts(line))
+    return out
 
 
 def _client_dir_mentions(steps: list[dict], job: dict | None = None) -> list[tuple[int, str, int | None]]:
@@ -1395,6 +1466,75 @@ _DESTINATION_VERBS = frozenset({"cp", "rsync", "mv", "ln", "install"})
 #: bare flag, which is what a person writes.
 _TARGET_OPTION_VERBS = frozenset({"cp", "mv", "ln", "install"})
 
+#: `find` PRIMARIES that open an operand list and are closed by a terminator. A find
+#: expression may carry several of them (#12271 PLAN-VERIFY round 2), and each one's
+#: own last operand is the destination for the verb inside it — a single
+#: whole-segment "last" read both spared a later replacement and, once the scan was
+#: stopped at the first terminator, went RED→GREEN on the escaped spelling.
+_EXEC_PRIMARY_WORDS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+
+#: Characters bash treats as ENDING a word, so a word they are GLUED to is still
+#: that word (#12279 review P1, measured FAIL-OPEN). A `find` terminator written
+#: where a `find` is almost always written — inside a command substitution — is
+#: tokenised with the closing `)` attached:
+#:
+#:     X=$(find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" ';')     -- GREEN
+#:     X=$(find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \;)      -- GREEN
+#:     out=`find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" ';'`    -- GREEN
+#:
+#: Bash executes every one of those replacements (measured: the destination's
+#: `NEW` body lands in `$b/16/bin/`), because `)` / a closing backtick is an
+#: OPERATOR that ends the `';'` word. Compared verbatim the token is `';')`, which
+#: is not in the terminator set — so it became the LAST OPERAND and the whole
+#: replacement went GREEN. This is the same class as the unquoted-`';'` hole this
+#: change closes, one carriage over: the terminator was compared as TEXT rather
+#: than as the WORD it is.
+#: ⛔ `}` IS NOT IN THE SET (#12279 review round 2, measured): the brace spelling bash
+#: accepts is `{ find … ';';}` — a quoted terminator, then the `;` LIST separator,
+#: then `}` — and `_segment_bounds` already cuts the segment at that unquoted `;`,
+#: so nothing needs a `}` rstrip. The only token a `}` rstrip would change is
+#: `';'}` / `';'};`, which `find` itself refuses as a non-terminator
+#: (`find: missing argument to \`-exec'`, measured) — and at TOP LEVEL `bash -n`
+#: ACCEPTS both (`rc=0`; it is only inside a brace group that `';'}` is
+#: `syntax error: unexpected end of file`). So the character covered no spelling
+#: that reaches the guard, and the first version of this note attributed that to the
+#: wrong mechanism — the same "a comment that attributes coverage to the wrong
+#: mechanism" class this change exists to remove.
+#: ⛔ A TRAILING BACKSLASH IS A CONTINUATION, NOT PART OF THE WORD (#12279 FINAL
+#: REVIEW, P2). `find ... -exec cp {} dest ';'\` at EOF is the word `';\`' to bash, so
+#: without `\` here it became the LAST OPERAND and the destination read as a
+#: SOURCE (measured: bash LANDED the replacement, the guard said GREEN).
+_TERMINATOR_TRAILING_OPERATORS = ")]`\\"
+
+
+def _bare_terminator(text: str) -> str:
+    """The `find` terminator WORD in `text`, or `text` when it is not one.
+
+    ONE RULE, NOT TWO (the principle this change applies to the comment strippers):
+    a terminator glued to a closing operator is the same terminator, and both
+    readers — the operand scan and `_is_command_position`'s walk-back — ask this
+    function rather than re-deriving it.
+
+    ⛔ ONE MATCHED QUOTE PAIR, NOT `.strip()` (#12279 review round 2, P3 — measured
+    FAIL-OPEN at the first cut AND at the pushed head). `str.strip("\\"'")` removes
+    ANY RUN of leading/trailing quote characters, so a QUOTED OPERAND whose content
+    is itself a quoted `;` collapses to a terminator:
+
+        find "$b/17/bin" -type f -exec cp {} '";"' "$b/16/bin/" ';'
+
+    `'\";\"'` → `;`, so the scan ended at the third operand, `awaiting_exec` went
+    True, the real DESTINATION was never read, and the complete replacement was
+    GREEN while bash copies it (measured: the destination's `NEW` body lands). The
+    token is the literal argument `";"` to find, i.e. NOT a terminator. Only an
+    enclosing pair is a quoting, so only an enclosing pair is removed.
+    """
+
+    word = text.rstrip(_TERMINATOR_TRAILING_OPERATORS)
+    if len(word) >= 2 and word[0] == word[-1] and word[0] in "\"'":
+        word = word[1:-1]
+    return word
+
+
 #: The options that take NO separate value. ⛔ THE LIST IS INVERTED ON PURPOSE
 #: (#12173 review round 32, measured FAIL-OPEN TWICE). Three consecutive repairs
 #: each traded one hole for another because the scan guessed which options TAKE a
@@ -1643,22 +1783,62 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
     segment = _REDIRECT_RE.sub(lambda m: " " * len(m.group(0)), segment)
 
     last: tuple[int, int] | None = None
-    # ⛔ ONE OPERAND SCAN THAT CONSUMES OPTION VALUES (#12173 review round 30,
-    # measured FAIL-OPEN). A first cut kept the last `/`-bearing token and then
-    # treated ANY later non-option token as "something comes after it", which
-    # reopened the hole this PR exists to close — an option's SEPARATE VALUE is
-    # not an operand:
+    # ⛔ EACH `find … -exec` PRIMARY HAS ITS OWN DESTINATION (#12271 PLAN-VERIFY
+    # round 2, measured FAIL-OPEN). A segment may carry SEVERAL `-exec` primaries
+    # (the POSIX-standard form), and each opens a fresh operand list. Two cuts were
+    # wrong here, in opposite directions:
     #
-    #     sudo rsync -a "$b/17/bin/" "$b/16/bin/" -e ssh          -- GREEN (bypass)
-    #     sudo rsync -a "$b/17/bin/" "$b/16/bin/" --exclude foo   -- GREEN (bypass)
+    #   · skipping only the terminator let `\)`, `\(`, `!`, `-o` become "last" —
+    #     `find … -exec cp {} "$b/16/bin/" ';' \)` was GREEN;
+    #   · BREAKING at the terminator fixed that but stopped the scan dead, so a
+    #     LATER exec's destination was never read — and
+    #     `find … -exec echo {} \; -exec cp {} "$b/16/bin/" \;` went RED→GREEN,
+    #     a regression this change introduced on the ESCAPED spelling.
     #
-    # So the scan walks the tokens ONCE: an option (`-e`, `--exclude`) makes the
-    # NEXT token its value and consumes it; `--opt=value` carries its own and
-    # consumes nothing; every other token is an OPERAND, and the LAST operand is
-    # what decides direction. `-t`/`--target-directory` never reaches here — the
-    # branch above returns first for the verbs where that flag MEANS a destination.
+    # So the scan tracks which exec primary each operand belongs to, and the verb's
+    # OWN primary decides. Expression tokens between primaries are skipped, never
+    # operands.
+    #
+    # ⛔ AND THE SCAN CONSUMES OPTION VALUES (#12173 review round 30, measured
+    # FAIL-OPEN): an option's SEPARATE VALUE is not an operand, or
+    # `sudo rsync -a "$b/17/bin/" "$b/16/bin/" -e ssh` reads GREEN. `-t`/
+    # `--target-directory` never reaches here — the branch above returns first for
+    # the verbs where that flag MEANS a destination.
+    last_by_primary: dict[int, tuple[int, int] | None] = {}
+    primary_span: dict[int, tuple[int, int]] = {}
+    primary = 0
+    awaiting_exec = False
     expect_value = False
     for token_start, token_end, text in _shell_tokens(segment):
+        bare = text.strip("\"'")
+        # `-exec`/`-execdir`/`-ok`/`-okdir` OPEN an operand list (checked before
+        # the option branch: a find primary is not an option that consumes a value).
+        if bare in _EXEC_PRIMARY_WORDS:
+            primary += 1
+            last_by_primary[primary] = None
+            primary_span[primary] = (token_start + seg_start, seg_end)
+            awaiting_exec = False
+            expect_value = False
+            continue
+        # Not operands: a `find … \\;`/`xargs` terminator (`+`), the escaped `\\;`
+        # itself, and the leading fragment the `2>&1` split leaves at `&`.
+        # ⛔ ONLY INSIDE AN `-exec` PRIMARY (#12279 REVIEW P0, measured RED→GREEN).
+        # Applied unconditionally, this branch swallowed a `+` / `';'` token in ANY
+        # command — `cp -a src + "$b/16/bin/"` set `awaiting_exec` and the
+        # destination was never read, so a complete replacement went GREEN (main
+        # REFUSED it). Outside a find primary those tokens are ordinary OPERANDS.
+        # ⛔ ANY QUOTING OF A TERMINATOR IS THE SAME TERMINATOR (#12271, measured
+        # FAIL-OPEN): `find … -exec cp {} "$b/16/bin/" ';'` and its `";"` spelling
+        # are valid `find` terminators, but compared verbatim they were not in the
+        # set — so the terminator became the LAST OPERAND and the destination was
+        # no longer "last", sparing the whole replacement (GREEN).
+        if primary and _bare_terminator(text) in {"+", "\\;", ";"}:
+            primary_span[primary] = (primary_span[primary][0], token_end + seg_start)
+            awaiting_exec = True
+            expect_value = False
+            continue
+        if primary and awaiting_exec:
+            continue  # a find EXPRESSION token: never an operand
         # ⛔ AN OPTION IS NOT AN OPERAND (#12069 review round 22, measured):
         # `--exclude-from=/etc/rsync-exclude` and `--log-file="$SCRATCH/x.log"`
         # carry a path in an option VALUE and were taken as the destination.
@@ -1672,16 +1852,83 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
         if expect_value:
             expect_value = False
             continue
-        # Not operands: a `find … \\;`/`xargs` terminator (`+`), the escaped `\\;`
-        # itself, and the leading fragment the `2>&1` split leaves at `&`.
-        if text in {"+", "\\;", ";"}:
-            continue
         if re.match(r"^\d*[<>]", text):
             continue
-        last = (token_start + seg_start, token_end + seg_start)
+        # ⛔ A TRAILING CLOSING OPERATOR IS NOT AN OPERAND (#12279 REVIEW 8, P1,
+        # measured FAIL-OPEN — pre-existing on `main`, not introduced here, and
+        # still in the declared surface). The segment a subshell owns ends with the
+        # `)` that closes it, and `_SEGMENT_SPLIT_RE` does not split on parens, so
+        # the final token was the bare `)` — the destination was no longer LAST and
+        # a wrapped replacement went GREEN:
+        #
+        #     ( cd /tmp && cp -a "$b/17/bin/." "$b/16/bin/" )      -- bash REPLACES
+        #     out=$( cd /tmp && cp -a "$b/17/bin/." "$b/16/bin/" )  -- bash REPLACES
+        #
+        # Its GLUED spelling (`…"$b/16/bin/" )`) was refused only because the `)`
+        # rode on the destination token, so whitespace decided the verdict. The
+        # terminator reader already had this rule (`_TERMINATOR_TRAILING_OPERATORS`)
+        # and the destination reader had none. Only a token that is ENTIRELY
+        # closing operators is skipped: a QUOTED `')'` is an ordinary word, and a
+        # lone backtick or quote is not a closer but an unterminated construct, so
+        # the class is `)]` and not the whole terminator set.
+        if not text.strip(")]"):
+            continue
+        this = (token_start + seg_start, token_end + seg_start)
+        last = this
+        if primary:
+            last_by_primary[primary] = this
+
+    # The verb's OWN exec primary decides when the segment carries one; the
+    # whole-segment last operand is the fallback for every non-`find` command.
+    for identifier, (primary_start, primary_end) in primary_span.items():
+        if primary_start <= verb.start() <= primary_end:
+            candidate = last_by_primary.get(identifier)
+            if candidate is not None:
+                return start >= candidate[0] and end <= candidate[1]
+            break
     if last is None:
         return True
     return start >= last[0] and end <= last[1]
+
+
+def _in_find_segment(line: str, pos: int) -> bool:
+    """Is `pos` inside a `find` command segment?
+
+    The `';'` / `\\;` token is a find TERMINATOR there, and an ordinary OPERAND
+    everywhere else — `echo ';' chmod …` prints text, while
+    `cp -a src ';' "$b/16/bin/"` really copies. Reading it as a separator in both
+    made one a false RED and the other a false GREEN (#12279 review P1).
+
+    ⛔ `find` ONLY, and `xargs` is deliberately NOT in the set (#12279 review P3,
+    then a MEASURED FAIL-OPEN fixed here). `xargs` has no `;` terminator, so
+    reading `';'` as a list separator inside an `xargs` command is exactly the
+    false GREEN this gate exists to stop. It USED to answer True for a
+    PATH-QUALIFIED `xargs`: the wrapper skip below compares the RAW token
+    (`word in _WRAPPER_WORDS`) while the return basename-normalises, so a bare
+    `xargs` was skipped as a wrapper but `/usr/bin/xargs` was not, fell through to
+    the return, and matched the `"xargs"` member — measured, one spelling away:
+    `/usr/bin/xargs -0 cp -a /tmp/src/. ';' "$b/16/bin/"` was spared while the
+    bare-`xargs` spelling was refused, and bash copies in both. A `find` behind a
+    BARE wrapper is still recognised (`xargs find …` skips the wrapper and reads
+    `find`), and so is a path-qualified `find` (`/usr/bin/find …`, basenamed
+    here). ⛔ A PATH-QUALIFIED WRAPPER is NOT skipped — the comparison above is on
+    the RAW token, the same asymmetry that caused the bug — so
+    `/usr/bin/xargs find …` answers False here, as `/usr/bin/sudo find …` already
+    did. MEASURED HARMLESS, which is why it is stated rather than fixed: both of
+    those spellings are still REFUSED by the operand model
+    (`_replaces_a_client_binary` is True for
+    `/usr/bin/xargs find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" ';'` and the
+    `/usr/bin/sudo find` sibling), so the missed reading spares nothing. The unit
+    test pins this direction too, so the sentence cannot later be re-read as
+    "no spelling is ever missed".
+    """
+
+    seg_start, _ = _segment_bounds(line, pos)
+    for word in line[seg_start:pos].split():
+        if word in _WRAPPER_WORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word):
+            continue  # `sudo find …`, `env FOO=1 find …`
+        return word.rsplit("/", 1)[-1] in {"find"}
+    return False
 
 
 def _is_command_position(line: str, start: int) -> bool:
@@ -1705,7 +1952,19 @@ def _is_command_position(line: str, start: int) -> bool:
     index = len(tokens) - 1
     while index >= 0:
         token = tokens[index]
+        # A list separator ends the walk as a COMMAND. A GLUED separator
+        # (`true;cp`) is covered by `rstrip`, because the separator is part of the
+        # word.
         if token.rstrip(";|&({") != token:
+            return True
+        # ⛔ A `find`/`xargs` TERMINATOR IS A SEPARATOR ONLY INSIDE A find/xargs
+        # COMMAND (#12279 REVIEW P1, measured in BOTH directions). `';'` and `\;`
+        # are ordinary OPERANDS of any other command — `echo ';' chmod -R 755 …`
+        # only PRINTS text, while blanket-treating them as separators made it a
+        # false RED; and skipping the client-dir mention on
+        # `cp -a src ';' "$b/16/bin/"` made it a false GREEN. Gated on the segment's
+        # own head word, which is the only place the token really terminates.
+        if _bare_terminator(token) in {";", "\\;"} and _in_find_segment(line, start):
             return True
         # ⛔ THE VERB WORD, NOT THE RAW TOKEN (#12069 review round 27, measured
         # FAIL-OPEN). `BINARY_MUTATION_RE` starts with `\b`, so it can never match
@@ -2761,7 +3020,41 @@ def _compared_variables(lines: list[str]) -> list[tuple[str, str]]:
 #: as CODE: its `done` truncated the body before the real comparison, or its `do`
 #: ran the body past its own loop. `{` is deliberately NOT in the class: it opens
 #: `${#arr[@]}`, which is not a comment.
-COMMENT_START_RE = re.compile(r"(?:^|[ \t;&|()])#")
+#: THE characters that can begin a comment WORD **other than a group-closing
+#: `)`**, shared so the comment rules in this file cannot drift apart (#12271).
+#: `#12069 review 16` fixed the narrow `(?:^|[ \t])` (which "MISSED `;#`, `)#`,
+#: `&#`, `|#`") and the later, hand-rolled `_strip_trailing_comment` reintroduced
+#: it verbatim — the same defect class, guarded in one function and unguarded in
+#: its sibling. Bash's rule: "A word begins at the beginning of a line, after
+#: unquoted whitespace, or after an operator"
+#: (<https://www.gnu.org/software/bash/manual/html_node/Comments.html>).
+#: ⚠️ `)` is DELIBERATELY ABSENT: it is an operator only when it closes a GROUP, so
+#: it cannot live in a flat class — `_strip_trailing_comment` tracks it on a stack
+#: (#12271 PLAN-VERIFY P1: `echo $(date)#note` is one word, not a comment).
+#: ⛔ `<` AND `>` ARE DELIBERATELY ABSENT, and this is a MEASURED decision, not an
+#: oversight (#12279 review round 2, P1 — the first cut of this very comment put them
+#: in and ERASED a live line). At COMMAND level bash treats `>`/`<` as operators, so
+#: `bash -c 'echo A >#foo'` is a syntax error *because* `#foo` is a comment — but a
+#: flat class cannot tell that from the contexts where a `#` after `>` is DATA:
+#:
+#:     a=1; (( a >#0 )); cp -a "$b/17/bin/." "$b/16/bin/"   # `(( ))`: comparison
+#:     echo ${x:->#y}; cp -a "$b/17/bin/." "$b/16/bin/"     # `${…}`: literal
+#:
+#: Both were measured: bash REPLACES the client dir, and a class containing `>`
+#: stripped at the `#` and returned GREEN — a RED→GREEN regression (main and the
+#: pushed head both refuse). That is the same reason `)` cannot live in a flat
+#: class, so the omission stays and its cost is stated: a `>#`/`2>#` TOMBSTONE is not
+#: stripped, so it survives into the scan and can only cause a false RED (category
+#: B), never a bypass.
+#: `test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary` pins the
+#: fail-OPEN direction of that trade: a `#` in an arithmetic / `${…}` context stays
+#: DATA there (measured), and it is the `(( … ))` / `${…}` FRAMES, not this class,
+#: that carry it — re-adding `<`/`>` now leaves those rows green.
+#: ⚠️ AND `(` IS ONLY THE DEFAULT, NOT A SHELL FACT (#12279 REVIEW 4, P0): a word
+#: begins after a plain `(` but NOT after an extglob opener (`@(#X)`) or the second
+#: `(` of a glued `((` — those are word parts, so `_strip_trailing_comment` derives
+#: `boundary` from the FRAME it pushed instead of from this class.
+COMMENT_START_CHARS = " \t;&|("
 
 
 def _without_comment(line: str) -> str:
@@ -2777,13 +3070,16 @@ def _without_comment(line: str) -> str:
     same text also moved `_loop_nesting_delta`: `# once done, exit` truncated the
     body before the real comparison (measured `['pg_dump', 'pg_restore']` where the
     cut before the comment fix refused).
+
+    ⛔ ONE RULE, NOT TWO (#12271 PLAN-VERIFY). This used to be a second
+    implementation of the same rule — `_mask_quotes` + `COMMENT_START_RE` — which
+    is how the narrow `(?:^|[ \t])` came back after `#12069 review 16` fixed it.
+    It now delegates to the single stripper, so the two cannot disagree again, and
+    it inherits the GROUP-vs-SUBSTITUTION `)` distinction that a flat class loses
+    (`echo $(date)#note` is one word; `(echo x)#note` is a comment).
     """
 
-    masked = _mask_quotes(line)
-    match = COMMENT_START_RE.search(masked)
-    if match is None:
-        return line
-    return line[: match.start()]
+    return _strip_trailing_comment(line)
 
 
 def _logical_lines(lines: list[str]) -> list[str]:
@@ -5611,7 +5907,721 @@ BINARY_MUTATION_POLARITY = [
         True,
         "#12173 round-32: a QUOTED value with a space is ONE token",
     ),
+    # ⛔ A QUOTED TERMINATOR IS THE SAME TERMINATOR (#12271, measured FAIL-OPEN).
+    # `find` accepts `;` quoted any way; the terminator compare read it VERBATIM,
+    # so a quoted one was not in the skip set, became "the last operand", and the
+    # destination stopped being last — the complete replacement went GREEN.
+    (
+        "find \"$b/17/bin\" -type f -exec cp {} \"$b/16/bin/\" ';'",
+        True,
+        "#12271: single-quoted find terminator is still a terminator",
+    ),
+    (
+        'find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" ";"',
+        True,
+        "#12271: double-quoted find terminator is still a terminator",
+    ),
+    (
+        "find \"$b/16/bin\" -type f -exec ls -l {} ';'",
+        False,
+        "#12271 CONTROL: a quoted terminator on a READ stays GREEN — the fix must "
+        "not blanket-refuse every quoted `;`",
+    ),
+    # ⛔ AND `find`'s OWN EXPRESSION TOKENS ARE NOT OPERANDS (#12271 PLAN-VERIFY
+    # P1, measured FAIL-OPEN). Skipping only the terminator itself let `\)`, `\(`,
+    # `!` and `-o` become "the last path" — so a GROUPED `-exec` put `\)` last and
+    # the complete replacement went GREEN, on the ESCAPED spelling too.
+    (
+        "find \"$b/17/bin\" -type f \\( -name '*.so' -exec cp {} \"$b/16/bin/\" ';' \\)",
+        True,
+        "#12271: a quoted terminator inside a find EXPRESSION GROUP still refuses",
+    ),
+    (
+        'find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \\; \\)',
+        True,
+        "#12271: the escaped terminator followed by `\\)` still refuses",
+    ),
+    (
+        "find \"$b/17/bin\" -type f \\( -name '*.so' -exec cp {} \"$b/16/bin/\" ';' \\) -print",
+        True,
+        "#12271: a trailing `-print` after the group still refuses",
+    ),
+    (
+        "find \"$b/16/bin\" -type f \\( -name '*.so' -exec ls -l {} ';' \\)",
+        False,
+        "#12271 CONTROL: the grouped READ stays GREEN",
+    ),
+    # ⛔ A SEGMENT MAY CARRY SEVERAL `-exec` PRIMARIES (#12271 PLAN-VERIFY round 2,
+    # measured in BOTH directions). Ending the scan at the first terminator closed
+    # T5 but stopped a LATER exec's destination from being read — which took the
+    # ESCAPED spelling from RED (on main) to GREEN, a regression. The verb's own
+    # primary decides now, so a later replacement is still refused.
+    (
+        'find "$b/17/bin" -type f -exec echo {} \\; -exec cp {} "$b/16/bin/" \\;',
+        True,
+        "#12271: a SECOND -exec primary's escaped terminator still refuses",
+    ),
+    (
+        "find \"$b/17/bin\" -type f -exec echo {} ';' -exec cp {} \"$b/16/bin/\" ';'",
+        True,
+        "#12271: a SECOND -exec primary's quoted terminator still refuses",
+    ),
+    (
+        'find "$b/17/bin" -type f -exec echo {} \\; -exec cp {} "$RUNNER_TEMP/snap" \\;',
+        False,
+        "#12271 CONTROL: the same shape copying OUT of the client dir stays GREEN",
+    ),
+    # ⛔ A TERMINATOR TOKEN OUTSIDE A find PRIMARY IS AN ORDINARY OPERAND (#12279
+    # REVIEW P0, measured RED→GREEN). Applying the find model unconditionally made
+    # `+` / `';'` end the operand scan in ANY command, so the destination was never
+    # read and a complete replacement went GREEN — `main` refused both.
+    (
+        'cp -a /tmp/src/. + "$b/16/bin/"',
+        True,
+        "#12279 P0: a `+` token in a non-find command is an operand, not a terminator",
+    ),
+    (
+        'cp -a /tmp/src/. \';\' "$b/16/bin/"',
+        True,
+        "#12279 P0: a quoted `;` in a non-find command is an operand",
+    ),
+    (
+        "cp -a \"$b/16/bin\" /tmp/snap +",
+        False,
+        "#12279 P0 CONTROL: the same tokens on a READ stay GREEN",
+    ),
+    # ⛔ A TERMINATOR GLUED TO A CLOSING OPERATOR IS STILL THE TERMINATOR (#12279
+    # REVIEW P1, measured FAIL-OPEN). `find` is nearly always written inside a
+    # command substitution, where the `)` is attached to the terminator token, so
+    # the verbatim compare saw `';')` / `\;)` / `` ';'` `` and made it the LAST
+    # OPERAND — the destination stopped being last and the whole replacement went
+    # GREEN. Bash executes all three (measured: the destination's `NEW` body
+    # lands). `_bare_terminator` is the single rule both readers ask.
+    (
+        'X=$(find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \';\')',
+        True,
+        "#12279 P1: a quoted terminator glued to the substitution's `)` still refuses",
+    ),
+    (
+        'X=$(find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \\;)',
+        True,
+        "#12279 P1: an escaped terminator glued to `)` still refuses",
+    ),
+    (
+        'out=`find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \';\'`',
+        True,
+        "#12279 P1: a quoted terminator glued to a closing backtick still refuses",
+    ),
+    (
+        '(find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \';\')',
+        True,
+        "#12279 P1: a quoted terminator glued to a subshell `)` still refuses",
+    ),
+    (
+        'find "$b/16/bin" -type f -exec ls -l {} \';\')',
+        False,
+        "#12279 P1 CONTROL: the same glue on a READ stays GREEN — the fix must not "
+        "blanket-refuse every glued terminator",
+    ),
+    # ⛔ ONE MATCHED QUOTE PAIR, NOT `.strip()` (#12279 review round 2, P3 — measured
+    # FAIL-OPEN at the pushed head). `str.strip("'\"")` removed EVERY leading and
+    # trailing quote character, so an OPERAND that merely CONTAINS a quoted `;`
+    # collapsed to a terminator: `'";"'` → `;`. The scan then ended at that operand,
+    # the real destination was never read, and the complete replacement went GREEN
+    # while bash copies it (measured: the destination's `NEW` body lands).
+    (
+        'find "$b/17/bin" -type f -exec cp {} \'\";\"\' "$b/16/bin/" \';\'',
+        True,
+        "#12279 P3: an operand whose content is a quoted `;` is not a terminator",
+    ),
+    # ⛔ THE VERB'S OWN PRIMARY DECIDES — AND THAT DECISION NEEDED ITS OWN ROW
+    # (#12279 review P2, measured: DELETING the per-primary decision leaves the
+    # module fully green — 383 passed — while the replacement below goes
+    # RED→GREEN). Every row above puts the destination in the segment's LAST
+    # primary, where `last_by_primary` and the whole-segment `last` fallback
+    # agree, so none of them exercises the decision at all: the model was
+    # carried by inspection, which is the R10 defect this PR fixed elsewhere.
+    (
+        'find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \\; -exec echo /tmp/x \\;',
+        True,
+        "#12279 review P2: the destination sits in an EARLIER -exec primary than "
+        "the segment's tail operand, so only the per-primary read refuses it",
+    ),
+    (
+        'find "$b/16/bin" -type f -exec cp {} "$RUNNER_TEMP/snap" \\; -exec echo /tmp/x \\;',
+        False,
+        "#12279 review P2 CONTROL: the same EARLIER-primary shape copying OUT of "
+        "the client dir stays GREEN — the row above must not be satisfied by "
+        "blanket-refusing a segment with two primaries",
+    ),
+    # ⛔ EVERY `_EXEC_PRIMARY_WORDS` MEMBER IS PINNED (#12279 review P2, measured:
+    # DROPPING `-execdir` from the set leaves the module fully green — 383 passed
+    # — while its replacement goes RED→GREEN). Only `-exec` had a row, so three of
+    # the four members were carried by inspection alone.
+    (
+        "find \"$b/17/bin\" -type f -execdir cp {} \"$b/16/bin/\" ';'",
+        True,
+        "#12279 review P2: `-execdir` opens an operand list exactly as `-exec` does",
+    ),
+    (
+        "find \"$b/17/bin\" -type f -ok cp {} \"$b/16/bin/\" ';'",
+        True,
+        "#12279 review P2: `-ok` opens an operand list exactly as `-exec` does",
+    ),
+    (
+        "find \"$b/17/bin\" -type f -okdir cp {} \"$b/16/bin/\" ';'",
+        True,
+        "#12279 review P2: `-okdir` opens an operand list exactly as `-exec` does",
+    ),
+    (
+        "find \"$b/16/bin\" -type f -execdir ls -l {} ';'",
+        False,
+        "#12279 review P2 CONTROL: `-execdir` on a READ stays GREEN",
+    ),
+    # ⛔ A PATH-QUALIFIED `xargs` IS NOT A find SEGMENT (#12279 review P3, measured
+    # FAIL-OPEN). `_in_find_segment` skipped a BARE `xargs` as a wrapper word but
+    # not `/usr/bin/xargs`, so the basename fell through to the `"xargs"` member
+    # and answered True — the `';'` then read as a list SEPARATOR, not an operand,
+    # and the replacement was spared. `xargs` has no `;` terminator, so it must
+    # never be a find segment: the bare spelling was refused and this one was not.
+    (
+        "/usr/bin/xargs -0 cp -a /tmp/src/. ';' \"$b/16/bin/\"",
+        True,
+        "#12279 P3: a path-qualified `xargs` is not a find segment — its `;` is an "
+        "OPERAND, so the destination is still read",
+    ),
+    (
+        "find \"$b/16/bin\" -type f -exec ls -l {} ';'",
+        False,
+        "#12279 P3 CONTROL: a BARE-find READ stays GREEN — narrowing the find "
+        "segment to `find` must not lose the ordinary spelling",
+    ),
+    # ⛔ A TRAILING CLOSING OPERATOR IS NOT THE DESTINATION (#12279 REVIEW 8, P1,
+    # measured FAIL-OPEN; pre-existing on `main`, fixed here because it is on the
+    # declared surface and the replacement is IDIOMATIC — a wrapped step is how this
+    # would actually be written). The subshell's `)` was read as the last operand, so
+    # a complete replacement went GREEN.
+    (
+        '( cd /tmp && cp -a "$b/17/bin/." "$b/16/bin/" )',
+        True,
+        "#12279 R8: the subshell's closing `)` is not an operand — the destination "
+        "is still the last PATH token and bash copies",
+    ),
+    (
+        'out=$( cd /tmp && cp -a "$b/17/bin/." "$b/16/bin/" )',
+        True,
+        "#12279 R8: the same `)` inside a command-substitution assignment",
+    ),
+    (
+        '( cp -a "$b/17/bin/." "$b/16/bin/" )',
+        True,
+        "#12279 R8: the wrapped spelling needs no `cd` to reach the same state",
+    ),
+    (
+        '( rsync -a "$b/17/bin/" "$b/16/bin/" )',
+        True,
+        "#12279 R8: verb-independent — the reader is shared, so a second verb pins "
+        "that the fix is in the reader and not in the `cp` rule",
+    ),
+    (
+        '( cat "$b/17/bin/pg_dump" )',
+        False,
+        "#12279 R8 CONTROL: a wrapped READ stays GREEN — skipping a closing "
+        "operator must not skip the destination",
+    ),
 ]
+
+
+def test_a_quoted_hash_does_not_erase_the_live_command_after_it() -> None:
+    """A `#` inside quotes is DATA — it must not truncate the line (#12271).
+
+    MEASURED FAIL-OPEN at `9828250732`: `_run_commands` split on the first
+    whitespace-then-`#` with no quote awareness, so a line that merely PRINTED a
+    literal `#` lost everything after it. The complete directory replacement on
+    that same line never reached ANY rule and the step was GREEN:
+
+        b=/usr/lib/postgresql; echo " # note"; sudo rsync -a "$b/17/bin/" "$b/16/bin/"
+        _run_commands -> 'b=/usr/lib/postgresql; echo "'
+
+    This is the same act as the sibling without the `echo`, which the guard
+    refuses — so the fix is not a new rule, it is the erasure.
+    """
+
+    replacement = 'sudo rsync -a "$b/17/bin/" "$b/16/bin/"'
+    for quoted in ('echo " # note"', "echo ' # note'", 'echo "see #12051"', 'echo "a # b" && true'):
+        step = {"run": f"b=/usr/lib/postgresql; {quoted}; {replacement}"}
+        survived = _run_commands(step)
+        assert replacement in survived, (
+            f"a quoted `#` ({quoted}) erased the live command after it: "
+            f"`_run_commands` returned {survived!r}. A `#` inside quotes is data, "
+            "not a comment — it starts one at column 0, after unquoted whitespace, "
+            "after unquoted whitespace/operator or a confirmed group-closing `)`, "
+            "and never inside a quoted span."
+        )
+        assert any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
+            f"the replacement after a quoted `#` ({quoted}) is not refused — the "
+            "line survived `_run_commands` but the arm stayed blind to it"
+        )
+
+    # CONTROL, the other direction: a REAL trailing comment must still be
+    # dropped, or the tombstone this stripper exists for comes back.
+    # ⛔ AND IT MUST BE DROPPED AFTER AN OPERATOR TOO (#12271 finding 3). Bash: a
+    # word begins "at the beginning of a line, after unquoted whitespace, or after
+    # an operator" — so `;#`, `&&#`, `)#` all open a comment, and a stripper that
+    # only reads whitespace leaves a tombstone visible. The regex that used to
+    # know this (`COMMENT_START_RE`, `#12069 review 16`) and the hand-rolled
+    # stripper that reintroduced the narrow rule are now ONE function; this change
+    # deletes the regex, so `COMMENT_START_CHARS` has a single owner.
+    for prefix in ("true  #", "true;#", "true;;#", "true&&#", "true||#", "true|#", "(true)#"):
+        step = {"run": f"{prefix} was: sudo cp -a x y"}
+        assert "sudo cp" not in _run_commands(step), (
+            f"a real trailing comment after {prefix!r} survived `_run_commands`: a "
+            "commented-out act reads identically to a live one, which is the "
+            "tombstone this strips"
+        )
+
+def test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary() -> None:
+    """A `#` after a redirect is DATA inside `(( ))` / `$(( ))` / `${…}` (#12279).
+
+    MEASURED FAIL-OPEN, and introduced by the first cut of this review round: putting
+    `<`/`>` into the flat `COMMENT_START_CHARS` made a `#` after ANY of them start a
+    comment, but those are redirect operators only at COMMAND level — inside `(( ))`
+    they are comparisons and inside `${…}` they are literal, so the `#` is part of the
+    word and bash runs whatever follows it. Both shapes below REPLACE the pinned
+    client dir in bash (measured) and were ERASED to GREEN by that class, where
+    `origin/main` and the pushed head both refuse. So the two characters stay OUT and
+    the cost is the fail-CLOSED one (a `>#` tombstone survives into the scan and can
+    only cause a false RED) — this test pins the direction that would otherwise have
+    no cover — `#` is DATA inside `(( … ))` / `$(( … ))` / `${…}` even where a
+    boundary character precedes it, and it is the FRAMES in `_strip_trailing_comment`
+    that enforce it (measured: re-adding `<`/`>` to the class leaves this test green).
+    """
+
+    # ⛔ `<`/`>` ARE **NOT** IN THE CLASS, AND THAT IS THE FIX (#12279 review round 2,
+    # P1 — the first cut of this round added them and opened a RED→GREEN hole). At
+    # COMMAND level bash treats a redirect as an operator, so `bash -c 'echo A >#foo'`
+    # is a syntax error *because* `#foo` is a comment — but inside `(( ))` / `$(( ))`
+    # `>` is a COMPARISON and inside `${…}` it is literal, and there the `#` is DATA:
+    #
+    #     a=1; (( a >#0 )); cp -a "$b/17/bin/." "$b/16/bin/"    -- bash REPLACES
+    #     echo ${x:->#y}; cp -a "$b/17/bin/." "$b/16/bin/"      -- bash REPLACES
+    #
+    # measured: with `>` in the class both lines were ERASED at the `#` and returned
+    # GREEN, where `main` and the pushed head both refuse. A `#` after a `>` is
+    # therefore NOT an operator boundary in a FLAT class, for the same reason `)`
+    # is not — so it stays out and the fail-CLOSED cost is accepted (a `>#`
+    # tombstone survives into the scan and can only cause a false RED). This test is
+    # the direction that has no cover otherwise: `#` must stay DATA inside
+    # `(( … ))` / `$(( … ))` / `${…}`, which the FRAMES enforce — not the class.
+    replacement = 'sudo rsync -a "$b/17/bin/" "$b/16/bin/"'
+    for opener in (
+        "a=1; (( a >#0 ))",
+        "a=1; (( a <#0 ))",
+        "echo ${x:->#y}",
+        "echo ${x:-<#y}",
+        # ⛔ AND THESE THREE CARRY A REAL BOUNDARY CHARACTER, WHICH IS WHY THEY PIN
+        # THE FRAME ITSELF (#12279 REVIEW 6, P3). The rows above have `#` after a
+        # character that is NOT in `COMMENT_START_CHARS`, so a frame-less stripper
+        # leaves them green as well and this test could not see `M8` on its own — it
+        # only redded when the redirect mutation AND the frame mutation were applied
+        # together, which made the sentence below true about the pair and false about
+        # this test. After `|`, `;` or `&` the flat class WOULD strip, so only the
+        # `arith` frame keeps the `#` as DATA in these three: reverting the frames
+        # reds THIS test, which is what the claim below asserts.
+        "a=1; (( a|#0 )) || true",
+        "a=1; (( a;#0 )) || true",
+        "a=1; (( a&#0 )) || true",
+    ):
+        step = {"run": f"b=/usr/lib/postgresql; {opener}; {replacement}"}
+        survived = _run_commands(step)
+        assert replacement in survived, (
+            f"a `#` after a redirect INSIDE {opener!r} erased the live command after "
+            f"it: {survived!r}. Inside `(( ))`/`$(( ))` a `<`/`>` is a comparison and "
+            "inside `${…}` it is literal, so the `#` is DATA — measured in bash, which "
+            "runs the replacement. That is why `<`/`>` cannot join a flat class."
+        )
+        assert any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
+            f"the replacement after {opener!r} is not refused"
+        )
+
+
+def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
+    """`$(…)#` is ONE word; only a GROUP-closing `)` ends a word (#12271).
+
+    MEASURED FAIL-OPEN, and introduced by this very change's first cut: putting
+    `(`/`)` in a flat character class made every `)` a comment boundary, so a line
+    that printed a substitution followed by `#` lost everything after it and the
+    replacement on that line was never refused:
+
+        echo $(date)#12051; sudo rsync -a "$b/17/bin/" "$b/16/bin/"
+        _run_commands -> 'b=/usr/lib/postgresql; echo $(date)'   -- GREEN arm
+
+    Bash ground truth (`echo $(date +%s)#note ; echo AFTER` prints `<epoch>#note`
+    then `AFTER`) is that the `#` is part of the SAME WORD, so nothing is a
+    comment. A `)` that closes a GROUP is an operator and DOES end the word
+    (`(echo x)#note ; echo AFTER` prints only `x`) — the two are indistinguishable
+    in a flat class, which is why the stripper tracks closers on a stack.
+    """
+
+    replacement = 'sudo rsync -a "$b/17/bin/" "$b/16/bin/"'
+    # ⛔ AND A `)` THAT BASH DOES NOT READ AS A PAREN CLOSER MUST NOT POP A FRAME
+    # (#12279 REVIEW 2, P0, measured RED→GREEN). Every construct above is
+    # paren-BALANCED, so a `case` pattern terminator (`case a in a)`) or a `${x%)}`
+    # modifier — neither of which ends a word — used to pop the `$(` frame, after
+    # which the substitution's real `)` closed nothing and the `#` was read as a
+    # comment that erased the live line.
+    for opener in (
+        "echo $(date)#12051",
+        "echo $((1+1))#X",
+        "echo <(true)#X",
+        "echo >(true)#X",
+        "echo $(case a in a) echo hi;; esac)#note",
+        "echo $(case \"$M\" in full) echo hi;; *) echo lo;; esac)#note",
+        "echo $(echo ${x%)})#note",
+        # ⛔ A `(` INSIDE A WORD PART DOES NOT OPEN A GROUP (#12279 REVIEW 3, P0,
+        # measured RED→GREEN in 8 of 17 spellings). bash keeps `#` as DATA inside
+        # `${…}`, and an extglob `(` is a word part, so the replacement still runs;
+        # opening a GROUP there let the `)` set a boundary and erase the line.
+        ": ${x:-(a)#}",
+        "echo ${x:-()#}",
+        "x=${y:-(a)#}",
+        "echo ${x:+(a)#}",
+        "echo @(b)#x",
+        "echo ${x:-plain}#note",
+        # ⛔ AND THE `#`-INSIDE-`${…}` BRANCH NEEDS A `boundary == True` ROW
+        # (#12279 REVIEW 5, P2). Every other `${…}` row puts the `#` where the
+        # boundary is already False, so deleting that branch left the suite GREEN
+        # while `echo ${x:- # y}; <replacement>` went REFUSED→GREEN — the branch is
+        # the only thing between a space-derived boundary and a fail-open. Measured:
+        # bash prints ` # y` (or `a # b`) and runs the replacement.
+        "unset x; echo ${x:- # y}",
+
+        "unset x; echo ${x:-a # b}",
+        # ⛔ A NESTED QUOTING CONTEXT INSIDE A DOUBLE-QUOTED SPAN (#12279 FINAL
+        # REVIEW, P1, measured FAIL-OPEN on main AND on this head before the fix):
+        # `$( … )`/`${…}` opens a NEW quoting context, so the inner `"` does not
+        # close the outer string and the `#` is DATA. 9 of 12 spellings LANDED in
+        # bash; the scanner cannot follow the scope, so it fails CLOSED.
+        'echo "$(echo " #note")"',
+        'echo "${x:-" #note"}"',
+        'echo "$(printf %s " #note")"',
+        'echo "$(basename " #note")"',
+        'echo "x $(echo " #note") y"',
+        'echo "$(true; echo " #note")"',
+        # ⛔ AND A QUOTED TERMINATOR FOLLOWED BY A LINE CONTINUATION AT EOF
+        # (#12279 FINAL REVIEW, P2): bash eats `\`+newline, so the word IS `';'`;
+        # without the trailing `\\` in `_TERMINATOR_TRAILING_OPERATORS` it became
+        # "the last operand" and the destination read as a SOURCE.
+        "find \"$b/17/bin\" -type f -exec cp {} \"$b/16/bin/\" ';'\\",
+        # ⛔ A FRAME'S INTERIOR IS READ BY THE *FRAME*, NOT BY THE FLAT CLASS (#12279
+        # REVIEW 6, P1 — one mechanism, three measured RED→GREEN faces). (a) An
+        # extglob word is ONE word inside too: `shopt -s extglob; echo @(a|#b)`
+        # PRINTS `@(a|#b)`, yet the `|`/space/`(` there used to set a boundary and cut
+        # the line at the `#`. (b) A `]]` GLUED to a word is regex DATA, not the
+        # conditional's closer — `[[ $v =~ a]]|#b ]]` is a live line, and `[[ -n x]]`
+        # is a syntax error, so an unspaced `]]` never terminates. (c) A `(` inside
+        # `[[ … ]]` is a regex group, not a shell one, so its `)` must not set a
+        # boundary either. All three erased the replacement while bash ran it.
+        "echo @(a|#b)",
+        "echo @(a #b)",
+        "echo @(a|(#b))",
+        'v=x; [[ $v =~ a]]|#b ]] || true',
+        'v=x; [[ $v =~ a|]]b ]] || true',
+        'v=x; [[ $v =~ (a|b)]]|#b ]] || true',
+        # ⛔ A `#` AFTER AN OPENER THAT BEGINS NO WORD IS DATA TOO (#12279 REVIEW 4,
+        # P0, measured RED→GREEN twice). The opener itself used to set the boundary,
+        # so the line was truncated AT THE `(` and every rule arm went blind.
+        "true || ((#X))",
+        "echo hi @(#X)",
+        # ⛔ `[[ … ]]` AND `(( … ))` ARE WORD PARTS TOO (#12279 REVIEW 4, P1,
+        # measured RED→GREEN — `main` refused every one of these and the head ERASED
+        # the line, GREEN, while bash runs the replacement). `; & | (` and a space are
+        # NOT operators inside them: after a regex alternation the `#` is part of the
+        # regex, and in arithmetic it is part of the token (`(( a|# 1 ))` errors on
+        # `# 1` and the line continues). Neither context is separable by the character
+        # before the `#`, so both are treated as open frames and a `#` inside is DATA.
+        # The fail-CLOSED cost — a `[[ -n x #c ]]`, which bash DOES comment (it
+        # swallows its own `]]` and dies on EOF) — stays live here instead, so a
+        # false RED is the worst case, never an erasure.
+        'v="#b"; [[ $v =~ a|#b ]]',
+        'v="#b"; [[ $v =~ (|#b) ]]',
+        "v=1; [[ $v == *#b ]]",
+        "a=1; (( a|# 1 )) || true",
+        "a=1; (( (;#a) )) || true",
+        "echo $((16#ff))",
+    ):
+        step = {"run": f"b=/usr/lib/postgresql; {opener}; {replacement}"}
+        assert replacement in _run_commands(step), (
+            f"a substitution closer before `#` ({opener}) was read as a comment "
+            f"boundary and erased the live command: {_run_commands(step)!r}. A "
+            "`$(…)`/`<(…)` closer is a WORD part — bash concatenates the `#` onto it."
+        )
+        assert any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
+            f"the replacement after {opener!r} is not refused"
+        )
+
+    # CONTROL: a `#` right after a SUBSTITUTION opener is still a comment (bash
+    # rejects `$(#…` on one line), so the `$(` opener's `boundary = True` is a pin,
+    # not an accident — the review measured that flipping it left the suite green.
+    assert _strip_trailing_comment("echo $(#note)") == "echo $(", (
+        "a comment after `$(` survived"
+    )
+
+    # CONTROL: three live mechanisms that were UNGRADED (#12279 REVIEW 6, P3):
+    # deleting the `]]` closer, deleting the `))` closer, or flipping the `=(`
+    # opener's boundary each left the whole suite GREEN. They fail CLOSED (only
+    # false REDs), but nothing noticed them — pinned here.
+    for stripper, what in (("[[ -n x ]]", "a `]]` closer"), ("(( 1 ))", "a `))` closer")):
+        step = {"run": f"b=/usr/lib/postgresql; {stripper} # {replacement}"}
+        assert replacement not in _run_commands(step), (
+            f"{what} did not end the word, so a REAL comment survived: {_run_commands(step)!r}"
+        )
+    step = {"run": f'b=/usr/lib/postgresql; a=(#c); {replacement}'}
+    assert replacement not in _run_commands(step), (
+        f"a `#` right after `=(` is a comment (bash: unexpected EOF), not data: {_run_commands(step)!r}"
+    )
+
+    # ⛔ AND A TRAILING BACKSLASH IS A CONTINUATION, NOT PART OF THE WORD
+    # (#12279 FINAL REVIEW, P2). A `run: |` block whose last line ends `';'` + `\`
+    # is the word `';'` to bash (the `\`+newline is deleted), but `_run_code` drops
+    # the trailing newline so the continuation join never fires and the backslash
+    # survives into `_bare_terminator` — where it did not match the terminator set,
+    # so the destination became "the last operand" and read as a SOURCE (measured:
+    # bash LANDED the replacement, the guard said GREEN). Pinned directly: the row
+    # above alone is also refused by a neighbouring arm, so it cannot isolate this.
+    _continued = "';'" + chr(92)  # a quoted terminator, then a continuation
+    assert _bare_terminator(_continued) == ";", (
+        "a quoted terminator followed by a line continuation was not read as a "
+        f"terminator: {_bare_terminator(_continued)!r} (bash runs the replacement)"
+    )
+
+    # ⛔ THE OPPOSITE READING OF AN AMBIGUOUS `#` MUST ALSO REFUSE (#12279 FINAL
+    # REVIEW 2, P0, measured RED→GREEN vs main): keeping the tail for a `#` bash
+    # reads as DATA is right for the comment rule, but it made the words after it
+    # ordinary OPERANDS — so the destination stopped being "the last path" and a
+    # COMPLETE replacement went GREEN. These are the natural spellings of the very
+    # regression this guard exists to catch.
+    for live, why in (
+        ('cp -a "${b}/17/bin/." "${b}/16/bin/" # restore the client', "a braced destination"),
+        ('sudo rsync -a "${b}/17/bin/" "${b}/16/bin/" # keep in sync', "the rsync carriage"),
+        ('echo "b=${b}"; cp -a "$b/17/bin/." "$b/16/bin/" # x', "an `echo` before the copy"),
+        # ⛔ AND THESE TWO PIN THE **DUAL READING ITSELF**, which nothing else did
+        # (#12279 REVIEW 10, P2, measured: disabling the cut reading left the whole
+        # suite at 397 passed, so the mechanism that commit exists for was ungraded —
+        # and its cited mutation had been reassigned to the depth rule).
+        # Both are BALANCED and bash LANDS them; the kept reading cannot refuse them
+        # — `nested_depth` stays above zero across a substitution that contains a
+        # double-quoted string, so the real trailing `#` is not stripped and its words
+        # become the segment's last operands — and only the CUT reading refuses.
+        ('echo "$(echo ")")"; cp -a "$b/17/bin/." "$b/16/bin/" # x', "a balanced nested string"),
+        (
+            'echo "$(echo ")")"; sudo rsync -a "$b/17/bin/" "$b/16/bin/" # keep in sync',
+            "the rsync carriage after a balanced nested string",
+        ),
+        # ⛔ AND THE EVERY-`#` CUT NEEDS ITS OWN ROW, because the one above does NOT
+        # grade it (#12279 REVIEW 11, P2, measured: truncating `_ambiguous_comment_cuts`
+        # to `cuts[:1]` left the module at 397 passed, and the row above is refused by
+        # the FIRST cut alone, so it never exercises the mechanism). These two spellings
+        # are the ones that separate the readings: the first word-position `#` sits
+        # INSIDE a nested double-quoted string, so cutting there erases the replacement
+        # and only a cut at the SECOND `#` — the real comment — refuses them. 48
+        # bash-live spellings depended on this and 397 passed with it reverted.
+        ('echo "$(echo " #note")"; cp -a "$b/17/bin/." "$b/16/bin/" # x', "a nested string before the comment"),
+        (
+            'echo "$(echo " #note")"; sudo rsync -a "$b/17/bin/" "$b/16/bin/" # 16 gets 17',
+            "the rsync carriage after a nested string",
+        ),
+        # ⛔ AND A DATA `#` EARLIER ON THE LINE MUST NOT BE THE ONLY CUT (#12279
+        # FINAL REVIEW 3, P0, measured 40 RED→GREEN spellings): with only the FIRST
+        # word-position `#` cut, `echo "old $(pg_dump --version) # was"; cp … # pin`
+        # had one reading that stopped before the replacement and one that kept
+        # everything as data — so NEITHER refused and the copy landed.
+        (
+            'echo "old $(pg_dump --version) # was"; cp -a "$b/17/bin/." "$b/16/bin/" # pin',
+            "a data `#` before the replacement",
+        ),
+        # ⛔ AND THIS is the row that GRADES the mechanism (#12279 FINAL REVIEW 4,
+        # P2, measured): the stripper legitimately keeps the tail for a nested-quote
+        # data `#`, so only the SECOND word-position cut (at the real ` # pin`) ends
+        # at the destination. Without the multi-cut reading neither this line nor
+        # its single-cut variant is refused.
+        (
+            'echo "$(echo " #n")"; cp -a "$b/17/bin/." "$b/16/bin/" # pin',
+            "a nested-quote data `#` before a real trailing comment",
+        ),
+    ):
+        step = {"run": f"b=/usr/lib/postgresql; {live}"}
+        assert any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
+            f"a replacement followed by a trailing comment survived with {why}: "
+            "the `#` is ambiguous, so the line must be graded BOTH ways"
+        )
+
+    # ⛔ AND THE ARITHMETIC CLOSER MUST NOT OVER-BLOCK (#12318, measured): the `))`
+    # closer used to be boundary-gated, so `((a>0))` / `$((16#ff))` / `$((1<<2))`
+    # (glued `))`) left `arith` stuck above zero, every later REAL trailing comment
+    # was kept, and a COMMENTED-OUT rewrite became a refusal on 24 measured rows
+    # where `main` strips. These must stay GREEN — the rewrite never runs.
+    for arithmetic in ("echo $((16#ff));", "n=$((2#101));", "a=1; ((a>0));", "echo $((1<<2));"):
+        step = {"run": f"b=/usr/lib/postgresql; {arithmetic} # {replacement}"}
+        assert not any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
+            f"a commented-out rewrite after {arithmetic!r} was refused — the arithmetic "
+            f"closer did not close, so a real comment was kept as live code"
+        )
+
+    # CONTROL: a GROUP-closing `)` IS an operator, so the rest of the line is a
+    # comment and must be dropped (bash prints only `x` for the same line).
+    step = {"run": f"(echo x)#note; {replacement}"}
+    assert replacement not in _run_commands(step), (
+        "a group-closing `)` did not end the word, so a REAL comment survived: "
+        f"{_run_commands(step)!r}"
+    )
+
+    # ⛔ THE DISTRUST OF A `#` INSIDE A NESTED QUOTING CONTEXT LASTS EXACTLY AS LONG
+    # AS THE SUBSTITUTION — NOT THE LINE (#12279 FINAL REVIEW 2, P1, measured
+    # RED→GREEN in 12 of 12 spellings). The first cut of that fix used a LINE-SCOPED
+    # latch, so every later `#` on the line stopped being a comment. A step is
+    # written exactly like these rows — a `$(…)` in its message, the real work after
+    # it, and a comment on that work — so bash RAN the copy while the latch kept `#`,
+    # `16`, `gets`, `17` as live words, made them the segment's last tokens, and
+    # spared the replacement (`main` refuses all of them).
+    for line in (
+        'echo "$(true)"; cp -a "$b/17/bin/." "$b/16/bin/" # x',
+        'echo "$(date +%T) syncing"; sudo cp -a "$b/17/bin/." "$b/16/bin/"  # 16 gets 17',
+        'echo "$(date)"; cp -a "$b/17/bin/." "$b/16/bin/" # was: old',
+    ):
+        step = {"run": line}
+        assert any(_replaces_a_client_binary(ln) for ln in _executed_lines(None, step)), (
+            f"a live replacement after a `$(…)` and a trailing COMMENT was spared: "
+            f"{_run_commands(step)!r}. The comment's words must not become the "
+            "segment's last operands — the distrust of `#` ends where the "
+            "substitution ends."
+        )
+
+    # CONTROL: and a REAL trailing comment after a CLOSED substitution still strips
+    # (the same finding's other direction). bash comments these out, so nothing is
+    # copied; a guard that refuses them is a false RED, and the latch above caused
+    # one on every `$(…)`-bearing step.
+    for line in (
+        'echo "$(date)" # lead; ' + replacement,
+        'echo "$(date)"; # ' + replacement,
+        'echo "$(date +%T) syncing"; # ' + replacement,
+        # ⛔ AND A `$(` INSIDE `${…}` MUST NOT LEAVE THE EXPANSION OPEN FOREVER
+        # (#12279 REVIEW 12, P1, measured as a NEW FALSE RED AT f637bcde4c, WHERE THE
+        # RULE WAS STILL SHIPPED). That rule was "only the frame's own closer closes a
+        # `${…}`"; the `${…}`-interior arm pushes a `word` frame for any `(`, and a
+        # `word` frame is never popped, so the `}` of `${x:-$(date)}` sat on a `word`
+        # top and was read as DATA — `braces` stayed above zero for the rest of the
+        # line, this real trailing comment survived, and tombstoned
+        # `echo … >> "$GITHUB_PATH"` text became live code for `_github_path_writes`.
+        # ⛔ THE RULE IS NOT IN THIS FILE ANY MORE — it was reverted upstream for 25
+        # measured false REDs (R24), so `braces` is a FLAT COUNTER and these two rows
+        # pass on that counter alone. They stay because they pin the direction the
+        # reverted rule broke: if it is ever reinstated, an unpopped `word` frame will
+        # refuse these lines again and this test says so. The alternative that makes
+        # the rule reachable — a `sub` frame for a `$( … )` inside `${…}`, popped by
+        # its own `)` — was built and measured (10/10 against real bash) and is
+        # recorded, NOT shipped, in the plan doc (R26); the nested-`}` fail-open the
+        # revert leaves is pre-existing and lives on #12292.
+        'X=${x:-$(date)} # ' + replacement,
+        'X=${x:-$(date)}; # ' + replacement,
+    ):
+        step = {"run": line}
+        assert replacement not in _run_commands(step), (
+            "a REAL comment after a closed substitution survived, so the line still "
+            f"ran: {_run_commands(step)!r}"
+        )
+        assert not any(_replaces_a_client_binary(ln) for ln in _executed_lines(None, step)), (
+            f"a commented-out replacement after a `$(…)` was refused: {step['run']!r}. "
+            "bash comments it out; refusing it is a false RED, and the latch that "
+            "caused it also spared live replacements."
+        )
+
+    # CONTROL: and a `#` right after a PLAIN `(` IS a comment (the round-4 fix must
+    # not turn every opener into data — `( #c )` really is a comment to bash).
+    step = {"run": f"( #c ); {replacement}"}
+    assert replacement not in _run_commands(step), (
+        "a comment after a plain `(` survived, so the whole line still ran: "
+        f"{_run_commands(step)!r}"
+    )
+
+    # CONTROL: a REAL trailing comment after a CLOSED frame still strips (#12279
+    # REVIEW 6, P1's other direction — making the interior data must not protect the
+    # text after the closer). Both are comments to bash.
+    for line in (
+        'v=x; [[ -n $v ]] || true # was: ' + replacement,
+        "echo @(a|b) # was: " + replacement,
+    ):
+        step = {"run": line}
+        assert replacement not in _run_commands(step), (
+            f"a REAL trailing comment after a closed frame survived: {_run_commands(step)!r}"
+        )
+
+
+def test_without_comment_is_the_same_rule_as_the_stripper() -> None:
+    r"""`_without_comment` must DELEGATE, not re-implement (#12279 REVIEW 4, P3).
+
+    It used to be a second implementation (`_mask_quotes` + a flat-class regex),
+    which is how the narrow rule came back once already. It now calls
+    `_strip_trailing_comment`, but nothing pinned that: reverting the delegation to
+    the deleted flat class left the suite fully green while the two answers
+    diverged on every word-part `#` (`echo $(date)#note; …` lost its tail). These
+    two assertions are the pin — the first fails on any re-implementation that
+    keeps the flat class, the second fails if the rule stops stripping real
+    comments.
+    """
+
+    assert _without_comment("echo $(date)#note; cp -a x y") == "echo $(date)#note; cp -a x y", (
+        "a substitution's `#` was treated as a comment — `_without_comment` is no "
+        "longer the stripper's rule"
+    )
+    assert _without_comment("echo ${x:-(a)#}; cp -a x y") == "echo ${x:-(a)#}; cp -a x y", (
+        "a `#` inside `${…}` was treated as a comment"
+    )
+    assert _without_comment("echo hi # note") == "echo hi ", (
+        "a real trailing comment was not stripped"
+    )
+
+
+def test_an_escaped_or_assignment_closer_does_not_start_a_comment() -> None:
+    r"""Only an UNQUOTED, UNESCAPED operator ends a word (#12271 PLAN-VERIFY round 2).
+
+    Both of these went RED→GREEN when this change first landed — the stripper
+    re-read the RAW character before the `#`, so an ESCAPED separator and an
+    ASSIGNMENT value's `)` both counted as operators and erased the live command
+    after them. Bash ground truth (`bash -e`, the copy really lands):
+
+        echo x\;#note; sudo rsync -a "$b/17/bin/" "$b/16/bin/"   # `x\;` is one word
+        a=(16 17)#note; sudo rsync -a "$b/17/bin/" "$b/16/bin/"  # `)` closes a VALUE
+
+    so in both cases `#note` is DATA and the `rsync` executes.
+    """
+
+    replacement = 'sudo rsync -a "$b/17/bin/" "$b/16/bin/"'
+    # ⛔ `\"` INSIDE DOUBLE QUOTES DOES NOT CLOSE THE SPAN (#12279 REVIEW 2 P1;
+    # the fix shipped without a row, so reverting it left the suite green).
+    for opener in (
+        r"echo x\;#note",
+        r"echo a\ #note",
+        "a=(16 17)#note",
+        r'echo "expected \"16\" # note"#note',
+    ):
+        step = {"run": f"b=/usr/lib/postgresql; {opener}; {replacement}"}
+        survived = _run_commands(step)
+        assert replacement in survived, (
+            f"an escaped/assignment `#` ({opener}) erased the live command: {survived!r}. "
+            "An escaped character is DATA, and `)` closing an assignment value is a "
+            "WORD part — neither is a comment boundary."
+        )
+        assert any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
+            f"the replacement after {opener!r} is not refused"
+        )
+
+    # CONTROL: the same shapes with a REAL (unquoted, unescaped) operator must
+    # still strip — the fix must not turn every `#` into data.
+    for comment in ("true;# was: sudo cp -a x y", "a=(1 2) ; # was: sudo cp -a x y"):
+        assert "sudo cp" not in _run_commands({"run": comment}), (
+            f"a real comment after an operator still survived: {comment!r}"
+        )
 
 
 @pytest.mark.parametrize(
@@ -6389,10 +7399,32 @@ def _runs_on_labels(job: dict) -> list[str]:
 def _strip_trailing_comment(line: str) -> str:
     """`line` up to its first UNQUOTED `#` that opens a trailing comment.
 
-    A `#` starts a comment only at column 0 or after whitespace, and only OUTSIDE
-    a single- or double-quoted span — so `echo "::error::…#12051 …"` is ONE
-    string, not a message followed by a comment (the issue number itself lives
+    A `#` starts a comment only where a WORD can begin, and this function is the
+    SINGLE OWNER of the complete rule: column 0; after unquoted, unescaped
+    whitespace or a character of `COMMENT_START_CHARS`; after a CONFIRMED
+    group-closing `)`; and after the OPENERS that begin a word (`$(`, `<(`, `>(`,
+    `=(` — those openers are a boundary, and their closers are NOT; an extglob or
+    arithmetic opener's closer is not one either). ⛔ THE ENUMERATION LIVES HERE,
+    NOT IN TWO PLACES (#12279 REVIEW 5, P3) — AND IT MUST NOT STATE THE INVERSE
+    (#12279 REVIEW 7, P3): it said the sub/assignment closers "ARE a boundary",
+    which is the opposite of the implemented and measured rule, so implementing
+    that sentence would restore the very P1 this change fixed (`echo $(date)#note`
+    is ONE word in bash — it prints `<epoch>#note` and the next command runs).
+    an earlier version named only `COMMENT_START_CHARS`, which omits EVERY `)`
+    boundary — an implementation written from that sentence alone would fail this
+    module's own `(true)#` row. Never inside a single- or double-quoted span, so
+    `echo "::error::…#12051 …"` is
+    ONE string, not a message followed by a comment (the issue number itself lives
     behind a `#`, and truncating there would hide the text under test).
+    ⛔ THE CLASS IS NAMED, NOT RESTATED (#12279 review round 2, P3): this sentence
+    used to list `; & | (` literally, so it went stale the moment the class changed —
+    the same "two hand-kept copies of one rule" drift that let the first cut of this
+    round put `<>` in the constant while the prose still described the old class.
+
+    ⛔ THE NARROW RULE IS HISTORY, NOT THE SPEC (#12279 REVIEW P2). An earlier
+    version cut at "column 0 or after whitespace" only, which `#12069 review 16`
+    had already replaced in a sibling function; naming the narrow rule in the
+    present tense here is exactly the drift that let the two diverge.
 
     WHY THIS EXISTS: the message scan below reads a step that is mostly `echo`
     lines, and MEASURED (review cycle 8 of `5ed3b1950b`) a trailing `# …` comment
@@ -6400,26 +7432,271 @@ def _strip_trailing_comment(line: str) -> str:
     to substitute something". A comment is not printed, so that was a FALSE BLOCK
     — the direction that teaches the next lane to widen a guard instead of
     trusting it.
+
+    ⚠️ AND A `)` IS ONLY AN OPERATOR WHEN IT CLOSES A **GROUP** (#12271 PLAN-VERIFY
+    P1, measured FAIL-OPEN). Bash's rule is "a word begins … after an operator",
+    and a `$(`/`$((`/`<(`/`>(` closer does NOT end a word — `echo $(date)#note` is
+    ONE word followed by a live command, so treating that `)` as an operator cut
+    the line at the `#` and ERASED the command after it (GREEN arm, bash ground
+    truth `echo $(date +%s)#note ; echo AFTER` → `<epoch>#note` + `AFTER`).
+    A group-closing `)` IS an operator and must still strip: `(echo x)#note`
+    prints only `x` (measured). The two are indistinguishable in a flat character
+    class, so the closers are tracked on a stack.
     """
+    index = 0
     quote = ""
-    escaped = False
-    for index, char in enumerate(line):
-        if escaped:
-            escaped = False
-            continue
-        # `\\` is literal inside single quotes and an escape everywhere else.
-        if char == "\\" and quote != "'":
-            escaped = True
-            continue
+    stack: list[str] = []
+    braces = 0
+    #: How many substitution/expansion contexts are open INSIDE the current
+    #: double-quoted span (see the block in the quote branch). A `#` is DATA while
+    #: this is above zero, and a comment again once it returns to zero — the scope of
+    #: the distrust is meant to be the substitution, never the rest of the line.
+    #:
+    #: ⛔ AND IT CAN ONLY BE RELIED ON TO FALL WHEN THE SUBSTITUTION CARRIES NO
+    #: DOUBLE-QUOTED STRING (#12279 REVIEW 10, P1, measured, filed as #12316). The
+    #: quote model is flat, so in `echo "$(echo " #note")"` the inner `"` is read as
+    #: closing the OUTER span; the substitution's `)` is then met outside a span (so
+    #: nothing decrements) or with `inner_quote` set (so the decrement is gated off),
+    #: and the depth can stay above zero to end of line — the real trailing `#` then
+    #: keeps its words as operands and the destination stops being last. That is a
+    #: FALSE GREEN the depth rule cannot see, which is exactly why `_executed_lines`
+    #: grades BOTH readings of an ambiguous `#` (R22) instead of trusting this one:
+    #: the cut reading refuses it. Do not read this counter as a scope proof.
+    nested_depth = 0
+    inner_quote = False
+    #: `[[ … ]]` and `(( … ))` are WHOLE WORD PARTS (#12279 REVIEW 4, P1, measured
+    #: RED→GREEN — `main` refused every row below, the head ERASED the line). Inside
+    #: them a `#` is not reliably a comment: bash keeps it as DATA after a regex
+    #: alternation (`[[ $v =~ a|#b ]]` matches), after a `(`/`;`/`&` in `(( … ))`
+    #: (`(( a|# 1 ))` errors on the token `# 1`, it does NOT truncate the line), and
+    #: inside arithmetic base notation (`$((16#ff))` is 255) — while `rest` of a
+    #: `[[` CAN comment (`[[ -n x #c ]]` swallows its own `]]` and dies on EOF).
+    #: The contexts are not separable by the character before the `#`, so BOTH are
+    #: treated as one word part: a `#` inside them is DATA, which is the fail-CLOSED
+    #: direction (the tail stays live, so the arms still see the command instead of
+    #: it being erased) and matches how `${…}` is already handled.
+    conditional = 0
+    arith = 0
+    #: Does the character AT `index` begin a new shell WORD? Column 0 does, and so
+    #: does the character after unquoted whitespace or an unquoted operator — the
+    #: shell's own rule, which is what `boundary` tracks instead of re-reading
+    #: `line[index - 1]` raw.
+    boundary = True
+    while index < len(line):
+        char = line[index]
         if quote:
+            # ⛔ A BACKSLASH ESCAPES INSIDE DOUBLE QUOTES TOO (#12279 REVIEW P1,
+            # measured FAIL-OPEN). Without this, `echo "expected \"16\" # note"`
+            # closed the span at the `\"`'s quote, so the `#` — which bash keeps
+            # INSIDE the string — was read as a boundary and erased the rest of the
+            # line (a live replacement with it). Single quotes have no escapes.
+            # ⛔ A NESTED QUOTING CONTEXT INSIDE A DOUBLE-QUOTED SPAN (#12279 FINAL
+            # REVIEW, P1 — measured FAIL-OPEN, 9 of 12 spellings LANDED in bash):
+            # `echo "$(echo " #note")"` prints ` #note`, because `$( … )` opens a NEW
+            # quoting context and the inner `"` does not close the outer string. A
+            # flat `quote` reads it the other way, so the `#` looked like a comment
+            # and the live replacement after it was erased.
+            #
+            # ⛔ AND THE DISTRUST MUST LAST EXACTLY AS LONG AS THE SUBSTITUTION, NOT
+            # THE LINE (#12279 FINAL REVIEW 2, P1, measured RED→GREEN in 12 of 12
+            # spellings). The first cut of this fix set a LINE-SCOPED latch, so every
+            # later `#` on the line stopped being a comment — and a step is written
+            # with a `$(…)` in its message and a comment on its real work:
+            #
+            #     echo "$(date +%T) syncing"; sudo cp -a "$b/17/bin/." "$b/16/bin/"  # 16 gets 17
+            #
+            # bash RUNS the copy (the `#` starts a comment), but the latch kept `#`,
+            # `16`, `gets`, `17` as live words, they became the segment's last tokens,
+            # the destination was no longer last, and the replacement went GREEN — a
+            # RED→GREEN against `main`, which refuses it. So the depth is COUNTED: it
+            # rises at an opener inside the span and falls at the `)`/`}` that closes
+            # it, and only while it is above zero is a `#` DATA. When it returns to
+            # zero the outer span is still open (bash's `"…"` continues after `$(…)`)
+            # and the next `"` closes it normally.
+            if quote == '"' and (line.startswith("$(", index) or line.startswith("${", index)):
+                nested_depth += 1
+                inner_quote = False
+            if quote == '"' and nested_depth and not inner_quote and char in ")}":
+                nested_depth -= 1
+            if quote == '"' and char == '"' and nested_depth:
+                inner_quote = not inner_quote
+            if quote == '"' and char == "\\" and index + 1 < len(line):
+                index += 2
+                continue
             if char == quote:
                 quote = ""
+            boundary = False
+            index += 1
+            continue
+        # ⛔ AN ESCAPED CHARACTER IS DATA, AND AN ESCAPED SEPARATOR IS NOT A
+        # SEPARATOR (#12271 PLAN-VERIFY round 2, both measured RED→GREEN — this
+        # change INTRODUCED them). Reading the RAW previous character made
+        # `echo x\;#note; <live replacement>` strip at the `#`, because the `;` of
+        # `\;` is escaped and bash runs the replacement; `echo a\ #note` is the
+        # same act with an escaped space. Consuming the pair here keeps the
+        # earlier escape-safety without re-reading raw text.
+        if char == "\\" and index + 1 < len(line):
+            boundary = False
+            index += 2
             continue
         if char in "\"'":
             quote = char
+            boundary = False
+            index += 1
             continue
-        if char == "#" and (index == 0 or line[index - 1].isspace()):
-            return line[:index]
+        if char == "#" and (braces or conditional or arith or "extglob" in stack or nested_depth):
+            boundary = False
+            index += 1
+            continue
+        if char == "#":
+            if boundary:
+                return line[:index]
+            boundary = False
+            index += 1
+            continue
+        # ⛔ `${…}` IS A WORD, SO NOTHING INSIDE IT ENDS ONE (#12279 REVIEW 3,
+        # P0, measured RED→GREEN in 8 of 17 spellings). A `(` inside a parameter
+        # expansion is a word part (`${x:-(a)#}` — bash prints `(a)#`), so the
+        # group frame it used to open let its `)` set a boundary and the `#`, which
+        # bash keeps as DATA, was read as a comment that erased the live line.
+        if char == "$" and index + 1 < len(line) and line[index + 1] == "{":
+            # ⛔ A NESTED QUOTING CONTEXT ENDS THE OUTER SPAN'S AUTHORITY (#12279
+            # FINAL REVIEW, P1). Inside `$( … )` and `${…}` bash opens a NEW quoting
+            # context, so `echo "$(echo " #note")"` prints ` #note` — the inner `"`
+            # does not close the outer string. A flat `quote` gets that backwards,
+            # reads the `#` as a comment and erases a live replacement (measured: 9
+            # of 12 spellings LANDED in bash and went GREEN). That shape is handled
+            # by the depth counter in the QUOTE branch of this loop (which owns every
+            # character of a double-quoted span, so this branch is only reached when
+            # no span is open) — and it is scoped to the substitution, not the line:
+            # see the correction there, where a line-scoped latch was measured as a
+            # RED→GREEN of its own.
+            braces += 1
+            boundary = False
+            index += 2
+            continue
+        # ⛔ `}` CLOSES THE EXPANSION COUNTER, AND THE "OWN CLOSER" VARIANT WAS
+        # REVERTED (#12279 FINAL REVIEW 5, P2, measured). Requiring a matching
+        # `brace` frame is unreachable whenever the `${…}` interior opened a paren
+        # frame (`$(…)`, `(…)`, `$((…))`), because `)` deliberately pops only
+        # `group`/`extglob` (R8) — so `${x:-$(date)} # comment` stopped stripping
+        # its real trailing comment: 25 measured FALSE REDs against `main`, on
+        # lines bash comments out. An over-block is worse than the pre-existing
+        # fail-open it would have closed (a `}` inside `$( … )` releasing the
+        # frame), so the gap stays OPEN and its evidence is recorded on #12292.
+        if char == "}" and braces:
+            braces -= 1
+            boundary = False
+            index += 1
+            continue
+        # ⛔ `[[ … ]]` / `(( … ))` ARE WORD PARTS, NOT OPERATOR CONTEXTS (#12279
+        # REVIEW 4, P1). Handled BEFORE the single-character branches below, so the
+        # `((` is not read as two group openers and the `[[` is not read as a word
+        # char. An UNCLOSED opener therefore protects the rest of the line, which is
+        # the fail-closed direction.
+        if char == "[" and index + 1 < len(line) and line[index + 1] == "[":
+            conditional += 1
+            boundary = False
+            index += 2
+            continue
+        if char == "]" and index + 1 < len(line) and line[index + 1] == "]" and conditional and boundary:
+            conditional -= 1
+            boundary = False
+            index += 2
+            continue
+        if char == "(" and index + 1 < len(line) and line[index + 1] == "(":
+            arith += 1
+            boundary = False
+            index += 2
+            continue
+        # ⛔ THE `))` CLOSER IS NOT BOUNDARY-GATED (#12318, measured over-block):
+        # `((a>0))`, `$((16#ff))` and `$((1<<2))` all end `))` GLUED to a word, so a
+        # boundary requirement never fired, `arith` stayed non-zero, and every later
+        # REAL trailing comment was kept — a commented-out rewrite became a refusal
+        # on 24 measured rows (`main` strips them). The boundary rule exists to stop
+        # `case a in a)`/`${x%)}` closing a SUBSTITUTION frame; an `arith` frame is
+        # only ever opened by a glued `((`, so it needs no such guard.
+        if char == ")" and index + 1 < len(line) and line[index + 1] == ")" and arith:
+            arith -= 1
+            boundary = False
+            index += 2
+            continue
+        # A `(` after `$`, `<` or `>` opens a SUBSTITUTION, and after `=` an
+        # ASSIGNMENT VALUE — both are WORD parts, so their `)` does not end a
+        # word. Any other `(` opens a GROUP, whose `)` IS an operator. A flat
+        # character class cannot tell the two apart, which is exactly how
+        # `echo $(date)#note` and `a=(16 17)#note` each erased a live line
+        # (#12271 PLAN-VERIFY P1/P2, measured). The closer is classified by what
+        # it OPENED, recorded here.
+        if char == "(":
+            previous = line[index - 1] if index else ""
+            # ⛔ `index and` IS LOAD-BEARING: `"" in "$<>"` is True in Python, so a
+            # `(` at column 0 was classified as a SUBSTITUTION and `(true)#x`
+            # stopped stripping a real comment (caught by the suite, 2 failed).
+            # ⛔ AND `boundary` COMES FROM THE FRAME, NOT THE CHARACTER (#12279
+            # REVIEW 4, P0, measured RED→GREEN twice). Setting it True for every
+            # `(` made a `#` after an extglob opener (`echo hi @(#X)`) or a glued
+            # arithmetic opener (`true || ((#X))`) a comment, which truncated the
+            # line at the `(` and blinded every rule arm while bash ran the
+            # replacement. A `(` inside `${…}`, the `(` of an extglob pattern, and
+            # the second `(` of `((` are word parts: no word begins there.
+            if braces or conditional or arith:
+                # ⛔ INSIDE `[[ … ]]` / `(( … ))` A `(` IS A REGEX/ARITHMETIC GROUP, NOT
+                # A SHELL ONE (#12279 REVIEW 5, P1, measured RED→GREEN). It pushed a
+                # GROUP frame, whose `)` set `boundary = True`, after which a GLUED
+                # `]]` closed the conditional early and the following `|#` — DATA to
+                # bash — was stripped and the line ERASED:
+                # `v=x; [[ $v =~ (a|b)]]|#b ]] || true` really replaces.
+                stack.append("word")
+                boundary = False
+            elif index and previous in "?*+@!":
+                # ⛔ AN EXTGLOB `@( … )` IS ONE WORD **INSIDE** AS WELL AS AT ITS
+                # CLOSER (#12279 REVIEW 5, P1, measured RED→GREEN). The closer was
+                # fixed two rounds ago, but the interior was still read by the flat
+                # class, so `|`, `(`, `;`, `&` and space set `boundary = True` inside
+                # ONE word: `echo @(a|#b)` is a single word to bash (it PRINTS
+                # `@(a|#b)`), yet the guard cut at the `|` and ERASED the rest of the
+                # line — the replacement included. The frame is therefore its own
+                # kind, and while it is on the stack no character opens a word and a
+                # `#` is DATA.
+                stack.append("extglob")
+                boundary = False
+            elif previous == "(":
+                stack.append("arith")
+                boundary = False
+            elif index and previous in "$<>":
+                stack.append("sub")
+                boundary = True
+            elif previous == "=":
+                stack.append("word")
+                boundary = True
+            else:
+                stack.append("group")
+                boundary = True
+            index += 1
+            continue
+        if char == ")":
+            # ⛔ ONLY A CONFIRMED GROUP FRAME IS CLOSED (#12279 REVIEW 2, P0,
+            # measured RED→GREEN). A `)` that bash does NOT read as a paren closer
+            # — a `case` pattern terminator (`case a in a)`), a `${x%)}` modifier,
+            # a stray closer — used to POP a substitution frame, so the real `)`
+            # then closed nothing and the following `#` was read as a comment and
+            # erased the live line. `$(`/`=()` frames are therefore left on the
+            # stack: an unconfirmable `)` is not a boundary (fail closed — the tail
+            # stays live and the arms still see it).
+            if stack and stack[-1] in {"group", "extglob"}:
+                kind = stack.pop()
+                boundary = kind == "group"
+            else:
+                boundary = False
+            index += 1
+            continue
+        # ⛔ INSIDE AN EXTGLOB WORD NOTHING IS AN OPERATOR (#12279 REVIEW 5, P1): the
+        # frame's interior is one shell WORD, so a `|`/`(`/space there must not set a
+        # boundary either — the same "derive it from the FRAME, not the character"
+        # rule R11 applied to the `(` opener.
+        boundary = char in COMMENT_START_CHARS and "extglob" not in stack
+        index += 1
     return line
 
 
@@ -7903,3 +9180,62 @@ def test_the_redirect_rule_reads_every_redirect_on_the_line() -> None:
         "only the FIRST redirect on the line was graded, so a second one could "
         "rewrite the pinned binary with every row green (#12069 review P1)"
     )
+
+
+def test_a_path_qualified_wrapper_word_is_not_a_find_segment() -> None:
+    """`_in_find_segment` basenames its ANSWER, so a `/usr/bin/xargs` must not answer True.
+
+    MEASURED FAIL-OPEN (#12279 review P3, found by VERIFYING the review finding
+    rather than applying it). The walk skips a wrapper word by comparing the RAW
+    token (`word in _WRAPPER_WORDS`), but the return basenames
+    (`word.rsplit("/", 1)[-1]`), so a bare `xargs` was skipped while
+    `/usr/bin/xargs` was not: it fell through and matched the `"xargs"` member,
+    the `';'` read as a list SEPARATOR instead of an operand, and the complete
+    replacement was spared while bash performs it —
+
+        xargs -0 cp -a /tmp/src/. ';' "$b/16/bin/"             refused
+        /usr/bin/xargs -0 cp -a /tmp/src/. ';' "$b/16/bin/"   SPARED
+
+    `xargs` has no `;` terminator, so an `xargs` command is not a find segment at
+    all and the member is gone. This asserts the decision points DIRECTLY,
+    because no polarity row can see the difference in the READ direction: a
+    path-qualified `find` READ is refused neither way, so a row would stay green
+    under both readings and pin nothing.
+    """
+
+    xargs_replacement = "/usr/bin/xargs -0 cp -a /tmp/src/. ';' \"$b/16/bin/\""
+    assert _replaces_a_client_binary(xargs_replacement), (
+        "a path-qualified `/usr/bin/xargs` is not a find segment, so its `';'` is "
+        "an OPERAND and the destination is still the last one — this spelling was "
+        "SPARED while the bare-`xargs` spelling was refused (#12279 P3, measured)"
+    )
+    assert not _in_find_segment(xargs_replacement, xargs_replacement.index("';'")), (
+        "the answer is basename-normalised but the wrapper skip is not, so a "
+        "path-qualified `xargs` reaches the `xargs` member again and its `';'` "
+        "becomes a list separator — the R7 false GREEN by one spelling"
+    )
+
+    path_qualified_wrapper = "/usr/bin/xargs find \"$b/17/bin\" -type f -exec cp {} \"$b/16/bin/\" ';'"
+    assert not _in_find_segment(path_qualified_wrapper, path_qualified_wrapper.index("';'")), (
+        "a PATH-QUALIFIED wrapper is not skipped (the comparison is on the raw "
+        "token), so this answers False — the same asymmetry as `/usr/bin/sudo "
+        "find …`. Pinned so the docstring cannot be re-read as \"no spelling is "
+        "ever missed\", AND so nobody \"fixes\" it by restoring the `xargs` member, "
+        "which is the fail-open `mut-133` refuses (#12279 P3)"
+    )
+    assert _replaces_a_client_binary(path_qualified_wrapper), (
+        "…and the missed reading must still cost NOTHING: the operand model "
+        "refuses this spelling anyway (measured). If that stops being true this "
+        "assertion is the alarm, because the `_in_find_segment` answer alone "
+        "would then spare a real replacement"
+    )
+
+    for spelling in (
+        "/usr/bin/find \"$b/16/bin\" -type f -exec ls -l {} ';'",
+        "sudo /usr/bin/find \"$b/16/bin\" -type f -exec ls -l {} ';'",
+        "xargs find \"$b/16/bin\" -type f -exec ls -l {} ';'",
+    ):
+        assert _in_find_segment(spelling, spelling.index("';'")), (
+            f"a `find` behind a wrapper, or spelled by an absolute path, is still a "
+            f"find segment — narrowing the set to `find` must not lose it: {spelling!r}"
+        )
