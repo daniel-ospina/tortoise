@@ -1000,12 +1000,65 @@ def display_holder_ids(candidate_ids) -> list:
     return [c if c is not None else "<id-less>" for c in candidate_ids]
 
 
+def is_ambiguous(holders) -> bool:
+    """Would a create on this holder set REFUSE? — THE ONE predicate (#9876).
+
+    ``holders`` is the row list the READER produced, id-less LIVE rows INCLUDED
+    (a name held by one id-carrying and one id-less entity is still TWO
+    holders). Extracted so the refusal sites and the non-fatal PROBES that must
+    predict them cannot answer differently — the threshold ``len(holders) > 1``
+    used to be spelled inline in :func:`refuse_if_ambiguous` only, and a second
+    site re-deriving it is exactly the drift #9876 closed.
+
+    ⛔ ONE predicate is not ONE reader: the threshold is shared here, but the
+    QUESTION also includes *which holders were read*. Every refusal and every
+    probe of one must therefore go through ``_live_holders_same_entity`` (the
+    raw + folded arm over ``name`` and ``canonical_name``) — a caller that pairs
+    this threshold with a narrower read (``live_name_holder_ids``) answers a
+    different question and lands in the drift this function exists to close
+    (see :func:`ambiguous_holder_ids`).
+    """
+    return len(holders) > 1
+
+
+def ambiguous_holder_ids(g, label: str, name: str) -> list[str]:
+    """The holder ids a create on ``(label, name)`` would REFUSE on — else ``[]``.
+
+    The NON-RAISING, NON-RECORDING twin of :func:`refuse_ambiguous_create`, for
+    a caller that has to decide whether to AVOID a refusal rather than make one.
+    ``#12060``'s kind guard needs exactly that: it moves the write to the OTHER
+    entity label, where two live carriers of the name — perfectly legal on the
+    label the caller chose — would turn the guard's own redirect into the
+    refusal the feature exists to prevent. It reads, decides nothing, and
+    records nothing (there was no refusal to record), and it asks
+    :func:`is_ambiguous` for the threshold.
+
+    ⛔ THE SAME TWO READS THE DOOR MAKES — ``_live_holders_same_entity``, the
+    raw arm then the FOLDED one, over ``name`` AND ``canonical_name``. This
+    function shipped reading only :func:`live_name_holder_ids` (``name`` alone,
+    no folded arm), which is NARROWER than both the door and this function's own
+    twin: two legacy carriers — one under the folded spelling, or one holding
+    the name as ``canonical_name`` — read as unambiguous here and then raise
+    ``AmbiguousEntityName`` at the door, i.e. the redirect invented exactly the
+    refusal it probes to avoid (measured: ``intent="as_declared"`` lands while
+    the same write with the guard ON raises). The probe is only a twin if it
+    asks the door's question, so it asks it through the door's helper; the
+    threshold stays :func:`is_ambiguous`.
+    """
+    holders, _props = _live_holders_same_entity(g, label, name)
+    return display_holder_ids(holders) if is_ambiguous(holders) else []
+
+
 def refuse_if_ambiguous(label: str, name: str, holders) -> None:
     """Refuse a CREATE whose name 2+ LIVE entities hold — records and raises.
 
     ⛔ THE ONE REFUSAL PREDICATE (#9876 review, this head). ``holders`` is the
-    raw :func:`live_name_holder_ids` row list (id-less LIVE rows INCLUDED, per
-    that function's own contract), and ``len(holders) > 1`` is the create's
+    row list the READER produced — today :func:`_live_holders_same_entity`
+    (``name`` AND ``canonical_name``, plus the folded spelling), i.e. exactly the
+    rows :func:`resolve_or_mint` refuses on; it is NOT the narrower
+    :func:`live_name_holder_ids` list, and this docstring said it was until the
+    #12060 round-5 review read the two call sites (id-less LIVE rows INCLUDED,
+    per that reader's own contract), and ``len(holders) > 1`` is the create's
     route-then-refuse (R8) threshold. Two sites ask it and both call here, so
     they cannot answer differently:
 
@@ -1018,7 +1071,7 @@ def refuse_if_ambiguous(label: str, name: str, holders) -> None:
     though the caller catches the exception — and it is why a pre-flight probe
     that short-circuits the door does not silently lose the record.
     """
-    if len(holders) > 1:
+    if is_ambiguous(holders):
         _refuse(label, name, display_holder_ids(holders))
 
 
