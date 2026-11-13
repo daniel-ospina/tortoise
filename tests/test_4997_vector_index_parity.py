@@ -479,11 +479,11 @@ def test_none_result_set_means_not_measured():
     nothing. The empty-catalogue arm stays a DIFFERENT answer, reached through
     `_bare([])` in `test_empty_result_set_means_measured_and_empty`.
 
-    ⛔ The "lane must have RUN" assertion is what makes this able to fail: on a
-    VIRGIN projection `_bare()` already leaves `_vector_indexed_labels` as
-    `None`, so `is None` afterwards is ALSO satisfied by a read that never
-    entered — the false-PASS shape `test_unmeasured_pair_is_none_in_both_halves`
-    guards its own arm against.
+    ⛔ The "lane must have RUN" assertion is what makes this able to fail ON A
+    READ THAT NEVER RAN: on a VIRGIN projection `_bare()` already leaves
+    `_vector_indexed_labels` as `None`, so `is None` afterwards is ALSO
+    satisfied by a read that never entered — the false-PASS shape
+    `test_unmeasured_pair_is_none_in_both_halves` guards its own arm against.
 
     ⛔ The pair's COHERENCE (both halves `None`, never half-populated) is
     deliberately NOT asserted here: on a virgin projection `_bare()` leaves the
@@ -707,16 +707,18 @@ def test_a_store_with_no_gap_does_not_warn(caplog):
 # ── #11087 (S4): the contract is reported POSITIVELY ──────────────────────
 #
 # The pin above is unchanged in SUBSTANCE — "no gap ⇒ no gap report" still
-# holds, and that substance sentence is the only part of plan §6.1 cited here —
-# but its CAPTURE LEVEL is INFO, not WARNING. ⛔ Do NOT follow §6.1 as a clean
-# record: its "captures at `logging.WARNING` … should survive unchanged"
+# holds, and that substance sentence is the only part of plan §6.1 relied on
+# here — but its CAPTURE LEVEL is INFO, not WARNING. ⛔ Do NOT follow §6.1 as a
+# clean record: its "captures at `logging.WARNING` … should survive unchanged"
 # sentence is STALE. The ARMED (retired) gap report is INFO by #11642; #11660
-# review F1 kept its `#4997` marker and raised the PINS that still demanded a
-# WARNING, which is where this one's INFO comes from (583c19a25a9b). The
-# UNARMED report keeps its WARNING — the split `_gap_level()` above reads from
-# `vector_index_retired()`. The header said "captures at WARNING" over a pin
-# that no longer takes one: the same defect class the sibling pins were fixed
-# for, and it sends the next reader to check the wrong half.
+# review F1 kept its `#4997` marker and raised the parity pins' capture level to
+# INFO — at `at_level(WARNING)` this pin's `assert not [...]` held by ABSENCE,
+# not by measurement — and that is where THIS PIN's INFO comes from
+# (583c19a25a9b). The UNARMED report keeps its WARNING — the split
+# `_gap_level()` above reads from `vector_index_retired()`. The header said
+# "captures at WARNING" over a pin that no longer takes one: the same defect
+# class the sibling pins were fixed for, and it sends the next reader to check
+# the wrong half.
 #
 # What #11087 ends is the SILENCE — the same store must now report the
 # serves/indexes pair at INFO, and so must a store that HAS a gap (which also
