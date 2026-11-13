@@ -1084,8 +1084,11 @@ def assemble_why_blocks(
     review round 4 — the old "any graph error … returns ``{}``" was false for
     four of the six arms):
 
-    * the EXISTENCE anchor and the outer guard return ``{}`` — no blocks at all,
-      which the caller reads as "no enrichment";
+    * the EXISTENCE anchor probe is per LABEL (a failed probe leaves that
+      label's ids without a block, and the rest of the batch is untouched), and
+      the OUTER guard returns ``{}`` — a batch in which NO label resolved also
+      yields ``{}``, through the empty existence set rather than by discarding
+      other labels' work;
     * a dimension's read error is absorbed PER LABEL (and, for the support
       dimension, PER LEG) and the block is still returned, with THAT dimension
       absent for that label.
@@ -1140,11 +1143,28 @@ def assemble_why_blocks(
             ep_rows: list = []
             resolved: dict[str, list[str]] = {}
             unresolved = list(dict.fromkeys(ids))
+            # ⛔ #11928 review round 5: the probe's `try` is PER LABEL. It used
+            #    to wrap this whole sweep and `return {}`, so a failure on any
+            #    label other than the first discarded the WHOLE BATCH — including
+            #    the ids whose existence read had already succeeded. That is a
+            #    larger blast radius than the two the rounds above fixed: one
+            #    failed `:Object` probe removed the `:Point` block too, i.e. the
+            #    enrichment for the entire recall turn.
+            #
+            #    A label whose probe fails simply does not resolve, so its ids get
+            #    no block — the same honesty `return {}` was reaching for, scoped
+            #    to the label that actually failed. A batch where NOTHING resolves
+            #    still yields `{}`, through the empty `existing_ids` in the final
+            #    loop (never by discarding other labels' work).
             for _label in EPISTEMIC_LABELS:
                 if not unresolved:
                     break
-                _rows = g.query(_for_label(_EP_CYPHER, _label),
-                                params={"ids": unresolved}).result_set
+                try:
+                    _rows = g.query(_for_label(_EP_CYPHER, _label),
+                                    params={"ids": unresolved}).result_set
+                except Exception as e:  # noqa: BLE001, RUF100 — per label
+                    logger.warning("W4 ep probe failed for %s: %s", _label, e)
+                    continue
                 _found = {r[0] for r in _rows if r and r[0]}
                 if not _found:
                     continue
@@ -1184,29 +1204,39 @@ def assemble_why_blocks(
             # so a leg that runs alone still emits a correct (shorter) chain.
             _seen: dict[str, dict[str, dict]] = {}
             _rank: dict[tuple[str, str], tuple[str, str]] = {}
-            try:
-                _assemble_supports(
-                    g.query(_for_label(_SUPPORT_OP_CYPHER, _label),
-                            params={"ids": _ids}).result_set,
-                    blocks,
-                    operator_leg=True,
-                    seen=_seen,
-                    rank=_rank,
-                )
-            except Exception as e:  # noqa: BLE001, RUF100 — fail-open per leg
-                logger.warning("W4 support-chain OPERATOR leg failed for %s: %s",
-                               _label, e)
-            try:
-                _assemble_supports(
-                    g.query(_for_label(_SUPPORT_DIRECT_CYPHER, _label),
-                            params={"ids": _ids}).result_set,
-                    blocks,
-                    seen=_seen,
-                    rank=_rank,
-                )
-            except Exception as e:  # noqa: BLE001, RUF100 — fail-open per leg
-                logger.warning("W4 support-chain DIRECT leg failed for %s: %s",
-                               _label, e)
+            # ⛔ #11928 review round 5: each leg's fold is TRANSACTIONAL on those
+            #    shared maps. `_assemble_supports` re-derives the published chain
+            #    from the WHOLE map on every call, so a leg that raised MID-FOLD
+            #    left its partial entries behind and the SURVIVING leg published
+            #    them as final — a wrong `operator_id`/`mitigation` pair, decided
+            #    by which row the read reached before raising. That is exactly
+            #    the row-order dependence #9962 and #11928-F1 exist to remove, and
+            #    it is reachable from data (a later row whose content is not a
+            #    string raises in `_snippet` after earlier rows folded). Snapshot
+            #    before each leg, restore on failure: a failed leg then
+            #    contributes nothing at all.
+            for _leg, _template, _operator in (
+                    ("OPERATOR", _SUPPORT_OP_CYPHER, True),
+                    ("DIRECT", _SUPPORT_DIRECT_CYPHER, False)):
+                _seen_snap = {pid: dict(m) for pid, m in _seen.items()}
+                _rank_snap = dict(_rank)
+                try:
+                    _assemble_supports(
+                        g.query(_for_label(_template, _label),
+                                params={"ids": _ids}).result_set,
+                        blocks,
+                        operator_leg=_operator,
+                        seen=_seen,
+                        rank=_rank,
+                    )
+                except Exception as e:  # noqa: BLE001, RUF100 — fail-open per leg
+                    _seen.clear()
+                    _seen.update(_seen_snap)
+                    _rank.clear()
+                    _rank.update(_rank_snap)
+                    logger.warning(
+                        "W4 support-chain %s leg failed for %s: %s",
+                        _leg, _label, e)
         # 3. NAND conflicts (≤ max_conflicts) — NANDer-only query.
         for _label, _ids in resolved.items():
             try:
@@ -1339,7 +1369,10 @@ def project_item(item: dict, block: dict) -> dict:
       - ``warnings: ["contested"]`` — contested items only, TOP-OF-ITEM;
       - ``why: {support_chain}`` — when the block carries supports (an
         empty support_chain is an empty collection — no why marker,
-        never a degradation);
+        normally not a degradation; ⛔ but see ``assemble_why_blocks``'
+        graded fail-open: a support read that FAILED for that label also
+        leaves it empty, and the wire cannot currently tell the two
+        apart);
       - ``conflicts`` — contested OR ≥ 1 active NAND; absent otherwise
         (an uncontested point carries no conflict noise);
       - ``supersession`` — the §3.1.4 VIEW ({line, successor_label} — the

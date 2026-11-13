@@ -926,6 +926,129 @@ def test_the_support_dimensions_direct_leg_still_runs_when_the_operator_leg_rais
         "share one try: " + repr(blocks[claim["id"]].get("support_chain")))
 
 
+def test_a_non_first_labels_existence_probe_failure_keeps_the_other_blocks(
+        sdk, monkeypatch):
+    """The existence anchor is per LABEL too (review round 5, finding 1).
+
+    The anchor's `try` wrapped the WHOLE per-label sweep, so a probe failure on any
+    label but the first returned ``{}`` and discarded the entire batch — including
+    the ids whose existence read had already succeeded. On a mixed
+    ``[:Point, :Object]`` recall that removed the ``:Point`` block too: the
+    enrichment for the whole turn, from one failed probe.
+
+    Measured as a mutant: put the ``return {}`` back around the sweep and this pin
+    reports ``[]`` (the Point's block is gone) while the total-failure case below
+    still yields ``{}`` — which is the grade that is actually intended.
+    """
+    from tortoise import why as why_module
+    from tortoise.projection import _GuardedGraph
+
+    proj = sdk._get_proj()
+    claim = sdk.create_point("caching", "the cache is warm")
+    indicator, target_node, goal = _world(sdk, tag="anchor-probe")
+    _judge(sdk, indicator, target_node, goal, 8.0, at="2026-05-01T00:00:00Z")
+    healthy = assemble_why_blocks(proj, [claim["id"], goal["id"]])
+    assert set(healthy) == {claim["id"], goal["id"]}, (
+        "fixture: both labels must resolve before the injection")
+
+    poisoned = why_module._for_label(why_module._EP_CYPHER, "Object")
+    real_query = proj.g.query
+
+    def _query(self, cypher, params=None, timeout=None):
+        if cypher == poisoned:
+            raise RuntimeError("injected Object-side existence-probe failure")
+        return real_query(cypher, params=params, timeout=timeout)
+
+    monkeypatch.setattr(_GuardedGraph, "query", _query)
+    try:
+        blocks = assemble_why_blocks(proj, [claim["id"], goal["id"]])
+    finally:
+        monkeypatch.setattr(_GuardedGraph, "query", real_query)
+
+    assert claim["id"] in blocks, (
+        "a non-first label's existence-probe failure emptied the WHOLE batch: "
+        + repr(sorted(blocks)))
+    assert goal["id"] not in blocks, (
+        "the label whose probe failed must not get a block: "
+        + repr(sorted(blocks)))
+
+
+def test_no_resolvable_label_still_yields_no_blocks(sdk, monkeypatch):
+    """The grade that IS intended: nothing resolved ⇒ ``{}`` (not a partial dict).
+
+    Same seam as the pin above, every label poisoned — the batch degrades to "no
+    enrichment" through the empty existence set, which is what the old whole-sweep
+    ``return {}`` was reaching for.
+    """
+    from tortoise import why as why_module
+    from tortoise.projection import _GuardedGraph
+
+    proj = sdk._get_proj()
+    claim = sdk.create_point("caching", "the cache is warm")
+    poisoned = {why_module._for_label(why_module._EP_CYPHER, label)
+                for label in why_module.EPISTEMIC_LABELS}
+    real_query = proj.g.query
+
+    def _query(self, cypher, params=None, timeout=None):
+        if cypher in poisoned:
+            raise RuntimeError("injected existence-probe failure")
+        return real_query(cypher, params=params, timeout=timeout)
+
+    monkeypatch.setattr(_GuardedGraph, "query", _query)
+    try:
+        blocks = assemble_why_blocks(proj, [claim["id"]])
+    finally:
+        monkeypatch.setattr(_GuardedGraph, "query", real_query)
+
+    assert blocks == {}, f"expected no blocks, got {sorted(blocks)}"
+
+
+def test_a_fold_that_raises_mid_way_leaves_no_partial_support_chain(
+        sdk, monkeypatch):
+    """A failed support leg contributes NOTHING — not its partial fold
+    (review round 5, finding 2).
+
+    The two legs share ``_seen``/``_rank`` and ``_assemble_supports`` re-derives
+    the published chain from the WHOLE map on every call. With round 4's per-leg
+    ``try``, a leg that raised MID-FOLD left its partial entries in the shared map
+    and the surviving leg then published them as final — a wrong
+    ``operator_id``/``mitigation`` pair decided by which row the read reached, the
+    exact row-order dependence #9962 and #11928-F1 exist to remove. Each leg now
+    snapshots the maps and restores them on failure.
+
+    Measured as a mutant: drop the snapshot/restore and this pin reports the
+    partial operator chain instead of ``[]``.
+    """
+    from tortoise import why as why_module
+
+    indicator, target_node, goal = _world(sdk, tag="partial-fold")
+    _judge(sdk, indicator, target_node, goal, 8.0, at="2026-05-01T00:00:00Z")
+    proj = sdk._get_proj()
+    healthy = assemble_why_blocks(proj, [goal["id"]])
+    assert healthy[goal["id"]]["support_chain"], (
+        "fixture: the goal has no operator-leg support to fold")
+
+    real = why_module._assemble_supports
+
+    def _flaky(rows, by_id, *, operator_leg=False, seen=None, rank=None):
+        if operator_leg and rows:
+            # Pollute the SHARED maps exactly as a mid-fold raise does — the real
+            # fold of one row, into a THROWAWAY by_id so nothing is published —
+            # then raise before this leg's own publish. (A genuine mid-fold raise
+            # never reaches the publish at the end of _assemble_supports; this
+            # models that, and models nothing stronger.)
+            real(rows[:1], {}, operator_leg=True, seen=seen, rank=rank)
+            raise ValueError("injected mid-fold failure")
+        return real(rows, by_id, operator_leg=operator_leg, seen=seen, rank=rank)
+
+    monkeypatch.setattr(why_module, "_assemble_supports", _flaky)
+    blocks = assemble_why_blocks(proj, [goal["id"]])
+
+    assert blocks[goal["id"]]["support_chain"] == [], (
+        "a leg that raised mid-fold left partial state that the surviving leg "
+        "published as final: " + repr(blocks[goal["id"]]["support_chain"]))
+
+
 def test_the_enriched_item_and_ask_entry_carry_the_assessment(sdk, monkeypatch):
     """The dimension reaches the surfaces that answer the question: the enriched
     item (search/analyze/recall) and ``item_to_why_entry`` (the ask lane)."""
