@@ -1011,12 +1011,16 @@ def invalidate_stale(
 
     ``counts.gone`` counts the findings whose goal NO LONGER EXISTS, so its
     ``goalState`` cache could not be reconciled: there is no node to reconcile it
-    on. TWO shapes set it, and it means the same thing in both — "the cache could
-    not be reconciled", never "a retirement landed": a retirement that DID land
-    whose cache follow-up could not, and #12315's ABSENT arm (``found: False``),
-    where no retirement was needed at all. It is neither a failure of a retirement
-    nor a success of the reconcile, and it exists so a sweep over deleted goals
-    cannot read clean.
+    on. THREE shapes set it, and it means the same thing in all of them — "the
+    cache could not be reconciled", never "a retirement landed": a retirement
+    that DID land whose cache follow-up could not; #12315's ABSENT arm (``found:
+    False``), where no retirement was needed at all; and either ALREADY-TERMINAL
+    arm (``found: True``) whose goal has also gone, where the retirement happened
+    out of band. ⛔ So ``gone`` is NOT attributable from ``retired``/``found``
+    alone (measured on the third: a claim flipped to ``retracted`` with its goal
+    deleted gives ``{'stale': 1, 'retired': 0, 'alreadyRetired': 1, 'gone': 1,
+    'failed': 0}``). It is neither a failure of a retirement nor a success of the
+    reconcile, and it exists so a sweep over deleted goals cannot read clean.
 
     ⛔ THE BUCKETS ARE PER-FINDING PREDICATES, NOT A PARTITION — do not read a
     bucket total as a finding count. A retirement that landed and whose cache

@@ -1556,6 +1556,13 @@ def test_one_refused_retirement_does_not_discard_the_rest_of_the_sweep(sdk):
     # answer: this synthetic raise happens before any read, and `invalidate`'s own
     # refusals do not say whether they got as far as reading the claim.
     assert failed[0]["found"] is None, failed[0]
+    # ⛔ AND `cache` IS THE ONE KEY A REFUSAL STILL OMITS, which is correct rather
+    # than untidy: no reconcile ran, so there is no report to carry — but an
+    # absent key must never be the whole answer, which is why `found` is present
+    # above. Pinned here because nothing else fails if a plausible `cache` is
+    # invented for a reconcile that never happened (the same class as the
+    # `counts.gone` fold this module already fixed).
+    assert "cache" not in failed[0], failed[0]
 
 
 # ── 8. the sweep: scope, limit, dry run, and no re-derivation ────────────
