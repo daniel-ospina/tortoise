@@ -348,23 +348,24 @@ can query — and the row could not see it, because the node measurement only ev
 One pin measures the edge doors on the fixed tree, the second is the falsifier that empties the decline
 and watches row 2 go `NOT MET`, and the third pins the PROBED POPULATION as drop-derived rather than
 input-derived, so an arm that stops planting cannot still report full coverage — measured UNPINNED:
-the input-derived variant left the split unmoved), and three by `#12265`'s generalisation of the same
+the input-derived variant left the split unmoved), and four by `#12265`'s generalisation of the same
 pin (`test_the_duplicate_key_detector_catches_a_duplicate`,
-`test_no_module_declares_the_same_dict_key_twice` and
-`test_the_scan_REPORTS_a_duplicate_it_finds` — the falsifier, the scan over `tortoise/`,
+`test_no_module_declares_the_same_dict_key_twice`,
+`test_the_scan_REPORTS_a_duplicate_it_finds` and
+`test_the_scan_root_is_the_REPO_not_the_process_cwd` — the falsifier, the scan over `tortoise/`,
 `tools/` and `tests/`, and the RED arm driven over a planted tree (a duplicate must be NAMED with
 its file and both line numbers, an unparseable module must be named rather than skipped green, and
 a clean module must contribute nothing) — and the scan's reach is deliberately not "repo-wide" and
 asserts no repo-wide file count: it pins only a per-root floor (`_MIN_MODULES`: 100 / 50 / 500) so a
 renamed or vanished root fails instead of narrowing silently (`battery/`, `graph-scripts/`, `docs/`,
 `eval/` and several smaller roots sit outside the three it walks, and a file count there has already
-gone stale once), so the three make a silently-shadowed declaration key a PYTEST red on any tree that
+gone stale once), so the four make a silently-shadowed declaration key a PYTEST red on any tree that
 holds both rows AND whose diff selects this file, including the MERGE tree, where the duplicate is
 actually born and where
 `main-lint.yml`'s ruff gate (`#2174`) only reds it after the fact; the scan also found the live
 `# noqa: F601` duplicate in `tests/test_commit_schema.py`, which the census-scoped pin cannot see —
 and which lint itself does NOT catch, because the suppression is on the repeated line)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 3 + 1 = 187`). ⚠️ No figure here names what `main` collects TODAY:
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 = 187`). ⚠️ No figure here names what `main` collects TODAY:
 which of those additions are already merged moves with `main`, so any "`main` at N" would be a moving
 reference this paragraph forbids — the total is bound to THIS TREE alone): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
@@ -403,8 +404,9 @@ under
 `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
-skip and one fewer pass than the docker lane, and both splits add
-to the same `187` the pin re-derives. That is why **neither is a stale figure**: a carve-out run that
+skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
+collected count — `186 passed, 1 skipped` and `185 passed, 2 skipped` here, both adding to the same `187` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+`186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
 head: a figure

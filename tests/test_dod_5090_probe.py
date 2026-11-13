@@ -8011,8 +8011,10 @@ def test_the_census_doc_collects_what_the_file_collects():
     skip plus `tests/_live_utils.py`'s live-graph fixture, which only a lane with
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
-    for exactly that reason. Both splits add to the `186` re-derived
-    below, which is why the doc states its split as
+    for exactly that reason. The two splits therefore add to the tree's OWN collected
+    count: `186 + 1` and `185 + 2` at THIS tree, both equal to the `187` the pin re-derives
+    below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
+    which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent
