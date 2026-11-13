@@ -4291,6 +4291,61 @@ def test_an_unreported_event_count_is_disclosed_not_refused(monkeypatch, tmp_pat
     assert "Event" in (report["read_note"] or ""), report.get("read_note")
 
 
+# ⛔ THE FIELD ON THE OTHER TWO ARTIFACTS, which had no revert proof (PR-review cycle 7).
+# `docs/architecture/CURATION-11469.md:196` promises `events_reconciled: false` on EVERY
+# artifact and enumerates the tests, but the only unreported-count test above drives
+# `inventory`: hardcoding `True` at `curate_graph.py`'s plan payload or at
+# `_disarmed_artifact` left the whole file at 238 passed (measured, both). That is the
+# unproven-guard class this PR has already been charged for twice — and this field is the
+# machine-readable form of "no cross-check existed for this layer", the exact prose->field
+# conversion two review cycles produced, so it is the one a lane would "simplify" to True.
+def test_the_plan_payload_carries_the_unreconciled_event_field(monkeypatch, tmp_path):
+    """The ARMED plan artifact states the lost cross-check, not just the inventory one."""
+    mod = _tool_module()
+    monkeypatch.setattr(mod, "_live_call_tool", _event_surface(EVENT_ROWS, reported=None))
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    assert payload["events_read"] == 3, payload
+    assert payload["events_total_reported"] is None, payload
+    assert payload["events_reconciled"] is False, payload
+
+
+def test_the_disarmed_artifact_carries_the_unreconciled_event_field(monkeypatch, tmp_path):
+    """...and so does the THIRD call site: a completed read with no count to reconcile.
+
+    ⚠️ `--off` alone does NOT reach `_disarmed_artifact` — a disarmed run that finishes
+    normally writes the ARMED plan payload with `run.off: true` (measured: a first revision
+    of this test asserted the field on that payload, so it pinned the plan's field a second
+    time and stayed GREEN with `_disarmed_artifact` hardcoded to `True`). The helper is
+    reached on a REFUSAL or an exception AFTER the Event read, so this drives a `graphs()`
+    failure — the same shape `test_a_completed_event_read_survives_a_graphs_failure_on_both
+    _disarmed_arms` uses for the `True` half of the tri-state.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        args = args or {}
+        if args.get("section") == "graphs":
+            return RealCallToolResult({"error": "429 Too Many Requests"}, is_error=True)
+        return _event_surface(EVENT_ROWS, reported=None)(name, args)
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    rc = mod.main(["plan", "--graph", "org_x_g_old", "--target", "org_x_g_new", "--off",
+                   "--no-verify-read", "--ledger", str(tmp_path / "l.jsonl"),
+                   "--out", str(tmp_path / "p.json")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "p.json").read_text())
+    # The read COMPLETED (3 rows) and reported NO count, so the tri-state is (3, None) and
+    # the field must say the cross-check was lost — not `True`, and not `None` (which would
+    # mean "no completed read", the round-2/3 defect this PR exists to close).
+    assert payload["events_read"] == 3, payload
+    assert payload["events_total_reported"] is None, payload
+    assert payload["events_reconciled"] is False, payload
+
+
 def test_the_event_read_is_routed_to_the_graph():
     """Omitting `graph` reads the DEFAULT graph while every other section came from
     `--graph` — a census mixing two graphs, which is the operator read's own defect."""
@@ -4664,7 +4719,12 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         "the plan does not describe the request the code sends")
     assert "RESULTSET_SIZE" in plan, (
         "the plan does not name the engine cap that makes `bound + 1` unfillable")
-    assert "sized to `counts.Event + 1`" not in plan, (
+    # ⚠️ PRESENT TENSE, not the broad substring (PR-review cycle 7): the plan legitimately
+    # RECORDS the superseded sizing ("the first draft said the request WAS sized to
+    # `counts.Event + 1`"), and a bare `sized to ...` test false-reds on exactly that note
+    # — measured: inserting one history line redded this test. `is sized to` cannot match a
+    # past-tense note, so the history stays writable and the prescription still reds.
+    assert "is sized to `counts.Event + 1`" not in plan, (
         "the plan still prescribes sizing the request to the count (one row of headroom)")
     # ⛔ ...and the CODE's own text, which nothing pinned (PR-review cycle 5). The plan pin
     # above guards the plan, but `tools/curate_graph.py` carried the SAME superseded
@@ -4710,16 +4770,20 @@ def test_the_architecture_doc_no_longer_claims_the_event_layer_is_unread():
         "sizes it to exactly EVENT_READ_CEILING")
     assert "sizes each request to `counts.Event + 1`" not in source_flat, (
         "the EVENT_READ_CEILING comment still prescribes sizing the request to the count")
-    # ⛔ CYCLE 5 CHANGED WHAT THE PRESENCE SIDE MUST PIN, and the scoping discipline above
-    # is what made the change visible: the shipped request is the BOUND, not the bound plus
-    # one, so the two presence assertions now name THAT sentence at each site — and each is
-    # phrased so a revert to `bound + 1` cannot satisfy it (a bare substring `sized to
-    # `EVENT_READ_CEILING`` would match inside `EVENT_READ_CEILING + 1` only up to the
-    # backtick, so the trailing `— NOT to` is load-bearing here).
-    assert "sized to `EVENT_READ_CEILING` — NOT to" in source_flat, (
-        "the read_events contract does not state the request the code sends (the bound)")
-    assert "size its request TO the bound, not above it" in source_flat, (
-        "the EVENT_READ_CEILING comment does not state the request the code sends")
+    # ⛔ THE CODE'S OWN VALUE, which nothing pinned until cycle 7 — the assertions above are
+    # all about PROSE. A meaning-preserving rewording of either sentence redded the previous
+    # pair (measured: "So the read must size its request TO the bound, not above it" →
+    # "The read therefore requests exactly this bound and never more" left 1 failed), which
+    # is the cost that gets a pin deleted rather than honoured. The value the code assigns is
+    # mechanical — no rewording can move it — and it is the thing every sentence above is
+    # trying to describe, so it is asserted directly, in BOTH directions: the shipped
+    # assignment present, and the superseded bound-plus-one absent.
+    assert "limit_sent = EVENT_READ_CEILING\n" in source_text, (
+        "curate_graph.py does not size the Event request to the bound")
+    assert "limit_sent = EVENT_READ_CEILING + 1" not in source_text, (
+        "curate_graph.py still sizes the Event request one ABOVE the bound, which the "
+        "engine's RESULTSET_SIZE cap makes unfillable and therefore leaves the fill "
+        "refusal inert")
     # ...and both must say WHY, because the reason is what a future lane edits away: the
     # engine caps a non-aggregate read at `RESULTSET_SIZE`, DEFAULT 10 000, i.e. AT this
     # bound, so `bound + 1` can never be filled and the fill refusal becomes inert.
