@@ -1423,6 +1423,29 @@ def test_a_client_error_never_quotes_the_password_prefix():
         assert leak not in scrubbed, (uri, scrubbed)
 
 
+def test_doctor_health_row_never_echoes_a_password_head(capsys, _isolated, monkeypatch):
+    """BOTH `Graph:` rows must agree about a credential — the second one leaked it.
+
+    Measured (#12428 review): with a `.env` value EXPORTED into the shell — the
+    remedy this PR prints (`set -a; . ./.env; set +a`) — for a password carrying
+    a `#`, `doctor` printed the FalkorDB row redacted and then
+    "Graph: health: Port could not be cast to integer value as 'Sup3rSecret'":
+    the password's head, from the outer exception arm, one row below a row that
+    had already hidden it.
+    """
+    uri = "docker://:Sup3rSecret#x@localhost:6379/g"
+    monkeypatch.setenv("TORTOISE_DB_URI", uri)
+    _write_env(_isolated, f"TORTOISE_DB_URI={uri}\n")
+
+    _run(("doctor",))
+    out = capsys.readouterr().out
+
+    assert "Sup3rSecret" not in out, "a `.env` credential reached the doctor output"
+    health = [line for line in out.splitlines() if "Graph: health" in line]
+    assert health, out
+    assert "<redacted>" in health[0], health[0]
+
+
 def test_a_file_that_was_never_applied_does_not_claim_it_was():
     """The non-applied arm must not say "this process applied that file".
 

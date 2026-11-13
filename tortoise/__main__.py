@@ -3187,10 +3187,17 @@ def _redact_credential_fragments(text: str, uri: str | None) -> str:
             fragments.add(fragment)
             fragments.add(_unquote(fragment))
     # ⛔ A minimum length: a one-character password would otherwise rewrite every
-    # occurrence of that character in the message.
+    # occurrence of that character in the message. Below the threshold the
+    # fragment is still removed where the CLIENT echoes it — quoted, as its own
+    # token (`Port could not be cast to integer value as 'Abc'`) — so a short
+    # credential is redacted without the replacement mangling prose (#12428).
     for fragment in sorted((f for f in fragments if len(f) >= 4),
                            key=len, reverse=True):
         text = text.replace(fragment, "<redacted>")
+    for fragment in sorted((f for f in fragments if 0 < len(f) < 4),
+                           key=len, reverse=True):
+        for quoted in (f"'{fragment}'", f'"{fragment}"'):
+            text = text.replace(quoted, "'<redacted>'")
     return text
 
 
@@ -15194,7 +15201,18 @@ def _cmd_doctor(args):
                     if sdk._proj:
                         sdk._proj.close()
             except Exception as e:
-                results.append(("Graph: health", "❌", str(e)[:60]))
+                # ⛔ The SAME redaction chain as Step 3's arm above (#12428 review):
+                # this is the OTHER place a client's own echo reaches a row, and it
+                # printed `Port could not be cast to integer value as 'Sup3rSecret'`
+                # raw — the password's head, from a `.env` value the user was told
+                # to export (`set -a; . ./.env; set +a`). One row above, the same
+                # error was already redacted, so the two rows disagreed about a
+                # credential in one screen.
+                results.append(("Graph: health", "❌",
+                                _mask_uri_userinfo(
+                                    _redact_credential_fragments(
+                                        str(e),
+                                        db or path or _env_db_target_value()))[:60]))
 
     # #280 check 4 / #5815 — ONE seam, exactly once. The session-index row used
     # to be appended inside the graph-health block, so its EXISTENCE was
