@@ -929,6 +929,27 @@ WAIT_BOUND_HEALTH_MIN_ATTEMPTS = 5
 #: never staleness.
 _WAIT_BOUND_RECENT: dict[str, deque[float]] = {
     _s: deque(maxlen=1024) for _s in _WAIT_BOUND_SURFACES}
+#: How many REFUSED control-plane requests (a `/health` or `/liveness` poll the
+#: transport bound could not run inside its deadline) inside the window mean the
+#: process is failing. Env ``TORTOISE_WAIT_BOUND_HEALTH_MIN_CONTROL_REFUSALS``;
+#: ``0`` disables the arm.
+#:
+#: ⛔ TWO, NOT ONE, and not many: a single refused health poll is a real signal
+#: (the handler does NO I/O, so a healthy box cannot fail to run it in 10 s), but
+#: a deploy's own cold-start seconds can produce one, and a gate that reds on a
+#: single cold-start poll fails deploys. Two inside two minutes is a process that
+#: cannot run its own no-I/O handler, which is exactly the 2026-11-13 wedge
+#: (`/health` itself 504'd half the time).
+#:
+#: This is a SEPARATE arm from the data share on purpose (#12477 review round 5):
+#: control traffic must stay out of the share's DENOMINATOR (12 served polls
+#: beside 10 refused data requests would read 0.455 → green over a refusing
+#: plane), but a control REFUSAL must still be a verdict — otherwise a quiet box
+#: reads green on the incident's own shape (measured: 2 refused signups + 8
+#: refused `/health` polls → `share 1.0, refusing None` → 200).
+WAIT_BOUND_HEALTH_MIN_CONTROL_REFUSALS = 2
+#: Control-plane refusal timestamps inside the window.
+_WAIT_BOUND_CONTROL_RECENT: deque[float] = deque(maxlen=256)
 #: Per-surface ``{bucket_index: [attempts, breaches]}``. The bucket dict is
 #: bounded by AGE (at most ``window/bucket + 2`` keys), so counting every
 #: request costs one integer increment and cannot grow the process's memory —
@@ -1035,8 +1056,33 @@ def record_wait_bound_attempt(surface: str) -> None:
         raise ValueError(f"#12477: unknown wait-bound surface {surface!r}")
     index = int(time.monotonic() // max(1.0, WAIT_BOUND_HEALTH_BUCKET_S))
     with _WAIT_BOUND_RECENT_LOCK:
+        _prune_wait_bound_buckets(surface, index)
         bucket = _WAIT_BOUND_BUCKETS[surface].setdefault(index, [0, 0])
         bucket[0] += 1
+
+
+def wait_bound_health_min_control_refusals() -> int:
+    """Resolve the refused-control-poll threshold; ``0`` disables the arm.
+
+    Env ``TORTOISE_WAIT_BOUND_HEALTH_MIN_CONTROL_REFUSALS``.
+    """
+    return _resolve_positive_int_env(
+        "TORTOISE_WAIT_BOUND_HEALTH_MIN_CONTROL_REFUSALS",
+        WAIT_BOUND_HEALTH_MIN_CONTROL_REFUSALS)
+
+
+def record_wait_bound_control_breach(at: float | None = None) -> None:
+    """Remember ONE refused control-plane request (``/health``, ``/liveness``).
+
+    A SEPARATE channel from :func:`record_wait_bound_breach_recent` because it
+    answers a different question: not "what share of data traffic was refused",
+    but "could the process run its own no-I/O handler at all". It never enters
+    the data share's numerator or denominator (see
+    :data:`WAIT_BOUND_HEALTH_MIN_CONTROL_REFUSALS`).
+    """
+    stamp = time.monotonic() if at is None else float(at)
+    with _WAIT_BOUND_RECENT_LOCK:
+        _WAIT_BOUND_CONTROL_RECENT.append(stamp)
 
 
 def record_wait_bound_breach_recent(surface: str, at: float | None = None) -> None:
@@ -1052,8 +1098,30 @@ def record_wait_bound_breach_recent(surface: str, at: float | None = None) -> No
     index = int(stamp // max(1.0, WAIT_BOUND_HEALTH_BUCKET_S))
     with _WAIT_BOUND_RECENT_LOCK:
         _WAIT_BOUND_RECENT[surface].append(stamp)
+        _prune_wait_bound_buckets(surface, index)
         bucket = _WAIT_BOUND_BUCKETS[surface].setdefault(index, [0, 0])
         bucket[1] += 1
+
+
+def _prune_wait_bound_buckets(surface: str, newest_index: int) -> None:
+    """Drop buckets older than the window — ON WRITE, not only on read.
+
+    ⛔ The read-side prune alone is not a bound. #12477 review round 5: a process
+    whose 9090 listener never bound (`start_health_listener` returns ``None`` and
+    nothing polls `/health`) never calls :func:`wait_bound_breach_window`, so the
+    dict grew one key per 10 s bucket for the life of the process (~17 k/day)
+    while the comment claimed it "cannot grow the process's memory". Pruning here
+    costs a scan of at most ``window/bucket + 2`` keys on the write path.
+    """
+    try:
+        keep = int(wait_bound_health_window_s()
+                   // max(1.0, WAIT_BOUND_HEALTH_BUCKET_S)) + 2
+    except Exception:  # noqa: BLE001 - the refusal path must not raise
+        keep = 14
+    buckets = _WAIT_BOUND_BUCKETS[surface]
+    if len(buckets) > keep:
+        for old_index in [i for i in buckets if i < newest_index - keep]:
+            del buckets[old_index]
 
 
 def wait_bound_breach_window(window_s: float | None = None) -> dict:
@@ -1100,6 +1168,8 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
         return {"window_s": window, "total": 0,
                 "by_surface": dict.fromkeys(_WAIT_BOUND_SURFACES, 0),
                 "attempts": 0, "share": None, "last_breach_age_s": None,
+                "control_refusals": 0, "min_control_refusals": 0,
+                "control_refusing": False,
                 "buckets": 0, "buckets_total": 0, "enabled": False,
                 "min_share": 0.0, "min_attempts": 0, "refusing": None,
                 "error": None}
@@ -1112,7 +1182,12 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
         attempts = 0
         buckets: set[int] = set()
         newest: float | None = None
+        min_control = wait_bound_health_min_control_refusals()
         with _WAIT_BOUND_RECENT_LOCK:
+            while (_WAIT_BOUND_CONTROL_RECENT
+                   and _WAIT_BOUND_CONTROL_RECENT[0] < now - window):
+                _WAIT_BOUND_CONTROL_RECENT.popleft()
+            control_refusals = len(_WAIT_BOUND_CONTROL_RECENT)
             for surface in _WAIT_BOUND_SURFACES:
                 # PRUNE BY AGE (bucket index), never by position: the dict is
                 # keyed by absolute bucket, so a stale key is a fact, not an
@@ -1152,9 +1227,15 @@ def wait_bound_breach_window(window_s: float | None = None) -> dict:
         refusing = None          # the term is disabled, and says so
     else:
         refusing = bool(share >= min_share)
+    control_refusing = bool(min_control > 0 and control_refusals >= min_control)
     return {"window_s": window, "total": total,
             "by_surface": by_surface,
             "attempts": attempts, "share": share,
+            # a REFUSED control poll is its own evidence (round 5): out of the
+            # share's denominator, IN as this separate verdict.
+            "control_refusals": control_refusals,
+            "min_control_refusals": min_control,
+            "control_refusing": control_refusing,
             "last_breach_age_s": (None if newest is None
                                   else round(max(0.0, now - newest), 2)),
             # buckets reachable across (now-window, now] is a SPAN, not a
@@ -1169,6 +1250,8 @@ def _wait_bound_error(message: str, *, window: float | None) -> dict:
     """One error shape, every key present, `refusing: None` (not False)."""
     return {"window_s": window, "total": None, "by_surface": None,
             "attempts": None, "share": None, "last_breach_age_s": None,
+            "control_refusals": None, "min_control_refusals": None,
+            "control_refusing": None,
             "buckets": None, "buckets_total": None,
             "enabled": window is not None, "min_share": None,
             "min_attempts": None, "refusing": None, "error": message}
@@ -1185,6 +1268,7 @@ def reset_wait_bound_breach_window() -> None:
         for surface, stamps in _WAIT_BOUND_RECENT.items():
             _WAIT_BOUND_RECENT[surface] = deque(maxlen=stamps.maxlen)
             _WAIT_BOUND_BUCKETS[surface] = {}
+        _WAIT_BOUND_CONTROL_RECENT.clear()
 # #10515: a LEGITIMATE revision was refused by `update_point`'s ABSENT arm.
 #
 # The arm itself is #10119's and is correct: an id absent from the live graph at
@@ -5753,11 +5837,27 @@ class _HealthzHandler(BaseHTTPRequestHandler):
             recent_total = recent.get("total")
             recent_refusing = recent.get("refusing")
             recent_error = recent.get("error")
+            control_refusing = recent.get("control_refusing")
         except Exception as exc:  # noqa: BLE001 - answer, never vanish
-            self._send(503, {"status": "unhealthy",
-                             "reasons": ["verdict-unreadable"],
-                             "error": f"{type(exc).__name__}: {exc}"[:200],
-                             **info})
+            # SAME SHAPE as the success arm (round 5): an operator or dashboard
+            # reading `recent_breaches.share` — the field added so exactly this
+            # degraded case is diagnosable — must not get a `KeyError` on the one
+            # response where it matters. Every diagnostic is present and reported
+            # as unmeasured, never omitted (the #3253 rule).
+            reason = f"{type(exc).__name__}: {exc}"[:200]
+            self._send(503, {
+                "status": "unhealthy",
+                "reasons": ["verdict-unreadable"],
+                "workload_idle": None,
+                "loop_block_episodes": None,
+                "dataplane": {"state": "unknown", "detail": None,
+                              "error": "verdict-unreadable"},
+                "served": {"registered": None, "last_served_age_s": None,
+                           "served": None, "error": "verdict-unreadable"},
+                "recent_breaches": _wait_bound_error(
+                    f"verdict-unreadable: {type(exc).__name__}", window=None),
+                "error": reason,
+                **info})
             return
         # A recent breach is a request the product REFUSED moments ago; the
         # verdict's own contract is "the door is refusing", so it fails here.
@@ -5782,6 +5882,10 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         else:
             refusing = bool(recent_refusing)
         plane_failed = plane.get("state") == "failed"
+        # A refused NO-I/O poll is its own failure (#12477 round 5) — and an
+        # UNREADABLE window is fail-closed here too (round 4's decision).
+        control_red = bool(control_refusing) or (
+            control_refusing is None and bool(recent_error))
         # ── THE WEDGE TERM (and the #10892 decision it must respect) ────────
         # #10892 recorded, as an OVERRIDES decision, that a liveness answer must
         # not be built on a gauge the loop itself writes ("a gauge the loop
@@ -5813,7 +5917,7 @@ class _HealthzHandler(BaseHTTPRequestHandler):
             wedged = bool(stale)
         else:
             wedged = bool(stale and demand and no_serve)
-        failing = bool(wedged or plane_failed or refusing)
+        failing = bool(wedged or plane_failed or refusing or control_red)
         reasons = []
         if wedged:
             # distinct labels, because the evidence is distinct: with a served
@@ -5823,11 +5927,16 @@ class _HealthzHandler(BaseHTTPRequestHandler):
                            else "loop-stale")
         if plane_failed:
             reasons.append("data-plane-failed")
+        if control_red:
+            reasons.append("control-refused")
         if refusing:
             reasons.append("requests-refused")
         self._send(503 if failing else 200,
                    {"status": ("ok" if not failing
-                              else "stale" if wedged else "unhealthy"),
+                              else "stale" if (wedged and not (plane_failed
+                                                               or refusing
+                                                               or control_red))
+                              else "unhealthy"),
                     "reasons": reasons,
                     "workload_idle": idle,
                     "loop_block_episodes": episodes,

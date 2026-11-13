@@ -3304,6 +3304,40 @@ class TestHealthzListener:
         assert payload["dataplane"]["state"] == "failed"
         assert "reader died" in (payload["dataplane"]["error"] or "")
 
+    def test_a_refused_control_poll_reds_the_listener(self):
+        """A refused NO-I/O poll is its own verdict (#12477 review round 5).
+
+        The window carries `control_refusing` and the listener must READ it —
+        mutation-verified: flipping that arm to ignore it left the whole suite
+        green, because the transport-level test only asserts the window value.
+        Two polls (the threshold), not one: a single cold-start refusal is a real
+        signal but not yet a process that cannot run its own handler.
+        """
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        try:
+            for _ in range(monitoring.WAIT_BOUND_HEALTH_MIN_CONTROL_REFUSALS):
+                monitoring.record_wait_bound_control_breach()
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.reset_wait_bound_breach_window()
+        assert status == 503
+        payload = json.loads(body)
+        assert payload["reasons"] == ["control-refused"], payload
+        assert payload["recent_breaches"]["control_refusing"] is True
+        assert payload["recent_breaches"]["total"] == 0, (
+            "a control refusal must not enter the data share's numerator")
+
+    def test_one_refused_control_poll_does_not_red_the_listener(self):
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        try:
+            monitoring.record_wait_bound_control_breach()
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.reset_wait_bound_breach_window()
+        assert status == 200, body
+
     def test_an_UNREADABLE_window_is_fail_closed_and_still_answers(self):
         """A channel the instrument cannot read is not evidence of health.
 

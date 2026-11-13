@@ -242,6 +242,30 @@ def test_health_reports_the_refusal_window_without_touching_status():
         "/health must carry the wedge evidence channel (#12477)")
 
 
+def test_health_answers_with_the_full_refusals_shape_when_the_window_RAISES(
+        monkeypatch):
+    """The degraded path must carry every key the healthy path carries.
+
+    Round 5 measured this arm with no test: reverting it to an ad-hoc
+    `{"error", "refusing"}` dict (2 of 13 keys) left the whole suite green, so a
+    dashboard reading `refusals["share"]` — the field that makes this degraded
+    case diagnosable — would `KeyError` on exactly the response where it matters.
+    """
+    def _boom(*_a, **_k):
+        raise RuntimeError("simulated unreadable window")
+
+    monkeypatch.setattr(monitoring, "wait_bound_breach_window", _boom)
+    body = asyncio.run(hosted_api.health())
+    healthy = monitoring._wait_bound_error("x", window=120.0)
+    assert set(body["refusals"]) == set(healthy), (
+        "the error arm must republish the resolver's full shape")
+    assert body["refusals"]["refusing"] is None
+    assert body["status"] in ("ok", "degraded"), (
+        "/health must still ANSWER, and must not derive `status` from a "
+        "degraded monitoring read")
+    assert body["refusals"]["share"] is None
+
+
 def test_a_historical_breach_does_not_appear_in_the_window():
     """The negative control: the window is a WINDOW (#10185's forever-red)."""
     monitoring.record_wait_bound_breach_recent(

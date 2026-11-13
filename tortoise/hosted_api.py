@@ -5399,34 +5399,119 @@ _pending_wait_bound_telemetry: set = set()
 #:     them than data requests. Measured end-to-end: 12 served `/health` polls +
 #:     10 refused `POST /v1/search` gave `share 0.455 -> 200` while EVERY data
 #:     request was refused — a fail-open, in the exact class this issue is about.
-#:   * DOCUMENTED LONG routes (`/v1/organizations/{id}/import` at 64 MiB,
-#:     `/v1/sessions/commit` at 8 MiB, `/v1/packs/manifests`). Their handlers
-#:     deliberately await a whole restore/commit, so exceeding a 10 s bound is
-#:     normal and the bound's own refusal is the product working. Measured: five
-#:     legitimate imports + five other requests in a window gave `share 0.5 -> 503`,
-#:     i.e. a healthy deployment failing its own deploy gate.
+#:   * DOCUMENTED LONG routes — handlers that deliberately await a WHOLE
+#:     restore / dump / rebuild, so exceeding a 10 s bound is normal and the
+#:     bound's own refusal is the product working: import (64 MiB),
+#:     `sessions/commit` (8 MiB), `packs/manifests`, the stripe webhook,
+#:     `organizations/{id}/export` (a whole graph snapshot), the backup
+#:     create/restore pair, `dream`, `graphs/{id}/promote`, and the
+#:     `/internal/{demo,starter-seed}` builders. Measured: five legitimate
+#:     imports + five other requests in a window gave `share 0.5 -> 503`, i.e. a
+#:     healthy deployment failing its own deploy gate.
+#:
+#: ⛔ THE `long` LIST IS NOT THE BODY-CAP LIST, and an earlier draft of this
+#: comment claimed it was. `_APP_BODY_CAP_EXEMPT_REGEXES` is a *size* exemption
+#: list (13 of its 17 entries are small, fast routes) and does not contain
+#: export/backup/restore AT ALL — so "same shapes as the body caps" made an
+#: incomplete list look derived, and export/backup refusals then redded the gate
+#: (round 5 measured it). The list below is the union of the two enumerable
+#: facts: whole-artifact transfers and whole-graph operations.
 #:
 #: So the term is computed ONLY from requests that are neither. Everything else
 #: is stamped — an allowlist would UNDERCOUNT the denominator on a route it does
 #: not know, and an undercount inflates the share, which is the fail-closed
 #: direction for a false red but the wrong one here: a gate that reds a healthy
 #: deploy for an admin route it has never heard of is the failure this repo has
-#: recorded twice. These two lists are the ones that can be enumerated exactly.
+#: recorded twice.
 _WAIT_BOUND_CONTROL_PREFIXES = (
     "/health", "/liveness", "/livez", "/readyz", "/healthz", "/metrics",
     "/v1/version", "/v1/build", "/v1/status", "/openapi.json", "/docs",
     "/redoc", "/favicon.ico",
 )
 #: Compiled at import: the refusal path is on every request, so the test has to
-#: be cheap. These are the SAME shapes `_APP_BODY_CAP_EXEMPT_REGEXES` names one
-#: screen below, which is where the "this route is deliberately slow/large"
-#: knowledge already lives.
+#: be cheap. See the note above for why this is NOT the body-cap list.
 _WAIT_BOUND_LONG_ROUTES = (
+    # whole-artifact transfers (bounded only by a body cap, so the handler
+    # awaits the whole restore/commit)
     re.compile(r"^/v1/organizations/[^/]+/import/?$"),
     re.compile(r"^/v1/sessions/commit/?$"),
     re.compile(r"^/v1/packs/manifests/?$"),
     re.compile(r"^/webhooks/stripe/?$"),
+    # whole-graph operations (a full dump, or a whole-graph rebuild)
+    re.compile(r"^/v1/organizations/[^/]+/export/?$"),
+    re.compile(r"^/(v1/)?backups(/restore)?/?$"),
+    re.compile(r"^/v1/dream/?$"),
+    re.compile(r"^/v1/graphs/[^/]+/promote/?$"),
+    # operator surfaces that publish their own patience and are NOT in
+    # `_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX` (which names `/v1/internal/` only)
+    re.compile(r"^/internal/(demo|starter-seed)/?$"),
 )
+
+
+#: Statuses that prove the DATA PLANE never answered, so the request is not
+#: demand the share should divide by: auth/rate-limit gates reject before any
+#: data work, and 405/412 are client errors about the route. ⚠️ 404 is NOT here:
+#: "point not found" IS the plane answering.
+_WAIT_BOUND_NON_DATA_STATUSES = frozenset({401, 403, 405, 407, 412, 429})
+
+
+def _embedder_load_in_flight() -> bool:
+    """True while a one-time embedder load (foreground OR pre-warm) is running.
+
+    ⛔ THE COLD-START CARVE-OUT IS NOT POLITENESS, IT IS A DEPLOY GATE. The
+    background pre-warm (``_prewarm_embeddings``, on by default) holds
+    ``EmbeddingModel._lock`` for the whole load (~57 s measured, 300 s cap), so
+    every concurrent request that needs the embedder is refused by a bound it was
+    never given a chance to meet — 1 attempt AND 1 breach each, and five in a
+    window is ``share 1.0`` ⇒ red on a machine that is merely warming. Fly's
+    ``grace_period`` is 180 s, the load can exceed it, and the red then stays for
+    the 120 s the window takes to age out — crossing the 5 min deploy allowance.
+    """
+    try:
+        from tortoise.embeddings import EmbeddingModel
+    except Exception:  # never a new failure mode
+        return False
+    try:
+        if EmbeddingModel.one_time_setup_in_progress():
+            return True
+        thread = getattr(EmbeddingModel, "_warm_up_thread", None)
+        return bool(thread is not None and thread.is_alive())
+    except Exception:  # a state probe must never raise into the refusal path
+        return False
+
+
+def _windowed_breach(traffic_class: str) -> bool:
+    """Is THIS refusal evidence the plane is failing (#12477, rounds 4-5)?
+
+    ``data`` → yes, UNLESS the process is inside a one-time embedder load (see
+    :func:`_embedder_load_in_flight` — otherwise a cold start fails its own
+    deploy). ``long`` → no: the bound firing on a whole-graph operation is the
+    product working. ``control`` → no for the SHARE (its denominator is data
+    traffic), but the caller records it on its own arm, because a refused no-I/O
+    health poll cannot be produced by a healthy box.
+    """
+    if traffic_class != "data":
+        return False
+    return not _embedder_load_in_flight()
+
+
+def _count_wait_bound_attempt_if_served(traffic_class: str, surface: str,
+                                        status: int | None) -> None:
+    """Count ONE attempt when the exchange shows the plane was actually asked.
+
+    ⛔ THE DENOMINATOR IS DEMAND THAT REACHED THE PLANE, not "a socket accepted an
+    HTTP request". Stamping on the way IN lets any unauthenticated client hold the
+    check green: 40 fast 401s to `/v1/points` beside 7 refused `/v1/search`
+    measured ``share 0.149 -> 200`` over a refusing plane, and a public API is
+    scanned continuously, so that dilution is ordinary background noise rather
+    than a contrived attack (#12477 review round 5).
+    """
+    if traffic_class != "data" or status in _WAIT_BOUND_NON_DATA_STATUSES:
+        return
+    try:
+        _monitoring.record_wait_bound_attempt(surface)
+    except Exception:  # measurement must never be a new failure mode
+        _logger.debug("wait-bound attempt count failed", exc_info=True)
 
 
 def _wait_bound_traffic_class(route_path: str) -> str:
@@ -5668,7 +5753,7 @@ class WaitBoundMiddleware:
         refused = False
 
         async def _guarded_send(message):
-            nonlocal response_started
+            nonlocal response_started, status_seen
             if refused:
                 # The caller already has the refusal. An ASGI send after
                 # response.end is a protocol violation, so the abandoned
@@ -5676,6 +5761,7 @@ class WaitBoundMiddleware:
                 return
             if message.get("type") == "http.response.start":
                 response_started = True
+                status_seen = message.get("status")
             await send(message)
 
         t0 = time.monotonic()
@@ -5693,14 +5779,13 @@ class WaitBoundMiddleware:
         # `_wait_bound_traffic_class` for what each class did to the verdict
         # when it was counted.
         traffic_class = _wait_bound_traffic_class(route_path)
-        try:
-            if traffic_class == "data":
-                _monitoring.record_wait_bound_attempt(
-                    _monitoring.WAIT_BOUND_SURFACE_MCP
-                    if _is_jsonrpc_surface(route_path)
-                    else _monitoring.WAIT_BOUND_SURFACE_REST)
-        except Exception:  # measurement must never be a new failure mode
-            _logger.debug("wait-bound attempt count failed", exc_info=True)
+        surface = (_monitoring.WAIT_BOUND_SURFACE_MCP
+                   if _is_jsonrpc_surface(route_path)
+                   else _monitoring.WAIT_BOUND_SURFACE_REST)
+        # The attempt is stamped on the way OUT (once the exchange has produced a
+        # status) and on the refusal path — never here on the way in: see
+        # `_count_wait_bound_attempt_if_served`.
+        status_seen: int | None = None
         # #3834 F1: stamp the TRANSPORT arrival so the MCP dispatch seam —
         # ``mcp_server._await_under_mcp_wait_bound``, which is what actually
         # bounds a tool call because Streamable-HTTP starts the SSE response
@@ -5743,9 +5828,12 @@ class WaitBoundMiddleware:
             # the MCP seam share ONE implementation — including the one-time
             # embedder-setup exemption (the bound times the WAITING, not the
             # SETTING UP).
-            return await _mcp_auth.await_under_wait_bound(
+            result = await _mcp_auth.await_under_wait_bound(
                 task, _mcp_auth._TRANSPORT_WAIT_BOUND_S, reference=t0,
                 owner=owner)
+            _count_wait_bound_attempt_if_served(traffic_class, surface,
+                                                status_seen)
+            return result
         except asyncio.CancelledError:
             # The caller was cancelled (client disconnect, server shutdown).
             # Propagate the cancellation INTO the handler and await it: the
@@ -5778,6 +5866,8 @@ class WaitBoundMiddleware:
             # The response already began; a refusal can no longer be
             # substituted, so the request is allowed to finish.
             await task
+            _count_wait_bound_attempt_if_served(traffic_class, surface,
+                                                status_seen)
             return
 
         refused = True
@@ -5853,10 +5943,12 @@ class WaitBoundMiddleware:
                 # alone, so its numerator and denominator describe one
                 # population.
                 _monitoring.record_wait_bound_breach(
-                    _monitoring.WAIT_BOUND_SURFACE_MCP
-                    if _is_jsonrpc_surface(route_path)
-                    else _monitoring.WAIT_BOUND_SURFACE_REST,
-                    windowed=(traffic_class == "data"))
+                    surface, windowed=_windowed_breach(traffic_class))
+                if traffic_class == "control":
+                    # Its own arm (#12477 round 5): out of the data share's
+                    # denominator, but a refused NO-I/O poll is evidence a
+                    # healthy box cannot produce.
+                    _monitoring.record_wait_bound_control_breach()
             except Exception:
                 _logger.debug("wait-bound count failed", exc_info=True)
         # ⛔ THE COUNT IS EXACTLY-ONCE; THIS EMIT IS NOT, IN THE REVERSE ORDER.
@@ -5870,6 +5962,14 @@ class WaitBoundMiddleware:
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
                                 int((time.monotonic() - t0) * 1000))
+        # A refused request is demand that reached the plane — it belongs in the
+        # denominator of the share it is also the numerator of, or the ratio
+        # divides by a population that excludes its own failures.
+        try:
+            if traffic_class == "data":
+                _monitoring.record_wait_bound_attempt(surface)
+        except Exception:  # measurement must never be a new failure mode
+            _logger.debug("wait-bound attempt count failed", exc_info=True)
         _logger.warning(
             "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly",
             _mcp_auth._TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path)

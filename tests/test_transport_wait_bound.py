@@ -2083,6 +2083,12 @@ def refusal_window(monkeypatch):
     monitoring.reset_wait_bound_breach_window()
 
 
+async def _served_ok(scope, receive, send):
+    await send({"type": "http.response.start", "status": 200,
+                "headers": [(b"content-type", b"application/json")]})
+    await send({"type": "http.response.body", "body": b'{"ok": true}'})
+
+
 async def _breach(mw, path, method="GET"):
     """Drive ONE request to a transport refusal under the fast bound."""
     rec = await _drive(mw, _scope(path, method=method))
@@ -2192,108 +2198,120 @@ async def test_the_cumulative_counter_still_sees_every_refusal(
 # that never answers), then reads the window the 9090 listener derives its
 # verdict from.
 
-@pytest.fixture
-def refusal_window(monkeypatch):
-    """Fresh window per test; restores the global state other tests assert on."""
-    from tortoise import monitoring
-    monitoring.reset_wait_bound_breach_window()
-    yield monitoring
-    monitoring.reset_wait_bound_breach_window()
 
+# ── round 5: a REFUSED control poll, and the cold-start carve-out ─────────
 
-async def _breach(mw, path, method="GET"):
-    """Drive ONE request to a transport refusal under the fast bound."""
-    rec = await _drive(mw, _scope(path, method=method))
-    assert rec.status == 504, (path, rec.status)
-    return rec
+@pytest.mark.asyncio
+async def test_a_refused_control_poll_is_the_verdict_on_its_own_arm(
+        fast_bound, refusal_window):
+    """A serving health poll is not evidence of data service — a REFUSED one is.
 
+    Round 4 excluded control traffic from the share to kill a fail-open; round 5
+    found that the refusal went with it, so a quiet refusing plane read GREEN.
+    Measured: 2 refused data requests + 8 refused `/health` polls →
+    `attempts 2, total 2, share 1.0, refusing None` → **200**, on the incident's
+    own shape (the issue's `/health` 504'd half the time). The refusal now has its
+    own arm, OUT of the data denominator.
+    """
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    for _ in range(2):
+        await _breach(hanging, "/v1/agent/signup", method="POST")
+    for _ in range(8):
+        await _breach(hanging, "/health")
 
-async def _served_ok(scope, receive, send):
-    await send({"type": "http.response.start", "status": 200,
-                "headers": [(b"content-type", b"application/json")]})
-    await send({"type": "http.response.body", "body": b'{"ok": true}'})
+    window = refusal_window.wait_bound_breach_window()
+    assert window["control_refusals"] == 8
+    assert window["min_control_refusals"] == (
+        refusal_window.WAIT_BOUND_HEALTH_MIN_CONTROL_REFUSALS)
+    assert window["control_refusing"] is True
+    assert window["attempts"] == 2, (
+        "control polls must still stay OUT of the data denominator", window)
 
 
 @pytest.mark.asyncio
-async def test_control_plane_polls_are_not_in_the_denominator(
+async def test_one_refused_control_poll_is_not_yet_the_verdict(
         fast_bound, refusal_window):
-    """12 served `/health` polls must not dilute 10 refused data requests.
+    """A cold start can produce one; two in the window is a process failing."""
+    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
+    await _breach(hanging, "/health")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["control_refusals"] == 1
+    assert window["control_refusing"] is False
 
-    Measured before the partition: `attempts 22, total 10, share 0.455,
-    refusing False` — the check answering **200 while every data request was
-    refused**, because a dashboard's health polls outnumbered real traffic. That
-    is a fail-open in the exact class this issue exists for.
+
+@pytest.mark.asyncio
+async def test_attempts_do_not_count_requests_the_plane_never_saw(
+        fast_bound, refusal_window):
+    """A 401 storm must not dilute the share into a false green.
+
+    Measured before this gate: 40 fast 401s to `/v1/points` beside 7 refused
+    `/v1/search` gave `attempts 47, total 7, share 0.149 -> 200` over a refusing
+    plane. A public API is scanned continuously, so that is ordinary noise.
     """
-    mw = ha.WaitBoundMiddleware(_served_ok)
-    for _ in range(12):
-        await _drive(mw, _scope("/health"))
-        await _drive(mw, _scope("/liveness"))
+    async def unauthorised(scope, receive, send):
+        await send({"type": "http.response.start", "status": 401,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"detail":"no"}'})
+
+    mw = ha.WaitBoundMiddleware(unauthorised)
+    for _ in range(40):
+        rec = await _drive(mw, _scope("/v1/points"))
+        assert rec.status == 401
 
     hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
-    for _ in range(10):
+    for _ in range(7):
         await _breach(hanging, "/v1/search")
 
     window = refusal_window.wait_bound_breach_window()
-    assert window["attempts"] == 10, (
-        "the instrument's own polls must not be in the denominator", window)
-    assert window["total"] == 10
+    assert window["attempts"] == 7, (
+        "a 401 never reached the data plane, so it is not demand to divide by",
+        window)
     assert window["share"] == 1.0
     assert window["refusing"] is True
 
 
 @pytest.mark.asyncio
-async def test_a_documented_long_route_is_not_a_refusal_of_the_plane(
+async def test_a_404_IS_counted_because_the_plane_answered(
         fast_bound, refusal_window):
-    """5 legitimate imports beside 5 data requests must stay green.
+    """The negative control for the test above: a plane's "not found" is demand."""
+    async def not_found(scope, receive, send):
+        await send({"type": "http.response.start", "status": 404,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"detail":"nope"}'})
 
-    Measured before the partition: `share 0.5, refusing True` — a HEALTHY
-    deployment failing its own deploy gate, because a 64 MiB restore is supposed
-    to exceed a 10 s bound and its refusal is the product working.
-    """
-    mw = ha.WaitBoundMiddleware(_served_ok)
-    for _ in range(5):
-        await _drive(mw, _scope("/v1/organizations/org-1/import", method="POST"))
-
-    hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
-    for _ in range(5):
-        await _breach(hanging, "/v1/organizations/org-1/import", method="POST")
-
+    mw = ha.WaitBoundMiddleware(not_found)
+    rec = await _drive(mw, _scope("/v1/points/p1"))
+    assert rec.status == 404
     window = refusal_window.wait_bound_breach_window()
-    # ⚠️ BOTH SIDES are excluded for the long class, so an all-import window has
-    # no traffic to divide by and decides NOTHING — which the listener treats as
-    # green (an idle plane refuses nobody). Asserting "attempts == 5" would pin
-    # the opposite of what makes the term safe.
-    assert window["attempts"] == 0, (
-        "a long route is excluded from the denominator as well as the numerator",
-        window)
-    assert window["total"] == 0, (
-        "an import refusal is the bound working, not the plane failing", window)
-    assert window["refusing"] is None
-
-    # …and mixing them in must not let imports carry the share over the bar
-    quick = ha.WaitBoundMiddleware(_slow_app(0.001))
-    for _ in range(5):
-        await _drive(quick, _scope("/v1/search"))
-    for _ in range(5):
-        await _breach(hanging, "/v1/organizations/org-1/import", method="POST")
-    window = refusal_window.wait_bound_breach_window()
-    assert window["attempts"] == 5 and window["total"] == 0
-    assert window["refusing"] is False
+    assert window["attempts"] == 1
 
 
 @pytest.mark.asyncio
-async def test_the_cumulative_counter_still_sees_every_refusal(
-        fast_bound, refusal_window):
-    """The WINDOW is partitioned; the LIFETIME counter is not.
+async def test_a_refusal_during_a_one_time_embedder_load_is_not_the_verdict(
+        fast_bound, refusal_window, monkeypatch):
+    """A machine that is merely WARMING must not fail its own deploy.
 
-    `/metrics` and `test_10602` read the cumulative total, and narrowing it would
-    silently change a published metric. Only the verdict's inputs are filtered.
+    The pre-warm holds `EmbeddingModel._lock` for the whole load (~57 s measured,
+    300 s cap), so concurrent requests are refused by a bound they never had a
+    chance to meet — five of them in a window is `share 1.0` ⇒ red. Fly's
+    `grace_period` is 180 s and the load can exceed it.
     """
-    before = refusal_window.wait_bound_breach_counts()["total"]
+    monkeypatch.setattr(ha, "_embedder_load_in_flight", lambda: True)
     hanging = ha.WaitBoundMiddleware(_slow_app(10.0))
-    await _breach(hanging, "/health")
-    await _breach(hanging, "/v1/search")
-    counts = refusal_window.wait_bound_breach_counts()
-    assert counts["total"] - before == 2
+    for _ in range(6):
+        await _breach(hanging, "/v1/search")
+
     window = refusal_window.wait_bound_breach_window()
-    assert window["total"] == 1, "only the data-route refusal is evidence"
+    # the refusals are still OBSERVED (cumulative), and kept out of the verdict
+    assert refusal_window.wait_bound_breach_counts()["total"] >= 6
+    assert window["total"] == 0, (
+        "a cold-start refusal is not evidence the plane is failing", window)
+    assert window["refusing"] is False, window
+
+    # …and once the load finishes, the very same traffic IS the verdict
+    monkeypatch.setattr(ha, "_embedder_load_in_flight", lambda: False)
+    for _ in range(6):
+        await _breach(hanging, "/v1/search")
+    window = refusal_window.wait_bound_breach_window()
+    assert window["total"] >= 6
+    assert window["refusing"] is True
