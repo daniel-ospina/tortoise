@@ -3077,7 +3077,7 @@ def _current_entity_priors(sdk, rows: list[dict],
     ``resolved_from``, and it writes **no** ``status``
     (``entity_resolver.apply_entity_merge``'s candidate props).
     ``:Object``/``:Subject`` are full-text
-    indexed on ``name`` alone (``projection/__init__.py:6819``, ``:6823``) and the
+    indexed on ``name`` alone (``projection._FULLTEXT_INDEX_LABEL_FIELDS``) and the
     FTS leg filters ``status`` only — so **a name search returns the survivor AND
     the carrier**. The capture path never called the resolver, and this leg then
     opts *back into* the terminal-inclusive view (``include_terminal=True``), so

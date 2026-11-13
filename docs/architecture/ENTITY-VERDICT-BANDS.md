@@ -40,7 +40,7 @@ names a file, not a blog.
 |---|---|---|
 | the merge writes no `status` | `entity_resolver.apply_entity_merge` — the candidate's only props are `resolved_from`, `dedup_reviewed='merge'`, `reviewed` (~`:909-913`) | the retired carrier stays a live node |
 | the carrier keeps its `name` | `entity_resolver.apply_entity_merge` — the SURVIVOR gains `aliases[]` (~`:890-901`); nothing rewrites the carrier's `name` | both rows carry the same spelling |
-| the FTS index is `name`-only | `projection/__init__.py:6819` (`:Subject`), `:6823` (`:Object`) | a name query matches both |
+| the FTS index is `name`-only | `_FULLTEXT_INDEX_LABEL_FIELDS`'s `("Subject", ["name"])` / `("Object", ["name"])` | a name query matches both |
 | the retrieval filter is `status`-only | `search_engine.py:2973-2997` (`_STATUS_FILTERED_LABELS`, `:148`) — `resolved_from` count in `search_engine.py`, `ranking.py`, `session_link.py`, `assembly.py`: **0** | the carrier is search-visible and ranked |
 | the capture path never consulted the resolver | `extractor_v2` S3 → `_fts_rows` → `sdk.tortoise_fts_query(..., include_terminal=True)` | and it opts *back into* the wider status view |
 | the tie rule | rows land in **id-keyed dicts**, order DISCARDED — `search_graph`'s id-keyed accumulator (`results[bucket[…]][rid] = row`; the comment in `_fts_rows` says the same) | carrier and survivor **tie** on the name-only index |
