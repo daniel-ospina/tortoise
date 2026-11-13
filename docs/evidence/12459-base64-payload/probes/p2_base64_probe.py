@@ -360,7 +360,8 @@ def main() -> int:
     # over the PRODUCER alone: `decoded` never appeared, so a line LABELLED
     # "decoded==producer" was a widening identity (`f32 ⊂ f64` by definition) that no
     # input can falsify, and the guard under it could never fire. That is the same
-    # class as the round-14 printed control this note reports, in the control itself.
+    # class as the tautological control an earlier review round of this note had to
+    # fix (its round 14), in the control itself.
     # The two arms say different things, and the direction is the point:
     #   (a) against the PRODUCER the value test PASSES (384/384) — it cannot
     #       discriminate, because a faithful `f32` pack and any lossless re-encode of

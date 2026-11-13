@@ -62,15 +62,19 @@ of framing (14 B prefix + 2 B of JSON quotes) = **2,064 B**.
 
 ## The two properties the format must survive
 
-- **Decode equivalence at float32 bits** — three links, each computed against something **outside** the
-  frame: `decoded f32 == producer f32`, `P0 text→f32 == producer f32`, and frame-invertibility. (An earlier
-  version's third link was `pack_f32(narrow(x)) == pack_f32(x)` — an identity, true for random floats with no
-  journal at all, so its `assert` could never fail.) A **float64-value** comparison is deliberately not the
-  test: an `f32` value is exactly a `float64`, so it passes on this vector, on a degenerate one, and on a
-  narrowed-then-re-widened one — the probe prints it passing, beside a **1-ULP perturbation** negative
-  control that proves the bits assertion can fail. Where a value *is* off the float32 grid (the `f64`
-  fixture below) the truth side is narrowed by `stored_form.narrow_to_stored_width` /
-  `consistency._as_f32` (#8615).
+- **Decode equivalence at float32 bits** — **two** links computed against something **outside** the frame,
+  both facing the producer: `decoded f32 == producer f32` and `P0 text→f32 == producer f32`. The third
+  reported line, frame-invertibility (`decoded == the frame's own input`), is *implied* by those two by
+  transitivity and carries no discriminating power of its own — it is printed for naming, not as an
+  independent test. (An earlier version's third link was `pack_f32(narrow(x)) == pack_f32(x)` — an
+  identity, true for random floats with no journal at all, so its `assert` could never fail.) A
+  **float64-value** comparison is deliberately not the test, and it fails in OPPOSITE directions depending
+  on the truth side: against the **producer** it passes 384 of 384 — an `f32` value is exactly a
+  `float64`, so value equality carries no width and cannot discriminate; against P0's **un-narrowed
+  decimal text** it rejects a correct encode, 0 of 384. Both arms are printed and asserted, beside a
+  **1-ULP perturbation** negative control that proves the bits assertion can fail. Where a value *is* off
+  the float32 grid (the `f64` fixture below) the truth side is narrowed by
+  `stored_form.narrow_to_stored_width` / `consistency._as_f32` (#8615).
 - **The `f64` population is not narrowed** — a caller-owned / preserved vector round-trips to the
   **same float64 bits**, and the fixture is off the float32 grid so the check cannot pass vacuously
   (P0's R2 rule).

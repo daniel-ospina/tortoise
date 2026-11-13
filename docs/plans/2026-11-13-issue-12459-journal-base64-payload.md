@@ -406,7 +406,8 @@ and beside them the **negative control** that proves the bits assertion is not v
 perturbation** of one element flips it to `False`. ⚠️ **The first draft of that control was itself inert** —
 it printed `float(np.float64(v)) == v` over the producer with `decoded` ABSENT, under a label naming
 `decoded==producer`, so it was a widening identity that no input can falsify and the guard under it could
-never fire: the same class as the round-14 printed control this note reports, one control down. Both arms
+never fire: the same class as the tautological control an earlier review round of this note had to
+fix (its round 14 replaced a printed control with an asserted one), one control down again. Both arms
 are now driven from a real verified vector and a `False` / `True` where this text says otherwise returns 1.
 The bits are the property because the bits are what the graph stores.
 
