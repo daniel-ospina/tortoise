@@ -1043,17 +1043,23 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
                        "point_kind": "core:other"}
                    for i, n in enumerate(names)}
     by_query = {_sanitise_query_text(n): n for n in names}
+    _ALIAS = {"id": row_by_name["#2258"]["id"], "content": "2258",
+              "point_kind": "core:other"}
 
     def _rows(query):
         # `#2266` is the UNREACHABLE-REGARDLESS case: no query (not even its own)
         # ever returns its row, so neither the ungated nor the gated union holds
         # it — the gate costs nothing there and it must NOT book as `lost`.
         if by_query.get(query) == "#2266":
-            return [row_by_name["#2258"]]
+            return [row_by_name["#2258"], _ALIAS]
         own = row_by_name.get(by_query.get(query, ""))
         rows = [own] if own is not None else []
         if row_by_name["#2258"] not in rows:
             rows.append(row_by_name["#2258"])
+        # the hash-dropped surface of `#2258` (`2258`), carrying the entity's own
+        # id, so exactly ONE gated VARIANT pair actually binds in phase 1 — the
+        # `gate_variant` assertions below are exact because of it
+        rows.append(_ALIAS)
         return rows
 
     rc, out = _drive(
@@ -1105,6 +1111,25 @@ def test_the_12294_gate_arms_reconcile_against_a_driven_run(tool_mod, monkeypatc
             assert cell["unreachable_regardless"] == 1, (p, k, cell)
             assert (cell["rescued_by_union"] + cell["lost"]
                     + cell["unreachable_regardless"] == cell["gated"] > 0), (p, k)
+
+    # 3. the FOURTH arm — `gate_variant`, the one whose denominators this file's
+    # own comments record as having been wrong twice (a (surface x k) numerator
+    # over a per-surface denominator, then a per-(pair x k) attach count)
+    assert set(arms["gate_variant"]) == {"shipped", "zep_full_name"}
+    _EXACT_GATED = {"shipped": 27, "zep_full_name": 18}
+    for p in ("shipped", "zep_full_name"):
+        vg = arms["gate_variant"][p]
+        # the denominator is ONE window's pair count. A per-k denominator reads
+        # 157/1676 (9.4 %) instead of 157/419 (37.5 %) on the corpus.
+        assert vg["pairs"] == arms["variant"]["3"]["pairs"] == 36, (p, vg)
+        assert vg["gated_pairs"] == _EXACT_GATED[p], (p, vg)
+        # EXACTLY ONE gated pair binds today (the `#2258` -> `2258` mention).
+        # Inverting the per-PAIR accumulator reports every NON-binding pair
+        # instead (35); accumulating it per (pair x k) over-reports it 4x.
+        assert vg["would_attach_before"] == 1, (p, vg)
+        assert vg["would_attach_before_any_k"] == 1, (p, vg)
+        assert 0 <= vg["would_attach_before"] <= vg["in_window_before"] \
+            <= vg["gated_pairs"] <= vg["pairs"], (p, vg)
 
 
 def test_the_harness_reports_how_much_of_its_own_input_it_discarded(tmp_path):
