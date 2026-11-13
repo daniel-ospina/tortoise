@@ -660,10 +660,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # SURVIVOR — the repeated key — so following "which one did ruff flag" finds the
     # row that won; the loser has to be read out of the dict by hand, which is what
     # `tests/test_dod_5090_probe.py`'s duplicate-key scan now does across `tortoise/`,
-    # `tools/` and `tests/`.) The
-    # #9219 rationale it carried is preserved
-    # verbatim at that entry, which is the one that matches this file's single
-    # mutation site (the `_run_indexer` restoration record).
+    # `tools/` and `tests/`.) The #9219 rationale it carried is preserved verbatim at
+    # the SURVIVING entry — the narrow continuation pin, the one that matches this
+    # file's single mutation site (the `_run_indexer` restoration record) — not at the
+    # dead broad row, which is gone.
     # #7017: the engine-probe suite is hermetic — every probe is injected, so
     # the URI's SOLE role is as the input to `graph_target_from_env()`, and the
     # endpoint-resolution tests set/del it precisely to pin which endpoint

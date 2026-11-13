@@ -8301,10 +8301,13 @@ def _constant_key_value(node: ast.expr) -> tuple[bool, object]:
     """`(True, value)` when the key is a literal Python can hash — else `(False, None)`.
 
     Recurses through a TUPLE literal, because `{(1, 2): …}` is a real declaration
-    shape (`ruff`'s `F601` catches it, and it is used 390 times under these roots) and
-    a `Constant`-only test would silently skip it — a hole in a guard that sells
-    itself as closing holes. Element values are compared by Python's own `==`/hash,
-    so `(1, 2)` and `(True, 2)` are ONE key, exactly as a dict treats them.
+    shape (`ruff`'s `F601` catches it; measured, 390 tuple-literal dict keys under
+    these roots) and a `Constant`-only test would silently skip it — a hole in a
+    guard that sells itself as closing holes. Only the 308 of those whose elements
+    are ALL literal are compared; the other 82 carry a computed element and are
+    skipped like any other non-literal key. Element values are compared by Python's
+    own `==`/hash, so `(1, 2)` and `(True, 2)` are ONE key, exactly as a dict treats
+    them.
     """
     if isinstance(node, ast.Constant):
         return True, node.value
@@ -8334,11 +8337,13 @@ def _duplicate_constant_key_sites(
     (`f"{x}"`) is not a declaration this can read, and guessing would report a
     duplicate that is not one. `**splat` in a literal parses as a `None` entry in
     `node.keys`, not a Constant, so it is skipped rather than mistaken for the key
-    `None`; `_constant_key_value` recurses through tuple literals so `{(1, 2): …}`
-    (390 uses under these roots) is compared too.
+    `None`; `_constant_key_value` recurses through tuple literals so a fully-literal
+    `{(1, 2): …}` is compared too (390 tuple-literal keys under these roots, 308 of
+    them fully literal).
 
     ⚠️ Still outside this population, stated so it is not mistaken for a total: a
-    SIGNED literal key (`{-1: 'a', -1: 'b'}`) parses as `UnaryOp(USub, Constant)`
+    SIGNED literal key (`{-1: 'a', -1: 'b'}`, `{+1: 'a', 1: 'b'}`) parses as
+    `UnaryOp(USub|UAdd, Constant)` rather than a `Constant`
     (measured: zero such dict keys under the three roots today), and so does a tuple
     containing one. `filename` is threaded into `ast.parse` so an unparseable module
     names ITSELF instead of `<unknown>` — the same "a hole is a hole, not a zero" rule
@@ -8367,7 +8372,7 @@ def test_the_duplicate_key_detector_catches_a_duplicate():
 
     This module's own contract (see the file docstring): an instrument that can
     only print `MET` is machinery. A guard whose scan silently returned `[]` for
-    every input would pass the repo-wide assertion below forever.
+    every input would pass the assertion below forever.
     """
     source = (
         "DECLARATIONS = {\n"
@@ -8392,7 +8397,8 @@ def test_the_duplicate_key_detector_catches_a_duplicate():
     # `**splat` is not the key `None`.
     assert _duplicate_constant_key_sites("D = {b'a': 1, 'a': 2}\n") == []
     assert _duplicate_constant_key_sites("D = {None: 1, **x}\n") == []
-    # A TUPLE-literal key is compared too (390 uses under the scanned roots), and
+    # A TUPLE-literal key is compared too (390 under the scanned roots, 308 fully
+    # literal), and
     # element values follow dict equality: `(1, 2)` and `(True, 2)` are ONE key.
     assert _duplicate_constant_key_sites("D = {(1, 2): 'a', (1, 2): 'b'}\n") == [
         (1, 1, "(1, 2)")]
@@ -8418,10 +8424,19 @@ def test_no_module_declares_the_same_dict_key_twice():
     """
     violations: list[str] = []
     per_root: dict[str, int] = {}
+    # ⛔ A root with no floor is a walk nothing checks: adding a fourth entry to
+    # `_DUP_KEY_ROOTS` without adding a `_MIN_MODULES` floor would leave it counted
+    # and unchecked, so it could yield zero and the guard would silently narrow —
+    # exactly what the floors exist to prevent.
+    assert set(_MIN_MODULES) == set(_DUP_KEY_ROOTS), (
+        "every scanned root needs a non-vacuity floor — "
+        f"roots={sorted(_DUP_KEY_ROOTS)}, floors={sorted(_MIN_MODULES)}")
     # ⛔ THE REPO ROOT COMES FROM THE FILE, NOT THE CWD (#12265 review):
     # `Path(root).rglob` resolves against the invocation directory, so a run from
-    # `tests/` scanned 0 modules and red this guard on a CORRECT tree. Every other
-    # repo-root read in this module uses `probe.REPO_ROOT` for the same reason.
+    # `tests/` scanned 0 modules and red this guard on a CORRECT tree. This is the
+    # same derivation the module's other repo-root reads use
+    # (`Path(probe.__file__).resolve().parent.parent`); `probe.REPO_ROOT` is that
+    # same value, but several reads here already spell it out for the same reason.
     root = Path(probe.__file__).resolve().parent.parent
     for name in _DUP_KEY_ROOTS:
         scanned_here = 0
@@ -8432,7 +8447,16 @@ def test_no_module_declares_the_same_dict_key_twice():
                     path.read_text(encoding="utf-8"), str(rel)):
                 violations.append(f"{rel}:{duplicate} re-declares key {key} (first at :{first})")
         per_root[name] = scanned_here
-    # A scan that read nothing would satisfy the assertion below vacuously — and it
+    # ⛔ THE VIOLATION IS ASSERTED FIRST. A floor failure means the guard is
+    # narrower than it claims, but a live duplicate in the same run is the finding
+    # the reader actually needs, and asserting floors first would hide it.
+    assert not violations, (
+        "a dict literal declares the same key twice, so the entry that loses the "
+        "last-wins race is DEAD while every test stays green (#12265, root #9314). "
+        "Delete the stale row (or correct the reason) — do not add `# noqa: F601`:\n  "
+        + "\n  ".join(violations)
+    )
+    # A scan that read nothing would satisfy the assertion above vacuously — and it
     # must be checked PER ROOT: rglob returns zero silently on a root that was
     # renamed or removed, and an aggregate floor lets two empty roots hide behind
     # the third. `tools/` is where this class's original instance lived, so losing
@@ -8443,9 +8467,3 @@ def test_no_module_declares_the_same_dict_key_twice():
             f"its floor of {floor} — the root was renamed, removed, or its walk broke, "
             "so the guard is now narrower than it claims. Re-derive the floor (or fix "
             f"the root) rather than lowering it. Full counts: {per_root}")
-    assert not violations, (
-        "a dict literal declares the same key twice, so the entry that loses the "
-        "last-wins race is DEAD while every test stays green (#12265, root #9314). "
-        "Delete the stale row (or correct the reason) — do not add `# noqa: F601`:\n  "
-        + "\n  ".join(violations)
-    )
