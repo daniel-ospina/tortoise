@@ -640,7 +640,7 @@ def _rerank_arm(
             "it has to be re-measured rather than read off. The VARIANT pairs carry "
             "at-pool TOP-3 "
             "counts of their own (`variant.in_window_3_before` / `in_window_3_after`); "
-            "neither is a ceiling — the variant pairs' in-pool count is arm 2's, in "
+            "the variant pairs' in-pool count is arm 2's, in "
             "`arms.variant.<k>.in_window` and `arms.variant_by_class.<cls>.<k>.in_window` "
             "at arm 2's widths. At a pool wider than the top-3 cut, neither TOP-3 count "
             "is in_window(P) — but at a pool no wider than that cut the window IS the "
