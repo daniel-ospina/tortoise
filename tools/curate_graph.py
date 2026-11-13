@@ -425,11 +425,12 @@ class MCPReader:
         * a read that FILLS the requested ``limit`` is REFUSED, whichever count accompanies
           it — there is no offset walk here, so "a full page" and "a truncated layer" are
           the same bytes. The count cannot vouch for a filled response: one at or above
-          the bound has already refused before the read, and any other disagrees. (While
-          the bound gate stands this arm is shadowed by the disagreement rule below, which
-          refuses the same cells; it is kept ABSOLUTE so that removing the gate leaves a
-          fail-CLOSED read rather than the fail-open #12378 measured for Events at
-          ``read_events``'s gate);
+          the bound has already refused before the read, and any other disagrees. (For a
+          filled response WITH a count, the bound gate and the disagreement rule already
+          refuse, so this arm's own reachable cell is the UNREPORTED one — it is also the
+          arm that keeps a gate deletion fail-CLOSED, which is the fail-open #12378
+          measured for Events at ``read_events``'s gate, so it is ABSOLUTE rather than
+          conditioned on a count);
         * a read whose row count disagrees with ``structure.operators`` is REFUSED. The
           reconciliation is the same discipline the source listing gets, and for the same
           reason: two surfaces describing one population must agree, or one of them did
@@ -525,8 +526,10 @@ class MCPReader:
         # gate): a filled response is "at least this many" whatever the count says, and
         # conditioning this arm on the count is what made removing THAT gate a FAIL-OPEN
         # — `len(raw) == reported == bound` then reached no fill check at all. With the
-        # bound gate above in place the two refuse the same cells (a count at or above the
-        # bound refuses before the read; any other count disagrees), so this arm is the
+        # bound gate above in place, a filled response that CARRIES a count is refused by
+        # the gate or by the disagreement rule, so this arm's own remaining cell is the
+        # UNREPORTED one (a fill with no count to disagree with) — which is why deleting
+        # this arm re-opens a real fail-open rather than removing dead code. It is the
         # BELT that keeps a gate deletion fail-CLOSED, not a second detector.
         if len(raw) >= OPERATOR_READ_CEILING:
             # The count is SPLIT OUT rather than rendered blind: `reported=None` is the

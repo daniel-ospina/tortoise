@@ -3385,7 +3385,8 @@ def test_an_operator_layer_one_row_below_the_bound_is_accepted(monkeypatch, tmp_
     """The counter-arm: the strict bound must not become an over-broad refusal.
 
     A layer of `OPERATOR_READ_CEILING - 1` rows with a count that agrees is provably the
-    whole layer — the request is BELOW the engine's cap, so it cannot have been cut. #12440
+    whole layer — the RESPONSE fills nothing (9 999 rows against a 10 000-row request that
+    is itself the engine's cap), so it cannot have been cut. #12440
     moves only the single cell where the count and the response are both AT the bound;
     everything below it must keep reading, or the fix would block a census it can measure.
     """
