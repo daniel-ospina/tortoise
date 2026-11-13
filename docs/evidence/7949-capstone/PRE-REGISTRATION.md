@@ -2674,5 +2674,45 @@ to answer.
   cite sweep edited them in place and was reverted. A reader who needs the live numbers takes
   the `edges.py` ones from §3.4/§3.7/§7 above, and the `record_projection.py` one from this
   entry, because no live carrier holds it.
+- **This entry was LIVE for the merged tree until §10.30** — §10.30 is its successor for this
+  branch's own `+83` and carries the live `#10360` read-back; this entry keeps the numbers it
+  measured.
+
+### 10.30 — the `#10360` read-back re-pointed for this branch's own `+83` (2026-11-13, `#12295`)
+
+> **A successor entry, not an edit to §10.29.** §10.29's numbers are a faithful record of the
+> `#12067` head it names, per §10.19/§10.22/§10.24 — re-numbering a history entry in place would be
+> a false record of what was measured. This branch inserts more into `tortoise/extractor_v2.py`
+> under that entry, and the handling is the one §10.25–§10.29 used: a new dated entry.
+
+- **Why this entry exists.** §10.29 closed by declaring itself "LIVE for the merged tree … it has no
+  successor". It has one now. `#12295` adds a net **`+83`** to `tortoise/extractor_v2.py`
+  (`+87`/`-4` against `origin/main`) across four hunks, which shift lines cumulatively by `+40`,
+  `+81`, `+82` and `+83`; the §11 row and this pin both sit above the last of them, so they take
+  the full `+83`.
+- **The one cite this entry re-derives is the one the capstone pin READS.**
+  `preregistration.json`'s `door.acceptance_arm.read_back` names the `#10360` switch,
+  `TORTOISE_STATE_VALUE_VERBATIM`, as read "PER EMITTED POINT at `extractor_v2.py:NNNN`", and
+  `tests/test_capstone_preregistration_9075.py::test_the_real_machine_record_agrees_with_the_pins`
+  opens that line and requires it to be the `_value_fidelity_judged = _state_value_verbatim_enforced()`
+  assignment. At the `#12067` head it was `:10536`; at this head that line is
+  `# #9906: an INTRA-BATCH duplicate (the same normalized content` — a comment, not a read.
+- **New value — measured at this head, by opening the line:** `tortoise/extractor_v2.py:10619` is
+  `_value_fidelity_judged = _state_value_verbatim_enforced()`. Re-derived by SYMBOL, not by adding
+  the file's `+83`: the other two occurrences of that symbol are unmoved, because they sit below
+  the first hunk — the `def` at `:5431` and the `armed =` site at `:5521`. A cite re-staled onto
+  either would satisfy a bare symbol match while naming something this sentence does not claim,
+  which is why the pin asserts the receiving variable and not the symbol alone.
+- **Scope: the pin's cite, and the two gate lines this entry names — nothing else.** A successor
+  entry that NAMES a symbol answers for it at this tree, so the two `if items:` guards are
+  re-derived here beside the read-back: `:14359` (the S2 pass) and `:14512` (the post-S4 union
+  pass). The rest of §10.29's block sits in the same `+83` band and was NOT re-derived here —
+  `_collect_classify_items` and the fail-open arms, plus §11's table row and §10.5's pair that cite
+  the same symbol. Those are carried as a follow-up rather than widened into this commit, and they
+  are deliberately not restated here: a second, unpinned copy of a number is a place to disagree.
+- **What moved: one citation, and nothing that is a protocol value.** No metric, denominator,
+  threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
+  denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per
+  §8's rule for *any* edit to this file, and the bundle README's present-tense digest with it.
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
   supersede marker.
