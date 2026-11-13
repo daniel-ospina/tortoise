@@ -684,7 +684,8 @@ class TestTheEventApiDoor:
     def test_the_outdated_half_is_gated_by_the_same_rendered_key_rule(self, sdk):
         """Review cycle 6, P1 — the SDK door gated on `status` ALONE.
 
-        `declares_status_key` gated `update_entity`, so `outdated` was dead code
+        `declares_status_key` (a helper since removed at PR #12108's review)
+        gated `update_entity`, so `outdated` was dead code
         there for exactly the key class this change fixed for `status`: a
         rendered-alias `outdated` key slipped past `_sanitize_props`' literal
         `"outdated" in props`, the guard was skipped, and the flag was STORED —

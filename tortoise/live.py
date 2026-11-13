@@ -609,26 +609,6 @@ def _status_is_discarded_by_every_writer(value: object) -> bool:
     return True
 
 
-def _event_state_key(key):
-    """The caller's key rendered the way the WRITER renders it.
-
-    ⛔ This must mirror `_map_key_ok` exactly — ``key.decode()`` for ``bytes``,
-    else ``str(key)`` — because the guard's question is *what name will the node
-    carry*. It is deliberately NOT ``str.__str__`` (which the VALUE side uses):
-    a ``str`` SUBCLASS whose CONTENT is ``"x"`` but whose ``__str__`` returns
-    ``"status"`` is stored under ``status``, so normalising by content let it
-    through and the guard saw a different key from the writer (measured, review
-    cycle 5, P0). ``bytes`` is the second half of the same rule: the driver
-    DECODES a bytes key, so ``b"status"`` writes ``status`` and a guard that
-    skipped non-``str`` keys missed it entirely (cycle 5, P1).
-
-    So: one rule per side of the pair — the KEY is rendered (``str(key)`` /
-    ``.decode()``), the VALUE keeps its base content (``str.__str__``), because
-    that is what the writer does with each.
-    """
-    return _event_state_key_names(key)[0]
-
-
 def _event_state_key_names(key) -> tuple[str, ...]:
     """EVERY name this key can be filed under — the union of the two renderers.
 
@@ -646,6 +626,21 @@ def _event_state_key_names(key) -> tuple[str, ...]:
     if ANY renderer would file the key under a guarded name, it is guarded. The
     reverse (content ``"x"``, ``__str__`` ``"status"``) was already refused; this
     closes the direction that was not.
+
+    ⛔ ONE rule per side of the pair — the KEY is rendered (``str(key)`` /
+    ``.decode()``), the VALUE keeps its base content (``str.__str__``) — because
+    that is what the writer does with each. A ``str`` SUBCLASS whose CONTENT is
+    ``"x"`` but whose ``__str__`` returns ``"status"`` is stored under
+    ``status``, so normalising a key by content let it through and the guard saw
+    a different key from the writer (measured, review cycle 5, P0). ``bytes`` is
+    the second half of the same rule: the driver DECODES a bytes key, so
+    ``b"status"`` writes ``status`` and a guard that skipped non-``str`` keys
+    missed it entirely (cycle 5, P1).
+
+    ⛔ There is deliberately NO single-name variant (``..._names(key)[0]``): a
+    door that tests ONE rendering instead of the union is exactly the hole this
+    function exists to close. The superseded one-name helper was removed at the
+    review of PR #12108 (finding 2) so the next door cannot wire it by mistake.
     """
     names: list[str] = []
     if isinstance(key, bytes):
@@ -693,18 +688,6 @@ def label_names_an_event(value) -> bool:
                for name in event_label_names(value))
 
 
-def declares_status_key(props) -> bool:
-    """True when ``props`` declares ``status`` under ANY key that renders to it.
-
-    The presence TEST must be as shape-independent as the refusal it guards:
-    ``"status" in props`` hashes the literal name, so a ``str`` SUBCLASS key that
-    overrides ``__hash__`` is missed and ``sdk.update_entity`` then skips the
-    guard entirely (measured at review cycle 4 — the VALUE axis was closed and
-    the KEY axis was not).
-    """
-    return any("status" in _event_state_key_names(key) for key in props)
-
-
 def declares_event_state_key(props) -> bool:
     """True when ``props`` declares ``status`` OR ``outdated``, under any name.
 
@@ -716,6 +699,17 @@ def declares_event_state_key(props) -> bool:
     (measured, review cycle 6 P1 — the terminal half-state #11825 records, reached
     through a declared door). `create_entity`/`add_event`/`_emit`/`emit_belief`
     refused the same key, so this was the one hole.
+
+    The presence TEST must also be as shape-independent as the refusal it
+    guards: ``"status" in props`` hashes the literal name, so a ``str`` SUBCLASS
+    key that overrides ``__hash__`` is missed and ``sdk.update_entity`` then
+    skips the guard entirely (measured at review cycle 4 — the VALUE axis was
+    closed and the KEY axis was not).
+
+    ⛔ The superseded ``status``-only helper was removed at the review of PR
+    #12108 (finding 2): it gated exactly ONE half of the predicate, which is the
+    defect above, so leaving it importable from this shared leaf module let the
+    next door re-open the hole silently.
     """
     return any(_event_state_key_names(key) and
                {"status", "outdated"}.intersection(_event_state_key_names(key))
