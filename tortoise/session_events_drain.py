@@ -90,6 +90,7 @@ from tortoise.capture_spool import (
     _normalise_machine_id,
     _normalise_model,
     _normalise_session_id,
+    outcome_unrecorded,
 )
 
 __all__ = [
@@ -802,7 +803,9 @@ def drain_session_events(
     ``dead_lettered``, ``held``, ``unselected``, ``consumed``, ``queued``
     (records still undelivered), ``unreadable`` (whole days this pass could not
     read at all) and ``stopped`` (``"batch"`` = the bound, ``"refused"`` = a
-    transient refusal ended the pass). The absence of exactly this record is why
+    transient refusal ended the pass). ``unrecorded`` counts the records filed
+    with an extraction outcome the server never recorded (#12379) — counted,
+    never priced. The absence of exactly this record is why
     tens of thousands of records accumulated invisibly (#6388).
     """
     root_path = Path(root) if root is not None else default_session_events_dir()
@@ -822,6 +825,14 @@ def drain_session_events(
         # 2xx responses that STORED the turns and extracted nothing (#4197's
         # shape, observed here rather than only on the spool leg).
         "degraded": 0,
+        # #12379: 2xx responses that stored the turns and whose EXTRACTION
+        # OUTCOME the server never recorded. Counted, never priced: a deferral
+        # is an offer to re-extract, and this state is precisely "nobody knows
+        # whether extraction ran". This leg's trace is the count alone — its day
+        # files are consumed as they are filed, so there is no per-session record
+        # left to stamp (the spool leg, which keeps its entries, stamps one and
+        # `session health` counts it).
+        "unrecorded": 0,
         "consumed": 0,
         "queued": 0,
         "stuck": 0,
@@ -1172,6 +1183,14 @@ def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
         if reason:
             summary["degraded"] += 1
             summary["detail"] = f"stored without extraction ({reason})"[:300]
+        elif outcome_unrecorded(getattr(outcome, "body", None)):
+            # #12379: no deferral to offer (the server has not said extraction
+            # did NOT run), but the state is COUNTED — otherwise this leg files
+            # it and says nothing, which is the silence this issue owns. The
+            # predicate is the spool's (`capture_spool.outcome_unrecorded`), the
+            # same one the spool leg and the durable marker use, so the legs
+            # cannot disagree about one wire body (#1178).
+            summary["unrecorded"] += 1
         return "filed", sid
     if may_keep_entry(outcome.status, outcome.detail):
         # ``retryable`` AND ``policy`` both keep the day: #5051's one contract
@@ -1232,6 +1251,12 @@ def format_progress(summary: dict[str, Any]) -> str:
     if summary.get("degraded"):
         line += (f", stored-not-extracted {summary['degraded']} "
                  f"(filed; #4197 shape)")
+    if summary.get("unrecorded"):
+        # Printed ONLY when non-zero: an ordinary drain's line must not grow a
+        # permanent `0` nobody can act on. #12379's state is the one shape where
+        # `filed` is true and nothing else on this line would mention it.
+        line += (f", outcome-unrecorded {summary['unrecorded']} "
+                 f"(filed; the server has not recorded whether extraction ran)")
     if summary.get("stopped"):
         line += f" (stopped {summary['stopped']})"
     if summary.get("posts"):
