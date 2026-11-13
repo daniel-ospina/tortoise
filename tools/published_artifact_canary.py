@@ -803,7 +803,13 @@ def install_and_run(
         # accept a cache/settings/telemetry sqlite file that some unrelated code path
         # created, turning the "reported success but created no database" arm into one that
         # can never fire (#12363 round 8).
-        created = sorted(p for p in home.rglob("*.db") if "tortoise" in str(p).lower())
+        # ⛔ Matched on the path RELATIVE to HOME. `"tortoise" in str(p)` is satisfied by
+        # any ANCESTOR named tortoise — a dev run inside the checkout, or a pool runner
+        # whose TMPDIR sits under one — so a foreign telemetry `.db` would be accepted and
+        # the "created no database" arm could never fire (#12363 round 9).
+        created = sorted(
+            p for p in home.rglob("*.db") if "tortoise" in str(p.relative_to(home)).lower()
+        )
         if created:
             db_path = created[0]
     if swept.returncode != 0:

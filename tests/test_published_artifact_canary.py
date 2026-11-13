@@ -1149,6 +1149,13 @@ def test_the_canary_files_a_durable_alert_and_reads_its_own_exit_code():
     assert "report" in jobs, "the alert must live in a DOWNSTREAM job (a killed job runs no steps)"
     report = jobs["report"]
     assert report.get("needs") == "canary"
+    # EQUALITY, not a substring: `always() && needs.canary.result == 'failure'` passes an
+    # `in` check while re-silencing the timeout/cancelled state this structure exists for
+    # (#12363 round 9).
+    report_if = str(report.get("if")).replace("${{", "").replace("}}", "").strip()
+    assert report_if == "always()", (
+        f"the report job must run on ANY canary terminal state, got {report_if!r}"
+    )
     assert "always()" in str(report.get("if")), (
         "the report job must run however the canary ended, else a timed-out canary is silent"
     )
@@ -1320,3 +1327,30 @@ def test_a_database_created_ANYWHERE_under_the_fresh_HOME_is_accepted(tmp_path):
     )
     assert arm.status == canary.OK, arm.detail
     assert "graph.db" in arm.detail
+
+
+def test_a_FOREIGN_database_under_HOME_does_not_count_as_initialised(tmp_path):
+    """`tortoise init` exiting 0 while creating only an unrelated sqlite store must be a
+    FAIL — otherwise the "reported success but created no database" arm can never fire
+    (#12363 rounds 8 and 9). The filter matches the path RELATIVE to HOME, so an ancestor
+    directory called `tortoise` (a dev checkout, a pool runner's TMPDIR) cannot launder a
+    foreign file either."""
+
+    class _Telemetry(_Runner):
+        def __call__(self, cmd, **kwargs):
+            result = super().__call__(cmd, **kwargs)
+            if Path(cmd[0]).name == "tortoise":
+                cache = Path(kwargs["env"]["HOME"]) / ".cache" / "telemetry"
+                cache.mkdir(parents=True, exist_ok=True)
+                (cache / "events.db").write_text("")
+            return result
+
+    arm, _ = canary.install_and_run(
+        package="tortoise-graph",
+        version="0.2.0",
+        workdir=tmp_path,
+        timeout=10,
+        runner=_Telemetry({}, creates_db_for=None),
+    )
+    assert arm.status == canary.FAIL, arm.detail
+    assert "created no database" in arm.detail

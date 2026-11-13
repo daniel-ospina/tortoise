@@ -70,7 +70,7 @@ open_issue() {
   # the `tortoise init` output plus its `[exit N]` last, so a head would show the setup
   # and hide the diagnosis (#12363 round 6).
   local log="${RUNNER_TEMP:-/tmp}/canary/published-artifact-canary.log"
-  local tail_text="(no transcript was written)"
+  local tail_text="(no transcript reached this job — the canary was killed before its upload, or the artifact was not available)"
   if [ -s "$log" ]; then
     tail_text="$(tail -n 40 "$log")"
   fi
@@ -96,7 +96,7 @@ open_issue() {
   # issue is now claiming a condition that is no longer true. Same contract the substrate
   # states for `resolve` (#8841) — the ledger must not outlive the state that justified it
   # (#12363 round 8). Best-effort: the filing above is the finding, this is bookkeeping.
-  if [ "$title" = "$TITLE_RELEASE" ]; then
+  if [ "$title" = "$TITLE_RELEASE" ] && [ "$rc" -eq 0 ]; then
     af_resolve --title "$TITLE_OUTAGE" \
       --why "The canary IS evaluating the artifact again (this run reached a verdict): the outage this issue recorded has ended." ||
       echo "::warning::could not resolve the outage ledger"

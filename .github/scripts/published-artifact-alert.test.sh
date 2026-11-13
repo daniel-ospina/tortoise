@@ -42,6 +42,9 @@ export RECORDER="$tmp/record"
 # ── source the script under test, then swap its substrate wrappers for recorders ─────
 # shellcheck source=/dev/null
 source .github/scripts/published-artifact-alert.sh
+# The script sets `-euo pipefail` for its own execution; a sourced `set -e` would abort
+# THIS harness on the very failure paths it exists to assert (e.g. "filing failed").
+set +e
 
 af_file() {
   printf 'VERB=file\n' >"$RECORDER"
@@ -114,6 +117,38 @@ grep -q '^TITLE=release-artifact-canary: could not evaluate the published artifa
 if grep -q 'clears when a release lands' "$RECORDER.body"; then
   note "exit 2 body tells a human to cut a release on a detector outage"
 fi
+
+# ── 2b2. an outage run must NOT resolve a ledger (it would close the very issue it
+#         just filed, or a truthful "could not evaluate" record) ────────────────────
+run_open 2 >/dev/null
+if grep -q '^VERB=resolve$' "$RECORDER"; then
+  note "an exit-2 outage run resolved a ledger — one new issue per day of outage"
+fi
+
+# ── 2d. a release finding whose FILING failed must not resolve the outage ledger ────
+rm -f "$RECORDER" "$RECORDER.body"
+af_file() { return 1; }   # the finding never reached GitHub
+EXIT_CODE=1 GH_TOKEN="fake-token" GITHUB_REPOSITORY="o/r" RUNNER_TEMP="$tmp" \
+  open_issue >/dev/null 2>&1
+grep -q '^VERB=resolve$' "$RECORDER" 2>/dev/null &&
+  note "a run whose finding was never recorded still closed the outage ledger"
+
+# restore the recording wrapper for the remaining cases
+af_file() {
+  printf 'VERB=file\n' >"$RECORDER"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title) printf 'TITLE=%s\n' "$2" >>"$RECORDER"; shift 2 ;;
+      --body-file)
+        printf 'BODY_FILE=%s\n' "$2" >>"$RECORDER"
+        cp "$2" "$RECORDER.body"
+        shift 2
+        ;;
+      --label) printf 'LABEL=%s\n' "$2" >>"$RECORDER"; shift 2 ;;
+      *) printf 'UNKNOWN=%s\n' "$1" >>"$RECORDER"; shift ;;
+    esac
+  done
+}
 
 # ── 2c. a genuine release finding disproves an earlier outage ──────────────────────
 rm -f "$RECORDER" "$RECORDER.body"

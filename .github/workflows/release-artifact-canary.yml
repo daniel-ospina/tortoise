@@ -83,16 +83,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      # #9018: the alert legs (`.github/scripts/published-artifact-alert.sh` →
-      # `auto-file-issue.sh`) reach the repo through `gh`, so this job needs it. Without
-      # this step a pool runner that ships no `gh` fails the ALERT step with 127 and the
-      # durable record this workflow exists to leave is never filed. Declared here AND in
-      # `tests/test_runner_tool_contract.py`'s `GH_JOBS`: the scanner reads the workflow
-      # TEXT, so once the `gh` call lives behind a script it no longer sees the
-      # requirement — the declaration is what keeps that blind spot from reading as
-      # coverage (#12363 review round 6).
-      - name: Runner tool contract — provide gh (#9018)
-        run: bash .github/scripts/runner-tools.sh ensure gh
       # No `uv`, no project install: the tool is stdlib-only on purpose, so this job
       # measures the PUBLISHED dependency graph and never the repo's own environment.
       - name: Smoke the published artifact (documented first command, clean HOME)
@@ -122,6 +112,9 @@ jobs:
             --transcript-dir "$RUNNER_TEMP/canary" || rc=$?
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit "$rc"
+      # ⛔ `always()` covers the job's own FAILING steps, not its own `timeout-minutes`:
+      # a job killed at that bound runs no remaining step at all — which is exactly why the
+      # alert lives in a downstream job (#12363 round 8).
       - name: Keep the install/run transcript (every terminal state)
         # `always()` — not `failure()`: a job CANCELLED at its timeout boundary does not
         # run `failure()` steps, and that is exactly when the incremental log is the only
@@ -160,6 +153,17 @@ jobs:
       # filed (#9018, #12363 round 8).
       - name: Runner tool contract — provide gh (#9018)
         run: bash .github/scripts/runner-tools.sh ensure gh
+      # ⛔ THE TRANSCRIPT LIVES ON THE OTHER VM. `report` runs on its own runner, so without
+      # this the alert body would always say "(no transcript was written)" and the TAIL —
+      # the whole reason round 6 made the log incremental — would never reach the issue.
+      # Best-effort: a job killed before the upload has no artifact, and that is a fact the
+      # body states rather than a reason to fail the report.
+      - name: Fetch the canary transcript
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: published-artifact-canary-log
+          path: ${{ runner.temp }}/canary
       # A red here is NOT a code defect in the merged tree: it is the published artifact
       # being broken or missing, and only a release clears it. Say which, in the job
       # summary, so the next reader does not go looking for a PR to fix.
@@ -167,7 +171,7 @@ jobs:
       # broken". A cancelled or timed-out canary exports NO exit code, and telling a human
       # to cut a release on that is the sentence that ends in an unneeded upload.
       - name: What a red here means
-        if: ${{ needs.canary.result != 'success' }}
+        if: ${{ needs.canary.result != 'success' && needs.canary.outputs.exit_code != '0' }}
         env:
           EXIT_CODE: ${{ needs.canary.outputs.exit_code }}
         run: |
@@ -195,7 +199,10 @@ jobs:
       # the run, so a red that opens no issue is a red nobody sees — and a 97-day broken
       # artifact can go on being broken while every summary says so (#12363 round 5).
       - name: File or refresh the alert issue
-        if: ${{ needs.canary.result != 'success' }}
+        # `exit_code == '0'` means the canary DID reach a verdict: a later step failing
+        # (the transcript upload, say) is the runner's fault and must not file an outage
+        # issue that then closes a truthful ledger (#12363 round 9).
+        if: ${{ needs.canary.result != 'success' && needs.canary.outputs.exit_code != '0' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EXIT_CODE: ${{ needs.canary.outputs.exit_code }}
