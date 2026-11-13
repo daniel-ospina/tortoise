@@ -3630,7 +3630,63 @@ def test_two_operator_rows_sharing_an_id_do_not_get_a_content_duplicate_reason()
     assert "content hash" not in mismatch.reason, mismatch.reason
     assert "endpoint" in mismatch.reason, mismatch.reason
 
-    same = C.classify_point(other, {}, duplicate_of=C.CARRY, keeper_id="o9")
+    # ⛔ The REACHABLE limb: an operator keeper is always UNDECIDABLE (the operator branch
+    # decides it that way), so `duplicate_of` on an operator row can only be UNDECIDABLE —
+    # `CARRY` is unreachable here and pinning only that left the guard that actually fires
+    # unpinned (round-6 review). Drive it through `build_plan` too, which is the shape the
+    # census produces: two enumeration rows sharing one id.
+    same = C.classify_point(other, {}, duplicate_of=C.UNDECIDABLE, keeper_id="o9")
     assert same.disposition == C.UNDECIDABLE, same
     assert "duplicate" not in same.reason.lower(), same.reason
     assert "content hash" not in same.reason, same.reason
+
+    plan = C.build_plan([
+        C.Row(node_id="o1", node_type="operator", kind="IMPL", content="",
+              content_hash=None, props={"id": "o1"}),
+        C.Row(node_id="o1", node_type="operator", kind="IMPL", content="",
+              content_hash=None, props={"id": "o1"}),
+    ], source_graph="g_old", target_graph="g_new")
+    assert len(plan.decisions) == 2, plan.decisions
+    for d in plan.decisions:
+        assert d.disposition == C.UNDECIDABLE, d
+        assert "duplicate" not in d.reason.lower(), d.reason
+        assert "content hash" not in d.reason, d.reason
+
+
+def test_an_operator_payload_that_is_not_a_row_listing_is_refused(monkeypatch, capsys,
+                                                                 tmp_path):
+    """The shape guard is the only thing between a wrong payload and a reported zero.
+
+    Round-6 review mutated `if not _is_row_listing(res):` to `if False:` and all 192
+    tests stayed green: with `structure.operators == 0` and a payload of
+    `{"unexpected": "shape"}`, removing the guard reports `operators_read: 0`,
+    `operators_total_reported: 0` and exit 0 — a census asserting an empty reasoning
+    layer over a payload nobody read, which is the silent-zero class this whole change
+    exists to close.
+    """
+    mod = _tool_module()
+
+    def call(name, args):
+        args = args or {}
+        if name == "tortoise_search":
+            return {"unexpected": "shape"}
+        if args.get("section") == "structure":
+            return {"total": 1, "operators": 0}
+        if args.get("section") == "status":
+            return {"counts": {"Point": 1, "Source": 0}}
+        if args.get("section") == "sources":
+            return {"result": [], "total": 0}
+        if args.get("section") == "graphs":
+            return {"result": [{"namespace": "org_x_g_old"}]}
+        if name == "tortoise_query":
+            return {"result": [{"id": "p1", "kind": "decision",
+                                "content": "a durable claim"}], "total": 1}
+        return {"result": []}
+
+    monkeypatch.setattr(mod, "_live_call_tool", call)
+    # A `RuntimeError`, deliberately: this reader's shape guard is the same class as
+    # `read_sources`', and the doc's rc-1 row is where "the payload was not a listing"
+    # belongs (it is the read being unusable, not a designed census refusal).
+    with pytest.raises(RuntimeError, match="unrecognised shape"):
+        mod.main(["inventory", "--graph", "org_x_g_old", "--no-verify-read",
+                  "--out", str(tmp_path / "i.json")])

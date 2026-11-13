@@ -405,7 +405,7 @@ class MCPReader:
         a floating node.
 
         The read is ROUTED like every other one: ``graph`` is the credential's
-        per-call routing argument (``mcp_auth``'s ``_take_graph_argument``), and
+        per-call routing argument (``mcp_server._take_graph_argument``), and
         ``tortoise_search`` takes it, so omitting it would read the operator layer
         from the DEFAULT graph while every other section came from ``--graph`` — a
         census mixing two graphs, which is what the graph-refusal fallback below
@@ -523,7 +523,7 @@ class MCPReader:
         """The operator enumeration, ROUTED to `self.graph` like every other read.
 
         ``graph`` is the credential's per-call routing argument (#9340,
-        ``mcp_auth._take_graph_argument``) and ``tortoise_search`` is not in
+        ``mcp_server._take_graph_argument``) and ``tortoise_search`` is not in
         ``GRAPH_ARGUMENT_EXCLUDED``, so it accepts and honours it. Omitting it was a
         real defect: on a workspace with two namespaces, every other section came from
         ``--graph`` while the operator layer came from the DEFAULT graph, and the
