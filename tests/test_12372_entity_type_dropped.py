@@ -781,7 +781,7 @@ def test_the_operator_remedy_discloses_the_view_it_bounds() -> None:
     assert "CURRENT VIEW" in message, (
         f"the remedy implies the operator LAYER while naming a view: {message!r}"
     )
-    assert "op_type" in message and "status" in message, (
+    assert "op_type" in message and "terminally-stated" in message, (
         "a reconciled gap's NAMED causes (terminal status, and operators "
         f"carrying only `op_type`) are missing: {message!r}"
     )
@@ -840,6 +840,10 @@ def test_the_object_and_subject_remedies_disclose_the_status_filter(
     )
     assert count_key in message, (
         f"the {entity_type!r} remedy must keep its size source: {message!r}"
+    )
+    assert "500 ms" in message and "breaker" in message, (
+        "this leg can also answer [] on its own budget/breaker, and no field "
+        f"reports it — the remedy must name that too: {message!r}"
     )
 
 

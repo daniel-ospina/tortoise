@@ -3812,7 +3812,10 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "10, no total) and reads the CURRENT VIEW — a terminal-status Object "
         "is excluded (`search_engine._STATUS_FILTERED_LABELS`) — so a gap "
         "against counts.Object in tortoise_graph_overview(section='status') "
-        "has two causes: the status filter, and the kinds you did not name."),
+        "has NAMED causes (that status filter, and the kinds you did not "
+        "name) and a SILENT one: the leg has a 500 ms driver budget and a "
+        "circuit breaker, and on either it answers [] with no field "
+        "reporting it."),
     "subject": (
         "No bulk listing — and none is planned (#12378 keeps these as counts): "
         "tortoise_search(entity_type='subject', kind=<subjectKind>, "
@@ -3820,7 +3823,10 @@ _ENTITY_TYPE_REMEDY: dict[str, str] = {
         "10, no total) and reads the CURRENT VIEW — a terminal-status Subject "
         "is excluded (`search_engine._STATUS_FILTERED_LABELS`) — so a gap "
         "against counts.Subject in tortoise_graph_overview(section='status') "
-        "has two causes: the status filter, and the kinds you did not name."),
+        "has NAMED causes (that status filter, and the kinds you did not "
+        "name) and a SILENT one: the leg has a 500 ms driver budget and a "
+        "circuit breaker, and on either it answers [] with no field "
+        "reporting it."),
 }
 
 #: #12372 — the remedy for a vocabulary member that arrives without an entry: a
