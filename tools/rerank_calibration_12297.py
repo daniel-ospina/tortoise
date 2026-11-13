@@ -238,7 +238,7 @@ def run(args: argparse.Namespace) -> int:
 
     from tortoise.rerank import (
         DEFAULT_FUSED_RERANK_POOL,
-        RERANK_MODEL_DEFAULT,
+        fused_rerank_model,
         get_scorer,
         rerank_pool,
     )
@@ -287,7 +287,15 @@ def run(args: argparse.Namespace) -> int:
         # full-scan cold cost (§14.3 V3: the label is unindexed).
         sdk.tortoise_fts_query("warm", entity_type="point", limit=1)
 
-        scorer, reason = get_scorer(args.model)
+        # ⛔ ONE resolver, used by BOTH the load and the report. ``args.model`` is
+        # None on an ordinary run, and the SCORING call resolves its own default
+        # through ``rerank_pool`` → ``load_scorer(model or fused_rerank_model())``,
+        # which honours ``TORTOISE_FUSED_RERANK_MODEL``. Writing
+        # ``args.model or RERANK_MODEL_DEFAULT`` into the artifact therefore
+        # records a name the scorer may not have loaded when that knob is set —
+        # an artifact that misnames its model is worse than one that says nothing.
+        model = args.model or fused_rerank_model()
+        scorer, reason = get_scorer(model)
         if scorer is None:
             print(f"REFUSED: the cross-encoder would not load ({reason}) — a "
                   f"rerank figure needs the model the product loads",
@@ -324,7 +332,7 @@ def run(args: argparse.Namespace) -> int:
                 t1 = time.perf_counter()
                 reordered, stats = rerank_pool(
                     query, pool_rows, text_key="content",
-                    pool=args.limit, enabled=True, model=args.model)
+                    pool=args.limit, enabled=True, model=model)
                 score_s += time.perf_counter() - t1
                 pairs_scored += stats.get("scored") or 0
                 after_ids = [r.get("id") for r in reordered]
@@ -397,8 +405,9 @@ def run(args: argparse.Namespace) -> int:
                 # ``get_scorer``), and an artifact that says ``null`` cannot
                 # tell a reader which cross-encoder produced its ms/pair —
                 # the sibling noun-path artifact records the default by name.
-                "model": args.model or RERANK_MODEL_DEFAULT,
+                "model": model,
                 "model_was_explicit": args.model is not None,
+                "model_resolver": "fused_rerank_model()",
                 "torch_threads": args.threads,
                 # ⛔ The read path's OWN gate decides what the baseline IS. It is
                 # False on every legitimate run (a True here means the caller

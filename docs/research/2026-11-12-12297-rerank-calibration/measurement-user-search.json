@@ -58,7 +58,7 @@
   "pool_size": null,
   "retrieval_limit": 40,
   "torch_threads": 1,
-  "model_provenance": "recorded after the run: this artifact predates the harness recording the RESOLVED id (it wrote `args.model`, which is None unless --model is passed), so the field read `null`. The id here is the harness default the run resolved through `get_scorer` \u2014 `tortoise.rerank.RERANK_MODEL_DEFAULT`, which is also the id the sibling noun-path artifact records by name for the same model. NO MEASURED VALUE changed; `tools/rerank_calibration_12297.py` now writes the resolved id (plus `model_was_explicit`) so a future run carries it natively."
+  "model_provenance": "recorded after the run: this artifact predates the harness recording the RESOLVED id (it wrote `args.model`, which is None unless --model is passed), so the field read `null`. The id here is what `fused_rerank_model()` resolves on this box with `TORTOISE_FUSED_RERANK_MODEL` unset \u2014 the same id the sibling noun-path artifact records by name for the same model. That env knob was not set for this run, so the scorer loaded this id. NO MEASURED VALUE changed; `tools/rerank_calibration_12297.py` now resolves the id ONCE and uses it for both the load and the report, so a future run records what it actually loaded even when the knob is set."
  },
  "corpus": {
   "dir": "/home/cmux/.tortoise/session-events",

@@ -41693,7 +41693,6 @@ class TortoiseSDK:
         #     (``id`` for Point, ``eventId`` for Event) and ``graph_label``
         #     likewise — the one batch Cypher per call stays label-correct.
         _recency_applied = False
-        _recency_pre_ids = list(result_ids)
         if recency_field and recency_boost > 0 and result_ids:
             try:
                 rows = graph.query(
@@ -41713,17 +41712,8 @@ class TortoiseSDK:
                                     key=lambda x: (x[1], weights.get(x[0], 0.0)),
                                     reverse=True))
                 result_ids = list(fused.keys())
-                # What the #12297 rerank below keys its skip on: the ORDER was
-                # actually REWRITTEN, not merely that the query ran. ⛔ The two are
-                # not the same: a recency property no row carries (or an all-tied
-                # page) returns a byte-identical list, and treating that as "the
-                # caller's order is in force" skipped the rerank and reported
-                # ``recency_order_requested`` over a pool in plain fused order —
-                # measured with ``recency_field="sourcePath"`` (no Point carries
-                # it): gate off == no-recency order, gate on reported the skip and
-                # never called the scorer. Comparing the ids is the mechanical
-                # test of "did anything move".
-                # ⛔ NOT "did the id order move": a recency multiplier that
+                # ⛔ NOT "did the id order move", and not "did the query
+                # return" either: a recency multiplier that
                 # agrees with the fused order leaves the ids identical while the
                 # caller's recency order IS in force (measured — the test's own
                 # fixture seeds newest-first, so 4b is a no-op permutation there
