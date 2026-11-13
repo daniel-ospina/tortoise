@@ -112,9 +112,12 @@ jobs:
             --transcript-dir "$RUNNER_TEMP/canary" || rc=$?
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit "$rc"
-      # ⛔ `always()` covers the job's own FAILING steps, not its own `timeout-minutes`:
-      # a job killed at that bound runs no remaining step at all — which is exactly why the
-      # alert lives in a downstream job (#12363 round 8).
+      # `always()` — not `failure()` — so this step is still considered when the JOB is
+      # cancelled (its `if` is re-evaluated during the cancellation grace window) and when
+      # an earlier step fails. It gives the upload a CHANCE, not a guarantee: a job killed
+      # before the grace window, or a run cancelled while this job is queued, can end with
+      # no upload at all — that residual is why the report job treats a missing artifact as
+      # a state to report rather than an error (#12363 round 9).
       - name: Keep the install/run transcript (every terminal state)
         # `always()` — not `failure()`: a job CANCELLED at its timeout boundary does not
         # run `failure()` steps, and that is exactly when the incremental log is the only
@@ -127,13 +130,31 @@ jobs:
           if-no-files-found: warn
 
   # ⛔ THE REPORT RUNS IN ITS OWN JOB, and this is not stylistic. `if: failure()` is
-  # JOB-scoped, and a step's outcome cannot rescue it: a job killed at its own
-  # `timeout-minutes` runs NONE of its remaining steps, `always()` included — so every
-  # in-job gate (and the round-7 `!cancelled() && contains(…, 'cancelled')`, which was also
-  # self-contradictory: `cancelled()` true ⇒ the guard false) left the alert silent in
-  # exactly the terminal state the `if: always()` transcript upload exists for. A
-  # downstream job with `needs:` and `always()` runs whenever the canary job ENDS, however
-  # it ends, and sees its conclusion as `needs.canary.result` (#12363 round 8).
+  # JOB-scoped, so a step's own condition cannot rescue it; and an in-job gate is a gate
+  # INSIDE the job whose failure is the reading, which is the wrong place for the thing
+  # that reports it. The round-7 gate was worse than useless on top of that:
+  # `!cancelled() && contains(…, 'cancelled')` is self-contradictory, because a `cancelled`
+  # step outcome implies `cancelled()` is true, so it could never fire. A downstream job
+  # with `needs:` and `always()` is scheduled whenever the canary job ENDS — failed,
+  # timed out, or cancelled — and reads the conclusion from `needs.canary.result`
+  # (#12363 rounds 8 and 9).
+  #
+  # ⛔ STATED RESIDUAL, not an absolute claim: a downstream job is not immune to a RUN-level
+  # cancellation. If the whole run is cancelled while `report` is still queued, `report` is
+  # cancelled and never runs, so nothing files. That case is accepted — a human who cancels
+  # a run has said they are looking at it — and it is written down here so the next reader
+  # does not read this design as a guarantee about cancellation in general.
+  #
+  # ⚠️ The claim this comment used to make — that a job killed at its own `timeout-minutes`
+  # runs NONE of its remaining steps, `always()` included — is NOT what the documentation
+  # says, so do not reinstate it as the justification. `jobs.<job_id>.timeout-minutes` is
+  # "GitHub automatically cancels it", and the cancellation reference has the server
+  # RE-EVALUATE the `if` conditions of the unfinished steps, running the ones that evaluate
+  # true (`actions/runner`'s `StepsRunner` re-checks each remaining step on job
+  # cancellation). So an in-job `always()` step does get a chance inside the grace window —
+  # which is how the transcript upload above can work at all. Nothing here is measured on a
+  # live timed-out run; the architecture is chosen because it does not depend on that
+  # window, not because the window is closed.
   report:
     needs: canary
     if: ${{ always() }}
