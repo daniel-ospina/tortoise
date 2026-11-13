@@ -5,8 +5,9 @@ WHERE WE ALREADY WERE, MEASURED — read this before adding a key
 The *stored* folded key is not missing. `#12047` landed it: every write door
 (`add_object`, `add_subject`, the `_emit` funnel, a real rename) fills
 ``canonical_name`` with :func:`tortoise.entity_resolver.normalize_entity_name`
-(``sdk.py``: the `_emit` fill at ``:45886``; ``api.py:2628``; ``api.py:2671``;
-``sdk.py``: the rename fill at ``:47229``), and the projection writes it ON CREATE
+(cited by SYMBOL, the rule stated below: ``sdk.SDK._create_entity``'s funnel fill,
+``api``'s ``add_subject`` and ``add_object`` name arms, and
+``sdk.SDK._update_entity``'s real-rename stamp), and the projection writes it ON CREATE
 with a `coalesce` fill on match (``projection/entities.py``: the object arm at
 ``:5094``/``:5101``, the subject arm at ``:4958``/``:4975``). ``name`` was never
 rewritten, which is exactly the shape `#12295` asks for — the key rides beside it.
@@ -15,7 +16,7 @@ What was missing was the **comparison** and the **blocker**. Both are WIRED NOW 
 the bullets below describe the BEFORE state this change replaced, and each names
 the shipped rung that replaced it:
 
-* ``extractor_v2._find_existing_entity`` (``extractor_v2.py:5769``) compared
+* ``extractor_v2._find_existing_entity`` (cited by SYMBOL, same rule) compared
   ``_norm`` — whitespace collapse + lowercase — so a capture that said
   ``the plan-doc`` could not bind the node stored as ``the plan doc``. `#11901`
   measured the consequence: **0 of 419 real surface variants attach at every
@@ -120,6 +121,7 @@ import re
 from tortoise.entity_resolver import (
     ENTITY_LABELS,
     MIN_BLOCK_CHARS,
+    block_key,
     normalize_entity_name,
 )
 
@@ -301,7 +303,8 @@ def is_path_shaped(name: object) -> bool:
 def block_keys(name: object, *, key: str | None = None) -> tuple[str, ...]:
     """Every key this name blocks on — the candidate generators.
 
-    ``P`` a folded prefix (this is the `#12047` key — kept because the scan used
+    ``P`` a folded prefix (:func:`tortoise.entity_resolver.block_key`, the owner of
+    the `#12047` key — kept because the scan used
     to block on it, so keeping it preserves **main's pairing set**; where the fold is
     at least ``MIN_BLOCK_CHARS`` long, ``E`` pairs are a subset of ``P`` pairs, so
     ``P`` adds no exactness of its own (a SHORTER fold gets no ``P`` key at all and
@@ -316,7 +319,14 @@ def block_keys(name: object, *, key: str | None = None) -> tuple[str, ...]:
     if not key:
         return tuple(keys)
     if len(key) >= MIN_BLOCK_CHARS:
-        keys.append(f"{PREFIX}:{key[:MIN_BLOCK_CHARS]}")
+        # ⛔ `block_key`, NEVER `key[:MIN_BLOCK_CHARS]` — the pre-#12295 single key
+        # is OWNED by `entity_resolver.block_key`, and the superset claim below is
+        # only true while blocking and the definition a caller reads are the SAME
+        # function. Re-spelling the slice here made the suite's `block_key` pin
+        # cover code no production path called: a future change to the owner (a
+        # normalisation, a wider key) would have left this key silently diverging
+        # from the definition this paragraph points at.
+        keys.append(f"{PREFIX}:{block_key(key)}")
     for token in _WORD.findall(key):
         if len(token) >= MIN_BLOCK_CHARS:
             keys.append(f"{TOKEN}:{token[:TOKEN_PREFIX_CHARS]}")

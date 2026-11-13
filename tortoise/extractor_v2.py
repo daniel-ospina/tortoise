@@ -6144,7 +6144,9 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     name match that did not happen.
 
     ⛔ #12295 — THE FOLDED RUNG, and why it is a SECOND arm rather than a
-    replacement. ``_norm`` (``:4232``) is whitespace collapse + lowercase only;
+    replacement. ``_norm`` (cited by SYMBOL, not line — it was ``:4232`` before
+    #12348's insertion and a line cite had already rotted once) is whitespace
+    collapse + lowercase only;
     it is byte-identical to Zep's ``_normalize_string_exact``
     (``dedup_helpers.py``), i.e. the exact rung of the field's ladder. `#11901`
     measured what that costs: **0 of 419 real surface variants attach at every
