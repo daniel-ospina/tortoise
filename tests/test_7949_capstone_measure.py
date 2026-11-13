@@ -5083,8 +5083,9 @@ _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "search_engine": _REPO / "tortoise/search_engine.py",
     # `03-test-design.md` cites the manifest's OWN `carve_out:` entry — by SYMBOL
-    # since #12266 (`_assert_carve_out_entry_is_pinned_by_symbol`, called from the
-    # tail of `test_the_epic_bundle_cites_the_branch_rederived_resolve`), by a line
+    # since #12266 (`_assert_carve_out_entry_is_pinned_by_symbol`, called from
+    # `test_the_epic_bundle_cites_the_branch_rederived_resolve` BEFORE its epic-cite
+    # assertion — the order is load-bearing, see the call site), by a line
     # number before that: no SINGLE tool and no single hand-written row owns its
     # position — the 44 lines it travelled are 4 `  - name.py` registrations spliced
     # by `register_tests`, the 39 hand-authored comment lines around them in the same
@@ -5253,7 +5254,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # pinned a NUMBER, and the paragraphs below record how such a number had to be
         # re-derived and why that could not be kept. There is no number any more and
         # there is no row; `_assert_carve_out_entry_is_pinned_by_symbol` (called from
-        # the tail of this test) holds the entry by symbol + section. Read this as the
+        # this test BEFORE its epic-cite assertion — see the call site for why the
+        # order is load-bearing) holds the entry by symbol + section. Read this as the
         # record of why a number could not be kept, never as an instruction — and do
         # not read the rows below as its continuation: the next rows are the
         # `RECONCILE-A1-A2-A5.md` `plan_hierarchy_edges` ones.
@@ -5309,8 +5311,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # file), a **+44** move re-derived at `abf186f1109`. Four re-points of
         # one number in one day is the row's own defect, not a transcription slip, so the
         # entry is now held by SYMBOL + SECTION in
-        # `_assert_carve_out_entry_is_pinned_by_symbol` below, called from the tail of
-        # THIS test, which also refuses that document's `carve_out:` row printing a
+        # `_assert_carve_out_entry_is_pinned_by_symbol` below, called from THIS test
+        # BEFORE its epic-cite assertion, which also refuses that document's
+        # `carve_out:` row printing a
         # `config/ci-surfaces.yml:<line>` cite. ⛔ The `9951` this comment used to
         # defend was never the ENTRY's position on `main` — `main`'s own row did print
         # it (`cd22562c24e4`, where the entry sat at 9973): it was 9943 + the 8 lines
@@ -5413,9 +5416,11 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     `main` — the fifth and sixth re-stale, landing on the fix for the first four.
     So the entry is pinned where the ownership sits: it must be the ONLY occurrence in
     `carve_out:`, and the document must not print the entry's LIVE line number in
-    ANY form — qualified, bare, arrowed, `@`-prefixed, bolded or behind a `#L<N>`
-    anchor (see the arm below for why an allow-list of cite shapes was the wrong
-    construction, measured GREEN on seven of nine).
+    any CITE form — qualified, bare, arrowed, `@`-prefixed, bolded or behind a
+    `#L<N>` anchor (see the arm below for why an allow-list of cite shapes was the
+    wrong construction, measured GREEN on seven of nine). ⛔ `#<N>` alone is NOT a
+    cite form and is accepted: it is an ISSUE reference, and refusing it was a
+    MEASURED false block (see the arm).
 
     ⚠️ STATED SCOPE: this reads the ONE row in `03-test-design.md` that asserts
     "`carve_out:` holds **one**". The refusal is about the entry's **live** line
@@ -5433,11 +5438,13 @@ def _assert_carve_out_entry_is_pinned_by_symbol():
     revision of this docstring attributed to `9f4c0bde5a`, is the document's cite at an
     EARLIER head and is not the value at `c7499ac7a7`.)
     ⛔ The rule is NOT "a bare number is not a cite". A headed history value is legal
-    whether it is dressed or not; the LIVE value is refused in EVERY form, bare
+    whether it is dressed or not; the LIVE value is refused in every CITE form, bare
     included — it is the one claim in the row that today's tree re-stales on somebody
     else's merge, so printing it makes the document false without anyone editing the
     document. Headings are what make a HISTORY value checkable; they do not make the
-    live one safe.
+    live one safe. One form is deliberately NOT a cite: `#<N>` is an ISSUE reference
+    (measured — `#10076` is a real issue while the entry sat on 10076, so refusing it
+    blocked a correct document), and it is the one exclusion this rule allows.
 
     This is `05-verify.md` D5's own rule ("the symbol is authoritative and the line
     number is a convenience") applied to the one cite whose number a third party
