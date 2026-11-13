@@ -36,6 +36,20 @@ ARTIFACT = DOC_DIR / "measurement.json"
 BRIEF = DOC_DIR / "research-brief.md"
 
 
+def _quotes(text: str, value: object) -> bool:
+    """True iff ``text`` quotes ``value`` as a COMPLETE number, not a prefix of one.
+
+    ⛔ A bare ``str(value) in text`` needle is satisfied by a SHORTER artifact
+    value: with the artifact mutated ``reduction_ratio`` 0.0255 -> 0.02 the
+    generated needle is ``"0.02"``, which is a substring of the brief's
+    ``"0.0255"`` — so the pin stayed green over an artifact that contradicts the
+    brief (measured #12304 review round 24: the four mutations below and this one
+    each gave ``9 passed``). Every numeric needle therefore goes through this.
+    """
+    pattern = r"(?<![\d.])" + re.escape(str(value)) + r"(?!\d)"
+    return re.search(pattern, text) is not None
+
+
 @pytest.fixture(scope="module")
 def report() -> dict:
     assert ARTIFACT.exists(), f"missing committed artifact {ARTIFACT}"
@@ -331,7 +345,19 @@ def test_the_brief_exists_and_quotes_the_artifact(report):
                    f"{b['fts_only']['pooled_candidates_per_capture']}",
                    str(report["arms"]["variant"]["3"]["attached_folded"]),
                    f"{b['multikey']['reduction_ratio']}"):
-        assert needle in text, f"the brief does not quote {needle!r} from the artifact"
+        assert _quotes(text, needle), f"the brief does not quote {needle!r} from the artifact"
+    #: The two figures the brief quotes in the SAME cells as the pinned ones
+    #: above, and which no assertion held: `34.9` was pinned but its `(max 152)`
+    #: parenthetical was not, and `42.65` per capture was pinned while the `2.84`
+    #: per mention beside it was not. Both moved with this file fully green
+    #: (measured #12304 review round 24). Pinned in the RENDERED form, because a
+    #: bare `152` can be satisfied by an unrelated number elsewhere in the prose.
+    assert f"(max {b['multikey']['candidates_max']})" in text, (
+        "the brief does not quote the artifact's multikey.candidates_max in its "
+        "``(max N)`` parenthetical")
+    assert f"| {b['fts_only']['pooled_candidates_per_mention']} (" in text, (
+        "the brief does not quote the artifact's "
+        "fts_only.pooled_candidates_per_mention in its table cell")
 
 
 def test_the_per_k_width_claim_matches_the_artifact(report):
@@ -388,3 +414,36 @@ def test_the_index_stats_key_set_is_the_one_the_code_emits(report):
         f"the artifact's index_stats keys {sorted(held)} are not the ones "
         f"BlockIndex.stats() emits {sorted(emitted)} — the artifact names a field "
         "the shipped module cannot produce")
+
+
+def test_the_completeness_claim_cannot_survive_a_skipped_block(report):
+    """The brief's "complete for THIS corpus" rests on TWO artifact facts, and
+    neither was pinned — a key-SET comparison cannot see either.
+
+    ⛔ Measured #12304 review round 24: mutating
+    ``index_stats.oversized_skipped`` from ``{}`` to ``{"E:xxx": 900}``, or
+    ``index_stats.max_block_size`` from 93 to 500 (above its own
+    ``query_candidate_cap``), each left this file fully green while the brief
+    still said **complete for THIS corpus**. That is the false-PASS direction
+    the pin exists to prevent: a skipped block DEFLATES pair completeness
+    silently, so the artifact's own ``pair_completeness: 1.0`` and the brief's
+    completeness sentence go false TOGETHER and nothing reds.
+    """
+    stats = report["arms"]["blocking"]["index_stats"]
+    assert stats["oversized_skipped"] == {}, (
+        "a block was skipped, so the capped path dropped candidates and this "
+        f"corpus is NOT complete: {stats['oversized_skipped']} — pair "
+        "completeness is then deflated over an unknown population, and the "
+        "brief's ``complete for THIS corpus`` must be re-cut")
+    assert stats["max_block_size"] <= stats["query_candidate_cap"], (
+        f"the largest block ({stats['max_block_size']}) exceeds the cap "
+        f"({stats['query_candidate_cap']}) — the cap fired, so the published "
+        "completeness is deflated")
+    text = BRIEF.read_text()
+    assert f"`max_block_size` **{stats['max_block_size']}**" in text, (
+        "the brief does not quote the artifact's max_block_size")
+    assert f"against the {stats['query_candidate_cap']} cap" in text, (
+        "the brief does not quote the cap the artifact was measured against")
+    assert "`oversized_skipped` **empty**" in text, (
+        "the brief no longer says the skipped set is empty — the claim guarded "
+        "above is gone or reworded, so re-read it against that assertion")
