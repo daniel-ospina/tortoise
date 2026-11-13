@@ -410,8 +410,8 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # the live cases read or write (#10203: the probe is what the census saw).
     "test_identifier_tokens_8933.py": [r"from_uri\(_LANE_URI\)"],
     # #12360: the SAME shape and the same reason — `test_12360_underscore_or_terms.py`
-    # copied the 8933 module's live probe, so `:65` (the module availability probe:
-    # construct + close, never DETATACH) and `:477` (the per-test fixture's
+    # copied the 8933 module's live probe, so `:66` (the module availability probe:
+    # construct + close, never DETATACH) and `:606` (the per-test fixture's
     # `_FP.from_uri(_LANE_URI)` availability probe) both open the lane handle with
     # no `graph_name`. The file's actual graph handles DO carry
     # `graph_name=f"test_12360_{uuid4…}"` and those are the only graphs the live

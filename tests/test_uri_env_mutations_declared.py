@@ -324,7 +324,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # above and copied its module-level live probe verbatim — including the
     # set/restore of `TORTOISE_DB_URI` — but not its declaration, which red-ed the
     # required `test (d)` shard with "undeclared TORTOISE_DB_URI mutation(s)"
-    # naming `:64` (set), `:72` (restore) and `:74` (pop when it was unset). The
+    # naming `:65` (set), `:73` (restore) and `:75` (pop when it was unset). The
     # three sites are one save/restore pair at import and DELIBERATE_URI is the
     # point: the claim under test is that RediSearch stores `web_search` as ONE
     # term and the composite OR alternative retrieves it, which no pure-function

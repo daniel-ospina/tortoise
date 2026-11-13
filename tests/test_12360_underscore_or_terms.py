@@ -446,10 +446,16 @@ class TestPin:
         so refusing it by run count was a false block with a false reason — the
         round-6 finding, and round 7 extended it to the ZERO-token shapes below.
         ⛔ Scoped, not generalised (round 9): a token carrying a separator the
-        read ESCAPES or the index SPLITS is still refused (the three shapes
-        below). `friday.`/`friday?`/`friday+`/`friday/` are ACCEPTED — `.`, `?`,
-        `+` and `/` are in neither set, so the read sends them as one term — which
-        is why this says "escapes or splits" and not "any other separator".
+        read ESCAPES is still refused (the three shapes below), and so is one
+        whose alphanumeric runs number more than one — the guard's rule is the
+        ESCAPE set plus the run count, NOT "the index splits". `friday.`/
+        `friday?`/`friday+`/`friday/` are ACCEPTED: none of them is escaped by
+        `escape_redisearch_literal`, and each leaves ONE alphanumeric run, so the
+        read sends them as one literal. ⚠️ They are still SPLIT by the index
+        (`_indexed_term_runs` is ``re.split(r"[\\W_]+", …)``, so `friday?` yields
+        `friday`) — the earlier revision of this line called them "in neither
+        set", which is false and contradicted the sentence above it (#12368
+        review round 13).
         """
         from tortoise.session_source_prose_migration import probe_phrase_rejection
 

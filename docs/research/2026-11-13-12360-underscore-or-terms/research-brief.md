@@ -268,13 +268,16 @@ stays a bound.
   `dé_installer` (o4), `x_café` (o2), `the_café` (o3) and `_café` (o1) were each returned by their
   OWN NAME with the switch OFF and returned **zero rows** with it ON — a recall regression inside
   the class this issue repairs, on the default-ON path, and it falsified the additive claim above.
-  Repaired: where the pre-change predicate was degenerate the escaped literal STAYS and the
-  composites ride beside it (`año_actual` → `año_actual|o_actual`), which restores the additivity
-  by construction. Pinned by `test_the_non_ascii_class_keeps_its_literal`.
+  Repaired: where the pre-change predicate was degenerate the escaped literal STAYS, which restores
+  the additivity by construction — and that is now the whole repair: the truncating composites the
+  round-3 fix first rode beside it (`año_actual` → `año_actual|o_actual`) are **dropped** by the
+  abutment rule (measured now: `build_or_query('año_actual') == 'año_actual'`,
+  `underscore_run_terms('año_actual') == []`), because a fragment the index does not hold is what made
+  the probe guard refuse a valid probe. Pinned by `test_the_non_ascii_class_keeps_its_literal`.
 * **The run alphabet is ASCII, so a NON-ASCII `snake_case` name is still unretrievable.**
   Measured on a live lane: the index holds `café_menu` as ONE term
   (`queryNodes('Object', 'café_menu')` → the record; `'café'`, `'menu'`, `'caf_'`, `'_menu'` →
-  nothing), while the ASCII-only run splitter breaks at `é` and emits `menu|caf|_menu` — so that
+  nothing), while the ASCII-only run splitter breaks at `é` and emits `menu|caf` — so that
   record is **not** recovered. The measured 300-name population carries **0** non-ASCII names, so
   the numbers above are unaffected; the widening is deliberately NOT shipped, because `#8933`'s
   ruling is explicit — *"start conservative … widen only on measurement; do not ship a broadened

@@ -1486,6 +1486,13 @@ def probe_phrase_rejection(phrase: str) -> str | None:
     # this comment claimed the run "IS the whole token (no other separator)",
     # which is false for exactly that shape, so the refusal below names the TOKEN
     # rather than a run length it did not measure.
+    #
+    # ⚠️ The MEASURED CAUSE LEADS the refusal (#12368 review round 13): the index
+    # does not hold a term this long — that is the failure, and the composite's
+    # absence from the query is one of two ways it shows up, not the cause. For
+    # `'a'*129 + '_b'` and `'ñ'*130 + '_b'` the read sends ONE alternative (the
+    # escaped literal, == the token), while for `('ab_'*43)[:129]` it sends
+    # twelve; the earlier wording narrated the first as if it were the second.
     if deferred and len(token) > MAX_COMPOSITE_RUN_LEN:
         # ⛔ THE CONSEQUENCE CLAUSE IS NOT ONE THING (#12360 review round 11, P3).
         # It used to assert "so the query is ONE literal term the index cannot
@@ -1495,12 +1502,12 @@ def probe_phrase_rejection(phrase: str) -> str | None:
         # SHORT term) — the OPPOSITE failure from a literal that matches nothing.
         # The refusal and the advice are right either way; only the reason had to
         # describe what the read actually does.
-        return (f"it is longer than {MAX_COMPOSITE_RUN_LEN} characters, the "
-                f"bound at which the read stops emitting the composite "
-                f"(#12360) — so the composite the index actually holds is NOT "
-                f"sent and the probe cannot address ONE indexed term: the read "
-                f"falls back to one escaped literal or to a split of its "
-                f"segments instead — pass a SHORTER token")
+        return (f"it is longer than {MAX_COMPOSITE_RUN_LEN} characters, and the "
+                f"index does not hold a term that long (#12360: MEASURED — a "
+                f"128-char name returns rows, 129/131/200-char names return "
+                f"NONE), so a token this long cannot be a probe: the read sends "
+                f"one escaped literal the index cannot match, or splits it into "
+                f"several alternatives instead — pass a SHORTER token")
     if (single_run and token.lower() == runs[0]
             and token.lower() in SPARSE_STOPWORDS):
         return ("it is a search stopword; a probe must be a RARE token that "
