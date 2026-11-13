@@ -141,9 +141,9 @@ def test_the_premise_is_false_for_our_query_builder(name):
     judgement:
       * `_signal_tokens` keeps one token, so the gate refuses the name;
       * `build_or_query` only builds the `|`-union when TWO OR MORE tokens
-        survive; with one survivor it returns the RAW query (`sparse.py:536-550`);
+        survive; with one survivor it returns the RAW query (`sparse.py:590`);
       * RediSearch evaluates space-separated terms as implicit AND
-        (`sparse.py:13-17`), so the leg searches BOTH terms — and finds the
+        (`sparse.py:12`), so the leg searches BOTH terms — and finds the
         node. Measured: 86 of 86 gated names in-window at k=15 (74 at k=3).
     """
     from tortoise.sparse import SPARSE_STOPWORDS, build_or_query
@@ -241,10 +241,12 @@ def test_no_gated_entity_reporting_reached_the_product():
     # the degenerate return path needs no graph, and is the cheapest real shape
     empty = v2.search_graph(None, {"entities": [{"name": "the fix"}]}, "")
     assert "gated_entities" not in empty, sorted(empty)
-    # …and no other return path may carry it either, so the module cannot name
-    # the seam at all.
-    # ⛔ The KEY form, not the bare word: the module is allowed to NAME the
-    # declined seam in prose (that is how a moved/reverted seam stays findable —
-    # see the `#2552` / `#4509` note in that file), it just may not WIRE it.
+    # …and no other return path may carry it either. ⛔ The guard matches the
+    # QUOTED LITERAL in both styles — the form a dict key actually takes — so the
+    # module stays free to NAME the declined seam in prose (that is how a moved
+    # or reverted seam stays findable: see the `#2552` / `#4509` note there),
+    # while a re-add cannot slip through on single quotes (the repo's ruff rule
+    # set has no `Q`).
     src = Path(v2.__file__).read_text()
-    assert '"gated_entities"' not in src
+    for quote in ('"', "'"):
+        assert f"{quote}gated_entities{quote}" not in src, quote

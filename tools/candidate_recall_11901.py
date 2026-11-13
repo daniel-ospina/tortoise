@@ -385,11 +385,12 @@ def _fold_punct(text: str) -> str:
 #   * `_has_high_entropy` (`:80-86`) refuses when `len(name) < 6 AND
 #     tokens < 2` (an **AND**, so a long single-token or a short two-token name
 #     passes THAT test) and otherwise requires the Shannon entropy of the name's
-#     CHARACTERS (spaces stripped, bits/char) to reach `1.5`;
-#   * the call site (`_resolve_with_similarity`, `:337-355`) runs EXACT
+#     CHARACTERS (`_name_entropy`, `:53-77`; spaces stripped, bits/char) to
+#     reach `1.5`;
+#   * the call site (`_resolve_with_similarity`, `:336-354`) runs EXACT
 #     normalised-name matching for **every** name first and gates only the block
 #     below it; a gated name goes to `unresolved_indices`, which
-#     `_resolve_with_llm` (`node_operations.py:660-670`) feeds to the LLM.
+#     `_resolve_with_llm` (`node_operations.py:649-670`) feeds to the LLM.
 #
 # ⛔ THE GATE IS DECLINED, AND THIS MODULE HOLDS THE EVIDENCE. #12294 proposed
 # porting it to `extractor_v2._derive_queries` (no query for a gated name) and
@@ -401,8 +402,8 @@ def _fold_punct(text: str) -> str:
 #     bare content word and returns a near-synonymous cluster. It does not:
 #     `sparse.build_or_query` builds the OR-union only when TWO OR MORE tokens
 #     survive stopword removal, and a single surviving token takes the RAW-LITERAL
-#     fallback (`sparse.py:536-550`) — so `the fix` is queried as `the fix`, which
-#     RediSearch evaluates as an implicit AND over both terms (`sparse.py:13-17`).
+#     fallback (`sparse.py:590`) — so `the fix` is queried as `the fix`, which
+#     RediSearch evaluates as an implicit AND over both terms (`sparse.py:12`).
 #     The article is not a wasted term, it is half of the conjunction.
 #   * the SHIPPED-shaped predicate gates **86 names of 300**, and **86 of 86 are
 #     reachable by the leg at k=15** (74 already at k=3) — so the gate removes a
@@ -751,7 +752,7 @@ def run(args: argparse.Namespace) -> int:
         #: ``suppressed_correct_k_sum`` is a SUM OVER THE MEASURED WINDOWS — a
         #: (name × k) count, so a name found at both k=3 and k=15 counts twice.
         #: ``suppressed_correct_by_k`` carries the per-window number, which is
-        #: the one to quote ("73 of 85 names at k=3, 85 of 85 at k=15"); the sum
+        #: the one to quote ("74 of 86 names at k=3, 86 of 86 at k=15"); the sum
         #: is kept only so the artifact totals reconcile. There is no separate
         #: ``in_window_before`` field: it was incremented in the SAME branch and
         #: could therefore never disagree with this one, i.e. it was not an
@@ -917,12 +918,6 @@ def run(args: argparse.Namespace) -> int:
         #: share is readable); ``would_attach_before`` is the number that decides
         #: the issue — a gated pair that phase 1 CAN bind today becomes a
         #: guaranteed duplicate once its query is not issued.
-        #: ⛔ ``pairs``, ``gated_pairs`` and ``in_window_before`` are all counted
-        #: at ONE window (``_GATE_KS[0]``) so the share is readable — the first
-        #: cut counted the denominator once per surface and the numerator per
-        #: (surface × k), which produced a 184 % ratio. The falsifier's number,
-        #: ``would_attach_before_any_k``, IS counted over every k: a gated pair
-        #: that phase 1 binds at ANY width is a duplicate the gate creates.
         #: ``pairs``, ``gated_pairs``, ``in_window_before`` and
         #: ``would_attach_before`` are all counted at ONE window (``_GATE_KS[0]``)
         #: so the share is readable — the first cut counted the denominator once
