@@ -91,12 +91,12 @@ import sys
 # ATTRIBUTED rather than a traceback from inside a function.
 #
 # ⚠️ The mechanism here is NOT the usual D9 one. This file has no 3.12-only
-# MODULE-LEVEL import — every `tortoise.*` import is function-local (`_ctx`,
-# `_authored_query_arm`), and the module-level block below is stdlib and 3.9-clean.
-# So without this guard an old interpreter would print `--help` fine and then die
-# MID-RUN, inside `_ctx`, on the retrieval stack's floor — an unattributed error
-# that reads as "this tool is broken". The guard moves that refusal to the front,
-# where it can name the floor, the interpreter and the fix.
+# MODULE-LEVEL import — every `tortoise.*` import is function-local (`run`,
+# `measure_declared_user_search`), and the module-level block below is stdlib and
+# 3.9-clean. So without this guard an old interpreter would print `--help` fine
+# and then die MID-RUN, inside `run`, on the retrieval stack's floor — an
+# unattributed error that reads as "this tool is broken". The guard moves that
+# refusal to the front, where it can name the floor, the interpreter and the fix.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/underscore_or_terms_12360.py requires Python >= 3.12 (got "
