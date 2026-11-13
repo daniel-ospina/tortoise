@@ -12934,7 +12934,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                         "was made (hosted: `tortoise signup`)"))
         return
 
-    masked = _mask_secret_tail(api_key)
+    masked = _printable(_mask_secret_tail(api_key))
     fingerprint = _publishable_fingerprint(api_key)
     detail = f"{_printable(source)} — {masked}"
     if fingerprint is not None:
@@ -12967,14 +12967,20 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         return
 
     # ── the reachability read (no credential in the request) ──
-    base = _mask_display_target(api_url or "")
+    # `_printable` is not cosmetic here: `api_url` is store-supplied (a
+    # `<cwd>/.tortoise` is attacker-controllable by this module's own reckoning)
+    # and it is interpolated into EVERY row below — a newline in it would forge
+    # whole `doctor` rows, which is the one thing a verdict report must not do.
+    base = _printable(_mask_display_target(api_url or ""))
     health_code: int | None = None
     health_status: str | None = None
     latency: float | None = None
-    started = time.monotonic()
-    try:
-        with urlopen(Request(f"{api_url}/health"),
-                     timeout=_DOCTOR_HEALTH_TIMEOUT_S) as resp:
+    health_timeout_used = _DOCTOR_HEALTH_TIMEOUT_S
+
+    def _health_request(timeout: int) -> None:
+        nonlocal health_code, health_status, latency
+        started = time.monotonic()
+        with urlopen(Request(f"{api_url}/health"), timeout=timeout) as resp:
             health_code = getattr(resp, "status", None) or resp.getcode()
             # The service's OWN verdict rides the body (`{"status": "degraded",
             # …}`) — a 200 whose body says degraded is a reachable-but-unhealthy
@@ -12993,23 +12999,49 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
                     http.client.HTTPException):
                 health_status = None
         latency = time.monotonic() - started
+
+    try:
+        _health_request(_DOCTOR_HEALTH_TIMEOUT_S)
     except HTTPError as exc:
         # A 4xx/5xx IS an answer — the host is reachable and something is
         # serving. The code is reported; it does not need the transport branch.
         health_code = exc.code
-        latency = time.monotonic() - started
     except (OSError, http.client.HTTPException, ValueError) as exc:
-        # The reason is `_scrub`ed as well as the target: `http.client` embeds
-        # the URL in its own message, and a URL with userinfo embeds a PASSWORD
-        # (`InvalidURL: nonnumeric port: '<password>@host'`). `_scrub` expands
-        # each supplied value into its user/password fragments, which is the one
-        # rule #5109 established for this file.
-        results.append(("Hosted", "❌",
-                        f"cannot reach {base} — "
-                        f"{_printable(_scrub(str(getattr(exc, 'reason', None) or exc), api_url, api_key))}"
-                        f". Check https://api.premiselabs.co/health or your "
-                        "TORTOISE_API_URL, then `tortoise config show`"))
-        return
+        reason = getattr(exc, "reason", None) or exc
+        if not _is_timeout_reason(reason):
+            # The reason is `_scrub`ed as well as the target: `http.client`
+            # embeds the URL in its own message, and a URL with userinfo embeds a
+            # PASSWORD (`InvalidURL: nonnumeric port: '<password>@host'`).
+            # `_scrub` expands each supplied value into its user/password
+            # fragments, the one rule #5109 established for this file.
+            results.append(("Hosted", "❌",
+                            f"cannot reach {base} — "
+                            f"{_printable(_scrub(str(reason), api_url, api_key))}"
+                            f". Check https://api.premiselabs.co/health or your "
+                            "TORTOISE_API_URL, then `tortoise config show`"))
+            return
+        # ⛔ A HEALTHY endpoint is allowed to time out here. The hosted app
+        # wakes slowly after idle (>10s measured — the reason `team info`
+        # retries), and 5s is BELOW that, so without this retry every cold
+        # first run (`tortoise onboard` ends by calling `doctor`) reports a
+        # broken endpoint, blames the user's config, and exits 1. The `/health`
+        # leg is retried for the SAME reason as the authenticated one, and the
+        # wider bound that was used is named in the output.
+        try:
+            health_timeout_used = _DOCTOR_TEAM_RETRY_TIMEOUT_S
+            _health_request(_DOCTOR_TEAM_RETRY_TIMEOUT_S)
+        except HTTPError as retry_exc:
+            health_code = retry_exc.code
+        except (OSError, http.client.HTTPException, ValueError) as retry_exc:
+            retry_reason = getattr(retry_exc, "reason", None) or retry_exc
+            results.append(("Hosted", "❌",
+                            f"cannot reach {base} — no answer in "
+                            f"{_DOCTOR_HEALTH_TIMEOUT_S}s, and none in "
+                            f"{_DOCTOR_TEAM_RETRY_TIMEOUT_S}s on retry "
+                            f"({_printable(_scrub(str(retry_reason), api_url, api_key))})"
+                            f". Check https://api.premiselabs.co/health or your "
+                            "TORTOISE_API_URL, then `tortoise config show`"))
+            return
 
     # ── the authenticated read: the ONLY thing that proves the key ──
     team_code: int | None = None
@@ -13058,6 +13090,10 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
 
     health_part = (f"/health {health_code}"
                    + (f" in {latency:.2f}s" if latency is not None else ""))
+    if health_timeout_used != _DOCTOR_HEALTH_TIMEOUT_S:
+        # Say so: a first attempt that timed out and a second that answered is a
+        # sleeping service, and the reader should not mistake it for fast.
+        health_part += f" (first attempt timed out at {_DOCTOR_HEALTH_TIMEOUT_S}s)"
     body = _scrub(team_body, api_url, api_key)
     parsed: object = None
     try:
@@ -13081,6 +13117,23 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
             candidate = detail_obj.get("error_code")
             if isinstance(candidate, str):
                 error_code = candidate
+
+    # SUSPENDED outranks the graph-scope remedy — `_explain_org_info_failure`'s own
+    # order, and the reason it exists: both can ride the same 403, and a suspension
+    # carries the one actionable fact (an appeal path) that the generic arm's
+    # truncated body would cut in half (#308).
+    if team_code == 403:
+        suspended = _suspended_info(body)
+        if suspended is not None:
+            message, appeal_url = suspended
+            suffix = f" Appeal: {appeal_url}" if appeal_url else ""
+            body_message = (message[:-len(suffix)]
+                            if (suffix and message.endswith(suffix)) else message)
+            results.append(("Hosted", "❌",
+                            f"{health_part}; /v1/team 403 — the organization is "
+                            f"suspended: {_printable(body_message)}"
+                            + (f". Appeal: {_printable(appeal_url)}" if appeal_url else "")))
+            return
 
     if team_code == 403 and error_code in _ORG_INFO_REMEDIES:
         # A DELIBERATE refusal, not a fault: the server authenticated the key and
@@ -13128,7 +13181,7 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
     code_display = team_code if team_code is not None else "no status"
     results.append(("Hosted", "❌",
                     f"{health_part}; /v1/team → API error {code_display}: "
-                    f"{_printable(body[:200]) if body else '(empty body)'}. "
+                    f"{_printable(body[:2000]) if body else '(empty body)'}. "
                     f"`tortoise config show` reports what this machine knows"))
 
 

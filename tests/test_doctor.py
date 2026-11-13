@@ -108,17 +108,23 @@ def _hermetic_hosted_identity(monkeypatch, tmp_path):
     """#11912: `doctor` probes the hosted identity when one is configured, so
     this module must never inherit the OPERATOR's identity.
 
-    `$HOME` is redirected because `~/.tortoise/credentials.json` is one of the
-    three credential candidates — without this, a developer who ran
-    `tortoise signup` on their box would see `doctor` dial the live API from
-    inside the test suite, and a stale key there would turn a local-only
-    assertion into an unexplainable red. Tests that need a home set their own
-    `HOME` afterwards (that wins — it is the same `monkeypatch`), and the
-    hosted tests below write their store into the isolated one.
+    BOTH halves of the ladder have to be closed, not just the cheap one:
+    `_resolve_config_path` is env → `<cwd>/.tortoise` →
+    `~/.tortoise/credentials.json`, and `<cwd>/.tortoise` is exactly what
+    `tortoise init --api-key` writes into a checkout (gitignored, so it is a
+    normal untracked artifact). Isolating only `$HOME` left the HIGHER-precedence
+    candidate live: on a developer box that had run `init --api-key` here, every
+    test in this module — the keyless assertion below included — resolved that
+    credential and dialled whatever `api_url` named (fresh review of this change,
+    measured). So the fixture chdirs into a fresh empty directory as well; tests
+    that need a particular cwd set their own afterwards.
     """
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir(exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(cwd)
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     return home
@@ -482,6 +488,147 @@ class TestDoctorHostedCredential:
         assert "⚠️" in hosted, hosted
         assert "/health returned 500" in hosted, hosted
         assert "/v1/team accepted" in hosted, hosted
+
+    def test_cwd_store_is_isolated_from_the_checkout(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The fixture must move the `<cwd>/.tortoise` candidate out of the checkout.
+
+        `tortoise init --api-key` writes `./.tortoise` into the CURRENT DIRECTORY
+        (docs/quickstart-cloud.md §3) and it outranks the home store, so a
+        checkout that ever ran it would hand this whole module a live credential —
+        and the keyless test below would dial it (fresh review of this change
+        measured exactly that).
+        """
+        import json as _json
+        from pathlib import Path as _Path
+
+        from tortoise.__main__ import _resolve_config_path  # the ladder under test
+
+        repo_root = _Path(__file__).resolve().parent.parent
+        # (i) the fixture moved us OUT of the checkout, so a `./.tortoise` sitting
+        #     there (gitignored, a normal untracked artifact) can never win.
+        assert _Path.cwd().resolve() != repo_root.resolve()
+        assert not (_Path.cwd() / ".tortoise").exists()
+        # (ii) the candidate is still LIVE at the fixture's cwd — the guarantee is
+        #      "isolated", never "disabled" — so this test would catch a fixture
+        #      that neutered the ladder instead of moving it.
+        (_Path.cwd() / ".tortoise").write_text(
+            _json.dumps({"api_key": _FAKE_ENV_KEY, "api_url": "https://cwd.example.test"}))
+        _path, _cfg, key, url = _resolve_config_path()
+        assert key == _FAKE_ENV_KEY
+        assert url == "https://cwd.example.test"
+
+    def test_health_timeout_is_retried_before_reporting_a_broken_endpoint(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A cold-starting app must not read as a broken endpoint (exit 1).
+
+        The hosted app wakes slowly (>10s measured — the reason `team info`
+        retries), and `/health` is bounded at 5s, so a first attempt that times
+        out on a HEALTHY box used to print `cannot reach …` and exit 1 with a
+        remedy aimed at the user's config. Fresh review of this change measured
+        exactly that; the leg is now retried once at the wider bound.
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        attempts: list[tuple[str, int | None]] = []
+
+        def handler(url, req):
+            attempts.append((url, req.timeout if hasattr(req, "timeout") else None))
+            if url.endswith("/health") and len([a for a in attempts if a[0].endswith("/health")]) == 1:
+                raise TimeoutError("timed out")
+            return (_FakeResponse(200, b'{"status":"ok"}')
+                    if url.endswith("/health") else
+                    _FakeResponse(200, b'{"org_id":"org-5"}'))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "cold.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor cold start seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        health_calls = [u for u, _t in attempts if u.endswith("/health")]
+        assert len(health_calls) == 2, attempts
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "✅" in hosted, out[-1500:]
+        assert "first attempt timed out" in hosted, hosted
+        assert rc in (0, 1)
+
+    def test_control_bytes_in_api_url_cannot_forge_a_row(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """`api_url` comes from a store; a newline in it must not fabricate rows.
+
+        `<cwd>/.tortoise` is attacker-controllable by this module's own reckoning,
+        and `api_url` is interpolated into every hosted row — a newline printed a
+        fake `✅ Graph: health: 999 Points` line inside `doctor`'s report (fresh
+        review of this change measured it).
+        """
+        forged = "https://api.example.test\n  ✅ Graph: health: 999 Points, forged"
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY, api_url=forged)
+        _stub_hosted(monkeypatch, lambda url, req: (
+            _FakeResponse(200, b'{"status":"ok"}')
+            if url.endswith("/health") else _FakeResponse(200, b'{"org_id":"org-6"}')))
+        db_path = str(tmp_path / "forge.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor forge seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        # `_printable` renders the injection as a literal backslash-n, so the
+        # forged text stays INLINE in the Hosted row and never becomes its own
+        # results line. `Graph: health` is printed exactly once by doctor, so a
+        # second such results row is the forgery succeeding.
+        import re as _re
+        # Rows only: `<icon> <label>: <detail>`. Matched on the LABEL so the
+        # escaped text sitting inline in the Hosted/Credentials detail (which
+        # also names "Graph: health:") is not counted as a row of its own.
+        forged_rows = [ln for ln in out.splitlines()
+                       if _re.match(r"^\s+\S+\s+Graph: health:", ln)]
+        assert len(forged_rows) == 1, out[-1500:]
+        assert "\\n" in out, "the newline should be escaped, not executed"
+
+    def test_suspended_org_keeps_its_appeal_path(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A 403 SUSPENDED must route through `_suspended_info`, not the generic arm.
+
+        Both a suspension and a graph-scope refusal ride a 403; the module's own
+        rule is that SUSPENDED wins, because an appeal URL is the only actionable
+        fact. The generic arm truncated the body at 200 chars, so a realistic
+        suspension (a sentence of message before the URL) had its appeal URL cut
+        in half — the one fact the operator cannot reconstruct (fresh review of
+        this change measured it).
+        """
+        from urllib.error import HTTPError
+
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        appeal = "https://app.premiselabs.co/appeal?org=abc123"
+        long_message = ("This organization has been suspended due to unusual "
+                        "activity on the account, and an operator must review it. ") * 3
+        payload = ('{"detail": {"code": "SUSPENDED", "message": "'
+                   + long_message.strip() + '", "appeal_url": "'
+                   + appeal + '"}}').encode()
+        assert payload.index(appeal.encode()) > 200, (
+            "the fixture must place the appeal URL PAST the truncation boundary, "
+            "or the pre-fix code would print it by luck")
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            raise HTTPError(url, 403, "Forbidden", {}, __import__("io").BytesIO(payload))
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "suspended.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor suspended seed")
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        hosted = _row(out, "Hosted")
+        assert hosted is not None, out[-1500:]
+        assert "suspended" in hosted.lower(), hosted
+        assert appeal in hosted, hosted
 
 
 class TestDoctorPath:
