@@ -500,6 +500,10 @@ def test_this_modules_own_header_did_not_restore_the_stale_boundary() -> None:
     """
     doc = "".join((__doc__ or "").split())
     present = [w for w in _HEADER_STALE if "".join(w.split()) in doc]
+    assert _HEADER_STALE, (
+        "the pin carries no wording, so it protects nothing — the inert-pin "
+        "class round 6 reded on the docstring pin; this one needs the same guard"
+    )
     assert present == [], (
         f"this file's header re-states the pre-fix boundary: {present}"
     )
