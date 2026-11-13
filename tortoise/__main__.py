@@ -12837,9 +12837,13 @@ def _session_index_rows_without_graph(
 #: The reachability read is cheap, so it gets a short bound. The AUTHENTICATED
 #: read is where the hosted app's cold start lands — a first request after an
 #: idle period measured >10s while a warm app answers in 0.2–1.6s (`tortoise
-#: team info` retries for exactly this reason), so it gets ONE bounded retry
-#: rather than reporting a waking service as a broken credential. Worst case is
-#: therefore 5 + 10 + 30 s, and only when the network is timing out.
+#: team info` retries for exactly this reason) — so EACH leg gets ONE bounded
+#: retry rather than reporting a waking service as a broken credential.
+#: ⛔ Worst case is therefore 5 + 30 + 10 + 30 = 75 s, and only when the network
+#: is timing out on both legs. An outer watchdog that sizes itself from this
+#: comment must use 75, not 45: a 45 s cap pre-empts the `/health` retry and
+#: reproduces the "cold box reported as a broken endpoint" failure this whole
+#: retry exists to prevent (fresh review of this change caught the arithmetic).
 _DOCTOR_HEALTH_TIMEOUT_S = 5
 _DOCTOR_TEAM_TIMEOUT_S = 10
 _DOCTOR_TEAM_RETRY_TIMEOUT_S = 30
@@ -13145,6 +13149,28 @@ def _doctor_hosted_rows(results: list[tuple[str, str, str]], offline: bool) -> N
         return
 
     if isinstance(team_code, int) and 200 <= team_code < 300:
+        # ⛔ A 2xx is NOT proof on its own. `TORTOISE_API_URL` can be aimed at a
+        # proxy that answers everything with 200 (a captive portal, a soft-200
+        # login page, the wrong service), and an empty or HTML body read as
+        # "accepted" certifies a setup on which every hosted command fails — the
+        # exact false green #11912 exists to remove. Acceptance = we READ an
+        # identity off the reply.
+        identity = None
+        for field in ("org_id", "org_name", "tier"):
+            value = parsed.get(field) if isinstance(parsed, dict) else None
+            if isinstance(value, str) and value.strip():
+                identity = field
+                break
+        if identity is None:
+            results.append(("Hosted", "❌",
+                            f"{health_part}; /v1/team answered "
+                            f"{team_code} but with no team identity in the body "
+                            f"({_printable(body[:160]) if body else '(empty body)'}) "
+                            "— a proxy or captive portal answering for the "
+                            "endpoint also returns 200, so the key is NOT proven. "
+                            "Check your TORTOISE_API_URL, then `tortoise config "
+                            "show`"))
+            return
         org = None
         if isinstance(parsed, dict):
             for field in ("org_name", "org_id"):

@@ -127,6 +127,23 @@ def _hermetic_hosted_identity(monkeypatch, tmp_path):
     monkeypatch.chdir(cwd)
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    # ⛔ AND A HARD GUARD, because scrubbing the ambient identity is not enough:
+    # any test in this module that puts a credential anywhere (a fixture setting
+    # TORTOISE_API_KEY, a seeded store) makes `doctor` dial for real, and a fake
+    # key aimed at the production default sent live requests to
+    # api.premiselabs.co from five spool tests (fresh review round 2, measured).
+    # A suite must never depend on a third party's availability. Tests that WANT
+    # the probe stub it with `_stub_hosted`, which overrides this; anything else
+    # fails loudly instead of reaching the network — `pytest.fail` raises
+    # `Failed`, which derives from BaseException, so `doctor`'s own
+    # `except Exception` cannot swallow it into a quiet ⚠️ row.
+    import urllib.request
+
+    def _no_network(req, timeout=None):
+        url = getattr(req, "full_url", str(req))
+        pytest.fail(f"unstubbed network call from tests/test_doctor.py: {url}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _no_network)
     return home
 
 
@@ -629,6 +646,119 @@ class TestDoctorHostedCredential:
         assert hosted is not None, out[-1500:]
         assert "suspended" in hosted.lower(), hosted
         assert appeal in hosted, hosted
+
+    def test_a_refused_credential_store_is_a_fail_not_a_quiet_warning(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A CORRUPT store makes every command fail, so `doctor` must not exit 0.
+
+        Without this arm the block's own `except Exception` renders a
+        `⚠️ Hosted: check unavailable: …` and returns — a warning does not fail
+        the report, so the pre-#11912 defect (green on a box where nothing hosted
+        works) comes straight back. Fresh review round 2 named this branch as
+        deletable with the suite green.
+        """
+        store = _hermetic_hosted_identity / ".tortoise"
+        store.mkdir(parents=True, exist_ok=True)
+        (store / "credentials.json").write_text("{ this is not json")
+        calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
+            f"a refused store must not be dialled — requested {url}"))
+        db_path = str(tmp_path / "refused.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor refused store seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert calls == []
+        cred = _row(out, "Credentials")
+        assert cred is not None and "❌" in cred, out[-1500:]
+        assert "refused" in cred and "config show" in cred, cred
+        assert rc == 1
+
+    def test_an_unsendable_key_is_refused_before_http_client_echoes_it(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A CR/LF key must be refused by US, not by `http.client`.
+
+        `http.client` raises `ValueError("Invalid header value b'Bearer <THE
+        KEY>'")` — the refusal itself echoes the credential into the report.
+        """
+        bad_key = _FAKE_HOSTED_KEY + "\r\nX-Injected: 1"
+        _write_credential(_hermetic_hosted_identity, bad_key)
+        calls = _stub_hosted(monkeypatch, lambda url, req: pytest.fail(
+            f"an unsendable key must not be dialled — requested {url}"))
+        db_path = str(tmp_path / "unsendable.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor unsendable seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert calls == []
+        cred = _row(out, "Credentials")
+        assert cred is not None and "❌" in cred, out[-1500:]
+        assert "cannot be sent in a request header" in cred, cred
+        assert rc == 1
+
+    def test_team_leg_timeout_is_retried_then_reported_unproven(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """The authenticated leg's cold-start retry, and its exhausted case.
+
+        The retry is the leg the block's comment says cold start lands on, so it
+        needs its own pin: a single attempt that times out must NOT read as a
+        refusal, and two must report the credential as UNPROVEN.
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+        team_calls = []
+
+        def handler(url, req):
+            if url.endswith("/health"):
+                return _FakeResponse(200, b'{"status":"ok"}')
+            team_calls.append(url)
+            raise TimeoutError("timed out")
+
+        _stub_hosted(monkeypatch, handler)
+        db_path = str(tmp_path / "team-timeout.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _seed_db(db_path, "doctor team timeout seed")
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert len(team_calls) == 2, team_calls  # one attempt + one bounded retry
+        hosted = _row(out, "Hosted")
+        assert hosted is not None and "❌" in hosted, out[-1500:]
+        assert "no answer in 10s" in hosted and "on retry" in hosted, hosted
+        assert rc == 1
+
+    def test_a_2xx_without_an_identity_is_not_an_accepted_key(
+            self, clear_db_env, tmp_path, capsys, monkeypatch, _hermetic_hosted_identity):
+        """A captive portal answers 200 too; only a READ identity proves the key.
+
+        `TORTOISE_API_URL` aimed at a proxy that returns 200 for everything (or
+        at the wrong service) used to render `✅ … accepted` and exit 0 — a green
+        report on a box whose hosted commands all fail (fresh review round 2).
+        """
+        _write_credential(_hermetic_hosted_identity, _FAKE_HOSTED_KEY)
+
+        for body in (b"", b"<html>Please sign in to the network</html>"):
+            def handler(url, req, _body=body):
+                if url.endswith("/health"):
+                    return _FakeResponse(200, b'{"status":"ok"}')
+                return _FakeResponse(200, _body)
+
+            _stub_hosted(monkeypatch, handler)
+            db_path = str(tmp_path / f"soft200-{len(body)}.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+            _seed_db(db_path, "doctor soft200 seed")
+            capsys.readouterr()
+
+            rc = _run_doctor([])
+            out = capsys.readouterr().out
+
+            hosted = _row(out, "Hosted")
+            assert hosted is not None and "❌" in hosted, (body, out[-1200:])
+            assert "no team identity" in hosted, hosted
+            assert rc == 1
 
 
 class TestDoctorPath:
@@ -2065,7 +2195,7 @@ class TestCaptureSpoolHealthRow:
             lambda payload: sp.PostOutcome(ok=False, status=402, detail="quota"),
             now=1000.0)
 
-        _run_doctor([])
+        _run_doctor(["--offline"])
         out = capsys.readouterr().out
         assert "capture: BLOCKED (5 queued, 402 quota)" in out, out
         assert "❌ Capture spool" in out, out
@@ -2091,7 +2221,7 @@ class TestCaptureSpoolHealthRow:
         try:
             if os.access(root / "entries", os.R_OK):  # root ignores mode bits
                 pytest.skip("running as root")
-            _run_doctor([])
+            _run_doctor(["--offline"])
             out = capsys.readouterr().out
             assert "capture: UNREADABLE (cannot list" in out, out
             assert "✅ Capture spool" not in out, out
@@ -2112,7 +2242,7 @@ class TestCaptureSpoolHealthRow:
         self._configured(monkeypatch, tmp_path)
         sp.spool_dir()  # the spool is created lazily; an empty one is `ok`
 
-        _run_doctor([])
+        _run_doctor(["--offline"])
         out = capsys.readouterr().out
         assert "capture: OK (0 queued)" in out, out
         assert "✅ Capture spool" in out, out
@@ -2151,7 +2281,7 @@ class TestCaptureSpoolHealthRow:
             turns=[{"role": "user", "content": "hi"}],
             source="s.jsonl", machine_id="m" * 64, harness="claude"))
 
-        _run_doctor([])
+        _run_doctor(["--offline"])
         out = capsys.readouterr().out
         # Keyless + one pending capture: the credential is the state that wins,
         # and the count is still named.
@@ -2161,7 +2291,7 @@ class TestCaptureSpoolHealthRow:
         assert "❌ Capture spool" not in out, out
 
         monkeypatch.setenv("TORTOISE_API_KEY", "tt_doctor_test")
-        _run_doctor([])
+        _run_doctor(["--offline"])
         out = capsys.readouterr().out
         assert "capture: DRAINING (1 queued)" in out, out
         assert "ℹ️ Capture spool" in out, out
@@ -2212,7 +2342,7 @@ class TestCaptureSpoolHealthRow:
             sp, "capture_health_line",
             lambda r, *, api_key=None, bounds=None: real(r, api_key=api_key, bounds=tiny))
 
-        assert _run_doctor([]) == 1, "a refusing box is a FAILED report, not a warn"
+        assert _run_doctor(["--offline"]) == 1, "a refusing box is a FAILED report, not a warn"
         out = capsys.readouterr().out
         assert "capture: SATURATED (2 queued, refusing new captures)" in out, out
         assert "❌ Capture spool" in out, out

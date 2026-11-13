@@ -1131,7 +1131,11 @@ def test_the_read_surface_reports_a_local_record_not_a_server_verdict(
     assert "Local record only" in out
     assert "not visible here" in out
 
-    main.main(["doctor", "--path", str(home / "doctor.db")])
+    # `--offline`: this test asserts the SAVED-BACKLOG row, and the hosted
+    # probe is not its subject — the store it seeds carries an `api_url`
+    # (`https://legit.example.com`) that would otherwise be dialled from a test
+    # (#11912 review round 2 measured the DNS attempts).
+    main.main(["doctor", "--offline", "--path", str(home / "doctor.db")])
     doctor_out = capsys.readouterr().out
     line = next(ln for ln in doctor_out.splitlines() if "Saved backlog" in ln)
     assert "LOCALLY RECORDED" in line
