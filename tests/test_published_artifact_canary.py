@@ -400,54 +400,87 @@ def test_the_install_cannot_resolve_from_a_configured_MIRROR(tmp_path, monkeypat
         k for k in captured["env"] if k.startswith("PIP_") and k != "PIP_DISABLE_PIP_VERSION_CHECK"
     ]
     assert "https_proxy" not in captured["env"]
+    assert "--isolated" in captured["cmd"], (
+        "`--index-url` alone does not close the config-file class: a config-file "
+        "`extra-index-url` MERGES with it, so a runner with a global mirror can resolve "
+        "the release from the mirror and report PASS over bytes PyPI never served"
+    )
     assert "--index-url" in captured["cmd"], captured["cmd"]
     assert canary.PYPI_SIMPLE in captured["cmd"], captured["cmd"]
 
 
-def test_an_install_failure_is_only_RED_when_pip_says_the_artifact_is_absent(tmp_path):
-    """A pip failure is not evidence that the ARTIFACT is broken: a DNS blip, an index
-    outage or a proxy 502 land in the same exit code, and reporting those as "users
-    cannot even install it — a release is owed" is the round-1 B1 mis-routing one layer
-    down (#12363 round 3). Only pip's own absence vocabulary is a FAIL."""
-    absent = _Runner(
-        {
-            "pip": _completed(
-                ["pip", "install"],
-                1,
-                "",
-                "ERROR: Could not find a version that satisfies the requirement "
-                "tortoise-graph==0.2.0 (from versions: none)",
-            )
-        }
+def test_an_install_failure_is_only_RED_when_the_INDEX_confirms_the_absence(tmp_path):
+    """pip's absence vocabulary is not proof of absence — MEASURED: against an
+    unreachable index pip prints the same "Could not find a version that satisfies …
+    (from versions: none)" it prints for a genuinely missing release. So the FAIL needs
+    an INDEPENDENT re-read of the index; anything else is UNKNOWN, which exits non-zero
+    without sending a human to cut an irreversible release (#12363 round 3 → round 4)."""
+    marks = (
+        "ERROR: Could not find a version that satisfies the requirement "
+        "tortoise-graph==0.2.0 (from versions: none)\n"
+        "ERROR: No matching distribution found for tortoise-graph==0.2.0"
     )
-    arm, _ = canary.install_and_run(
-        package="tortoise-graph",
-        version="0.2.0",
-        workdir=tmp_path,
-        timeout=10,
-        runner=absent,
-    )
-    assert arm.status == canary.FAIL
 
-    flaky = _Runner(
-        {
-            "pip": _completed(
-                ["pip", "install"],
-                1,
-                "",
-                "ERROR: Could not install packages due to an OSError: "
-                "[Errno -3] Temporary failure in name resolution",
-            )
-        }
-    )
-    arm2, _ = canary.install_and_run(
+    def _run(probe_state):
+        return canary.install_and_run(
+            package="tortoise-graph",
+            version="0.2.0",
+            workdir=tmp_path,
+            timeout=10,
+            runner=_Runner({"pip": _completed(["pip", "install"], 1, "", marks)}),
+            absent_probe=lambda package: probe_state,
+        )[0]
+
+    assert _run(canary.INDEX_ABSENT).status == canary.FAIL
+    # the real unreachable-index shape: pip's wording, but the index answers nothing
+    assert _run(canary.INDEX_UNREADABLE).status == canary.UNKNOWN
+    # and a failure pip does not attribute to a missing distribution is never a FAIL
+    arm = canary.install_and_run(
         package="tortoise-graph",
         version="0.2.0",
         workdir=tmp_path,
         timeout=10,
-        runner=flaky,
+        runner=_Runner(
+            {
+                "pip": _completed(
+                    ["pip", "install"],
+                    1,
+                    "",
+                    "ERROR: Could not install packages due to an OSError: "
+                    "[Errno -3] Temporary failure in name resolution",
+                )
+            }
+        ),
+    )[0]
+    assert arm.status == canary.UNKNOWN, arm.detail
+
+
+def test_the_wheel_mode_install_failure_is_never_attributed_to_the_index(tmp_path):
+    """Wheel mode has no index in play: only pip naming the BUILT wheel is a FAIL.
+    A dependency fetch that failed is the network's problem — telling the reader "the
+    artifact about to be uploaded is not installable" would block a good release
+    (#12363 round 4)."""
+    wheel = tmp_path / "dist" / "tortoise_graph-0.3.0-py3-none-any.whl"
+    wheel.parent.mkdir(parents=True)
+
+    def _run(stderr):
+        return canary.install_and_run(
+            package="tortoise-graph",
+            version="",
+            workdir=tmp_path,
+            timeout=10,
+            runner=_Runner({"pip": _completed(["pip", "install"], 1, "", stderr)}),
+            wheel=wheel,
+        )[0]
+
+    assert _run(f"ERROR: {wheel.name} is not a valid wheel").status == canary.FAIL
+    assert (
+        _run(
+            "ERROR: Could not find a version that satisfies the requirement "
+            "falkordblite==0.9 (from versions: none)"
+        ).status
+        == canary.UNKNOWN
     )
-    assert arm2.status == canary.UNKNOWN, arm2.detail
 
 
 def test_both_workflows_keep_the_transcript_and_budget_the_fetches():
@@ -687,6 +720,7 @@ def test_a_failed_install_is_red_and_never_reaches_the_command(tmp_path):
         workdir=tmp_path,
         timeout=10,
         runner=runner,
+        absent_probe=lambda package: canary.INDEX_ABSENT,
     )
     assert arm.status == canary.FAIL
     assert "cannot even install" in arm.detail

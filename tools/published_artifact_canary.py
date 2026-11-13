@@ -98,17 +98,37 @@ _INSTALL_ABSENCE_MARKERS = (
 )
 
 
-def _install_failure_is_absence(stderr: str, spec: str, wheel: Path | None = None) -> bool:
-    """True when the failure is about the ARTIFACT, not about pip's environment.
+def _install_failure_is_absence(stderr: str, wheel: Path | None = None) -> bool:
+    """True when pip's output is about the ARTIFACT rather than pip's environment.
 
-    Index mode: pip's own "this distribution does not exist" vocabulary. Wheel mode:
-    pip naming the wheel it could not install — that IS the artifact failing, and it is
-    the pre-publish gate's whole job to red on it.
+    ⛔ pip's "absence" vocabulary is NOT proof of absence. MEASURED: against an
+    unreachable index (`--index-url http://127.0.0.1:9/simple`) and against a
+    name-resolution failure, pip prints the SAME `Could not find a version that
+    satisfies … (from versions: none)` it prints for a genuinely absent release — it
+    collapses "I could not reach the index" into "there is nothing there". So the
+    markers are a CANDIDATE, never a verdict.
+
+    * WHEEL mode has no index in play at all: the only artifact-attributable failure is
+      pip naming the wheel it could not install, and nothing else counts. A dependency
+      fetch that failed is the network's problem, not the built wheel's.
+    * INDEX mode is settled by the caller re-reading the index (``index_absence_probe``)
+      — an independent confirmation, not the same connection's opinion (#12363 round 4).
     """
     text = (stderr or "").lower()
-    if wheel is not None and Path(wheel).name.lower() in text:
-        return True
+    if wheel is not None:
+        return Path(wheel).name.lower() in text
     return any(marker in text for marker in _INSTALL_ABSENCE_MARKERS)
+
+
+def index_absence_probe(package: str, timeout: float = 30.0) -> str:
+    """Re-read the index after pip failed: did the PROJECT itself disappear?
+
+    Returns one of INDEX_ABSENT / INDEX_UNREADABLE. Only INDEX_ABSENT justifies a FAIL:
+    anything else means the detector could not get an answer, which is UNKNOWN — a
+    non-zero exit that never tells a human to cut a release.
+    """
+    _doc, _reason, state = fetch_index(package, timeout)
+    return state
 
 
 OK = "OK"
@@ -533,6 +553,7 @@ def install_and_run(
     runner=subprocess.run,
     wheel: Path | None = None,
     transcript_path: Path | None = None,
+    absent_probe=index_absence_probe,
 ) -> tuple[Arm, str]:
     """Install the PUBLISHED wheel and run the documented first command.
 
@@ -599,11 +620,13 @@ def install_and_run(
                 "install",
                 "--quiet",
                 "--no-cache-dir",
-                # ⛔ Explicit, because pip ALSO reads /etc/pip.conf and
-                # /etc/xdg/pip/pip.conf unconditionally — an env strip cannot reach
-                # them, and a CLI flag outranks both. Without this, a runner with a
-                # global index configured grades the MIRROR's copy of the artifact
-                # (#12363 review round 3).
+                # ⛔ --isolated IGNORES every config file and every PIP_* env var, and
+                # --index-url then names PyPI explicitly. Both are required: measured,
+                # `--index-url` alone leaves a config-file `extra-index-url` MERGING
+                # ("Looking in indexes: https://pypi.org/simple, http://mirror/…"), so a
+                # runner with a global mirror could resolve tortoise-graph==0.2.0 from
+                # the MIRROR and report PASS over bytes PyPI never served (#12363 round 4).
+                "--isolated",
                 "--index-url",
                 PYPI_SIMPLE,
                 spec,
@@ -611,7 +634,7 @@ def install_and_run(
             f"install {spec}" if wheel is not None else f"install the PUBLISHED artifact {spec}",
         )
         if installed.returncode != 0 and not _install_failure_is_absence(
-            installed.stderr or "", spec, wheel
+            installed.stderr or "", wheel
         ):
             # A pip failure is not evidence that the ARTIFACT is broken: a DNS blip,
             # an index outage or a proxy 502 all land here, and reporting those as
@@ -626,6 +649,21 @@ def install_and_run(
                 ),
                 "\n".join(transcript),
             )
+        if installed.returncode != 0 and wheel is None:
+            # pip's absence vocabulary matched — but pip prints it for an UNREACHABLE
+            # index too (measured), so confirm independently before telling a human
+            # that users cannot install the release.
+            confirmed = absent_probe(package)
+            if confirmed != INDEX_ABSENT:
+                return (
+                    Arm(
+                        "engine-init",
+                        UNKNOWN,
+                        f"`pip install {spec}` failed and the index could not confirm the "
+                        f"release is absent ({confirmed}) — not the artifact's fault",
+                    ),
+                    "\n".join(transcript),
+                )
         if installed.returncode != 0:
             return (
                 Arm(
