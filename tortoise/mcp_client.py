@@ -1142,11 +1142,17 @@ def refusal_message(error: BaseException | str) -> str | None:
       rate-limit (429).
 
     `tortoise.mcp_auth.REFUSAL_PROSE_MESSAGES` is the ONE list of the prose ones, so
-    a reworded message cannot silently re-open the crash bucket, and each producer
-    writes the constant rather than a copy of the sentence. ⛔ Naming each wait-bound
-    arm explicitly (rather than leaning on their shared 60-char opening) is a PIN,
-    not a fix: they agree today only by prefix coincidence, and that is user-facing
-    prose a human may reword (pinned by
+    a reworded message cannot silently re-open the crash bucket. ⛔ HOW each family is
+    kept in sync differs, and the difference is stated rather than implied: the
+    wait-bound, margin, rate-limit and AUTHZ producers write the named CONSTANT, and
+    their pins DRIVE the producer (measured: reverting one to inline prose reds the
+    suite); the graph-target family is prose written literally in `mcp_auth`
+    (`_retarget_refusal`, the resolver), so its pin asserts against that module's own
+    functions where they exist and against the registered lead otherwise — a reword
+    there is a maintenance task, not a silent regression, because the lead and the
+    sentence live in the same file. ⛔ Naming each wait-bound arm explicitly (rather
+    than leaning on their shared 60-char opening) is a PIN, not a fix: they agree today
+    only by prefix coincidence (pinned by
     `test_every_wait_bound_prose_arm_is_a_designed_refusal`).
 
     A server-side CRASH's text is prose too (`Error calling tool: TypeError: …`)

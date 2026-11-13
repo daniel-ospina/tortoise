@@ -409,8 +409,9 @@ def test_every_designed_prose_refusal_is_classified_not_a_crash(monkeypatch):
     the sensitive-op rate-limit (429) — so `refusal_message` bucketed them as CRASHES:
     `tools/curate_graph.py` re-raised them bare (an uncaught traceback, rc 1, for a
     designed refusal) and the CLI printed `call failed: …` instead of the refusal
-    payload. The list is read from `mcp_auth`, and each producer writes the CONSTANT
-    rather than a copy of the sentence, so this pin cannot drift from the wire.
+    payload. The list is read from `mcp_auth`, and the MARGIN and 429 producers write
+    the named CONSTANT rather than a copy of the sentence — pinned in the test below by
+    driving the producers, so this one cannot claim more than it holds.
 
     A crash must still fall through — asserted here so a future widening cannot make
     the classifier answer yes for everything.
@@ -558,22 +559,39 @@ def test_the_authz_refusals_are_designed_refusals_not_crashes(monkeypatch):
     of rc 3 with the actionable text) and `tortoise-client call` printed `call failed:`
     for the most common refusal a scoped key receives.
 
-    Pinned from the PRODUCER's side: the messages are rebuilt from the leads the
-    producers write (`mcp_auth._REFUSAL_AUTHZ_*`), so a reworded producer that drops
-    the constant fails here instead of silently regressing.
+    Pinned from the PRODUCER's side — the scope seam is DRIVEN, not its text rebuilt —
+    so a producer that reverts to an inline copy of the sentence fails here instead of
+    silently turning a designed refusal back into a crash page. That is the difference
+    between this pin and a vacuous one: an earlier draft formatted the wire strings FROM
+    the constants, which stayed green when the producer was reworded (measured).
     """
     from fastmcp.exceptions import ToolError
 
     from tortoise import curation as C
     from tortoise import mcp_auth, mcp_client
+    from tortoise import mcp_server as seam
 
-    wires = (
-        f"{mcp_auth._REFUSAL_AUTHZ_UNKNOWN_TOOL_LEAD}florb — denied "
-        "(not present in the registry).",
-        f"{mcp_auth._REFUSAL_AUTHZ_WRITE_SCOPE_LEAD}tortoise_create_point.",
-        f"{mcp_auth._REFUSAL_AUTHZ_READ_SCOPE_LEAD}tortoise_query.",
-        f"{mcp_auth._REFUSAL_AUTHZ_GRAPH_SCOPED_LEAD}tortoise_org_create.",
-    )
+    # ── the four AUTHZ refusals, raised by the seam itself ────────────────
+    wires = []
+    token = mcp_auth._current_scopes.set([])  # no scopes, no legacy full access
+    try:
+        assert not mcp_auth._current_legacy_full_access.get()
+        for tool in ("tortoise_query", "tortoise_create_point", "florb"):
+            with pytest.raises(seam.AuthorizationError) as caught:
+                seam._enforce_mcp_tool_scope(tool)
+            wires.append(str(caught.value))
+    finally:
+        mcp_auth._current_scopes.reset(token)
+
+    graph_token = mcp_auth._current_graph_id.set("org_x_g_aaa")
+    try:
+        with pytest.raises(seam.AuthorizationError) as caught:
+            seam._reject_graph_bound_mcp_org_surface("pack installation")
+        wires.append(str(caught.value))
+    finally:
+        mcp_auth._current_graph_id.reset(graph_token)
+
+    assert len(wires) == 4, wires
     for wire in wires:
         assert mcp_client.refusal_message(wire) == wire, wire
         assert mcp_client.refusal_message(ToolError(wire)) == wire, wire
@@ -594,7 +612,6 @@ def test_the_authz_refusals_are_designed_refusals_not_crashes(monkeypatch):
     with pytest.raises(C.CurationRefused) as caught:
         mod._live_call_tool("tortoise_create_point", {})
     assert str(caught.value) == wires[1], str(caught.value)
-
 
 def test_a_total_outage_of_the_orientation_summary_is_a_refusal(monkeypatch):
     """`tortoise_overview()` with no `section` must not bury a total outage.
