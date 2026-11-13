@@ -893,7 +893,10 @@ def install_and_run(
                     f"`pip install` could not be evaluated (exit {installed.returncode}): "
                     # ⛔ The LAST LINE, not `[-1:]` — a one-element LIST interpolates its
                     # repr (`['ERROR: …']`) into the arm detail, which is rendered
-                    # verbatim in the step summary and the issue body (#12363 round 17).
+                    # verbatim in the step summary and the `--json` payload (#12363 round 17;
+                    # ⛔ NOT the alert issue's body — that body is `$why` + `tail -n 40` of the
+                    # TRANSCRIPT file, so an arm detail reaches it only by way of the pip output
+                    # the transcript already carries. Measured, #12422 round-18 review P3.)
                     f"{next(iter((installed.stderr or '').strip().splitlines()[-1:]), 'no output')}",
                 ),
                 "\n".join(transcript),
