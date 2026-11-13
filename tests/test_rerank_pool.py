@@ -555,12 +555,17 @@ def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
     """
     nonce = uuid.uuid4().hex[:8]
     q = f"zebrafish {nonce}"
-    # Filler passages all contain the query terms, so fusion has every reason to
-    # rank them; the marker contains them too but is otherwise unremarkable, so
-    # its survival must come from the SCORER, not from lexical accident.
+    # ⛔ THE PREMISE MUST BE CONSTRUCTED, NOT ASSUMED. Filler passages repeat the
+    # query terms THREE times each; the marker carries them once and is longer.
+    # Fusion is term-frequency weighted, so the fillers outrank the marker by
+    # construction — measured here: one occurrence per filler put the marker
+    # FIRST in a 6-doc corpus on this box (so a `limit=2` cut contained it and the
+    # premise below failed), while three occurrences place it LAST. Without the
+    # repetition the test would be testing which way the ranker happened to
+    # break. The marker's survival must come from the SCORER.
     for i in range(5):
         sdk.create_point(kind="statement",
-                         content=f"{q} filler passage number {i}")
+                         content=f"{q} {q} {q} filler passage number {i}")
     marker = sdk.create_point(
         kind="statement",
         content=f"{q} — the exact zebrafish husbandry protocol for the marker")
