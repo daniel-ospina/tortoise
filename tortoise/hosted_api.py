@@ -163,6 +163,8 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     event_retention_interval,
     graph_offload_timeout_s,
     heartbeat_record,
+    load_persisted_loop_block,  # #12477: the wedge's evidence outlives the exit
+    loop_block_report,
     loop_heartbeat_info,
     loop_heartbeat_task,
     note_heartbeat_task,
@@ -173,7 +175,9 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
     run_on_daemon_worker,
+    set_dataplane_verdict_source,  # #12477: the 9090 check's data-plane term
     start_health_listener,
+    start_loop_block_sampler,
     start_stall_watchdog,
     workload_enter,
     workload_exit,
@@ -2002,6 +2006,75 @@ async def _first_contact_prewarm() -> None:
         _logger.warning("control plane: pre-warm not run: %s", exc)
 
 
+def _health_probe_stale_after_s() -> float:
+    """The liveness probe's own staleness window (seconds).
+
+    Read off the coordinator rather than restated, so the verdict flips exactly
+    when ``GET /health`` would start reporting ``probe result stale`` — one
+    number, two surfaces.
+    """
+    return float(getattr(_HEALTH_PROBE, "_stale_after", 30.0))
+
+
+def _liveness_dataplane_verdict() -> dict:
+    """The 9090 check's data-plane term, read from MEMORY only (#12477).
+
+    Registered with ``monitoring.set_dataplane_verdict_source`` at startup so
+    the ``/healthz`` listener can report whether the data plane answers without
+    importing this module, opening a socket, or touching the event loop — it may
+    be called from the listener's own thread while the app is wedged, which is
+    precisely when any of those would make the liveness signal a second victim.
+
+    The three states, and why they differ:
+
+    * ``healthy`` — a COMPLETED probe result, younger than its stale window,
+      says the DB answers. The age check is what makes this honest: the
+      coordinator's last-known-good is served for ``stale_after`` after the
+      plane dies, and a verdict that cannot tell "answers now" from "answered
+      before the outage" is the fossil this whole issue is about.
+    * ``failed`` — a fresh result that says NOT ok (the #1381/#2850 shape: a
+      stopped FalkorDB), or a result that is stale because the refresher itself
+      stopped. "Unknown for too long" is a failure of the DATA PLANE as far as
+      the door is concerned, and it is the shape a 600s wedge produces: the
+      refresher task is on the loop, so a blocked loop stops refreshing.
+    * ``unknown`` — no result at all yet (a few seconds after boot). NOT a
+      failure: a check that is red during every cold start teaches operators to
+      ignore it, and the loop-stale term already covers a boot that never gets
+      going.
+    """
+    try:
+        snap = _HEALTH_PROBE.snapshot()
+        meta = _HEALTH_PROBE.info()
+    except Exception as exc:  # noqa: BLE001 - a verdict must never raise
+        return {"state": "failed",
+                "detail": {"reason": "probe-state-unreadable"},
+                "error": f"{type(exc).__name__}: {exc}"[:200]}
+    age = meta.get("result_age_s")
+    in_flight = bool(meta.get("in_flight"))
+    if age is None:
+        return {"state": "unknown",
+                "detail": {"reason": "no-probe-result-yet",
+                           "in_flight": in_flight}, "error": None}
+    if age > _health_probe_stale_after_s():
+        return {"state": "failed",
+                "detail": {"reason": "probe-result-stale",
+                           "result_age_s": age,
+                           "in_flight": in_flight,
+                           "last_error": (snap or {}).get("error")},
+                "error": None}
+    if snap.get("ok") is not True:
+        return {"state": "failed",
+                "detail": {"reason": "probe-reports-not-ok",
+                           "result_age_s": age,
+                           "latency_ms": (snap or {}).get("latency_ms"),
+                           "last_error": (snap or {}).get("error")},
+                "error": None}
+    return {"state": "healthy",
+            "detail": {"result_age_s": age,
+                       "latency_ms": snap.get("latency_ms")},
+            "error": None}
+
+
 async def _health_probe_loop() -> None:
     """Keep ``_HEALTH_PROBE`` warm, entirely off the request path (#2850).
 
@@ -2544,6 +2617,35 @@ def _start_liveness(app) -> None:
     # (policy `on-failure`) to turn the non-zero exit into a RESTART.
     app.state._loop_watchdog = start_stall_watchdog(
         stop_event=app.state._loop_watchdog_stop)
+    # ── #12477: the loop-block EVIDENCE channel ────────────────────────────
+    # Armed here, AFTER the ceiling, and deliberately independent of it: the
+    # ceiling's job is to END a wedge (and it takes the stack with it), while
+    # this one's job is to say WHAT blocked the loop and leave a record that
+    # outlives the `os._exit`. Two threads because they answer two questions;
+    # folding the capture into the watchdog would mean the evidence exists only
+    # on deployments that armed a destructive ceiling.
+    #
+    # `loop_thread_ident` defaults to THIS thread's ident and this function runs
+    # ON the loop (called from the startup half of `_lifespan`), so the sampler
+    # observes the right thread without the loop having to be queried — which
+    # would be impossible precisely when it is blocked.
+    #
+    # The persisted record is loaded FIRST so `/health` reports the episode that
+    # killed the PREVIOUS process: measured 2026-11-13 (tortoise#12477), a 600s
+    # wedge was replaced by the ceiling and left no artifact at all, so the cause
+    # was unobtainable from outside.
+    with suppress(Exception):
+        load_persisted_loop_block()
+    app.state._loop_block_sampler_stop = threading.Event()
+    app.state._loop_block_sampler = start_loop_block_sampler(
+        loop_thread_ident=threading.get_ident(),
+        stop_event=app.state._loop_block_sampler_stop)
+    # ── #12477: the data-plane verdict the 9090 listener reports ───────────
+    # `/healthz` runs on its OWN thread and must not import this module, so the
+    # app registers a zero-I/O reader here. It reads the SAME coordinator
+    # `GET /health` reads (`_HEALTH_PROBE`), so the two surfaces cannot disagree
+    # about whether the data plane is answering.
+    set_dataplane_verdict_source(_liveness_dataplane_verdict)
 
 
 async def _stop_liveness(app) -> None:
@@ -2566,6 +2668,12 @@ async def _stop_liveness(app) -> None:
     stop = getattr(app.state, "_loop_watchdog_stop", None)
     if stop is not None:
         stop.set()
+    # #12477: the loop-block sampler must stop with the heartbeat it watches —
+    # shutdown makes the heartbeat legitimately stale, and a sampler left armed
+    # would file a "blocked loop" capture for a clean drain.
+    block_stop = getattr(app.state, "_loop_block_sampler_stop", None)
+    if block_stop is not None:
+        block_stop.set()
     pending = [t for t in (getattr(app.state, attr, None)
                            for attr in _LIVENESS_TASK_ATTRS) if t is not None]
     for task in pending:
@@ -7115,9 +7223,42 @@ async def health():
         loop_age_ms = None
     watcher = _backup_watcher_health()
     record = _record_health()
-    return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"])
+    try:
+        breaches = _monitoring.wait_bound_breach_counts()
+    except Exception as exc:  # a monitoring read must never 5xx
+        breaches = {"total": None, "by_surface": None, "recent": None,
+                    "error": f"wait_bound_breaches unreadable: {type(exc).__name__}"}
+    # ── #12477: a REFUSED request is a failure observable NOW ─────────────
+    # The cumulative counter above is deliberately not folded into `status`
+    # (#10185/#10620: a total that never resets would pin a deployment degraded
+    # for the life of the process). A WINDOW is the distinction that makes the
+    # reading usable: a request the transport wait bound refused inside the
+    # recent window means the door is refusing clients at this moment.
+    #
+    # Measured 2026-11-13 (this issue): `wait_bound_breaches.total` at 8 with a
+    # live 504 on `POST /v1/agent/signup`, while this handler answered
+    # `status: "ok"` and the platform reported `2/2 checks passing` over 30-45s
+    # timeouts on every data request. That is the whole defect: green while the
+    # data plane is unusable.
+    recent = (breaches or {}).get("recent") or {}
+    recent_total = recent.get("total")
+    refusing = bool(recent_total) if recent_total is not None else False
+    try:
+        loop_blocks = loop_block_report()
+    except Exception:  # a monitoring read must never 5xx
+        loop_blocks = None
+    return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"]
+                              and not refusing)
             else "degraded",
+            "degraded_reasons": ({"requests_refused_recently": recent_total}
+                                 if refusing else {}),
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
+            # #12477: the loop-block EVIDENCE (in-memory episodes + the last
+            # captured stack, loaded from the persisted record at boot when the
+            # previous process died of a wedge). `status` is NOT derived from it:
+            # an episode that already cleared is history, and a live one makes
+            # this endpoint unreachable anyway.
+            "loop_blocks": loop_blocks,
             "backup_watcher": watcher, "change_feed": _change_feed_health(),
             # #10602: the transport wait bound's own breach count. This is the
             # surface an operator curls FIRST, and on 2026-11-02T15:44Z it read
@@ -7128,7 +7269,7 @@ async def health():
             # tied to a failure that is observable NOW — which on THIS body
             # means `db.ok`, `backup_watcher.ok` and `record.ok` (the three
             # terms in the `status` expression above), not the counter.
-            "wait_bound_breaches": _monitoring.wait_bound_breach_counts(),
+            "wait_bound_breaches": breaches,
             "record": record, "build": _build_identity()}
 
 

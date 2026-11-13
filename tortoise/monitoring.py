@@ -17,8 +17,10 @@ import os
 import queue
 import socket
 import socketserver
+import sys
 import threading
 import time
+import traceback
 from collections import deque
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -865,6 +867,138 @@ WAIT_BOUND_BREACH_COUNT = Counter(
 # know exist".
 for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
     WAIT_BOUND_BREACH_COUNT.labels(surface=_surface)
+
+# ── #12477: the SAME channel, read as a WINDOW instead of a lifetime total ──
+# The counter above is cumulative since process start, and `status` deliberately
+# does not derive from it: a total that never resets would pin a deployment
+# `degraded` for the life of the process (#10185's forever-red / #10620). That
+# rule is right about TOTALS and does not apply to a WINDOW: a breach in the
+# last two minutes is a request the product REFUSED a moment ago, which is a
+# failure observable NOW — the exact reading `status` is reserved for.
+#
+# WHY IT IS NEEDED (measured 2026-11-13, tortoise#12477): with
+# `wait_bound_breaches.total` at 8 and a live 504 "wait budget exceeded" on
+# `POST /v1/agent/signup`, `/health` answered `status: "ok"`, `db.ok: true` and
+# the platform reported `2/2 checks passing` while every data request timed out.
+# The cumulative total alone cannot distinguish that state from a breach cleared
+# an hour ago, so no reader could fold it into a verdict — which is why the
+# deployment read green over an unusable data plane. The window is that
+# distinction.
+#
+#: Default window (seconds) in which a breach counts as a live failure. Env
+#: ``TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S``. A window, not a rate: ONE refused
+#: request is enough to say the door refused someone.
+WAIT_BOUND_HEALTH_WINDOW_S = 120.0
+#: Per-surface monotonic timestamps of recent breaches. Bounded (``maxlen``) so
+#: a breach storm cannot grow the process's memory; old entries are also pruned
+#: by AGE on read, so the bound is memory, never staleness.
+_WAIT_BOUND_RECENT: dict[str, deque[float]] = {
+    _s: deque(maxlen=1024) for _s in _WAIT_BOUND_SURFACES}
+_WAIT_BOUND_RECENT_LOCK = threading.Lock()
+
+
+def wait_bound_health_window_s() -> float:
+    """Resolve the recent-breach window (seconds); ``<= 0`` disables the term.
+
+    A malformed value falls back to the default with a warning rather than
+    raising: this is read on the liveness path, whose contract is that it always
+    answers.
+    """
+    raw = os.environ.get("TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S")
+    if raw is None or raw.strip() == "":
+        return WAIT_BOUND_HEALTH_WINDOW_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S=%r is not a number — using "
+            "the default %.0fs", raw, WAIT_BOUND_HEALTH_WINDOW_S)
+        return WAIT_BOUND_HEALTH_WINDOW_S
+    if not math.isfinite(value):
+        logger.warning(
+            "TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S=%r is not finite — using the "
+            "default %.0fs", raw, WAIT_BOUND_HEALTH_WINDOW_S)
+        return WAIT_BOUND_HEALTH_WINDOW_S
+    return max(0.0, value)
+
+
+def record_wait_bound_breach_recent(surface: str, at: float | None = None) -> None:
+    """Remember ONE breach timestamp for :func:`wait_bound_breach_window`.
+
+    ``at`` is a test seam (monotonic). Never raises beyond the surface
+    validation the caller already performs, and never touches I/O: the refusal
+    path must not pay for its own observation.
+    """
+    if surface not in _WAIT_BOUND_SURFACES:
+        raise ValueError(f"#12477: unknown wait-bound surface {surface!r}")
+    stamp = time.monotonic() if at is None else float(at)
+    with _WAIT_BOUND_RECENT_LOCK:
+        _WAIT_BOUND_RECENT[surface].append(stamp)
+
+
+def wait_bound_breach_window(window_s: float | None = None) -> dict:
+    """Breaches observed inside the recent window (#12477).
+
+    ``{"window_s": W, "total": n, "by_surface": {"mcp": n, "rest": n},
+    "last_breach_age_s": x|None, "error": None}``.
+
+    ⛔ NEVER RAISES, for the same contract reason as
+    :func:`wait_bound_breach_counts`: its readers are ``/health`` (which promises
+    never to 5xx) and the ``/healthz`` listener (which must answer even while the
+    app is wedged). A failed read reports ``total: None`` with an ``error``,
+    never a padded zero (the ``#3253`` rule).
+
+    ``window_s`` resolves from :func:`wait_bound_health_window_s` when omitted.
+    A window of ``0`` disables the term and reports ``total: 0`` with
+    ``enabled: false`` — distinguishable from a measured zero.
+    """
+    try:
+        window = wait_bound_health_window_s() if window_s is None else float(window_s)
+    except Exception as exc:  # noqa: BLE001 - a monitoring read must not raise
+        return {"window_s": None, "total": None, "by_surface": None,
+                "last_breach_age_s": None, "enabled": False,
+                "error": f"wait_bound window unreadable: {type(exc).__name__}"}
+    if not math.isfinite(window) or window <= 0:
+        return {"window_s": window, "total": 0,
+                "by_surface": dict.fromkeys(_WAIT_BOUND_SURFACES, 0),
+                "last_breach_age_s": None, "enabled": False, "error": None}
+    try:
+        now = time.monotonic()
+        cutoff = now - window
+        by_surface = dict.fromkeys(_WAIT_BOUND_SURFACES, 0)
+        newest: float | None = None
+        with _WAIT_BOUND_RECENT_LOCK:
+            for surface, stamps in _WAIT_BOUND_RECENT.items():
+                # Filter by AGE, never by position: a stamp may be appended out
+                # of order (a caller passing an explicit ``at``, a test, a
+                # clock adjustment), so popping from the left would keep a
+                # genuinely old stamp that happened to arrive last and report a
+                # breach the window should not contain. Rebuilding the deque is
+                # O(n) over a bounded 1024 and keeps the memory bound intact.
+                kept = deque((t for t in stamps if t >= cutoff),
+                             maxlen=stamps.maxlen)
+                _WAIT_BOUND_RECENT[surface] = kept
+                by_surface[surface] = len(kept)
+                if kept:
+                    newest = max(newest, kept[-1]) if newest else max(kept)
+    except Exception as exc:  # noqa: BLE001 - a monitoring read must not raise
+        logger.warning("#12477: wait-bound window unreadable: %r", exc)
+        return {"window_s": window, "total": None, "by_surface": None,
+                "last_breach_age_s": None, "enabled": True,
+                "error": f"wait_bound window unreadable: "
+                         f"{type(exc).__name__}"}
+    return {"window_s": window, "total": sum(by_surface.values()),
+            "by_surface": by_surface,
+            "last_breach_age_s": (None if newest is None
+                                  else round(max(0.0, now - newest), 2)),
+            "enabled": True, "error": None}
+
+
+def reset_wait_bound_breach_window() -> None:
+    """Clear the recent-breach window (test seam / ops recovery)."""
+    with _WAIT_BOUND_RECENT_LOCK:
+        for surface, stamps in _WAIT_BOUND_RECENT.items():
+            _WAIT_BOUND_RECENT[surface] = deque(maxlen=stamps.maxlen)
 # #10515: a LEGITIMATE revision was refused by `update_point`'s ABSENT arm.
 #
 # The arm itself is #10119's and is correct: an id absent from the live graph at
@@ -1729,6 +1863,18 @@ def record_wait_bound_breach(surface: str) -> None:
             f"bounded to {_WAIT_BOUND_SURFACES} so the health report's "
             f"zero-padding cannot omit a counted surface")
     WAIT_BOUND_BREACH_COUNT.labels(surface=surface).inc()
+    # #12477: the same breach, stamped so a LIVENESS check can tell "refused a
+    # moment ago" from "refused an hour ago". One write, one decision — the
+    # window is fed HERE rather than at the call sites, so a detector can never
+    # count a breach without stamping it. Wrapped because the surrounding call
+    # sites catch around the counter, and a stamp failure must not replace the
+    # refusal the caller is already composing.
+    try:
+        record_wait_bound_breach_recent(surface)
+    except Exception:  # noqa: BLE001 - observation must never replace the refusal
+        logger.warning(
+            "#12477: wait-bound breach stamp failed for %s", surface,
+            exc_info=True)
 
 
 def wait_bound_breach_counts() -> dict:
@@ -1774,7 +1920,14 @@ def wait_bound_breach_counts() -> dict:
                 "error": f"wait_bound_breaches unreadable: "
                          f"{type(exc).__name__}"}
     return {"total": sum(by_surface.values()), "by_surface": by_surface,
-            "error": None}
+            "error": None,
+            # #12477: the WINDOWED sibling. Read here so every consumer of this
+            # channel (`/health`, `/metrics`, the `/healthz` listener) gets the
+            # same number from one resolver and cannot disagree about whether
+            # the data plane is refusing requests RIGHT NOW. Additive: the
+            # cumulative `total` keeps its meaning, so a reader keyed on it is
+            # unaffected.
+            "recent": wait_bound_breach_window()}
 
 
 def record_silent_revision_loss(reason: str) -> None:
@@ -4631,27 +4784,397 @@ def _reset_heartbeat() -> None:
         _LOOP_HEARTBEAT_TICKS = 0
 
 
+# ── #12477: the loop-block EVIDENCE channel ──────────────────────────────
+# The heartbeat answers "is the loop ticking?". It does not answer "WHAT is
+# blocking it", and on the hosted deployment nothing else could: the process
+# that would hold the answer is the process that `os._exit`s at the stall
+# ceiling (#10585), and Fly's log is not readable from the box that needs it.
+# Measured 2026-11-13 (tortoise#12477): a 600s wedge was replaced by the hard
+# ceiling and left NO artifact — no stack, no counter, no file — so the cause
+# was unobtainable and the next occurrence would have shipped the same way.
+#
+# This records the LOOP THREAD's Python stack the moment the heartbeat goes
+# stale past a sampling threshold, twice over:
+#   * in memory (bounded), so `/health` and `/healthz` can report the episode
+#     count and the last stack while the process is still up; and
+#   * on the persistent volume (bounded JSONL), so it SURVIVES the restart the
+#     ceiling triggers — the artifact the next lane reads.
+#
+# Reading another thread's frames is what `faulthandler` does; it is safe from
+# a monitor thread (`sys._current_frames()` returns a snapshot dict and frame
+# code objects are immutable). Nothing here blocks, allocates unboundedly, or
+# runs on the loop: the sampler is its OWN daemon thread, deliberately separate
+# from `start_stall_watchdog` (which is armed only when an operator arms a
+# ceiling, and whose job is to kill, not to diagnose).
+
+#: Heartbeat age (seconds) at which a stack is captured. Above the largest
+#: legitimate on-loop operation the repository records (a 10s socket read; 60s
+#: at the operator maximum) so it does not fire on a healthy slow request, and
+#: far below LOOP_STALE_AFTER (90s) so the capture lands while the loop is still
+#: blocked in the thing that is about to make it stale. ``0`` disables.
+LOOP_BLOCK_SAMPLE_AFTER_S = 2.0
+#: Poll period of the sampler. Half a second bounds the sampling error well
+#: below the threshold while costing nothing (one monotonic read).
+LOOP_BLOCK_POLL_INTERVAL_S = 0.5
+#: Frames kept per capture (innermost first after reversal): enough to name the
+#: handler and the blocking call, short enough to read in one log line.
+LOOP_BLOCK_FRAME_LIMIT = 12
+#: Persistence bounds. Both are enforced, because an unbounded diagnostic is a
+#: new way to fill the volume the journal lives on.
+LOOP_BLOCK_RECORD_MAX_LINES = 200
+LOOP_BLOCK_RECORD_MAX_BYTES = 512 * 1024
+
+_LOOP_BLOCK_LOCK = threading.Lock()
+_LOOP_BLOCK_EPISODES = 0
+_LOOP_BLOCK_MAX_AGE_S = 0.0
+_LOOP_BLOCK_LAST: dict | None = None
+_LOOP_BLOCK_PERSIST_ERROR: str | None = None
+
+
+def loop_block_sample_threshold_s() -> float:
+    """Resolve the capture threshold; ``<= 0`` disables capture.
+
+    Env ``TORTOISE_LOOP_BLOCK_SAMPLE_AFTER_S``. A malformed value falls back to
+    the default with a warning rather than raising — this is read by a daemon
+    thread whose absence would otherwise be silent.
+    """
+    raw = os.environ.get("TORTOISE_LOOP_BLOCK_SAMPLE_AFTER_S")
+    if raw is None or raw.strip() == "":
+        return LOOP_BLOCK_SAMPLE_AFTER_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "TORTOISE_LOOP_BLOCK_SAMPLE_AFTER_S=%r is not a number — using the "
+            "default %.1fs", raw, LOOP_BLOCK_SAMPLE_AFTER_S)
+        return LOOP_BLOCK_SAMPLE_AFTER_S
+    if not math.isfinite(value):
+        logger.warning(
+            "TORTOISE_LOOP_BLOCK_SAMPLE_AFTER_S=%r is not finite — DISABLED", raw)
+        return 0.0
+    return max(0.0, value)
+
+
+def loop_block_record_path() -> str | None:
+    """Where the persisted record lives, or ``None`` when nothing is writable.
+
+    ``TORTOISE_LOOP_BLOCK_RECORD`` wins. Otherwise the record sits BESIDE the
+    hosted event journal's base dir (``TORTOISE_EVENT_LOG_BASE_DIR=/data/events``
+    → ``/data/loop-blocks.jsonl``): the same persistent volume, one level up, so
+    it is not swept with the journal. Absent both, there is no persistence and
+    that absence is REPORTED (``persisted`` in :func:`loop_block_report`), never
+    silently assumed away — an unread artifact and a clean run must not read the
+    same.
+    """
+    explicit = os.environ.get("TORTOISE_LOOP_BLOCK_RECORD")
+    if explicit and explicit.strip():
+        return explicit.strip()
+    base = os.environ.get("TORTOISE_EVENT_LOG_BASE_DIR")
+    if not base or not base.strip():
+        return None
+    base = base.strip().rstrip("/")
+    parent = os.path.dirname(base) or "/data"
+    return os.path.join(parent, "loop-blocks.jsonl")
+
+
+def _format_frames(frames, limit: int = LOOP_BLOCK_FRAME_LIMIT) -> list[str]:
+    """Render a frame chain as ``file:line in function``, innermost LAST."""
+    rendered: list[str] = []
+    try:
+        stack = traceback.extract_stack(frames)
+    except Exception:  # noqa: BLE001 - diagnostics must never raise
+        return rendered
+    for entry in stack[-limit:]:
+        rendered.append(f"{os.path.basename(entry.filename)}:{entry.lineno} "
+                        f"in {entry.name}")
+    return rendered
+
+
+def _trim_loop_block_record(path: str) -> None:
+    """Keep the record inside BOTH bounds (lines and bytes). Never raises.
+
+    Both are enforced because they bound different things: ``max_lines`` bounds
+    the read cost, ``max_bytes`` bounds the volume — a line carrying a full
+    frame chain is ~500 bytes, so a line-only bound silently exceeds a byte
+    budget. At least ONE line is always kept: a record that keeps nothing after
+    surviving a wedge is the failure mode it exists to prevent.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+        keep: list[str] = []
+        used = 0
+        for line in reversed(lines):
+            size = len(line.encode("utf-8"))
+            if keep and (len(keep) >= LOOP_BLOCK_RECORD_MAX_LINES
+                         or used + size > LOOP_BLOCK_RECORD_MAX_BYTES):
+                break
+            keep.append(line)
+            used += size
+        keep.reverse()
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.writelines(keep)
+    except OSError:
+        pass
+
+
+def _persist_loop_block(event: dict, path: str) -> None:
+    """Append one capture to the bounded JSONL record. Never raises."""
+    global _LOOP_BLOCK_PERSIST_ERROR
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+        # Bound the file: an unbounded diagnostic is a way to fill the volume.
+        try:
+            if os.path.getsize(path) > LOOP_BLOCK_RECORD_MAX_BYTES:
+                _trim_loop_block_record(path)
+        except OSError:
+            pass
+        if _LOOP_BLOCK_PERSIST_ERROR is not None:
+            _LOOP_BLOCK_PERSIST_ERROR = None
+    except Exception as exc:  # noqa: BLE001 - never let persistence kill the sampler
+        _LOOP_BLOCK_PERSIST_ERROR = f"{type(exc).__name__}: {exc}"[:200]
+        logger.warning("#12477: loop-block record write failed (%s): %s",
+                       path, _LOOP_BLOCK_PERSIST_ERROR)
+
+
+def record_loop_block(*, age_s: float, frames=None, thread_ident=None) -> dict:
+    """Record ONE loop-blocking episode and return the event that was written.
+
+    ``frames`` defaults to the CURRENT thread's frame chain, which is the wrong
+    thread for the production sampler — it always passes the loop thread's
+    frame. It is the default so a caller standing on the blocked thread (a test,
+    a self-diagnosis hook) can capture itself.
+
+    Side effects are bounded and fail-soft: one WARNING log line, one in-memory
+    episode counter, at most one bounded append to the persistent record.
+    """
+    global _LOOP_BLOCK_EPISODES, _LOOP_BLOCK_MAX_AGE_S, _LOOP_BLOCK_LAST
+    ident = threading.get_ident() if thread_ident is None else thread_ident
+    frame = sys._current_frames().get(ident) if frames is None else frames
+    rendered = _format_frames(frame) if frame is not None else []
+    event = {
+        "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "loop_age_s": round(float(age_s), 3),
+        "loop_ticks": heartbeat_read()[1],
+        "workload_in_flight": workload_in_flight(),
+        "loop_thread": threading.current_thread().name if frames is None else None,
+        "frames": rendered,
+    }
+    with _LOOP_BLOCK_LOCK:
+        _LOOP_BLOCK_EPISODES += 1
+        _LOOP_BLOCK_MAX_AGE_S = max(_LOOP_BLOCK_MAX_AGE_S, float(age_s))
+        _LOOP_BLOCK_LAST = event
+    logger.warning(
+        "#12477: the event loop has not ticked for %.1fs — the loop thread is "
+        "blocked in: %s", float(age_s),
+        " <- ".join(reversed(rendered)) or "(no Python frame captured)")
+    path = loop_block_record_path()
+    if path:
+        _persist_loop_block(event, path)
+    return event
+
+
+def loop_block_report(limit: int = LOOP_BLOCK_FRAME_LIMIT) -> dict:
+    """In-memory summary of loop-block episodes (#12477). Never raises.
+
+    ``{"episodes": n, "max_age_s": x, "last": {...}|None, "persist_path": p,
+    "persist_error": e|None, "enabled": bool}``. ``last`` is the most recent
+    capture (or the one loaded from the persisted record at boot, so a wedge
+    that killed the previous process is still readable in this one).
+    """
+    path = loop_block_record_path()
+    with _LOOP_BLOCK_LOCK:
+        last = dict(_LOOP_BLOCK_LAST) if _LOOP_BLOCK_LAST else None
+        report = {
+            "episodes": _LOOP_BLOCK_EPISODES,
+            "max_age_s": round(_LOOP_BLOCK_MAX_AGE_S, 3),
+            "last": (None if last is None else {
+                **last,
+                "frames": last.get("frames", [])[-limit:],
+            }),
+            "persist_path": path,
+            "persist_error": _LOOP_BLOCK_PERSIST_ERROR,
+            "enabled": loop_block_sample_threshold_s() > 0,
+        }
+    return report
+
+
+def load_persisted_loop_block() -> dict | None:
+    """Load the LAST persisted capture, if any (read at boot). Never raises.
+
+    Call once at startup so `loop_block_report()` carries the episode that
+    killed the PREVIOUS process: the whole point of persisting it is that the
+    wedge's evidence outlives the `os._exit` that ends it.
+    """
+    global _LOOP_BLOCK_LAST
+    path = loop_block_record_path()
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()[-1:]
+        if not lines:
+            return None
+        event = json.loads(lines[0])
+        if not isinstance(event, dict):
+            return None
+    except FileNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001 - a diagnostic read must not break boot
+        logger.warning("#12477: persisted loop-block record unreadable: %r", exc)
+        return None
+    if _LOOP_BLOCK_LAST is None:
+        with _LOOP_BLOCK_LOCK:
+            _LOOP_BLOCK_LAST = event
+    return event
+
+
+def _reset_loop_blocks() -> None:
+    """Test seam: clear the in-memory loop-block summary."""
+    global _LOOP_BLOCK_EPISODES, _LOOP_BLOCK_MAX_AGE_S, _LOOP_BLOCK_LAST
+    global _LOOP_BLOCK_PERSIST_ERROR
+    with _LOOP_BLOCK_LOCK:
+        _LOOP_BLOCK_EPISODES = 0
+        _LOOP_BLOCK_MAX_AGE_S = 0.0
+        _LOOP_BLOCK_LAST = None
+        _LOOP_BLOCK_PERSIST_ERROR = None
+
+
+def start_loop_block_sampler(*, loop_thread_ident: int | None = None,
+                             threshold_s: float | None = None,
+                             poll_interval: float | None = None,
+                             stop_event: threading.Event | None = None) -> threading.Thread | None:
+    """Daemon thread that captures the loop thread's stack while it is blocked.
+
+    ``loop_thread_ident`` defaults to the CALLING thread's ident, which is what
+    a startup coroutine wants (it runs ON the loop). Never runs on the loop and
+    never touches the loop's state beyond the heartbeat's monotonic stamp.
+
+    One capture per EPISODE, not per poll: an episode opens when the age first
+    crosses the threshold and closes once the age is back under half of it, so a
+    five-minute wedge produces one stack (plus one per further 10x escalation),
+    not six hundred identical lines.
+    """
+    if threshold_s is None:
+        threshold_s = loop_block_sample_threshold_s()
+    if not math.isfinite(threshold_s) or threshold_s <= 0:
+        logger.info("#12477: loop-block sampling DISABLED (threshold=%s)",
+                    threshold_s)
+        return None
+    ident = threading.get_ident() if loop_thread_ident is None else loop_thread_ident
+    interval = poll_interval or LOOP_BLOCK_POLL_INTERVAL_S
+    stop = stop_event or threading.Event()
+
+    def _sample() -> None:
+        in_episode = False
+        #: age at which the NEXT capture is forced while the same episode runs
+        #: (10x steps): a wedge that grows from 2s to 600s is not one event.
+        next_capture_at = threshold_s
+        while not stop.wait(interval):
+            age = loop_heartbeat_age()
+            if age is None:
+                continue
+            if age < threshold_s / 2.0:
+                in_episode = False
+                next_capture_at = threshold_s
+                continue
+            if in_episode and age < next_capture_at:
+                continue
+            in_episode = True
+            next_capture_at = max(age * 10.0, threshold_s)
+            try:
+                record_loop_block(age_s=age, thread_ident=ident)
+            except Exception:  # noqa: BLE001 - a sampler must never die
+                logger.warning("#12477: loop-block capture failed", exc_info=True)
+
+    thread = threading.Thread(target=_sample, name="tortoise-loop-block-sampler",
+                              daemon=True)
+    thread.start()
+    return thread
+
+
+# ── #12477: the data plane's verdict, for the liveness listener ──────────
+# The 9090 listener must not import `hosted_api` (circular, and it deliberately
+# touches nothing but in-memory state), so the app REGISTERS a zero-I/O reader
+# at startup instead. Unregistered is reported as such and is NOT a failure: a
+# self-hosted lane with no such reader is not a broken deployment, and a check
+# that is red for a wiring choice teaches operators to ignore it.
+_DATAPLANE_VERDICT: Callable[[], dict] | None = None
+
+
+def set_dataplane_verdict_source(reader: Callable[[], dict] | None) -> None:
+    """Register the in-memory data-plane verdict reader (#12477).
+
+    ``reader()`` must be synchronous, non-blocking and non-raising-by-contract;
+    it is called on the liveness listener's own thread while the app may be
+    wedged, so anything that touches a socket, a lock held by the app, or the
+    event loop would turn the liveness signal into a second victim of the
+    outage it exists to report. It must return
+    ``{"state": "healthy"|"failed"|"unknown", ...}``.
+    """
+    global _DATAPLANE_VERDICT
+    _DATAPLANE_VERDICT = reader
+
+
+def dataplane_verdict() -> dict:
+    """Read the registered data-plane verdict, fail-closed on a broken reader.
+
+    ``{"state": "healthy"|"failed"|"unknown", "registered": bool,
+    "detail": ..., "error": e|None}``. A raising reader is ``failed``: a verdict
+    that cannot be read is not evidence of health (the #4034 family — an
+    instrument that reports OK when it cannot see). Unregistered is ``unknown``
+    and never a failure.
+    """
+    reader = _DATAPLANE_VERDICT
+    if reader is None:
+        return {"state": "unknown", "registered": False, "detail": None,
+                "error": None}
+    try:
+        result = reader()
+    except Exception as exc:  # noqa: BLE001 - liveness must still answer
+        return {"state": "failed", "registered": True, "detail": None,
+                "error": f"verdict reader raised: {type(exc).__name__}: {exc}"[:200]}
+    if not isinstance(result, dict):
+        return {"state": "failed", "registered": True, "detail": None,
+                "error": "verdict reader returned a non-dict"}
+    state = result.get("state")
+    if state not in ("healthy", "failed", "unknown"):
+        return {"state": "failed", "registered": True, "detail": result,
+                "error": f"unrecognised verdict state {state!r}"}
+    return {"state": state, "registered": True,
+            "detail": result.get("detail"), "error": result.get("error")}
+
+
 # ── #2850 item 4: the DEDICATED liveness listener (own port) ─────────────
 #
 # Fixed interface contract: port 9090, bound 0.0.0.0, ``GET /healthz`` ->
-# 200 (loop fresh, OR loop stale with work in flight) / 503 (loop stale AND
-# nothing in flight). A non-routing top-level Fly check points here, so the
-# answer must NOT depend on the app's event loop: this is a plain
-# ``ThreadingHTTPServer`` on its own daemon thread, in its own OS thread(s),
-# touching nothing but in-memory state. It never uses
-# ``asyncio.to_thread`` or the app's default executor, so it cannot be
-# queued behind ~89 stalled DB calls the way /health was.
+# 200 (loop ticking AND no failed-dependency term) / 503 otherwise. A
+# non-routing top-level Fly check points here, so the answer must NOT depend on
+# the app's event loop: this is a plain ``ThreadingHTTPServer`` on its own daemon
+# thread, in its own OS thread(s), touching nothing but in-memory state. It
+# never uses ``asyncio.to_thread`` or the app's default executor, so it cannot
+# be queued behind ~89 stalled DB calls the way /health was.
 #
-# ⚠ SIGNAL CONTRACT (round-3 review P1): this is an ALERTING signal, NOT an
-# availability/routing gate. It must not be wired as one (e.g. a Fly check
-# whose failure de-registers the machine) until the synchronous DB/LLM work
-# in ``_capture_session_impl`` is offloaded off the event loop — that is the
-# durable follow-up. Reason: a merely BUSY loop is not a wedged loop, and
-# this app runs seconds-long synchronous DB queries and 60s-timeout LLM calls
-# on the loop, so a legitimate request can exceed ``LOOP_STALE_AFTER``. With a
-# loop-stale 503 and 2xx-means-healthy semantics, that would de-register the
-# sole machine — a total outage. The handler therefore reports 503 ONLY for
-# stale-and-idle (a genuinely wedged loop); see ``_HealthzHandler.do_GET``.
+# ⚠ SIGNAL CONTRACT (#12477, superseding the round-3 "stale AND idle" rule):
+# this is a NON-ROUTING top-level check. Fly's proxy ignores top-level checks
+# when choosing where to route, so a red here cannot de-register the machine —
+# it fails a deploy's health wait and appears in `flyctl checks list`. That is
+# exactly what an honest health check may do, and it is why the previous
+# conjunct (which reported 200 for a stale loop whenever ANY request was in
+# flight) is gone: it reported GREEN through the two wedges it was built for
+# (2026-11-02: 97 min wedged, 2/2 passing; 2026-11-13: tortoise#12477, 2/2
+# passing over 30-45s timeouts on every data request). A wedged app holds an MCP
+# SSE stream in flight, so `workload_idle` is false BY CONSTRUCTION during the
+# wedge — the gate could only ever have been open. #10585 settled the reasoning
+# one module over: a request in flight does not stop the loop ticking; only a
+# BLOCKED loop does. A missing TICK is the evidence, and `workload_idle` remains
+# in the payload as a diagnostic, not a veto.
+#
+# The dependency terms (a failed data-plane verdict, and a request the transport
+# wait bound refused inside the recent window) are what close the OTHER half of
+# tortoise#12477: the app was not merely wedged, it was REFUSING work, and
+# nothing on the health surface said so.
 #
 # Deliberately NOT reusing ``serve_health``/``_Handler`` above: that handler
 # is Bearer-auth-gated in prod mode (#7395) and a platform check cannot send
@@ -4755,14 +5278,24 @@ def _drain_unread_now(sock, max_bytes: int) -> None:
 
 
 class _HealthzHandler(BaseHTTPRequestHandler):
-    """Liveness only: one in-memory heartbeat read, HTTP 200 or 503.
+    """Liveness + dependency verdict: in-memory reads only, HTTP 200 or 503.
 
-    The 503 condition is STALE **AND** IDLE (round-3 review P1): a busy loop
-    is not a wedged loop, so a stale heartbeat with a request in flight
-    (``workload_is_idle()`` false) reports 200. This is an ALERTING signal,
-    not an availability/routing gate — do not wire its failure to machine
-    de-registration until the synchronous on-loop work is offloaded (the
-    durable follow-up).
+    #12477: two terms decide the verdict, both read from process memory:
+
+    1. **The loop's own progress.** 503 when the heartbeat is stale — a missing
+       TICK, not "a request is in flight" (#10585's reasoning, applied here).
+       A busy loop still ticks; only a BLOCKED one stops.
+    2. **The data plane.** 503 when the registered verdict reader reports
+       ``failed``, or when the transport wait bound REFUSED a request inside the
+       recent window (:func:`wait_bound_breach_window`). This is what makes the
+       check honest about the state tortoise#12477 measured: `/health` answered
+       ``ok`` and the platform reported ``2/2 checks passing`` while every data
+       request was refused or timed out.
+
+    It is a TOP-LEVEL Fly check (fly.toml ``[checks.loop_liveness]``), so a red
+    result fails a deploy's health wait and appears in ``flyctl checks list``;
+    it cannot de-register the machine — the proxy ignores top-level checks for
+    routing, and the routing check is the TCP one.
 
     Hardened because this port is unauthenticated and must never become the
     way the machine is exhausted (review P1/P2):
@@ -4867,20 +5400,58 @@ class _HealthzHandler(BaseHTTPRequestHandler):
             return
         info = loop_heartbeat_info()
         stale = bool(info["loop_stale"])
-        # STALE **AND** IDLE — the same idle predicate the stall watchdog
-        # uses (#2850 round-3 review P1). A busy loop is not a wedged loop:
-        # the live top-level Fly check points here (fly.toml
-        # [checks.loop_liveness]) and 2xx-means-healthy to flyctl, so
-        # answering 503 for a legitimate synchronous request would fail
-        # EVERY deploy and cry wolf on the operator signal. It cannot
-        # de-register the machine — the proxy ignores top-level checks for
-        # routing; only flyctl's deploy wait reads it. Only "nothing has
-        # ticked AND nothing is in flight" is a genuinely wedged loop.
+        # ── #12477: the verdict is STALE **OR** A FAILED DEPENDENCY. ────────
+        #
+        # The `stale AND idle` conjunct this replaces could not see the wedge it
+        # exists for. #10585 already recorded why, one file over: "a request in
+        # flight does NOT stop the loop ticking — it awaits, releasing the loop;
+        # only a BLOCKED loop stops it. So 'in flight' is not evidence of
+        # progress. A TICK is." A wedged app keeps an MCP SSE stream counted in
+        # flight, so `workload_idle` is FALSE by construction DURING the wedge —
+        # measured 2026-11-02 (97 min wedged, `2/2 checks passing`) and again
+        # 2026-11-13 (tortoise#12477, `2/2 checks passing` over 30–45s timeouts
+        # on every data request). The conjunct therefore made the one state the
+        # check exists to report the one state it could not report.
+        #
+        # The de-registration fear that motivated the conjunct does not apply to
+        # THIS listener: the Fly check pointing here is a TOP-LEVEL check, and
+        # the proxy ignores top-level checks for routing (fly.toml says so at
+        # both sites). A red here fails the deploy health WAIT and shows in
+        # `flyctl checks list`; it cannot take the machine out of service. The
+        # routing check is the TCP one, which never rides this predicate.
+        #
+        # `workload_idle` stays in the payload as the DIAGNOSTIC it always was;
+        # it just no longer vetoes the verdict.
         idle = workload_is_idle()
-        wedged = stale and idle
-        self._send(503 if wedged else 200,
-                   {"status": "stale" if wedged else "ok",
-                    "workload_idle": idle, **info})
+        plane = dataplane_verdict()
+        recent = wait_bound_breach_window()
+        recent_total = recent.get("total")
+        # A recent breach is a request the product REFUSED moments ago; the
+        # verdict's own contract is "the door is refusing", so it fails here.
+        # ``None`` (an unreadable window) is NOT folded in: it is reported, and
+        # the plane verdict beside it is the primary term. Folding an
+        # unmeasurable diagnostic in would make the check red for its own
+        # blindness rather than the app's state, and an operator cannot act on
+        # that.
+        refusing = bool(recent_total)
+        plane_failed = plane.get("state") == "failed"
+        failing = bool(stale or plane_failed or refusing)
+        reasons = []
+        if stale:
+            reasons.append("loop-not-scheduling")
+        if plane_failed:
+            reasons.append("data-plane-failed")
+        if refusing:
+            reasons.append("requests-refused")
+        self._send(503 if failing else 200,
+                   {"status": ("ok" if not failing
+                              else "stale" if stale else "unhealthy"),
+                    "reasons": reasons,
+                    "workload_idle": idle,
+                    "loop_block_episodes": loop_block_report()["episodes"],
+                    "dataplane": plane,
+                    "recent_breaches": recent,
+                    **info})
 
     def _method_not_allowed(self):
         self._send(405, {"status": "method-not-allowed", "allow": "GET"})

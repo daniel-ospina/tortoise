@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import os
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -2899,9 +2901,16 @@ def _clean_heartbeat_and_listeners():
     no listener bound behind."""
     monitoring._reset_heartbeat()
     monitoring._reset_workload()
+    # #12477: the recent-breach window and the registered data-plane verdict
+    # reader are process-global too, and a breach left by one test would make
+    # the next test's "the door is healthy" assertion red for the wrong reason.
+    monitoring.reset_wait_bound_breach_window()
+    monitoring.set_dataplane_verdict_source(None)
     yield
     monitoring._reset_heartbeat()
     monitoring._reset_workload()
+    monitoring.reset_wait_bound_breach_window()
+    monitoring.set_dataplane_verdict_source(None)
     monitoring.stop_health_listener()
 
 
@@ -3087,15 +3096,30 @@ class TestHealthzListener:
         status, _ = _http_get(server.server_address[1])
         assert status == 503
 
-    def test_busy_loop_is_not_reported_as_wedged(self):
-        """Round-3 review P1: a merely BUSY loop is not a wedged loop.
+    def test_a_stale_loop_reports_503_even_with_work_in_flight(self):
+        """#12477: an in-flight request is NOT evidence of progress.
 
-        ``_capture_session_impl`` runs seconds-long synchronous DB/LLM work on
-        the event loop, so a legitimate request can exceed LOOP_STALE_AFTER.
-        With the deferred Fly check pointing here and 2xx-means-healthy, a 503
-        for that case would de-register the sole machine (total outage). The
-        signal must therefore be STALE **AND** IDLE — the same idle predicate
-        the stall watchdog uses.
+        This INVERTS the round-3 "STALE **AND** IDLE" rule this class used to
+        pin, and the inversion is the fix. That rule could not see the wedge it
+        existed for: a wedged app holds an open ``GET /mcp`` SSE stream, so
+        ``workload_idle`` is FALSE by construction DURING the wedge. Measured
+        twice on the deployed app with this predicate in place:
+
+          * 2026-11-02 (`#10585`): 97 min wedged, ``loop_lag_max_ms`` 696164,
+            machine reporting ``2/2 checks passing``;
+          * 2026-11-13 (`#12477`): 30–45 s timeouts on every data request,
+            ``wait_bound_breaches.rest`` climbing, again ``2/2 checks passing``.
+
+        ``#10585`` settled the reasoning one module over: "a request in flight
+        does NOT stop the loop ticking — it awaits, releasing the loop; only a
+        BLOCKED loop stops it. So 'in flight' is not evidence of progress. A
+        TICK is." The tick is exactly what is missing here.
+
+        The de-registration fear that motivated the conjunct was also wrong
+        about THIS check: Fly's proxy ignores top-level checks for routing (the
+        routing check is the TCP one), so a red here fails a deploy health wait
+        and shows in ``flyctl checks list`` — it cannot take the machine out of
+        service. ``workload_idle`` stays in the payload as a diagnostic.
         """
         import time
 
@@ -3107,11 +3131,131 @@ class TestHealthzListener:
             status, body = _http_get(server.server_address[1])
         finally:
             monitoring.workload_exit()
-        assert status == 200, body
+        assert status == 503, body
         payload = json.loads(body)
-        assert payload["status"] == "ok"
+        assert payload["status"] == "stale"
         assert payload["loop_stale"] is True
         assert payload["workload_idle"] is False
+        assert "loop-not-scheduling" in payload["reasons"]
+
+    def test_a_failed_data_plane_reports_503_while_the_loop_is_fine(self):
+        """#12477 acceptance (2): the check fails when the DATA PLANE fails.
+
+        Injected, not asserted: the reader the app registers at startup is
+        replaced with one that reports ``failed`` (the shape
+        ``hosted_api._liveness_dataplane_verdict`` produces for a fresh probe
+        result whose ``ok`` is false). The loop heartbeat is FRESH, so the only
+        term that can make this 503 is the dependency — which is the whole
+        point: before this, a dead data plane behind a ticking loop reported
+        ``2/2 checks passing``.
+        """
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        monitoring.set_dataplane_verdict_source(
+            lambda: {"state": "failed",
+                     "detail": {"reason": "probe-reports-not-ok"},
+                     "error": None})
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.set_dataplane_verdict_source(None)
+        assert status == 503, body
+        payload = json.loads(body)
+        assert payload["status"] == "unhealthy"
+        assert payload["reasons"] == ["data-plane-failed"]
+        assert payload["dataplane"]["state"] == "failed"
+        assert payload["loop_stale"] is False
+
+    def test_a_healthy_data_plane_keeps_the_check_green(self):
+        """The negative control for the test above: same wiring, ok verdict."""
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        monitoring.set_dataplane_verdict_source(
+            lambda: {"state": "healthy", "detail": {"result_age_s": 1.0},
+                     "error": None})
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.set_dataplane_verdict_source(None)
+        assert status == 200, body
+        payload = json.loads(body)
+        assert payload["reasons"] == []
+        assert payload["dataplane"]["state"] == "healthy"
+
+    def test_an_unregistered_verdict_reader_is_unknown_never_a_failure(self):
+        """A self-hosted lane with no reader is not a broken deployment.
+
+        A check that is red for a wiring choice teaches operators to ignore it,
+        so "not registered" must not fail — and must not silently read as
+        ``healthy`` either (``registered: false`` says which it is).
+        """
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        monitoring.set_dataplane_verdict_source(None)
+        status, body = _http_get(server.server_address[1])
+        assert status == 200, body
+        payload = json.loads(body)
+        assert payload["dataplane"] == {"state": "unknown", "registered": False,
+                                        "detail": None, "error": None}
+
+    def test_a_raising_verdict_reader_fails_closed(self):
+        """A verdict that cannot be read is not evidence of health (#4034)."""
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        monitoring.set_dataplane_verdict_source(
+            lambda: (_ for _ in ()).throw(RuntimeError("reader died")))
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.set_dataplane_verdict_source(None)
+        assert status == 503, body
+        payload = json.loads(body)
+        assert payload["dataplane"]["state"] == "failed"
+        assert "reader died" in (payload["dataplane"]["error"] or "")
+
+    def test_a_request_refused_inside_the_window_reports_503(self):
+        """#12477: a REFUSED request is the door failing, not background noise.
+
+        This is the signal that was live and unread on 2026-11-13:
+        ``wait_bound_breaches.total`` reached 8 with a 504 on
+        ``POST /v1/agent/signup`` while ``/health`` said ``ok`` and the platform
+        said ``2/2``. The window (not the lifetime total) is what makes it a
+        verdict: a breach from an hour ago is history, a breach from a moment
+        ago is the product refusing a client.
+        """
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_REST)
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.reset_wait_bound_breach_window()
+        assert status == 503, body
+        payload = json.loads(body)
+        assert "requests-refused" in payload["reasons"]
+        assert payload["recent_breaches"]["total"] == 1
+        assert payload["recent_breaches"]["by_surface"] == {"mcp": 0, "rest": 1}
+
+    def test_a_breach_outside_the_window_does_not_fail_the_check(self):
+        """The window is a WINDOW: an old breach must not pin the check red.
+
+        This is the ``#10185``/``#10620`` forever-red rule applied to the
+        windowed read — the reason the cumulative counter was never folded into
+        a verdict in the first place.
+        """
+        server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
+        monitoring.heartbeat_record()
+        monitoring.record_wait_bound_breach_recent(
+            monitoring.WAIT_BOUND_SURFACE_REST,
+            at=time.monotonic() - (monitoring.WAIT_BOUND_HEALTH_WINDOW_S + 60))
+        try:
+            status, body = _http_get(server.server_address[1])
+        finally:
+            monitoring.reset_wait_bound_breach_window()
+        assert status == 200, body
+        payload = json.loads(body)
+        assert payload["recent_breaches"]["total"] == 0
+        assert payload["recent_breaches"]["enabled"] is True
 
     def test_unknown_path_is_404(self):
         server = monitoring.start_health_listener(port=0, bind="127.0.0.1")
@@ -4914,3 +5058,198 @@ def test_event_retention_interval_validation(monkeypatch):
     for raw in ("0", "-1", "-3600", "oops", "3.5", "", "   "):
         monkeypatch.setenv("TORTOISE_EVENT_RETENTION_INTERVAL", raw)
         assert event_retention_interval() == EVENT_RETENTION_INTERVAL_DEFAULT_S, raw
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #12477 — the loop-block EVIDENCE channel and the windowed breach read
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLoopBlockEvidence:
+    """The wedge must leave an artifact the NEXT lane can read.
+
+    Measured 2026-11-13 (tortoise#12477): a 600 s wedge was ended by
+    ``TORTOISE_LOOP_STALL_HARD_EXIT_S`` and left NO trace — no stack, no file,
+    no counter — so the cause was unobtainable and the next occurrence would
+    have shipped the same way. These tests pin the artifact: the blocked loop
+    thread's own stack, in memory for ``/health`` and on disk for after the
+    restart.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, tmp_path, monkeypatch):
+        monitoring._reset_loop_blocks()
+        monkeypatch.delenv("TORTOISE_LOOP_BLOCK_RECORD", raising=False)
+        monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+        monkeypatch.delenv("TORTOISE_LOOP_BLOCK_SAMPLE_AFTER_S", raising=False)
+        yield
+        monitoring._reset_loop_blocks()
+
+    def test_a_capture_names_the_blocking_frame(self):
+        """The stack of the BLOCKED thread, innermost frame first at the end.
+
+        ``frames`` is what an operator reads: the handler and the blocking call
+        are the whole answer to \"what stalled the loop\", and a capture that
+        only says \"it was slow\" is the instrument this issue replaces.
+        """
+        box: dict = {}
+
+        def _blocked_callee():
+            box["event"] = monitoring.record_loop_block(
+                age_s=3.5, frames=sys._getframe())
+
+        def _blocked_caller():
+            _blocked_callee()
+
+        _blocked_caller()
+        event = box["event"]
+        assert event["loop_age_s"] == 3.5
+        assert any("_blocked_callee" in f for f in event["frames"]), event
+        assert any("_blocked_caller" in f for f in event["frames"]), event
+        report = monitoring.loop_block_report()
+        assert report["episodes"] == 1
+        assert report["last"]["loop_age_s"] == 3.5
+
+    def test_the_capture_is_persisted_and_survives_a_restart(self, tmp_path):
+        """The point of the file: the evidence outlives the ``os._exit``.
+
+        A process that dies of a wedge cannot report it, so the record must be
+        readable by the NEXT process — this simulates that by clearing the
+        in-memory state and loading the persisted line, exactly as
+        ``_start_liveness`` does at boot.
+        """
+        path = tmp_path / "loop-blocks.jsonl"
+        os.environ["TORTOISE_LOOP_BLOCK_RECORD"] = str(path)
+        try:
+            monitoring.record_loop_block(age_s=11.0, frames=sys._getframe())
+            assert path.exists()
+            lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
+            assert len(lines) == 1
+            persisted = json.loads(lines[0])
+            assert persisted["loop_age_s"] == 11.0
+
+            monitoring._reset_loop_blocks()
+            loaded = monitoring.load_persisted_loop_block()
+            assert loaded is not None, "the record must be readable after a restart"
+            assert loaded["loop_age_s"] == 11.0
+            assert monitoring.loop_block_report()["last"]["loop_age_s"] == 11.0
+        finally:
+            os.environ.pop("TORTOISE_LOOP_BLOCK_RECORD", None)
+
+    def test_the_record_is_bounded(self, tmp_path, monkeypatch):
+        """An unbounded diagnostic is a new way to fill the journal's volume."""
+        path = tmp_path / "loop-blocks.jsonl"
+        os.environ["TORTOISE_LOOP_BLOCK_RECORD"] = str(path)
+        monkeypatch.setattr(monitoring, "LOOP_BLOCK_RECORD_MAX_BYTES", 2048)
+        monkeypatch.setattr(monitoring, "LOOP_BLOCK_RECORD_MAX_LINES", 20)
+        try:
+            for i in range(60):
+                monitoring.record_loop_block(age_s=1.0 + i / 1000.0,
+                                             frames=sys._getframe())
+            assert path.stat().st_size <= 4096, path.stat().st_size
+            assert monitoring.loop_block_report()["persist_error"] is None
+        finally:
+            os.environ.pop("TORTOISE_LOOP_BLOCK_RECORD", None)
+
+    def test_an_unwritable_record_is_reported_not_silently_absent(
+            self, tmp_path):
+        """An unread artifact and a clean run must not read the same."""
+        os.environ["TORTOISE_LOOP_BLOCK_RECORD"] = str(tmp_path / "nope" / "x.jsonl")
+        try:
+            monitoring.record_loop_block(age_s=1.0, frames=sys._getframe())
+            report = monitoring.loop_block_report()
+            assert report["persist_error"], report
+        finally:
+            os.environ.pop("TORTOISE_LOOP_BLOCK_RECORD", None)
+
+    def test_no_configured_path_is_reported_as_null(self):
+        report = monitoring.loop_block_report()
+        assert report["persist_path"] is None
+        assert report["persist_error"] is None
+
+    def test_the_sampler_captures_a_blocked_loop_and_not_a_healthy_one(self):
+        """End-to-end over the real sampler: one episode, one capture.
+
+        A healthy (ticking) loop produces NOTHING; a blocked one produces one
+        capture. This is the property that makes the artifact trustworthy —
+        a sampler that fires on a healthy process would fill the record with
+        noise and name the wrong code.
+        """
+        import asyncio
+
+        loop_thread_ident = threading.get_ident()
+        stop = threading.Event()
+        thread = monitoring.start_loop_block_sampler(
+            loop_thread_ident=loop_thread_ident, threshold_s=0.2,
+            poll_interval=0.05, stop_event=stop)
+        assert thread is not None
+        try:
+            # healthy: the heartbeat keeps ticking (the real task, on this loop)
+            async def _tick_for_a_moment():
+                task = asyncio.ensure_future(monitoring.loop_heartbeat_task(0.05))
+                await asyncio.sleep(0.5)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+            asyncio.run(_tick_for_a_moment())
+            assert monitoring.loop_block_report()["episodes"] == 0, (
+                "a ticking loop must not be recorded as blocked")
+            # blocked: stop ticking and hold the thread
+            stop_ticking_age = time.monotonic() - 5.0
+            monitoring.heartbeat_record(at=stop_ticking_age)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if monitoring.loop_block_report()["episodes"]:
+                    break
+                time.sleep(0.05)
+            report = monitoring.loop_block_report()
+            assert report["episodes"] >= 1, report
+            assert report["max_age_s"] >= 0.2
+        finally:
+            stop.set()
+
+
+class TestWaitBoundBreachWindow:
+    """#12477: the windowed read beside the cumulative counter (#10602)."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monitoring.reset_wait_bound_breach_window()
+        monkeypatch.delenv("TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S", raising=False)
+        yield
+        monitoring.reset_wait_bound_breach_window()
+
+    def test_the_window_counts_only_recent_breaches(self):
+        monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_REST)
+        monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_MCP)
+        monitoring.record_wait_bound_breach_recent(
+            monitoring.WAIT_BOUND_SURFACE_REST,
+            at=time.monotonic() - (monitoring.WAIT_BOUND_HEALTH_WINDOW_S + 5))
+        window = monitoring.wait_bound_breach_window()
+        assert window["total"] == 2
+        assert window["by_surface"] == {"mcp": 1, "rest": 1}
+        assert window["last_breach_age_s"] is not None
+        assert window["error"] is None
+
+    def test_a_disabled_window_is_not_a_measured_zero(self):
+        window = monitoring.wait_bound_breach_window(0)
+        assert window["enabled"] is False
+        assert window["total"] == 0
+
+    def test_the_cumulative_counter_keeps_its_meaning(self):
+        """Additive, not a rewrite: `total` still counts the process lifetime."""
+        monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_REST)
+        counts = monitoring.wait_bound_breach_counts()
+        assert counts["total"] >= 1
+        assert counts["by_surface"]["rest"] >= 1
+        assert counts["recent"]["total"] >= 1
+
+    def test_a_malformed_window_falls_back_to_the_default(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_WAIT_BOUND_HEALTH_WINDOW_S", "not-a-number")
+        assert (monitoring.wait_bound_health_window_s()
+                == monitoring.WAIT_BOUND_HEALTH_WINDOW_S)
+
+    def test_an_unknown_surface_is_refused(self):
+        with pytest.raises(ValueError):
+            monitoring.record_wait_bound_breach_recent("third-surface")
