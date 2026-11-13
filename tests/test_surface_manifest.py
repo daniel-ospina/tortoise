@@ -5706,3 +5706,49 @@ def test_a_baseline_with_NO_retired_half_is_SAID_not_silent(monkeypatch, tmp_pat
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "WARNING the committed baseline carries no `retired:` list" in out, out
+
+
+def test_an_SDK_archive_entry_without_the_map_entry_is_REFUSED_by_both_gates():
+    """`cut` and `archive_surface.check` must not disagree about one shape.
+
+    `check` requires a frozen `sdk-method` to ALSO be in `RETIRED_SDK_METHODS` /
+    `REMOVED_SDK_METHODS` ("a caller would then hit a bare AttributeError instead of the
+    recorded departure"). `cut` accepted the archive entry ALONE and printed it as the
+    accounting record, so an operator was told the removal was recorded and then reddened CI
+    — and the cheapest way to clear that red without knowing the map requirement is to
+    delete the frozen entry, the exact loss the archive exists to prevent. Found by the
+    review of PR #12313; both sides are asserted here so a later change cannot move one
+    without the other.
+    """
+    from tools import archive_surface
+
+    sm = _load_manifest_tool()
+    records = {
+        "archived": {("sdk-method", "backfill_sources")},
+        "forward": set(),
+        "sdk_retired": set(),
+    }
+
+    problems, accounting = sm.removal_report({("backfill_sources", "sdk")}, set(), records)
+    assert problems and not accounting, (problems, accounting)
+    assert "RETIRED_SDK_METHODS" in problems[0], problems
+
+    # The other gate really does red the identical shape — the assertion above is not a
+    # second opinion invented here.
+    surface = {
+        "tools": set(),
+        "methods": set(),
+        "forward": set(),
+        "sdk_retired": set(),
+        "modules": set(),
+    }
+    violations = archive_surface.surface_violations(
+        [{"kind": "sdk-method", "symbol": "backfill_sources"}], surface
+    )
+    assert violations and "RETIRED_SDK_METHODS" in violations[0], violations
+
+    # non-vacuity: the map entry (with or without the freeze) is the record and passes.
+    records["sdk_retired"] = {"backfill_sources"}
+    problems, accounting = sm.removal_report({("backfill_sources", "sdk")}, set(), records)
+    assert problems == [], problems
+    assert "archived code" in accounting[("backfill_sources", "sdk")], accounting

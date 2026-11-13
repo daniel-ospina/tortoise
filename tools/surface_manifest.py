@@ -2370,6 +2370,22 @@ def removal_report(
             # frozen code — as the only passing one (see the docstring).
             label = "RETIRED_SDK_METHODS/REMOVED_SDK_METHODS"
             found.append(f"{label} + archived code" if archived else label)
+        elif cls == "sdk" and archived:
+            # The OTHER half of that one-directional rule, and NOT a pass.
+            # `surface_violations` reds this exact shape — "archived but absent from
+            # RETIRED_SDK_METHODS / REMOVED_SDK_METHODS — a caller would then hit a bare
+            # AttributeError instead of the recorded departure" — so accepting it here told
+            # the operator the removal was accounted for and then reddened CI, and the
+            # cheapest way to clear that red without knowing the map requirement is to
+            # DELETE the frozen entry: the loss this archive exists to prevent. Measured on
+            # both sides (review of PR #12313).
+            problems.append(
+                f"{symbol} (sdk) is archived but absent from RETIRED_SDK_METHODS / "
+                "REMOVED_SDK_METHODS — `archive_surface.py check` reds that shape, so the "
+                "freeze alone is not the record: record the departure too (for an SDK method "
+                "the freeze and the map entry are ONE record)"
+            )
+            continue
         elif archived:
             found.append(f"archive entry ({kind})")
         if cls == "tool" and symbol in records.get("forward", ()):
@@ -2537,25 +2553,26 @@ def cmd_cut(args: argparse.Namespace) -> int:
         e for e in allowed if not any(waiver_matches(e, s, c) for (s, c) in removals)
     )
     if unexplained:
-        print(f"::error::--allow-removal named symbol(s) this cut does not remove: "
-              f"{', '.join(unexplained)}")
-        print("REFUSED an override must name a symbol that is actually going away — an "
-              "unused override is a permission granted for something else later.")
+        print(f"::error::--allow-removal named symbol(s)/surface(s) this cut does not "
+              f"remove: {', '.join(unexplained)}")
+        print("REFUSED an override must name a symbol that is actually going away, on the "
+              "surface named — an unused override is a permission granted for something "
+              "else later.")
         return 1
     if problems:
-            print(f"::error::cut would drop {len(problems)} surface row(s) with no usable record")
-            print("REFUSED a removal must leave a record — the #11609 owner ruling archives "
-                  "removed code so a mistake can be inspected later, and a re-cut cannot "
-                  "tell an archived removal from a silent deletion:")
-            for problem in problems:
-                print(f"  {problem}")
-            print("  Account for each symbol by exactly one of:")
-            for way in REMOVAL_WAYS:
-                print(f"    - {way}")
-            print("  A genuine RENAME (the old name is gone by design) passes "
-                  "`--allow-removal <symbol> --allow-removal-reason <why>`; it is logged "
-                  "below and belongs in the PR body.")
-            return 1
+        print(f"::error::cut would drop {len(problems)} surface row(s) with no usable record")
+        print("REFUSED a removal must leave a record — the #11609 owner ruling archives "
+              "removed code so a mistake can be inspected later, and a re-cut cannot "
+              "tell an archived removal from a silent deletion:")
+        for problem in problems:
+            print(f"  {problem}")
+        print("  Account for each symbol by exactly one of:")
+        for way in REMOVAL_WAYS:
+            print(f"    - {way}")
+        print("  A genuine RENAME (the old name is gone by design) passes "
+              "`--allow-removal <symbol> --allow-removal-reason <why>`; it is logged "
+              "below and belongs in the PR body.")
+        return 1
 
     if prior_doc is not None and prior_doc.get("retired") is None:
         print("  WARNING the committed baseline carries no `retired:` list, so the retired "
