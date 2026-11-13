@@ -463,12 +463,41 @@ def _scoped(brief: str, heading: str) -> str:
 # when matching `values`, so a caller keeps passing the magnitude it derives from
 # the artifact while the shape still matches (and therefore counts) a falsified
 # copy whose sign was flipped (#12349 round-24 reviewer, P2).
-_SIGNED_NUMBER = r"[-\u2212+]?\d+(?:\.\d+)?"
+_SIGNED_NUMBER = r"[-\u2212+]?\d+(?:\.\d+)?(?:e[-\u2212+]?\d+)?"
 
 
 def _magnitude(token: str) -> str:
     """The unsigned form of a numeric token — what `values` carries."""
     return token.lstrip("-\u2212+")
+
+
+def _unnamed_values(true: str, values: tuple[str, ...],
+                    free: tuple[str, ...]) -> list[str]:
+    """Numeric tokens in `true` that are neither a NAMED value nor a LABEL digit.
+
+    A label digit IDENTIFIES the claim rather than being its content — `k=5`,
+    `k=15`, `§4.1`, `#12298`, `n=300` — and must stay literal, or two claims of
+    the same wording about different windows collide (measured: a true
+    `while at k=10 …` sentence reddened the k=5 pin). Everything else is a value
+    and must be named, because an unnamed value is the one thing that turns this
+    helper back into a presence pin without anybody noticing.
+    """
+    residual = true
+    for token in sorted(free, key=len, reverse=True):
+        residual = residual.replace(token, " ")
+    out = []
+    for match in re.finditer(_SIGNED_NUMBER, residual):
+        token = match.group(0)
+        if _magnitude(token) in values:
+            continue
+        before = residual[match.start() - 1] if match.start() else ""
+        after = residual[match.end()] if match.end() < len(residual) else ""
+        if before.isalnum() or before == "_" or after.isalnum() or after == "_":
+            continue  # part of an IDENTIFIER, not a value (`BM25`, `m3-000014`)
+        if re.search(r"(?:k=|k<|k>|n=|§|#|=)\s*$", residual[:match.start()]):
+            continue
+        out.append(token)
+    return out
 
 
 def _shape(text: str, values: tuple[str, ...] = (),
@@ -550,6 +579,20 @@ def _only_claim(scope: str, true: str, where: str,
     from the artifact by the caller) and `free` the words that are its content;
     see `_shape` for why wildcarding more than that is wrong.
     """
+    # ⛔ A GATE ON THE PINS THEMSELVES, not on the documents (#12349 round-24
+    # reviewer: the SAME class — "a value nobody named" — was found in three
+    # consecutive review cycles). A value the caller forgets to name stays
+    # literal in the shape, so a falsified copy does not match it and the plant
+    # goes GREEN, silently, with no test able to see it. The pin therefore
+    # refuses to be written that way: every number in the claim must be a named
+    # value, a named free token, or part of an identifying LABEL.
+    unnamed = _unnamed_values(true, values, free)
+    assert not unnamed, (
+        f"{where} pins a claim whose values are not all named: {unnamed!r} in "
+        f"{true!r}. An unnamed value stays LITERAL in the shape, so a falsified "
+        "copy no longer matches and the plant passes — the false-pass class "
+        "three review cycles found (#12349 round 24). Pass it in `values=`, or "
+        "in `free=` if it is a word/threshold rather than a number")
     found = re.findall(_shape(true, values, free), scope)
     assert found == [true], (
         f"{where} must state this claim EXACTLY ONCE and to the artifact's "
@@ -571,7 +614,7 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     named VALUES plus its named CONTENT words, and this pins both halves.
     """
     claim = "while at k=5 it is \u22120.67 pts (the shipped leg ahead 2\u20130)"
-    values = ("0.67", "2")
+    values = ("0.67", "2", "0")
     # 1. the true claim alone is accepted
     _only_claim(claim, claim, "scope", values=values)
     # 2. a SECOND, DIFFERENT claim about another window is NOT a duplicate.
@@ -605,11 +648,30 @@ def test_the_claim_shape_identifies_its_claim_and_reds_the_plant() -> None:
     with pytest.raises(AssertionError):
         _only_claim("the two Postgres arms' ranks are equal. " + word, word,
                     "scope", free=("identical",))
-    # 7. an OPERATOR claim's content is its operators
+    # 8. an OPERATOR claim's content is its operators
     ops = "`==`, not `>=`"
     _only_claim(ops, ops, "scope", free=("==", ">="))
     with pytest.raises(AssertionError):
         _only_claim("`>=`, not `==` and " + ops, ops, "scope", free=("==", ">="))
+    # 9. ARTIFACT-TIME GATE: a value the caller forgot to name is REFUSED rather
+    #    than silently degrading the pin back to a presence check — the false-pass
+    #    shape three review cycles independently found (`1e-6` unnamed, `only_b`'s
+    #    `0` unnamed, a sign outside `values`).
+    with pytest.raises(AssertionError, match="values are not all named"):
+        _only_claim(claim, claim, "scope", values=("0.67",))
+    # …and an EXPONENT is a value, not an identifier: `1e-6` unnamed is refused
+    # (the gate's first cut skipped it as "adjacent to a letter", which is how a
+    # threshold slipped through a cycle).
+    with pytest.raises(AssertionError, match="values are not all named"):
+        _only_claim("p < 1e-6", "p < 1e-6", "scope", values=())
+    _only_claim("p < 1e-6", "p < 1e-6", "scope", free=("1e-6",))
+    # 10. …and it must NOT fire on an IDENTIFIER's digits (`BM25`, `m3-000014`) or
+    #     on a LABEL (`k=5`, `§4.1`, `#12298`) — those identify the claim.
+    _only_claim("BM25 buys +1.33 pts (p = 0.34) in m3-000014",
+                "BM25 buys +1.33 pts (p = 0.34) in m3-000014", "scope",
+                values=("1.33", "0.34"))
+    _only_claim("while at k=5 it is −0.67 pts", "while at k=5 it is −0.67 pts",
+                "scope", values=("0.67",))
 
 
 # ── 1. the defect claim, asserted against the shipped tokenizer ─────────────
