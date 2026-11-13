@@ -1441,5 +1441,6 @@
    "hybrid": 8760,
    "keyword_only": 0
   }
- }
+ },
+ "artifact_note": "ceiling_note text synced to the generator's corrected wording after the retraction (tools/candidate_recall_11901.py); NO MEASURED VALUE in this artifact changed, because the note carries no measurement \u2014 re-running the tool reproduces every number and emits this text"
 }

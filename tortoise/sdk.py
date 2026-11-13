@@ -41982,12 +41982,24 @@ class TortoiseSDK:
                 # one. It is kept because the honest failure to report then is
                 # "this read has no property to score", not "the read broke",
                 # and a unit test exercises the arm so it cannot rot silently.
+                # ⛔ THREE ways to arrive here, and they are NOT the same fact:
+                #   no_text_field          the entity type has no text property
+                #   pool_text_empty        the read SUCCEEDED and every pooled row
+                #                          came back with empty/absent text — there
+                #                          is nothing to score, and blaming the
+                #                          read would send a reader to the graph
+                #                          when the data is the problem
+                #   pool_text_read_failed  the read itself returned nothing
+                # Reporting the middle case as the last one is a mis-direction,
+                # not a nicety: the counts below are identical either way, so the
+                # REASON is the only thing that tells them apart.
                 _rr_stats = {
                     "applied": False,
                     "degrade_reason": (
                         "no_text_field"
                         if _rerank_text_field(entity_type, graph_label) is None
-                        else "pool_text_read_failed"),
+                        else ("pool_text_empty"
+                              if _pool_texts else "pool_text_read_failed")),
                 }
             # ⛔ THE CAP IS DISCLOSED, NEVER SILENT. ``rerank_pool`` bounds how
             # many leading candidates are SCORED; rows past that width keep

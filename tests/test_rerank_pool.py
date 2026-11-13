@@ -815,3 +815,37 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
     assert entries and entries[0]["ran"] is False, (
         f"the skip must be disclosed in the leg trace, not silent ({entries})")
     assert entries[0]["reason"] == "recency_order_requested", entries[0]
+
+
+def test_an_ALL_empty_pool_says_nothing_scorable(sdk, monkeypatch):
+    """#12297 — "the read broke" and "nothing to score" are different facts.
+
+    The read can SUCCEED and still return no usable text for any pooled row
+    (every property null). Reporting that as ``pool_text_read_failed`` sends the
+    reader to the graph when the data is the problem; the counts are identical in
+    both arms, so the REASON is the only thing that distinguishes them. This arm
+    was untested: the empty-text test beside it always leaves scored rows.
+    """
+    nonce = uuid.uuid4().hex[:8]
+    q = f"zebra {nonce}"
+    for i in range(4):
+        sdk.create_point(kind="statement",
+                         content=f"{q} passage that will read as blank {i}")
+    real_read = sdk_mod._fetch_rerank_pool_texts
+    assert real_read is not None
+
+    def _all_blank(graph, entity_type, graph_label, id_field, ids):
+        # every id comes back (the read SUCCEEDED), every text is empty
+        return {pid: "" for pid in ids}
+
+    monkeypatch.setattr(sdk_mod, "_fetch_rerank_pool_texts", _all_blank)
+    monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
+    _inject(_Positional(), monkeypatch)
+    trace: list[dict] = []
+    sdk.tortoise_fts_query(q, entity_type="point", limit=4, leg_trace=trace)
+    entry = _rerank_entries(trace)[0]
+    assert entry["ran"] is False, entry
+    assert entry["reason"] == "pool_text_empty", (
+        f"an empty-but-successful read must not blame the read itself: {entry}")
+    assert entry[rerank.RERANK_SCORED_KEY] == 0, entry
+    assert entry[rerank.RERANK_UNSCORED_KEY] > 0, entry
