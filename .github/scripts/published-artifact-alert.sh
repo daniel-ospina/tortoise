@@ -9,9 +9,11 @@
 #
 # ⛔ IT DOES NOT RE-IMPLEMENT FILING. Dedupe, `Recurrence #N`, close-then-comment and
 # the refusal to file on a failed search are the SHARED substrate
-# (`.github/scripts/auto-file-issue.sh`, #3907) — every other monitor rides it, and a
-# local copy is how the fleet ended up with three different behaviours in the first
-# place. This script only supplies the canary's TITLE and BODY.
+# (`.github/scripts/auto-file-issue.sh`, #3907), which `deploy-api-alert.sh` also rides.
+# NOT every monitor does: `check-deploy-staleness.sh` and `availability-watchdog.sh` still
+# carry their own `gh api` filing/close helpers and share only the `auto-filed` LABEL —
+# which is exactly the divergence a local copy would deepen. This script supplies only the
+# canary's TITLE and BODY.
 #
 # usage: published-artifact-alert.sh open|close
 #   open   — file or recur the alert issue. Reads $EXIT_CODE so an exit-2 detector

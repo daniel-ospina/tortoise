@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # published-artifact-alert.test.sh — harness for the release-artifact-canary alert (#12363).
 #
-# WHY THIS EXISTS. Every sibling monitor on the shared auto-file substrate ships a
-# `.test.sh` that ci.yml's `ops-harnesses` job runs (auto-file-issue, deploy-api-alert,
-# availability-watchdog, welcome-e2e-monitor …). This alert originally shipped with NO
+# WHY THIS EXISTS. The scripts on the shared auto-file substrate ship a `.test.sh` that
+# ci.yml's `ops-harnesses` job runs (`auto-file-issue.test.sh`, `deploy-api-alert.test.sh`)
+# — note that `availability-watchdog` and `welcome-e2e-monitor` are NOT on that substrate,
+# so do not cite them as adopters. This alert originally shipped with NO
 # executable test at all — its only pin was a `grep` for the string "gh issue create" in
 # the Python suite, which cannot tell a working alert from one that files nothing — and
 # it re-implemented dedupe, `Recurrence #N` and close-then-comment inline instead of
