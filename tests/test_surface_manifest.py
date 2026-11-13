@@ -508,6 +508,9 @@ def _load_guard():
     return mod
 
 
+REMOVAL_WAYS_HEAD = "Account for the rows above reported as missing a record by exactly one of:"
+
+
 def _load_manifest_tool():
     """Import tools/surface_manifest.py (hyphenated filename) as a module."""
     import importlib.util
@@ -5023,3 +5026,1889 @@ def test_the_required_lint_reds_on_a_declaration_that_is_not_the_owners_list(
     out = capsys.readouterr().out
     assert rc == 1, "the required lint passed a declaration missing an approved method"
     assert "MISSING from __all__" in out, out
+
+
+# ── the REMOVAL direction (#12237) ───────────────────────────────────────────────
+#
+# `tools/archive_surface.py check` grades ONE direction: an archived symbol that is still
+# live is RED. It iterates the archive MANIFEST, never the surface, so a symbol gone from
+# both is invisible to it (`surface_violations([], surface) == []`). `cut` is the seam where
+# a row is actually forgotten, so the other direction is enforced there — and these tests
+# are what prove the detector FIRES, because a gate nobody has seen fire is
+# indistinguishable from one that cannot.
+
+
+def test_removal_records_read_the_REAL_archive_and_retirement_maps():
+    """The reader is wired to the real artifacts, not to a fixture's idea of them.
+
+    Asserting against a synthetic record set would pass while `removal_records` read the
+    wrong path or an empty manifest — and an empty manifest refuses every removal, which
+    reads as "the gate works" until it blocks a legitimate batch.
+    """
+    sm = _load_manifest_tool()
+    records = sm.removal_records()
+    assert ("module", "tortoise.archived.search_legacy") in records["archived"], (
+        "the committed archive manifest was not read — batch 0's entry is missing"
+    )
+    assert "tortoise_get" in records["forward_raw"], "RETIRED_USE_INSTEAD was not read"
+    assert "backfill_sources" in records["sdk_retired"], (
+        "RETIRED_SDK_METHODS/REMOVED_SDK_METHODS was not read"
+    )
+    # ⛔ AND THE RENAME MAP IS NOT THE UNION. `RETIRED_SDK_METHODS` names a REPLACEMENT (a
+    # rename, which needs no freeze); `REMOVED_SDK_METHODS` records a departure with none. Only
+    # the rename map may take the no-freeze route, and this pins the wiring against the REAL
+    # maps — every other `sdk_renamed` site in this file mocks `removal_records`, so deleting
+    # the real one would have left the suite green (review of PR #12313, round 18).
+    assert "events_poll" in records["sdk_renamed"], (
+        "RETIRED_SDK_METHODS (the rename map) was not read into `sdk_renamed`"
+    )
+    assert "backfill_sources" not in records["sdk_renamed"], (
+        "a REMOVED_SDK_METHODS name (a departure with no replacement) must not be a rename"
+    )
+
+
+def test_an_unreadable_archive_manifest_is_a_REFUSAL_not_an_empty_record(tmp_path):
+    """A MISSING manifest is legitimately empty (first run); an UNREADABLE one is not.
+
+    `archive_surface.load_manifest` treats a missing file as `{"entries": []}` so a
+    first-ever archive can start — kept here deliberately. A file that exists and cannot be
+    parsed is a different verdict: it may hold entries that account for removals this cut is
+    about to forget, so "I could not read it" must never grade as "there are none".
+    """
+    sm = _load_manifest_tool()
+    import pytest as _pytest
+
+    broken = tmp_path / "MANIFEST.json"
+    broken.write_text("{not json", encoding="utf-8")
+    with _pytest.raises(sm.SurfaceEvidenceUnreadable):
+        sm.removal_records(archive_manifest=broken)
+
+    # And the documented first-run arm still reads as empty rather than refusing — asserted in
+    # a directory that has NO `MANIFEST.json` at all. The previous form used a sibling path in
+    # `tmp_path` AFTER writing `MANIFEST.json` there, so the absence arm of the delegated
+    # `manifest_violations` never ran and the assertion was satisfied by the wrong branch: it
+    # passed while every cut on an archive-less tree was refused (review of PR #12313, round 10).
+    empty_dir = tmp_path / "no-archive-here"
+    empty_dir.mkdir()
+    assert not (empty_dir / "MANIFEST.json").exists(), "the fixture must not carry a manifest"
+    assert sm.removal_records(archive_manifest=empty_dir / "MANIFEST.json")["archived"] == set()
+
+
+def _prior_with_extra_rows(derived_baseline, rows: list[dict]) -> dict:
+    """A committed baseline that carries rows the code no longer has — a REMOVAL."""
+    prior = copy.deepcopy(derived_baseline)
+    prior["rows"].extend(rows)
+    return prior
+
+
+def test_cut_REFUSES_a_dropped_tool_with_no_record(monkeypatch, tmp_path, derived_baseline, capsys):
+    """The #12237 defect, end to end: delete a tool, re-cut, and NOTHING notices.
+
+    This is the acceptance arm — a tool row dropped with no archive entry must refuse, name
+    the symbol, and name the ways to account for it. The refusal must also leave the
+    committed baseline UNWRITTEN: writing first and refusing second would already have
+    forgotten the only list of what used to exist.
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 1, f"a tool vanished with no record and the re-cut passed:\n{out}"
+    assert "tortoise_vanished_probe" in out, out
+    # ⛔ ASSERT THE ROUTE ITSELF, not the mere presence of a map name. `RETIRED_USE_INSTEAD` and
+    # `RETIRED_SDK_METHODS` also appear in the lines that say they are NOT routes
+    # (`NOT_A_REMOVAL_ROUTE`, `SDK_PAIR_RULE`), so those two assertions passed unchanged even
+    # with every route deleted from `REMOVAL_WAYS` (review of PR #12313, round 15).
+    assert sm.REMOVAL_WAYS[0] in out, "the archive route was not printed:\n" + out
+    assert sm.SDK_PAIR_RULE in out, "the SDK pair rule was not printed:\n" + out
+    assert sm.NOT_A_REMOVAL_ROUTE in out, "the not-a-route line was not printed:\n" + out
+    assert "archive_surface.py archive" in out, "the freeze command was not named:\n" + out
+    assert path.read_text(encoding="utf-8") == before, (
+        "the refusal WROTE the baseline — the removed symbol is now unforgotten"
+    )
+
+
+def test_a_dropped_tool_still_in_RETIRED_USE_INSTEAD_is_REFUSED_like_check(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The forward map CANNOT account for a removal — archiving it is red by `check`.
+
+    ⛔ This test used to assert the opposite (`rc == 0`, `tortoise_get: RETIRED_USE_INSTEAD`),
+    and that acceptance could not be reached in production: `build_doc` writes every SERVED
+    forward name into `retired:`, which `surface_symbols` reads, so such a name is never in
+    `prior - derived` and never a removal at all — the arm was dead. The REACHABLE shape is the
+    one below after the map is read RAW: a `RETIRED_USE_INSTEAD` key whose tool declaration is
+    gone (the "retire the name AND delete the tool" cleanup) leaves the surface without the
+    name while the map still holds it — and `archive_surface.surface_violations` reds archiving
+    a forward entry. Both halves are asserted, so `cut` and `check` cannot disagree again
+    (review of PR #12313: `cut` exited 0 there and `check` reddened it).
+    """
+    from tools import archive_surface
+
+    sm = _load_manifest_tool()
+    prior = copy.deepcopy(derived_baseline)  # already carries `tortoise_get` as retired
+    derived = copy.deepcopy(derived_baseline)
+    derived["retired"] = [
+        row for row in (derived.get("retired") or []) if row.get("name") != "tortoise_get"
+    ]
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 1, f"a forward entry was accepted as a record for a removal:\n{out}"
+    assert "tortoise_get" in out and "RETIRED_USE_INSTEAD" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+    # And `check` really does red the archive that would have cleared it — the refusal above
+    # is not a second opinion invented here.
+    surface = {
+        "tools": set(),
+        "methods": set(),
+        "forward": {name for name in sm.removal_records()["forward_raw"]},
+        "sdk_retired": set(),
+        "modules": set(),
+    }
+    violations = archive_surface.surface_violations(
+        [{"kind": "mcp-tool", "symbol": "tortoise_get"}], surface
+    )
+    assert violations and "STILL SERVED" in violations[0], violations
+
+    # non-vacuity: with the stale key actually gone, the same removal is refused for the
+    # REASON the gate exists (no record), not for the contradiction.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": set(), "forward_raw": set(), "sdk_retired": set()},
+    )
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "tortoise_get (tool) was DROPPED with no record" in out, out
+
+
+def test_cut_REFUSES_a_dropped_sdk_method_recorded_in_the_MAP_but_NOT_archived(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The map records the DEPARTURE; it does not keep the code — and nothing else sees that loss.
+
+    Map-only used to be ACCEPTED here (exit 0, baseline rewritten). `archive_surface.check`
+    iterates the archive MANIFEST, so a method that was never frozen is invisible to it: the
+    cut was the only gate in a position to notice, and it reported success. The #11609 owner
+    ruling keeps removed code "in case we made a mistake", so both halves are required.
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:backfill_sources", "method": "backfill_sources"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 1, f"a map entry alone was accepted as the record for an SDK removal:\n{out}"
+    assert "backfill_sources (sdk)" in out and "NOT archived" in out, out
+    assert "archive_surface.py archive sdk-method backfill_sources" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+
+    # The other single half stays refused too: the pair is the record, and it is ONE record.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": {("sdk-method", "backfill_sources")},
+            "forward": set(),
+            "forward_raw": set(),
+            "sdk_retired": set(),
+        },
+    )
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 1, f"a freeze without the map entry was accepted as the record:\n{out}"
+    assert "archived but absent from RETIRED_SDK_METHODS" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+
+def test_an_SDK_rename_with_NO_map_entry_is_refused_so_the_CALLER_fails_closed(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """`--allow-removal` alone is not a departure record for an SDK method.
+
+    This arm accepted the override as the WHOLE record for a method that was neither frozen nor
+    in the map, so the old name vanished with nothing that fails closed: a caller got a bare
+    `AttributeError` instead of the recorded departure, the only trace was a stdout line (`cut`
+    persists nothing about removals), and the owner's approved-rename gates read only the map,
+    so they never saw it — while `SDK_PAIR_RULE` and both docs state that a rename's record IS
+    the map entry plus the override (review of PR #12313, round 17).
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:backfill_sources", "method": "backfill_sources"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": set(), "forward_raw": set(), "sdk_retired": set()},
+    )
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["sdk:backfill_sources"],
+            allow_removal_reason="renamed to annotate_ask_matches",
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 1, f"a waiver alone recorded an SDK rename with no departure record:\n{out}"
+    assert "has no departure record" in out, out
+    assert "sdk_retired.py" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+    # ⛔ THE TWO MAPS MEAN OPPOSITE THINGS, and `backfill_sources` is in REMOVED_SDK_METHODS —
+    # a departure with NO replacement. Collapsing the maps into one set accepted that shape as
+    # "a deliberate rename" too, so a DELETED method was recorded as a rename and skipped the
+    # freeze: the caller got a bare `AttributeError`, `cut` persisted nothing, and
+    # `archive_surface.py check` (which iterates the archive manifest) could not see it
+    # (review of PR #12313, round 18). A REMOVED name still needs the freeze.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"backfill_sources"},
+            "sdk_renamed": set(),
+        },
+    )
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["sdk:backfill_sources"],
+            allow_removal_reason="deleted: returned every tenant, zero callers",
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 1, f"a REMOVED_SDK_METHODS name was accepted as a rename with no freeze:\n{out}"
+    assert "NO replacement" in out and "FREEZE IT" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+    # Non-vacuity: a RETIRED_SDK_METHODS name (a RENAME, replacement named) is the one shape
+    # that needs no freeze — see `test_a_STATED_RENAME_clears_the_SDK_map_ONLY_half`.
+
+
+def test_the_rename_remedy_does_not_claim_to_be_the_whole_record_for_an_SDK_method():
+    """The closing rename line and the flag's help must not promise what the code refuses.
+
+    `cut` prints "A genuine RENAME … passes `--allow-removal`" over a refusal whose cause can
+    be the MISSING SDK map entry — a shape the override does not clear (the row above says so:
+    "`--allow-removal` states the rename but a caller of the old name needs the fail-closed
+    `AttributeError` the map raises"). The operator has already typed the flag, so a closing
+    line naming only the flag reads as "your remedy did not work", which is the moment a
+    hand-spliced baseline looks reasonable — the #12327 hole the same paragraph warns against.
+    The `--help` text had the same over-claim ("with no archive or retirement record … a
+    genuine rename") while `removal_report` refuses an SDK method that has no map entry even
+    WITH the flag (review of PR #12313, round 20).
+    """
+    import inspect
+
+    sm = _load_manifest_tool()
+    parser_source = inspect.getsource(sm.main)
+    assert "--allow-removal" in parser_source
+    # Non-vacuity: the wording is IN the source we are grading, and the flag really refuses.
+    problems, accounting = sm.removal_report(
+        {("ghost_method", "sdk")},
+        set(),
+        {"archived": set(), "forward_raw": set(), "sdk_retired": set(), "sdk_renamed": set()},
+        allowed={"sdk:ghost_method"},
+    )
+    assert len(problems) == 1 and problems[0].kind == "no-record", problems
+    assert accounting == {}, accounting
+    assert "has no departure record" in str(problems[0]), problems[0]
+    # ⛔ AND THE PER-ROW LINE NAMES ONE MAP FOR THIS SHAPE. It offered
+    # "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`" as interchangeable, so following it
+    # literally (add the DEPARTURE map, re-pass "the same override") produced a byte-identical
+    # refusal — the closing line's round-21 defect in the row an operator reads first (review
+    # of PR #12313, round 22). The line must say the departure map does not clear this shape.
+    row = str(problems[0])
+    assert "`RETIRED_SDK_METHODS` in `tortoise/sdk_retired.py`" in row, row
+    assert "A `REMOVED_SDK_METHODS` entry is a DEPARTURE with no replacement" in row, row
+    assert "does not clear this shape" in row, row
+
+    # Non-vacuity, and the reason the wording is not cosmetic: the RENAME route it names does
+    # clear this exact shape, and the DEPARTURE route it now excludes does not.
+    rename_records = dict(
+        archived=set(),
+        forward_raw=set(),
+        sdk_retired={"ghost_method"},
+        sdk_renamed={"ghost_method"},
+    )
+    cleared, accounting = sm.removal_report(
+        {("ghost_method", "sdk")}, set(), rename_records, allowed={"sdk:ghost_method"}
+    )
+    assert cleared == [] and accounting, (cleared, accounting)
+    departure_records = dict(
+        archived=set(),
+        forward_raw=set(),
+        sdk_retired={"ghost_method"},
+        sdk_renamed=set(),
+    )
+    refused, accounting = sm.removal_report(
+        {("ghost_method", "sdk")}, set(), departure_records, allowed={"sdk:ghost_method"}
+    )
+    assert len(refused) == 1 and refused[0].kind == "no-record", refused
+    assert accounting == {}, accounting
+    # The remedy the parser ADVERTISES names the map entry as still required — and names the
+    # RENAME map only: offering `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` as interchangeable
+    # halves re-collapsed the two maps round 18 separated, and for a `REMOVED_SDK_METHODS` name
+    # the flag changes nothing (review of PR #12313, round 21).
+    assert "an SDK method still needs its" in parser_source, parser_source[:200]
+    assert "`RETIRED_SDK_METHODS` entry, which is what records the rename" in parser_source
+    assert "a DEPARTURE, not a rename" in parser_source
+    # ⛔ AND NOT AN ASSERTION THAT CANNOT FAIL. `assert "<the old phrase>" not in
+    # parser_source` looked like the natural counterpart and is inert: the old wording was
+    # split across two adjacent literals, so the joined phrase never appears in the SOURCE and
+    # the assert could not red on a revert (measured, review of PR #12313, round 20). The
+    # positive assertion above is the discriminator: it reds when the help text is reverted.
+    # ...and the printed closing line no longer calls the flag the record on its own, nor offers
+    # the DEPARTURE map as a sufficient half. Asserted on the RENDERED text: the print is one
+    # concatenated call, so a `not in source` check over split literals cannot fail.
+    cut_source = inspect.getsource(sm.cmd_cut)
+    assert "that is the record TOGETHER WITH its" in cut_source, "the SDK qualifier is missing"
+    assert "A `REMOVED_SDK_METHODS` name is a DEPARTURE, not a rename" in cut_source
+
+    # The DEPARTURE state really is inert under the flag — the premise the text now states.
+    problems, accounting = sm.removal_report(
+        {("apikey_list", "sdk")},
+        set(),
+        {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"apikey_list"},
+            "sdk_renamed": set(),
+        },
+        allowed={"sdk:apikey_list"},
+    )
+    assert len(problems) == 1 and problems[0].kind == "no-record", problems
+    assert accounting == {}, accounting
+
+
+def test_the_audit_line_does_not_call_a_TOOL_deletion_a_rename(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The `accounted` line is the ONLY lasting record of a removal; it may not mislabel one.
+
+    `cut` persists nothing about removals (its own comment says so), so the accounted block is
+    the audit `#11609` keeps. The generic waiver arm labelled it "a deliberate RENAME" and
+    cannot tell a rename from a deletion: on the TOOL surface a rename can never reach the arm
+    (a `RETIRED_USE_INSTEAD` name stays served, so it stays in the `retired:` half; with the
+    key present and the declaration gone the cut refuses it as a contradiction before any
+    waiver is read), and every other state that reaches it is a deletion — so the label
+    contradicted the operator's own `--allow-removal-reason` printed one line below it (review
+    of PR #12313, round 24).
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["tortoise_vanished_probe"],
+            allow_removal_reason="deleted: zero callers, owner approved",
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    asserted = out[out.index("accounted 1 removal(s)") :]
+    assert "deliberate removal, stated in the PR" in asserted, asserted
+    assert "deliberate rename" not in asserted, asserted
+    # The reason the operator typed is echoed beside it, so a "rename" label would contradict
+    # the line directly below it — that juxtaposition is what made the old wording a defect.
+    assert "deleted: zero callers, owner approved" in asserted, asserted
+
+
+def test_the_rename_remedy_is_NOT_offered_as_the_clearance_for_a_DEPARTURE(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """A `REMOVED_SDK_METHODS` name is a DEPARTURE; `--allow-removal` provably cannot clear it.
+
+    The closing remedy named `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` as interchangeable
+    halves. The no-freeze arm reads `sdk_renamed` (`RETIRED_SDK_METHODS`) only - so for a
+    `REMOVED_SDK_METHODS` name (a departure with NO replacement) the flag changed nothing and
+    the refusal was BYTE-IDENTICAL with and without it: round 15's defect, one map over
+    (review of PR #12313, round 21). This asserts on the RENDERED closing line, because the
+    `print` is one concatenated call and a `not in source` check over split literals cannot
+    fail.
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:apikey_list", "method": "apikey_list"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    # A DEPARTURE: the name IS in a retirement map, but in `REMOVED_SDK_METHODS`, not the
+    # rename map - exactly what `removal_records()` returns for `apikey_list`.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"apikey_list"},
+            "sdk_renamed": set(),
+        },
+    )
+
+    args = argparse.Namespace(
+        commit=CUT_SHA,
+        allow_approval_reset=True,
+        allow_removal=["sdk:apikey_list"],
+        allow_removal_reason="deleted: returned every tenant, zero callers",
+    )
+    rc = sm.cmd_cut(args)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "NO replacement" in out and "FREEZE IT" in out, out
+    # The closing line names ONE sufficient map (`RETIRED_SDK_METHODS`) and says the departure
+    # map is not cleared by the override - the claim the code actually enforces.
+    closing = out[out.index("A genuine RENAME") :]
+    assert "`RETIRED_SDK_METHODS` entry" in closing, closing
+    assert "A `REMOVED_SDK_METHODS` name is a DEPARTURE, not a rename" in closing, closing
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+    # Non-vacuity: the SAME waiver over the RENAME map clears the identical shape.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"apikey_list"},
+            "sdk_renamed": {"apikey_list"},
+        },
+    )
+    rc = sm.cmd_cut(args)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "rename record" in out, out
+
+
+def test_the_REMOVAL_docs_do_not_name_a_route_the_writer_REFUSES():
+    """CONTRIBUTING must not list `RETIRED_USE_INSTEAD` as a removal source.
+
+    The opening line said "a tool from `TOOL_REGISTRY` or from `RETIRED_USE_INSTEAD`", and
+    the archive route it then prescribes refuses that symbol in BOTH orders an operator can
+    perform (`archive_surface.archive` — "a `RETIRED_USE_INSTEAD` forward entry — still
+    SERVED" with the declaration live; "has no `ToolDefinition` … nothing to archive" with it
+    gone), while six lines later the same paragraph says the forward is NOT a route and
+    `archive/README.md` says the 23 committed entries are deliberately not archived
+    (review of PR #12313, round 19). A doc is a prescription, so this is pinned.
+    """
+    sm = _load_manifest_tool()
+    contributing = (sm.ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    start = contributing.index("**To REMOVE a symbol**")
+    paragraph = contributing[start : contributing.index("\n\n", start)]
+    assert "or from `RETIRED_USE_INSTEAD`" not in paragraph, paragraph[:400]
+    # ...and the correction names it as GRADED but not a removal source, rather than dropping
+    # the map from the docs entirely (it is graded: the `retired:` half is compared).
+    assert "`RETIRED_USE_INSTEAD`" in paragraph
+    assert "not a removal source" in paragraph
+    # The README's blanket claim is qualified: the surface classes are named, and the module
+    # gap it cannot see is disclosed with the issue that tracks it (#12402).
+    readme = (sm.ROOT / "archive" / "README.md").read_text(encoding="utf-8")
+    bullet = readme[readme.index("**a symbol that disappears with NO record is RED**") :]
+    bullet = bullet[: bullet.index("\n  `#12327`") if "\n  `#12327`" in bullet else 1800]
+    assert "whole-`module` removal is NOT graded" in bullet, bullet[:600]
+
+    # ⛔ AND THE SUMMARY TABLE CELL, WHICH CLAIMED THE FREEZE FOR EVERY DROP. It said a `cut`
+    # that drops an SDK method "requires the frozen entry too" — unconditionally — while a
+    # STATED RENAME keeps no code by design and archives nothing (the paragraph further down
+    # says exactly that, and `cut` exits 0 over a rename with no archive entry, measured). The
+    # table is the section a reader consults to learn what the mechanism KEEPS, so an
+    # unconditional "yes" there re-asserts the conflation rounds 18-22 removed from the prose
+    # (review of PR #12313, round 23).
+    table = readme[readme.index("| mechanism |") :]
+    table = table[: table.index("\n\n")]
+    assert "yes for a REMOVAL" in table, table
+    assert "stated rename" in table, table
+
+
+def test_a_class_the_archive_knows_but_the_baseline_cannot_carry_is_REFUSED_by_name():
+    """An unmapped surface class must refuse BY NAME, not raise a bare `KeyError`.
+
+    `ARCHIVE_KIND_BY_CLASS` is closed over the two classes `surface_symbols` can emit, so a
+    `module` (a real archive kind, and the one committed archive entry) never reaches
+    `removal_report` from `cut` — the #12237 hole is closed for surface rows, and the module
+    half is #12402. The lookup used to be `ARCHIVE_KIND_BY_CLASS[cls]`, so a caller passing a
+    `module` class got `KeyError: 'module'`, which names neither the class nor what a new class
+    needs (review of PR #12313, round 19). This pins the MESSAGE, not just the exception type:
+    the type alone is satisfied by the old `KeyError` not being re-raised.
+    """
+    sm = _load_manifest_tool()
+    with pytest.raises(ValueError) as excinfo:
+        sm.removal_report({("tortoise.archived.search_legacy", "module")}, set(), {})
+    message = str(excinfo.value)
+    assert "'module'" in message, message
+    assert "ARCHIVE_KIND_BY_CLASS" in message, message
+    assert "REMOVAL_WAYS" in message, message
+    assert "12402" in message, message
+
+    # Non-vacuity: the two classes the baseline DOES carry are still graded normally.
+    records = {
+        "archived": {("mcp-tool", "tortoise_x")},
+        "forward_raw": set(),
+        "sdk_retired": set(),
+        "sdk_renamed": set(),
+    }
+    problems, accounting = sm.removal_report({("tortoise_x", "tool")}, set(), records)
+    assert problems == [] and accounting, (problems, accounting)
+
+
+def test_the_MAP_HALF_has_a_printed_route_it_can_actually_use(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """A frozen-but-unrecorded SDK method was told to run a command that refuses.
+
+    The block's only route was the freeze, and `archive_symbol` raises "is already archived"
+    for exactly the shape `incomplete-record` describes — so the operator's one runnable
+    follow-up failed, and the action actually needed (add the name to the map) was named
+    nowhere in the refusal. The routes now include it, and `SDK_PAIR_RULE` no longer says a
+    freeze is mandatory a few lines above the rename remedy that clears the same shape without
+    one (review of PR #12313, round 16).
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:backfill_sources", "method": "backfill_sources"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": {("sdk-method", "backfill_sources")},
+            "forward_raw": set(),
+            "sdk_retired": set(),
+        },
+    )
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "archived but absent from RETIRED_SDK_METHODS" in out, out
+    # The missing half has its own printed route, and that route says not to re-freeze.
+    map_route = sm.REMOVAL_WAYS[1]
+    assert map_route in out, "the map half has no printed route:\n" + out
+    # The tool route must name BOTH files: `archive_symbol` freezes the declaration AND the
+    # handler, and a handler that is already gone is skipped SILENTLY — so restoring only
+    # `tool_registry.py` archives a tool whose behaviour is lost, with every gate green.
+    assert "tortoise/mcp_server.py" in sm.REMOVAL_WAYS[0], sm.REMOVAL_WAYS[0]
+    assert "sdk_retired.py" in map_route and "already archived" in map_route, map_route
+    # And the pair rule is qualified, so it does not contradict the rename remedy beside it.
+    assert "STATED RENAME" in sm.SDK_PAIR_RULE, sm.SDK_PAIR_RULE
+
+
+def test_a_STATED_RENAME_clears_the_SDK_map_ONLY_half(monkeypatch, tmp_path, derived_baseline, capsys):
+    """The rename remedy the refusal prints must WORK for the shape it is printed over.
+
+    This is the repo's recorded SDK rename procedure — old name into `RETIRED_SDK_METHODS`
+    (the RENAME map, whose entry names the replacement; `REMOVED_SDK_METHODS` is the other
+    map and records a departure with no replacement, so it gets no such shortcut),
+    method gone from `sdk.py` — which is map-only with no freeze, so the cut refused it and
+    then printed "a genuine RENAME … passes `--allow-removal`" four lines under its own "FREEZE
+    IT FIRST". Re-running with the flag produced a byte-identical refusal, because that arm
+    `continue`d before any waiver was read: a printed remedy that provably did nothing
+    (review of PR #12313, round 15). A rename keeps no code BY DESIGN, so a STATED one is
+    accounted by the map entry plus the override, while an unstated one is still refused.
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:events_poll", "method": "events_poll"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"events_poll"},
+            "sdk_renamed": {"events_poll"},
+        },
+    )
+
+    # Unstated: refused, and the refusal names the freeze (the default for a removal).
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "NOT archived" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the baseline"
+
+    # Stated rename: ACCEPTED, reported as the map record plus the override.
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["sdk:events_poll"],
+            allow_removal_reason="renamed to events_watch",
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "RETIRED_SDK_METHODS" in out and "--allow-removal" in out, out
+
+
+def test_cut_ACCEPTS_a_dropped_sdk_method_when_BOTH_halves_are_recorded(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """ONE record, TWO halves: the freeze and the map entry together are what `cut` accepts."""
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(
+        derived_baseline, [{"name": "sdk:backfill_sources", "method": "backfill_sources"}]
+    )
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": {("sdk-method", "backfill_sources")},
+            "forward": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"backfill_sources"},
+        },
+    )
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert (
+        "backfill_sources: RETIRED_SDK_METHODS/REMOVED_SDK_METHODS + archived code" in out
+    ), out
+
+
+def test_cut_ACCEPTS_a_dropped_tool_that_is_ARCHIVED(monkeypatch, tmp_path, derived_baseline, capsys):
+    """An archive entry of the MATCHING KIND satisfies the gate — and is reported."""
+    sm = _load_manifest_tool()
+    symbol = "tortoise_vanished_probe"
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": symbol}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": {("mcp-tool", symbol)}, "forward_raw": set(), "sdk_retired": set()},
+    )
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert f"{symbol}: archive entry (mcp-tool)" in out, out
+
+
+def test_an_archive_entry_of_the_WRONG_KIND_does_not_satisfy_the_gate():
+    """`kind` is matched, not ignored: an `sdk-method` entry cannot account for a tool.
+
+    Matched on `(kind, symbol)` because the two halves' records are different artifacts — an
+    SDK entry freezes a method body, which is not the tool the MCP surface lost.
+    """
+    sm = _load_manifest_tool()
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool")},
+        set(),
+        {"archived": {("sdk-method", "tortoise_x")}, "forward_raw": set(), "sdk_retired": set()},
+    )
+    assert problems and not accounting, (problems, accounting)
+    assert "no record" in problems[0], problems
+
+
+def test_TWO_records_is_a_problem_not_a_pass():
+    """Archived AND retired-forward is "gone" and "still served" at once — an inconsistency."""
+    sm = _load_manifest_tool()
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool")},
+        set(),
+        {"archived": {("mcp-tool", "tortoise_x")}, "forward_raw": {"tortoise_x"}, "sdk_retired": set()},
+    )
+    assert problems and not accounting, (problems, accounting)
+    assert "2 records" in problems[0], problems
+
+
+def test_an_override_must_name_a_symbol_this_cut_REMOVES(monkeypatch, tmp_path, derived_baseline, capsys):
+    """A permission granted for one name must not sit unused for the next one."""
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["tortoise_some_other_symbol"],
+            allow_removal_reason="rename",
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "does not remove" in out, out
+
+
+def test_an_override_without_a_reason_is_refused(monkeypatch, tmp_path, derived_baseline, capsys):
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["tortoise_vanished_probe"],
+            allow_removal_reason="",
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "--allow-removal-reason" in out, out
+
+
+def test_a_named_override_with_a_reason_carries_the_removal_and_logs_it(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The rename escape hatch: named, reasoned, LOGGED — never a blanket flag."""
+    sm = _load_manifest_tool()
+    symbol = "tortoise_vanished_probe"
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": symbol}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=[symbol],
+            allow_removal_reason="renamed to tortoise_vanished_probe_v2",
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert f"REMOVAL OVERRIDE (--allow-removal): {symbol}" in out, out
+    assert "renamed to tortoise_vanished_probe_v2" in out, out
+
+
+def test_an_unreadable_record_is_a_REFUSAL(monkeypatch, tmp_path, derived_baseline, capsys):
+    """A gate that cannot read its evidence must not report success (#1382 class)."""
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    def _boom(*a, **k):
+        raise sm.SurfaceEvidenceUnreadable("the archive manifest is unreadable")
+
+    monkeypatch.setattr(sm, "removal_records", _boom)
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "unreadable" in out, out
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_an_ORDINARY_re_cut_reports_no_removals(monkeypatch, tmp_path, derived_baseline, capsys):
+    """NON-VACUITY: the gate must not fire on a re-cut where nothing was removed.
+
+    Without this, a gate that refused every cut would satisfy all the refusal tests above.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(
+        yaml.safe_dump(copy.deepcopy(derived_baseline), sort_keys=False, allow_unicode=True, width=110)
+    )
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "accounted" not in out, out
+
+
+def test_the_RETIRED_half_is_gated_too(monkeypatch, tmp_path, derived_baseline, capsys):
+    """A retired name is STILL SERVED, and dropping it is a removal like any other.
+
+    `RETIRED_TOOL_REGISTRY` is derived from `RETIRED_USE_INSTEAD`, so one ordinary edit
+    (delete a key from the map) removes BOTH the `retired:` row and the forward record. A
+    gate that read only `rows:` watched that happen and reported nothing — the same silent
+    wipe through a different door the approvals reset guards against (#4598). Found by the
+    verification review of this change; this test is the arm that would have caught it.
+    """
+    sm = _load_manifest_tool()
+    symbol = "tortoise_vanished_retired"
+    prior = copy.deepcopy(derived_baseline)
+    prior["retired"] = [*(prior.get("retired") or []), {"name": symbol}]
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 1, f"a RETIRED name vanished with no record and the re-cut passed:\n{out}"
+    assert symbol in out, out
+    assert path.read_text(encoding="utf-8") == before
+
+    # And it is accounted for by an archive entry of the tool kind, exactly like a row.
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": {("mcp-tool", symbol)}, "forward_raw": set(), "sdk_retired": set()},
+    )
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert f"{symbol}: archive entry (mcp-tool)" in out, out
+
+
+def test_a_symbol_that_is_BOTH_a_tool_and_a_method_does_not_hide_a_removal():
+    """`(symbol, class)` keys: a name collision must not overwrite one half's removal.
+
+    Keyed by symbol alone, a dropped `tortoise_x` tool row vanished from the mapping because
+    a live `tortoise_x` SDK method wrote the same key — and its removal became invisible. Not
+    reachable today (`tortoise_*` vs bare method names), but it is a silent-pass shape.
+    """
+    sm = _load_manifest_tool()
+    problems, _ = sm.removal_report(
+        {("tortoise_x", "tool"), ("tortoise_x", "sdk")},
+        {("tortoise_x", "sdk")},
+        {"archived": set(), "forward_raw": set(), "sdk_retired": set()},
+    )
+    assert len(problems) == 1 and "tortoise_x (tool)" in problems[0], problems
+
+
+def test_a_reason_without_an_allow_removal_is_refused(monkeypatch, tmp_path, derived_baseline, capsys):
+    """A justification for an override that did not happen is a false record, not a no-op."""
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(
+        yaml.safe_dump(copy.deepcopy(derived_baseline), sort_keys=False, allow_unicode=True, width=110)
+    )
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=[],
+            allow_removal_reason="I thought I was removing something",
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "no --allow-removal" in out, out
+
+
+def test_a_NON_MAPPING_baseline_row_is_UNREADABLE_not_absent(monkeypatch, tmp_path, derived_baseline, capsys):
+    """A row the gate cannot read must REFUSE — grading it as absent is the fail-open.
+
+    Found by review round 4 of PR #12313. `_read_manifest` accepts a `rows:` list whose
+    entries are not mappings (it only requires the half to be a LIST), and `check`'s
+    malformed-row finding needs a COMMITTED tree — which a cut never gives it, because the
+    cut is the operation that erases the shape. So `- tortoise_x` (a hand-edit, or a `yq`
+    append that dropped the `name:` key) used to land here as "no such row existed": the
+    symbol left the surface, the baseline was rewritten, and `cut` exited 0.
+    """
+    sm = _load_manifest_tool()
+    prior = copy.deepcopy(derived_baseline)
+    prior["rows"] = [*prior["rows"], "tortoise_vanished_probe"]  # a bare string, not a mapping
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 1, f"an unreadable row was graded as absent and the cut passed:\n{out}"
+    assert "not a mapping" in out, out
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_the_SDK_archive_pair_is_ONE_record_not_two():
+    """The pair is ONE record, and `cut` requires BOTH halves of it.
+
+    Counting the pair as two records refused the DOCUMENTED procedure (freeze the code, record
+    the departure) — review round 5 of PR #12313. That fix then accepted the MAP ALONE, which
+    keeps no code and is invisible to `archive_surface.check` (it iterates the archive
+    manifest), so a method could be deleted by a one-line map edit with every gate green —
+    review round 14, which made the freeze half required too. One record, two halves, neither
+    optional.
+    """
+    sm = _load_manifest_tool()
+    problems, accounting = sm.removal_report(
+        {("backfill_sources", "sdk")},
+        set(),
+        {
+            "archived": {("sdk-method", "backfill_sources")},
+            "forward_raw": set(),
+            "sdk_retired": {"backfill_sources"},
+        },
+    )
+    assert problems == [], problems
+    # `accounting` is keyed `(symbol, surface-class)` — one entry per REMOVAL, so the printed
+    # audit cannot undercount a symbol removed from two surfaces (review of PR #12313).
+    assert "archived code" in accounting[("backfill_sources", "sdk")], accounting
+
+    # The TOOL pair is still a contradiction: archived AND still served.
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool")},
+        set(),
+        {
+            "archived": {("mcp-tool", "tortoise_x")},
+            "forward_raw": {"tortoise_x"},
+            "sdk_retired": set(),
+        },
+    )
+    assert problems and not accounting, (problems, accounting)
+
+
+def test_an_override_does_not_MASK_a_two_record_inconsistency():
+    """A rename is not an answer to "simultaneously archived and still served"."""
+    sm = _load_manifest_tool()
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool")},
+        set(),
+        {
+            "archived": {("mcp-tool", "tortoise_x")},
+            "forward_raw": {"tortoise_x"},
+            "sdk_retired": set(),
+        },
+        allowed={"tortoise_x"},
+    )
+    assert problems and not accounting, (problems, accounting)
+    assert "2 records" in problems[0], problems
+
+
+def test_an_override_on_a_FIRST_cut_is_refused(monkeypatch, tmp_path, derived_baseline, capsys):
+    """No prior baseline means nothing was removed, so any waiver for it is a false record.
+
+    Round 7 of PR #12313: the symbol-vs-removal check lived inside the prior-doc arm, so a
+    first cut accepted `--allow-removal x --allow-removal-reason r` and printed
+    `REMOVAL OVERRIDE …` although no symbol can have gone — the same false-record class the
+    mirror case (a reason with no symbol) already refused.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "no-such-baseline.yml"  # a FIRST cut: nothing committed to compare against
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=["whatever"],
+            allow_removal_reason="a rename that is not happening",
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "does not remove" in out, out
+    assert not path.exists(), "the refused first cut still wrote a baseline"
+
+    # …and a first cut with NO override still works (non-vacuity).
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    assert rc == 0, capsys.readouterr().out
+    assert path.exists()
+
+
+def test_an_override_cannot_waive_TWO_surfaces_at_once():
+    """ONE waiver is ONE removal. Keyed by symbol alone, one `--allow-removal x` waived a
+    dropped tool AND a dropped SDK method of the same name and printed a single `accounted`
+    entry for two removals — the audit line understated what the cut had removed.
+
+    Not reachable today (`tortoise_*` tool names vs bare method names), which is why it is a
+    test and not a red. The fix is a REFUSAL naming the disambiguating form, plus the
+    qualified form itself, and both arms are pinned here.
+    """
+    sm = _load_manifest_tool()
+    records = {"archived": set(), "forward_raw": set(), "sdk_retired": set()}
+    prior = {("tortoise_x", "tool"), ("tortoise_x", "sdk")}
+
+    problems, accounting = sm.removal_report(prior, set(), records, allowed={"tortoise_x"})
+    # The SDK row is ALSO refused its departure record (an SDK rename carries the map entry),
+    # so the ambiguity that this test is about is one of two problems.
+    kinds = [p.kind for p in problems]
+    assert kinds == ["no-record", "ambiguous-waiver"], problems
+    ambiguous = problems[1]
+    assert "would waive 2 removals" in ambiguous, ambiguous
+    assert "tool:tortoise_x" in ambiguous and "sdk:tortoise_x" in ambiguous, ambiguous
+
+    # The qualified form waives ONE surface and leaves the other removal unrecorded — which
+    # is the point: the waiver may not silently cover the second one (non-vacuity: the
+    # qualified arm really does waive its own class, or this would pass for the wrong reason).
+    problems, accounting = sm.removal_report(prior, set(), records, allowed={"tool:tortoise_x"})
+    assert accounting == {
+        ("tortoise_x", "tool"): "`--allow-removal` (deliberate removal, stated in the PR)"
+    }, accounting
+    assert len(problems) == 1 and "tortoise_x (sdk)" in problems[0], problems
+
+    # …and naming BOTH surfaces is the remedy the refusal above prescribes, so it must PASS
+    # with two records. Keyed by symbol the two qualified entries collapsed into one class and
+    # this legitimate case was refused as "dropped with no record" — the refusal recommending
+    # a path the tool could not execute (review of PR #12313, round 9).
+    # (…with the SDK departure record in the map, which every SDK rename carries.)
+    problems, accounting = sm.removal_report(
+        prior,
+        set(),
+        {
+            "archived": set(),
+            "forward_raw": set(),
+            "sdk_retired": {"tortoise_x"},
+            "sdk_renamed": {"tortoise_x"},
+        },
+        allowed={"tool:tortoise_x", "sdk:tortoise_x"},
+    )
+    assert problems == [], problems
+    assert sorted(accounting) == [("tortoise_x", "sdk"), ("tortoise_x", "tool")], accounting
+
+
+def test_an_override_for_an_ALREADY_recorded_symbol_is_a_false_record():
+    """An override for a symbol a REAL record already accounts for waives nothing — and
+    honouring it REPLACES that record in the cut log, printing "deliberate rename" for a
+    symbol that is frozen in the archive. Same false-record class as a reason with no symbol.
+    """
+    sm = _load_manifest_tool()
+    records = {
+        "archived": {("mcp-tool", "tortoise_x")},
+        "forward_raw": set(),
+        "sdk_retired": set(),
+    }
+
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool")}, set(), records, allowed={"tortoise_x"}
+    )
+    assert len(problems) == 1, problems
+    assert "already accounted for by archive entry (mcp-tool)" in problems[0], problems
+    assert accounting == {}, accounting
+
+    # …and with NO override the same tree passes and prints the archive record (non-vacuity).
+    problems, accounting = sm.removal_report({("tortoise_x", "tool")}, set(), records)
+    assert problems == [], problems
+    assert accounting == {("tortoise_x", "tool"): "archive entry (mcp-tool)"}, accounting
+
+
+def test_a_NON_MAPPING_archive_entry_is_UNREADABLE_not_absent(tmp_path):
+    """A frozen entry the gate cannot read is unreadable EVIDENCE, not an absent entry.
+
+    Skipping it `continue`d, so a corrupt `archive/MANIFEST.json` graded as "nothing is
+    archived" and `cut` told the operator to archive a symbol that is already archived. The
+    row reader one function over was fixed to refuse for exactly this reason (round 4).
+    """
+    import json as _json
+
+    sm = _load_manifest_tool()
+    path = tmp_path / "MANIFEST.json"
+    # `schema` IS HERE SO THE FIXTURE IS WELL-FORMED for the delegated sibling — it is NOT what
+    # pins the guard. ⛔ THE MESSAGE ASSERTION BELOW IS WHAT PINS THE GUARD; an exception TYPE
+    # cannot: over a string entry the DELEGATED sibling (`archive_surface.manifest_violations`)
+    # raises `AttributeError: 'str' object has no attribute 'get'`, which `removal_records`'
+    # blanket `except Exception` wraps into the SAME `SurfaceEvidenceUnreadable` — so with the
+    # guard replaced by `continue` the old type-only assertion still passed, and the
+    # operator-facing diagnostic degraded to "could not grade the archive manifest against its
+    # own checker: AttributeError…". Measured: a SCHEMA-LESS fixture plus the same mutant also
+    # fails, on the message assertion — the schema does not close the hole (review round 19 of
+    # PR #12313 corrected round 18's claim that it did).
+    path.write_text(_json.dumps({"schema": 1, "entries": ["mcp-tool:tortoise_x"]}), encoding="utf-8")
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm.removal_records(path)
+    # The GUARD'S OWN WORDING, so deleting the guard cannot be masked by the sibling's message.
+    assert "entry is not a mapping" in str(excinfo.value), excinfo.value
+
+    # non-vacuity: a well-formed entry list is still read.
+    path.write_text(
+        _json.dumps({"schema": 1, "entries": [_real_archive_entry()]}), encoding="utf-8"
+    )
+    real = _real_archive_entry()
+    assert sm.removal_records(path)["archived"] == {(real["kind"], real["symbol"])}
+
+
+def test_an_override_for_a_recorded_symbol_reports_the_RECORD_not_an_unused_override(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The SPECIFIC refusal must survive the `cmd_cut` seam.
+
+    `removal_report` produces "already accounted for by archive entry (mcp-tool)", but the
+    `unexplained` gate in `cmd_cut` compared the waiver against `accounting` — which is empty
+    for exactly that case — and returned first with "this cut does not remove <symbol>". That
+    claim is FALSE (the cut does remove it), it hid the real reason, and it suppressed the
+    `accounted` block that names the archive record. The unit test above cannot see this,
+    which is why this one drives `cmd_cut` (review of PR #12313, round 8).
+    """
+    sm = _load_manifest_tool()
+    symbol = "tortoise_vanished_probe"
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": symbol}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {
+            "archived": {("mcp-tool", symbol)},
+            "forward_raw": set(),
+            "sdk_retired": set(),
+        },
+    )
+
+    rc = sm.cmd_cut(
+        argparse.Namespace(
+            commit=CUT_SHA,
+            allow_approval_reset=True,
+            allow_removal=[symbol],
+            allow_removal_reason="renamed to something else",
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "does not remove" not in out, out
+    assert "already accounted for by archive entry (mcp-tool)" in out, out
+    # ⛔ AND THE HEADER MUST MATCH THE PROBLEM. This is not a "no record" refusal — the row
+    # HAS one — but `cmd_cut` printed one header for every class: "cut would drop N surface
+    # row(s) with no usable record", the three archive routes, and "passes --allow-removal"
+    # (the flag that was just refused, as if the refusal had not happened). So the operator was
+    # told to add a record to a recorded row, and the printed remedies contradicted the line
+    # directly above them (review of PR #12313).
+    assert "no usable record" not in out, out
+    # The REAL heading the tool prints (it used to read "Account for each symbol …", a string
+    # no code emits, so the assertion could not fail — review of PR #12313, round 12).
+    assert REMOVAL_WAYS_HEAD not in out, out
+    assert "cut refused this removal" in out, out
+    assert path.read_text(encoding="utf-8") == before
+
+    # non-vacuity: the same tree with NO override passes and names the record.
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert f"{symbol}: archive entry (mcp-tool)" in out, out
+
+
+def test_the_no_record_header_and_remedies_still_print_for_a_no_record_refusal(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The other half of the header split: a real "no record" refusal keeps both blocks.
+
+    The header is now class-driven, so the guard against a false *absence* of the remedy is
+    as necessary as the guard against printing it wrongly — otherwise "print the routes"
+    could pass while the routes never render for the one class they exist for.
+    """
+    sm = _load_manifest_tool()
+    symbol = "tortoise_vanished_probe"
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": symbol}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": set(), "forward_raw": set(), "sdk_retired": set()},
+    )
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"{symbol} (tool) was DROPPED with no record" in out, out
+    assert "cut would drop 1 surface row(s) with no usable record" in out, out
+    assert REMOVAL_WAYS_HEAD in out, out
+    assert "--allow-removal <symbol> --allow-removal-reason" in out, out
+    # ⛔ AND THE ROUTE LIST MUST NOT OFFER A DEAD END. `RETIRED_USE_INSTEAD` cannot account for
+    # a removal — a key with the declaration still live is a RETIREMENT (still served, so not a
+    # removal at all), and a key whose declaration is gone dangles, which the cut refuses as a
+    # contradiction — so it is stated as NOT a route rather than printed as one, which is what
+    # sent lanes to a route that could never satisfy the gate they were reading
+    # (review of PR #12313, round 9).
+    assert "- `RETIRED_USE_INSTEAD`" not in out, out
+    assert "A `RETIRED_USE_INSTEAD` entry is NOT a route here" in out, out
+    # The claim was false: a refused cut writes no log below the refusal.
+    assert "logged below" not in out, out
+
+
+def test_each_refusal_BLOCK_is_scoped_to_the_PROBLEM_CLASSES_it_can_clear(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """The header, the routes and the rename remedy are per-class, not per-refusal.
+
+    Three rounds have each made one of these blocks print over a row it cannot help:
+    "no usable record" over a row that HAS a record (round 12: the SDK half-record, typed
+    `no-record`), "Account for each row reported above as 'DROPPED with no record'" over rows
+    that are not reported that way, and the `--allow-removal` rename remedy (which only the
+    no-record path consults) under a mixed refusal carrying a contradiction. The kinds are
+    what `cmd_cut` branches on, so this drives the three mixtures through the real `cmd_cut`.
+    """
+    sm = _load_manifest_tool()
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    monkeypatch.setattr(
+        sm,
+        "removal_records",
+        lambda *a, **k: {"archived": set(), "forward_raw": set(), "sdk_retired": set()},
+    )
+
+    def _run(problems):
+        monkeypatch.setattr(sm, "removal_report", lambda *a, **k: (problems, {}))
+        rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+        out = capsys.readouterr().out
+        assert rc == 1, out
+        return out
+
+    renamed = "--allow-removal <symbol> --allow-removal-reason"
+
+    # A plain drop: every block applies.
+    out = _run([sm.RemovalProblem("no-record", "x was DROPPED with no record")])
+    assert "no usable record" in out and REMOVAL_WAYS_HEAD in out, out
+    assert renamed in out, out
+
+    # A record that exists but is missing its other half IS a row under the header (it needs a
+    # route — the missing half), but the rename remedy cannot supply it, so that one line must
+    # not print. This is the shape round 12 found mis-typed as a plain drop.
+    out = _run([sm.RemovalProblem("incomplete-record", "x (sdk) is archived but absent")])
+    assert "no usable record" in out and REMOVAL_WAYS_HEAD in out, out
+    assert renamed not in out, out
+
+    # A problem that needs NO record at all (a contradiction settled before any waiver is read)
+    # gets the class-neutral refusal: no header, no routes, no rename.
+    out = _run([sm.RemovalProblem("contradiction", "y is accounted by 2 records")])
+    assert "no usable record" not in out, out
+    assert REMOVAL_WAYS_HEAD not in out, out
+    assert renamed not in out, out
+    assert "cut refused this removal" in out, out
+
+    # Mixed: the routes DO apply (one row really has no record) but the rename remedy does not
+    # apply to the contradiction row, which `removal_report` settles before reading a waiver.
+    out = _run(
+        [
+            sm.RemovalProblem("no-record", "x was DROPPED with no record"),
+            sm.RemovalProblem("contradiction", "y is accounted by 2 records"),
+        ]
+    )
+    assert "no usable record" in out and REMOVAL_WAYS_HEAD in out, out
+    assert renamed not in out, out
+
+
+def test_an_archive_entry_without_its_FIELDS_is_not_a_RECORD(tmp_path):
+    """`kind` + `symbol` alone is a row `archive_surface.py check` REDS, so it is no record.
+
+    `archive_symbol` always writes `batch`, `reason` and `file`, and `file_violations` reds a
+    row without them. Reading only `kind`/`symbol` made a hand-typed row a record `cut`
+    accepted while `check` refused it — and the cheapest way to clear that red, before the
+    already-deleted code can be frozen, is deleting the row: then prior == derived and no gate
+    can ever see the removal again, i.e. the #12237 loss reached THROUGH this gate (review of
+    PR #12313).
+    """
+    import json as _json
+
+    sm = _load_manifest_tool()
+    path = tmp_path / "MANIFEST.json"
+
+    real = _real_archive_entry()
+    for missing in ("batch", "reason", "file"):
+        entry = copy.deepcopy(real)
+        del entry[missing]
+        path.write_text(_json.dumps({"schema": 1, "entries": [entry]}), encoding="utf-8")
+        with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+            sm.removal_records(path)
+        # ⛔ THE FIELD-NAME GUARD'S OWN WORDING, not merely the field name. The bare
+        # `assert missing in ...` passed with the loop deleted: the DELEGATED sibling grading
+        # (`archive_surface.manifest_violations` / `file_violations`) refuses the same row and
+        # its message happens to name whichever field is missing, so the loop could be removed
+        # with the suite green — a test that cannot fail for the guard it is named after
+        # (review round 15 of PR #12313: the mutant survived 38/38).
+        assert f"carries no usable `{missing}`" in str(excinfo.value), str(excinfo.value)
+
+    # non-vacuity: the REAL row, unmodified, is a record — so the refusals above are about the
+    # missing field, not about the fixture. (The committed entry is a `module`, which the
+    # removal gate cannot grade at all: `ARCHIVE_KIND_BY_CLASS` is closed over the classes the
+    # SURFACE BASELINE can carry — tool rows and SDK methods — so a module deletion moves
+    # nothing `cut` compares. That gap is #12402, not something this test can close; what it
+    # asserts here is the READER's acceptance, and that a module row is not mistaken for a tool
+    # record.)
+    path.write_text(_json.dumps({"schema": 1, "entries": [real]}), encoding="utf-8")
+    records = sm.removal_records(path)
+    assert records["archived"] == {(real["kind"], real["symbol"])}, records
+    problems, _ = sm.removal_report({(real["symbol"], "tool")}, set(), records)
+    assert len(problems) == 1 and "DROPPED with no record" in problems[0], problems
+
+
+def test_an_archive_row_that_names_no_SYMBOL_is_UNREADABLE_not_absent(tmp_path):
+    """A row with `kind` but no `symbol` must REFUSE, not be skipped as "not archived".
+
+    Skipping it grades "unreadable" as "not there", so `cut` tells the operator to archive a
+    symbol that IS archived while a corrupt manifest stays quiet — and the cut never gives the
+    tree a committed baseline, so `check` cannot see the shape either.
+    (review round 15 of PR #12313: disarming the guard left 247/247 green.)
+    """
+    import json as _json
+
+    sm = _load_manifest_tool()
+    path = tmp_path / "MANIFEST.json"
+    real = _real_archive_entry()
+    entry = copy.deepcopy(real)
+    del entry["symbol"]
+    path.write_text(_json.dumps({"schema": 1, "entries": [entry]}), encoding="utf-8")
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm.removal_records(path)
+    assert "an `archive/MANIFEST.json` entry names no symbol" in str(excinfo.value), excinfo.value
+
+
+def test_a_baseline_ROW_with_no_name_is_UNREADABLE_not_absent():
+    """A `rows:`/`retired:` row that names no symbol must REFUSE, not vanish from the prior.
+
+    Grading it as absent loses the symbol: `cut` exits 0 and the row the operator hand-edited
+    (or `yq`'d, dropping `name:`) leaves the surface with nothing recorded — the exact deletion
+    this gate exists to refuse. `_read_manifest` accepts the shape (it only requires `rows` to
+    be a list) and `check`'s malformed-row finding needs a committed tree a cut never gives it.
+    (review round 15 of PR #12313: disarming the guard left 247/247 green.)
+    """
+    sm = _load_manifest_tool()
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm.surface_symbols({"rows": [{"method": "tortoise_x"}], "retired": []})
+    assert "a manifest `rows:` row carries no name" in str(excinfo.value), excinfo.value
+
+
+def test_a_FORGED_archive_row_is_not_a_RECORD(tmp_path):
+    """Every shape a hand-typed row takes that `archive_surface.py check` REDS.
+
+    The round-8 check was a field list (`batch`/`reason`/`file` present, file exists), which is
+    a SECOND opinion about what a record is — and it accepted a row naming `MEMORY.md`, a row
+    pointing at a REAL frozen file under a different symbol, a row with no `archived_at`, a
+    mutated block sha, and the same `(kind, symbol)` twice. Each of those is red by the sibling
+    checker, so each would let `cut` write a baseline whose archive has already lost the code,
+    with deleting the row as the cheapest way out of the red — the #12237 loss reached THROUGH
+    the gate (review of PR #12313, round 9). The row reader now DELEGATES the question instead
+    of answering it a second time, and this pins the delegation.
+    """
+    import json as _json
+
+    sm = _load_manifest_tool()
+    path = tmp_path / "MANIFEST.json"
+    real = _real_archive_entry()
+
+    def _refused(entry, duplicates: bool = False) -> str:
+        entries = [entry, copy.deepcopy(entry)] if duplicates else [entry]
+        path.write_text(_json.dumps({"schema": 1, "entries": entries}), encoding="utf-8")
+        with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+            sm.removal_records(path)
+        return str(excinfo.value)
+
+    # A real file OUTSIDE `archive/`: containment is what `check` reds, and "the file exists"
+    # is not the question.
+    outside = copy.deepcopy(real)
+    outside["file"] = "MEMORY.md"
+    assert "not a path inside archive/" in _refused(outside)
+
+    traversal = copy.deepcopy(real)
+    traversal["file"] = "archive/../MEMORY.md"
+    assert "not a path inside archive/" in _refused(traversal)
+
+    # A real frozen file, claimed under a different symbol: `check` reds the drift.
+    wrong_symbol = copy.deepcopy(real)
+    wrong_symbol["symbol"] = "tortoise_never_frozen_here"
+    assert "drifted" in _refused(wrong_symbol).lower()
+
+    no_anchor = copy.deepcopy(real)
+    del no_anchor["archived_at"]
+    assert "archived_at" in _refused(no_anchor)
+
+    bad_block = copy.deepcopy(real)
+    bad_block["blocks"][0]["sha256"] = "0" * 64
+    assert "sha256" in _refused(bad_block)
+
+    # The same symbol archived twice is a manifest `check` reds.
+    assert "twice" in _refused(copy.deepcopy(real), duplicates=True).lower()
+
+    # non-vacuity: the unmodified real row still reads (so the refusals above are the
+    # mutations, not the fixture or the delegation itself).
+    path.write_text(_json.dumps({"schema": 1, "entries": [real]}), encoding="utf-8")
+    assert sm.removal_records(path)["archived"] == {(real["kind"], real["symbol"])}
+
+
+def _real_archive_surface():
+    from tools import archive_surface
+
+    return archive_surface
+
+
+def _real_archive_entry() -> dict:
+    """The committed manifest's own row — a file, its blocks and its anchor all real.
+
+    A fixture that invents `{"kind": …, "symbol": …, "file": "archive/MANIFEST.json"}` pins
+    the HOLE it means to close: `archive/MANIFEST.json` exists (so an existence check passes)
+    while `archive_surface.py check` reds it on every other arm. Mutating the real row keeps
+    each arm "the one field that is wrong" instead of "wrong everywhere", which is what makes
+    a refusal test discriminate (review of PR #12313, round 9).
+    """
+    entries = _real_archive_surface().load_manifest()["entries"]
+    assert entries, "the committed archive is empty — this fixture would prove nothing"
+    return copy.deepcopy(entries[0])
+
+
+def test_an_archive_entry_whose_FROZEN_FILE_is_gone_is_not_a_RECORD(tmp_path):
+    """An entry pointing at a file this checkout does not have cannot be a freeze.
+
+    Same class and same consequence as the field check above — an entry whose frozen code is
+    missing is a claim, not a record, and `archive_surface.py check` reds it.
+    """
+    import json as _json
+
+    sm = _load_manifest_tool()
+    path = tmp_path / "MANIFEST.json"
+    path.write_text(
+        _json.dumps(
+            {
+                "entries": [
+                    {
+                        "kind": "mcp-tool",
+                        "symbol": "tortoise_forgotten",
+                        "batch": "b",
+                        "reason": "r",
+                        "file": "archive/modules/never-frozen/Tool.py",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm.removal_records(path)
+    assert "never-frozen" in str(excinfo.value), str(excinfo.value)
+
+    # non-vacuity: the REAL committed manifest resolves its files and still reads.
+    assert sm.removal_records()["archived"], "the committed archive read as empty"
+
+
+def test_ONE_waiver_grammar_is_shared_by_both_callers():
+    """`removal_report` and `cmd_cut` used to parse the waiver grammar differently.
+
+    `removal_report` treated `foo:bar` as a BARE symbol (its head is not a surface class)
+    while `cmd_cut` keyed on any `:` and read it as the qualified `bar` — so a symbol
+    literally named `foo:bar` was accepted by one and mangled by the other. Both now go
+    through `parse_waiver`, and `waiver_matches` is the single matcher, on the class axis the
+    waiver grammar added: a `sdk:` waiver must NOT be satisfied by a tool removal.
+    """
+    sm = _load_manifest_tool()
+    assert sm.parse_waiver("foo:bar") == (None, "foo:bar")
+    assert sm.parse_waiver("tool:foo:bar") == ("tool", "foo:bar")
+    assert sm.parse_waiver("tool:") == (None, "tool:")
+    assert sm.parse_waiver("tortoise_x") == (None, "tortoise_x")
+
+    assert sm.waiver_matches("foo:bar", "foo:bar", "tool") is True
+    assert sm.waiver_matches("x", "x", "tool") is True
+    assert sm.waiver_matches("tool:x", "x", "tool") is True
+    # The class axis: a waiver naming the OTHER surface is not an explanation.
+    assert sm.waiver_matches("sdk:x", "x", "tool") is False
+    assert sm.waiver_matches("tool:x", "x", "sdk") is False
+def test_a_DANGLING_forward_key_is_a_CONTRADICTION_and_its_absence_is_no_record():
+    """The arm that RUNS: `forward_raw`, not the inert `forward` field this test used to pin.
+
+    A `RETIRED_USE_INSTEAD` key whose `ToolDefinition` was deleted serves NOTHING (neither
+    advertised nor answered), and `archive_surface.py check` refuses to archive a name that is
+    in that map at all — so a gate that graded it as "no record" sent the operator to archive
+    and then red, and a gate that graded it as "keeps SERVING the name" reported the opposite
+    of the truth. The assertion used to read `records["forward"]`, a field no production path
+    consulted, so it could not fail for the property it named: `removal_report` reads
+    `forward_raw` (review of PR #12313, round 11). This drives the real arm instead.
+    """
+    import tortoise.tool_registry as registry
+
+    sm = _load_manifest_tool()
+    real = list(registry.RETIRED_TOOL_REGISTRY)
+    assert real, "the retired registry is empty — this arm would prove nothing"
+    symbol = real[0].name
+    # The dangling shape: the key is in the raw map, the declaration is not.
+    records = {"archived": set(), "forward_raw": {symbol}, "sdk_retired": set()}
+    problems, accounting = sm.removal_report({(symbol, "tool")}, set(), records)
+    assert len(problems) == 1, problems
+    assert problems[0].kind == "contradiction", problems[0].kind
+    assert "RETIRED_USE_INSTEAD" in problems[0], problems[0]
+    assert not accounting, accounting
+
+    # Non-vacuity: with no forward key at all, the same removal is the plain no-record case.
+    problems, accounting = sm.removal_report(
+        {(symbol, "tool")}, set(), {"archived": set(), "forward_raw": set(), "sdk_retired": set()}
+    )
+    assert [p.kind for p in problems] == ["no-record"], problems
+    assert not accounting, accounting
+
+
+def test_a_cut_that_removes_NOTHING_does_not_grade_the_archive(
+    monkeypatch, tmp_path, derived_baseline, capsys
+):
+    """An archive defect the cut neither reads nor aggravates must not refuse a no-op cut.
+
+    `removal_records()` grades the WHOLE archive (`manifest_violations` + `file_violations`),
+    so calling it on every cut with a prior baseline made a single unindexed `.py` — exactly
+    what an interrupted `archive_symbol` leaves behind, since the file is written before the
+    row is appended — refuse EVERY later cut in that tree, with a message about forgetting a
+    symbol, when the cut drops nothing. Round 10 fixed this only for a MISSING manifest
+    (review of PR #12313, round 11).
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(
+        yaml.safe_dump(
+            copy.deepcopy(derived_baseline), sort_keys=False, allow_unicode=True, width=110
+        )
+    )
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    def _broken_archive(*a, **k):
+        raise sm.SurfaceEvidenceUnreadable("archive/ORPHAN.py: archived code no row indexes")
+
+    monkeypatch.setattr(sm, "removal_records", _broken_archive)
+
+    # No prior row is missing from the derivation, so there is no record to consult: the cut
+    # must not even ask, and the broken archive must not be able to refuse it.
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "ORPHAN" not in out, out
+
+    # Non-vacuity: give the same cut one removal, and the SAME broken archive refuses it —
+    # so the arm above is the absence of a removal, not a dead stub.
+    prior = _prior_with_extra_rows(derived_baseline, [{"name": "tortoise_vanished_probe"}])
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "ORPHAN" in out, out
+
+
+def test_a_BARE_waiver_is_not_a_redundant_override_for_the_OTHER_surfaces_record():
+    """`--allow-removal x` where only `sdk:x` is recorded: the bare entry waives the TOOL.
+
+    The redundant-override arm used `_waived` (which matches a bare entry against every
+    class), so a bare waiver was refused as "replaces a real record with a rename claim"
+    although the removal it actually covered — the UNRECORDED tool — is exactly what a waiver
+    is for. The "sole authority" rule the ambiguity counter already applies applies here too
+    (review of PR #12313, round 11).
+    """
+    sm = _load_manifest_tool()
+    records = {
+        "archived": {("sdk-method", "x")},
+        "forward_raw": set(),
+        "sdk_retired": {"x"},
+    }
+    problems, accounting = sm.removal_report(
+        {("x", "tool"), ("x", "sdk")}, set(), records, allowed={"x"}
+    )
+    assert problems == [], problems
+    assert accounting[("x", "sdk")].startswith("RETIRED_SDK_METHODS"), accounting
+    assert "--allow-removal" in accounting[("x", "tool")], accounting
+
+    # The two-surface AMBIGUITY must not leave the records it refused in `accounting` either —
+    # the same invariant the redundant-override arm enforces (review of PR #12313, round 12).
+    empty = {"archived": set(), "forward_raw": set(), "sdk_retired": set()}
+    problems, accounting = sm.removal_report(
+        {("tortoise_x", "tool"), ("tortoise_x", "sdk")}, set(), empty, allowed={"tortoise_x"}
+    )
+    # The SDK row is refused its departure record as well (an SDK rename must carry the map
+    # entry), so the ambiguity is the SECOND problem — the invariant under test is that neither
+    # leaves a record in `accounting`.
+    assert [p.kind for p in problems] == ["no-record", "ambiguous-waiver"], problems
+    assert accounting == {}, accounting
+
+    # Non-vacuity: a QUALIFIED waiver on the recorded class IS the false record, and is refused
+    # — and the tool removal it no longer covers is then the plain no-record case.
+    problems, accounting = sm.removal_report(
+        {("x", "tool"), ("x", "sdk")}, set(), records, allowed={"sdk:x"}
+    )
+    assert [p.kind for p in problems] == ["redundant-override", "no-record"], problems
+    assert not accounting, accounting
+
+
+def test_a_baseline_with_NO_retired_half_is_SAID_not_silent(monkeypatch, tmp_path, derived_baseline, capsys):
+    """`cut` is the repair path for that shape, so it proceeds — but it must SAY so.
+
+    `check` reds a baseline with no `retired:` list from both directions, so this shape is only
+    reachable on a tree `cut` is repairing; refusing would block the repair. The absence is
+    still printed, because a retired name dropped in the same PR is then not graded.
+    """
+    sm = _load_manifest_tool()
+    prior = copy.deepcopy(derived_baseline)
+    prior.pop("retired", None)
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "WARNING the committed baseline carries no `retired:` list" in out, out
+
+    # An EMPTY `retired:` is the same absence in another spelling, and it used to be graded
+    # silently: the disclosure fired on `is None` only, so a baseline whose list had been
+    # emptied (a splice or union-merge artefact) compared nothing and said nothing while a
+    # retired name left the declaration in the same cut (review of PR #12313).
+    emptied = copy.deepcopy(derived_baseline)
+    emptied["retired"] = []
+    path.write_text(yaml.safe_dump(emptied, sort_keys=False, allow_unicode=True, width=110))
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "WARNING the committed baseline carries no `retired:` list" in out, out
+
+    # ⛔ AND THE WARNING IS NOT CONDITIONAL ON THE DERIVED HALF HAVING ROWS. The disclosure
+    # used to require `doc.get("retired")` too, so a tree whose committed half was gone AND
+    # whose derivation produced no retired names said NOTHING while every forward entry left
+    # the surface — the state where silence is worst, and the one the docs already describe as
+    # unconditional (`CONTRIBUTING.md`, `archive/README.md`). (review round 15 of PR #12313.)
+    no_forward = copy.deepcopy(derived_baseline)
+    no_forward["retired"] = []
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(no_forward))
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    rc = sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "WARNING the committed baseline carries no `retired:` list" in out, out
+
+
+def test_an_SDK_archive_entry_without_the_map_entry_is_REFUSED_by_both_gates():
+    """`cut` and `archive_surface.check` must not disagree about one shape.
+
+    `check` requires a frozen `sdk-method` to ALSO be in `RETIRED_SDK_METHODS` /
+    `REMOVED_SDK_METHODS` ("a caller would then hit a bare AttributeError instead of the
+    recorded departure"). `cut` accepted the archive entry ALONE and printed it as the
+    accounting record, so an operator was told the removal was recorded and then reddened CI
+    — and the cheapest way to clear that red without knowing the map requirement is to
+    delete the frozen entry, the exact loss the archive exists to prevent. Found by the
+    review of PR #12313; both sides are asserted here so a later change cannot move one
+    without the other.
+    """
+    from tools import archive_surface
+
+    sm = _load_manifest_tool()
+    records = {
+        "archived": {("sdk-method", "backfill_sources")},
+        "forward_raw": set(),
+        "sdk_retired": set(),
+    }
+
+    problems, accounting = sm.removal_report({("backfill_sources", "sdk")}, set(), records)
+    assert problems and not accounting, (problems, accounting)
+    assert "RETIRED_SDK_METHODS" in problems[0], problems
+
+    # The other gate really does red the identical shape — the assertion above is not a
+    # second opinion invented here.
+    surface = {
+        "tools": set(),
+        "methods": set(),
+        "forward": set(),
+        "sdk_retired": set(),
+        "modules": set(),
+    }
+    violations = archive_surface.surface_violations(
+        [{"kind": "sdk-method", "symbol": "backfill_sources"}], surface
+    )
+    assert violations and "RETIRED_SDK_METHODS" in violations[0], violations
+
+    # non-vacuity: the PAIR (frozen entry AND map entry) is the record and passes. The map
+    # ALONE is refused — `test_cut_REFUSES_a_dropped_sdk_method_recorded_in_the_MAP_but_
+    # NOT_archived` covers that shape end to end; the frozen entry is still in `records`
+    # here, which is the whole point of the half this assertion adds.
+    records["sdk_retired"] = {"backfill_sources"}
+    problems, accounting = sm.removal_report({("backfill_sources", "sdk")}, set(), records)
+    assert problems == [], problems
+    assert "archived code" in accounting[("backfill_sources", "sdk")], accounting
+
+
+def test_an_SDK_rows_identity_is_its_NAME_not_its_derived_method_cell():
+    """A hand-edit that moves `method` must not move which symbol the gate thinks departed.
+
+    `method` is a DERIVED column beside the row's `sdk:<name>`; reading it first made the
+    gate's identity for a prior row come from that cell, so a row still naming the departed
+    method could be graded as a surviving one (review of PR #12313).
+    """
+    sm = _load_manifest_tool()
+    prior = {"rows": [{"name": "sdk:tortoise_vanished", "method": "something_else"}]}
+    assert sm.surface_symbols(prior) == {("tortoise_vanished", "sdk")}
+
+
+def test_a_bare_waiver_beside_a_QUALIFIED_one_is_not_the_two_surface_ambiguity():
+    """`--allow-removal x --allow-removal sdk:x`: the bare entry covers only the TOOL.
+
+    The ambiguity refusal ("one `--allow-removal x` would waive 2 removals") counted every
+    class the bare entry MATCHED, including the one a qualified entry already names — so a
+    legitimate command was refused, with a reason that is false for it and whose prescribed
+    remedy the operator had already half-applied (review of PR #12313). Only a class whose
+    sole authority is the bare entry counts toward the ambiguity.
+    """
+    sm = _load_manifest_tool()
+    # The SDK rename carries its departure record, as every SDK rename must: `--allow-removal`
+    # alone is refused for an SDK method (a caller of the old name needs the map's fail-closed
+    # `AttributeError`), so the legitimate two-surface command names the map as well.
+    records = {
+        "archived": set(),
+        "forward_raw": set(),
+        "sdk_retired": {"x"},
+        "sdk_renamed": {"x"},
+    }
+    problems, accounting = sm.removal_report(
+        {("x", "tool"), ("x", "sdk")}, set(), records, allowed={"x", "sdk:x"}
+    )
+    assert problems == [], problems
+    assert set(accounting) == {("x", "tool"), ("x", "sdk")}, accounting
+
+    # …and a BARE waiver alone is still the ambiguity (non-vacuity: the refusal still fires
+    # for the command that really does collapse two removals into one record). With no map
+    # entry the SDK row is ALSO refused its departure record, so both refusals stand.
+    problems, _ = sm.removal_report(
+        {("x", "tool"), ("x", "sdk")},
+        set(),
+        {"archived": set(), "forward_raw": set(), "sdk_retired": set()},
+        allowed={"x"},
+    )
+    kinds = [p.kind for p in problems]
+    assert kinds == ["no-record", "ambiguous-waiver"], problems
+    assert "would waive 2 removals" in problems[1], problems
+
+
+def test_the_dangling_forward_REMEDY_runs_the_order_it_prints(tmp_path):
+    """The printed exit from the dangling-forward state must be EXECUTABLE, and key-first.
+
+    ⛔ F1 of the review at `2899c30e1e` (surviving at `62a8f3f773`): the paragraph closed by
+    telling the operator to "restore the declaration from git FIRST, then … freeze the code and
+    delete it", which is the REVERSE of what the writer accepts. With the declaration restored
+    the `RETIRED_USE_INSTEAD` KEY is still in the map, so the symbol is a RETIREMENT that is
+    still SERVED and `archive_symbol` refuses the freeze — the operator would follow the remedy
+    and meet the same contradiction again. `CONTRIBUTING.md` states the executable order
+    (delete the map KEY first, archive, then delete the declaration) and the printed twin said
+    the opposite. The pre-existing test asserted only that the paragraph was PRESENT, which
+    passes on any wording — round 15's lesson, one paragraph over.
+
+    So this runs the order, on a real scratch repo, in both directions.
+    """
+    from tools import archive_surface as arch
+
+    # The printed paragraph must NAME the order that the probe below proves works — a probe
+    # alone would pass with the paragraph still saying the reverse, which is exactly how the
+    # old wording survived a presence check.
+    sm = _load_manifest_tool()
+    assert "delete the map KEY before you archive" in sm.NOT_A_REMOVAL_ROUTE, (
+        "the paragraph no longer names the key-first order CONTRIBUTING.md states:\n"
+        + sm.NOT_A_REMOVAL_ROUTE
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / "archive").mkdir()
+    (repo / "archive" / "MANIFEST.json").write_text(
+        '{"schema": 1, "entries": []}\n', encoding="utf-8"
+    )
+    reg = repo / "tortoise" / "tool_registry.py"
+    reg.parent.mkdir()
+    decl = (
+        "from dataclasses import dataclass\n"
+        "\n"
+        "@dataclass(frozen=True)\n"
+        "class ToolDefinition:\n"
+        "    name: str\n"
+        "\n"
+        "TOOL_REGISTRY = [\n"
+        "    ToolDefinition(\n"
+        "        name='probe_fwd',\n"
+        "    ),\n"
+        "]\n"
+    )
+    reg.write_text(decl + "\nRETIRED_USE_INSTEAD = {'probe_fwd': 'probe_fwd_new'}\n")
+    _git(repo, "add", "tortoise/tool_registry.py", "archive/MANIFEST.json")
+    _git(repo, "commit", "-qm", "sources")
+    assert "probe_fwd" in arch._forward_names(repo)
+
+    # THE OLD ORDER (restore the declaration, then archive): refused, because the restored key
+    # makes the symbol a RETIREMENT that is still SERVED.
+    with pytest.raises(arch.ArchiveRefused) as refused:
+        arch.archive_symbol("mcp-tool", "probe_fwd", "probe-batch", "order probe", root=repo)
+    assert "still SERVED" in str(refused.value), refused.value
+
+    # THE ORDER THE PARAGRAPH NOW GIVES (delete the map KEY first): the same call succeeds.
+    reg.write_text(decl, encoding="utf-8")
+    _git(repo, "commit", "-qam", "drop the forward key, per CONTRIBUTING.md's order")
+    assert "probe_fwd" not in arch._forward_names(repo)
+    entry = arch.archive_symbol("mcp-tool", "probe_fwd", "probe-batch", "order probe", root=repo)
+    assert entry["kind"] == "mcp-tool" and entry["symbol"] == "probe_fwd", entry
+    assert (repo / entry["file"]).exists(), entry
+    assert "probe_fwd" in (repo / entry["file"]).read_text(encoding="utf-8")
+

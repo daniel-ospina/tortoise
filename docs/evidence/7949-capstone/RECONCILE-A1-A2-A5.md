@@ -94,14 +94,14 @@ is §7's lesson one merge later: **a count is only as good as the base it was ta
 record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49788706a`, *feat(extractor):
 S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
 `tortoise/relation_write.py` is the consumer `#10999` did not have, called from
-`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:18877` (`relation_write = apply_relation_edges(` —
-the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:18876`, and the
+`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:18900` (`relation_write = apply_relation_edges(` —
+the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:18899`, and the
 binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
 taken on this merge:
 
 - `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:11524`,
-  `relation_write.py:7`, `sdk.py:18864`), against the *"that comment and no consumer at all"* this
+  `relation_write.py:7`, `sdk.py:18887`), against the *"that comment and no consumer at all"* this
   record was written with.
 - `git grep -n 'plan_hierarchy_edges' -- tortoise/` → **8** lines, four of them in `relation_write.py`
   and one of them the **call** (`:700`): a declared hierarchy over a pair the story *states* is routed
@@ -733,7 +733,7 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
-# sdk.py:18877 (`_capture_session` reaches it at `sdk.py:16779`). Of the three hits only ONE was still prose-about-absence (the stale comment at
+# sdk.py:18900 (`_capture_session` reaches it at `sdk.py:16802`). Of the three hits only ONE was still prose-about-absence (the stale comment at
 # `extractor_v2.py:11524`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
 # ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:11524` was

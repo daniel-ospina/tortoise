@@ -615,8 +615,10 @@ def test_the_row_two_MEASURES_the_EDGE_vector_door(monkeypatch):
     # halves are pinned here (`#12015` round 4: measured UNPINNED by removing the
     # `not projection["relationships_probed"]` arm and watching every test in this file
     # stay green — a green run OF THE FILE AS IT STOOD THEN, which is why no count is
-    # quoted: this file collects 183 today, so any unscoped figure here would be the
-    # stale-measurement defect the §6 note below forbids). Without it, "41 edge types
+    # quoted: this file collects a different number today, so any unscoped figure here would
+    # be the stale-measurement defect the §6 note below forbids — the reason this note
+    # names no live count at all is that a forward merge moves it, `#12281`'s own
+    # `183 -> 187` being the demonstration). Without it, "41 edge types
     # measured, none stores a vector" and "the edge arm never ran" are the SAME printed
     # evidence — `stored-without-a-query-path: none`
     # / `MET` — which is the rule the neighbouring notes already state: a `MET` must not
@@ -669,8 +671,9 @@ def test_an_edge_arm_that_stops_PLANTING_cannot_report_full_coverage(monkeypatch
     full coverage. That promise was pinned by NOTHING: deriving the population from the input
     list (`edge_probed.add(rel_type)` at the top of the per-type loop — the exact variant the
     probe's own comment calls MEASURED wrong) left the file as it stood then green at
-    `171 passed, 2 skipped` (=173, SCOPED to that head — this file collects 183 today, so the
-    figure is not re-cut). What CANNOT be reproduced here is that GREEN observation: the
+    `171 passed, 2 skipped` (=173, SCOPED to that head — this file collects a different
+    number today, so the figure is not re-cut). What CANNOT be reproduced here is that
+    GREEN observation: the
     variant is CAUGHT now — measured, it leaves the population pin above SATISFIED
     (input-derived equals `KNOWN_REL_TYPES`, so `:607` is not the assert that reds) while
     THIS test's own `relationships_probed == frozenset()` assertion below does red. Only
@@ -7912,9 +7915,9 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # existed, but the note that enrols it did not until `#12000`'s F1b note),
     # and a provenance asserted here would be the false record this note exists
     # to prevent. ⛔ The count is SCOPED
-    # to that head rather than re-cut, because this file collects 183 now and no
-    # run of it can report
-    # 152; an unscoped figure here would be the stale-measurement defect §6 of the
+    # to that head rather than re-cut, because this file collects a different number now and
+    # no run of it can report 152; an unscoped figure here would be the stale-measurement
+    # defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
     # measured at this tree, deleting the same line ADDS exactly one failure over
     # the same run's own baseline, namely
@@ -8000,14 +8003,18 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `182 passed, 1 skipped`
+    defect. Measured at `eee465029a`: the docker lane reads `185 passed, 1 skipped`
     (the skip is the `<3.12` re-derive; the three `main` reds this docstring used
     to record — `#12045`'s undeclared `tortoise.api::_emit` /
     `_verify_record_vector_width` writers — are cleared by `#12042`, landed as
-    `b367c54214a2`) and the carve-out lane reads `181 passed, 2 skipped` (that
+    `b367c54214a2`) and the carve-out lane reads `184 passed, 2 skipped` (that
     skip plus `tests/_live_utils.py`'s live-graph fixture, which only a lane with
-    a `TORTOISE_DB_URI` satisfies). Both splits add to the `183` re-derived
-    below, which is why the doc states its split as
+    a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
+    lane, which is the invariant that lasts; the two figures above are bound to the sha
+    for exactly that reason. The two splits therefore add to the tree's OWN collected
+    count: `186 + 1` and `185 + 2` at THIS tree, both equal to the `187` the pin re-derives
+    below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
+    which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent
@@ -8042,12 +8049,12 @@ def test_the_census_doc_collects_what_the_file_collects():
     statements = [int(n) for n in re.findall(r"this tree: (\d+) collected", text)]
     statements += [int(n) for n in
                    re.findall(r"collects \*\*(\d+) in the tree", text)]
-    # ⛔ The arithmetic total is written ``(`122 + … = 183`)`` — a BACKTICK follows the
+    # ⛔ The arithmetic total is written ``(`122 + … = 187`)`` — a BACKTICK follows the
     # digits, never a paren (`#12015` review MEASURED the first spelling: it matched
     # nothing, and a dead arm shrinks to the arms that still match, so `= 999` stayed
     # green while the comment claimed all three were pinned).
     statements += [int(n) for n in re.findall(r"= (\d+)`", text)]
-    # The splits paragraph's `to the same `183` the pin re-derives` clause — the fourth
+    # The splits paragraph's `to the same `187` the pin re-derives` clause — the fourth
     # statement of the same figure, and the one an earlier revision of this pin missed.
     statements += [int(n) for n in
                    re.findall(r"to the same `(\d+)` the pin re-derives", text)]
@@ -8385,3 +8392,683 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
             f"{name} declares {dupes} more than once. Python keeps the LAST "
             "binding, so the earlier row is DEAD — an active override, not a "
             "harmless no-op (#9314, measured on #11996)")
+# ── #12265 (root: #9314) — a duplicated declaration key is a SILENT loser ────
+#
+# `#11996` landed two duplicate `"tortoise.sdk::create_source"` rows in
+# `tools/dod_5090_probe.py`'s census dicts and a third in
+# `tortoise/embed_writer_register.py`. The two DICT rows were silently resolved by
+# Python's last-wins semantics — the earlier entry, the one a review had pinned,
+# simply stopped existing, and no test went red FOR THEM (the register's third copy
+# is what red the tree, at import — below). ⛔ The duplicate was born AT THE MERGE,
+# not inside either PR: each PR's own tree held ONE row (`#12016` landed at 20:43Z;
+# `#11996`'s base predated it), so no run of either PR could see two.
+# `main-lint.yml`'s ruff gate (`#2174`, `on: push: branches: [main]`) then red the
+# pushed tree — `F601` twice, 16 minutes after the merge — and that lint job was the
+# whole detection this class had. The register's own copy raised
+# `DuplicateWriterDeclaration` at IMPORT, which is loud but is a different shape (a
+# tuple of pairs, checked by `load()` — see
+# `tests/test_embed_writer_register.py::test_a_duplicate_key_raises`).
+#
+# So this is the DICT half: one scan, run wherever a diff SELECTS this module. ⛔ Not
+# on every tree that holds a duplicate — selection is the real bound, and it is
+# NARROWER than "every file under the scanned roots". Measured per file on the tree that
+# measured them, with `select([p], "pull_request")` over every module the scan walks:
+#
+#   * `tools/` — 140 of 195 DO reach it; 55 do not (measured:
+#     `select(["tools/min_signal.py"], "pull_request")` → 91 test files, this one
+#     absent — a `tools/`-only diff matching NO pattern is swallowed by
+#     NON_PYTHON_PREFIXES before the `core` fallback runs, and
+#     `tools/merge_throughput.py` measures the same 91; `tools/ask_spotcheck.py`
+#     misses by the OTHER mechanism (`tools/ci_selection.py:1147` makes it an `sdk`
+#     named surface, which REPLACES the fallback → 198 test files, this one absent)).
+#     ⛔ Do NOT name `tools/who_is_on.py` here — this bullet did, and it is the
+#     OPPOSITE of a miss: an UNCLASSIFIED path selects in FULL, so this test DOES run
+#     on that diff (measured: `full=True`, `test_files == "ALL"`). `tools/claim_lanes.py`
+#     is not a file in this repo (agent-infra's is `tools/fleet/claim_lanes.py`), so it
+#     could not have been the one measured. `tools/dod_5090_probe.py`
+#     itself does — it is a `CORE_ALSO` entry in `tools/ci_selection.py` (the
+#     instrument has to be selected by its own subject; 833 test files, this one
+#     PRESENT) — which is the file `#11996`'s duplicate lived in, and why a
+#     duplicate born there at a merge IS caught. It is pinned by
+#     `test_the_instrument_is_selected_by_its_own_subjects` in this module.
+#   * `tortoise/` — 31 of 287 do NOT reach it (`tortoise/ranking.py` → `ep`,
+#     `tortoise/hosted_api.py` → `api`+`onboarding`, `tortoise/reader.py` → `sdk`, …).
+#     The mechanism is the one this module already documents: a named-surface match
+#     REPLACES the `core` fallback that would otherwise sweep this file in.
+#   * `tests/` — 1,493 of 1,494 reach it; the exception is `tests/_html_links.py`
+#     (`onboarding`).
+#
+# So the honest bound is per root and NOT a rule you can generalise: any full-lane run
+# (push and schedule select in FULL, which is what makes the born-at-merge case
+# catchable), plus a per-file `pull_request` selection that covers every `tests/`
+# module but one, 140 of 195 `tools/` modules (`tools/dod_5090_probe.py` — the file
+# `#11996`'s duplicate lived in — among them), and 256 of 287 `tortoise/` modules.
+# Anything outside that is lint's alone.
+
+#: Roots the declaration dicts live under today. ⛔ NOT the whole repo: `battery/`,
+#: `graph-scripts/`, `docs/`, `eval/` and several smaller roots sit outside these three,
+#: so this scan does not reach a duplicate declared there. Stated rather than called
+#: "repo-wide" because the difference is what a reader would rely on.
+#:
+#: ⛔ Outside these roots a duplicate is not reliably caught by LINT either: `ruff`'s
+#: `F601` lands on the repeated (surviving) key, and a `noqa` marker naming `F601` on
+#: that line suppresses it — which is exactly the live shape this change found and
+#: removed in `tests/test_commit_schema.py`. So "lint would still catch it there" is
+#: false for the one shape we have actually observed.
+#:
+#: ⛔ THE CANONICAL ALTERNATIVE, stated so this scan is not read as the only catcher
+#: and not read as a substitute for the linter: the standard answer to a suppressible
+#: rule is to run the rule UNSUPPRESSED — `ruff check --select F601 --ignore-noqa`
+#: (measured on this tree: `All checks passed`, and no `noqa` directive naming F601
+#: survives to un-suppress, so it costs nothing). What this scan adds is what lint
+#: cannot: a red that no marker can defuse, one that runs in the pytest shard without
+#: depending on the lint step's selection, and one whose RED arm is provable by a test
+#: — so it is a COMPLEMENT to lint, never a replacement. ⛔ That step must stay
+#: rule-SCOPED: a repo-wide `--ignore-noqa` would un-baseline the WHOLE suppression
+#: baseline — measured on the tree this note was written on, **4,452** suppressed
+#: findings (the 242 markers `#1685` added on 2026-08-25 are where it started, not the
+#: size it reached) — i.e. it would reverse that decision. Do not propose it.
+#:
+#: (⛔ Neither sentence above spells the suppressive marker prefix itself: a comment
+#: whose text contains that prefix followed by the word `noqa` is PARSED by ruff as a
+#: directive, so prose about suppression emits "invalid directive" warnings on exactly
+#: the cache-cold lint run that is supposed to report findings — measured: this paragraph
+#: cost 2 spurious warnings in its first draft.)
+#:
+#: ⛔ NO FILE COUNT IS ASSERTED, here or for the roots outside. A count is a
+#: measurement of the tree it was taken on: a draft of this comment said "254", and by
+#: the time the text landed the tree held 255 outside these roots, in directories the
+#: enumeration had also missed — the drift class this very comment is about. The
+#: figures elsewhere in this comment are bound to the tree that measured them. The
+#: population an assertion should pin is the one it ENFORCES (`_MIN_MODULES` below),
+#: not a figure in prose.
+#:
+#: It is one scan over ALL three roots on purpose: the class is not specific to the
+#: probe, and naming files here would re-open the hole the moment a declaration moves
+#: into one not named.
+#:
+#: ⛔ IT IS NOT FREE, measured on the tree that measured it: 1,976 modules (`tortoise/` 287,
+#: `tools/` 195, `tests/` 1,494), **19.1 s** of `ast.parse`+walk, inside a file whose
+#: own run is ~2 min. Recorded so the next reader does not assume it is cheap — and so
+#: a future budget discussion has a figure. There is no sound cheap pre-filter:
+#: narrowing the roots narrows the guard, which is the hole the scan exists to close.
+_DUP_KEY_ROOTS = ("tortoise", "tools", "tests")
+
+#: Per-root FLOOR for the scan's own non-vacuity check, deliberately per root and not
+#: as an aggregate: measured 287 / 195 / 1,494 on the tree above, so an aggregate floor
+#: (>1,000) still passes if the `tortoise/` AND `tools/` walks silently yield nothing —
+#: and `tools/` is exactly where this class's original instance lived. Set well under
+#: what each root holds so ordinary churn does not red it, but non-zero, so a renamed or
+#: vanished root fails instead of quietly narrowing the guard.
+_MIN_MODULES = {"tortoise": 100, "tools": 50, "tests": 500}
+
+
+class _JoinedKey:
+    """An F-STRING dict key that CARRIES a placeholder, compared by its source.
+
+    Two byte-identical f-string keys are ONE key at runtime for any referentially
+    transparent expression (shown by `ruff`'s `F601`, measured:
+    `{f"{x}": 1, f"{x}": 2}`), and `ast.unparse` normalises quoting, so `f"{x}"` and
+    `f'{x}'` are one key here as they are at runtime.
+    ⛔ The transparency qualifier is MEASURED, not caution: `c = iter(["a", "b"]);
+    D = {f"{next(c)}": 1, f"{next(c)}": 2}` builds `{'a': 1, 'b': 2}` — two DISTINCT
+    keys — while this arm reports a duplicate. That is a false RED, never a false
+    PASS, and `ruff 0.16.4 --select F601` flags the same shape (verified), so the
+    guard is not weaker than the lint it backs; skipping impure JoinedStrs would
+    diverge from the oracle, so the residual is stated instead.
+
+    ⛔ THIS CLASS IS REACHED ONLY BY A PLACEHOLDER-BEARING F-STRING. A placeholder-free
+    one (`f"a"`, `f""`) is FOLDED to the plain `str` key CPython compiles it to,
+    inside `_constant_key_value` — and that distinction is the difference between a
+    FALSE PASS and a caught duplicate. `{f"a": 1, "a": 2}` IS one key at runtime
+    (`{'a': 2}`), it needs NO evaluation to prove (CPython has already dropped the
+    `FormattedValue`s, so the key is the `str` constants joined in order), and `ruff
+    0.16.4` does not flag that CROSS-FORM pair (measured; it flags only the
+    same-source `{f"a": 1, f"a": 2}`) — so an arm that refused to compare it caught
+    nothing on the one shape whose only other catcher can be a `noqa` on the
+    survivor, while reading as a deliberate limit. The earlier text here said proving
+    it "needs evaluation"; that was FALSE, and it is why the false PASS survived a
+    review round. Only a PLACEHOLDER-BEARING f-string genuinely needs evaluation to
+    be equated with a `Constant`, and that is the comparison refused here.
+    """
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __hash__(self) -> int:
+        return hash((_JoinedKey, self.text))
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _JoinedKey) and other.text == self.text
+
+    def __repr__(self) -> str:
+        return f"f-string key {self.text}"
+
+
+def _constant_key_value(node: ast.expr) -> tuple[bool, object]:
+    """`(True, value)` when the key is a literal Python can hash — else `(False, None)`.
+
+    Recurses through a TUPLE literal, because `{(1, 2): …}` is a real declaration
+    shape (`ruff`'s `F601` catches it; measured, 390 tuple-literal dict keys under
+    these roots) and a `Constant`-only test would silently skip it — a hole in a
+    guard that sells itself as closing holes. Only the 308 of those whose elements
+    are ALL literal are compared; the other 82 carry a computed element and are
+    skipped like any other non-literal key. Element values are compared by Python's
+    own `==`/hash, so `(1, 2)` and `(True, 2)` are ONE key, exactly as a dict treats
+    them.
+
+    Recurses through a SIGNED numeric literal too (`{-1: …}`, `{+1: …}`, and
+    `{(-1, 2): …}` via the tuple arm), because `ruff`'s `F601` flags all three and
+    `{+1: 'a', 1: 'b'}` is a real duplicate — Python collapses it to one key. A
+    `Constant`-only reading would skip the class, and a skipped duplicate is one that
+    no lane catches at all when the survivor carries a `noqa` marker.
+
+    An F-STRING key is read too, in the two arms its own AST separates:
+
+      * PLACEHOLDER-FREE (`f"a"`, `f""`) is folded to the `str` key CPython compiles it
+        to, so `{f"a": 1, "a": 2}` — one key at runtime, `{'a': 2}` — is caught. This
+        FOLD is the repaired arm: the scan used to answer `[]` for it, justified by a
+        claim that proving the equality "needs evaluation". That claim was FALSE (the
+        `ast` has no `FormattedValue` left to evaluate) and `ruff 0.16.4 --select F601`
+        does not flag the cross-form pair either, so the guard was WEAKER than nothing
+        on it: a FALSE PASS nobody else caught.
+      * PLACEHOLDER-BEARING (`f"{x}"`) is compared by SOURCE (`_JoinedKey`), because
+        equating that with a `Constant` genuinely does need evaluation. The same-source
+        duplicate was MEASURED missing by a fresh review — the scan reported `[]` where
+        `ruff --select F601` reported a duplicate.
+    """
+    if isinstance(node, ast.Constant):
+        return True, node.value
+    if isinstance(node, ast.JoinedStr):
+        # A placeholder-free f-string is a CONSTANT FOLD, not a computation: `ast` has
+        # already removed every `FormattedValue`, so the key is the `str` constants
+        # joined in order. Reading it is the difference between catching
+        # `{f"a": 1, "a": 2}` (`{'a': 2}` at runtime, and NOT flagged by `ruff`) and
+        # missing it.
+        if all(isinstance(v, ast.Constant) and isinstance(v.value, str)
+               for v in node.values):
+            return True, "".join(v.value for v in node.values)
+        # A placeholder-bearing f-string cannot be equated with a `Constant` without
+        # evaluating it (see `_JoinedKey`), so it is compared by SOURCE — and two
+        # byte-identical sources are one key for a referentially transparent
+        # expression, which is exactly what `ruff` reports.
+        return True, _JoinedKey(ast.unparse(node))
+    if isinstance(node, ast.Tuple):
+        values = []
+        for element in node.elts:
+            ok, value = _constant_key_value(element)
+            if not ok:
+                return False, None
+            values.append(value)
+        return True, tuple(values)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        ok, operand = _constant_key_value(node.operand)
+        # Numeric only: `-`/`+` on anything else is a TypeError at runtime, so there
+        # is no key to compare. `bool` is an `int` here on purpose — `+True` IS `1`,
+        # so `{+True: 'a', True: 'b'}` is a real duplicate.
+        if ok and isinstance(operand, (int, float, complex)):
+            return True, (-operand if isinstance(node.op, ast.USub) else +operand)
+    return False, None
+
+
+def _duplicate_constant_key_sites(
+        source: str | bytes, filename: str = "<string>") -> list[tuple[int, int, str]]:
+    """`(first_lineno, duplicate_lineno, key)` for every duplicated dict-literal key.
+
+    The `seen` map is keyed on the VALUE, not on a type-prefixed spelling of it, so
+    the comparison IS Python's own: `1`, `1.0` and `True` collapse to ONE key (they
+    hash equal), `None` is a key like any other, and `b"a"` stays distinct from
+    `"a"`. A type-prefixed marker would read `{1: 'a', 1.0: 'b'}` as two keys and
+    miss a real shadow — the exact class this guard exists for (found in this
+    guard's own first draft by a fresh review).
+
+    Only LITERAL keys can be compared without evaluating anything: a computed key
+    (`SOME_NAME`) is not a declaration this can read, and guessing would report a
+    duplicate that is not one. An F-STRING key is read in its two arms, and neither is
+    a guess: a PLACEHOLDER-FREE one (`f"a"`, `f""`) is the `str` constant CPython
+    folds it to, and a PLACEHOLDER-BEARING one is compared by SOURCE — two byte-identical
+    sources are ONE key for a referentially transparent expression (`_JoinedKey`; an
+    impure one is a stated false-RED residual there, and `ruff` shares it), which is
+    also exactly what `ruff`'s `F601` reports.
+    `**splat` in a
+    literal parses as a `None` entry in
+    `node.keys`, not a Constant, so it is skipped rather than mistaken for the key
+    `None`; `_constant_key_value` recurses through tuple and signed-numeric literals
+    so a fully-literal `{(1, 2): …}` is compared too (390 tuple-literal keys under
+    these roots, 308 of them fully literal).
+
+    ⚠️ Still outside this population, stated so it is not mistaken for a total, AND
+    stated as a HOLE rather than as parity with the lint: a COMPUTED key (`SOME_NAME`),
+    a PLACEHOLDER-BEARING f-string compared against a DIFFERENT expression or against a
+    plain literal — that comparison needs the evaluation this refuses — any tuple
+    containing one, and a key built by an operator outside `USub`/`UAdd`. ⛔ The
+    placeholder-bearing cross-form pair is NOT harmless: `{f"{'a'}": 1, "a": 2}` is
+    `{'a': 2}` at runtime, its first entry is DEAD, and BOTH this scan and
+    `ruff 0.16.4 --select F601` report nothing for it (measured). The earlier text here
+    supported the exclusion with `{f"{x}": 1, "{x}": 2}`, which is a near-non-example
+    (`x` would have to evaluate to the literal string `"{x}"`), so a reader testing the
+    boundary that way concluded the residual was unreachable. It is reachable; closing
+    it needs evaluating the placeholder, which is the one step this function does not take.
+    ⛔ The PLACEHOLDER-FREE cross-form pair, `{f"a": 1, "a": 2}`, USED to be listed
+    here as "needs evaluation" — that was FALSE and it hid a duplicate no other
+    instrument reported (see `_constant_key_value`); it is IN this population and is
+    pinned by its own case below.
+
+    ⚠️ `filename` is threaded into `ast.parse` so a `SyntaxError` carries the module's
+    REAL path rather than `<string>` — it does NOT affect any message. The
+    UNPARSEABLE text is built by `_scan_declaration_roots` from `rel` and `exc.msg`,
+    so dropping this argument leaves every message byte-identical (measured by
+    mutation: removing `filename=filename` keeps all three tests green, and the
+    `{rel}` PREFIX is what makes an unparseable module name ITSELF instead of
+    `<unknown>` — the "a hole is a hole, not a zero" rule this file's
+    predicate-count test states). Stated so the next reader does not mistake an
+    inert argument for the mechanism.
+
+    ⛔ `source` may be BYTES on purpose: the scan hands it the file's raw bytes, so
+    CPython's own source decoding applies (a PEP 263 coding cookie and a UTF-8 BOM are
+    legal source). Decoding as UTF-8 first would report a file the interpreter reads
+    fine as a hole — measured: a `latin-1` cookie read `UNREADABLE (UnicodeDecodeError)`
+    and a BOM read `UNPARSEABLE (U+FEFF at line 1)`, both of which `ast.parse(bytes)`
+    accepts.
+    """
+    sites: list[tuple[int, int, str]] = []
+    for node in ast.walk(ast.parse(source, filename=filename)):
+        if not isinstance(node, ast.Dict):
+            continue
+        seen: dict[object, int] = {}
+        for key in node.keys:
+            if key is None:  # `**splat`, not a key literal
+                continue
+            ok, value = _constant_key_value(key)
+            if not ok:
+                continue
+            if value in seen:
+                sites.append((seen[value], key.lineno, repr(value)))
+            else:
+                seen[value] = key.lineno
+    return sites
+
+
+def test_the_duplicate_key_detector_catches_a_duplicate():
+    """The detector must be able to come back RED, or the scan below proves nothing.
+
+    This module's own contract (see the file docstring): an instrument that can
+    only print `MET` is machinery. A guard whose scan silently returned `[]` for
+    every input would pass the assertion below forever.
+    """
+    source = (
+        "DECLARATIONS = {\n"
+        "    'a::b': ('first', 1),\n"
+        "    'c::d': ('other', 2),\n"
+        "    'a::b': ('second', 3),\n"
+        "}\n"
+    )
+    assert _duplicate_constant_key_sites(source) == [(2, 4, "'a::b'")]
+    # …and a clean map reports nothing, so the positive case above is the ONLY
+    # reason a red is possible.
+    assert _duplicate_constant_key_sites("D = {'a': 1, 'b': 2}\n") == []
+    # A computed key is not a declaration this reads: no false positive.
+    assert _duplicate_constant_key_sites("D = {K: 1, K: 2}\n") == []
+    # The comparison must BE Python's own key equality, in the MISS direction too:
+    # `1`, `1.0` and `True` are ONE key, so a numeric/alias shadow must be caught
+    # (a type-prefixed marker misses it — this guard's own first draft did).
+    assert _duplicate_constant_key_sites("D = {1: 'a', 1.0: 'b'}\n") == [(1, 1, "1.0")]
+    assert _duplicate_constant_key_sites("D = {1: 'a', True: 'b'}\n") == [(1, 1, "True")]
+    assert _duplicate_constant_key_sites("D = {None: 1, None: 2}\n") == [(1, 1, "None")]
+    # …while genuinely distinct keys stay silent: bytes are not text, and a
+    # `**splat` is not the key `None`.
+    assert _duplicate_constant_key_sites("D = {b'a': 1, 'a': 2}\n") == []
+    assert _duplicate_constant_key_sites("D = {None: 1, **x}\n") == []
+    # A TUPLE-literal key is compared too (390 under the scanned roots, 308 fully
+    # literal), and
+    # element values follow dict equality: `(1, 2)` and `(True, 2)` are ONE key.
+    assert _duplicate_constant_key_sites("D = {(1, 2): 'a', (1, 2): 'b'}\n") == [
+        (1, 1, "(1, 2)")]
+    assert _duplicate_constant_key_sites("D = {(1, 2): 'a', (True, 2): 'b'}\n") == [
+        (1, 1, "(True, 2)")]
+    # …while a 1-tuple is NOT the bare key, and a non-literal element is skipped.
+    assert _duplicate_constant_key_sites("D = {(1,): 'a', 1: 'b'}\n") == []
+    assert _duplicate_constant_key_sites("D = {(K, 2): 'a', (K, 2): 'b'}\n") == []
+    # A SIGNED numeric key is still a key, and `ruff`'s `F601` flags all three of
+    # these shapes — so a guard that skipped them would be WEAKER than the lint it
+    # exists to backstop, on the one shape that has no other catcher when the
+    # survivor carries a noqa marker.
+    assert _duplicate_constant_key_sites("D = {-1: 'a', -1: 'b'}\n") == [(1, 1, "-1")]
+    assert _duplicate_constant_key_sites("D = {+1: 'a', 1: 'b'}\n") == [(1, 1, "1")]
+    assert _duplicate_constant_key_sites("D = {(-1, 2): 'a', (-1, 2): 'b'}\n") == [
+        (1, 1, "(-1, 2)")]
+    # ⛔ `bool` is an `int` in this arm ON PURPOSE (`+True` IS `1`), and that is what
+    # makes `{+True: 'a', True: 'b'}` a real duplicate — `ruff F601` flags it too. Nothing
+    # pinned it until a review MEASURED the narrowing: `isinstance(operand, (int, float,
+    # complex))` → `type(operand) in (int, float, complex)` reads like a tidy-up, makes the
+    # scan return `[]`, and leaves the whole suite GREEN — a false PASS on a shape lint
+    # catches, i.e. exactly the weakness this arm exists to avoid.
+    assert _duplicate_constant_key_sites("D = {+True: 'a', True: 'b'}\n") == [(1, 1, "True")]
+    # …and the sign is compared, not stripped: `-1` and `1` are DIFFERENT keys.
+    assert _duplicate_constant_key_sites("D = {-1: 'a', 1: 'b'}\n") == []
+    # An F-STRING key is a gap a fresh review MEASURED in this guard: the scan returned
+    # `[]` where `ruff --select F601` reported a duplicate, so the guard was WEAKER than
+    # the lint it backstops — a false PASS on the one shape whose only other catcher can
+    # be a `noqa` marker on the survivor.
+    # A PLACEHOLDER-FREE f-string FOLDS to the plain `str` key CPython compiles, so `f"a"`
+    # and `f'a'` are ONE key and render as the `str` they are rather than as a
+    # `_JoinedKey`. This arm used to refuse the fold on a FALSE claim that proving the
+    # equality "needs evaluation" — `ast` has no `FormattedValue` left to evaluate, and
+    # `ruff 0.16.4` does not flag the cross-form pair, so nothing else caught it.
+    assert _duplicate_constant_key_sites('D = {f"a": 1, f"a": 2}\n') == [
+        (1, 1, "'a'")]
+    assert _duplicate_constant_key_sites("D = {f\"a\": 1, f'a': 2}\n") == [
+        (1, 1, "'a'")]
+    assert _duplicate_constant_key_sites('D = {f"": 1, "": 2}\n') == [(1, 1, "''")]
+    # ⛔ …and the CROSS-FORM pair specifically, which is the shape with NO other catcher
+    # at all: `{f"a": 1, "a": 2}` IS `{'a': 2}` at runtime and `ruff --select F601` does
+    # NOT flag it (measured on 0.16.4), so refusing it was a false PASS reading as a
+    # deliberate limit. Pinned so the wording cannot drift back.
+    assert _duplicate_constant_key_sites('D = {f"a": 1, "a": 2}\n') == [(1, 1, "'a'")]
+    # A PLACEHOLDER-BEARING f-string is compared by SOURCE instead, because equating it
+    # with a `Constant` genuinely needs evaluation: two byte-identical sources are one
+    # key for a referentially transparent expression, and
+    # `ast.unparse` normalises the quoting (`f"{x}"` and `f'{x}'` are one key, as at runtime).
+    assert _duplicate_constant_key_sites('D = {f"{x}": 1, f"{x}": 2}\n') == [
+        (1, 1, "f-string key f'{x}'")]
+    # …while a DIFFERENT placeholder expression is a different key. ⛔ A
+    # PLACEHOLDER-BEARING f-string is NOT compared with a plain literal, and that is a
+    # RESIDUAL HOLE IN BOTH INSTRUMENTS — not parity with the lint, which the earlier
+    # wording here claimed: `{f"{'a'}": 1, "a": 2}` is `{'a': 2}` at runtime (the first
+    # entry is DEAD) and NEITHER this scan NOR `ruff 0.16.4 --select F601` reports it
+    # (both measured). Equating it needs the placeholder EVALUATED, which is the one step
+    # this function refuses; the hole is pinned here so the next lane inherits the truth
+    # rather than a claim that nothing is missed.
+    assert _duplicate_constant_key_sites('D = {f"{x}": 1, f"{y}": 2}\n') == []
+    # the residual HOLE itself, pinned so its absence cannot be read as coverage:
+    assert _duplicate_constant_key_sites("D = {f\"{'a'}\": 1, \"a\": 2}\n") == []
+
+    # ⛔ The one direction this arm gets WRONG, pinned so the wording cannot drift back
+    # to "whatever the expression is": an IMPURE expression is re-evaluated per key, so
+    # two byte-identical sources build two DISTINCT keys — and this reports a duplicate.
+    # It is a false RED, not a false PASS, and `ruff --select F601` flags the same shape
+    # (verified), so the guard stays no weaker than the oracle it backstops.
+    assert _duplicate_constant_key_sites(
+        'D = {f"{next(c)}": 1, f"{next(c)}": 2}\n') == [
+        (1, 1, "f-string key f'{next(c)}'")]
+
+
+def _duplicate_key_report(violations: list[str]) -> str:
+    """The guard's failure message — separated so a test can DRIVE it.
+
+    It used to be composed inline in the guard's `assert`, where it is evaluated only
+    when that assert FAILS — so no run ever built it, and changing the prefix or the
+    newline-and-indent separator would have left every test green. A message nobody renders is
+    not a guard's evidence.
+
+    ⛔ The prose covers BOTH arms this prefixes, because `_scan_declaration_roots` routes
+    three kinds of violation through it: a duplicated key, an UNREADABLE module and an
+    UNPARSEABLE one. A prefix that named only the duplicate would send a reader holding a
+    parse failure looking for a duplicate key that is not there — the misattribution this
+    guard exists to stop, one layer up (review of `#12265`).
+    """
+    return (
+        "a duplicate declaration is a SILENT loser: a dict literal that declares the same "
+        "key twice keeps only the LAST binding, so the entry that loses the last-wins race "
+        "is DEAD while every test stays green (#12265, root #9314) — and a module this scan "
+        "could not READ or PARSE is a HOLE in the same guard, not a pass. Delete the stale "
+        "row (or correct the reason) rather than adding `# noqa: F601`, and make an "
+        "UNREADABLE/UNPARSEABLE module readable:\n  "
+        + "\n  ".join(violations)
+    )
+
+
+def _guard_root() -> Path:
+    """The repo root the duplicate-key scan walks, resolved from THIS FILE.
+
+    ⛔ NOT `Path.cwd()`. `Path(root).rglob(...)` resolves against the invocation
+    directory, so a CWD-derived root scans 0 modules when pytest is launched from
+    `tests/` and reds this guard on a CORRECT tree. Hoisted out of the test body
+    only so `test_the_scan_root_is_the_REPO_not_the_process_cwd` can be the
+    FALSIFIER for it: a `chdir` is the one thing that tells a file-derived root
+    apart from a CWD-derived one, and comparing without it passes under the repo
+    root, which is how CI and `tools/test_lane.py` both invoke pytest.
+    """
+    return Path(probe.__file__).resolve().parent.parent
+
+
+def _scan_declaration_roots(root: Path) -> tuple[list[str], dict[str, int]]:
+    """`(violation messages, modules FOUND per root)` over `_DUP_KEY_ROOTS` under `root`.
+
+    ⚠️ "found", not "read": the per-root counter is incremented BEFORE the read, so a
+    module that cannot be READ is counted here while its own message says
+    `UNREADABLE (…), not scanned`. Stated because these counts are what satisfy the
+    per-root floors — i.e. the guard's non-vacuity claim. A module that cannot be
+    DECODED is a different case now that the read hands `ast.parse` raw bytes: it
+    surfaces as a `SyntaxError` and says `UNPARSEABLE`, never `UNREADABLE`.
+
+    ⛔ KNOWN SILENT HOLE in the WALK (measured, filed as `#12385`): `rglob` swallows a
+    `PermissionError` from `scandir` and does not descend a symlinked directory, so an
+    unlistable (`chmod 000`) subtree or one reachable only through a symlink is a
+    directory the scan never ENUMERATES — no violation, and the per-root floors are too
+    coarse to notice a partial loss (losing 20 of `tortoise/`'s 287 still clears the
+    floor of 100). Neither shape exists under these roots today (no tracked symlinks;
+    every file git-readable), which is why the hole is stated rather than repaired in a
+    review lane: the repair replaces this walk with `os.walk(..., onerror=…)` plus a
+    symlinked-directory violation, and that belongs with the follow-up, not here.
+
+    Hoisted out of the test so the REPORTING path can be driven: on a real tree
+    `violations` is empty, so the message formatting, the `relative_to` naming and the
+    `"\n  ".join(...)` would otherwise be code no run ever executes. A guard whose
+    only exercised arm is the green one is not evidence the red one works.
+    """
+    violations: list[str] = []
+    per_root: dict[str, int] = {}
+    for name in _DUP_KEY_ROOTS:
+        scanned_here = 0
+        for path in sorted((root / name).rglob("*.py")):
+            rel = path.relative_to(root)
+            scanned_here += 1
+            try:
+                # ⛔ BYTES, not text: `read_text(encoding="utf-8")` is STRICTER than
+                # CPython — a PEP 263 coding cookie and a UTF-8 BOM are legal source, and
+                # decoding it ourselves reported both as holes (measured). Handing the
+                # bytes to `ast.parse` makes the interpreter the decoder, so an
+                # UNREADABLE verdict now means what its name says: the file could not be
+                # READ (permissions, a directory), not that it is unusual source.
+                source = path.read_bytes()
+            except OSError as exc:  # a hole is a hole, not a zero
+                violations.append(f"{rel}: UNREADABLE ({exc.__class__.__name__}), not scanned")
+                continue
+            try:
+                for first, duplicate, key in _duplicate_constant_key_sites(source, str(rel)):
+                    violations.append(
+                        f"{rel}:{duplicate} re-declares key {key} (first at :{first})")
+            except SyntaxError as exc:  # name the file, never `<unknown>`
+                # `lineno` is `None` for a NUL byte and `0` for a codec/cookie failure
+                # (`# coding: unknown-xyz`), so a `is not None` test still renders
+                # "at line 0" — a located-LOOKING defect pointing at a line that cannot
+                # exist, which is the misattribution this message exists to prevent, one
+                # field down. Both mean "no line", so test the VALUE, not `is None`.
+                where = exc.lineno if exc.lineno else "?"
+                violations.append(
+                    f"{rel}: UNPARSEABLE ({exc.msg} at line {where}), not scanned")
+        per_root[name] = scanned_here
+    return violations, per_root
+
+
+def test_no_module_declares_the_same_dict_key_twice():
+    """#12265: a duplicated literal key silently disables the entry that loses.
+
+    Measured at `origin/main` `9828250732`: three sites — two in
+    `tools/dod_5090_probe.py` (`WRITER_CENSUS`, `CENSUS_EVIDENCE`) and one in
+    `tests/test_commit_schema.py` (a fixture `op_type` that last-wins discarded,
+    silenced with `# noqa: F601`). This assertion is the lane-independent catch
+    `#9314` asks for: it reds in the pytest shard, not only where lint runs.
+
+    ⛔ Its coverage is the three roots `_DUP_KEY_ROOTS` names, not the whole repo —
+    see that constant: `battery/`, `graph-scripts/`, `docs/`, `eval/` and the smaller
+    roots sit outside them.
+    """
+    # ⛔ A root with no floor is a walk nothing checks: adding a fourth entry to
+    # `_DUP_KEY_ROOTS` without adding a `_MIN_MODULES` floor would leave it counted
+    # and unchecked, so it could yield zero and the guard would silently narrow —
+    # exactly what the floors exist to prevent.
+    assert set(_MIN_MODULES) == set(_DUP_KEY_ROOTS), (
+        "every scanned root needs a non-vacuity floor — "
+        f"roots={sorted(_DUP_KEY_ROOTS)}, floors={sorted(_MIN_MODULES)}")
+    # ⛔ …and a floor of ZERO is the same hole: `per_root[name] >= 0` is true for a walk
+    # that yielded nothing, so `{n: 0 for n in _DUP_KEY_ROOTS}` satisfies the loop below
+    # while making the non-vacuity claim vacuous — measured GREEN before this assert
+    # existed. The comment says "non-zero"; this is the line that enforces it. ⛔ And an
+    # EMPTY population is the same vacuity one level up: `all(...)` over no values is True
+    # and the key-set equality is satisfied by two empty containers, so the scan walks
+    # nothing and passes — measured GREEN with `_DUP_KEY_ROOTS = ()`.
+    assert _MIN_MODULES and all(floor > 0 for floor in _MIN_MODULES.values()), (
+        f"every floor must be non-zero, or a root that yields nothing passes — {_MIN_MODULES}")
+    # ⛔ THE REPO ROOT COMES FROM THE FILE, NOT THE CWD (#12265 review):
+    # `Path(root).rglob` resolves against the invocation directory, so a run from
+    # `tests/` scanned 0 modules and red this guard on a CORRECT tree. This is the
+    # same derivation the module's other repo-root reads use
+    # (`Path(probe.__file__).resolve().parent.parent`); `probe.REPO_ROOT` is that
+    # same value, but several reads here already spell it out for the same reason.
+    violations, per_root = _scan_declaration_roots(_guard_root())
+    # ⛔ THE VIOLATION IS ASSERTED FIRST, deliberately: a floor failure means the
+    # guard is narrower than it claims, but a live duplicate in the same run is the
+    # finding the reader actually needs, and asserting floors first would hide it.
+    # ⚠️ The ORDER itself is not separately asserted — both asserts fire on their own
+    # (each is proven RED by its own mutation), but no test builds a tree holding a
+    # duplicate AND a broken walk, so swapping these two lines leaves the suite green
+    # (measured by mutation). The sentence above is the RATIONALE for the order, not a
+    # claim that the order is pinned.
+    assert not violations, _duplicate_key_report(violations)
+    # A scan that read nothing would satisfy the assertion above vacuously — and it
+    # must be checked PER ROOT: rglob returns zero silently on a root that was
+    # renamed or removed, and an aggregate floor lets two empty roots hide behind
+    # the third. `tools/` is where this class's original instance lived, so losing
+    # that walk while still counting `tests/` is the regression that matters most.
+    for name, floor in _MIN_MODULES.items():
+        assert per_root[name] >= floor, (
+            f"the duplicate-key scan found {per_root[name]} module(s) under {name}/, below "
+            f"its floor of {floor} — the root was renamed, removed, or its walk broke, "
+            "so the guard is now narrower than it claims. Re-derive the floor (or fix "
+            f"the root) rather than lowering it. Full counts: {per_root}")
+
+
+def test_the_scan_root_is_the_REPO_not_the_process_cwd(tmp_path, monkeypatch):
+    """The FALSIFIER for `_guard_root` — a `chdir` is the only thing that tells them apart.
+
+    ⛔ WHY THIS EXISTS (#12265 review cycle 3). `_guard_root` is a fix for a measured
+    defect (a run from `tests/` scanned 0 modules and red this guard on a CORRECT
+    tree), and until this test the fix had NO driving case: mutating the return to
+    `Path.cwd()` kept the whole guard GREEN when pytest runs from the repo root —
+    which is exactly how CI and `tools/test_lane.py` invoke it — so the defect could
+    return with every assertion here still passing.
+
+    ⛔ The `chdir` is the discriminating half, not decoration. Comparing
+    `_guard_root()` against `probe.REPO_ROOT` WITHOUT moving the CWD passes under
+    either implementation, because at the repo root the two derivations agree. Only
+    after `monkeypatch.chdir(tmp_path)` do they diverge — a CWD-derived root answers
+    `tmp_path` and reds here.
+    """
+    before = _guard_root()
+    assert (before / "tortoise").is_dir() and (before / "tools").is_dir(), (
+        f"_guard_root() returned {before}, which is not this checkout — the scan would "
+        "walk roots that do not exist and satisfy its floors vacuously")
+    monkeypatch.chdir(tmp_path)
+    after = _guard_root()
+    assert after == before, (
+        f"_guard_root() moved with the CWD ({before} -> {after}): it is derived from "
+        "`Path.cwd()` (or another process-relative source) instead of this file, so "
+        "every invocation from a directory other than the repo root scans 0 modules "
+        "and the duplicate-key guard silently narrows to nothing")
+
+
+def test_the_scan_REPORTS_a_duplicate_it_finds(tmp_path):
+    """The scan's RED arm, driven — the reporting path no real tree exercises.
+
+    `test_no_module_declares_the_same_dict_key_twice` passes on every healthy tree
+    with `violations == []`, so its message formatting, its `relative_to` naming and
+    its `"\n  ".join(...)` never run. A guard whose only demonstrated arm is the green
+    one is not evidence the red one works, so this drives the same helper over a
+    planted tree and asserts the report names the file, the duplicate line and the
+    first line.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tools" / "clean.py").write_text("D = {'a': 1}\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "dup.py").write_text(
+        "DECLARATIONS = {\n"
+        "    'x::y': 1,\n"
+        "    'x::y': 2,\n"
+        "}\n", encoding="utf-8")
+    # A module that cannot be parsed must be NAMED, never skip silently to a green.
+    (tmp_path / "tests" / "broken.py").write_text("def (:\n", encoding="utf-8")
+    # …and neither may a module that cannot be READ: the UNREADABLE arm is the one whose
+    # own comment states the doctrine ("a hole is a hole, not a zero"), so leaving it
+    # undriven would make that comment the only thing behind it — and its failure mode
+    # is a FALSE GREEN (the file is counted as scanned, contributes no violation, and
+    # satisfies the per-root floor). A DIRECTORY named `*.py` is the readable-shape case
+    # that survives the bytes fix: `read_bytes` raises `IsADirectoryError`, an OSError.
+    (tmp_path / "tools" / "adir.py").mkdir()
+    # …and non-UTF-8 BYTES are legal source shapes, not holes: CPython decodes them, so
+    # this one must land in UNPARSEABLE (its own decode error), never UNREADABLE.
+    (tmp_path / "tools" / "binary.py").write_bytes(b"\xff\xfe\n")
+    # …and a PARSE failure that carries no line number must read as UNKNOWN, never as a
+    # located defect: a NUL byte raises a `SyntaxError` whose `lineno` is None, and a
+    # codec failure raises one whose `lineno` is 0. Both mean "no line", and rendering
+    # either prints a location that is not there (`at line None` / `at line 0`).
+    (tmp_path / "tools" / "nul.py").write_bytes(b"D = {}\x00\n")
+    (tmp_path / "tools" / "codec.py").write_bytes(b"# coding: unknown-xyz\nD = {}\n")
+
+    violations, per_root = _scan_declaration_roots(tmp_path)
+
+    # `binary.py` still counts as SCANNED (the counter runs before the read), which is
+    # exactly why the report — not the count — is what has to name it.
+    assert per_root == {"tortoise": 1, "tools": 5, "tests": 1}, per_root
+    # The key is rendered with `repr`, so `1` and `'1'` stay distinguishable in the
+    # report — the whole reason that spelling was chosen over `str(value)`.
+    assert any(
+        v.startswith("tortoise/dup.py:3 re-declares key 'x::y' (first at :2)") for v in violations
+    ), violations
+    # ⛔ The TRUTHY branch — a real line number — must still render it: without this pin
+    # `where = "?"` unconditionally is GREEN on every other assertion here (measured), so
+    # the one branch that prints a usable location would be the one the suite cannot see.
+    # `def (:` yields `lineno == 1`; so does `binary.py`'s UTF-8 decode failure below
+    # (the COOKIE failure in `codec.py` yields 0 — a different fixture, a different case).
+    assert any(
+        v.startswith("tests/broken.py: UNPARSEABLE") and "at line 1" in v for v in violations
+    ), violations
+    assert any(
+        v.startswith("tools/adir.py: UNREADABLE (IsADirectoryError)") for v in violations
+    ), violations
+    # ⛔ A file CPython CAN decode is never reported as unreadable: the bytes arm above
+    # means a non-UTF-8 file is a PARSE failure with its own message, not a hole.
+    assert any(v.startswith("tools/binary.py: UNPARSEABLE") for v in violations), violations
+    assert not any("binary.py: UNREADABLE" in v for v in violations), violations
+    # ⛔ A parse failure with no line number must say UNKNOWN, never `None`: a NUL byte's
+    # `SyntaxError.lineno` is None, and "at line None" reads as a location that is not
+    # there — the same misattribution, one field down (#12265 round 4).
+    assert any(
+        v.startswith("tools/nul.py: UNPARSEABLE") and "at line ?" in v for v in violations
+    ), violations
+    assert any(
+        v.startswith("tools/codec.py: UNPARSEABLE") and "at line ?" in v for v in violations
+    ), violations
+    assert not any("at line None" in v for v in violations), violations
+    assert not any("at line 0" in v for v in violations), violations
+    # …and the clean module contributes nothing: the report is specific, not a roll-up.
+    assert not any("clean.py" in v for v in violations), violations
+    # ⛔ And the guard's OWN message — the one `test_no_module_declares_the_same_dict_key_twice`
+    # asserts with — must carry both sites. It used to be composed inline in that
+    # `assert`, so it was evaluated only on FAILURE and no run ever built it; a
+    # change to the prefix or the `"\n  "` separator left every test green. This
+    # drives the real builder, not a local copy of it.
+    report = _duplicate_key_report(violations)
+    assert "tortoise/dup.py:3 re-declares key 'x::y' (first at :2)" in report, report
+    assert "tests/broken.py: UNPARSEABLE" in report, report
+    assert report.count("\n  ") >= 2, report
+    # ⛔ The wrapper's PROSE must describe EVERY arm it prefixes, not just the duplicate
+    # one: `broken.py`/`binary.py` are not duplicate keys, and a red run whose first line
+    # says "a dict literal declares the same key twice" sends the reader hunting for a
+    # duplicate that does not exist. Asserted on a PARSE-ONLY set, so the arm that has no
+    # duplicate in it is the one the prose has to hold for.
+    parse_only = _duplicate_key_report([v for v in violations if "broken.py" in v])
+    assert "could not READ or PARSE" in parse_only.split("\n  ")[0], parse_only

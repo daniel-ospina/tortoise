@@ -5160,13 +5160,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("18877", "relation_write = apply_relation_edges("),
+            ("18900", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("18876", "from tortoise.relation_write import apply_relation_edges"),
+            ("18899", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18864", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18887", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5176,8 +5176,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("9939", "subject_binding_available,"),
-            ("9992", "and not subject_binding_available(graph):"),
+            ("9955", "subject_binding_available,"),
+            ("10008", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6607", "def subject_binding_available(graph) -> bool:"),
@@ -5186,13 +5186,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("9939", "subject_binding_available,"),
-            ("9992", "and not subject_binding_available(graph):"),
+            ("9955", "subject_binding_available,"),
+            ("10008", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18524", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18547", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
@@ -5231,11 +5231,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("16323", "The v2 path reports"),
-            ("16324", '"extraction_mode": "llm:<route>"'),
+            ("16346", "The v2 path reports"),
+            ("16347", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         ("04-plan.md", "operator / label path", (
-            ("25236", "declared = declared_relation_predicates()"),
+            ("25284", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
@@ -5370,7 +5370,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # the entry), so a row sitting BELOW every insertion moves by the
             # whole +46. The `core:` sub-key reads 2235 on every tree (no
             # insertion above it); `sdk:` moves +30 then +13 then +32 to 8300.
-            ("10021", "- test_pack_logic_writeprobe_11083.py"),
+            ("10076", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (

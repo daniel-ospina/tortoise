@@ -2491,7 +2491,16 @@ def test_a_dead_SOURCE_is_not_an_active_edge(sdk):
                                   require_calibration=False)["confidences"], \
         "fixture drifted: the live edge must build a factor"
     # EP-dead source BEFORE the supersession: the factor is already gone.
-    sdk.update_entity(p["id"], status="archived")
+    # #9649: this ARCHIVE is a PRE-#9649 shape — `live -> archived` is not a
+    # declared Point transition (ONTOLOGY §5 keeps `archived` reserved on
+    # Points), so the generic door refuses it now. The subject here is the audit
+    # instrument comparing `status` rather than the node, not the door, so the
+    # dead state is seeded the way a pre-#9649 writer left it (the same treatment
+    # `test_3311` / `test_6239` got in that change). `retract_point` is NOT a
+    # substitute: the `archived` half of `_live_only` is what this pins.
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status='archived'",
+        params={"id": p["id"]})
     assert not (sdk.compute_confidence(anchors=[p["id"]],
                                        require_calibration=False)["confidences"]), \
         "fixture drifted: EP must drop the factor once the source is dead"

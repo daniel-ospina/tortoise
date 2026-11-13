@@ -498,6 +498,12 @@ def test_ambient_delegation_var_is_cleared_per_test():
     assert os.environ.get("TORTOISE_API_URL") is None, (
         "the ambient TORTOISE_API_URL reached a test body — the suite is not "
         "hermetic (#4017); a seeded value must be deleted before every test")
+    # #11912: the hosted identity is the same hazard — `doctor` probes it, so an
+    # exported key would make the suite dial the live API.
+    assert "TORTOISE_API_KEY" in AMBIENT_ENV_GLOBALS
+    assert os.environ.get("TORTOISE_API_KEY") is None, (
+        "the ambient TORTOISE_API_KEY reached a test body — `doctor` would probe "
+        "the live hosted API from inside the suite (#11912)")
 
 
 # ── rule 5: a host-capability gap is a SKIP ────────────────────────────────

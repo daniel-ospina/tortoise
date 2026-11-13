@@ -336,8 +336,8 @@ though the receipt cannot witness them.
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
 | S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
-| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:14650-14654` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:18919`), so this ❌ is the frozen run's answer, not the seam's reachability |
-| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:14640-14646` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:18919`) |
+| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:14650-14654` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:18942`), so this ❌ is the frozen run's answer, not the seam's reachability |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:14640-14646` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:18942`) |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
 | S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
@@ -423,7 +423,7 @@ list, no classify items, or a fail-open `except`) while doing nothing, and that 
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution — the surface is emitted
 unconditionally at `:14640`/`:14650` and now reaches the receipt through the seam at the meta fold
-`sdk.py:18919` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
+`sdk.py:18942` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
 accordingly, and the "where the fix must target" line with it.
 
 Pinned by `test_a_witnessed_vet_surface_makes_s2_2_observed` (8/8 witnessed when the surface is
@@ -1183,7 +1183,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 
 The pipeline's OWN path WAS `TortoiseSDK.capture_session` (**DELETED by #4282**, 2026-10-27 —
 this bundle's probes now drive the private `sdk._capture_session`) →
-`sdk._extract_session_v2` (`sdk.py:17890`; called at `:16779`) →
+`sdk._extract_session_v2` (`sdk.py:17913`; called at `:16802`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:13705`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
@@ -1212,7 +1212,7 @@ the same lesson (cite the symbol, not the line).
 | S0 READ | `_edus_from_conversation` `:13823` | `stats["edus"]`, `stats["chunks"]` | ✅ |
 | S1 NARRATE | `run_s1` `:16748` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
 | S2.1 EXTRACT | `run_s2` `:16780` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:16834` | `result["vet"]` — built at `extractor_v2.py:14650-14654`, copied onto the receipt at the meta fold `sdk.py:18919` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
+| S2.2 VET | `_run_vet_pass` `:16834` | `result["vet"]` — built at `extractor_v2.py:14650-14654`, copied onto the receipt at the meta fold `sdk.py:18942` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
 | S2.3 CLASSIFY | `_apply_classify_kinds` `:14278` | `result["classify_later"]` — built at `extractor_v2.py:14640-14646`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
 | S3 RESOLVE | `search_graph` `:14294` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
 | S5 CONNECT | `execute_embed` `:14554` (+ `run_s4` `:14315` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
@@ -1225,7 +1225,7 @@ steps unobserved and refused at G5 for EVERY input. That was a property of the c
 not of §4.4 or of the pipeline: the steps' surfaces are BUILT unconditionally, and the surface the
 probe was handed did not say so. The drop was one layer ABOVE the extractor — it builds
 `result["vet"]` and `result["classify_later"]`, and the SDK's meta fold
-(`tortoise/sdk.py:18919`, `"stats": _capture_stats_with_step_witness(out, len(extracted))` inside
+(`tortoise/sdk.py:18942`, `"stats": _capture_stats_with_step_witness(out, len(extracted))` inside
 `_extract_session_v2`) forwarded `stats` and `error_census` only.
 
 **#9116 LANDED that seam** — `_capture_step_witness` (``tortoise/sdk.py``) copies each stage's own

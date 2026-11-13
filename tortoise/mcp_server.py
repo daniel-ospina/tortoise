@@ -4962,6 +4962,107 @@ def tortoise_status() -> dict:
     return _safe(_get_org_sdk().status)
 
 
+def _org_quota_block(sdk=None) -> dict:
+    """The ``health.quota`` block: the ENFORCED boundary, from the gate's numbers.
+
+    #11892 option (3). ``health`` reported ``graph_size`` and nothing about the
+    quota gate, so a lane could not tell "the graph is healthy" from "the graph
+    is healthy and will refuse every write" except by attempting one. Measured
+    live: ``graph_size`` 31,248 against a ``max_points`` cap of 25,000, with every
+    ``create_point`` refused ``-32006`` — and the CLI exiting **0** on it (#11153),
+    so the refusal read as a successful write.
+
+    Resolution follows ``_enforce_quota`` — so that a report cannot disagree with
+    the gate it describes — and that includes the parts of its pipeline it would
+    be easy to skip: the request's carried ContextVar limits are AUGMENTED with
+    ``_carry_allowances(limits, resource)`` exactly as ``_enforce_quota`` does,
+    and ``org_quota_state`` then runs the allowance gate itself (the gate's
+    first check). ⛔ Skipping the carry published ``open`` for a tenant whose
+    every write was refused by a control-plane fault in that read — the false
+    PASS this report exists to remove, caught in fresh review of #12426. If the
+    carry itself raises, the write gate refuses in that state, so the block says
+    ``closed`` and names it rather than shrugging.
+
+    The ruled-dimension *dimensions* are still not modelled (graph MB / Postgres
+    bytes / extraction tokens have their own meters; this block reports the
+    ``points`` node cap) — but their REFUSAL is honoured, because it refuses the
+    same writes. Only the ``points`` resource is modelled: that is the one #11892
+    measured.
+
+    Never raises and never degrades ``status``: a closed or unmeasurable quota is
+    REPORTED, not folded into ``status``. Folding it in would pin a healthy
+    deployment ``degraded`` for as long as its graph is full and let Fly restart
+    it forever — the rule ``hosted_api.health``'s docstring already states for
+    ``change_feed``, ``record``, ``build`` and ``wait_bound_breaches``, and the
+    same reason ``record``'s cumulative counters do not degrade it (#10185).
+    """
+    try:
+        # ⛔ INSIDE the try (fresh review of #12426, P2): every other import here
+        # is guarded, and this one sat outside — so with the module broken, the
+        # ModuleNotFoundError escaped and `health` propagated an exception instead
+        # of answering with the documented `unknown` block. The except branch
+        # below therefore builds its dict BY HAND: the quota module may be exactly
+        # what failed.
+        from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id, _current_org_limits
+        from tortoise.quota import (
+            count_resource_now,
+            org_quota_state,
+            quota_state_refused,
+            run_bounded_quota_state,
+        )
+        # ⛔ ContextVars are PER-THREAD, so they are read HERE on the request
+        # thread and the values (not the vars) are handed to the worker.
+        org_id = _current_org_id.get()
+        if not org_id or org_id == SELFHOST_ORG_ID:
+            # stdio/operator/selfhost: no tenant registry, so the gate is a no-op.
+            # Reported as `not_applicable`, NEVER as `open` (#11892).
+            return org_quota_state(None, "points", sdk=sdk)
+        carried = _current_org_limits.get()
+
+        def _compute() -> dict:
+            """Resolve/carry + measure — ALL of it, on the bounded worker.
+
+            ⛔ The resolution is I/O too (registry `MATCH (:Team)`, or a PostgREST
+            GET), so leaving it on the `health` thread contradicted the bounded
+            tail this tool documents — the class `probe_db`/
+            `_bounded_graph_size` exist to keep off it (fresh review of #12426).
+            """
+            limits = carried
+            try:
+                if limits is None:
+                    from tortoise.quota import resolve_org_limits
+                    limits = resolve_org_limits(org_id)
+                else:
+                    # ⛔ THE SAME AUGMENTATION `_enforce_quota` APPLIES: this
+                    # lane's ContextVar dict carries no allowance keys, and the
+                    # gate's allowance check reads the CARRIED dict. Omitting it
+                    # made the report say `open` while every write was refused by
+                    # a fault in that very read (fresh review of #12426).
+                    limits = _carry_allowances(limits, "points")
+            except Exception as exc:  # noqa: BLE001, RUF100 — the gate refuses here
+                # A raise from this resolution IS a refusal in the write path
+                # (`_enforce_quota` turns it into ``QuotaCheckError``), so the
+                # honest state is `closed` with the fault named.
+                return quota_state_refused(
+                    "points",
+                    f"the limits could not be resolved/carried for this request "
+                    f"({type(exc).__name__}: {str(exc)[:160]}), and the write "
+                    f"gate refuses in that state")
+            # ⛔ INLINE count: we are ALREADY on the single-slot worker, so a
+            # nested submit would queue behind our own call and deadlock.
+            return org_quota_state(limits, "points", sdk=sdk,
+                                   count_runner=count_resource_now)
+
+        return run_bounded_quota_state(_compute)
+    except Exception as exc:  # noqa: BLE001, RUF100 — health must answer, always
+        # Same shape as every other unmeasurable arm: `unknown` + None values +
+        # a reason. NOT `open` and NOT zeros — see org_quota_state's docstring.
+        return {"resource": "points", "state": "unknown", "points_used": None,
+                "points_limit": None, "points_remaining": None,
+                "error": f"quota state unavailable: {type(exc).__name__}: "
+                         f"{str(exc)[:160]}"}
+
+
 def tortoise_health() -> dict:
     """Health check + basic metrics: graph_size, last_ingest, error_count, uptime.
     Alias → graph_overview(section='health') (epic #888 W3).
@@ -5010,16 +5111,38 @@ def tortoise_health() -> dict:
     cannot be measured, the report carries the per-call ``graph_size_error``
     marker (``None`` when ``graph_size`` was really measured, so a 0 is a
     genuinely empty graph; a string otherwise), instead of the previous
-    indistinguishable ok/0."""
+    distinguishable ok/0.
+
+    #11892 option (3): the report carries a ``quota`` block — the ENFORCED
+    boundary (``state``: open/closed/unknown/not_applicable, plus
+    ``points_used``/``points_limit``/``points_remaining``) — so a caller can
+    learn that the write path is closed BEFORE it drafts the finding it cannot
+    record. Its own bounded phase (``quota.QUOTA_STATE_TIMEOUT``, 3.0s on a
+    dedicated daemon worker), so this tool's worst case becomes
+    ``probe_setup_timeout() + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT +
+    QUOTA_STATE_TIMEOUT`` — still a bounded tail, never "as long as the server
+    stalls". The block never changes ``status`` (a full graph is not a degraded
+    process — see ``_org_quota_block``) and never raises."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     # #3143: pass the cold-start allowance (call-time resolved) so a reachable
     # graph whose cold-start exceeds /health's shared budget is reported ok
     # with its real graph_size instead of degraded/0.
-    return _safe(lambda: monitoring.metrics(
-        sdk=_get_org_sdk(),
-        setup_timeout=monitoring.probe_setup_timeout(),
-    ))
+    # #11892: the SDK is acquired ONCE and shared with the quota block, so the
+    # block's count is measured on the SAME handle this report uses — "count on
+    # the SAME org SDK the tool writes to" is the gate's own rule
+    # (quota.enforce_org_limit); a second handle could open another graph.
+    def _report() -> dict:
+        sdk = _get_org_sdk()
+        report = monitoring.metrics(
+            sdk=sdk,
+            setup_timeout=monitoring.probe_setup_timeout(),
+        )
+        if isinstance(report, dict):
+            report["quota"] = _org_quota_block(sdk)
+        return report
+
+    return _safe(_report)
 
 
 def tortoise_session_context() -> dict:
@@ -5121,8 +5244,11 @@ def tortoise_analyze(question: str,
     Returns {"answer": "...", "raw": [...], "pattern": "...", "query": "..."}
     — plus, with the W4 enrichment flag ON (epic #2080), an additive ``why``
     array of canonical why-blocks (support_chain/ep/conflicts/supersession/
-    tradeoffs/dig_deeper) for the Points surfaced in ``raw`` (zero-LLM,
-    bounded batch reads; absent with the flag OFF — byte-identical).
+    assessment/tradeoffs/dig_deeper) for the ids surfaced in ``raw`` (zero-LLM,
+    bounded batch reads; absent with the flag OFF — byte-identical). #11928:
+    the anchors are the four epistemic labels, not ``:Point`` only — a goal
+    (``:Object``) or a reading (``:Event``) gets a block, and ``assessment``
+    names the derived judgement that decided its belief.
     """
     from tortoise.analyze import analyze
     from tortoise.navigation import entityProfile
@@ -5165,8 +5291,10 @@ def tortoise_analyze(question: str,
     if isinstance(result, dict) and isinstance(result.get("answer"), str):
         result["answer"] = _scrub_analyze_answer(result["answer"])
     # W4 (#2101): additive why-layer enrichment — the additive keys ride the
-    # ``why`` entries for the Point ids surfaced in ``raw`` (flag-gated;
-    # absent with the flag OFF — the response stays byte-identical).
+    # ``why`` entries for the epistemic ids surfaced in ``raw`` (flag-gated;
+    # absent with the flag OFF — the response stays byte-identical). #11928:
+    # the anchors are the four labels, not ``:Point`` only — do NOT narrow them
+    # back to "the Point ids", which is the #7927 partial-widening shape.
     # Zero-LLM, bounded batch reads, fail-open (no key on assembly error).
     if isinstance(result, dict) and result.get("raw"):
         try:
