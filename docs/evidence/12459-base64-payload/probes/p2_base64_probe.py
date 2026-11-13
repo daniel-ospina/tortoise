@@ -489,7 +489,9 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
     # The design claims base64 for ubiquity, not for optimality, so the cheaper
     # alphabets are measured here rather than waved at. Sizes are the FIELD only
     # (frame prefix + 2 JSON quotes are the same 16 B for all of them).
-    print("\n== text alphabets (field bytes: 14 B prefix + 2 quotes + encoded body)")
+    print("\n== text alphabets (body B = encoded chars; field B = 14 B frame prefix +")
+    print("   the JSON-escaped string as it lands on the line, so an alphabet that")
+    print("   needs escaping is charged for it)")
     print("   alphabet            body B   field B   vs b64   needs JSON escaping")
     raw = b"".join(struct.pack("<f", x) for x in vec)
 
@@ -513,13 +515,13 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
         ("base64 (RFC 4648 §4)", base64.b64encode(raw).decode()),
         ("base64url (§5)", base64.urlsafe_b64encode(raw).decode()),
         ("b85 (RFC 1924)", base64.b85encode(raw).decode()),
-        ("a85 (Adobe/RFC 1924)", base64.a85encode(raw).decode()),
+        ("a85 (Adobe Ascii85)", base64.a85encode(raw).decode()),
         ("z85 (ZeroMQ)", _z85(raw)),
     ]
-    b64_field = len(base64.b64encode(raw)) + 16
+    b64_field = len(json.dumps(base64.b64encode(raw).decode())) + 14
     for name, enc in alphas:
-        field = len(enc) + 16
         needs_escape = any(c in enc for c in '"\\\n\r')
+        field = len(json.dumps(enc)) + 14  # +2 quotes are inside json.dumps
         print(f"   {name:<20} {len(enc):>7,}   {field:>7,}   "
               f"{field / b64_field:>6.3f}x   {needs_escape}")
     if not any(n.startswith("b85") for n, _ in alphas):

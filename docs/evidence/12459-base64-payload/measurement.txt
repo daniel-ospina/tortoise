@@ -66,13 +66,15 @@
    -20   0          1,521 B   380.25   False       refuses
   count check on the -16 frame: REFUSED (frame declares 384 elements at f32 (1536 B), decoded 1524 B)
 
-== text alphabets (field bytes: 14 B prefix + 2 quotes + encoded body)
+== text alphabets (body B = encoded chars; field B = 14 B frame prefix +
+   the JSON-escaped string as it lands on the line, so an alphabet that
+   needs escaping is charged for it)
    alphabet            body B   field B   vs b64   needs JSON escaping
    hex                    3,072     3,088    1.496x   False
    base64 (RFC 4648 §4)   2,048     2,064    1.000x   False
    base64url (§5)         2,048     2,064    1.000x   False
    b85 (RFC 1924)         1,920     1,936    0.938x   False
-   a85 (Adobe/RFC 1924)   1,920     1,936    0.938x   True
+   a85 (Adobe Ascii85)    1,920     1,970    0.954x   True
    z85 (ZeroMQ)           1,920     1,936    0.938x   False
   b85/z85 are 25 % overhead against base64's 33.3 % — cheaper by 128 B on this field. base64 is chosen for ubiquity and hand-inspectability (every language's stdlib, `echo | base64 -d`), not for being the smallest.
 

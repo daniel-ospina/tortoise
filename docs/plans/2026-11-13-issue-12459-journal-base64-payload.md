@@ -76,7 +76,7 @@ how a repairable gap becomes a permanent one.
   several do, so base64 is chosen among them for ubiquity, not for being the smallest (§2.5.1 measures all
   six: `b85`/`z85` are 25 % overhead against base64's 33.3 %, `a85` is refused for containing `"` and
   `\`, `hex` costs +100 %). On
-  **corruption detection all six give this note nothing**: none carries a checksum over *this* payload by
+  **corruption detection all six *formats* give this note nothing**: none carries a checksum over *this* payload by
   default (Parquet's optional page-level CRC32 is the exception, and it covers the page, not the vector),
   and a checksum would not catch a **validly re-encoded** alteration in any case. That is why §2.2's
   refusals are structural (count, version, alphabet) and why this note does **not** claim integrity from
@@ -103,8 +103,8 @@ how a repairable gap becomes a permanent one.
   error, never an attempt to guess the layout***. A **file-level** version is safe *"only when every
   record in that file is guaranteed to use the same format"*, and is explicitly called out as unsafe
   across *"rolling upgrades or records from multiple producers"*. That is §2.1's argument, reached
-  independently: this journal is append-only (#5917), concatenable and restorable, so a file header cannot
-  describe it — and §3.1's `unknown version → refuse` is the cited rule, not a local preference.
+  independently: this journal is append-only (#5917) and, in the normal deployment shape, **upgraded in
+  place**, so a file header cannot describe it — and §3.1's `unknown version → refuse` is the cited rule, not a local preference.
 - **(d) what the memory comparables store — answered, and the answer is "not this".** **Zep/Graphiti**
   episodes are graph nodes whose *content* may be `text`/`message`/`json`, and embeddings are computed for
   graph entities and handed to the configured graph store; the episode payload is not documented as
@@ -257,9 +257,9 @@ shrink at all. Corrected on the creating record: **2.80 GB, saving ≈ $0.33/mo*
 row implies `(5.423 − 2.069) × $0.125 = $0.42`, i.e. the correction is **~22 %** of that quote. ⚠️ Name the
 base: that `$0.42` pairs the **measured** P0 (`5.423 GB`) with the **modelled** P2 row (`2.069 GB`), which
 is what a reader would actually budget. It is *not* the quote's own saving — the quote's two rows imply
-`2.67 GB = $0.33/mo` unrounded (`2.60 GB` on the table's printed 4.7/2.1 rows), within **0.95 %** of the
-measured saving, because both rows' absolute errors partly cancel — the P2 row **understates the truth by
-26 %** (2.069 modelled vs 2.798 measured). The defect is the row *values*, not
+`2.67 GB = $0.33/mo` unrounded (`2.60 GB` on the table's printed 4.7/2.1 rows), because both rows' absolute
+errors partly cancel — the P2 row **understates the truth by 26 %** (2.069 modelled vs 2.798 measured). The
+printed 2.60 GB is **0.95 %** from the measured 2.625 GB saving; the unrounded 2.67 GB is 1.6 % above it. The defect is the row *values*, not
 the saving the pair happens to imply. Stated because a reader would budget from the quote. Whether this line is metered at all is **not settled
 anywhere**: #11758, the pricing-of-record ticket, closed `COMPLETED` on 2026-11-12 without addressing
 journal bytes, and #4333 (open) counts **node** sets, not journal bytes.
@@ -292,8 +292,10 @@ journal bytes, and #4333 (open) counts **node** sets, not journal bytes.
   shape: once a v2 build appends to a v1 journal the file holds **both** shapes, and there is no
   rewrite-free way to declare v2 for the tail alone. (An earlier draft blamed concatenation and restore —
   `backup.restore` **replaces** the journal (`backup.py:638`, `shutil.copy2`, truncating the destination;
-  its docstring says "REPLACES the destination journal"), so a restored file is single-version and a header
-  would be *correct* for it. Rotation yields separate files, which a per-file header would also handle.)
+  its docstring says "REPLACES the destination journal"). So restore never **creates** a mixed-version file —
+  but it faithfully **carries** one that the in-place upgrade already mixed, so restore is not a
+  counter-example either, and the reason stands on the append/upgrade ground alone. Rotation, if and when
+  #9025 lands, would yield separate files, which a per-file header would also handle.)
 - Per-record is self-describing, so the reader needs **no file-level state** — the same property that
   makes §3's mixed-version replay a per-line dispatch instead of a sequential state machine.
 
@@ -307,7 +309,7 @@ journal bytes, and #4333 (open) counts **node** sets, not journal bytes.
 
 A string is **also** a shape the seam refuses to treat as a vector — `_drop_journalled_embedding` replaces
 it with an owned `None` and logs a warning. It is the *same* branch as the dict row two lines above
-(`isinstance(raw, (str, bytes, dict))`, `embeddings.py:502`), so the two rows are one refusal rather than
+(`isinstance(raw, (str, bytes, dict))`, `embeddings.py:504`), so the two rows are one refusal rather than
 two, and a mis-ordered pipeline is **loud**, not silently transposed.
 
 ### 2.2 How the length is encoded — and why the count is load-bearing, measured
@@ -328,9 +330,10 @@ in `measurement.txt`):
    -20   0          1,521 B   380.25   False       refuses
   count check on the -16 frame: REFUSED (frame declares 384 elements at f32 (1536 B), decoded 1524 B)
 
-Note the two checks disagree on exactly one row: `len%4==0` is `True` there while the declared-count
-check is `refuses`. That disagreement *is* the argument — a reader with only the length check accepts a
-381-float truncation, and the count is the only thing standing between it and a silently short vector.
+*(The block above is `measurement.txt` verbatim. The two checks disagree on exactly one row — `len%4==0` is
+`True` at −16 while the declared-count check `refuses` — and that disagreement **is** the argument: a reader
+with only the length check accepts a 381-float truncation, and the count is the only thing between it and a
+silently short vector.)*
 ```
 
 `b64decode` **refuses** a cut that is not a multiple of 4 characters (`Incorrect padding`, or *"cannot be 1
@@ -435,11 +438,12 @@ An earlier draft said base64 is the *only* framing that keeps the line a JSON ob
 
 ```
    alphabet            body B   field B   vs b64   needs JSON escaping
+   (field B = 14 B prefix + the JSON-ESCAPED string, so escaping is charged for)
    hex                    3,072     3,088    1.496x   False
    base64 (RFC 4648 §4)   2,048     2,064    1.000x   False
    base64url (§5)         2,048     2,064    1.000x   False
    b85 (RFC 1924)         1,920     1,936    0.938x   False
-   a85 (Adobe/RFC 1924)   1,920     1,936    0.938x   True
+   a85 (Adobe Ascii85)    1,920     1,970    0.954x   True
    z85 (ZeroMQ)           1,920     1,936    0.938x   False
 ```
 
@@ -451,8 +455,10 @@ trade, not an optimum**, and this note does not claim otherwise:
   and `echo '<b64>' | base64 -d | xxd` lets a human read a vector out of a journal during an incident.
   b85 has a Python stdlib decoder and much less support elsewhere; z85 has none in Python's stdlib (the
   probe implements it) and its alphabet is a ZeroMQ spec (RFC 32), not an IETF one.
-- **a85 is refused outright**: its alphabet contains `"` and `\`, so it would need JSON escaping and would
-  break the one-write-no-escaping property §2.5 exists to keep (measured: `needs JSON escaping = True`).
+- **a85 is refused outright**: its alphabet contains the quote and the backslash, so it needs JSON escaping
+  and would break the one-write-no-escaping property §2.5 exists to keep — and its real JSON field is
+  **1,970 B**, not the 1,936 its body length suggests, which is why the table's field column charges the
+  escaped length (measured: `needs JSON escaping = True`).
 - **hex is refused on size**: +100 % overhead, 3,088 B — still 1.52× better than P0, but it gives back a
   third of the win for no property base64 lacks.
 
@@ -725,14 +731,19 @@ journal — every frame-bearing journal is thereafter a second code path that mu
 
 ## 7. Recommendation — stated plainly, because the number is smaller than the headline
 
-**The format in §2–§4 is the correct one if P2 is taken.** It is the only framing **of those compared**
-that satisfies all four recorded constraints at once: per-record versioning (append-only), a count that fails closed on the
-measured silent-truncation path, two widths so #5004 is preserved rather than overridden, and JSONL
-compatibility so the tear contract and the reader are not replaced. ⛔ **"Of those compared" is load-bearing**:
-§2.5.1 measures the text alphabets, and `b85` would be **128 B/record cheaper** (2,670 B, 2.03×) for a
-decoder most non-Python readers would have to write — base64 is a recorded trade on ubiquity, not an
-optimum, and a lane may reopen it by changing the frame's version token. What it *does not* decide is whether
-P2 is worth taking, and the honest numbers for that are:
+**The format in §2–§4 is the correct one if P2 is taken.** It is the only **frame shape** of those compared
+— a tagged string under the existing key, against a sibling key, a nested object, a file header and a binary
+layer (§2.1, §2.5) — that satisfies all four recorded constraints at once: per-record versioning
+(append-only), a count that fails closed on the measured silent-truncation path, two widths so #5004 is
+preserved rather than overridden, and JSONL compatibility so the tear contract and the reader are not
+replaced.
+
+⛔ **The alphabet inside that shape is a separate choice, and base64 is not the only one that works.**
+§2.5.1 measures six: `b85` satisfies all four constraints **128 B/record cheaper** (2,670 B, 2.03×) and needs
+no escaping, so base64 is a recorded trade on ubiquity and hand-inspectability — *not* an optimum and *not* a
+necessity. `b85` is the drop-in if a later lane wants the 4.6 %; changing the frame's version token is what
+makes that a v2 rather than a break. What the format does *not* decide is whether P2 is worth taking, and the
+honest numbers for that are:
 
 - **the remaining win is 1.94× on a creating record and 2.27× on its vector — not 4.1×** (§1.4);
 - **≈ $0.33/mo per million creates** at $0.125/GB, on a line whose metering is unsettled (§1.5);
