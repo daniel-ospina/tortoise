@@ -5623,15 +5623,11 @@ def test_a_NON_MAPPING_archive_entry_is_UNREADABLE_not_absent(tmp_path):
         sm.removal_records(path)
 
     # non-vacuity: a well-formed entry list is still read.
-    full = {
-        "kind": "mcp-tool",
-        "symbol": "tortoise_y",
-        "batch": "test-batch",
-        "reason": "test fixture",
-        "file": "archive/MANIFEST.json",
-    }
-    path.write_text(_json.dumps({"entries": [full]}), encoding="utf-8")
-    assert sm.removal_records(path)["archived"] == {("mcp-tool", "tortoise_y")}
+    path.write_text(
+        _json.dumps({"schema": 1, "entries": [_real_archive_entry()]}), encoding="utf-8"
+    )
+    real = _real_archive_entry()
+    assert sm.removal_records(path)["archived"] == {(real["kind"], real["symbol"])}
 
 
 def test_an_override_for_a_recorded_symbol_reports_the_RECORD_not_an_unused_override(
@@ -5721,8 +5717,16 @@ def test_the_no_record_header_and_remedies_still_print_for_a_no_record_refusal(
     assert rc == 1, out
     assert f"{symbol} (tool) was DROPPED with no record" in out, out
     assert "cut would drop 1 surface row(s) with no usable record" in out, out
-    assert "Account for each symbol by exactly one of" in out, out
+    assert "Account for each row reported above as 'DROPPED with no record'" in out, out
     assert "--allow-removal <symbol> --allow-removal-reason" in out, out
+    # ⛔ AND THE ROUTE LIST MUST NOT OFFER A DEAD END. `RETIRED_USE_INSTEAD` cannot account for
+    # a removal — a key with the declaration still live is a RETIREMENT (still served, so not a
+    # removal at all), and a key whose declaration is gone dangles, which the cut refuses as a
+    # contradiction — so it is stated as NOT a route rather than printed as one, which is what
+    # sent lanes to a route that could never satisfy the gate they were reading
+    # (review of PR #12313, round 9).
+    assert "- `RETIRED_USE_INSTEAD`" not in out, out
+    assert "A `RETIRED_USE_INSTEAD` entry is NOT a route here" in out, out
     # The word "below" was false: a refused cut writes no log below the refusal.
     assert "below" not in out, out
 
@@ -5742,48 +5746,101 @@ def test_an_archive_entry_without_its_FIELDS_is_not_a_RECORD(tmp_path):
     sm = _load_manifest_tool()
     path = tmp_path / "MANIFEST.json"
 
+    real = _real_archive_entry()
     for missing in ("batch", "reason", "file"):
-        entry = {
-            "kind": "mcp-tool",
-            "symbol": "tortoise_forgotten",
-            "batch": "b",
-            "reason": "r",
-            "file": "archive/MANIFEST.json",
-        }
+        entry = copy.deepcopy(real)
         del entry[missing]
-        path.write_text(_json.dumps({"entries": [entry]}), encoding="utf-8")
+        path.write_text(_json.dumps({"schema": 1, "entries": [entry]}), encoding="utf-8")
         with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
             sm.removal_records(path)
         assert missing in str(excinfo.value), str(excinfo.value)
 
-    # …and it is NOT accepted as a record for a removal either (the consequence that matters).
-    with pytest.raises(sm.SurfaceEvidenceUnreadable):
-        sm.removal_records(path)
-
-    # non-vacuity: the same entry WITH its fields is a record and waives the removal.
-    path.write_text(
-        _json.dumps(
-            {
-                "entries": [
-                    {
-                        "kind": "mcp-tool",
-                        "symbol": "tortoise_forgotten",
-                        "batch": "b",
-                        "reason": "r",
-                        "file": "archive/MANIFEST.json",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+    # non-vacuity: the REAL row, unmodified, is a record — so the refusals above are about the
+    # missing field, not about the fixture. (The committed entry is a `module`, which the
+    # removal gate does not grade — `ARCHIVE_KIND_BY_CLASS` is tool/sdk — so this asserts the
+    # READER's acceptance, and, below, that a module row is not mistaken for a tool record.)
+    path.write_text(_json.dumps({"schema": 1, "entries": [real]}), encoding="utf-8")
     records = sm.removal_records(path)
-    assert records["archived"] == {("mcp-tool", "tortoise_forgotten")}, records
-    problems, accounting = sm.removal_report(
-        {("tortoise_forgotten", "tool")}, set(), records
-    )
-    assert problems == [], problems
-    assert accounting == {("tortoise_forgotten", "tool"): "archive entry (mcp-tool)"}, accounting
+    assert records["archived"] == {(real["kind"], real["symbol"])}, records
+    problems, _ = sm.removal_report({(real["symbol"], "tool")}, set(), records)
+    assert len(problems) == 1 and "DROPPED with no record" in problems[0], problems
+
+
+def test_a_FORGED_archive_row_is_not_a_RECORD(tmp_path):
+    """Every shape a hand-typed row takes that `archive_surface.py check` REDS.
+
+    The round-8 check was a field list (`batch`/`reason`/`file` present, file exists), which is
+    a SECOND opinion about what a record is — and it accepted a row naming `MEMORY.md`, a row
+    pointing at a REAL frozen file under a different symbol, a row with no `archived_at`, a
+    mutated block sha, and the same `(kind, symbol)` twice. Each of those is red by the sibling
+    checker, so each would let `cut` write a baseline whose archive has already lost the code,
+    with deleting the row as the cheapest way out of the red — the #12237 loss reached THROUGH
+    the gate (review of PR #12313, round 9). The row reader now DELEGATES the question instead
+    of answering it a second time, and this pins the delegation.
+    """
+    import json as _json
+
+    sm = _load_manifest_tool()
+    path = tmp_path / "MANIFEST.json"
+    real = _real_archive_entry()
+
+    def _refused(entry, duplicates: bool = False) -> str:
+        entries = [entry, copy.deepcopy(entry)] if duplicates else [entry]
+        path.write_text(_json.dumps({"schema": 1, "entries": entries}), encoding="utf-8")
+        with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+            sm.removal_records(path)
+        return str(excinfo.value)
+
+    # A real file OUTSIDE `archive/`: containment is what `check` reds, and "the file exists"
+    # is not the question.
+    outside = copy.deepcopy(real)
+    outside["file"] = "MEMORY.md"
+    assert "not a path inside archive/" in _refused(outside)
+
+    traversal = copy.deepcopy(real)
+    traversal["file"] = "archive/../MEMORY.md"
+    assert "not a path inside archive/" in _refused(traversal)
+
+    # A real frozen file, claimed under a different symbol: `check` reds the drift.
+    wrong_symbol = copy.deepcopy(real)
+    wrong_symbol["symbol"] = "tortoise_never_frozen_here"
+    assert "drifted" in _refused(wrong_symbol).lower()
+
+    no_anchor = copy.deepcopy(real)
+    del no_anchor["archived_at"]
+    assert "archived_at" in _refused(no_anchor)
+
+    bad_block = copy.deepcopy(real)
+    bad_block["blocks"][0]["sha256"] = "0" * 64
+    assert "sha256" in _refused(bad_block)
+
+    # The same symbol archived twice is a manifest `check` reds.
+    assert "twice" in _refused(copy.deepcopy(real), duplicates=True).lower()
+
+    # non-vacuity: the unmodified real row still reads (so the refusals above are the
+    # mutations, not the fixture or the delegation itself).
+    path.write_text(_json.dumps({"schema": 1, "entries": [real]}), encoding="utf-8")
+    assert sm.removal_records(path)["archived"] == {(real["kind"], real["symbol"])}
+
+
+def _real_archive_surface():
+    from tools import archive_surface
+
+    return archive_surface
+
+
+def _real_archive_entry() -> dict:
+    """The committed manifest's own row — a file, its blocks and its anchor all real.
+
+    A fixture that invents `{"kind": …, "symbol": …, "file": "archive/MANIFEST.json"}` pins
+    the HOLE it means to close: `archive/MANIFEST.json` exists (so an existence check passes)
+    while `archive_surface.py check` reds it on every other arm. Mutating the real row keeps
+    each arm "the one field that is wrong" instead of "wrong everywhere", which is what makes
+    a refusal test discriminate (review of PR #12313, round 9).
+    """
+    entries = _real_archive_surface().load_manifest()["entries"]
+    assert entries, "the committed archive is empty — this fixture would prove nothing"
+    return copy.deepcopy(entries[0])
 
 
 def test_an_archive_entry_whose_FROZEN_FILE_is_gone_is_not_a_RECORD(tmp_path):

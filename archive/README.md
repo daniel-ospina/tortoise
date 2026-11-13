@@ -120,8 +120,13 @@ enforced at two different seams, deliberately:
   retired name is still SERVED: `RETIRED_TOOL_REGISTRY` is derived from
   `RETIRED_USE_INSTEAD`, so one edit to that map detaches both, and a gate reading only
   `rows:` would watch a live name leave the product and report nothing. A dropped symbol must
-  be accounted for by exactly ONE of an archive entry of the matching kind,
-  `RETIRED_USE_INSTEAD` (MCP), or `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` (SDK). For a
+  be accounted for by exactly ONE of an archive entry of the matching kind, or
+  `RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` (SDK). A `RETIRED_USE_INSTEAD` entry is **not**
+  one of these routes:
+  that map is what makes a name a RETIREMENT rather than a removal — `TOOL_REGISTRY` excludes it
+  and `RETIRED_TOOL_REGISTRY` includes it, so the name is still served and the baseline's
+  `retired:` half names it — and a bare key whose declaration is gone dangles, which the cut
+  refuses ("delete the stale forward key"). For a
   **tool**, an archive entry AND a `RETIRED_USE_INSTEAD` row is two records and is refused: a
   name that is both archived and still served is the inconsistency `check` reds from its own
   side. For an **SDK method** the freeze and the map entry are ONE record: `check` requires a

@@ -2139,10 +2139,25 @@ REMOVAL_WAYS = (
     "without the map entry strips the caller with a bare `AttributeError` instead of a "
     "recorded departure (the freeze and the map entry are ONE record, and `CONTRIBUTING.md` "
     "says so)",
-    "`RETIRED_USE_INSTEAD` (an MCP tool only — it keeps SERVING the name and names its "
-    "replacement, so it is a retirement, not a removal)",
     "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` (an SDK method only — the fail-closed "
     "`AttributeError` record)",
+)
+
+# ⛔ `RETIRED_USE_INSTEAD` IS NOT A ROUTE HERE, and listing it as one sent lanes to a dead end.
+# A name that is in that map WITH its declaration is a RETIREMENT: `TOOL_REGISTRY` excludes it
+# and `RETIRED_TOOL_REGISTRY` includes it, so the name is still SERVED, it appears in the
+# baseline's `retired:` half, and the surface never lost it — not a removal at all. A name
+# whose declaration is GONE is the only state that can be a removal, and there the map key
+# dangles: `removal_report` refuses it with "delete the stale forward key, or restore the tool",
+# the exact opposite of the "account for it here" instruction this line used to give
+# (review of PR #12313, round 9 — reproduced, and the docstring one screen up already said the
+# accepting arm "could not fire in production").
+NOT_A_REMOVAL_ROUTE = (
+    "A `RETIRED_USE_INSTEAD` entry is NOT a route here: with the declaration still live the "
+    "symbol is RETIRED, not removed (it is still served, and the `retired:` half of the "
+    "baseline is compared); with the declaration gone the map key dangles and the cut refuses "
+    "it as a contradiction. Restore the declaration if you want a retirement, archive the code "
+    "if you want a removal."
 )
 
 
@@ -2270,13 +2285,6 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
                     "this gate may accept: a hand-typed row would let `cut` forget the symbol, "
                     "and the cheapest way to clear the red afterwards is deleting the row"
                 )
-        frozen = Path(str(entry["file"]))
-        if not (frozen if frozen.is_absolute() else ROOT / frozen).is_file():
-            raise SurfaceEvidenceUnreadable(
-                f"an `archive/MANIFEST.json` entry ({kind}:{symbol}) names `{entry['file']}`, "
-                "which is not in this checkout - an entry whose frozen code is missing is not a "
-                "record that the code was kept, and `archive_surface.py check` reds it too"
-            )
         if not kind or not symbol:
             # A mapping that names no symbol is the same defect one branch over: skipping it
             # grades "unreadable" as "not archived", so `cut` tells the operator to archive
@@ -2288,6 +2296,32 @@ def removal_records(archive_manifest: Path | None = None) -> dict:
                 "freezes, and an entry it cannot read is not an entry that is not there"
             )
         archived.add((kind, symbol))
+    # ⛔ DELEGATE THE DEFINITION OF "A RECORD", DO NOT RE-DERIVE IT. A field list here is a
+    # SECOND opinion about what makes an archive row a record, and the two opinions drifted:
+    # the round-8 check ("`file` must name a file that exists") accepted a row naming
+    # `MEMORY.md`, a row pointing at a REAL frozen file under a DIFFERENT symbol, a row with
+    # no `archived_at`, a mutated block sha, and the same `(kind, symbol)` twice — every one of
+    # them RED by `archive_surface.py check`, so `cut` wrote a baseline whose archive has
+    # already lost the code and the cheapest way out of the red is deleting the row, after
+    # which no gate sees the removal at all (review of PR #12313, round 9). The sibling owns
+    # this question; the record reader now asks it instead of answering it again.
+    try:
+        violations = archive_surface.manifest_violations(doc, path.parent)
+        violations += archive_surface.file_violations(
+            [e for e in (doc.get("entries") or []) if isinstance(e, dict)], path.parent, ROOT
+        )
+    except Exception as exc:  # pragma: no cover - an environment fault is a refusal
+        raise SurfaceEvidenceUnreadable(
+            f"could not grade the archive manifest against its own checker: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if violations:
+        raise SurfaceEvidenceUnreadable(
+            "the archive manifest does not hold up under `archive_surface.py check`, so its "
+            "rows are not records this gate may accept (a cut that trusted them would forget "
+            "a symbol whose code was never frozen): " + "; ".join(violations[:3])
+            + (f" (+{len(violations) - 3} more)" if len(violations) > 3 else "")
+        )
     try:
         from tortoise.sdk_retired import REMOVED_SDK_METHODS, RETIRED_SDK_METHODS
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, RETIRED_USE_INSTEAD
@@ -2671,17 +2705,18 @@ def cmd_cut(args: argparse.Namespace) -> int:
                   "tell an archived removal from a silent deletion:")
             for problem in problems:
                 print(f"  {problem}")
-            print("  Account for each symbol by exactly one of:")
+            print("  Account for each row reported above as 'DROPPED with no record' by "
+                  "exactly one of:")
             for way in REMOVAL_WAYS:
                 print(f"    - {way}")
+            print(f"  {NOT_A_REMOVAL_ROUTE}")
             print("  A genuine RENAME (the old name is gone by design) passes "
                   "`--allow-removal <symbol> --allow-removal-reason <why>`; it is logged "
                   "in the cut output and belongs in the PR body.")
             return 1
-        print(f"::error::cut refused this removal: {len(problems)} problem(s) with the "
-              "records supplied")
-        print("REFUSED the records for these removals do not hold — each line names what is "
-              "wrong and what to do instead:")
+        print(f"::error::cut refused this removal: {len(problems)} problem(s)")
+        print("REFUSED — each line names what is wrong, and the record it names is the "
+              "problem. Nothing was written:")
         for problem in problems:
             print(f"  {problem}")
         return 1
