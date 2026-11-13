@@ -324,15 +324,10 @@ class MCPReader:
         """
         args = {"section": section}
         if not self.graph:
-            return self._checked(
-                self._labelled(f"read of section {section!r} was refused",
-                               self._call, "tortoise_graph_overview", args),
-                section)
+            return self._checked(self._section_call(args, section), section)
         try:
             res = C.normalise_tool_result(
-                self._labelled(f"read of section {section!r} was refused",
-                               self._call, "tortoise_graph_overview",
-                               {**args, "graph": self.graph}))
+                self._section_call({**args, "graph": self.graph}, section))
         except Exception as exc:
             # ONLY a recognised graph-refusal may fall back. A timeout/429 says
             # nothing about the binding, and re-reading a DIFFERENT graph under the
@@ -352,10 +347,26 @@ class MCPReader:
         if reason:
             self._note(f"section {section!r}: the explicit graph argument was refused "
                        f"({reason[:160]}); read from the credential's own graph instead")
-            return self._checked(self._call("tortoise_graph_overview", args), section)
+            return self._checked(self._section_call(args, section), section)
         # An EMPTY result is a legitimate answer (a graph with no sources), so it is
         # returned as-is rather than re-read from a different graph.
         return res
+
+    def _section_call(self, args: dict[str, Any], section: str) -> Any:
+        """One `graph_overview` read, with a refusal re-raised UNDER its section name.
+
+        ⛔ The call is spelled `self._call("tortoise_graph_overview", …)` INLINE, not
+        delegated to `_labelled`: `tests/test_curation_11469.py`'s AST audit
+        (`_first_arg_strings({"_call"}, CLI_SRC)`) reads exactly that shape to prove
+        every tool name this file uses is on the served registry, and handing `_call`
+        around as a VALUE made `tortoise_graph_overview` vanish from that audit — the
+        non-vacuity floor caught it (measured). Keep the literal call.
+        """
+        try:
+            return self._call("tortoise_graph_overview", args)
+        except C.CurationRefused as exc:
+            raise C.CurationRefused(
+                f"read of section {section!r} was refused: {str(exc)[:300]}") from exc
 
     def _note(self, text: str) -> None:
         """Notes ACCUMULATE: a single slot kept only the last falling section, so a
@@ -603,25 +614,22 @@ class MCPReader:
         args: dict[str, Any] = {"entity_type": "operator", "limit": OPERATOR_READ_CEILING}
         label = "read of the operator layer was refused"
         if not self.graph:
-            return C.normalise_tool_result(
-                self._labelled(label, self._call, "tortoise_search", dict(args)))
+            return C.normalise_tool_result(self._operator_call(dict(args), label))
         try:
             res = C.normalise_tool_result(
-                self._labelled(label, self._call, "tortoise_search",
-                               {**args, "graph": self.graph}))
+                self._operator_call({**args, "graph": self.graph}, label))
         except Exception as exc:
             reason = str(exc) or type(exc).__name__
             if not _looks_like_graph_refusal(reason):
                 raise
             self._note(f"the operator read: the explicit graph argument was refused "
                        f"({reason[:160]}); read from the credential's own graph instead")
-            return C.normalise_tool_result(
-                self._labelled(label, self._call, "tortoise_search", dict(args)))
+            return C.normalise_tool_result(self._operator_call(dict(args), label))
         reason = _error_of(res)
         if reason and _looks_like_graph_refusal(reason):
             self._note(f"the operator read: the explicit graph argument was refused "
                        f"({reason[:160]}); read from the credential's own graph instead")
-            return C.normalise_tool_result(self._call("tortoise_search", dict(args)))
+            return C.normalise_tool_result(self._operator_call(dict(args), label))
         return res
 
     def read_events(
@@ -932,6 +940,18 @@ class MCPReader:
                        f"({reason[:160]}); read from the credential's own graph instead")
             return C.normalise_tool_result(self._call("tortoise_get_entity", dict(args)))
         return res
+
+    def _operator_call(self, args: dict[str, Any], label: str) -> Any:
+        """One operator-layer read, with a refusal re-raised UNDER its label.
+
+        ⛔ Same AST constraint as `_section_call`: `self._call("tortoise_search", …)`
+        stays a LITERAL call so `tests/test_curation_11469.py`'s registry audit still
+        reads the tool name out of this file.
+        """
+        try:
+            return self._call("tortoise_search", args)
+        except C.CurationRefused as exc:
+            raise C.CurationRefused(f"{label}: {str(exc)[:300]}") from exc
 
     def audit(self) -> dict[str, Any]:
         res = self._section("audit")

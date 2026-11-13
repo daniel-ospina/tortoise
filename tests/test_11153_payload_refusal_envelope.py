@@ -382,6 +382,35 @@ def test_a_total_outage_of_the_orientation_summary_is_a_refusal(monkeypatch):
     assert result["error"] == QUOTA_REFUSAL
 
 
+@pytest.mark.asyncio
+async def test_a_heterogeneous_outage_still_flips_the_verdict(quiet, http_mode,
+                                                              monkeypatch):
+    """The R6 test's hole, closed (review round 7, P1).
+
+    The aggregate builds ELEVEN `_SafeError`s in one dispatch, while the seam's
+    holder keeps only the LAST eight — so returning the FIRST section's refusal
+    verbatim handed the gate a payload that had already been evicted, and a total
+    outage whose per-section texts DIFFER still shipped `isError: false`. The
+    producer now re-constructs the refusal (`_SafeError(dict(...))`), which
+    re-records it as the most recent one.
+    """
+    produced = {"n": 0}
+
+    def _unique_text_per_section(_sec, *_a, **_k):
+        produced["n"] += 1
+        return ms._SafeError({"error": f"section {produced['n']}: boom"})
+
+    monkeypatch.setattr(ms, "_overview_section", _unique_text_per_section)
+    result = await ms.mcp.call_tool("tortoise_overview", {})
+
+    assert produced["n"] > ms._MAX_RECORDED_SAFE_FAILURES, (
+        "this test only proves anything when the aggregate outruns the holder's "
+        "window")
+    assert result.is_error is True, (
+        "a total outage with per-section texts shipped `isError: false` — the "
+        "returned refusal had been evicted from the holder before the gate read it")
+
+
 def test_a_partial_orientation_summary_keeps_reporting_what_answered(monkeypatch):
     """The other direction: a summary where SOME sections answered stays a
     summary — the aggregate is still useful, and only a total outage is a

@@ -1832,7 +1832,12 @@ _dispatch_safe_failures: ContextVar[list[dict[str, Any]] | None] = ContextVar(
 #: Failures retained per dispatch. A tool body calls `_safe` a handful of times,
 #: so this is not reached in practice; it bounds the holder for a body that
 #: loops over caller-sized batches. Dropping the OLDEST can only make a failure
-#: MISS (it reads ``ok``) — it can never misclassify a success.
+#: MISS — it can never misclassify a success, but a MISS now has a WIRE
+#: consequence since #11153 (the verdict flip reads this list), not only a
+#: telemetry one. `tortoise_overview`'s no-`section` aggregate constructs eleven
+#: in one dispatch, so it is reachable: a producer that returns a refusal built
+#: EARLY must re-record it (`_SafeError(dict(...))`, which re-appends) rather than
+#: hand back an object already evicted from the window.
 _MAX_RECORDED_SAFE_FAILURES = 8
 
 
@@ -6380,10 +6385,19 @@ def tortoise_overview(section: str | None = None,
             combined[sec] = result
         if answered == 0 and first_refusal is not None:
             # NOTHING answered: this is a refused call, not an empty graph. Return
-            # the refusal itself so it lands at the payload's TOP level, where the
-            # seam's `_returned_safe_failure` gate flips the verdict and the
-            # telemetry row stops reading `ok`.
-            return first_refusal
+            # the refusal at the payload's TOP level, where the seam's
+            # `_returned_safe_failure` gate flips the verdict and the telemetry row
+            # stops reading `ok`.
+            #
+            # ⛔ RE-CONSTRUCTED, not returned as-is: `_SafeError.__init__` is what
+            # RECORDS the failure, and the holder keeps only the last
+            # `_MAX_RECORDED_SAFE_FAILURES` (8) of them — while this aggregate
+            # builds eleven. Returning the first section's object verbatim handed
+            # the seam a payload that had already been evicted, so on a TOTAL
+            # outage whose per-section texts DIFFER the match missed and the wire
+            # still said `isError: false` (measured, review round 7). Building a
+            # new `_SafeError` from it re-records it as the most recent one.
+            return _SafeError(dict(first_refusal))
         return combined
     if not isinstance(section, str):
         return _SafeError({"error": f"overview: section must be a string, got "
