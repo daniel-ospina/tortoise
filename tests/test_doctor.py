@@ -2727,7 +2727,7 @@ class TestDoctorHostedCredential:
         # loop head and never reaches the EOF branch — round 25), so the sleep
         # happens INSIDE the second read.
         class _EofLate(_Chunked):
-            def __init__(self, status, body, declared=None, delay=0.05):
+            def __init__(self, status, body, declared=None, delay=0.30):
                 super().__init__(status, body)
                 self._declared = declared
                 self._delay = delay
@@ -2748,15 +2748,34 @@ class TestDoctorHostedCredential:
 
         eof_late = _EofLate(200, b"hi")
         _d_late, cut_late = _doctor_read_capped(eof_late, 4096,
-                                                _time.monotonic() + 0.01)
+                                                _time.monotonic() + 0.25)
         assert cut_late is True, "EOF after our own interrupt is not completeness"
 
         # ...but a DECLARED length fully satisfied still proves completeness, even
         # when the deadline has passed by the time the EOF lands (round 17).
         done = _EofLate(200, b"hi", declared=0)
         _d_done, cut_done = _doctor_read_capped(done, 4096,
-                                                _time.monotonic() + 0.01)
+                                                _time.monotonic() + 0.25)
         assert cut_done is False, "a satisfied declared length is complete"
+
+        # (b3) the same rule on the ONE-BYTE CAP PROBE: an empty probe at a spent
+        # deadline may be our own watchdog's shutdown, so it is a CUT (round 24;
+        # unpinned until round 26). The deadline is ahead at entry and passes
+        # INSIDE the probe read, which is the only way to reach that branch.
+        class _CapProbeLate(_Chunked):
+            def __init__(self, status, body):
+                super().__init__(status, body)
+
+            def read(self, n=None):
+                if n == 1:  # the probe
+                    _time.sleep(0.30)
+                    return b""
+                return self._buf.read(n)
+
+        cap_late = _CapProbeLate(200, b"y" * 16)
+        _d_cap, cut_cap = _doctor_read_capped(cap_late, 16,
+                                              _time.monotonic() + 0.25)
+        assert cut_cap is True, "an empty probe at a spent deadline is a cut"
 
         # (c) the probe is ONE byte — its wait and allocation must not scale with
         # the cap (fresh review round 23).
