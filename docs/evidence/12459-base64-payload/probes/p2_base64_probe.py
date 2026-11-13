@@ -369,6 +369,39 @@ def main() -> int:  # noqa: C901 — a report, read top to bottom
             print(f"  {label:<42} ⛔ DECODED — this is a defect")
             return 1
 
+    # ── WHY the count is load-bearing: the silent-truncation sweep ──────
+    # A body cut by N base64 chars loses 3*N/4 bytes. Only ONE cut in four
+    # leaves a length that is still a multiple of the element size, so a
+    # reader that checked only `len(decoded) % 4` would accept it.
+    print("\n== silent truncation: which cuts a LENGTH-ONLY check would accept")
+    print("   cut   decoded    floats   len%4==0   count check (declared n)")
+    accepted_by_length_only = []
+    for cut in (4, 8, 12, 16, 20):
+        try:
+            out = base64.b64decode(body[:-cut], validate=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"   -{cut:<4} refused by b64decode ({type(exc).__name__})")
+            continue
+        elems = len(out) / 4
+        len_only = len(out) % 4 == 0
+        if len_only:
+            accepted_by_length_only.append(cut)
+        print(f"   -{cut:<4} {len(out):>7,} B  {elems:>7.2f}   {str(len_only):<10}  "
+              f"{'ACCEPTS (381 floats)' if len_only else 'refuses'}")
+    if accepted_by_length_only != [16]:
+        print(f"  ⛔ unexpected sweep result {accepted_by_length_only} — the count's "
+              f"justification in the note assumes exactly the -16 cut")
+        return 1
+    # …and the frame REFUSES that exact cut, because of the count.
+    short = f"b64:1:f32:{len(vec)}:{body[:-16]}"
+    try:
+        unframe(short)
+    except ValueError as exc:
+        print(f"  count check on the -16 frame: REFUSED ({exc})")
+    else:
+        print("  count check on the -16 frame: ⛔ DECODED — this is a defect")
+        return 1
+
     print("\nVERDICT: measured. The frame is 2.27x the P0 vector span on a "
           "creating record, the float32 bits are unchanged, and the f64 "
           "population is preserved at its own width.")

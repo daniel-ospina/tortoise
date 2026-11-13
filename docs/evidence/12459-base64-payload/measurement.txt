@@ -42,4 +42,13 @@
   unknown version                            REFUSED (ValueError)
   non-base64 character in body               REFUSED (Error)
 
+== silent truncation: which cuts a LENGTH-ONLY check would accept
+   cut   decoded    floats   len%4==0   count check (declared n)
+   -4      1,533 B   383.25   False       refuses
+   -8      1,530 B   382.50   False       refuses
+   -12     1,527 B   381.75   False       refuses
+   -16     1,524 B   381.00   True        ACCEPTS (381 floats)
+   -20     1,521 B   380.25   False       refuses
+  count check on the -16 frame: REFUSED (frame declares 384 elements at f32 (1536 B), decoded 1524 B)
+
 VERDICT: measured. The frame is 2.27x the P0 vector span on a creating record, the float32 bits are unchanged, and the f64 population is preserved at its own width.

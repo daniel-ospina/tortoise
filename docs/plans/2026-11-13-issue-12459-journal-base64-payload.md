@@ -42,7 +42,7 @@ the append path)
 | #11821 | the three-phase spec. P0 = width, P1 = the `:GraphEvent` mirror, **P2 = this**. Its own sequencing rule: *"no implementation until P0 and P1 are merged and measured… shares a PR with nothing."* |
 | #11835 (P0's PR) | the Review Scope Contract R1–R5, the measured post-P0 figures, and the two acceptance figures it reported as **not** holding rather than adjusting them |
 | `tortoise/embeddings.py::stamp_journal_embedding`, `_stamp_journal_vector_width`, `_is_shortest_f32_text`, `shortest_float32_vector` | the landed P0 seam: what "the shortest float32 round trip" means here, the **three outcomes** of the width stamp, and the eight homes the marker is declared in |
-| `tests/test_11821_journal_vector_width.py` (21 tests) | the pins P2 must not move: float32 bits, the never-narrowed population, the pre-change replay test at `:518` |
+| `tests/test_11821_journal_vector_width.py` (**51 tests** at this head) | the pins P2 must not move: float32 bits, the never-narrowed population, the pre-change replay test at `:518` |
 | `docs/durability-posture.md` **R1** | the embedding **stores** — a replay restores it verbatim and never regenerates it. *"presence is ownership."* |
 | `docs/architecture/STORAGE-ARCHITECTURE.md` §5.2 | the recorded P2 finding already on the books: *"~4× more than base64 of the same information as the float32 the graph itself stores (2,048 B for a 384-d vector)"* — and that it needs its own decision and its own tests |
 | `tools/journal_growth.py` | read **critically** — see §1.1. It cannot report the vector-payload figure. |
@@ -150,9 +150,9 @@ For one 384-d vector, at the frame in §2:
 ```
 raw float32 payload      384 elements × 4 B/elem            = 1,536 B
 base64 (RFC 4648 standard alphabet)  ⌈1536/3⌉ × 4            = 2,048 B   (+33.3 % — the encoding tax)
-frame prefix + JSON quotes
-   "b64:1:f32:384:"  = 12 + 2 = 14 B of key/version/width/count framing,
-   plus 2 B of JSON string quotes                            =   16 B
+frame prefix  "b64:1:f32:384:"  = 4 marker + 2 version
+                                  + 4 width + 4 count         =   14 B
+plus 2 B of JSON string quotes                                =    2 B
                                                               ---------
 vector span under P2                                        = 2,064 B
                                                             
@@ -160,9 +160,9 @@ record:  5,423 − 4,689 + 2,064                               = 2,798 B
 ratio    5,423 / 2,798 = 1.94×   (vector alone: 4,689/2,064 = 2.27×)
 ```
 
-Cross-check on an independent path: 384 floats × 5.38 chars/float = 2,064 B. P0 was 12.2 chars/float,
+Cross-check on an independent path: 384 floats × **5.375** chars/float = 2,064 B. P0 was 12.2 chars/float,
 pre-P0 21.9 — so the per-element cost is now **5.4 characters, of which 5.33 is the base64 of 4 bytes**.
-The framing is 16 B on a 2,064 B field: 0.8 %. That is the whole overhead of the version marker.
+The framing is 16 B on a 2,064 B field: **0.8 %**. That is the whole overhead of the frame.
 
 ### 1.4 ⛔ The headline "~4.1×" is a **pre-P0 → P2** figure, not the step this note decides
 
@@ -192,17 +192,19 @@ pre-P0       1,000,000 × 9,176 B = 9.176 GB  ≈ $1.15/mo
 different basis:
 
 ```
-  pre-P0 blended basis in that table:  8,500 B/record  (from §5.2's "8.8 MB per 1,000 creates")
+  pre-P0 blended basis in that table:  8,500 B/record  (8.5 GB at 1,000,000 — §5.2, STORAGE-ARCHITECTURE.md:438)
   P0 row:  8,500 × 4,689 / 8,414 = 4,737 B → 4.74 GB   (table says 4.7 GB  ✓)
   P2 row:  8,500 × 2,048 / 8,414 = 2,069 B → 2.07 GB   (table says 2.1 GB  ✓)
 ```
 
-Both rows scale **the whole record by the VECTOR's ratio**. That is nearly right pre-P0, where the vector
-is 92 % of the record — and wrong once the non-vector bytes are a third of it. The P2 row therefore assumes
-the record shrinks *with* its vector, when in fact 734 B of the record (the payload around the vector) does
-not shrink at all. Corrected on the creating record: **2.80 GB, saving ≈ $0.33/mo, not $0.33–0.42**.
-Stated because the difference is ~25 % of the quoted saving and the quote is what a reader would budget
-from. Whether this line is metered at all is #11758's open question.
+So both rows are **reproducible arithmetic on a blended basis, plus a vector-ratio assumption the P2 row
+then breaks**: they scale the whole record by the VECTOR's ratio. That is nearly right pre-P0, where the
+vector is 92 % of the record — and wrong once the non-vector bytes are a third of it. The P2 row assumes
+the record shrinks *with* its vector, when in fact **734 B** of the record (`2,798 − 2,064`) does not
+shrink at all. Corrected on the creating record: **2.80 GB, saving ≈ $0.33/mo** — where the vector-ratio
+row implies `(5.423 − 2.069) × $0.125 = $0.42`, i.e. the correction is **~22 %** of that quote. Stated
+because a reader would budget from the quote. Whether this line is metered at all is #11758's open
+question.
 
 ---
 
@@ -249,20 +251,24 @@ A string is the one shape the seam already refuses to treat as a vector, so a mi
 
 The element count is in the frame, and it is **not** redundant with the base64 length. Python's
 `base64.b64decode(validate=True)` **silently drops an incomplete trailing quantum** — measured on a real
-384-d payload:
+384-d payload, sweeping the cut (`p2_base64_probe.py`, verbatim in `measurement.txt`):
 
 ```
-  - 4 chars: DECODED 1533 B = 383.25 floats   len%4==0: False  count check (384): REFUSES
-  -12 chars: DECODED 1527 B = 381.75 floats   len%4==0: False  count check (384): REFUSES
-  -16 chars: DECODED 1524 B = 381.00 floats   len%4==0: TRUE   count check (384): REFUSES   ⛔
-  -20 chars: DECODED 1521 B = 380.25 floats   len%4==0: False  count check (384): REFUSES
+   cut   decoded    floats   len%4==0   count check (declared n)
+   -4      1,533 B   383.25   False       refuses
+   -8      1,530 B   382.50   False       refuses
+   -12     1,527 B   381.75   False       refuses
+   -16     1,524 B   381.00   True        ACCEPTS (381 floats)
+   -20     1,521 B   380.25   False       refuses
+  count check on the -16 frame: REFUSED (frame declares 384 elements at f32 (1536 B), decoded 1524 B)
 ```
 
 At **−16 characters the decoded length is still a multiple of the element size** (381 whole floats), so a
 length-only check **accepts a silently truncated vector**. Only the declared count refuses it. (This is the
 fail-open direction on the durability artifact: a short vector replayed into the graph is a wrong graph
 with no error anywhere.) `validate=True` is mandatory for the same reason — the default `False` discards
-characters outside the alphabet instead of refusing.
+characters outside the alphabet instead of refusing. The probe asserts that `−16` is the **only** cut of
+the five where a length-only check would accept, so the justification cannot silently stop holding.
 
 The reader's four refusals, all measured in the probe:
 
@@ -314,17 +320,19 @@ element size, declared in the frame **and** cross-checked against P0's `embeddin
 - frame present, `embedding_width` **absent** → refuse (no pre-P0 record may carry a frame);
 - `embedding_width` present, value is a plain JSON list → P0 shape, read as today (the mixed-log path).
 
-The duplication is deliberate: it costs 16 B and it removes the only way the width can be wrong at rebuild
+The duplication is deliberate: it costs **4 B of the 16 B frame** (the `f32:` width token, which is
+already implied by `embedding_width`) and it removes the only way the width can be wrong at rebuild
 time without anything noticing. Where a checked duplicate and a single source of truth conflict, the
 unrecoverable direction wins.
 
 ### 2.5 The log line stays newline-delimited and parseable — and why not raw bytes
 
 Raw packed float32 is **1,536 B**, i.e. 512 B per record cheaper than base64. It is refused, and this is
-measured rather than asserted: on the corpus vector, the raw packet contains
+measured rather than asserted: on the probe's corpus vector (`p2_base64_probe.py`'s `unit_vector()`), the
+raw packet contains
 
 ```
-  contains 0x0A (newline): 2    contains 0x22 ('"'): 5    contains 0x00: 2
+  contains 0x0A (newline): 4    contains 0x22 ('"'): 4    contains 0x00: 7
 ```
 
 Raw float32 bytes include `0x0A` and `0x22`, so they cannot live in a JSON string unescaped and cannot be
@@ -379,10 +387,18 @@ needed — i.e. at the worst possible moment, against a journal nobody can re-cr
 
 ### 3.1 One dispatch, in one place
 
-The frame is decoded in **`EventLog.read_all`**, at the record-read boundary, so every downstream consumer
-(`fold`, `rebuild_all`, `begin_ingest`'s cache scan, `record_projection`, `session_indexer._journal_vector`,
-`EventAPI`'s replay legs) still sees **exactly the shape it sees today** and needs no change. One spelling
-of the frame, one place to get it wrong — the same reason P0 put the width decision in one seam.
+The frame is decoded in **`EventLog.read_all`**, at the record-read boundary, so every vector consumer
+(`fold`, `rebuild_all`, `begin_ingest`'s cache scan, `record_projection`, `recover_from_log`, the backup
+and cursor readers) still sees **exactly the shape it sees today** and needs no change. One spelling of
+the frame, one place to get it wrong — the same reason P0 put the width decision in one seam.
+
+**The bypasses, named rather than left to be found.** Three journal line-parsers do *not* go through
+`read_all`: `log.py`'s seal/tail detection, `subject_binding`'s key scan, and `MentionScan`
+(`log.py:1243`, used by `EventLog.mention_lines` and `sdk._journal_presence_state`). All three read
+`type`/id-shaped keys and **never** `embedding`, so an undecoded frame cannot reach them — which is a
+property to keep, not an accident to assume: the implementation's tests must red if any of them starts
+reading a vector. (`sdk._journal_vector` is the opposite direction — a `Vectorf32` → JSON-able list
+converter on the **write** path — and reads no journal.)
 
 Dispatch is on the **value**, per record:
 
@@ -463,8 +479,9 @@ fixture (the P0 test's rule, so the check cannot pass vacuously):
   f64 spans: today (JSON text) 5,770 B → frame 4,112 B  (1.40×)
 ```
 
-So the verbatim population **shrinks too** (1.40×, since 17-digit text → 10.67 base64 chars/float) while
-being narrowed **not at all**. The frame's width field is what carries the promise: `f64` in, `f64` out.
+So the verbatim population **shrinks too** (1.40×, since 15.0 chars/float of float64 text → 10.7 base64
+chars/float) while being narrowed **not at all**. The frame's width field is what carries the promise:
+`f64` in, `f64` out.
 
 ### 4.3 What happens to a caller-owned vector under the new format
 
@@ -547,7 +564,7 @@ this note.
 ## Appendix — reproducing every figure
 
 ```bash
-# 1. everything in §1, §2.2 and §4, and the decode-equivalence proof
+# 1. everything in §1, §2.2 and §4, the silent-truncation sweep, and the decode-equivalence proof
 env -u TORTOISE_DB_URI uv run python \
     docs/evidence/12459-base64-payload/probes/p2_base64_probe.py
 
@@ -555,7 +572,7 @@ env -u TORTOISE_DB_URI uv run python \
 env -u TORTOISE_DB_URI uv run python \
     docs/evidence/11821-journal-encoding/probes/journal_encoding_probe.py
 
-# 3. the 9-digit and raw-bytes measurements quoted in §2.3 / §2.5
+# 3. the 9-digit and raw-byte measurements quoted in §2.3 / §2.5
 uv run python - <<'PY'
 import base64, struct
 import numpy as np
@@ -564,9 +581,17 @@ v = rng.standard_normal(2_000_000).astype(np.float32)
 for d in (7, 8, 9):
     back = np.array([float("%.*g" % (d, float(x))) for x in v], dtype=np.float32)
     print(d, int((back != v).sum()))
-vec = [float(x) for x in rng.standard_normal(384).astype(np.float32)]
-raw = struct.pack("<384f", *vec)
-print(len(raw), raw.count(b"\n"), raw.count(b'"'), len(base64.b64encode(raw)))
+# the SAME vector the probe uses (§2.5's counts), then the appendix's own
+for seed, skip in ((5612, 0), (12459, 2_000_000)):
+    r = np.random.default_rng(seed)
+    if skip:
+        r.standard_normal(skip)
+    # NORMALISED, exactly as the probe's unit_vector() does — the raw-byte
+    # counts below differ on the un-normalised draw.
+    v = r.standard_normal(384).astype(np.float32)
+    v = (v / np.linalg.norm(v)).astype(np.float32)
+    raw = struct.pack("<384f", *[float(x) for x in v])
+    print(seed, len(raw), raw.count(b"\n"), raw.count(b'"'), raw.count(b"\x00"), len(base64.b64encode(raw)))
 PY
 ```
 
