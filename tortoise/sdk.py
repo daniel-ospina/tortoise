@@ -8470,16 +8470,14 @@ def _type_text(value: object) -> str:
 def _item_type_text(item: dict) -> str:
     """The item's `type` as its WRITER reads it: content, lowercased.
 
-    ⛔ One rule, applied by EVERY Phase-1 arm that asks what an item IS. The
-    writer's rule is content, then lowercase — implemented once in `_type_text`
-    (`:8447`), which this function delegates to. `_type_text` calls
-    `str.strip`/`str.lower` as BASE functions, so neither an overridden
-    `strip`/`lower` nor an overridden `__str__` can change the answer: the
-    content is what is read, on every path. An arm that compared `str(item.get("type") or "")` was asking a
-    DIFFERENT question (the `__str__` rendering), so a subclass whose content is
-    a real label and whose `__str__` differs passed Phase 1 and step 3 then
-    raised with the point items already committed — the #2422/#7925
-    partial-mutation class, measured for four arms at review cycle 10.
+    ⛔ One rule, applied by EVERY Phase-1 arm that asks what an item IS: content,
+    then lowercase, implemented once in `_type_text` (`:8447`) — which this
+    delegates to, and whose explicit `str.strip`/`str.lower` BASE calls mean no
+    overridden `strip`/`lower` or `__str__` can change the answer. An arm that
+    compared `str(item.get("type") or "")` was asking a DIFFERENT question (the
+    `__str__` rendering), so a subclass whose content is a real label and whose
+    `__str__` differs passed Phase 1 and step 3 then raised with the point items
+    already committed — the #2422/#7925 partial-mutation class, review 10.
     """
     return _type_text(item.get("type"))
 
