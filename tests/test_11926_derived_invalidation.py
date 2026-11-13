@@ -1650,10 +1650,9 @@ def test_a_claim_that_vanishes_BEFORE_the_retirement_lands_is_alreadyRetired(
     that benign no-op as ``failed`` AND skipped the goal's reconcile, which is the
     #12336 residual this module closes for every other already-retired arm:
     measured before this round, ``goalState`` stayed ``met`` naming a claim that no
-    longer existed, and no later sweep could repair it — ``invalidate_stale`` scans
-    LIVE claims, so a claim that is gone never becomes a finding again (another of
-    the goal's claims going stale later would reconcile the word, which is exactly
-    why this arm may not skip its own).
+    longer existed, and no later sweep could revisit THAT CLAIM — only another of
+    the goal's claims going stale could reconcile the word, and that is luck, not
+    a route this arm may rely on.
 
     ⚠️ ``found`` here is ``False``, not ``None``, and that is the point: ``None``
     is reserved for a re-read that could not answer (``after is None``). "Gone" is
@@ -2138,22 +2137,36 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
     `test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_left`;
     this pins that the words still agree with it.
     """
+    import inspect
+
     import tortoise.derived_invalidation as di
 
     # Collapse the source line-wrapping: these are prose contracts, not layout.
     door = " ".join((di.invalidate.__doc__ or "").lower().split())
-    assert "another of that goal's claims going stale later does repair it" in door, (
+    assert "claims going stale later does repair" in door, (
         "the `alreadyRetired` note must say WHICH shape repairs itself")
     assert "a goal whose last claim is gone is never a finding again" in door, (
         "and which shape does not")
     assert "needs no new input" in door, (
-        "the manual route must be scoped to 'no new input': a re-judge also "
-        "rewrites the word, so naming it as THE route over-claims in the other "
-        "direction")
+        "the manual route must be scoped to 'no new input': a re-judge that reaches "
+        "a decided state also writes the word, so naming it as THE route "
+        "over-claims in the other direction")
+    assert "no automatic path" not in door, (
+        "the door note states the QUALIFIED form; an absolute may not return here")
 
+    # ⛔ ADJACENCY, not co-presence: the 27th-round version asserted the two
+    # phrases separately, so an absolute with the qualifier parked in an
+    # unrelated sentence passed a mutant that kept the false claim (#12315
+    # review cycle 27). The qualifier has to be IN the sentence.
     helper = " ".join((di._reconcile_or_report.__doc__ or "").lower().split())
-    at = helper.find("no automatic path repairs it")
-    assert at != -1, "the rule itself must stay stated"
-    assert "once the goal holds no other live claim" in helper, (
+    assert ("no automatic path repairs it once the goal holds no other live "
+            "claim") in helper, (
         "an UNQUALIFIED 'no automatic path repairs it' is false while the goal "
         "still holds a live claim: that claim going stale reconciles the word")
+
+    # The arm COMMENT is the site a maintainer reads while editing exactly that
+    # arm, and it is the one that has regressed before — pin it at source level,
+    # because no docstring assertion can see it.
+    src = inspect.getsource(di.invalidate).lower()
+    assert "once the goal holds no other live claim" in src, (
+        "the absent-arm comment must keep the qualifier too")
