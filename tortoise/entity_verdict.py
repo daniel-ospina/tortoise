@@ -488,7 +488,7 @@ def hard_vetoes(mention: dict, candidate: dict, facts: dict | None = None) -> li
         got.append(VETO_TARGET_SUPPRESSED)
     if facts.get("retired"):
         # D-1 at the candidate-table layer. The S3 guard
-        # (`extractor_v2._live_entity_priors`) already rewrites such a row onto
+        # (`extractor_v2._current_entity_priors`) already rewrites such a row onto
         # its survivor, so this fires only for a table built another way — and
         # when it does, the correct answer is a refusal, not a hop: a caller
         # that reached here lost the evidence the hop needs.
