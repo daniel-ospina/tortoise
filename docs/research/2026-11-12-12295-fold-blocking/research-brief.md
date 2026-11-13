@@ -239,9 +239,13 @@ across the **article**. Its 386 decomposes per class as 175 (`article-drop`, bou
 folded rung) + 179 (`space-to-hyphen`, bound because the mention was separator-normalised to
 `the plan doc` and the stored `the plan doc` folds onto it) + 21 (`hyphen-to-space`) + 11
 (`hash-dropped`). So 207 is what the *stored* key binds, and 386 is what it binds **once the MENTION
-is separator-normalised before the comparison** — a lever on the matcher's input, which §4 shows
-does **not** require the `#12047` round-4 finding-5 article anchor to be reopened. Neither number is
-"the fold works" on its own, which is why both are in the artifact.
+is separator-normalised before the comparison** — a lever on the matcher's input. ⛔ It leaves the
+STORED anchor alone, but it is **not free** and not compatible with `#12047` round-4 finding 5 as
+written: `_fold_punct("a-b")` → `"a b"`, the fold then drops the leading `a`, so
+`key_of("a b") == "b"` and an `a-b` mention binds a stored `b` — the binding that finding forbids.
+§4 and §7(a) therefore treat it as its own decision (or a reopen), not as a way to reach the 179
+without touching that finding. Neither number is "the fold works" on its own, which is why both are
+in the artifact.
 
 ## 4. The residual is exactly three declared classes — two of them decisions, one a retrieval miss
 
@@ -330,10 +334,11 @@ retrieval-miss class `#11901` owns; the folded rung cannot reach what the window
 
 ## 7. What moves next, with the number attached
 
-1. **Two distinct levers, and only one of them needs a reopen.** The argument rests on the per-class
-   reach numbers, not on one total: `space-to-hyphen` is **180/180 reachable by the blocker, 179 in
-   the `k=3` window, 0 attach** (and `0 attach` at every `k`, including the widths where all 180 are
-   in the window) — so the pairs are present and unattached, and no `k` budget reaches them.
+1. **Two distinct levers — neither is free, and one is a reopen in the stored key.** The argument
+   rests on the per-class reach numbers, not on one total: `space-to-hyphen` is **180/180 reachable by
+   the blocker, 179 in the `k=3` window, 0 attach** (and `0 attach` at every `k`, including the widths
+   where all 180 are in the window) — so the pairs are present and unattached, and no `k` budget
+   reaches them.
    **(a) Separator-normalise the MENTION before the comparison** — that recovers **179** of them, it
    is exactly what the artifact's `attached_folded = 386` measures (386 = 175 + 179 + 21 + 11). It
    leaves the STORED key alone, but it is not free and not priced by this artifact —
