@@ -3362,6 +3362,10 @@ def test_the_per_file_caveat_names_the_MEASURED_build_edge(tmp_path, monkeypatch
     caveat = probe.per_file_scope_note(shipped["deployment"])
     assert "BUILDS from Dockerfile.selfhost" in caveat, caveat
     assert "BUILDS from Dockerfile.worker" in caveat, caveat
+    # ⛔ NEGATIVE pin: both images are IN the population, so neither may be marked with
+    # the outside-population caveat — an over-reporting mutation published a false
+    # statement in the row note and stayed green (fresh review of PR #12474, P3).
+    assert "OUTSIDE the walked population" not in caveat, caveat
 
 
 def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
@@ -3385,12 +3389,42 @@ def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
     assert shipped["unset_declarations"], shipped
     assert shipped["deployment"]["files"]["docker-compose.yml"] == "OFF", shipped["deployment"]
     caveat = probe.per_file_scope_note(shipped["deployment"])
-    assert "UNSETS it" in caveat, caveat
     assert "never unsets" not in caveat, caveat
+    # ⛔ The caveat VARIES with this tree's disarming declarations, so the arm measures
+    # something: the empty reading cannot produce the DISARMS sentence (fresh review of
+    # PR #12474, P3 — the first version's two arms passed for every input).
+    assert "DISARMS it" in caveat, caveat
+    assert "UNSET it" in caveat, caveat
+    empty = probe.per_file_scope_note(
+        {**shipped["deployment"], "unset_declarations": [], "disarming_assignments": []})
+    assert "DISARMS it" not in empty, empty
     note = _gate_note(shipped)
     assert "compose declarations that UNSET it: ['docker-compose.yml:" in note, note
+    # ⛔ …and the EXPLICIT-FALSE override is the other disarming direction: compose
+    # `environment:` OVERRIDES the image's `ENV`, so a `"0"` here disarms a deployment
+    # whose image arms it — and calling the file merely "silent" steered a reader to
+    # "armed" (fresh review of PR #12474, P2).
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
+        '    environment:\n      TORTOISE_EMBED_GATE: "0"\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["disarming_assignments"], shipped
+    assert shipped["deployment"]["disarming_assignments"], shipped["deployment"]
+    caveat = probe.per_file_scope_note(shipped["deployment"])
+    assert "OVERRIDE it with a non-truthy one" in caveat, caveat
+    # …and a compose BUILD ARG is not a runtime arm (the fourth reader now agrees with
+    # the other three about what build-time means).
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    build:\n      context: .\n"
+        '      args:\n        TORTOISE_EMBED_GATE: "1"\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["docker-compose.yml"]["state"] == "OFF", shipped
+    assert any("build-time build arg" in hit
+               for hit in shipped["outside_runtime"]), shipped["outside_runtime"]
+
     # …the map spellings too.
-    for spelling in ("TORTOISE_EMBED_GATE:", "TORTOISE_EMBED_GATE: null"):
+    for spelling in ("TORTOISE_EMBED_GATE:", "TORTOISE_EMBED_GATE: null",
+                     "TORTOISE_EMBED_GATE:   # disable the gate"):
         (tmp_path / "docker-compose.yml").write_text(
             f"services:\n  tortoise:\n    environment:\n      {spelling}\n",
             encoding="utf-8")
@@ -3423,6 +3457,22 @@ def test_the_LEGACY_ENV_space_form_is_a_deployment_hit(tmp_path, monkeypatch):
         "FROM python:3.12\nARG TORTOISE_EMBED_GATE 1\n", encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped["per_surface"]
+    # ⛔ …and it is REPORTED as build-time, not silently dropped: the arm used to require
+    # the assignment reader to parse it, which it does not do for the legacy spelling
+    # (fresh review of PR #12474, P3).
+    assert any("build-time ARG" in hit for hit in shipped["outside_runtime"]), shipped
+    # ⛔ …and the MULTI-ASSIGNMENT form `ENV FLAG="1" OTHER=1` sets the flag: Docker's own
+    # grammar allows it, and the multi-word rejection read it as prose (PR #12474, P3).
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE="1" PYTHONUNBUFFERED=1\n',
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "ON", shipped["per_surface"]
+    # …while a genuine PROSE line after the value is still not a setting.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE 1 to enable\n", encoding="utf-8")
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "per_surface"]["Dockerfile"]["state"] == "OFF"
 
 
 

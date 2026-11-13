@@ -2443,6 +2443,48 @@ def _shell_line_is_exported(line: str, flag: str,
     return flag in exported
 
 
+#: A compose mapping ENTRY, bare or quoted key, optionally an array item.
+_COMPOSE_ENTRY_KEY = re.compile(
+    r"""^(?P<indent>\s*)(?:-\s+)?(?P<q>["']?)(?P<key>[A-Za-z_][\w.-]*)(?P=q)\s*:(?P<rest>.*)$""")
+
+
+def _compose_contexts(text: str) -> dict[int, str]:
+    """1-based line → the dotted mapping PATH it lives in (`environment`, `build.args`).
+
+    ⛔ compose is a structure, not a line list: `TORTOISE_EMBED_GATE: "1"` is a RUNTIME
+    arm under `services.<svc>.environment`, a BUILD-TIME value under
+    `services.<svc>.build.args` and a label under `labels` — the same line, three
+    meanings (fresh review of PR #12474, P2). The TOML reader got a table scope for
+    exactly this reason; this is the same rule for compose, so the fourth reader stops
+    disagreeing with the other three about what a build-time value is.
+
+    Indentation-driven: a mapping key with no inline value opens a scope, and a line
+    belongs to the innermost open scope. Array items (`- FLAG`) inherit their parent's.
+    """
+    ctx: dict[int, str] = {}
+    stack: list[tuple[int, str]] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            ctx[number] = ".".join(key for _, key in stack)
+            continue
+        indent = len(line) - len(line.lstrip())
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        entry = _COMPOSE_ENTRY_KEY.match(line)
+        if entry:
+            # ⛔ The line's context is the ENCLOSING scope, not including its own key:
+            # assigning before the push put `FLAG:` inside `environment.FLAG`, so the
+            # unset arm (which tests for `environment`) never fired on the map spelling.
+            ctx[number] = ".".join(key for _, key in stack)
+            rest = entry.group("rest").split("#", 1)[0].strip()
+            if not rest:
+                stack.append((indent, entry.group("key").lower()))
+            continue
+        ctx[number] = ".".join(key for _, key in stack)
+    return ctx
+
+
 def _is_unset_declaration(line: str, flag: str) -> bool:
     """A compose `environment:` entry that DECLARES ``flag`` with no value → UNSETS it.
 
@@ -2456,8 +2498,12 @@ def _is_unset_declaration(line: str, flag: str) -> bool:
     stripped = line.strip()
     if not stripped or stripped[0] in "#;":
         return False
+    # ⛔ An INLINE comment is not part of the value: `- FLAG   # disable the gate` is
+    # YAML-null (unset) and the comment-blind version read the words as a value, so the
+    # disarming line landed in no bucket at all (fresh review of PR #12474, P3).
+    stripped = stripped.split(" #", 1)[0].strip()
     stripped = stripped.lstrip("-").lstrip()
-    if stripped.startswith("#"):
+    if not stripped or stripped.startswith("#"):
         return False
     name, colon, value = stripped.partition(":")
     if name.strip().strip("'\"") != flag:
@@ -2675,8 +2721,16 @@ def _assigned_value(line: str, flag: str) -> str | None:
     value = rest[1:].strip()
     # A genuine assignment's value is ONE token, optionally followed by a
     # comment (`FLAG=1  # enable`). Words after it mean the line is prose
-    # about the flag, not a setting of it.
+    # about the flag, not a setting of it — ⛔ EXCEPT the Dockerfile
+    # MULTI-ASSIGNMENT form `ENV FLAG="1" PYTHONUNBUFFERED=1`, where every later
+    # token carries its own `=`: prose tokens do not, so that test separates the two
+    # (fresh review of PR #12474, P3; measured `ENV FLAG="1" OTHER=1` → OFF, a false
+    # HOLD on a form Docker's own grammar defines).
     value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
+    tokens = value.split()
+    if len(tokens) > 1 and not all("=" in token for token in tokens[1:]):
+        return None
+    value = tokens[0] if tokens else ""
     value = value.strip("'\"")
     if len(value.split()) > 1:
         return None
@@ -2784,9 +2838,11 @@ def flag_in_shipped_configs(flag: str) -> dict:
     # reading "silent" would be a claim about a line the walk did not understand.
     indeterminate: list[str] = []
     outside_runtime: list[str] = []
-    # ⛔ The DISARMING direction, reported separately: a compose `environment:` entry
-    # that declares the flag with no value removes it from the container.
+    # ⛔ The TWO DISARMING directions, reported separately, because either one takes an
+    # arm AWAY: a compose `environment:` entry with no value UNSETS the variable, and one
+    # that assigns it a NON-truthy value OVERRIDES the image's `ENV` with that value.
     unset_declarations: list[str] = []
+    disarming_assignments: list[str] = []
     per_surface: dict[str, dict] = {}
     for rel in CONFIG_SURFACES:
         target = REPO_ROOT / rel
@@ -2834,6 +2890,10 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # deployment really gets a runtime default.
             shell_exports = (_shell_exported_names(text)
                              if posix.endswith(".sh") else None)
+            # ⛔ compose is read STRUCTURALLY: the enclosing mapping decides whether a
+            # line is runtime env, a build arg, or a label (`_compose_contexts`).
+            compose_ctx = (_compose_contexts(text)
+                           if posix.startswith("docker-compose") else None)
             for number, line in enumerate(text.splitlines(), 1):
                 if number in bodies:
                     executed = (workflow
@@ -2863,15 +2923,26 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 # nothing for the one Dockerfile instruction that has the same property
                 # (fresh review of PR #12474, P2, measured: `ARG FLAG=1` read `ON`).
                 if (posix.startswith(IMAGE_BUILD_GLOB.rstrip("*"))
-                        and re.match(r"^ARG[ \t]+", line.strip(), re.IGNORECASE)
-                        and _assigned_value(line, flag) is not None):
+                        and re.match(r"^ARG[ \t]+" + re.escape(flag) + r"(?:[ \t=]|$)",
+                                     line.strip(), re.IGNORECASE)):
                     outside_runtime.append(
                         f"{posix}:{number}: {line.strip()[:90]} (build-time ARG)")
+                    continue
+                where = compose_ctx.get(number, "") if compose_ctx is not None else ""
+                if where == "build.args" or where.endswith(".build.args"):
+                    # A compose BUILD ARG reaches `docker build --build-arg`, never the
+                    # container's environment — the same reading `[build.args]` and a
+                    # Dockerfile `ARG` already get (fresh review of PR #12474, P2).
+                    if (_assigned_value(line, flag) is not None
+                            or _is_unset_declaration(line, flag)):
+                        outside_runtime.append(
+                            f"{posix}:{number}: {line.strip()[:90]} "
+                            "(build-time build arg)")
                     continue
                 # ⛔ Checked BEFORE the assignment reader: a bare `FLAG:` parses as an
                 # assignment with an EMPTY value (`_assigned_value` returns `""`), so the
                 # unset arm placed after it never ran for the map spellings (measured).
-                if (posix.startswith("docker-compose")
+                if ((where == "environment" or where.endswith(".environment"))
                         and _is_unset_declaration(line, flag)):
                     unset_declarations.append(
                         f"{posix}:{number}: {line.strip()[:90]}")
@@ -2889,6 +2960,14 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     hits.append(hit)
                     surface_hits.append(hit)
                     surface_file_hits.setdefault(posix, []).append(hit)
+                elif where == "environment" or where.endswith(".environment"):
+                    # ⛔ An explicit FALSE value in `environment:` OVERRIDES the image's
+                    # `ENV` — the deployment is disarmed, and calling the file "silent"
+                    # while the caveat says a build "INHERITS" an arm steered a reader to
+                    # `True` on a self-disarming deployment (fresh review of PR #12474,
+                    # P2). Reported, so the direction has a bucket a reader can consult.
+                    disarming_assignments.append(
+                        f"{posix}:{number}: {line.strip()[:90]}")
         if not present:
             state = "ABSENT"
         elif surface_hits:
@@ -2969,6 +3048,11 @@ def flag_in_shipped_configs(flag: str) -> dict:
         "silent": [p for p in deployment_present if deployment_files[p] == "OFF"],
         "absent": _rels("ABSENT", DEPLOYMENT_SURFACES),
         "unmeasured": deployment_unmeasured,
+        # ⛔ The two DISARMING directions carried WITH the deployment reading, so the
+        # caveat that speaks about them can vary with THIS tree rather than printing a
+        # constant sentence a test cannot distinguish from an empty one.
+        "unset_declarations": list(unset_declarations),
+        "disarming_assignments": list(disarming_assignments),
         # MEASURED requires at least one deployment surface FILE to exist, every
         # existing one to be READABLE, and every RUNTIME-RELEVANT assignment of the
         # flag in it to be RESOLVABLE: a tree that ships no deployment config cannot
@@ -2995,6 +3079,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
             "indeterminate": indeterminate,
             "outside_runtime": outside_runtime,
             "unset_declarations": unset_declarations,
+            "disarming_assignments": disarming_assignments,
             "surfaces": list(CONFIG_SURFACES),
             "per_surface": per_surface,
             "armed": _rels("ON", CONFIG_SURFACES),
@@ -3019,9 +3104,14 @@ def per_file_scope_note(deployment: dict) -> str:
 
     ⛔ The leading clause is the PER-FILE fact, never a deployment consequence that
     a parenthetical then retracts (`#12070` item 4): a reader quotes the leading
-    clause, and the only deployment statement here is the one the compose spec
-    actually implies — a compose `environment:` mapping adds to / overrides the
-    image's `ENV` and never unsets it, so inheritance can only ADD an arm.
+    clause. ⛔ AND THE DEPLOYMENT STATEMENT IS BOUNDED, not absolute (fresh review of
+    PR #12474, P2): compose `environment:` ADDS TO or OVERRIDES the image's `ENV`, so
+    inheritance can ADD an arm — and the two directions that TAKE IT AWAY are a
+    value-less entry (which UNSETS the variable) and a non-truthy value (which
+    OVERRIDES it). Neither is modelled here; both are REPORTED (`unset_declarations`,
+    `disarming_assignments`) and named in the sentence this function returns, which is
+    the only honest form — an earlier draft said "never unsets it, so inheritance can
+    only ADD an arm", which the function five lines below falsified.
 
     ⛔ The build edge is MEASURED (`deployment["builds_from"]`, read from each
     compose file's `build:`/`dockerfile:`), not assumed (`#12070` item 3): before
@@ -3047,13 +3137,25 @@ def per_file_scope_note(deployment: dict) -> str:
     else:
         edge_note = ("; measured build edge(s): none — no compose file in this tree "
                      "declares a `build:`/`dockerfile:` that names an image build file")
+    unsets = len(deployment.get("unset_declarations") or ())
+    overrides = len(deployment.get("disarming_assignments") or ())
+    disarm = ""
+    if unsets or overrides:
+        parts = []
+        if unsets:
+            parts.append(f"{unsets} declaration(s) with no value UNSET it")
+        if overrides:
+            parts.append(f"{overrides} value(s) OVERRIDE it with a non-truthy one")
+        disarm = ("; ⛔ and this tree's compose file DISARMS it in "
+                  + " and ".join(parts) + " — that direction is NOT modelled here")
     return (
         "this reading is PER FILE and does not model the MERGE: a compose file's "
         "`environment:` mapping ADDS TO or OVERRIDES the image's `ENV`, so a silent "
         "compose file that BUILDS from an ARMED image build file INHERITS that image's "
-        "`ENV` — unless the compose file DECLARES the flag with no value, which "
-        "UNSETS it, and this reading does not model that direction (see "
-        "`unset declarations`)"
+        "`ENV` — EXCEPT in the two directions that take the arm away, which this "
+        "reading does not model: a value-less entry UNSETS the variable and a "
+        "non-truthy value OVERRIDES it"
+        + disarm
         + edge_note
     )
 
@@ -3173,6 +3275,8 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
         # UNSETS the variable, which this per-file reading does not model.
         f"compose declarations that UNSET it: "
         f"{shipped.get('unset_declarations') or 'none'}; "
+        f"compose values that OVERRIDE it OFF: "
+        f"{shipped.get('disarming_assignments') or 'none'}; "
         f"mentioning it: {shipped['mentions'] or 'none'}"
         f"; set ON in: {shipped['files'] or 'none'})"
     )
