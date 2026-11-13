@@ -11,18 +11,26 @@ with a `coalesce` fill on match (``projection/entities.py``: the object arm at
 ``:5094``/``:5101``, the subject arm at ``:4958``/``:4975``). ``name`` was never
 rewritten, which is exactly the shape `#12295` asks for — the key rides beside it.
 
-What was missing is the **comparison** and the **blocker**:
+What was missing was the **comparison** and the **blocker**. Both are WIRED NOW —
+the bullets below describe the BEFORE state this change replaced, and each names
+the shipped rung that replaced it:
 
-* ``extractor_v2._find_existing_entity`` (``extractor_v2.py:5769``) compares
-  ``_norm`` — whitespace collapse + lowercase — so a capture that says
-  ``the plan-doc`` cannot bind the node stored as ``the plan doc``. `#11901`
+* ``extractor_v2._find_existing_entity`` (``extractor_v2.py:5769``) compared
+  ``_norm`` — whitespace collapse + lowercase — so a capture that said
+  ``the plan-doc`` could not bind the node stored as ``the plan doc``. `#11901`
   measured the consequence: **0 of 419 real surface variants attach at every
   ``k``, in both retrieval modes**, while 62 % of them are *inside* the window.
-* ``entity_resolver.entity_candidates`` (``entity_resolver.py:379``) blocks on
+  ⛔ The folded rung is now reached from that path: `_find_existing_entity`
+  delegates to ``_find_by_folded_key`` (``extractor_v2.py:5823``), which binds on
+  :func:`tortoise.entity_blocking.key_of` equality.
+* ``entity_resolver.entity_candidates`` (``entity_resolver.py:379``) blocked on
   ONE key — ``block_key`` = the first :data:`entity_resolver.MIN_BLOCK_CHARS`
   folded characters — so a transposition or a word-order change
-  (``the project alpha`` vs ``alpha project``) lands in two blocks and the pair
-  is never compared.
+  (``the project alpha`` vs ``alpha project``) landed in two blocks and the pair
+  was never compared. ⛔ The scan now blocks on the multi-key union of
+  :func:`block_keys`, and
+  `test_the_scan_finds_a_transposition_the_single_prefix_key_could_not` asserts
+  that pair reaches ``similarity``.
 
 THE SHAPE, TAKEN FROM THE SOURCE RATHER THAN FROM PROSE
 -------------------------------------------------------

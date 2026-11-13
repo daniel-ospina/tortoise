@@ -75,8 +75,8 @@ therefore **blocked** — the standard record-linkage reduction — on the MULTI
 union :func:`tortoise.entity_blocking.block_keys` yields, partitioned per
 ``(label, key)``: ``E`` the folded name, ``B`` a path basename, ``P`` the
 ``MIN_BLOCK_CHARS`` prefix, one ``T`` per word-prefix, and 8 ``S`` minhash bands.
-Equal folded names always share ``E`` and ``P``, so the exact rung can never be
-missed by blocking. ⛔ The bound the prefix alone imposed is GONE (#12295): a pair
+Equal folded names always share ``E``, so the exact rung can never be missed by
+blocking. ⛔ The bound the prefix alone imposed is GONE (#12295): a pair
 whose folded names share no 3-character prefix is no longer excluded — that is
 exactly what the ``T`` (word order / transposition) and ``S`` (typo and separator
 classes) keys reach, and `test_the_scan_finds_a_transposition_the_single_prefix_key_could_not`
@@ -463,9 +463,12 @@ def entity_candidates(graph, *, limit: int | None = 50,
         #: row against a SIBLING DUPLICATE, become ``ambiguous``/``tied_with``, and
         #: ``entity_pair_for`` then raises on it — so ``approve_merge`` can never
         #: merge it, where ``main`` merged it cleanly, and the queue reports
-        #: "matches 2 survivors" when both survivors are the same entity. Measured
-        #: over 500 duplicate-heavy populations: 52 candidates moved from mergeable
-        #: to ``ambiguous``, 0 rows lost, 0 displaced to a lower-scoring survivor.
+        #: "matches 2 survivors" when both survivors are the same entity. The
+        #: mechanism is determined by the code above (``settled`` is per block, and
+        #: the ``best`` reduction keys on the candidate), NOT by a rate quoted here:
+        #: a count that no committed artifact or test holds cannot be re-run, and
+        #: this one is the sole evidence for a decision to leave the scan alone.
+        #: It bites on populations that carry several spellings of ONE entity.
         #: That is deliberate and it is the SAFE direction (#2730 §6.7: a false
         #: merge is invisible, a false split is cheap), but it is a real loss of
         #: mergeability on duplicate-heavy data, so it is stated rather than
