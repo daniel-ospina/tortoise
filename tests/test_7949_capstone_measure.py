@@ -5350,12 +5350,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # registered test files above it; 9987 at the `main` tip `abf186f1109a`
         # (+14: a 13-line `surfaces:` block inserted at 2237 and a 1-line
         # `tier1:` one at 9150); 10005 at #12108's branch alone
-        # (`d036b9859960` — a branch commit not fetchable from `origin`, so the
-        # value is checkable arithmetically as 9973 + 32 and from the landing at
-        # `ea2c41a696` where it read 9987 + 32 = 10019; +32 from its one 32-line
-        # block at 7522-7553 on its
-        # OWN branch tree — 7535 once landed, 7626 here — the +1
-        # it also adds sitting below the entry). At the `87c07462a8` merge both
+        # (`d036b9859960` — #12108's OWN branch commit, fetchable by sha from
+        # `origin`, so this one is measured and not inferred: on that tree the
+        # entry reads 10005 = 9973 + 32, its one 32-line block sits at
+        # 7522-7553, and the +1 `durations:` row it adds at 10291 is BELOW the
+        # entry, so it moves nothing above it. Once landed the same block reads
+        # 7535 (`ea2c41a696`, where the entry is 9987 + 32 = 10019) and 7626 on
+        # THIS tree). At the `87c07462a8` merge both
         # landing blocks sat above the entry — this branch's 39-line `core` block
         # (7509 there, 7537 on THIS tree) and #12108's 32-line one (7576 there,
         # 7626 here) — and `main`'s +2 advance after
