@@ -1275,6 +1275,10 @@ def test_brief_headline_matches_the_artifact(artifact, brief, arm: str, want: fl
     for cells in _table(_scope_slice(brief, "0"), "recall@3", "Δ vs shipped"):
         # `_plain` drops the backticks as well, so the ARM is the first token.
         arm_name = _plain(cells[0]).split(" (")[0].strip()
+        # ⛔ A DICT IS LAST-WINS (round-25 review, cycle 9): a falsified DUPLICATE
+        # row placed BEFORE the true one was never compared, so §0 was not
+        # "compared cell by cell" as the surface row says. Mirrors §3.2's guard.
+        assert arm_name not in got, f"§0 states {arm_name!r} twice"
         if arm_name:
             got[arm_name] = cells[1]
     assert arm in got, f"the brief's §0 table has no `{arm}` row"
@@ -1366,6 +1370,7 @@ def test_brief_headline_table_pins_every_column_and_the_subset_row(
             rows["__subset__"] = cells
             continue
         arm_name = _plain(cells[0]).split(" (")[0].strip()
+        assert arm_name not in rows, f"§0 states {arm_name!r} twice"
         if arm_name:
             rows[arm_name] = cells
 
@@ -1774,8 +1779,12 @@ ARM_ORDER_31 = (
 
 def test_brief_rank_table_is_the_artifact(artifact, brief: str) -> None:
     """§3.1 — the whole recall@k table, the empty-row census and the latencies."""
-    rows = {_plain(r[0]).lower(): r for r in _table(
-        _scope_slice(brief, "3.1"), "falkordb__tokens_fixed")}
+    _rows31 = _table(_scope_slice(brief, "3.1"), "falkordb__tokens_fixed")
+    rows = {_plain(r[0]).lower(): r for r in _rows31}
+    # ⛔ Last-wins is not "compared cell by cell" (round-25 review, cycle 9): a
+    # duplicate row's earlier copy was never read. Same guard as §3.2's.
+    assert len(rows) == len(_rows31), (
+        f"§3.1 states a row twice: {[r[0] for r in _rows31]}")
     assert len(rows) == 6, f"§3.1 no longer has its 6 rows: {sorted(rows)}"
     for k in ("3", "5", "10", "15"):
         cells = rows[k]
